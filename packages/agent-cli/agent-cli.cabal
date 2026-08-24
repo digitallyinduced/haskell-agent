@@ -84,6 +84,7 @@ library
                     , Agent.CLI.ManagedTurn
                     , Agent.CLI.LearnedSkills
                     , Agent.CLI.LearnedSkills.Store
+                    , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpManager
@@ -137,6 +138,7 @@ library
                     , Agent.CLI.Turn
                     , Agent.CLI.TurnState
                     , Agent.CLI.Usage
+                    , Agent.CLI.WebFetch
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
@@ -169,10 +171,14 @@ library
                     , hasql-pool >= 1.3 && < 2
                     , JuicyPixels
                     , mtl
+                    , network
+                    , network-uri
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
+                    , scientific
                     , stm
+                    , tagsoup
                     , text >= 2.0 && < 2.2
                     , time
                     , transformers
@@ -306,6 +312,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.UsageSpec
+                    , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core

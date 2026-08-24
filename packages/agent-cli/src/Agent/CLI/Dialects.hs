@@ -30,6 +30,7 @@ import Agent.Dialect
 import Agent.GrokBuild.Dialect.ProjectInstructions (formatGrokAgentsMd)
 import Agent.GrokBuild.Dialect.Runtime
     ( GrokCodingTools(..)
+    , GrokRuntimeControl
     , newGrokCodingTools
     )
 import Agent.GrokBuild.Dialect.Task
@@ -62,6 +63,7 @@ data CodingTools = CodingTools
     , codingSuspendGhci :: !(IO ())
     , codingClose :: !(IO ())
     , codingAgentTypes :: !GrokSubagentSpecs
+    , codingGrokRuntime :: !(Maybe GrokRuntimeControl)
     }
 
 codingToolsFor
@@ -89,13 +91,14 @@ codingToolsForWithTypes
     secretStore <- traverse (newSecretStore env) secretHooks
     let closeSecrets = mapM_ closeSecretStore secretStore
         secretTools = maybe [] (pure . askSecretTool) secretStore
-        finish tools plan suspendGhci close agentTypes =
+        finish tools plan suspendGhci close agentTypes grokRuntime =
             CodingTools
                 { codingAppTools = tools <> secretTools
                 , codingPlanMode = plan
                 , codingSuspendGhci = suspendGhci
                 , codingClose = close `finally` closeSecrets
                 , codingAgentTypes = agentTypes
+                , codingGrokRuntime = grokRuntime
                 }
     flip onException closeSecrets $ case dialectToolSurface dialect of
         CodexToolSurface -> do
@@ -107,6 +110,7 @@ codingToolsForWithTypes
                     coding.codexSuspendGhci
                     coding.codexClose
                     typesRef
+                    Nothing
         GrokBuildToolSurface -> do
             coding <- newGrokCodingTools env planHooks multi typesRef
             pure $
@@ -116,6 +120,7 @@ codingToolsForWithTypes
                     coding.grokSuspendGhci
                     coding.grokClose
                     coding.grokAgentTypes
+                    (Just coding.grokRuntimeControl)
         ClaudeCodeToolSurface -> do
             plan <- newPlanModeEnv env.toolCwd planHooks
             pure $
@@ -125,6 +130,7 @@ codingToolsForWithTypes
                     (pure ())
                     (pure ())
                     typesRef
+                    Nothing
 
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]
 filterChildGrokTools = filterGrokToolsForType

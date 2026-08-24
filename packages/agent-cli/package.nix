@@ -5,13 +5,14 @@
 , async, base, base64-bytestring, brick, bytestring, colour
 , containers, directory, filelock, filepath, haskeline, hasql-pool
 , hspec, http-client, http-client-tls, http-types, JuicyPixels, lib
-, mtl, process, retry, safe-exceptions, stm, text, time
-, transformers, unix, vector, vty, vty-crossplatform
+, mtl, network, network-uri, process, retry, safe-exceptions
+, scientific, stm, tagsoup, text, time, transformers, unix, vector
+, vty, vty-crossplatform
 }:
 mkDerivation {
   pname = "agent-cli";
   version = "0.1.0.0";
-  src = packages/agent-cli;
+  src = ./.;
   isLibrary = true;
   isExecutable = true;
   enableSeparateDataOutput = true;
@@ -22,8 +23,9 @@ mkDerivation {
     agent-tui agent-xai ansi-terminal async base base64-bytestring
     brick bytestring colour containers directory filelock filepath
     haskeline hasql-pool http-client http-client-tls http-types
-    JuicyPixels mtl process retry safe-exceptions stm text time
-    transformers unix vector vty vty-crossplatform
+    JuicyPixels mtl network network-uri process retry safe-exceptions
+    scientific stm tagsoup text time transformers unix vector vty
+    vty-crossplatform
   ];
   executableHaskellDepends = [
     aeson agent-responses agent-responses-types agent-store base

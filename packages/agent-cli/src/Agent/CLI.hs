@@ -10,6 +10,7 @@ module Agent.CLI
     , devMain
     , devMainResume
     , formatMcpModelNotice
+    , formatMcpModelNoticeFor
     , formatMcpProgress
     , formatReplStatusLine
     , formatRepositoryPath
@@ -148,7 +149,7 @@ import Agent.CLI.ImagePreview
 import Agent.CLI.Input
     ( ReplLine(..)
     , formatPasteChip
-    , readReplLineWithSkillsAndModels
+    , readReplLineWithCatalog
     , submissionPromptText
     )
 import Agent.CLI.ReplMode
@@ -176,6 +177,12 @@ import Agent.CLI.Login
     , loginAccountSelectionId
     , refreshLoginAccount
     , runLoginManager
+    )
+import Agent.CLI.Lsp
+    ( LspStartup(..)
+    , closeLspRuntime
+    , lspRuntimeTool
+    , newLspRuntime
     )
 import Agent.CLI.McpManager (runMcpManager)
 import Agent.CLI.ModelPicker (pickModel)
@@ -361,8 +368,8 @@ import Agent.CLI.TUI.App
     , newFullscreenInputBuffer
     , newFullscreenRuntime
     , queuedFullscreenInputDisplays
-    , readFullscreenLineOrWithModels
-    , readFullscreenLineWithModels
+    , readFullscreenLineOrWithCatalog
+    , readFullscreenLineWithCatalog
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
@@ -398,6 +405,11 @@ import Agent.CLI.Usage
     , formatOpenRouterLimitStatus
     , formatUsageReport
     )
+import Agent.CLI.WebFetch
+    ( closeWebFetchRuntime
+    , newWebFetchRuntime
+    , webFetchRuntimeTool
+    )
 import Agent.CLI.Worktree
     ( createWorktree
     , isUnderWorktreeRoot
@@ -422,10 +434,13 @@ import Agent.Error
     )
 import Agent.Dialect
     ( Dialect
-    , DialectId
+    , DialectId(..)
+    , ToolLayout(..)
     , dialectForId
     , dialectId
+    , dialectToolLayout
     , dialectSlug
+    , grokBuildPublicToolName
     , providerSupportsDialect
     )
 import Agent.ProjectInstructions
@@ -500,13 +515,27 @@ import Agent.Subagents
     , setSubagentOnSettled
     , setSubagentRunner
     )
+import Agent.GrokBuild.Dialect.Goal
+    ( activateGoal
+    , clearGoal
+    , formatGoalSnapshot
+    , pauseGoal
+    , readGoal
+    , resumeGoal
+    )
+import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl(..))
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
+import Agent.GrokBuild.Dialect.Workflow
+    ( formatWorkflowRuns
+    , workflowRunSnapshots
+    )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
+    , multiAgentToolNames
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -2111,7 +2140,12 @@ runAgentInitializedWithLock
                     (Just isConnecting, previous == Just True && not isConnecting)
             when (settled && not (null statuses)) $
                 atomicModifyIORef' pendingNotices \notices ->
-                    (notices <> [UserMessage (formatMcpModelNotice statuses)], ())
+                    ( notices
+                        <> [ UserMessage
+                                (formatMcpModelNoticeFor dialectId statuses)
+                           ]
+                    , ()
+                    )
     mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
@@ -2150,6 +2184,46 @@ runAgentInitializedWithLock
             agentTypesRef
             `onException`
                 (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
+    let closeBeforeSession =
+            coding.codingClose
+                `finally`
+                    (MCP.releaseMcpFleetLease mcpLease
+                        `finally` cleanupScratch)
+        acquireGrokExtras
+            | dialectId /= GrokBuildDialect =
+                pure
+                    ( Nothing
+                    , LspStartup
+                        { lspStartupRuntime = Nothing
+                        , lspStartupWarnings = []
+                        }
+                    )
+            | otherwise = do
+                webRuntime <-
+                    newWebFetchRuntime
+                        harnessConfig.configWebFetch
+                        toolEnv >>= \case
+                            Left err ->
+                                startupDie startup
+                                    ("Failed to initialize web_fetch: "
+                                        <> Text.unpack err)
+                            Right runtime -> pure runtime
+                lspStartup <-
+                    newLspRuntime harnessConfig.configLsp toolEnv
+                        `onException`
+                            mapM_ closeWebFetchRuntime webRuntime
+                pure (webRuntime, lspStartup)
+    (webFetchRuntime, lspStartup) <-
+        acquireGrokExtras `onException` closeBeforeSession
+    mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
+    let lspRuntime = lspStartup.lspStartupRuntime
+        extraTools =
+            maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
+                <> maybe [] (pure . lspRuntimeTool) lspRuntime
+        closeExtraTools =
+            mapM_ closeLspRuntime lspRuntime
+                `finally`
+                    mapM_ closeWebFetchRuntime webFetchRuntime
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -2203,9 +2277,13 @@ runAgentInitializedWithLock
                 sessionProcessStatus sessionProcessManager
             }
         mcpTools =
-            if progressiveMcp && not (null mcpServerConfigs)
-                then MCP.mcpFleetMetaTools mcpFleet
-                else MCP.mcpFleetTools mcpFleet
+            if null mcpServerConfigs
+                then []
+                else if dialectId == GrokBuildDialect
+                    then MCP.mcpFleetGrokMetaTools mcpFleet
+                    else if progressiveMcp
+                        then MCP.mcpFleetMetaTools mcpFleet
+                        else MCP.mcpFleetTools mcpFleet
         databaseToolsEnv =
             databaseToolsEnvForStore
                 startup.startupDatabaseStore
@@ -2221,13 +2299,17 @@ runAgentInitializedWithLock
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools = learnedSkillTools learnedSkillToolsEnv
         allTools =
-            coding.codingAppTools ++ mcpTools ++ sessionTools
+            coding.codingAppTools
+                ++ extraTools
+                ++ mcpTools
+                ++ sessionTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
+                ++ extraTools
                 ++ mcpTools
                 ++ sessionTools
                 ++ gatewayTools
@@ -2238,7 +2320,7 @@ runAgentInitializedWithLock
         noteSessionDir dir = do
             writeIORef planMode.planSessionDir (Just dir)
             writeIORef subagentStoreRoot (Just dir)
-        closeAll = do
+        closeAgents =
             case multiCtx of
                 Just ctx -> do
                     interruptActiveSubagents ctx.multiRegistry
@@ -2246,15 +2328,26 @@ runAgentInitializedWithLock
                         subagentSessions agentTypesRef
                     closeSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
-            closeSessionProcessManager sessionProcessManager
-            readIORef activeSessionLock >>= mapM_ releaseSessionLock
-            MCP.releaseMcpFleetLease mcpLease
-            coding.codingClose
-            cleanupScratch
+        closeAll =
+            closeAgents
+                `finally`
+                    (closeSessionProcessManager sessionProcessManager
+                        `finally`
+                            ((readIORef activeSessionLock
+                                >>= mapM_ releaseSessionLock)
+                                `finally`
+                                    (closeExtraTools
+                                        `finally`
+                                            (MCP.releaseMcpFleetLease mcpLease
+                                                `finally`
+                                                    (coding.codingClose
+                                                        `finally`
+                                                            cleanupScratch)))))
     flip finally closeAll do
         case
                 mcpToolCollision
                     ( coding.codingAppTools
+                        ++ extraTools
                         ++ sessionTools
                         ++ gatewayTools
                         ++ databaseAppTools
@@ -2627,7 +2720,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2691,7 +2784,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2752,7 +2845,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2824,7 +2917,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -3039,7 +3132,14 @@ formatMcpProgress statuses =
                 <> " ready"
 
 formatMcpModelNotice :: [MCP.McpServerStatus] -> Text
-formatMcpModelNotice statuses =
+formatMcpModelNotice =
+    formatMcpModelNoticeFor CodexDialect
+
+formatMcpModelNoticeFor
+    :: DialectId
+    -> [MCP.McpServerStatus]
+    -> Text
+formatMcpModelNoticeFor activeDialect statuses =
     let connecting =
             [ status.mcpStatusName
             | status <- statuses
@@ -3062,8 +3162,13 @@ formatMcpModelNotice statuses =
         <> statusPart "Connecting" connecting
         <> statusPart "Ready" ready
         <> statusPart "Unavailable" failed
-        <> "Use mcp_search to discover currently available MCP tools and "
-        <> "mcp_call to invoke one by its server__tool name.</system-reminder>"
+        <> if activeDialect == GrokBuildDialect
+            then
+                "Use search_tool to discover currently available MCP tools and "
+                    <> "use_tool to invoke one by its server__tool name.</system-reminder>"
+            else
+                "Use mcp_search to discover currently available MCP tools and "
+                    <> "mcp_call to invoke one by its server__tool name.</system-reminder>"
   where
     statusPart _ [] = ""
     statusPart label names =
@@ -3084,6 +3189,7 @@ runSession
     -> ApprovalPolicy
     -> [AppTool]
     -> IO ()
+    -> Maybe GrokRuntimeControl
     -> [MCP.McpToolRegistration]
     -> [Text]
     -> IORef Bool
@@ -3129,7 +3235,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools suspendGhci mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools suspendGhci grokRuntime mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3611,6 +3717,35 @@ runSession catalog connectionId options provider dialect policy allTools suspend
                 (False, True) -> ShellBash
                 (True, True) -> ShellBoth
                 (False, False) -> ShellNone
+        currentActiveToolNames = do
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            let active =
+                    activeShellTools ghciEnabled bashEnabled
+                internalNames = map (.appToolName) active
+                projectedNames =
+                    case dialectToolLayout dialect of
+                        NoHostToolLayout -> []
+                        FlatToolLayout
+                            | dialectId dialect
+                                == GrokBuildDialect ->
+                                    map
+                                        grokBuildPublicToolName
+                                        internalNames
+                            | otherwise -> internalNames
+                        CollaborationNamespaceLayout ->
+                            filter
+                                (`notElem` multiAgentToolNames)
+                                internalNames
+                                <> if any
+                                    (`elem` multiAgentToolNames)
+                                    internalNames
+                                    then ["collaboration"]
+                                    else []
+            pure $
+                case dialectToolLayout dialect of
+                    NoHostToolLayout -> []
+                    _ -> "web_search" : projectedNames
         shellModeFlags = \case
             ShellGhci -> (True, False)
             ShellBash -> (False, True)
@@ -3686,6 +3821,8 @@ runSession catalog connectionId options provider dialect policy allTools suspend
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
+            , sessionActiveToolNames = currentActiveToolNames
+            , sessionGrokRuntime = grokRuntime
             , sessionShellMode = currentShellMode
             , sessionSetShellMode = setShellMode
             , sessionEscPaused = escPaused
@@ -4266,6 +4403,8 @@ replWithDraft env@SessionEnv
     , sessionSkills = skillsRef
     , sessionSkillInvocations = skillInvocationsRef
     , sessionRefreshSkills = refreshSkills
+    , sessionActiveToolNames = readActiveToolNames
+    , sessionGrokRuntime = grokRuntime
     , sessionDraft = draftRef
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
@@ -4289,6 +4428,13 @@ replWithDraft env@SessionEnv
     let skillCommands =
             map skillInvocationCommand
                 (filter (.invocationSkill.skillUserInvocable) skillInvocations)
+    activeToolNames <- readActiveToolNames
+    let slashCatalog =
+            mkSlashCatalog
+                (dialectId dialect)
+                activeToolNames
+                skillCommands
+                (catalogModelIds catalog)
     stdoutColor <- resolveColor stdout
     planState <- readIORef planMode.planStateRef
     let planActive = planState == PlanActive
@@ -4315,17 +4461,15 @@ replWithDraft env@SessionEnv
                     readIORef startupUnavailableRef >>= \case
                         Nothing ->
                             Right
-                                <$> readFullscreenLineWithModels
+                                <$> readFullscreenLineWithCatalog
                                     runtime
-                                    skillCommands
-                                    (catalogModelIds catalog)
+                                    slashCatalog
                                     promptState
                                     draft
                         Just unavailable ->
-                            readFullscreenLineOrWithModels
+                            readFullscreenLineOrWithCatalog
                                 runtime
-                                skillCommands
-                                (catalogModelIds catalog)
+                                slashCatalog
                                 promptState
                                 draft
                                 unavailable
@@ -4376,8 +4520,8 @@ replWithDraft env@SessionEnv
                         <> if stdoutColor
                             then Text.pack clearFromCursorToLineEndCode
                             else mempty
-            result <- readReplLineWithSkillsAndModels
-                skillCommands (catalogModelIds catalog)
+            result <- readReplLineWithCatalog
+                slashCatalog
                 interrupt chromePrompt draft
             when terminal.terminalSemanticPrompts $
                 emitTerminalSequence terminal stdout osc133PromptEnd
@@ -4401,7 +4545,7 @@ replWithDraft env@SessionEnv
             -- the selected provider and leaves request-time fallback in charge.
             writeIORef startupUnavailableRef Nothing
             handleReplLine
-                skillCommands
+                slashCatalog
                 skillInvocations
                 stdoutColor
                 planState
@@ -4455,7 +4599,9 @@ replWithDraft env@SessionEnv
                 limitStatus
                 (emitUiEvent runtime . UiSetPromptLimitStatus . Just)
 
-    handleReplLine skillCommands skillInvocations stdoutColor planState policy = \case
+    handleReplLine
+            slashCatalog skillInvocations
+            stdoutColor planState policy = \case
         ReplEof -> do
             when (isNothing fullscreen) $
                 putStrLn ""
@@ -4556,12 +4702,14 @@ replWithDraft env@SessionEnv
             writeIORef draftRef keptDraft
             chooseAccount (continueWith keptDraft)
         ReplPasted pasted ->
-            submitLine skillCommands skillInvocations
+            submitLine slashCatalog skillInvocations
                 continue stdoutColor True pasted
         ReplText line ->
-            submitLine skillCommands skillInvocations
+            submitLine slashCatalog skillInvocations
                 continue stdoutColor False line
-    submitLine skillCommands skillInvocations continue color pasted line = do
+    submitLine
+            slashCatalog skillInvocations
+            continue color pasted line = do
         attachmentCount <- length <$> readIORef attachmentsRef
         case submissionPromptText attachmentCount line of
             Nothing -> continue
@@ -4571,7 +4719,7 @@ replWithDraft env@SessionEnv
                     let chip = formatPasteChip stripped
                     when (chip /= stripped && isNothing fullscreen) do
                         Text.putStrLn (roleMuted color chip)
-                case parseReplLineWithSkills skillCommands promptLine of
+                case parseReplLineWithCatalog slashCatalog promptLine of
                     ReplQuit -> pure RunQuit
                     ReplReload -> requestReload fullscreen persist
                     ReplPrompt text -> do
@@ -4618,6 +4766,9 @@ replWithDraft env@SessionEnv
                                         fullscreenEvent (UiUserSubmitted text)
                                         result <- runOneTurn env text skillInputs
                                         finishTurn env False result
+                    ReplExpandedPrompt original expanded ->
+                        submitExpandedTurn
+                            continue color original expanded
                     ReplInvokeSkill invocationName arguments ->
                         case resolveSkillInvocation
                             skillInvocations invocationName of
@@ -4793,6 +4944,149 @@ replWithDraft env@SessionEnv
                             then requestMcpRestart
                                 fullscreen persist
                             else continue
+                    ReplGoalStatus -> do
+                        color <- resolveColor stdout
+                        case grokRuntime of
+                            Nothing ->
+                                displayError
+                                    "goal commands are unavailable in this session" $
+                                    Text.hPutStrLn stderr
+                                        (roleError color
+                                            "goal commands are unavailable in this session")
+                            Just control ->
+                                readGoal control.grokGoalRuntime >>= \case
+                                    Nothing ->
+                                        displayInfo "No goal is active." $
+                                            Text.putStrLn
+                                                (roleMuted color
+                                                    "No goal is active.")
+                                    Just goal -> do
+                                        let message =
+                                                formatGoalSnapshot goal
+                                        displayInfo message $
+                                            Text.putStrLn
+                                                (roleMuted color message)
+                        continue
+                    ReplGoalPause -> do
+                        color <- resolveColor stderr
+                        case grokRuntime of
+                            Nothing ->
+                                displayError
+                                    "goal commands are unavailable in this session" $
+                                    Text.hPutStrLn stderr
+                                        (roleError color
+                                            "goal commands are unavailable in this session")
+                            Just control ->
+                                pauseGoal control.grokGoalRuntime >>= \case
+                                    Left err ->
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                    Right goal -> do
+                                        let message =
+                                                "Goal paused.\n"
+                                                    <> formatGoalSnapshot goal
+                                        displayInfo message $
+                                            Text.hPutStrLn stderr
+                                                (roleMuted color message)
+                        continue
+                    ReplGoalResume -> do
+                        color <- resolveColor stderr
+                        case grokRuntime of
+                            Nothing ->
+                                displayError
+                                    "goal commands are unavailable in this session" $
+                                    Text.hPutStrLn stderr
+                                        (roleError color
+                                            "goal commands are unavailable in this session")
+                            Just control ->
+                                resumeGoal control.grokGoalRuntime >>= \case
+                                    Left err ->
+                                        displayError err $
+                                            Text.hPutStrLn stderr
+                                                (roleError color err)
+                                    Right goal -> do
+                                        let message =
+                                                "Goal resumed.\n"
+                                                    <> formatGoalSnapshot goal
+                                        displayInfo message $
+                                            Text.hPutStrLn stderr
+                                                (roleMuted color message)
+                        continue
+                    ReplGoalClear -> do
+                        color <- resolveColor stderr
+                        case grokRuntime of
+                            Nothing ->
+                                displayError
+                                    "goal commands are unavailable in this session" $
+                                    Text.hPutStrLn stderr
+                                        (roleError color
+                                            "goal commands are unavailable in this session")
+                            Just control -> do
+                                cleared <-
+                                    clearGoal control.grokGoalRuntime
+                                let message =
+                                        if cleared
+                                            then "Goal cleared."
+                                            else "No goal was active."
+                                displayInfo message $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color message)
+                        continue
+                    ReplGoalSet original objective budget expanded ->
+                        case grokRuntime of
+                            Nothing -> do
+                                color <- resolveColor stderr
+                                let err =
+                                        "goal commands are unavailable in this session"
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError color err)
+                                continue
+                            Just control ->
+                                activateGoal
+                                    control.grokGoalRuntime
+                                    objective
+                                    budget >>= \case
+                                        Left err -> do
+                                            color <- resolveColor stderr
+                                            displayError err $
+                                                Text.hPutStrLn stderr
+                                                    (roleError color err)
+                                            continue
+                                        Right _ ->
+                                            submitExpandedTurn
+                                                continue
+                                                color
+                                                original
+                                                expanded
+                    ReplWorkflowRuns -> do
+                        color <- resolveColor stdout
+                        case grokRuntime >>= (.grokWorkflowRuntime) of
+                            Nothing ->
+                                displayError
+                                    "workflow commands are unavailable in this session" $
+                                    Text.hPutStrLn stderr
+                                        (roleError color
+                                            "workflow commands are unavailable in this session")
+                            Just runtime -> do
+                                runs <- workflowRunSnapshots runtime
+                                let message = formatWorkflowRuns runs
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted color message)
+                        continue
+                    ReplWorkflowManage operation target -> do
+                        color <- resolveColor stderr
+                        let err =
+                                "workflow_management_unsupported: /workflow "
+                                    <> operation
+                                    <> maybe "" (" " <>) target
+                                    <> " is not supported by this host; use /workflow runs to inspect tracked runs."
+                        displayError err $
+                            Text.hPutStrLn stderr
+                                (roleError color err)
+                        continue
 
                     ReplCopyLast -> do
                         answer <- readIORef lastAssistantRef
@@ -5132,6 +5426,64 @@ replWithDraft env@SessionEnv
                                                 (roleMuted color
                                                     (glyphSession <> message))
                         continue
+                    ReplShowSessionInfo -> do
+                        color <- resolveColor stdout
+                        params <- readIORef paramsRef
+                        usage <- readIORef usageRef
+                        shellMode <- env.sessionShellMode
+                        (persistenceState, sessionId, sessionTitle) <-
+                            case persist of
+                                PersistenceDisabled ->
+                                    pure ("not_persisted", Nothing, Nothing)
+                                PersistenceEnabled slotRef -> do
+                                    slot <- readIORef slotRef
+                                    pure $ case slot of
+                                        PersistencePending _ pendingId _ ->
+                                            ("pending", Just pendingId, Nothing)
+                                        PersistenceActive handle ->
+                                            ( "active"
+                                            , Just handle.sessionMeta.metaId
+                                            , Just handle.sessionMeta.metaTitle
+                                            )
+                        let toolNames =
+                                Set.toAscList
+                                    slashCatalog.slashCatalogToolNames
+                            usageText =
+                                let formatted = formatTokenUsage usage
+                                in if Text.null formatted
+                                    then "0 in · 0 out"
+                                    else formatted
+                            message = Text.unlines $
+                                [ "session: "
+                                    <> fromMaybe "(not persisted)" sessionId
+                                , "state: " <> persistenceState
+                                ]
+                                    <> maybe
+                                        []
+                                        (\title -> ["title: " <> title])
+                                        sessionTitle
+                                    <> [ "provider: " <> providerSlug provider
+                                       , "connection: " <> connectionId
+                                       , "model: " <> currentModel params
+                                       , "dialect: "
+                                            <> dialectSlug
+                                                (dialectId dialect)
+                                       , "effort: " <> currentEffort params
+                                       , "cwd: " <> toText cwd
+                                       , "shell: "
+                                            <> shellModeText shellMode
+                                       , "tokens: " <> usageText
+                                       , "tools: "
+                                            <> if null toolNames
+                                                then "(none)"
+                                                else
+                                                    Text.intercalate
+                                                        ", "
+                                                        toolNames
+                                       ]
+                        displayInfo message $
+                            Text.putStrLn (roleMuted color message)
+                        continue
                     ReplWorktree -> do
                         result <- withReplActivity "Creating worktree…" $
                             createWorktree cwd (worktreeRoot env.sessionHome)
@@ -5283,17 +5635,41 @@ replWithDraft env@SessionEnv
                     ReplHelp maybeName -> do
                         color <- resolveColor stdout
                         displayInfo
-                            (formatSlashHelpWithSkills
-                                False skillCommands maybeName) $
+                            (formatSlashHelpWithCatalog
+                                False slashCatalog maybeName) $
                             Text.putStrLn
-                                (formatSlashHelpWithSkills
-                                    color skillCommands maybeName)
+                                (formatSlashHelpWithCatalog
+                                    color slashCatalog maybeName)
                         continue
                     ReplCommandError err -> do
                         color <- resolveColor stderr
                         displayError err $
                             Text.hPutStrLn stderr (roleError color err)
                         continue
+    submitExpandedTurn next color original expanded = do
+        pendingImages <-
+            atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
+        forM_ fullscreen \runtime ->
+            setFullscreenImagePreviews runtime []
+        let turnInputs =
+                if null pendingImages
+                    then [UserMessage expanded]
+                    else
+                        [ UserMultimodal
+                            { userText = expanded
+                            , userImages = pendingImages
+                            }
+                        ]
+        preparePromptSkillInputs env original turnInputs >>= \case
+            Left err -> do
+                displayError err $
+                    Text.hPutStrLn stderr (roleError color err)
+                next
+            Right skillInputs -> do
+                writeIORef printed False
+                fullscreenEvent (UiUserSubmitted original)
+                result <- runOneTurn env original skillInputs
+                finishTurn env False result
     continue = continueWith ""
     continueWith keptDraft =
         replWithDraft env keptDraft
@@ -5313,6 +5689,11 @@ replWithDraft env@SessionEnv
     displayError message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
+    shellModeText = \case
+        ShellGhci -> "ghci"
+        ShellBash -> "bash"
+        ShellBoth -> "ghci + bash"
+        ShellNone -> "none"
     withReplActivity message action = do
         case fullscreen of
             Nothing ->
