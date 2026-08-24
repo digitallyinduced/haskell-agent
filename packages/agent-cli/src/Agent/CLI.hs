@@ -23,6 +23,14 @@ import Agent.CLI.AccountSelection
     , providerSupportsUsageAccountSelection
     , selectProviderAccount
     )
+import Agent.CLI.Rlm
+    ( RlmConfig(..)
+    , RlmMode(..)
+    , closeRlmRuntime
+    , newRlmRuntime
+    , rlmGhciHelpers
+    , rlmRootGuidance
+    )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , authErrorNeedsOnboarding
@@ -297,15 +305,20 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( requireToolRegistry
+    , schemasFromAppTools
+    , schemasFromAppToolsWithWeb
+    )
 import Agent.CLI.Dialects
     ( CodingTools(..)
-    , codingToolsForWithTypes
+    , codingToolsForWithTypesAndGhciHelpers
     , filterBashTools
     , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     , isBashToolName
+    , isGhciTool
     , isGhciToolName
     )
 import Agent.CLI.TUI.App
@@ -451,12 +464,17 @@ import Agent.Subagents
     , setSubagentOnSettled
     , setSubagentRunner
     )
-import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
+import Agent.GrokBuild.Dialect.Task
+    ( GrokSubagentSpec(..)
+    , GrokSubagentSpecs
+    , recordAgentSpec
+    )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
 import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
 import Agent.Tools.MultiAgents
-    ( MultiAgentContext(..)
+    ( CollaborationSpawnOptions(..)
+    , MultiAgentContext(..)
     , SubagentWorktree(..)
     )
 import Agent.Tools.PlanMode
@@ -1785,13 +1803,14 @@ runAgentInitializedWithLock
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
+    subagentUsageRef <- newIORef Map.empty
     agentTypesRef <- newIORef Map.empty
     let sendToRoot message = do
             atomicModifyIORef' pendingNotices \xs ->
                 (xs <> [AgentMessage message], ())
             pure (Right "queued")
         multiCtx
-            | not options.optSubagents = Nothing
+            | not options.optSubagents && not options.optRlm = Nothing
             | otherwise = Just MultiAgentContext
                 { multiRegistry = registry
                 , multiSelfId = Nothing
@@ -1894,15 +1913,49 @@ runAgentInitializedWithLock
             Right fleet -> pure fleet
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
+    rlmRuntime <- case (options.optRlm, multiCtx) of
+        (True, Just ctx) -> do
+            let prepareWorker agentId mode = do
+                    forM_ ctx.multiPrepareSpawn \prepare ->
+                        prepare agentId CollaborationSpawnOptions
+                            { collaborationModel = options.optRlmModel
+                            , collaborationReasoningEffort = options.optRlmEffort
+                            , collaborationForkTurns = Just "none"
+                            }
+                    recordAgentSpec agentTypesRef agentId GrokSubagentSpec
+                        { agentType = case mode of
+                            RlmReadOnly -> "rlm_readonly"
+                            RlmCoding -> "rlm_coding"
+                        , modelOverride = options.optRlmModel
+                        , reasoningEffortOverride = options.optRlmEffort
+                        }
+                    pure mempty
+            Just <$> newRlmRuntime RlmConfig
+                { rlmMailbox = sessionTmp </> unsafeEncodeUtf "rlm"
+                , rlmContext = ctx
+                , rlmModel = options.optRlmModel
+                , rlmEffort = options.optRlmEffort
+                , rlmMaxCalls = options.optRlmMaxCalls
+                , rlmParallelism = options.optRlmParallelism
+                , rlmWorkerTimeoutSeconds =
+                    options.optRlmWorkerTimeoutSeconds
+                , rlmPrepareWorker = prepareWorker
+                }
+        _ -> pure Nothing
     coding <-
-        codingToolsForWithTypes
+        codingToolsForWithTypesAndGhciHelpers
             dialect
             toolEnv
             (Just planHooks)
             secretHooks
             multiCtx
             agentTypesRef
-            `onException` (MCP.closeMcpFleet mcpFleet >> cleanupScratch)
+            (maybe [] rlmGhciHelpers rlmRuntime)
+            `onException`
+                ( mapM_ closeRlmRuntime rlmRuntime
+                    >> MCP.closeMcpFleet mcpFleet
+                    >> cleanupScratch
+                )
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -1956,20 +2009,28 @@ runAgentInitializedWithLock
             }
         mcpTools = MCP.mcpFleetTools mcpFleet
         sessionTools
-            | options.optSubagents = agentSessionTools sessionToolsEnv
+            | options.optSubagents && not options.optRlm =
+                agentSessionTools sessionToolsEnv
             | otherwise = []
-        allTools = coding.codingAppTools ++ mcpTools ++ sessionTools
+        allTools
+            | options.optRlm = filter isGhciTool coding.codingAppTools
+            | otherwise = coding.codingAppTools ++ mcpTools ++ sessionTools
         tools =
-            filterGhciTools options.optGhci
-                (filterBashTools options.optBash coding.codingAppTools)
-                ++ mcpTools
-                ++ sessionTools
+            if options.optRlm
+                then filter isGhciTool coding.codingAppTools
+                else
+                    filterGhciTools options.optGhci
+                        (filterBashTools
+                            options.optBash coding.codingAppTools)
+                        ++ mcpTools
+                        ++ sessionTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
             writeIORef planMode.planSessionDir (Just dir)
             writeIORef subagentStoreRoot (Just dir)
         closeAll = do
+            mapM_ closeRlmRuntime rlmRuntime
             case multiCtx of
                 Just ctx -> do
                     interruptActiveSubagents ctx.multiRegistry
@@ -2001,8 +2062,13 @@ runAgentInitializedWithLock
                     (Just sessionTmp)
                     today
                     (isOneShot options)
+                    <> if options.optRlm
+                        then "\n\n" <> rlmRootGuidance
+                        else ""
             params = requestParams model instructions
-                (schemasFromAppTools dialect tools) effort
+                (schemasFromAppToolsWithWeb
+                    (not options.optRlm) dialect tools)
+                effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             initialPrevious = case transition of
@@ -2032,6 +2098,12 @@ runAgentInitializedWithLock
                     subscriptionSubagentModelGuidance
                         provider
                         (tokenProviderBillingMode tokenProvider)
+                , subagentRecordUsage = \rootTurnId usage ->
+                    forM_ rootTurnId \owned ->
+                        atomicModifyIORef' subagentUsageRef \usages ->
+                            ( Map.insertWith addTokenUsage owned usage usages
+                            , ()
+                            )
                 }
         transcriptRef <- newIORef initialItems
         contextTokensRef <- newIORef Nothing
@@ -2352,7 +2424,7 @@ runAgentInitializedWithLock
                                     link switchWorker
                                     runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                        multiCtx rootTurnRef subagentUsageRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -2416,7 +2488,7 @@ runAgentInitializedWithLock
                                 projectRoot transition persist backend
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentUsageRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
                         claudeAuth <-
                             loadClaudeCodeAuth
@@ -2477,7 +2549,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist backend
                                 runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                                    multiCtx rootTurnRef subagentUsageRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of
@@ -2549,7 +2621,7 @@ runAgentInitializedWithLock
                                 projectRoot transition persist backend
                         runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                            multiCtx rootTurnRef subagentUsageRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -2764,6 +2836,7 @@ runSession
     -> InterruptState
     -> Maybe MultiAgentContext
     -> IORef (Maybe RootTurnId)
+    -> IORef (Map RootTurnId TokenUsage)
     -> IORef (Map SubagentId SubagentSession)
     -> IORef [TurnInput]
     -> SubagentStoreRoot
@@ -2780,7 +2853,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentUsageRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3195,6 +3268,12 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
                     Nothing -> pure ()
                 Nothing -> pure ()
             finishSubagentTurn rootTurnId
+        drainSubagentUsage rootTurnId = case rootTurnId of
+            Nothing -> pure emptyTokenUsage
+            Just owned ->
+                atomicModifyIORef' subagentUsageRef \usages ->
+                    let usage = Map.findWithDefault emptyTokenUsage owned usages
+                    in (Map.delete owned usages, usage)
         activeShellTools ghciEnabled bashEnabled =
             filterGhciTools ghciEnabled
                 (filterBashTools bashEnabled allTools)
@@ -3299,6 +3378,7 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
             , sessionAbortSubagentTurn = abortSubagentTurn
+            , sessionDrainSubagentUsage = drainSubagentUsage
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }

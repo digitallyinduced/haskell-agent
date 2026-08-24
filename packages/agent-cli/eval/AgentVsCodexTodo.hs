@@ -66,7 +66,7 @@ import System.Posix.Signals
 import System.Posix.Types (ProcessID)
 import System.Timeout (timeout)
 
-data Runner = AgentCli | Codex
+data Runner = AgentCli | AgentCliRlm | Codex
     deriving (Eq, Ord, Show)
 
 data Config = Config
@@ -117,6 +117,7 @@ data HttpResponse = HttpResponse
 
 instance ToJSON Runner where
     toJSON AgentCli = toJSON ("agent-cli" :: Text)
+    toJSON AgentCliRlm = toJSON ("agent-cli-rlm" :: Text)
     toJSON Codex = toJSON ("codex" :: Text)
 
 instance ToJSON RunResult where
@@ -208,8 +209,10 @@ parseConfig = go Config
             _ -> Left "--timeout-seconds expects a positive integer"
         "--runner" : value : rest -> case value of
             "agent-cli" -> go config { selectedRunner = Just AgentCli } rest
+            "agent-cli-rlm" ->
+                go config { selectedRunner = Just AgentCliRlm } rest
             "codex" -> go config { selectedRunner = Just Codex } rest
-            _ -> Left "--runner expects agent-cli or codex"
+            _ -> Left "--runner expects agent-cli, agent-cli-rlm, or codex"
         "--help" : _ -> Left usage
         unknown : _ -> Left ("unknown eval argument: " <> unknown <> "\n\n" <> usage)
 
@@ -225,7 +228,7 @@ usage = unlines
     , "  --effort LEVEL         Same reasoning effort for both (default: medium)"
     , "  --trials N             Repetitions per runner (default: 1)"
     , "  --timeout-seconds N    Agent timeout per run (default: 900)"
-    , "  --runner NAME          Run only agent-cli or codex"
+    , "  --runner NAME          Run only agent-cli, agent-cli-rlm, or codex"
     ]
 
 todoPrompt :: Text
@@ -254,6 +257,13 @@ todoPrompt = Text.unlines
     , "- Start the server with `nix run path:.` and test GET, POST, and DELETE with `curl`."
     , "- End your final response with exactly `SELF_VERIFIED: yes` only after those checks succeed."
     ]
+
+rlmTodoPrompt :: Text
+rlmTodoPrompt =
+    Text.replace
+        "- Do not spawn subagents or use web search; do the implementation and verification yourself."
+        "- Use the RLM worker helpers for delegated inspection and implementation; do not use web search."
+        todoPrompt
 
 runOne :: Config -> Int -> Runner -> IO RunResult
 runOne config trial runner = do
@@ -285,6 +295,23 @@ runOne config trial runner = do
                     , "--model", Text.unpack config.model
                     , "--effort", Text.unpack config.effort
                     ]
+            AgentCliRlm ->
+                proc config.agentBin
+                    [ "--cwd", workspace
+                    , "--prompt", Text.unpack rlmTodoPrompt
+                    , "--save-session"
+                    , "--no-agents-md"
+                    , "--no-skills"
+                    , "--no-subagents"
+                    , "--rlm"
+                    , "--rlm-model", Text.unpack config.model
+                    , "--rlm-effort", Text.unpack config.effort
+                    , "--yolo"
+                    , "--max-turns", "50"
+                    , "--provider", "openai"
+                    , "--model", Text.unpack config.model
+                    , "--effort", Text.unpack config.effort
+                    ]
             Codex ->
                 proc config.codexBin
                     [ "exec"
@@ -306,15 +333,19 @@ runOne config trial runner = do
     ended <- getCurrentTime
     sessionId <- case runner of
         AgentCli -> sessionIdFromLog stderrLog
+        AgentCliRlm -> sessionIdFromLog stderrLog
         Codex -> codexSessionId stdoutLog
     usageResult <- case runner of
         AgentCli -> agentUsage sessionsDir config.resultsDir runName sessionId
+        AgentCliRlm -> agentUsage sessionsDir config.resultsDir runName sessionId
         Codex -> codexUsage stdoutLog
     gradeStarted <- getCurrentTime
     (graded, gradeMessage) <- gradeTodo workspace port
     gradeEnded <- getCurrentTime
     let timedOut = exitCode == ExitFailure 124
-        comparable = usageResult.selfVerified && not usageResult.delegated
+        comparable =
+            usageResult.selfVerified
+                && (runner == AgentCliRlm || not usageResult.delegated)
         finalGrade = Text.intercalate "; "
             [ if timedOut then "timed out" else "agent exited"
             , "self-verified=" <> yesNo usageResult.selfVerified
@@ -371,8 +402,10 @@ sessionUsage meta turns = TokenUsage
     }
   where
     delegatedTurn SessionTurn { turnItems = items } =
-        "spawn_agent" `Text.isInfixOf`
-            Text.decodeUtf8 (LBS.toStrict (encode items))
+        let encoded = Text.decodeUtf8 (LBS.toStrict (encode items))
+        in "spawn_agent" `Text.isInfixOf` encoded
+            || "rlmQuery" `Text.isInfixOf` encoded
+            || "rlmCode" `Text.isInfixOf` encoded
 
 emptyUsage :: TokenUsage
 emptyUsage = TokenUsage Nothing Nothing Nothing False False
@@ -743,15 +776,17 @@ onlyTaskNamed expected response =
 
 runnerOrder :: Int -> [Runner]
 runnerOrder trial
-    | odd trial = [AgentCli, Codex]
-    | otherwise = [Codex, AgentCli]
+    | odd trial = [AgentCli, AgentCliRlm, Codex]
+    | otherwise = [Codex, AgentCliRlm, AgentCli]
 
 runnerOffset :: Runner -> Int
 runnerOffset AgentCli = 1
-runnerOffset Codex = 2
+runnerOffset AgentCliRlm = 2
+runnerOffset Codex = 3
 
 runnerSlug :: Runner -> String
 runnerSlug AgentCli = "agent-cli"
+runnerSlug AgentCliRlm = "agent-cli-rlm"
 runnerSlug Codex = "codex"
 
 collectVersions :: Config -> IO [(Text, Text)]
@@ -804,7 +839,7 @@ renderConsoleSummary results =
         [ "| runner | passed | median successful seconds | median successful input | median successful uncached | median successful output | median successful cached |"
         , "|---|---:|---:|---:|---:|---:|---:|"
         ]
-            <> map renderRunnerSummary [AgentCli, Codex]
+            <> map renderRunnerSummary [AgentCli, AgentCliRlm, Codex]
   where
     renderRunnerSummary runner =
         let selected = filter ((== runner) . (.resultRunner)) results

@@ -43,6 +43,7 @@ module Agent.Subagents.Registry
     , closeSubagent
     , interruptSubagent
     , getStatus
+    , getLastResult
     , getPreviousResponseId
     , getSubagentCwd
     , getSubagentIdentity
@@ -130,6 +131,7 @@ data SubagentRecord = SubagentRecord
       -- | Last successful response id for conversation continuity.
     , recordPreviousResponseId :: !(TVar (Maybe Text))
     , recordLastUpdate :: !(TVar (Maybe (Int, SubagentStatus)))
+    , recordLastResult :: !(TVar (Maybe LoopResult))
     , recordTaskPath :: !TaskPath
     , recordCwd :: !OsPath
     }
@@ -475,6 +477,7 @@ spawnSubagentAtWithIdPreparedForTurn
     asyncVar <- newTVarIO Nothing
     previousVar <- newTVarIO Nothing
     lastUpdateVar <- newTVarIO Nothing
+    lastResultVar <- newTVarIO Nothing
     admitted <- withMVar registry.registryLifecycle \_ -> atomically do
         closed <- readTVar registry.registryClosed
         aborted <- isRootTurnAborted registry rootTurnId
@@ -536,6 +539,7 @@ spawnSubagentAtWithIdPreparedForTurn
                                                                 , recordAsync = asyncVar
                                                                 , recordPreviousResponseId = previousVar
                                                                 , recordLastUpdate = lastUpdateVar
+                                                                , recordLastResult = lastResultVar
                                                                 , recordTaskPath = childPath
                                                                 , recordCwd = childCwd
                                                                 }
@@ -649,9 +653,10 @@ runSupervisor registry record = awaitWork
                 Right (Right loopResult) -> Completed loopResult.finalText
         case result of
             Right (Right loopResult) ->
-                atomically $
+                atomically do
                     writeTVar record.recordPreviousResponseId
                         (Just loopResult.finalResponseId)
+                    writeTVar record.recordLastResult (Just loopResult)
             _ -> pure ()
         atomically (nextSupervisorStep registry record) >>= \case
             SupervisorStop -> pure ()
@@ -1437,6 +1442,7 @@ restoreSubagentResolvedWithCwd
         asyncVar <- newTVarIO Nothing
         previousVar <- newTVarIO previous
         lastUpdateVar <- newTVarIO Nothing
+        lastResultVar <- newTVarIO Nothing
         restored <- atomically do
             closed <- readTVar registry.registryClosed
             if closed
@@ -1465,6 +1471,7 @@ restoreSubagentResolvedWithCwd
                                             , recordAsync = asyncVar
                                             , recordPreviousResponseId = previousVar
                                             , recordLastUpdate = lastUpdateVar
+                                            , recordLastResult = lastResultVar
                                             , recordTaskPath = resolvedPath
                                             , recordCwd = childCwd
                                             }
@@ -1490,6 +1497,18 @@ restoreSubagentResolvedWithCwd
 
 getStatus :: SubagentRegistry -> SubagentId -> IO SubagentStatus
 getStatus registry agentId = atomically (readStatusSTM registry agentId)
+
+-- | Return the most recently completed loop result for a subagent.
+--
+-- The result is retained independently of the public lifecycle status so
+-- callers such as the in-process RLM bridge can recover token usage and the
+-- final response without changing collaboration status payloads.
+getLastResult :: SubagentRegistry -> SubagentId -> IO (Maybe LoopResult)
+getLastResult registry agentId = atomically do
+    agents <- readTVar registry.registryAgents
+    case Map.lookup agentId agents of
+        Nothing -> pure Nothing
+        Just record -> readTVar record.recordLastResult
 
 getPreviousResponseId :: SubagentRegistry -> SubagentId -> IO (Maybe Text)
 getPreviousResponseId registry agentId = atomically do

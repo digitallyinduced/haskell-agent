@@ -87,6 +87,14 @@ data CliOptions = CliOptions
       -- ^ Expose the provider's explicit shell execution tool (default: False).
     , optSubagents :: !Bool
       -- ^ Expose collaboration and subagent tools (default: True).
+    , optRlm :: !Bool
+      -- ^ Use the experimental recursive-language-model orchestrator.
+    , optRlmModel :: !(Maybe Text)
+    , optRlmEffort :: !(Maybe Text)
+    , optRlmMaxCalls :: !Int
+    , optRlmParallelism :: !Int
+    , optRlmWorkerMaxTurns :: !Int
+    , optRlmWorkerTimeoutSeconds :: !Int
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -111,6 +119,13 @@ defaultCliOptions = CliOptions
     , optGhci = True
     , optBash = False
     , optSubagents = True
+    , optRlm = False
+    , optRlmModel = Nothing
+    , optRlmEffort = Nothing
+    , optRlmMaxCalls = 8
+    , optRlmParallelism = 4
+    , optRlmWorkerMaxTurns = 50
+    , optRlmWorkerTimeoutSeconds = 600
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -222,6 +237,27 @@ parseOptions options = \case
         parseOptions options { optSubagents = True } rest
     "--no-subagents" : rest ->
         parseOptions options { optSubagents = False } rest
+    "--rlm" : rest ->
+        parseOptions options { optRlm = True } rest
+    "--no-rlm" : rest ->
+        parseOptions options { optRlm = False } rest
+    "--rlm-model" : value : rest ->
+        parseOptions options { optRlmModel = Just (Text.pack value) } rest
+    "--rlm-effort" : value : rest -> do
+        effort <- parseEffort (Text.pack value)
+        parseOptions options { optRlmEffort = Just effort } rest
+    "--rlm-max-calls" : value : rest -> do
+        count <- parsePositiveInt "--rlm-max-calls" value
+        parseOptions options { optRlmMaxCalls = count } rest
+    "--rlm-parallelism" : value : rest -> do
+        count <- parsePositiveInt "--rlm-parallelism" value
+        parseOptions options { optRlmParallelism = count } rest
+    "--rlm-worker-max-turns" : value : rest -> do
+        count <- parsePositiveInt "--rlm-worker-max-turns" value
+        parseOptions options { optRlmWorkerMaxTurns = count } rest
+    "--rlm-worker-timeout-seconds" : value : rest -> do
+        seconds <- parsePositiveInt "--rlm-worker-timeout-seconds" value
+        parseOptions options { optRlmWorkerTimeoutSeconds = seconds } rest
     "--fullscreen" : rest ->
         parseOptions options { optScreenMode = ScreenFullscreen } rest
     "--minimal" : rest ->
@@ -243,6 +279,8 @@ validate options
         Left "use either -p/--prompt or --prompt-file, not both"
     | options.optMaxTurns < 1 =
         Left "--max-turns must be at least 1"
+    | options.optRlm && not options.optGhci =
+        Left "--rlm requires GHCi; remove --no-ghci"
     | isJust options.optResume && options.optWorktree =
         Left "use either --resume or --worktree, not both"
     | otherwise = Right options
@@ -251,6 +289,9 @@ parseInt :: String -> String -> Either String Int
 parseInt flag value = case reads value of
     [(n, "")] | n >= 1 -> Right n
     _ -> Left (flag <> " expects a positive integer, got " <> value)
+
+parsePositiveInt :: String -> String -> Either String Int
+parsePositiveInt = parseInt
 
 parseMotionMode :: String -> Either String MotionMode
 parseMotionMode raw = case Text.toLower (Text.pack raw) of
@@ -299,6 +340,16 @@ usage = unlines
     , "      --no-bash           Disable explicit shell execution tools (default)"
     , "      --subagents         Enable collaboration/subagent tools (default)"
     , "      --no-subagents      Disable collaboration/subagent tools"
+    , "      --rlm               Enable experimental in-process RLM mode"
+    , "      --no-rlm            Disable experimental RLM mode (default)"
+    , "      --rlm-model MODEL   Model override for RLM workers"
+    , "      --rlm-effort LEVEL  Reasoning effort override for RLM workers"
+    , "      --rlm-max-calls N   Maximum RLM worker calls (default: 8)"
+    , "      --rlm-parallelism N Maximum parallel read-only workers (default: 4)"
+    , "      --rlm-worker-max-turns N"
+    , "                          Maximum turns per RLM worker (default: 50)"
+    , "      --rlm-worker-timeout-seconds N"
+    , "                          Timeout per RLM worker (default: 600)"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

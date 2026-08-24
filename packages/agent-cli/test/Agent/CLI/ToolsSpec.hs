@@ -45,6 +45,14 @@ spec = describe "schemasFromAppTools" do
                 tagged.fields `shouldBe` KeyMap.empty
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
+    it "can omit web_search for a constrained root tool surface" do
+        case schemasFromAppToolsWithWeb False codexDialect [jsonTool] of
+            [FunctionToolValue tool] ->
+                tool.name `shouldBe` "read_file"
+            other ->
+                expectationFailure
+                    ("expected only the app tool, got " <> show other)
+
     it "builds a strict function tool for OpenAI JSON tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             [_, FunctionToolValue tool] -> do

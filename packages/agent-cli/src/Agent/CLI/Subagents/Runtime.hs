@@ -49,6 +49,7 @@ import Agent.CLI.Dialects
     , filterBashTools
     , filterChildGrokTools
     , filterGhciTools
+    , filterReadOnlyTools
     )
 import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
@@ -74,6 +75,7 @@ import Agent.Loop
     , LoopError(..)
     , LoopEvent
     , LoopResult(..)
+    , TokenUsage
     , TurnInput(..)
     , defaultLoopDispatch
     , runLoop
@@ -97,6 +99,7 @@ import Agent.Subagents
     ( RunSubagent
     , SubagentId(..)
     , SubagentRegistry
+    , RootTurnId
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
     , getPreviousResponseId
@@ -190,6 +193,7 @@ data SubagentRuntime = SubagentRuntime
     , subagentConnection :: !Text
     , subagentMapModel :: !(Text -> Text)
     , subagentSpawnModelGuidance :: !(Maybe Text)
+    , subagentRecordUsage :: !(Maybe RootTurnId -> TokenUsage -> IO ())
     }
 
 data PreparedChild = PreparedChild
@@ -555,6 +559,9 @@ runCodexSubagent
     -> RunSubagent
 runCodexSubagent runtime tokenProvider sendToRoot =
     \env previous prompt onEvent -> do
+        agentType <-
+            fromMaybe defaultSubagentType
+                <$> lookupAgentType runtime.subagentTypes env.subId
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
         parentParams <- readIORef runtime.subagentParams
@@ -584,7 +591,9 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
                         Nothing
-                        (Just prepared.preparedMultiContext)
+                        (if runtime.subagentOptions.optRlm
+                            then Nothing
+                            else Just prepared.preparedMultiContext)
                 syncStoreRootFromPlan
                     runtime.subagentStoreRoot
                     coding.codingPlanMode
@@ -592,11 +601,21 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     today <- utctDay <$> getCurrentTime
                     ghciEnabled <- readIORef runtime.subagentGhciEnabled
                     bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let codingTools =
+                    let baseTools
+                            | agentType == "rlm_readonly" =
+                                filterReadOnlyTools coding.codingAppTools
+                            | otherwise = coding.codingAppTools
+                        codingTools =
                             filterGhciTools ghciEnabled $
-                                filterBashTools bashEnabled coding.codingAppTools
+                                filterBashTools
+                                    (bashEnabled || runtime.subagentOptions.optRlm)
+                                    baseTools
                         tools =
-                            codingTools <> runtime.subagentMcpTools
+                            codingTools
+                                <> [ tool
+                                   | not runtime.subagentOptions.optRlm
+                                   , tool <- runtime.subagentMcpTools
+                                   ]
                         baseInstructions =
                             fromMaybe
                                 (systemPromptForTools
@@ -613,6 +632,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 <> "report results clearly. Your agent id is "
                                 <> env.subId.unSubagentId
                                 <> "."
+                                <> rlmWorkerSuffix agentType
                         childParams = requestParams model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -696,7 +716,9 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         prepared.preparedToolEnv
                         (Just runtime.subagentPlanHooks)
                         Nothing
-                        (Just prepared.preparedMultiContext)
+                        (if runtime.subagentOptions.optRlm
+                            then Nothing
+                            else Just prepared.preparedMultiContext)
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
                     shellPath <-
@@ -713,11 +735,21 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                 []
                     ghciEnabled <- readIORef runtime.subagentGhciEnabled
                     bashEnabled <- readIORef runtime.subagentBashEnabled
-                    let codingTools =
+                    let modeTools
+                            | agentType == "rlm_readonly" =
+                                filterReadOnlyTools childTools
+                            | otherwise = childTools
+                        codingTools =
                             filterGhciTools ghciEnabled $
-                                filterBashTools bashEnabled childTools
+                                filterBashTools
+                                    (bashEnabled || runtime.subagentOptions.optRlm)
+                                    modeTools
                         tools =
-                            codingTools <> runtime.subagentMcpTools
+                            codingTools
+                                <> [ tool
+                                   | not runtime.subagentOptions.optRlm
+                                   , tool <- runtime.subagentMcpTools
+                                   ]
                         baseInstructions =
                             case dialectChildAgentProtocol childDialect of
                                 CodexCollaborationProtocol ->
@@ -770,6 +802,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         genericSubagentSuffix agentType env.subId
                                     NoHostChildAgentProtocol ->
                                         ""
+                                <> rlmWorkerSuffix agentType
                         childParams = requestParams model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -901,7 +934,10 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
                 }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
-            , loopMaxTurns = runtime.subagentOptions.optMaxTurns
+            , loopMaxTurns =
+                if runtime.subagentOptions.optRlm
+                    then runtime.subagentOptions.optRlmWorkerMaxTurns
+                    else runtime.subagentOptions.optMaxTurns
             , loopOnEvent = onEvent
             , loopApprove =
                 \call ->
@@ -911,10 +947,14 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
     result <- runChild config
     case result of
         Right loopResult ->
-            setPreviousResponseId
-                runtime.subagentRegistry
-                env.subId
-                loopResult.finalResponseId
+            do
+                setPreviousResponseId
+                    runtime.subagentRegistry
+                    env.subId
+                    loopResult.finalResponseId
+                runtime.subagentRecordUsage
+                    env.subRootTurnId
+                    loopResult.tokenUsage
         Left _ ->
             modifyIORef' session.subSessionTranscript trimDanglingToolSuffix
     persistSubagentSnapshot
@@ -947,6 +987,14 @@ genericSubagentSuffix agentType agentId =
             _ ->
                 "\n\nStart broad and narrow down. Check multiple locations and naming conventions. \
                 \Never create documentation files unless explicitly requested."
+
+rlmWorkerSuffix :: Text -> Text
+rlmWorkerSuffix agentType
+    | agentType == "rlm_readonly" =
+        "\n\nYou are an RLM read-only worker. Inspect and analyze only; do not modify files. Return a concise, self-contained result to the root orchestrator."
+    | agentType == "rlm_coding" =
+        "\n\nYou are an RLM coding worker. Implement the delegated change directly, verify it, and return a concise summary to the root orchestrator."
+    | otherwise = ""
 
 lookupOrCreateSubagentSession
     :: IORef (Map SubagentId SubagentSession)

@@ -83,6 +83,7 @@ library
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
                     , Agent.CLI.ProviderTransition
+                    , Agent.CLI.Rlm
                     , Agent.CLI.Render
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
@@ -264,6 +265,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
                     , Agent.CLI.RequestSpec
+                    , Agent.CLI.RlmSpec
                     , Agent.CLI.RenderSpec
                     , Agent.CLI.ReplStatusSpec
                     , Agent.CLI.ResumeSpec

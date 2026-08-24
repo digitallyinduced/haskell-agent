@@ -2,9 +2,11 @@ module Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
     , codingToolsForWithTypes
+    , codingToolsForWithTypesAndGhciHelpers
     , filterBashTools
     , filterChildGrokTools
     , filterGhciTools
+    , filterReadOnlyTools
     , isBashTool
     , isBashToolName
     , isGhciTool
@@ -17,6 +19,7 @@ import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
 import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
+    , newCodexCodingToolsWithGhciHelpers
     )
 import Agent.Dialect
     ( Dialect
@@ -31,6 +34,7 @@ import Agent.GrokBuild.Dialect.ProjectInstructions (formatGrokAgentsMd)
 import Agent.GrokBuild.Dialect.Runtime
     ( GrokCodingTools(..)
     , newGrokCodingTools
+    , newGrokCodingToolsWithGhciHelpers
     )
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpecs
@@ -49,7 +53,7 @@ import Agent.Tools.Secret
     , closeSecretStore
     , newSecretStore
     )
-import Agent.Tools.Types (AppTool(..), ToolEnv(..))
+import Agent.Tools.Types (AppTool(..), ApprovalRule(..), ToolEnv(..))
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -85,6 +89,20 @@ codingToolsForWithTypes
     -> IO CodingTools
 codingToolsForWithTypes
         dialect env planHooks secretHooks multi typesRef = do
+    codingToolsForWithTypesAndGhciHelpers
+        dialect env planHooks secretHooks multi typesRef []
+
+codingToolsForWithTypesAndGhciHelpers
+    :: Dialect
+    -> ToolEnv
+    -> Maybe PlanModeHooks
+    -> Maybe SecretPromptHooks
+    -> Maybe MultiAgentContext
+    -> GrokSubagentSpecs
+    -> [Text]
+    -> IO CodingTools
+codingToolsForWithTypesAndGhciHelpers
+        dialect env planHooks secretHooks multi typesRef ghciHelpers = do
     secretStore <- traverse (newSecretStore env) secretHooks
     let closeSecrets = mapM_ closeSecretStore secretStore
         secretTools = maybe [] (pure . askSecretTool) secretStore
@@ -97,7 +115,11 @@ codingToolsForWithTypes
                 }
     flip onException closeSecrets $ case dialectToolSurface dialect of
         CodexToolSurface -> do
-            coding <- newCodexCodingTools env planHooks multi
+            coding <-
+                if null ghciHelpers
+                    then newCodexCodingTools env planHooks multi
+                    else newCodexCodingToolsWithGhciHelpers
+                        env planHooks multi ghciHelpers
             pure $
                 finish
                     coding.codexAppTools
@@ -105,7 +127,11 @@ codingToolsForWithTypes
                     coding.codexClose
                     typesRef
         GrokBuildToolSurface -> do
-            coding <- newGrokCodingTools env planHooks multi typesRef
+            coding <-
+                if null ghciHelpers
+                    then newGrokCodingTools env planHooks multi typesRef
+                    else newGrokCodingToolsWithGhciHelpers
+                        env planHooks multi typesRef ghciHelpers
             pure $
                 finish
                     coding.grokAppTools
@@ -131,6 +157,12 @@ filterBashTools False = filter (not . isBashTool)
 filterGhciTools :: Bool -> [AppTool] -> [AppTool]
 filterGhciTools True = id
 filterGhciTools False = filter (not . isGhciTool)
+
+filterReadOnlyTools :: [AppTool] -> [AppTool]
+filterReadOnlyTools = filter \tool -> case tool.appToolApproval of
+    AlwaysReadOnly -> True
+    ClassifyReadOnly _ -> False
+    AlwaysPrompt -> False
 
 isBashTool :: AppTool -> Bool
 isBashTool = isBashToolName . (.appToolName)

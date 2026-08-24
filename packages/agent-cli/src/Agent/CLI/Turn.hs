@@ -162,6 +162,7 @@ runOneTurn env@SessionEnv
     , sessionBeginSubagentTurn = beginSubagentTurn
     , sessionFinishSubagentTurn = finishSubagentTurn
     , sessionAbortSubagentTurn = abortSubagentTurn
+    , sessionDrainSubagentUsage = drainSubagentUsage
     , sessionOnPersisted = onPersisted
     } promptText inputs = do
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
@@ -266,7 +267,14 @@ runOneTurn env@SessionEnv
                 >> restorePlanStateAfterIncomplete planMode initialPlanState
                 >> abortSubagentTurn rootTurnId
             )
-    let result = execution.executionResult
+    subagentUsage <- drainSubagentUsage rootTurnId
+    let result = fmap
+            (\loopResult ->
+                loopResult
+                    { tokenUsage =
+                        addTokenUsage loopResult.tokenUsage subagentUsage
+                    })
+            execution.executionResult
     clearThinking render
     finishedAt <- getCurrentTime
     restartEffort <-

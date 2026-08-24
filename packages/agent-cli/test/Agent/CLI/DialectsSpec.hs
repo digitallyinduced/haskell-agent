@@ -5,6 +5,7 @@ import Agent.CLI.Dialects
     , codingToolsFor
     , filterBashTools
     , filterGhciTools
+    , filterReadOnlyTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     )
@@ -19,7 +20,7 @@ import Agent.ToolDispatch (noArgsTool)
 import Agent.Tools.Secret (SecretPromptHooks(..))
 import Agent.Tools.Types
     ( AppTool(..)
-    , ApprovalRule(AlwaysReadOnly)
+    , ApprovalRule(AlwaysPrompt, AlwaysReadOnly)
     , ToolEnv
     , defaultToolEnv
     , jsonAppTool
@@ -107,6 +108,16 @@ spec = describe "Agent.CLI.Dialects" do
                 , "write_stdin"
                 , "run_terminal_cmd"
                 ]
+
+    it "keeps only statically read-only tools for RLM inspectors" do
+        let readTool = fakeTool "read_file"
+            writeTool =
+                readTool
+                    { appToolName = "write_file"
+                    , appToolApproval = AlwaysPrompt
+                    }
+        map (.appToolName) (filterReadOnlyTools [readTool, writeTool])
+            `shouldBe` ["read_file"]
 
 withTempToolEnv :: (ToolEnv -> IO a) -> IO a
 withTempToolEnv action = do

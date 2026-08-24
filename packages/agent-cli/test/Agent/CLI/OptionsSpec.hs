@@ -41,6 +41,35 @@ spec = do
                     , optPrompt = Just "hello"
                     })
 
+        it "parses the experimental in-process RLM options" do
+            parseArgs
+                [ "--rlm"
+                , "--rlm-model", "gpt-5.6-luna"
+                , "--rlm-effort", "low"
+                , "--rlm-max-calls", "12"
+                , "--rlm-parallelism", "3"
+                , "--rlm-worker-max-turns", "20"
+                , "--rlm-worker-timeout-seconds", "90"
+                ]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optRlm = True
+                    , optRlmModel = Just "gpt-5.6-luna"
+                    , optRlmEffort = Just "low"
+                    , optRlmMaxCalls = 12
+                    , optRlmParallelism = 3
+                    , optRlmWorkerMaxTurns = 20
+                    , optRlmWorkerTimeoutSeconds = 90
+                    })
+
+        it "requires GHCi for RLM mode" do
+            parseArgs ["--rlm", "--no-ghci"] `shouldSatisfy` isLeft
+
+        it "rejects invalid RLM numeric options" do
+            parseArgs ["--rlm-max-calls", "0"] `shouldSatisfy` isLeft
+            parseArgs ["--rlm-parallelism", "-1"] `shouldSatisfy` isLeft
+            parseArgs ["--rlm-worker-max-turns", "x"] `shouldSatisfy` isLeft
+            parseArgs ["--rlm-worker-timeout-seconds", "0"] `shouldSatisfy` isLeft
+
         it "parses --subagents and --no-subagents" do
             parseArgs ["--no-subagents", "-p", "hello"]
                 `shouldBe` Right (RunAgent defaultCliOptions

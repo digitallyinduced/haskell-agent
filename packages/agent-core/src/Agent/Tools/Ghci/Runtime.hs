@@ -8,6 +8,7 @@ module Agent.Tools.Ghci.Runtime
     , GhciOutcome(..)
     , GhciResult(..)
     , newGhciSession
+    , newGhciSessionWithHelpers
     , closeGhciSession
     , evalGhci
     , classifyGhci
@@ -152,12 +153,19 @@ data GhciSession = GhciSession
     { ghciEnv :: !ToolEnv
     , ghciRuntime :: !(MVar GhciRuntimeState)
     , ghciMarkerSeed :: !Text
+    , ghciExtraHelpers :: ![Text]
     }
 
 type GhciRuntime = StateT GhciRuntimeState IO
 
 newGhciSession :: ToolEnv -> IO GhciSession
-newGhciSession env = do
+newGhciSession env = newGhciSessionWithHelpers env []
+
+-- | Create a persistent GHCi session with additional startup statements.
+-- Statements are reinstalled after commands such as @:load@ that reset the
+-- interactive context.
+newGhciSessionWithHelpers :: ToolEnv -> [Text] -> IO GhciSession
+newGhciSessionWithHelpers env extraHelpers = do
     runtime <- newMVar GhciRuntimeState
         { runtimeSessionState = GhciNotStarted
         , runtimeNextMarker = 0
@@ -168,6 +176,7 @@ newGhciSession env = do
         { ghciEnv = env
         , ghciRuntime = runtime
         , ghciMarkerSeed = seed
+        , ghciExtraHelpers = extraHelpers
         }
 
 closeGhciSession :: GhciSession -> IO ()
@@ -250,7 +259,7 @@ evalRawGhci session expression requestedTimeout = do
                 sent <- liftIO $ try @_ @SomeException do
                     sendGhciInput process expression
                     when (ghciInputResetsHelpers expression)
-                        (sendGhciHelpers process)
+                        (sendGhciHelpers session process)
                     sendMarker process marker
                 case sent of
                     Left err -> do
@@ -447,7 +456,7 @@ startProcess session = mask \restore ->
                 marker <- nextMarker session
                 sent <- liftIO $
                     try @_ @SomeException do
-                        sendGhciHelpers process
+                        sendGhciHelpers session process
                         sendMarker process marker
                 case sent of
                     Left err -> do
@@ -640,10 +649,10 @@ ghciInputResetsHelpers expression =
 -- | Install a tiny, provider-neutral scripting prelude. These bindings target
 -- the repetitive process and file operations seen in agent GHCi sessions while
 -- keeping argv-based execution as the default (rather than shell strings).
-sendGhciHelpers :: GhciProcess -> IO ()
-sendGhciHelpers process =
+sendGhciHelpers :: GhciSession -> GhciProcess -> IO ()
+sendGhciHelpers session process =
     mapM_ (sendLine process)
-        [ "import qualified System.Process as AgentGhciProcess"
+        ( [ "import qualified System.Process as AgentGhciProcess"
         , "import qualified System.IO as AgentGhciIO"
         , "import qualified Data.Text.IO as AgentGhciTextIO"
         , "import qualified System.Directory as AgentGhciDirectory"
@@ -657,6 +666,8 @@ sendGhciHelpers process =
         , "let readText = AgentGhciTextIO.readFile; writeText = AgentGhciTextIO.writeFile; appendText = AgentGhciTextIO.appendFile"
         , "let listFiles = AgentGhciDirectory.listDirectory; pathExists = AgentGhciDirectory.doesPathExist"
         ]
+            <> session.ghciExtraHelpers
+        )
 
 frameGhciInput :: Text -> Text
 frameGhciInput expression

@@ -105,6 +105,23 @@ spec = describe "Agent.Subagents" do
         timedOut `shouldBe` False
         Map.lookup agentId statuses `shouldBe` Just (Completed (Just "done:hello"))
 
+    it "retains the last completed loop result separately from public status" do
+        expected <- pure LoopResult
+            { finalResponseId = "child-result"
+            , finalText = Just "result text"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure (Right expected))
+            (\_ _ -> pure ())
+        Right agentId <- spawnSubagent registry Nothing 0 "result" Nothing
+        (statuses, timedOut) <- waitSubagents registry [agentId] 15000
+        timedOut `shouldBe` False
+        Map.lookup agentId statuses
+            `shouldBe` Just (Completed (Just "result text"))
+        getLastResult registry agentId `shouldReturn` Just expected
+
     it "does not launch a prepared supervisor after registry shutdown" do
         entered <- newEmptyMVar
         release <- newEmptyMVar

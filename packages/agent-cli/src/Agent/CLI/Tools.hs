@@ -3,6 +3,7 @@ module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
     , schemasFromAppTools
+    , schemasFromAppToolsWithWeb
     , webSearchTool
     ) where
 
@@ -54,17 +55,22 @@ webSearchTool = KnownResponseTool ToolWebSearch TaggedObject
     }
 
 schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
-schemasFromAppTools dialect tools = case dialectToolLayout dialect of
+schemasFromAppTools = schemasFromAppToolsWithWeb True
+
+schemasFromAppToolsWithWeb :: Bool -> Dialect -> [AppTool] -> [ResponseTool]
+schemasFromAppToolsWithWeb includeWeb dialect tools = case dialectToolLayout dialect of
     CollaborationNamespaceLayout ->
         let (multi, rest) = partition isMultiAgentTool tools
-            base = webSearchTool : mapMaybe (schemaFromAppTool dialect) rest
+            base = webTools <> mapMaybe (schemaFromAppTool dialect) rest
         in if null multi
             then base
             else base ++ [multiAgentNamespaceTool multi]
     FlatToolLayout ->
-        webSearchTool : mapMaybe (schemaFromAppTool dialect) tools
+        webTools <> mapMaybe (schemaFromAppTool dialect) tools
     NoHostToolLayout ->
         []
+  where
+    webTools = [webSearchTool | includeWeb]
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
