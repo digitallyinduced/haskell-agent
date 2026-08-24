@@ -30,6 +30,7 @@ spec = describe "Agent.Telegram" do
                 , "--model", "grok-4.6"
                 , "--cwd", "/tmp/project"
                 , "--allowed-user", "123"
+                , "--all-group-messages"
                 , "--yolo"
                 , "--start"
                 ]
@@ -40,6 +41,7 @@ spec = describe "Agent.Telegram" do
                         , setupCwd = Just "/tmp/project"
                         , setupYolo = True
                         , setupAllowedUser = Just 123
+                        , setupRespondToAllGroupMessages = True
                         , setupStart = True
                         })
 
@@ -174,6 +176,13 @@ spec = describe "Agent.Telegram" do
                     :: Either String TelegramUpdate)
                     `shouldReturnRight` "Telegram update should decode"
                 pure (classifyTelegramUpdate bot allowedUsers update)
+            classifyAll bytes = do
+                update <- (eitherDecode (LBS.pack bytes)
+                    :: Either String TelegramUpdate)
+                    `shouldReturnRight` "Telegram update should decode"
+                pure
+                    (classifyTelegramUpdateWithMode
+                        bot allowedUsers True update)
 
         it "routes an allowed mention into the shared group session" do
             action <- classify
@@ -300,6 +309,28 @@ spec = describe "Agent.Telegram" do
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"@HarnessBot hello\"}}"
             blocked `shouldBe` IgnoreUpdate
+
+        it "optionally routes ambient messages from allowed group users" do
+            ambient <- classifyAll
+                "{\"update_id\":31,\"message\":{\
+                \\"message_id\":89,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"hello everyone\"}}"
+            ambient `shouldBe`
+                QueueTurn
+                    89
+                    (TelegramChatKey (-1001) Nothing)
+                    "[Telegram group message from Marc, user 456]\n\
+                    \hello everyone"
+                    Nothing
+
+            otherBot <- classifyAll
+                "{\"update_id\":32,\"message\":{\
+                \\"message_id\":90,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/new@OtherBot\"}}"
+            otherBot `shouldBe` IgnoreUpdate
 
     describe "durable queue state" do
         it "loads state written before pending turns were introduced" do
