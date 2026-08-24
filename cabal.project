@@ -1,4 +1,5 @@
 packages:
+    packages/agent-process
     packages/agent-cli
     packages/agent-core
     packages/agent-codex-dialect

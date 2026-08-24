@@ -39,6 +39,15 @@
                     ];
                 };
 
+                agentProcessSource = nix-filter.lib {
+                    root = ./packages/agent-process;
+                    include = [
+                        "src"
+                        "agent-process.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentResponsesTypesSource = nix-filter.lib {
                     root = ./packages/agent-responses-types;
                     include = [
@@ -280,6 +289,11 @@
                                 pkgs.git
                                 pkgs.ripgrep
                             ];
+                        agent-process = pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-process/package.nix { })
+                            {
+                                src = agentProcessSource;
+                            };
                         agent-responses-types = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
                             src = agentResponsesTypesSource;
                         };
@@ -344,6 +358,7 @@
                 );
 
                 agentCorePackage = haskellPackages.agent-core;
+                agentProcessPackage = haskellPackages.agent-process;
                 agentCodexDialectPackage = haskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = haskellPackages.agent-grok-build-dialect;
                 agentSyntaxPackage = haskellPackages.agent-syntax;
@@ -456,6 +471,7 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentCliExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
                 packages.agent-syntax = agentSyntaxPackage;
@@ -488,6 +504,7 @@
                     packages = packages: [
                         packages.agent-cli
                         packages.agent-core
+                        packages.agent-process
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
                         packages.agent-syntax
@@ -526,6 +543,7 @@
                 checks = {
                     agent-cli = agentCliPackage;
                     agent-core = agentCorePackage;
+                    agent-process = agentProcessPackage;
                     agent-codex-dialect = agentCodexDialectPackage;
                     agent-grok-build-dialect = agentGrokBuildDialectPackage;
                     agent-syntax = agentSyntaxPackage;
