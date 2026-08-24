@@ -1,8 +1,9 @@
 module Agent.CLI.InterruptSpec (spec) where
 
 import Agent.CLI.Interrupt
+import qualified Control.Exception as Base
 import Control.Exception (AsyncException(ThreadKilled, UserInterrupt))
-import Control.Exception.Safe (toSyncException)
+import Control.Exception.Safe (finally, throwIO, toSyncException)
 import Test.Hspec
 
 spec :: Spec
@@ -27,3 +28,29 @@ spec = do
 
         it "rejects other wrapped async exceptions" do
             isWrappedUserInterrupt (toSyncException ThreadKilled) `shouldBe` False
+
+    describe "catchUserInterrupt" do
+        it "handles an asynchronous UserInterrupt" do
+            catchUserInterrupt
+                (Base.throwIO UserInterrupt)
+                (pure ("stopped" :: String))
+                `shouldReturn` ("stopped" :: String)
+
+        it "handles a synchronously wrapped UserInterrupt" do
+            catchUserInterrupt
+                (throwIO UserInterrupt)
+                (pure ("stopped" :: String))
+                `shouldReturn` ("stopped" :: String)
+
+        it "handles a UserInterrupt propagated through a finalizer" do
+            catchUserInterrupt
+                (pure ("completed" :: String)
+                    `finally` Base.throwIO UserInterrupt)
+                (pure "stopped")
+                `shouldReturn` "stopped"
+
+        it "does not swallow other asynchronous exceptions" do
+            catchUserInterrupt
+                (Base.throwIO ThreadKilled)
+                (pure ())
+                `shouldThrow` anyException

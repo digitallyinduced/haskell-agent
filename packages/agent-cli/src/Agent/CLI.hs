@@ -159,7 +159,7 @@ import Agent.CLI.ReplMode
 import Agent.CLI.Interrupt
     ( CtrlCDecision(..)
     , InterruptState
-    , isWrappedUserInterrupt
+    , catchUserInterrupt
     , newInterruptState
     , noteFullscreenCtrlC
     , withCtrlCHandler
@@ -554,7 +554,6 @@ import Control.Exception.Safe
     ( Exception
     , SomeException
     , catchAny
-    , catchAsync
     , finally
     , mask_
     , onException
@@ -794,13 +793,16 @@ managedPostgresConfigForHome home = do
 -- Automatic transitions carry the exact failed turn in memory and commit
 -- persisted provider metadata only after the replacement backend succeeds.
 runAgentWithRestarts :: CliOptions -> IO DevResult
-runAgentWithRestarts options = do
-    fullscreenInputs <- newFullscreenInputBuffer
-    sessionState <- newSessionState
-    mcpSupervisor <- MCP.newMcpSupervisor
-    withRestoredCurrentDirectory
-        (go mcpSupervisor fullscreenInputs sessionState options Nothing)
-        `finally` MCP.closeMcpSupervisor mcpSupervisor
+runAgentWithRestarts options =
+    catchUserInterrupt
+        (do
+            fullscreenInputs <- newFullscreenInputBuffer
+            sessionState <- newSessionState
+            mcpSupervisor <- MCP.newMcpSupervisor
+            withRestoredCurrentDirectory
+                (go mcpSupervisor fullscreenInputs sessionState options Nothing)
+                `finally` MCP.closeMcpSupervisor mcpSupervisor)
+        (pure DevQuit)
   where
     go mcpSupervisor fullscreenInputs sessionState current transition =
         runAgent mcpSupervisor fullscreenInputs sessionState current transition >>= \case
@@ -2960,18 +2962,8 @@ withInterruptResume
     -> IO a
     -> IO a
 withInterruptResume fullscreen progName persist interrupted action =
-    (action `catchAny` handleSyncException) `catchAsync` handleInterrupt
+    catchUserInterrupt action finishInterrupt
   where
-    -- UserInterrupt can arrive asynchronously from the installed SIGINT
-    -- handler or wrapped as a synchronous exception by safe-exceptions when
-    -- the inline editor's double-Ctrl-C path calls throwIO.
-    handleInterrupt (e :: AsyncException) =
-        case e of
-            UserInterrupt -> finishInterrupt
-            _ -> throwIO e
-    handleSyncException (e :: SomeException)
-        | isWrappedUserInterrupt e = finishInterrupt
-        | otherwise = throwIO e
     finishInterrupt = do
         case fullscreen of
             Nothing -> printResumeHint progName persist
