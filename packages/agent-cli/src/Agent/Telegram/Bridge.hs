@@ -52,7 +52,11 @@ import System.Directory
     , doesFileExist
     , listDirectory
     )
-import System.FilePath (addTrailingPathSeparator)
+import System.FilePath
+    ( addTrailingPathSeparator
+    , takeExtension
+    , (</>)
+    )
 
 data TelegramBridgeEnv = TelegramBridgeEnv
     { telegramBridgeClient :: !TelegramClient
@@ -129,8 +133,14 @@ processBridgeRequests env seenRef = do
         Left _ -> pure []
         Right values -> pure values
     seen <- readIORef seenRef
-    forM_ (filter (`Set.notMember` seen) files) \name -> do
-        let path = directory <> "/" <> name
+    let published =
+            filter
+                (\name ->
+                    takeExtension name == ".json"
+                        && name `Set.notMember` seen)
+                files
+    forM_ published \name -> do
+        let path = directory </> name
         decodeBridgeRequest path >>= \case
             Nothing -> pure ()
             Just request -> do
