@@ -363,13 +363,20 @@
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
                                 ++ [ pkgs.makeWrapper ];
+                            disallowedRequisites = pkgs.lib.remove
+                                haskellPackages.ghc
+                                (old.disallowedRequisites or [ ]);
                             postInstall =
                                 (old.postInstall or "")
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
-                                        --prefix PATH : "${pkgs.postgresql_18}/bin"
+                                        --prefix PATH : \
+                                            "${pkgs.lib.makeBinPath [
+                                                pkgs.postgresql_18
+                                                haskellPackages.ghc
+                                            ]}"
                                 '';
                         });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
