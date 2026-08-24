@@ -212,9 +212,9 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
-    , providerTransitionDraft
     , setPendingExitAfter
     )
+import Agent.CLI.SessionState (SessionState(..), newSessionState)
 import Agent.CLI.Render
     ( RenderConfig(..)
     , clearThinking
@@ -611,6 +611,7 @@ data StartupRuntime = StartupRuntime
     , startupStartedAt :: !UTCTime
     , startupTimings :: !(IORef [(Text, NominalDiffTime)])
     , startupSyntaxLoadDuration :: !(IORef (Maybe NominalDiffTime))
+    , startupSessionState :: !SessionState
     }
 
 newtype StartupFailure = StartupFailure String
@@ -712,38 +713,42 @@ run = do
 runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options = do
     fullscreenInputs <- newFullscreenInputBuffer
-    withRestoredCurrentDirectory (go fullscreenInputs options Nothing)
+    sessionState <- newSessionState
+    withRestoredCurrentDirectory
+        (go fullscreenInputs sessionState options Nothing)
   where
-    go fullscreenInputs current transition =
-        runAgent fullscreenInputs current transition >>= \case
+    go fullscreenInputs sessionState current transition =
+        runAgent fullscreenInputs sessionState current transition >>= \case
             RunResumeSession sessionId ->
-                go fullscreenInputs
-                    current
-                        { optProvider = Nothing
-                        , optModel = Nothing
-                        , optCwd = Nothing
-                        , optWorktree = False
-                        , optEffort = Nothing
-                        , optPrompt = Nothing
-                        , optPromptFile = Nothing
-                        , optResume = Just sessionId
-                        }
-                    Nothing
+                newSessionState >>= \nextState ->
+                    go fullscreenInputs nextState
+                        current
+                            { optProvider = Nothing
+                            , optModel = Nothing
+                            , optCwd = Nothing
+                            , optWorktree = False
+                            , optEffort = Nothing
+                            , optPrompt = Nothing
+                            , optPromptFile = Nothing
+                            , optResume = Just sessionId
+                            }
+                        Nothing
             RunSwitchWorktree path provider model effort ->
-                go fullscreenInputs
-                    current
-                        { optProvider = Just provider
-                        , optModel = Just model
-                        , optCwd = Just path
-                        , optWorktree = False
-                        , optEffort = Just effort
-                        , optPrompt = Nothing
-                        , optPromptFile = Nothing
-                        , optResume = Nothing
-                        }
-                    Nothing
+                newSessionState >>= \nextState ->
+                    go fullscreenInputs nextState
+                        current
+                            { optProvider = Just provider
+                            , optModel = Just model
+                            , optCwd = Just path
+                            , optWorktree = False
+                            , optEffort = Just effort
+                            , optPrompt = Nothing
+                            , optPromptFile = Nothing
+                            , optResume = Nothing
+                            }
+                        Nothing
             RunSwitchProvider next ->
-                go fullscreenInputs
+                go fullscreenInputs sessionState
                     (applyProviderTransition current next)
                     (Just next)
             RunProviderStartFailed apiError ->
@@ -753,7 +758,7 @@ runAgentWithRestarts options = do
                             continueAutomaticFallback
                                 Nothing failed apiError >>= \case
                                 Just next ->
-                                    go fullscreenInputs
+                                    go fullscreenInputs sessionState
                                         (applyProviderTransition current next)
                                         (Just next)
                                 Nothing -> do
@@ -943,18 +948,21 @@ formatRepositoryPath home cwd
 
 runAgent
     :: FullscreenInputBuffer
+    -> SessionState
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO RunResult
-runAgent fullscreenInputs options transition = do
+runAgent fullscreenInputs sessionState options transition = do
     prepared <-
-        prepareAgentIteration fullscreenInputs Nothing options transition
+        prepareAgentIteration
+            fullscreenInputs sessionState Nothing options transition
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
                 runFullscreen runtime $
                     runFullscreenRestartLoop
                         fullscreenInputs
+                        sessionState
                         runtime
                         options
                         transition
@@ -978,11 +986,13 @@ runAgent fullscreenInputs options transition = do
 -- resumes still return to 'runAgentWithRestarts' and start a fresh UI.
 prepareAgentIteration
     :: FullscreenInputBuffer
+    -> SessionState
     -> Maybe FullscreenRuntime
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO PreparedAgent
-prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
+prepareAgentIteration
+        fullscreenInputs sessionState activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
     let failPreparation message =
@@ -1136,6 +1146,7 @@ prepareAgentIteration fullscreenInputs activeFullscreen options transition = do
             , startupStartedAt = startedAt
             , startupTimings = startupTimingsRef
             , startupSyntaxLoadDuration = syntaxLoadDurationRef
+            , startupSessionState = sessionState
             }
     resumeLock <- readIORef resumeLockRef
     let action =
@@ -1163,6 +1174,7 @@ resetFullscreenSessionActions runtime =
 
 runFullscreenRestartLoop
     :: FullscreenInputBuffer
+    -> SessionState
     -> FullscreenRuntime
     -> CliOptions
     -> Maybe ProviderTransition
@@ -1170,6 +1182,7 @@ runFullscreenRestartLoop
     -> IO RunResult
 runFullscreenRestartLoop
     fullscreenInputs
+    sessionState
     runtime =
         loop
   where
@@ -1181,6 +1194,7 @@ runFullscreenRestartLoop
                 let nextOptions = applyProviderTransition options next
                 prepared <- prepareAgentIteration
                     fullscreenInputs
+                    sessionState
                     (Just runtime)
                     nextOptions
                     (Just next)
@@ -1196,6 +1210,7 @@ runFullscreenRestartLoop
                                             applyProviderTransition options next
                                     prepared <- prepareAgentIteration
                                         fullscreenInputs
+                                        sessionState
                                         (Just runtime)
                                         nextOptions
                                         (Just next)
@@ -1257,7 +1272,6 @@ runAgentInitializedWithLock
     markStartupStage startup "Loading credentials…"
     let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
-        transitionDraft = providerTransitionDraft transition
         unavailableProviders =
             maybe [] (.transitionUnavailableProviders) transition
         configuredOptionTarget =
@@ -2264,7 +2278,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2328,7 +2342,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2389,7 +2403,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2461,7 +2475,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn transitionDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2657,7 +2671,6 @@ runSession
     -> StartupRuntime
     -> Maybe Text
     -> Maybe PendingTurn
-    -> Text
     -> [Provider]
     -> Maybe (STM ApiError)
     -> IORef ResponseCreateParams
@@ -2693,7 +2706,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn initialDraft unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2744,8 +2757,8 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
   withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
     printed <- newIORef False
-    attachmentsRef <- newIORef []
-    previewIdRef <- newIORef (1 :: Int)
+    let attachmentsRef = startup.startupSessionState.sessionAttachments
+        previewIdRef = startup.startupSessionState.sessionPreviewId
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
@@ -3192,6 +3205,7 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
             , sessionShellMode = currentShellMode
             , sessionSetShellMode = setShellMode
             , sessionEscPaused = escPaused
+            , sessionDraft = startup.startupSessionState.sessionDraft
             , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
@@ -3245,7 +3259,8 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
                         result <- runOneTurn env text inputs
                         finishTurn env True result
                     Nothing ->
-                        replWithDraft env initialDraft
+                        readIORef startup.startupSessionState.sessionDraft
+                            >>= replWithDraft env
     result <- sessionAction
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
@@ -3683,6 +3698,7 @@ replWithDraft env@SessionEnv
     , sessionSkills = skillsRef
     , sessionSkillInvocations = skillInvocationsRef
     , sessionRefreshSkills = refreshSkills
+    , sessionDraft = draftRef
     , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
@@ -3700,6 +3716,7 @@ replWithDraft env@SessionEnv
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
+    writeIORef draftRef draft
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef
     let skillCommands =
@@ -3901,12 +3918,14 @@ replWithDraft env@SessionEnv
                 Nothing -> do
                     fullscreenEvent (UiSetNotice Nothing)
                     continueWith pastedDraft
-        ReplChooseModel keptDraft ->
-            chooseModel keptDraft (continueWith keptDraft)
+        ReplChooseModel keptDraft -> do
+            writeIORef draftRef keptDraft
+            chooseModel (continueWith keptDraft)
         ReplChooseEffort keptDraft ->
             chooseEffort (continueWith keptDraft)
-        ReplChooseAccount keptDraft ->
-            chooseAccount keptDraft (continueWith keptDraft)
+        ReplChooseAccount keptDraft -> do
+            writeIORef draftRef keptDraft
+            chooseAccount (continueWith keptDraft)
         ReplPasted pasted ->
             submitLine skillCommands skillInvocations
                 continue stdoutColor True pasted
@@ -4218,7 +4237,7 @@ replWithDraft env@SessionEnv
                         setEffort level
                         continue
                     ReplShowModel -> do
-                        chooseModel "" continue
+                        chooseModel continue
                     ReplSetModel name -> do
                         color <- resolveColor stdout
                         let rawChoice = rawModelOption provider name
@@ -4237,7 +4256,7 @@ replWithDraft env@SessionEnv
                                 connectionId provider (dialectId dialect) choice
                             then
                                 requestModelTargetSwitch
-                                    fullscreen choice "" persist >>= \case
+                                    fullscreen choice persist >>= \case
                                     Left err -> do
                                         displayError err $
                                             Text.hPutStrLn stderr
@@ -4739,7 +4758,7 @@ replWithDraft env@SessionEnv
         effortChoice fullscreen (currentEffort params) >>= \case
             Nothing -> next
             Just level -> setEffort level >> next
-    chooseModel keptDraft next = do
+    chooseModel next = do
         color <- resolveColor stderr
         params <- readIORef paramsRef
         let current = currentModel params
@@ -4780,15 +4799,14 @@ replWithDraft env@SessionEnv
                                 (glyphOk <> message))
                     next
                   else
-                    requestModelTargetSwitch
-                        fullscreen choice keptDraft persist >>= \case
+                    requestModelTargetSwitch fullscreen choice persist >>= \case
                         Left err -> do
                             displayError err $
                                 Text.hPutStrLn stderr
                                     (roleError color err)
                             next
                         Right result -> pure result
-    chooseAccount keptDraft next =
+    chooseAccount next =
         case fullscreen of
             Just runtime -> do
                 currentSelectionId <- readIORef selectionRef
@@ -4928,17 +4946,10 @@ replWithDraft env@SessionEnv
                         | otherwise =
                             readIORef paramsRef >>= \params ->
                                 requestAccountProviderSwitch
-                                    catalog
-                                    fullscreen
-                                    provider
-                                    connectionId
-                                    (currentModel params)
-                                    (dialectId dialect)
-                                    selectedProvider
-                                    selectedSelectionId
-                                    selectedAccountId
-                                    keptDraft
-                                    persist >>= \case
+                                    catalog fullscreen provider connectionId
+                                    (currentModel params) (dialectId dialect)
+                                    selectedProvider selectedSelectionId
+                                    selectedAccountId persist >>= \case
                                         Left err -> do
                                             displayError err (pure ())
                                             next
@@ -5457,12 +5468,11 @@ applyModelChange
 requestModelTargetSwitch
     :: Maybe FullscreenRuntime
     -> ModelOption
-    -> Text
     -> Persistence
     -> IO (Either Text RunResult)
-requestModelTargetSwitch fullscreen choice draft persist =
+requestModelTargetSwitch fullscreen choice persist =
     prepareProviderTransition
-        ManualTransition [] Nothing draft choice persist >>= \case
+        ManualTransition [] Nothing choice persist >>= \case
             Left err -> pure (Left err)
             Right transition -> do
                 color <- resolveColor stdout
@@ -5490,7 +5500,6 @@ requestAccountProviderSwitch
     -> Provider
     -> Text
     -> Text
-    -> Text
     -> Persistence
     -> IO (Either Text RunResult)
 requestAccountProviderSwitch
@@ -5503,7 +5512,6 @@ requestAccountProviderSwitch
     selectedProvider
     selectionId
     accountId
-    draft
     persist = do
         currentTransportModel <-
             persistenceTransportModel currentModelId persist
@@ -5534,7 +5542,6 @@ requestAccountProviderSwitch
                             , transitionAccountId = Just accountId
                             , transitionSessionId = sessionId
                             , transitionPendingTurn = Nothing
-                            , transitionDraft = draft
                             , transitionUnavailableProviders = []
                             , transitionCause = ManualTransition
                             , transitionAutomaticBilling = Nothing
@@ -5758,7 +5765,6 @@ chooseAutomaticProviderTransition
                         , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
-                        , transitionDraft = ""
                         , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback
                         , transitionAutomaticBilling = Just sourceBilling
@@ -5811,7 +5817,6 @@ chooseStartupProviderTransition
                         , transitionAccountId = Nothing
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
-                        , transitionDraft = ""
                         , transitionUnavailableProviders = unavailable
                         , transitionCause = AutomaticFallback
                         , transitionAutomaticBilling = Just sourceBilling
@@ -5821,11 +5826,10 @@ prepareProviderTransition
     :: TransitionCause
     -> [Provider]
     -> Maybe PendingTurn
-    -> Text
     -> ModelOption
     -> Persistence
     -> IO (Either Text ProviderTransition)
-prepareProviderTransition cause unavailable pending draft rawChoice persist = do
+prepareProviderTransition cause unavailable pending rawChoice persist = do
     choice <- resolveModelOptionDialect rawChoice
     validateProviderTarget choice >>= \case
         Left err -> pure (Left err)
@@ -5837,7 +5841,6 @@ prepareProviderTransition cause unavailable pending draft rawChoice persist = do
                 , transitionAccountId = Nothing
                 , transitionSessionId = sessionId
                 , transitionPendingTurn = pending
-                , transitionDraft = draft
                 , transitionUnavailableProviders = unavailable
                 , transitionCause = cause
                 , transitionAutomaticBilling = Nothing

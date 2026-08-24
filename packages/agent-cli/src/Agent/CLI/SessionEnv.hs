@@ -62,6 +62,7 @@ data SessionEnv = SessionEnv
     , sessionShellMode :: !(IO ShellMode)
     , sessionSetShellMode :: !(ShellMode -> IO Text)
     , sessionEscPaused :: !(IORef Bool)
+    , sessionDraft :: !(IORef Text)
     , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState

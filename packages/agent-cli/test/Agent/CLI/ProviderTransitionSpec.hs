@@ -30,16 +30,6 @@ spec = do
                     (transition (Just "session-1") Nothing)
             transitioned.optResume `shouldBe` Just "session-1"
 
-        it "retains an unsubmitted draft across a provider rebuild" do
-            let switched =
-                    (transition Nothing Nothing)
-                        { transitionCause = ManualTransition
-                        , transitionDraft = "unfinished prompt"
-                        }
-            providerTransitionDraft (Just switched)
-                `shouldBe` "unfinished prompt"
-            providerTransitionDraft Nothing `shouldBe` ""
-
     describe "setPendingExitAfter" do
         it "preserves the plan state while changing exit behavior" do
             let pending = PendingTurn
@@ -68,7 +58,6 @@ transition sessionId pending = ProviderTransition
     , transitionAccountId = Nothing
     , transitionSessionId = sessionId
     , transitionPendingTurn = pending
-    , transitionDraft = ""
     , transitionUnavailableProviders = [XAIProvider]
     , transitionCause = AutomaticFallback
     , transitionAutomaticBilling = Just SubscriptionBilled
