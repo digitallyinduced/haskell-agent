@@ -131,6 +131,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
+    , runtimeBtw :: !(Text -> IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
@@ -160,6 +161,7 @@ data FullscreenRuntime = FullscreenRuntime
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionCancel :: !(IO ())
+    , sessionBtw :: !(Text -> IO ())
     , sessionRestartEffort :: !(Text -> IO ())
     , sessionCtrlC :: !(IO CtrlCDecision)
     , sessionAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))

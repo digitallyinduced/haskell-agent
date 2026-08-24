@@ -3,6 +3,7 @@ module Agent.CLI.TUIComposerSpec (spec) where
 import Agent.CLI.Input (ReplLine(..))
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
+import Agent.TUI.Model (UiState(..), initialUiState)
 import Control.Concurrent.STM (atomically)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (toList)
@@ -15,6 +16,20 @@ spec = describe "fullscreen composer" do
     it "cancels a running turn even when the slash menu is open" do
         composerEscapeAction False True
             `shouldBe` EscapeCancelTurn
+
+    it "runs /btw immediately only while a turn is active" do
+        immediateBtwQuestion
+            initialUiState { uiRunning = True }
+            (ReplText "/btw why?")
+            `shouldBe` Just "why?"
+        immediateBtwQuestion
+            initialUiState
+            (ReplText "/btw why?")
+            `shouldBe` Nothing
+        immediateBtwQuestion
+            initialUiState { uiRunning = True }
+            (ReplText "ordinary follow-up")
+            `shouldBe` Nothing
 
     it "dismisses slash completion or clears the draft while idle" do
         composerEscapeAction True True
