@@ -1,23 +1,68 @@
 --- a/src/Graphics/Vty/Platform/Unix/Input/Mouse.hs
 +++ b/src/Graphics/Vty/Platform/Unix/Input/Mouse.hs
-@@ -41 +41 @@ requestMouseEvents :: ByteString
+@@ -9,6 +9,7 @@
+   ( requestMouseEvents
+   , disableMouseEvents
+   , isMouseEvent
++  , isMouseEventPrefix
+   , classifyMouseEvent
+   )
+ where
+@@ -38,16 +39,31 @@
+ -- | These sequences set xterm-based terminals to send mouse event
+ -- sequences.
+ requestMouseEvents :: ByteString
 -requestMouseEvents = BS8.pack "\ESC[?1000h\ESC[?1002h\ESC[?1006h"
 +requestMouseEvents = BS8.pack "\ESC[?1000h\ESC[?1002h\ESC[?1003h\ESC[?1006h"
-@@ -45 +45 @@ disableMouseEvents :: ByteString
+ 
+ -- | These sequences disable mouse events.
+ disableMouseEvents :: ByteString
 -disableMouseEvents = BS8.pack "\ESC[?1000l\ESC[?1002l\ESC[?1006l"
 +disableMouseEvents = BS8.pack "\ESC[?1003l\ESC[?1002l\ESC[?1000l\ESC[?1006l"
-@@ -72,0 +73,6 @@ ctrlBit = 16
+ 
+ -- | Does the specified string begin with a mouse event?
+ isMouseEvent :: ByteString -> Bool
+ isMouseEvent s = isSGREvent s || isNormalEvent s
+ 
++-- | Does the specified string contain an incomplete mouse report?
++--
++-- Terminal transports are allowed to split an escape sequence across reads.
++-- Keep a recognized mouse prefix buffered until its final byte arrives
++-- instead of discarding it as invalid input.
++isMouseEventPrefix :: ByteString -> Bool
++isMouseEventPrefix s =
++    s `BS8.isPrefixOf` sgrPrefix
++        || s `BS8.isPrefixOf` normalPrefix
++        || (sgrPrefix `BS8.isPrefixOf` s && BS8.length s < 6)
++        || (normalPrefix `BS8.isPrefixOf` s
++            && maybe True (`notElem` ("Mm" :: String)) (safeLast s))
++  where
++    safeLast value = snd <$> BS8.unsnoc value
++
+ isSGREvent :: ByteString -> Bool
+ isSGREvent = BS8.isPrefixOf sgrPrefix
+ 
+@@ -70,6 +86,12 @@
+ ctrlBit :: Int
+ ctrlBit = 16
+ 
 +motionBit :: Int
 +motionBit = 32
 +
 +noButton :: Int
 +noButton = 3
 +
-@@ -162 +168,2 @@ parseSGRMouseEvent readChar = do
+ -- These bits indicate the buttons involved:
+ buttonMask :: Int
+ buttonMask = 67
+@@ -159,8 +181,18 @@
+     final <- readChar
+ 
+     let modifiers = getModifiers mods
 -    button <- getSGRButton mods
 +        isMotion = mods `hasBitSet` motionBit
 +        buttonCode = mods .&. buttonMask
-@@ -164,2 +171,11 @@ parseSGRMouseEvent readChar = do
+     case final of
 -        'M' -> return $ EvMouseDown (xCoord-1) (yCoord-1) button modifiers
 -        'm' -> return $ EvMouseUp   (xCoord-1) (yCoord-1) (Just button)
 +        'M'
@@ -31,3 +76,161 @@
 +        'm' -> do
 +            button <- getSGRButton mods
 +            return $ EvMouseUp (xCoord-1) (yCoord-1) (Just button)
+         _ -> failParse
+--- a/src/Graphics/Vty/Platform/Unix/Input/Classify.hs
++++ b/src/Graphics/Vty/Platform/Unix/Input/Classify.hs
+@@ -65,7 +65,10 @@
+                     if bracketedPasteFinished s
+                     then parseBracketedPaste s
+                     else Chunk
+-                _ | isMouseEvent s      -> classifyMouseEvent s
++                _ | isMouseEvent s      ->
++                    case classifyMouseEvent s of
++                        Invalid | isMouseEventPrefix s -> Prefix
++                        result -> result
+                 _ | isFocusEvent s      -> classifyFocusEvent s
+                 Just (c,cs) | c >= 0xC2 -> classifyUtf8 c cs
+                 _                       -> standardClassifier s
+--- a/src/Graphics/Vty/Platform/Unix/Input/Loop.hs
++++ b/src/Graphics/Vty/Platform/Unix/Input/Loop.hs
+@@ -48,6 +48,7 @@
+ import Control.Monad.Trans.Reader (ReaderT(..), asks)
+ import System.Posix.IO (fdReadBuf, setFdOption, FdOption(..))
+ import System.Posix.Types (Fd(..))
++import System.Timeout (timeout)
+ 
+ data InputBuffer = InputBuffer
+     { _ptr :: Ptr Word8
+@@ -63,6 +64,7 @@
+     , _originalInput :: Input
+     , _inputBuffer :: InputBuffer
+     , _classifier :: ClassifierState -> ByteString -> KClass
++    , _inputTimeoutMicros :: Int
+     }
+ 
+ makeLenses ''InputState
+@@ -79,10 +81,16 @@
+ -- of the lightweight threads.
+ loopInputProcessor :: InputM ()
+ loopInputProcessor = forever $ do
+-    readFromDevice >>= addBytesToProcess
+-    validEvents <- many parseEvent
+-    forM_ validEvents emit
+-    dropInvalid
++    pending <- hasPendingPrefix
++    timeoutMicros <- if pending then Just <$> use inputTimeoutMicros else pure Nothing
++    next <- readFromDevice timeoutMicros
++    case next of
++        Nothing -> expirePendingPrefix
++        Just block -> do
++            addBytesToProcess block
++            validEvents <- many parseEvent
++            forM_ validEvents emit
++            dropInvalid
+ 
+ addBytesToProcess :: ByteString -> InputM ()
+ addBytesToProcess block = unprocessedBytes <>= block
+@@ -97,26 +105,54 @@
+ --
+ -- Precondition: Under the threaded runtime. Only current use is from a
+ -- forkOS thread. That case satisfies precondition.
+-readFromDevice :: InputM ByteString
+-readFromDevice = do
++readFromDevice :: Maybe Int -> InputM (Maybe ByteString)
++readFromDevice timeoutMicros = do
+     fd <- use deviceFd
+ 
+     bufferPtr <- use $ inputBuffer.ptr
+     maxBytes  <- use $ inputBuffer.size
+-    stringRep <- liftIO $ do
++    maybeStringRep <- liftIO $ do
+         -- The killThread used in shutdownInput will not interrupt the
+         -- foreign call fdReadBuf uses this provides a location to be
+         -- interrupted prior to the foreign call. If there is input on
+         -- the FD then the fdReadBuf will return in a finite amount of
+         -- time due to the vtime terminal setting.
+-        threadWaitRead fd
+-        bytesRead <- fdReadBuf fd bufferPtr (fromIntegral maxBytes)
+-        if bytesRead > 0
+-        then BS.packCStringLen (castPtr bufferPtr, fromIntegral bytesRead)
+-        else return BS.empty
+-    when (not $ BS.null stringRep) $
+-        logMsg $ "input bytes: " ++ show (BS8.unpack stringRep)
+-    return stringRep
++        let waitAndRead = do
++                threadWaitRead fd
++                fdReadBuf fd bufferPtr (fromIntegral maxBytes)
++        maybeBytesRead <-
++            maybe (Just <$> waitAndRead) (`timeout` waitAndRead) timeoutMicros
++        case maybeBytesRead of
++            Nothing -> pure Nothing
++            Just bytesRead -> do
++                stringRep <-
++                    if bytesRead > 0
++                    then BS.packCStringLen (castPtr bufferPtr, fromIntegral bytesRead)
++                    else pure BS.empty
++                pure (Just stringRep)
++    forM_ maybeStringRep $ \stringRep ->
++        when (not $ BS.null stringRep) $
++            logMsg $ "input bytes: " ++ show (BS8.unpack stringRep)
++    pure maybeStringRep
++
++hasPendingPrefix :: InputM Bool
++hasPendingPrefix = do
++    classifier' <- use classifier
++    state <- use classifierState
++    bytes <- use unprocessedBytes
++    pure $
++        not (BS.null bytes)
++            && (bytes == BS8.pack "\ESC"
++                || classifier' state bytes == Prefix)
++
++expirePendingPrefix :: InputM ()
++expirePendingPrefix = do
++    bytes <- use unprocessedBytes
++    if bytes == BS8.pack "\ESC"
++        then emit (EvKey KEsc [])
++        else logMsg "dropping timed-out input prefix"
++    classifierState .= ClassifierStart
++    unprocessedBytes .= BS.empty
+ 
+ parseEvent :: InputM Event
+ parseEvent = do
+@@ -124,6 +160,8 @@
+     s <- use classifierState
+     b <- use unprocessedBytes
+     case c s b of
++        Valid (EvKey KEsc []) remaining
++            | BS.null remaining && b == BS8.pack "\ESC" -> mzero
+         Valid e remaining -> do
+             logMsg $ "valid parse: " ++ show e
+             logMsg $ "remaining: " ++ show remaining
+@@ -150,14 +188,15 @@
+             unprocessedBytes .= BS8.empty
+         _ -> return ()
+ 
+-runInputProcessorLoop :: ClassifyMap -> Input -> Fd -> IO ()
+-runInputProcessorLoop classifyTable input devFd = do
++runInputProcessorLoop :: Int -> ClassifyMap -> Input -> Fd -> IO ()
++runInputProcessorLoop timeoutMicros classifyTable input devFd = do
+     let bufferSize = 1024
+     allocaArray bufferSize $ \(bufferPtr :: Ptr Word8) -> do
+         let s0 = InputState BS8.empty ClassifierStart
+                     devFd input
+                     (InputBuffer bufferPtr bufferSize)
+                     (classify classifyTable)
++                    timeoutMicros
+         runReaderT (evalStateT loopInputProcessor s0) input
+ 
+ initInput :: UnixSettings -> ClassifyMap -> IO Input
+@@ -174,7 +213,9 @@
+                    <*> pure (return ())
+                    <*> pure (return ())
+                    <*> pure (const $ return ())
+-    inputThread <- forkOSFinally (runInputProcessorLoop classifyTable input devFd)
++    let timeoutMicros = max 1 theVtime * 1000
++    inputThread <- forkOSFinally
++        (runInputProcessorLoop timeoutMicros classifyTable input devFd)
+                                  (\_ -> putMVar stopSync ())
+     let killAndWait = do
+           killThread inputThread
