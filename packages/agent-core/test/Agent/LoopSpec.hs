@@ -41,6 +41,15 @@ spec = describe "runLoop" do
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "secret-image-bytes"
 
+    it "shows file metadata without exposing file bytes" do
+        let file = FileAttachment (Just "report.pdf") "application/pdf" "secret-file-bytes"
+            rendered = show file
+        rendered `shouldContain` "report.pdf"
+        rendered `shouldContain` "application/pdf"
+        rendered `shouldContain` "fileByteLength = 17"
+        rendered `shouldContain` "<redacted>"
+        rendered `shouldNotContain` "secret-file-bytes"
+
     it "combines TokenUsage component-wise" do
         TokenUsage 10 4 6 <> TokenUsage 3 2 1
             `shouldBe` TokenUsage 13 6 7
@@ -89,6 +98,31 @@ spec = describe "runLoop" do
         result `shouldBe` Right LoopResult
             { finalResponseId = "resp-m"
             , finalText = Just "saw it"
+            , turnsUsed = 1
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        seen `shouldBe` [(Nothing, inputs)]
+
+    it "accepts file attachments in multimodal turns" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-f" [] (Just "saw files")
+            ]
+        let image = ImageAttachment "image/png" "abc"
+            file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
+            inputs =
+                [ UserMultimodalFiles
+                    { userText = "see this"
+                    , userImages = [image]
+                    , userFiles = [file]
+                    }
+                ]
+        config <- testConfig backend
+        result <- runLoopInputs config Nothing inputs
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-f"
+            , finalText = Just "saw files"
             , turnsUsed = 1
             , tokenUsage = emptyTokenUsage
             }

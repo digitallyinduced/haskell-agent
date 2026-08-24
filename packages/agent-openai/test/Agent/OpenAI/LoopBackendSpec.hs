@@ -116,6 +116,23 @@ spec = do
                 other ->
                     expectationFailure ("expected one user message, got " <> show other)
 
+        it "encodes multimodal files as input_image plus input_file parts" do
+            let image = ImageAttachment "image/png" "png-bytes"
+                file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
+            case turnInputsToItems
+                    [UserMultimodalFiles "see this" [image] [file]] of
+                [MessageItem message] -> do
+                    message.role `shouldBe` RoleUser
+                    case message.content of
+                        MessageContentParts parts ->
+                            parts `shouldSatisfy` \ps ->
+                                any isInputFile ps && any isInputImage ps
+                        other ->
+                            expectationFailure
+                                ("expected text+image+file parts, got " <> show other)
+                other ->
+                    expectationFailure ("expected one user message, got " <> show other)
+
         it "encodes function results as function_call_output strings" do
             let items = turnInputsToItems
                     [CompletedTool (functionResult "c1" "echoed")]
@@ -1350,3 +1367,13 @@ replayUnsafeAuxiliaryFailure failure =
             <> Text.pack (show failure)
         )
         Nothing
+
+isInputFile :: ResponseContentPart -> Bool
+isInputFile = \case
+    InputFilePart{} -> True
+    _ -> False
+
+isInputImage :: ResponseContentPart -> Bool
+isInputImage = \case
+    InputImagePart{} -> True
+    _ -> False

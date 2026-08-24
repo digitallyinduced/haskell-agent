@@ -7,6 +7,7 @@ module Agent.Loop
     ( Backend(..)
     , BackendResult(..)
     , BackendStateStore(..)
+    , FileAttachment(..)
     , ImageAttachment(..)
     , LoopConfig(..)
     , LoopExecution(..)
@@ -66,12 +67,33 @@ instance Show ImageAttachment where
             <> ", imageByteLength = " <> show (ByteString.length image.imageBytes)
             <> " }"
 
+-- | File bytes attached to a user turn. Providers that cannot ingest files
+-- natively should fall back to a local path or text summary.
+data FileAttachment = FileAttachment
+    { fileName :: !(Maybe Text)
+    , fileMime :: !Text
+    , fileBytes :: !ByteString
+    } deriving (Eq)
+
+instance Show FileAttachment where
+    show file =
+        "FileAttachment { fileName = " <> show file.fileName
+            <> ", fileMime = " <> show file.fileMime
+            <> ", fileBytes = <redacted>"
+            <> ", fileByteLength = " <> show (ByteString.length file.fileBytes)
+            <> " }"
+
 data TurnInput
     = UserMessage Text
     | AgentMessage InterAgentMessage
     | UserMultimodal
         { userText :: !Text
         , userImages :: ![ImageAttachment]
+        }
+    | UserMultimodalFiles
+        { userText :: !Text
+        , userImages :: ![ImageAttachment]
+        , userFiles :: ![FileAttachment]
         }
     | CompletedTool ToolCallResult
     deriving (Eq, Show)

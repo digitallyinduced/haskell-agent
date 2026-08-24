@@ -52,6 +52,7 @@ library
                     , bytestring
                     , containers
                     , directory
+                    , filepath
                     , process               >= 1.6.26
                     , safe-exceptions
                     , text

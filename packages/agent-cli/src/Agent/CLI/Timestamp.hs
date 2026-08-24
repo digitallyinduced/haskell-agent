@@ -81,6 +81,12 @@ stampTurnInputs inputs = do
                 { userText = stampUserTextAt tz now userText
                 , userImages
                 }
+        UserMultimodalFiles{userText, userImages, userFiles} ->
+            UserMultimodalFiles
+                { userText = stampUserTextAt tz now userText
+                , userImages
+                , userFiles
+                }
         other -> other
 
 hasTrailingTimestamp :: Text -> Bool

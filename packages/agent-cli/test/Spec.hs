@@ -18,6 +18,7 @@ import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
+import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
@@ -82,6 +83,7 @@ main = hspec do
     CredentialStoreSpec.spec
     DialectsSpec.spec
     ErrorSpec.spec
+    GatewayBridgeSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
     InterruptSpec.spec

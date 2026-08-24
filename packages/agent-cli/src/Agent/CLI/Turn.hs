@@ -480,6 +480,8 @@ grokFrameLastUserInput = reverse . go . reverse
         UserMessage (grokUserQuery text) : rest
     go (input@UserMultimodal{userText} : rest) =
         input { userText = grokUserQuery userText } : rest
+    go (input@UserMultimodalFiles{userText} : rest) =
+        input { userText = grokUserQuery userText } : rest
     go (input : rest) = input : go rest
 
 grokUserQuery :: Text -> Text

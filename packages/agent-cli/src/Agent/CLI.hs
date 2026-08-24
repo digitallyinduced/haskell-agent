@@ -69,6 +69,17 @@ import Agent.CLI.AgentSessions
     , signalManagedSessionReady
     , sessionProcessStatus
     )
+import Agent.CLI.ManagedTurn
+    ( ManagedTurnRequest(..)
+    , loadManagedTurnRequest
+    , managedTurnInputs
+    , managedTurnRequestFromText
+    )
+import Agent.CLI.GatewayBridge
+    ( managedGatewayTools
+    , publishManagedLoopEvent
+    , requestManagedApproval
+    )
 import Agent.CLI.Approval
     ( ApprovalNotice(..)
     , approveToolDecision
@@ -1957,12 +1968,13 @@ runAgentInitializedWithLock
                     provider
                     (tokenProviderBillingMode tokenProvider)
             }
-    prompt <- loadPrompt options
+    promptRequest <- loadPrompt options
+    let promptText = fmap (\request -> request.managedTurnText) promptRequest
     persist <-
         preparePersistence
             fullscreen options root
                 inferredTarget { targetDialect = dialectId }
-                (isNothing transition) cwd effort prompt resumed
+                (isNothing transition) cwd effort promptText resumed
     writeIORef persistSlotRef persist
     (sessionTmp, ephemeralSessionId) <-
         persistenceTempDir persist >>= \case
@@ -2116,12 +2128,15 @@ runAgentInitializedWithLock
                 then MCP.mcpFleetMetaTools mcpFleet
                 else MCP.mcpFleetTools mcpFleet
         sessionTools = agentSessionTools sessionToolsEnv
-        allTools = coding.codingAppTools ++ mcpTools ++ sessionTools
+        gatewayTools = maybe [] managedGatewayTools promptRequest
+        allTools =
+            coding.codingAppTools ++ mcpTools ++ sessionTools ++ gatewayTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
                 ++ sessionTools
+                ++ gatewayTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -2143,7 +2158,10 @@ runAgentInitializedWithLock
     flip finally closeAll do
         case
                 mcpToolCollision
-                    (coding.codingAppTools ++ agentSessionTools sessionToolsEnv)
+                    ( coding.codingAppTools
+                        ++ agentSessionTools sessionToolsEnv
+                        ++ gatewayTools
+                    )
                     mcpFleet.mcpFleetRegistrations
             of
                 Just err ->
@@ -2198,7 +2216,9 @@ runAgentInitializedWithLock
         writeIORef subagentForkSource (Just transcriptRef)
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
-                Nothing -> sessionTitleFromPrompt <$> prompt
+                Nothing ->
+                    fmap (\request -> sessionTitleFromPrompt request.managedTurnText)
+                        promptRequest
         setWindowTitle (cliWindowTitle cwd titleHint)
         markStartupStage startup "Loading instructions…"
         startupContext <-
@@ -2250,7 +2270,7 @@ runAgentInitializedWithLock
                             && isNothing resumed
                             && isNothing options.optProvider
                             && isNothing options.optModel
-                            && isNothing prompt
+                            && isNothing promptRequest
                     withStartupAvailability action
                         | shouldProbeAtStartup =
                             withAsync
@@ -2509,7 +2529,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2573,7 +2593,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2634,7 +2654,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2706,7 +2726,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2976,7 +2996,7 @@ runSession
     -> ToolEnv
     -> PlanModeEnv
     -> StartupRuntime
-    -> Maybe Text
+    -> Maybe ManagedTurnRequest
     -> Maybe PendingTurn
     -> [Provider]
     -> Maybe (STM ApiError)
@@ -3013,7 +3033,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3351,19 +3371,22 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                         options.optMotionMode
             , renderMotionMode = options.optMotionMode
             }
-        emitLoop event = case fullscreen of
-            Nothing -> renderEvent render event
-            Just runtime -> do
-                case event of
-                    TurnStarted -> do
-                        now <- getCurrentTime
-                        writeIORef startedAtRef (Just now)
-                        writeIORef activityRef "Thinking…"
-                    TextDelta _ -> writeIORef printed True
-                    ToolStarted _ ->
-                        writeIORef activityRef "Running tool…"
-                    _ -> pure ()
-                emitUiEvent runtime (UiLoop event)
+        emitLoop event = do
+            forM_ promptRequest \request ->
+                publishManagedLoopEvent request event
+            case fullscreen of
+                Nothing -> renderEvent render event
+                Just runtime -> do
+                    case event of
+                        TurnStarted -> do
+                            now <- getCurrentTime
+                            writeIORef startedAtRef (Just now)
+                            writeIORef activityRef "Thinking…"
+                        TextDelta _ -> writeIORef printed True
+                        ToolStarted _ ->
+                            writeIORef activityRef "Running tool…"
+                        _ -> pure ()
+                    emitUiEvent runtime (UiLoop event)
         shellToolAllowed call = do
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef
@@ -3373,28 +3396,40 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                     && (not (isBashToolName toolName) || bashEnabled)
         approveRegisteredTool call =
             withMVar ioLock \_ ->
-                case fullscreen of
-                    Nothing ->
-                        withStdinPaused escPaused $
-                            approveToolDecision
-                                policyRef allowedToolsRef toolRegistry planMode
-                                projectRoot call
-                    Just runtime ->
-                        approveToolDecisionWithReporterAndPersistence
-                            (requestFullscreenPermission runtime)
-                            (\case
-                                ApprovalWarning _ -> pure ()
-                                ApprovalSuccess message ->
-                                    emitUiEvent runtime
-                                        (UiSetNotice
-                                            (Just
-                                                (successNotice message))))
-                            (saveProjectAutoApprove projectRoot True)
-                            policyRef
-                            allowedToolsRef
-                            toolRegistry
-                            planMode
-                            call
+                case promptRequest of
+                    Just request
+                        | isJust request.managedTurnBridgeDirectory ->
+                            approveToolDecisionWithReporterAndPersistence
+                                (requestManagedApproval request)
+                                (const (pure ()))
+                                (pure ())
+                                policyRef
+                                allowedToolsRef
+                                toolRegistry
+                                planMode
+                                call
+                    _ -> case fullscreen of
+                        Nothing ->
+                            withStdinPaused escPaused $
+                                approveToolDecision
+                                    policyRef allowedToolsRef toolRegistry planMode
+                                    projectRoot call
+                        Just runtime ->
+                            approveToolDecisionWithReporterAndPersistence
+                                (requestFullscreenPermission runtime)
+                                (\case
+                                    ApprovalWarning _ -> pure ()
+                                    ApprovalSuccess message ->
+                                        emitUiEvent runtime
+                                            (UiSetNotice
+                                                (Just
+                                                    (successNotice message))))
+                                (saveProjectAutoApprove projectRoot True)
+                                policyRef
+                                allowedToolsRef
+                                toolRegistry
+                                planMode
+                                call
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
@@ -3563,11 +3598,16 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                             else SubmitPendingTurn)
                         env
                         pending
-                Nothing -> case prompt of
-                    Just text -> do
-                        inputs <- preparePromptSkillInputs env text [UserMessage text]
-                            >>= either (die . Text.unpack) pure
-                        result <- runOneTurn env text inputs
+                Nothing -> case promptRequest of
+                    Just request -> do
+                        inputs <- managedTurnInputs cwd request
+                        skillInputs <-
+                            preparePromptSkillInputs
+                                env
+                                request.managedTurnText
+                                inputs
+                                >>= either (die . Text.unpack) pure
+                        result <- runOneTurn env request.managedTurnText skillInputs
                         finishTurn env True result
                     Nothing ->
                         readIORef startup.startupSessionState.sessionDraft
@@ -6516,6 +6556,7 @@ restartSessionOptions options sessionId =
         , optEffort = Nothing
         , optPrompt = Nothing
         , optPromptFile = Nothing
+        , optManagedTurnFile = Nothing
         , optResume = Just sessionId
         }
 
@@ -6711,10 +6752,20 @@ putTrailingNewline printed = do
     didPrint <- readIORef printed
     if didPrint then putStrLn "" else pure ()
 
-loadPrompt :: CliOptions -> IO (Maybe Text)
-loadPrompt options = case (options.optPrompt, options.optPromptFile) of
-    (Just text, _) -> pure (Just text)
-    (_, Just path) -> Just . Text.strip <$> Text.readFile (unsafeToFilePath path)
+loadPrompt :: CliOptions -> IO (Maybe ManagedTurnRequest)
+loadPrompt options =
+  case
+        ( options.optPrompt
+        , options.optPromptFile
+        , options.optManagedTurnFile
+        )
+    of
+    (Just text, _, _) ->
+        pure (Just (managedTurnRequestFromText (Text.strip text)))
+    (_, Just path, _) ->
+        loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
+    (_, _, Just path) ->
+        loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
     _ -> pure Nothing
 
 handleResume

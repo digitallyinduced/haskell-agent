@@ -3,16 +3,21 @@
 -- independent from the caller's model loop while remaining resumable.
 module Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
+    , SessionProcessLifetime(..)
     , SessionProcessManager
     , agentSessionTools
     , closeSessionProcessManager
+    , launchManagedTurn
+    , launchManagedTurnBounded
     , launchSessionTurn
     , newSessionProcessManager
+    , newSessionProcessManagerWithLifetime
     , signalManagedSessionReady
     , sessionProcessStatus
     ) where
 
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.Error (formatException)
 import Agent.CLI.Session
     ( SessionCreate(..)
@@ -59,7 +64,7 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (SomeException, try)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON(..), Value, object, (.=))
+import Data.Aeson (FromJSON(..), Value, encode, object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
@@ -85,10 +90,18 @@ import System.Process
     , ProcessHandle
     , StdStream(..)
     , createProcess
+    , getPid
     , getProcessExitCode
     , proc
+    , terminateProcess
     , waitForProcess
     )
+import System.Posix.Signals
+    ( sigKILL
+    , sigTERM
+    , signalProcessGroup
+    )
+import qualified System.Timeout as Timeout
 
 data AgentSessionToolsEnv = AgentSessionToolsEnv
     { toolsRoot :: !OsPath
@@ -111,14 +124,28 @@ data ManagedSessionProcess
 data SessionProcessManager = SessionProcessManager
     { managedRoot :: !OsPath
     , managedProcesses :: !(MVar (Map Text ManagedSessionProcess))
+    , managedLifetime :: !SessionProcessLifetime
     }
 
+data SessionProcessLifetime
+    = DetachedSessionProcesses
+    | ScopedSessionProcesses
+    deriving (Eq, Show)
+
 newSessionProcessManager :: OsPath -> IO SessionProcessManager
-newSessionProcessManager root = do
+newSessionProcessManager =
+    newSessionProcessManagerWithLifetime DetachedSessionProcesses
+
+newSessionProcessManagerWithLifetime
+    :: SessionProcessLifetime
+    -> OsPath
+    -> IO SessionProcessManager
+newSessionProcessManagerWithLifetime lifetime root = do
     processes <- newMVar Map.empty
     pure SessionProcessManager
         { managedRoot = root
         , managedProcesses = processes
+        , managedLifetime = lifetime
         }
 
 -- | Start one background turn for a persisted session. A second turn is
@@ -134,6 +161,32 @@ launchSessionTurn
     -> Text
     -> IO (Either Text Text)
 launchSessionTurn manager background policy ghciEnabled bashEnabled handle message =
+    launchSessionTurnInput
+        manager
+        background
+        policy
+        ghciEnabled
+        bashEnabled
+        Nothing
+        handle
+        (ManagedTextInput message)
+
+data ManagedTurnInput
+    = ManagedTextInput !Text
+    | ManagedRequestInput !ManagedTurnRequest
+
+launchSessionTurnInput
+    :: SessionProcessManager
+    -> Bool
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> Maybe Int
+    -> SessionHandle
+    -> ManagedTurnInput
+    -> IO (Either Text Text)
+launchSessionTurnInput
+        manager background policy ghciEnabled bashEnabled turnTimeout handle input =
     resolveAgentExecutable >>= \case
         Left err -> pure (Left err)
         Right executable -> do
@@ -172,12 +225,23 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
                             if background
                                 then pure (Right ("started session " <> sessionId))
                                 else do
-                                    exitCode <- waitForProcess process
+                                    exitResult <- case turnTimeout of
+                                        Nothing -> Right <$> waitForProcess process
+                                        Just micros ->
+                                            Timeout.timeout micros
+                                                (waitForManagedExit process) >>= \case
+                                                    Nothing -> do
+                                                        terminateManagedProcess process
+                                                        pure (Left
+                                                            "agent session timed out")
+                                                    Just exitCode ->
+                                                        pure (Right exitCode)
                                     forgetSession manager sessionId
-                                    pure case exitCode of
-                                        ExitSuccess ->
+                                    pure case exitResult of
+                                        Left err -> Left err
+                                        Right ExitSuccess ->
                                             Right ("completed session " <> sessionId)
-                                        ExitFailure code ->
+                                        Right (ExitFailure code) ->
                                             Left
                                                 ("session failed with exit code "
                                                     <> Text.pack (show code))
@@ -186,11 +250,15 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
 
     startManagedSession executable = do
         parentEnv <- getEnvironment
-        (promptPath, promptHandle) <- openTempFile
-            (unsafeToFilePath handle.sessionDir) ".agent-prompt-"
-        TextIO.hPutStr promptHandle message
-        hClose promptHandle
-        setFileMode promptPath 0o600
+        (inputPath, inputHandle) <- openTempFile
+            (unsafeToFilePath handle.sessionTempDir) ".agent-turn-"
+        case input of
+            ManagedTextInput message ->
+                TextIO.hPutStr inputHandle message
+            ManagedRequestInput request ->
+                LBS.hPut inputHandle (encode request)
+        hClose inputHandle
+        setFileMode inputPath 0o600
         (readyPath, readyHandle) <- openTempFile
             (unsafeToFilePath handle.sessionDir) ".agent-ready-"
         hClose readyHandle
@@ -205,13 +273,17 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
             logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
             approvalArgs = case policy of
                 ApproveAll -> ["--yolo"]
-                DenyMutating -> ["--no-yolo"]
+                DenyMutating -> ["--managed-deny-mutations"]
                 PromptMutating -> ["--no-yolo"]
+            inputArgs = case input of
+                ManagedTextInput _ -> ["--prompt-file", inputPath]
+                ManagedRequestInput _ -> ["--managed-turn-file", inputPath]
             agentArgs =
                 [ "--resume", Text.unpack sessionId
-                , "--prompt-file", promptPath
-                , "--save-session"
                 ]
+                    <> inputArgs
+                    <> [ "--save-session"
+                       ]
                     <> approvalArgs
                     <> ["--no-ghci" | not ghciEnabled]
                     <> ["--bash" | bashEnabled]
@@ -223,7 +295,7 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
             args =
                 [ "-c", cleanupScript
                 , "agent-session-runner"
-                , promptPath
+                , inputPath
                 , executable
                 ]
                     <> agentArgs
@@ -240,18 +312,69 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
                     }
         case started of
             Left err -> do
-                removePrivateFile promptPath
+                removePrivateFile inputPath
                 removePrivateFile readyPath
                 pure $ Left
                     ("failed to start agent session: " <> formatException err)
             Right (_, _, _, process) -> do
-                ready <- waitForManagedSessionReady process readyPath
+                ready <- Timeout.timeout 30_000_000
+                    (waitForManagedSessionReady process readyPath) >>= \case
+                        Nothing -> do
+                            _ <- try @_ @SomeException (terminateProcess process)
+                            _ <- try @_ @SomeException (waitForProcess process)
+                            pure (Left
+                                "agent session did not become ready within 30 seconds")
+                        Just result -> pure result
                 removePrivateFile readyPath
                 case ready of
                     Left err -> do
                         _ <- waitForProcess process
                         pure (Left err)
                     Right () -> pure (Right process)
+
+-- | Launch a structured gateway turn through the private request-file
+-- interface, without exposing gateway credentials to the child.
+launchManagedTurn
+    :: SessionProcessManager
+    -> Bool
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> SessionHandle
+    -> ManagedTurnRequest
+    -> IO (Either Text Text)
+launchManagedTurn manager background policy ghciEnabled bashEnabled handle request =
+    launchManagedTurnBounded
+        manager
+        background
+        policy
+        ghciEnabled
+        bashEnabled
+        Nothing
+        handle
+        request
+
+launchManagedTurnBounded
+    :: SessionProcessManager
+    -> Bool
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> Maybe Int
+    -> SessionHandle
+    -> ManagedTurnRequest
+    -> IO (Either Text Text)
+launchManagedTurnBounded
+        manager background policy ghciEnabled bashEnabled turnTimeout handle request =
+    launchSessionTurnInput
+        manager
+        background
+        policy
+        ghciEnabled
+        bashEnabled
+        turnTimeout
+        handle
+        (ManagedRequestInput request)
 
 forgetSession :: SessionProcessManager -> Text -> IO ()
 forgetSession manager sessionId =
@@ -290,8 +413,6 @@ sessionProcessStatus manager sessionId =
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager =
     modifyMVar_ manager.managedProcesses \processes -> do
-        -- Running sessions intentionally outlive the caller. The child owns
-        -- the advisory session lock; its wrapper owns prompt cleanup.
         forM_ (Map.elems processes) \case
             ManagedSessionStarting -> pure ()
             ManagedSessionRunning managedHandle ->
@@ -300,8 +421,36 @@ closeSessionProcessManager manager =
                         _ <- try @_ @SomeException
                             (waitForProcess managedHandle)
                         pure ()
-                    Nothing -> pure ()
+                    Nothing ->
+                        case manager.managedLifetime of
+                            DetachedSessionProcesses -> pure ()
+                            ScopedSessionProcesses -> do
+                                terminateManagedProcess managedHandle
         pure Map.empty
+
+waitForManagedExit :: ProcessHandle -> IO ExitCode
+waitForManagedExit process =
+    getProcessExitCode process >>= \case
+        Nothing -> threadDelay 10_000 >> waitForManagedExit process
+        Just exitCode -> do
+            _ <- try @_ @SomeException (waitForProcess process)
+            pure exitCode
+
+terminateManagedProcess :: ProcessHandle -> IO ()
+terminateManagedProcess process = do
+    processGroup <- getPid process
+    let signalGroup signal =
+            case processGroup of
+                Nothing -> terminateProcess process
+                Just pid -> signalProcessGroup signal pid
+    _ <- try @_ @SomeException (signalGroup sigTERM)
+    stopped <- Timeout.timeout 2_000_000 (waitForManagedExit process)
+    case stopped of
+        Just _ -> pure ()
+        Nothing -> do
+            _ <- try @_ @SomeException (signalGroup sigKILL)
+            _ <- try @_ @SomeException (waitForManagedExit process)
+            pure ()
 
 signalManagedSessionReady :: Either Text () -> IO ()
 signalManagedSessionReady result =

@@ -74,6 +74,7 @@ data CliOptions = CliOptions
     , optWorktree :: !Bool
     , optYolo :: !Bool
     , optNoYolo :: !Bool
+    , optManagedDenyMutations :: !Bool
     , optMaxTurns :: !Int
     , optCompactThreshold :: !(Maybe Int)
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
@@ -81,6 +82,7 @@ data CliOptions = CliOptions
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optPrompt :: !(Maybe Text)
     , optPromptFile :: !(Maybe OsPath)
+    , optManagedTurnFile :: !(Maybe OsPath)
     , optResume :: !(Maybe Text)
     , optSaveSession :: !Bool
     , optAgentsMd :: !Bool
@@ -103,11 +105,13 @@ defaultCliOptions = CliOptions
     , optWorktree = False
     , optYolo = False
     , optNoYolo = False
+    , optManagedDenyMutations = False
     , optMaxTurns = 500
     , optCompactThreshold = Nothing
     , optEffort = Nothing
     , optPrompt = Nothing
     , optPromptFile = Nothing
+    , optManagedTurnFile = Nothing
     , optResume = Nothing
     , optSaveSession = False
     , optAgentsMd = True
@@ -127,7 +131,10 @@ defaultEffortFor = \case
     ClaudeCodeProvider -> "xhigh"
 
 isOneShot :: CliOptions -> Bool
-isOneShot options = isJust options.optPrompt || isJust options.optPromptFile
+isOneShot options =
+    isJust options.optPrompt
+        || isJust options.optPromptFile
+        || isJust options.optManagedTurnFile
 
 -- | One-shot without a TTY auto-approves so scripts do not hang, unless
 -- @--no-yolo@ is set. Interactive sessions prompt on mutating tools, unless
@@ -135,6 +142,9 @@ isOneShot options = isJust options.optPrompt || isJust options.optPromptFile
 resolveApprovalPolicy :: CliOptions -> Bool -> Bool -> ApprovalPolicy
 resolveApprovalPolicy options isTty projectAutoApprove
     | options.optYolo && not options.optNoYolo = ApproveAll
+    | options.optManagedDenyMutations = DenyMutating
+    | isJust options.optManagedTurnFile && options.optNoYolo =
+        PromptMutating
     | options.optNoYolo && not isTty = DenyMutating
     | not isTty && isOneShot options = ApproveAll
     | not isTty = DenyMutating
@@ -186,6 +196,13 @@ parseOptions options = \case
         parseOptions options { optYolo = True, optNoYolo = False } rest
     "--no-yolo" : rest ->
         parseOptions options { optNoYolo = True, optYolo = False } rest
+    "--managed-deny-mutations" : rest ->
+        parseOptions options
+            { optManagedDenyMutations = True
+            , optNoYolo = True
+            , optYolo = False
+            }
+            rest
     "--max-turns" : value : rest -> do
         turns <- parseInt "--max-turns" value
         parseOptions options { optMaxTurns = turns } rest
@@ -201,6 +218,8 @@ parseOptions options = \case
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt-file" : value : rest ->
         parseOptions options { optPromptFile = Just (unsafeEncodeUtf value) } rest
+    "--managed-turn-file" : value : rest ->
+        parseOptions options { optManagedTurnFile = Just (unsafeEncodeUtf value) } rest
     "--resume" : value : rest ->
         parseOptions options { optResume = Just (Text.pack value) } rest
     "--save-session" : rest ->
@@ -238,8 +257,13 @@ parseOptions options = \case
 
 validate :: CliOptions -> Either String CliOptions
 validate options
-    | isJust options.optPrompt && isJust options.optPromptFile =
-        Left "use either -p/--prompt or --prompt-file, not both"
+    | length
+        (filter id
+            [ isJust options.optPrompt
+            , isJust options.optPromptFile
+            , isJust options.optManagedTurnFile
+            ]) > 1 =
+        Left "use only one of -p/--prompt, --prompt-file, or --managed-turn-file"
     | options.optMaxTurns < 1 =
         Left "--max-turns must be at least 1"
     | isJust options.optResume && options.optWorktree =
