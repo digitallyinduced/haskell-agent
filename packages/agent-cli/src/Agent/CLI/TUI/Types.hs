@@ -20,7 +20,7 @@ module Agent.CLI.TUI.Types
 
 import Agent.CLI.AgentViewport (AgentEntry, AgentTarget)
 import Agent.CLI.Command (SkillCommand)
-import Agent.CLI.Input (ReplLine)
+import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
 import Agent.CLI.Resume (ResumeBrowser, ResumeEntry)
