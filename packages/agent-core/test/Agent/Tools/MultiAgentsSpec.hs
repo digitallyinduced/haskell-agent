@@ -264,6 +264,29 @@ spec = describe "Agent.Tools.MultiAgents" do
         result.output `shouldSatisfy` Text.isInfixOf "restore failed"
         closeSubagentRegistry registry
 
+    it "rejects blank send and follow-up messages before resolving targets" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let handlers = appToolHandlers
+                (multiAgentTools (rootContext registry Nothing))
+            blankCall name = ToolCall
+                { callId = "blank-" <> name
+                , name = "collaboration." <> name
+                , arguments = "{\"target\":\"/root\",\"message\":\" \\n \"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        sendResult <- dispatchToolCall defaultLoopDispatch handlers
+            (blankCall "send_message")
+        followupResult <- dispatchToolCall defaultLoopDispatch handlers
+            (blankCall "followup_task")
+        sendResult.output `shouldBe`
+            "Error: send_message requires a non-empty message"
+        followupResult.output `shouldBe`
+            "Error: followup_task requires a non-empty message"
+        closeSubagentRegistry registry
+
     it "routes encrypted child messages to the root inbox" do
         rootInbox <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

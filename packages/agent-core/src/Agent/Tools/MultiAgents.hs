@@ -350,28 +350,18 @@ sendMessageDescription =
 
 runSendMessage :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runSendMessage ctx call args
-    | Text.null (Text.strip args.message) =
-        pure (Left "send_message requires a non-empty message")
-    | otherwise = do
-        case resolveTaskPath ctx.multiTaskPath args.target of
-            Right targetPath | targetPath == taskPathRoot ->
-                sendToRoot ctx (messageContent call args.message)
-            _ -> do
-                restored <- maybeRestore ctx args.target
-                case restored of
-                    Left err -> pure (Left err)
-                    Right () -> do
-                        resolved <-
-                            resolveAgentTarget
-                                ctx.multiRegistry ctx.multiTaskPath args.target
-                        case resolved of
-                            Left err -> pure (Left err)
-                            Right agentId -> do
-                                rootTurnId <- ctx.multiRootTurnId
-                                queueMessageFromForTurn
-                                    ctx.multiRegistry rootTurnId
-                                    ctx.multiTaskPath agentId
-                                    (messageContent call args.message)
+    = case validateMessage "send_message" args.message of
+        Left err -> pure (Left err)
+        Right () ->
+            withMessageTarget ctx args.target \target ->
+                case target of
+                    RootMessageTarget ->
+                        sendToRoot ctx (messageContent call args.message)
+                    AgentMessageTarget agentId rootTurnId ->
+                        queueMessageFromForTurn
+                            ctx.multiRegistry rootTurnId
+                            ctx.multiTaskPath agentId
+                            (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
@@ -392,28 +382,51 @@ followupDescription =
 
 runFollowup :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runFollowup ctx call args
-    | Text.null (Text.strip args.message) =
-        pure (Left "followup_task requires a non-empty message")
-    | otherwise = do
-        case resolveTaskPath ctx.multiTaskPath args.target of
-            Right targetPath | targetPath == taskPathRoot ->
-                pure (Left "followup_task cannot target the root agent; use send_message")
-            _ -> do
-                restored <- maybeRestore ctx args.target
-                case restored of
-                    Left err -> pure (Left err)
-                    Right () -> do
-                        resolved <-
-                            resolveAgentTarget
-                                ctx.multiRegistry ctx.multiTaskPath args.target
-                        case resolved of
-                            Left err -> pure (Left err)
-                            Right agentId -> do
-                                rootTurnId <- ctx.multiRootTurnId
-                                sendInputMessageForTurn
-                                    ctx.multiRegistry rootTurnId
-                                    ctx.multiTaskPath agentId
-                                    (messageContent call args.message) False
+    = case validateMessage "followup_task" args.message of
+        Left err -> pure (Left err)
+        Right () ->
+            withMessageTarget ctx args.target \target ->
+                case target of
+                    RootMessageTarget ->
+                        pure (Left "followup_task cannot target the root agent; use send_message")
+                    AgentMessageTarget agentId rootTurnId ->
+                        sendInputMessageForTurn
+                            ctx.multiRegistry rootTurnId
+                            ctx.multiTaskPath agentId
+                            (messageContent call args.message) False
+
+validateMessage :: Text -> Text -> Either Text ()
+validateMessage toolName message
+    | Text.null (Text.strip message) =
+        Left (toolName <> " requires a non-empty message")
+    | otherwise = Right ()
+
+data MessageTarget
+    = RootMessageTarget
+    | AgentMessageTarget SubagentId (Maybe RootTurnId)
+
+withMessageTarget
+    :: MultiAgentContext
+    -> Text
+    -> (MessageTarget -> IO (Either Text Text))
+    -> IO (Either Text Text)
+withMessageTarget ctx target action =
+    case resolveTaskPath ctx.multiTaskPath target of
+        Right targetPath | targetPath == taskPathRoot ->
+            action RootMessageTarget
+        _ -> do
+            restored <- maybeRestore ctx target
+            case restored of
+                Left err -> pure (Left err)
+                Right () -> do
+                    resolved <-
+                        resolveAgentTarget
+                            ctx.multiRegistry ctx.multiTaskPath target
+                    case resolved of
+                        Left err -> pure (Left err)
+                        Right agentId -> do
+                            rootTurnId <- ctx.multiRootTurnId
+                            action (AgentMessageTarget agentId rootTurnId)
 
 sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
 sendToRoot ctx content =
