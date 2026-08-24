@@ -9,6 +9,7 @@ module Agent.CLI.GatewayBridge
     , managedBridgeRequestsDirectory
     , managedBridgeResponsesDirectory
     , managedBridgeActivityPath
+    , isManagedBridgeRequestFile
     , writeManagedBridgeResponse
     , writeManagedBridgeResponseAt
     ) where
@@ -59,6 +60,7 @@ import System.Directory
     , doesFileExist
     , removeFile
     )
+import System.FilePath (takeExtension)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
 import System.Posix.Process (getProcessID)
@@ -438,6 +440,12 @@ managedBridgeResponsesDirectory request =
 managedBridgeActivityPath :: ManagedTurnRequest -> OsPath
 managedBridgeActivityPath request =
     bridgeRoot request </> unsafeEncodeUtf "activity.json"
+
+-- | Whether a directory entry is a fully published bridge request.
+-- Atomic writers expose their unique @.tmp@ file before renaming it, so
+-- request-directory consumers must not attempt to open every entry they see.
+isManagedBridgeRequestFile :: FilePath -> Bool
+isManagedBridgeRequestFile path = takeExtension path == ".json"
 
 bridgeRoot :: ManagedTurnRequest -> OsPath
 bridgeRoot request =

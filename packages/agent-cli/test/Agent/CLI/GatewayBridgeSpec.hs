@@ -29,6 +29,11 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.GatewayBridge" do
+    it "recognizes only fully published request files" do
+        isManagedBridgeRequestFile "call-1.json" `shouldBe` True
+        isManagedBridgeRequestFile "call-1.json123.tmp" `shouldBe` False
+        isManagedBridgeRequestFile "call-1.tmp" `shouldBe` False
+
     it "round-trips a channel tool request through private files" $
         withBridgeRequest \request -> do
             let call = functionToolCall
@@ -113,7 +118,7 @@ waitForBridgeRequest request = go (100 :: Int)
     go 0 = expectationFailure "timed out waiting for bridge request" >> fail "timeout"
     go attempts = do
         files <- listDirectory directory
-        case listToMaybe files of
+        case listToMaybe (filter isManagedBridgeRequestFile files) of
             Nothing -> threadDelay 20_000 >> go (attempts - 1)
             Just name -> do
                 bytes <- LBS.readFile (directory </> name)

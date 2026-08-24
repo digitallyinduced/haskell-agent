@@ -9,6 +9,7 @@ import Agent.CLI.GatewayBridge
     ( ManagedActivity(..)
     , ManagedBridgeRequest(..)
     , ManagedBridgeResponse(..)
+    , isManagedBridgeRequestFile
     , managedBridgeActivityPath
     , managedBridgeRequestsDirectory
     , writeManagedBridgeResponse
@@ -129,7 +130,13 @@ processBridgeRequests env seenRef = do
         Left _ -> pure []
         Right values -> pure values
     seen <- readIORef seenRef
-    forM_ (filter (`Set.notMember` seen) files) \name -> do
+    forM_
+        (filter
+            (\name ->
+                isManagedBridgeRequestFile name
+                    && Set.notMember name seen)
+            files)
+        \name -> do
         let path = directory <> "/" <> name
         decodeBridgeRequest path >>= \case
             Nothing -> pure ()
