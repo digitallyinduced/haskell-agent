@@ -9,8 +9,11 @@ import Agent.ToolDispatch
     , ToolDispatchConfig(..)
     , functionToolCall
     )
+import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
     ( appToolHandlers
+    , mkToolRegistry
+    , toolSchedulingPlanFor
     )
 import Agent.ToolDispatch (dispatchToolCall)
 import Control.Exception.Safe (displayException)
@@ -23,6 +26,22 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "databaseTools" do
+        it "claims independent scopes separately and serializes writes" do
+            let registry =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry (databaseTools testEnv)
+            userRead <- toolSchedulingPlanFor registry
+                (functionToolCall "user-read" "database_query"
+                    "{\"scope\":\"user\",\"sql\":\"select 1\"}")
+            repositoryRead <- toolSchedulingPlanFor registry
+                (functionToolCall "repo-read" "database_query"
+                    "{\"scope\":\"repository\",\"sql\":\"select 1\"}")
+            userWrite <- toolSchedulingPlanFor registry
+                (functionToolCall "user-write" "database_execute"
+                    "{\"scope\":\"user\",\"sql\":\"select 1\",\"purpose\":\"test\"}")
+            schedulingPlansConflict userRead repositoryRead `shouldBe` False
+            schedulingPlansConflict userRead userWrite `shouldBe` True
+
         it "dispatches a read-only query to the selected scope" do
             seen <- newIORef Nothing
             let env = testEnv

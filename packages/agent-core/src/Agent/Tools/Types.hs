@@ -48,6 +48,7 @@ import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
 import Data.IORef (IORef, newIORef, writeIORef)
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -75,8 +76,19 @@ data ApprovalRule
 data ToolExecutionPolicy
     = ParallelSafe
     | TurnSequential
+    -- | Run exclusively and defer approval of later calls from the same model
+    -- response until this handler finishes. Use for state transitions that can
+    -- change whether following calls are permitted.
+    | TurnApprovalBarrier
     deriving (Eq, Show)
 
+-- | Resolve the resources touched by one call.
+--
+-- Resolvers run once after approval. Calls following an exclusive plan are
+-- resolved only after that plan finishes, so arbitrary stateful tools cannot
+-- stale later claims. Resolvers must still be bounded and observational: they
+-- must not acquire leases or perform externally visible mutations. Errors,
+-- exceptions, and empty claim lists fail closed to exclusive execution.
 type ToolResourceResolver =
     ToolCall -> IO (Either Text [ToolResourceClaim])
 
@@ -215,6 +227,8 @@ rawJsonAppToolWithExecution
     , appToolResourceClaims = Nothing
     }
 
+-- | Refine a tool's static parallel/sequential policy with call-specific
+-- resource claims. Approval barriers remain exclusive.
 withToolResourceClaims
     :: ToolResourceResolver
     -> AppTool
@@ -296,18 +310,27 @@ toolSchedulingPlanFor
 toolSchedulingPlanFor registry call =
     case lookupRegisteredTool call.name registry of
         Nothing -> pure ToolExclusive
-        Just tool -> case tool.appToolResourceClaims of
-            Just resolve -> do
-                resolved <- tryAny (resolve call)
-                pure $ case resolved of
-                    Left _ -> ToolExclusive
-                    Right (Left _) -> ToolExclusive
-                    Right (Right claims) -> ToolResourceClaims claims
-            Nothing -> pure $ case tool.appToolExecution of
-                ParallelSafe ->
-                    ToolResourceClaims
-                        [ToolResourceClaim ToolRead ToolAllPaths]
-                TurnSequential -> ToolExclusive
+        Just tool
+            | tool.appToolExecution == TurnApprovalBarrier ->
+                pure ToolExclusive
+            | otherwise ->
+                case tool.appToolResourceClaims of
+                    Just resolve -> do
+                        resolved <- tryAny (resolve call)
+                        pure $ case resolved of
+                            Left _ -> ToolExclusive
+                            Right (Left _) -> ToolExclusive
+                            Right (Right (claim : claims)) ->
+                                ToolResourceClaims (claim :| claims)
+                            Right (Right []) -> ToolExclusive
+                    Nothing -> pure $ case tool.appToolExecution of
+                        ParallelSafe ->
+                            ToolResourceClaims
+                                (ToolResourceClaim
+                                    ToolRead
+                                    ToolAllResources :| [])
+                        TurnSequential -> ToolExclusive
+                        TurnApprovalBarrier -> ToolExclusive
 
 dispatchRegisteredToolCall
     :: ToolDispatchConfig

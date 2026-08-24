@@ -213,7 +213,7 @@ enterPlanModeToolWith completion env = jsonTool "enter_plan_mode"
     -- The tool performs its own explicit user confirmation through
     -- planConfirmEnter, so it must not also trigger generic tool approval.
     True
-    TurnSequential
+    TurnApprovalBarrier
     (typedTool "enter_plan_mode" (runEnterPlanMode completion env))
 
 enterPlanDescription :: PlanCompletion -> Text
@@ -298,7 +298,7 @@ exitPlanModeTool env = jsonTool "exit_plan_mode" exitPlanDescription
         "Optional short summary shown with the plan approval prompt."
     ]
     False
-    TurnSequential
+    TurnApprovalBarrier
     (typedTool "exit_plan_mode" (runExitPlanMode env))
 
 exitPlanDescription :: Text

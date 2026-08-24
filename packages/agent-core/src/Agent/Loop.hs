@@ -12,6 +12,7 @@ module Agent.Loop
     , LoopConfig(..)
     , LoopExecution(..)
     , LoopEvent(..)
+    , ToolSchedulingSnapshot(..)
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
@@ -44,12 +45,15 @@ import Agent.ToolDispatch
     , ToolDispatchConfig(..)
     )
 import Agent.Tools.Scheduling
-    ( ToolSchedulingPlan(..)
-    , schedulingPlansConflict
+    ( SchedulingDecision(..)
+    , ToolSchedulingPlan(..)
+    , nextSchedulingWave
     )
 import Agent.Tools.Types
-    ( ToolRegistry
+    ( ToolExecutionPolicy(..)
+    , ToolRegistry
     , dispatchRegisteredToolCall
+    , toolExecutionPolicyFor
     , toolSchedulingPlanFor
     )
 import Control.Concurrent.Async
@@ -95,6 +99,7 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.Maybe (mapMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -142,6 +147,11 @@ data TurnInput
         }
     | CompletedTool ToolCallResult
     deriving (Eq, Show)
+
+data ToolSchedulingSnapshot = ToolSchedulingSnapshot
+    { schedulingReadyCallIds :: ![Text]
+    , schedulingBlockedCallIds :: ![(Text, Text)]
+    } deriving (Eq, Show)
 
 -- | Provider-reported token counts for one model response. @inputTokens@
 -- typically includes any cached prefix; @cachedTokens@ is that subset when
@@ -248,6 +258,7 @@ data LoopEvent
     | TurnStarted
     | TurnFinished TurnOutput
     | ToolStarted ToolCall
+    | ToolSchedulingUpdated ToolSchedulingSnapshot
     -- | Latest accumulated output snapshot for an in-flight tool call.
     | ToolOutputUpdated Text Text
     | ToolFinished ToolCallResult
@@ -709,11 +720,46 @@ recordLoopEventFailure pump failure =
 -- calls from the same model turn to overlap. Results are returned in model
 -- order regardless of completion order.
 runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls config calls = do
-    prepared <- prepareIndexedToolCalls config (zip [0..] calls)
-    scheduled <- traverse schedule prepared
-    go scheduled Map.empty
+runToolCalls config = runApprovalBatches
   where
+    runApprovalBatches [] = pure []
+    runApprovalBatches remaining = do
+        let (current, later) = nextApprovalBatch remaining
+        currentResults <- runScheduledCalls current
+        cancelled <- isCancelled config.loopCancel
+        if cancelled
+            then pure currentResults
+            else (currentResults <>) <$> runApprovalBatches later
+
+    nextApprovalBatch = collect []
+      where
+        collect accumulated [] = (reverse accumulated, [])
+        collect accumulated (call : rest)
+            | toolExecutionPolicyFor config.loopTools call
+                == TurnApprovalBarrier =
+                (reverse (call : accumulated), rest)
+            | otherwise =
+                collect (call : accumulated) rest
+
+    runScheduledCalls current = do
+        prepared <- prepareIndexedToolCalls config (zip [0..] current)
+        runPlannedGroups [] prepared
+
+    runPlannedGroups completed [] =
+        pure completed
+    runPlannedGroups completed remaining =
+        race
+            (waitCancel config.loopCancel)
+            (scheduleThroughExclusive remaining) >>= \case
+                Left () -> pure completed
+                Right (planned, later) -> do
+                    groupResults <- runWaves planned Map.empty
+                    let completed' = completed <> groupResults
+                    cancelled <- isCancelled config.loopCancel
+                    if cancelled
+                        then pure completed'
+                        else runPlannedGroups completed' later
+
     schedule
         :: IndexedPreparedToolCall
         -> IO PreparedScheduledToolCall
@@ -725,40 +771,103 @@ runToolCalls config calls = do
             , prepared = indexed.prepared
             }
 
-    go
+    -- Claims are resolved once. Stop after the first exclusive plan so calls
+    -- following arbitrary stateful work resolve against its completed state.
+    scheduleThroughExclusive = collect []
+      where
+        collect accumulated [] =
+            pure (reverse accumulated, [])
+        collect accumulated (indexed : rest) = do
+            scheduled <- schedule indexed
+            let planned = scheduled : accumulated
+            case scheduled.plan of
+                Just ToolExclusive ->
+                    pure (reverse planned, rest)
+                _ ->
+                    collect planned rest
+
+    runWaves
         :: [PreparedScheduledToolCall]
         -> Map.Map Int ToolCallResult
         -> IO [ToolCallResult]
-    go [] completed =
+    runWaves [] completed =
         pure (map snd (Map.toAscList completed))
-    go remaining completed = do
-        let ready = readyCalls remaining
-            readyIndexes = Map.fromList [(call.index, ()) | call <- ready]
+    runWaves remaining completed = do
+        let decision =
+                nextSchedulingWave
+                    [ (scheduled.index, scheduled.plan)
+                    | scheduled <- remaining
+                    ]
+            readyIndexes =
+                Map.fromList
+                    [ (index, ())
+                    | index <- decision.schedulingReady
+                    ]
+            ready =
+                filter
+                    (\scheduled ->
+                        Map.member scheduled.index readyIndexes)
+                    remaining
             pending =
                 filter
                     (\scheduled ->
                         Map.notMember scheduled.index readyIndexes)
                     remaining
+            callIds =
+                Map.fromList
+                    [ ( scheduled.index
+                      , scheduledCallId scheduled.prepared
+                      )
+                    | scheduled <- remaining
+                    ]
+            readyCallIds =
+                mapMaybe
+                    (\scheduled ->
+                        scheduledCallId scheduled.prepared
+                            <$ scheduled.plan)
+                    ready
+            blockedCallIds =
+                mapMaybe
+                    (\(blocked, blocker) ->
+                        (,)
+                            <$> Map.lookup blocked callIds
+                            <*> Map.lookup blocker callIds)
+                    decision.schedulingBlocked
+            snapshot = ToolSchedulingSnapshot
+                { schedulingReadyCallIds = readyCallIds
+                , schedulingBlockedCallIds = blockedCallIds
+                }
+        if null readyCallIds && null blockedCallIds
+            then pure ()
+            else config.loopOnEvent
+                (ToolSchedulingUpdated snapshot)
         batchResults <-
             mapConcurrently
                 (\scheduled -> do
                     result <-
-                        runPreparedToolCall config scheduled.prepared
-                    pure (fmap (\value -> (scheduled.index, value)) result))
+                        runPreparedToolCall
+                            config
+                            scheduled.prepared
+                    pure
+                        (fmap
+                            (\value ->
+                                (scheduled.index, value))
+                            result))
                 ready
         let completed' =
                 foldr
                     (\result acc ->
                         maybe
                             acc
-                            (\(index, value) -> Map.insert index value acc)
+                            (\(index, value) ->
+                                Map.insert index value acc)
                             result)
                     completed
                     batchResults
         cancelled <- isCancelled config.loopCancel
         if cancelled
             then pure (map snd (Map.toAscList completed'))
-            else go pending completed'
+            else runWaves pending completed'
 
 data IndexedPreparedToolCall = IndexedPreparedToolCall
     { index :: !Int
@@ -767,21 +876,9 @@ data IndexedPreparedToolCall = IndexedPreparedToolCall
 
 data PreparedScheduledToolCall = PreparedScheduledToolCall
     { index :: !Int
-    , plan :: !ToolSchedulingPlan
+    , plan :: !(Maybe ToolSchedulingPlan)
     , prepared :: !PreparedToolCall
     }
-
-readyCalls :: [PreparedScheduledToolCall] -> [PreparedScheduledToolCall]
-readyCalls calls =
-    [ call
-    | call <- calls
-    , not
-        (any
-            (\earlier ->
-                earlier.index < call.index
-                    && schedulingPlansConflict earlier.plan call.plan)
-            calls)
-    ]
 
 prepareIndexedToolCalls
     :: LoopConfig
@@ -815,15 +912,18 @@ data PreparedToolCall =
 schedulingPlanForPrepared
     :: LoopConfig
     -> PreparedToolCall
-    -> IO ToolSchedulingPlan
+    -> IO (Maybe ToolSchedulingPlan)
 schedulingPlanForPrepared config (PreparedToolCall call approval) =
     case approval of
-        ToolApprovalGranted ->
-            toolSchedulingPlanFor config.loopTools call
+        ToolApprovalGranted -> Just
+            <$> toolSchedulingPlanFor config.loopTools call
         ToolApprovalDenied{} ->
-            pure ToolUnconstrained
+            pure Nothing
         ToolApprovalRejected ->
-            pure ToolUnconstrained
+            pure Nothing
+
+scheduledCallId :: PreparedToolCall -> Text
+scheduledCallId (PreparedToolCall call _) = call.callId
 
 -- | Approval may touch interactive or otherwise order-sensitive state, so it
 -- is prepared serially even when the resulting handlers may run concurrently.

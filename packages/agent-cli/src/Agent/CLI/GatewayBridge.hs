@@ -16,7 +16,7 @@ module Agent.CLI.GatewayBridge
 import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.Loop (LoopEvent(..))
+import Agent.Loop (LoopEvent(..), ToolSchedulingSnapshot(..))
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -316,6 +316,8 @@ publishManagedLoopEvent request event =
         WarningRaised message -> ("warning", nonEmpty "Warning" message)
         ResponseRestarted _ -> ("retrying", "Retrying response…")
         ToolStarted call -> ("tool", "Running " <> call.name <> "…")
+        ToolSchedulingUpdated snapshot ->
+            ("tool", schedulingActivity snapshot)
         ToolOutputUpdated name _ -> ("tool", "Running " <> name <> "…")
         ToolFinished _ -> ("thinking", "Thinking…")
         TurnFinished _ -> ("finished", "Finishing…")
@@ -323,6 +325,16 @@ publishManagedLoopEvent request event =
     nonEmpty fallback value
         | Text.null (Text.strip value) = fallback
         | otherwise = Text.strip value
+
+    schedulingActivity :: ToolSchedulingSnapshot -> Text
+    schedulingActivity snapshot =
+        let running = length snapshot.schedulingReadyCallIds
+            queued = length snapshot.schedulingBlockedCallIds
+        in "Running " <> Text.pack (show running) <> " tool"
+            <> if running == 1 then "" else "s"
+            <> if queued == 0
+                then ""
+                else "; " <> Text.pack (show queued) <> " queued"
 
 writeManagedBridgeResponse
     :: ManagedTurnRequest

@@ -71,7 +71,7 @@ grokTools
             , grepTool env
             , listDirTool env
             , searchReplaceTool env planMode
-            , runTerminalCmdTool session
+            , runTerminalCmdTool session planMode
             , todoWriteTool session
             , getTaskOutputTool session multi
             , waitTasksTool session multi

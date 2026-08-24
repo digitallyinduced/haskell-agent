@@ -10,11 +10,22 @@ module Agent.CLI.Database
     ) where
 
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall (..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withToolResourceClaims
     )
 import Data.Aeson
     ( FromJSON(..)
@@ -63,18 +74,13 @@ data DatabaseToolsEnv = DatabaseToolsEnv
         :: !(Text -> Int -> IO (Either Text Value))
     }
 
-data SchemaArgs = SchemaArgs
-    { schemaScope :: !DatabaseScope
-    }
+newtype SchemaArgs = SchemaArgs DatabaseScope
 
 instance FromJSON SchemaArgs where
     parseJSON = withObject "SchemaArgs" \object ->
         SchemaArgs <$> object .: "scope"
 
-data QueryArgs = QueryArgs
-    { queryScope :: !DatabaseScope
-    , querySql :: !Text
-    }
+data QueryArgs = QueryArgs !DatabaseScope !Text
 
 instance FromJSON QueryArgs where
     parseJSON = withObject "QueryArgs" \object ->
@@ -82,11 +88,7 @@ instance FromJSON QueryArgs where
             <$> object .: "scope"
             <*> object .: "sql"
 
-data ExecuteArgs = ExecuteArgs
-    { executeScope :: !DatabaseScope
-    , executeSql :: !Text
-    , executePurpose :: !Text
-    }
+data ExecuteArgs = ExecuteArgs !DatabaseScope !Text !Text
 
 instance FromJSON ExecuteArgs where
     parseJSON = withObject "ExecuteArgs" \object ->
@@ -95,10 +97,7 @@ instance FromJSON ExecuteArgs where
             <*> object .: "sql"
             <*> object .: "purpose"
 
-data ConversationSearchArgs = ConversationSearchArgs
-    { conversationSearchQuery :: !Text
-    , conversationSearchLimit :: !Int
-    }
+data ConversationSearchArgs = ConversationSearchArgs !Text !Int
 
 instance FromJSON ConversationSearchArgs where
     parseJSON = withObject "ConversationSearchArgs" \object ->
@@ -115,7 +114,9 @@ databaseTools env =
     ]
 
 schemaTool :: DatabaseToolsEnv -> AppTool
-schemaTool env = jsonTool
+schemaTool env =
+    withToolResourceClaims (schemaClaims ToolRead) $
+    jsonTool
     "database_schema"
     ( "Inspect the user-defined PostgreSQL tables visible in one durable "
         <> "scope. Returns tables, columns, keys, constraints, indexes, and "
@@ -129,7 +130,9 @@ schemaTool env = jsonTool
         encodeResult <$> env.databaseDescribeScope scope)
 
 queryTool :: DatabaseToolsEnv -> AppTool
-queryTool env = jsonTool
+queryTool env =
+    withToolResourceClaims (queryClaims ToolRead) $
+    jsonTool
     "database_query"
     ( "Run one read-only PostgreSQL query against user-defined tables in one "
         <> "durable scope. The database enforces a read-only transaction, "
@@ -149,7 +152,9 @@ queryTool env = jsonTool
                 <$> env.databaseRunQuery scope sql)
 
 executeTool :: DatabaseToolsEnv -> AppTool
-executeTool env = jsonTool
+executeTool env =
+    withToolResourceClaims (executeClaims ToolWrite) $
+    jsonTool
     "database_execute"
     ( "Execute a transactional PostgreSQL DDL/DML batch against user-defined "
         <> "tables in one durable scope. Use this to create or alter structured "
@@ -180,7 +185,9 @@ executeTool env = jsonTool
                         sql)
 
 conversationSearchTool :: DatabaseToolsEnv -> AppTool
-conversationSearchTool env = jsonTool
+conversationSearchTool env =
+    withToolResourceClaims (const (pure (Right conversationClaims))) $
+    jsonTool
     "conversation_search"
     ( "Search user and assistant messages from past, non-deleted conversations. "
         <> "Use this when earlier decisions, preferences, facts, or work may be "
@@ -209,6 +216,55 @@ scopeProperty = PropertySchema
         ( "Durable data scope: user for cross-project personal data, repository "
             <> "for data shared by clones/worktrees, or checkout for this worktree."
         ))
+
+schemaClaims
+    :: ToolAccess
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+schemaClaims access call =
+    pure $ do
+        SchemaArgs scope <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text SchemaArgs
+        pureScopeClaim access scope
+
+queryClaims
+    :: ToolAccess
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+queryClaims access call =
+    pure $ do
+        QueryArgs scope _ <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text QueryArgs
+        pureScopeClaim access scope
+
+executeClaims
+    :: ToolAccess
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+executeClaims access call =
+    pure $ do
+        ExecuteArgs scope _ _ <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text ExecuteArgs
+        pureScopeClaim access scope
+
+pureScopeClaim :: ToolAccess -> DatabaseScope -> Either Text [ToolResourceClaim]
+pureScopeClaim access scope =
+    Right
+        [ ToolResourceClaim access
+            (ToolNamedResource ("database-scope:" <> scopeName scope)) ]
+
+conversationClaims :: [ToolResourceClaim]
+conversationClaims =
+    [ToolResourceClaim ToolRead (ToolNamedResource "conversation-store")]
+
+scopeName :: DatabaseScope -> Text
+scopeName = \case
+    DatabaseUserScope -> "user"
+    DatabaseRepositoryScope -> "repository"
+    DatabaseCheckoutScope -> "checkout"
 
 encodeResult :: Either Text Value -> Either Text Text
 encodeResult =

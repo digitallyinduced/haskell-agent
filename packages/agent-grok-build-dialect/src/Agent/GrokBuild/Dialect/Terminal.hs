@@ -15,6 +15,10 @@ import Agent.Tools.IO
     ( combineCommandOutput
     , formatCommandResult
     )
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , isPlanModeActive
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
@@ -38,8 +42,8 @@ instance FromJSON TerminalArgs where
         <*> reqText object "description"
         <*> (fromMaybe False <$> optBool object "background")
 
-runTerminalCmdTool :: GrokSession -> AppTool
-runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
+runTerminalCmdTool :: GrokSession -> PlanModeEnv -> AppTool
+runTerminalCmdTool session planMode = jsonTool "run_terminal_cmd" terminalDescription
     [ PropertySchema "command" PropertyString True $ Just
         "The bash command to run."
     , PropertySchema "timeout" PropertyInteger False $ Just
@@ -51,7 +55,7 @@ runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
     ]
     False
     TurnSequential
-    (typedStreamingTool "run_terminal_cmd" (runTerminal session))
+    (typedStreamingTool "run_terminal_cmd" (runTerminal session planMode))
 
 terminalDescription :: Text
 terminalDescription =
@@ -61,10 +65,11 @@ terminalDescription =
 
 runTerminal
     :: GrokSession
+    -> PlanModeEnv
     -> (Text -> IO ())
     -> TerminalArgs
     -> IO (Either Text Text)
-runTerminal session emitOutput args
+runTerminal session planMode emitOutput args
     | Text.null args.description =
         pure (Left "Missing parameter: description")
     | commandLooksLikeRmRf args.command =
@@ -72,13 +77,19 @@ runTerminal session emitOutput args
     | not args.background && hasUnwaitedBackgroundOp args.command =
         pure $ Left
             "The command contains a background '&'. Set background=true to run it as a background task, or append `wait` if you meant to wait for the children."
-    | args.background = startBackground session args.command
     | otherwise = do
-        let timeoutMs = min 300000 (max 1 (fromMaybe 120000 args.timeout))
-        result <- runForegroundStreaming
-            session
-            (Text.unpack args.command)
-            timeoutMs
-            (\out err ->
-                emitOutput (stripAnsi (combineCommandOutput out err)))
-        pure $ Right $ stripAnsi (formatCommandResult result)
+        active <- isPlanModeActive planMode
+        if active
+            then pure (Left "Rejected: terminal commands are not allowed in plan mode.")
+            else if args.background
+                then startBackground session args.command
+            else do
+                let timeoutMs =
+                        min 300000 (max 1 (fromMaybe 120000 args.timeout))
+                result <- runForegroundStreaming
+                    session
+                    (Text.unpack args.command)
+                    timeoutMs
+                    (\out err ->
+                        emitOutput (stripAnsi (combineCommandOutput out err)))
+                pure $ Right $ stripAnsi (formatCommandResult result)

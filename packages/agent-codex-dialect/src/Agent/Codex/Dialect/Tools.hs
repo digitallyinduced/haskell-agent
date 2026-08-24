@@ -6,7 +6,6 @@
 -- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Codex.Dialect.Tools
     ( codexTools
-    , shellCommandIsReadOnly
     ) where
 
 import Agent.OsPath (fromText)
@@ -56,6 +55,8 @@ import Agent.Tools.PlanMode
     , askUserQuestionTool
     , enterCodexPlanModeTool
     , isPlanModeActive
+    , planFilePath
+    , planModeBlockedEditMessage
     , writePlanTool
     )
 import Agent.Tools.Scheduling
@@ -80,7 +81,6 @@ import Data.Aeson.Types (parseFail)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified System.FilePath as FilePath
 import System.OsPath (unsafeEncodeUtf)
 
 codexTools
@@ -96,13 +96,13 @@ codexTools env shellSession ghci planMode multi =
         , readFileTool env
         , grepTool env
         , listDirTool env
-        , applyPatchTool env
+        , applyPatchTool env planMode
         , updatePlanTool planMode
         , enterCodexPlanModeTool planMode
         , writePlanTool planMode
         , askUserQuestionTool planMode
-        , shellCommandTool env shellSession
-        , writeStdinTool shellSession
+        , shellCommandTool env shellSession planMode
+        , writeStdinTool shellSession planMode
         ]
         ++ maybe [] multiAgentTools multi
 
@@ -124,9 +124,8 @@ instance FromJSON ShellCommandArgs where
         <*> optIntOrString object "timeout_ms"
         <*> optIntOrString object "yield_time_ms"
 
-shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
-shellCommandTool env session =
-    withToolResourceClaims (shellCommandResourceClaims env) $
+shellCommandTool :: ToolEnv -> CodexShellSession -> PlanModeEnv -> AppTool
+shellCommandTool env session planMode =
     jsonTool "shell_command" shellDescription
     [ PropertySchema "command" PropertyString True $ Just
         "Shell script to run in the user's default shell."
@@ -139,117 +138,7 @@ shellCommandTool env session =
     ]
     False
     TurnSequential
-    (typedStreamingTool "shell_command" (runShell env session))
-
-shellCommandResourceClaims
-    :: ToolEnv
-    -> ToolCall
-    -> IO (Either Text [ToolResourceClaim])
-shellCommandResourceClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text ShellCommandArgs
-    of
-        Left err -> pure (Left err)
-        Right args
-            | args.yieldTimeMs /= Nothing ->
-                pure (Left "yielding shell commands remain exclusive")
-            | not (shellCommandIsReadOnly args.command) ->
-                pure (Left "shell command is not in the read-only allowlist")
-            | otherwise -> do
-                let requested = maybe env.toolCwd fromText args.workdir
-                resolveUnderCwd env requested
-                    >>= pure . fmap
-                        (\_ ->
-                            [ ToolResourceClaim
-                                ToolRead
-                                ToolAllPaths
-                            ])
-
-shellCommandIsReadOnly :: Text -> Bool
-shellCommandIsReadOnly command
-    | Text.null stripped = False
-    | Text.any (`elem` forbiddenChars) stripped = False
-    | "$(" `Text.isInfixOf` stripped = False
-    | "`" `Text.isInfixOf` stripped = False
-    | "$" `Text.isInfixOf` stripped = False
-    | otherwise =
-        case Text.words stripped of
-            [] -> False
-            executable : arguments ->
-                allowedCommand
-                    (Text.pack
-                        (FilePath.takeFileName (Text.unpack executable)))
-                    arguments
-  where
-    stripped = Text.strip command
-    forbiddenChars = ['\n', '\r', ';', '&', '|', '>', '<']
-
-allowedCommand :: Text -> [Text] -> Bool
-allowedCommand executable arguments
-    | executable `elem`
-        [ "cat", "head", "tail", "grep", "rg", "fd", "ls"
-        , "pwd", "wc", "stat", "file", "jq", "sort", "uniq", "cut"
-        , "tr", "realpath", "basename", "dirname", "which", "du", "df"
-        , "nl", "ps", "test", "diff", "printf", "echo"
-        ] =
-        not (any mutatingFlag arguments)
-            && not (executable == "sort" && any outputFlag arguments)
-    | executable == "find" =
-        not (any findAction arguments)
-    | executable == "sed" =
-        safeSed arguments
-    | executable == "git" =
-        case arguments of
-            subcommand : _ ->
-                subcommand `elem`
-                    [ "diff", "log", "show", "rev-parse"
-                    , "ls-files", "blame", "grep", "merge-base", "rev-list"
-                    , "symbolic-ref", "ls-remote"
-                    ]
-                    && not (any gitMutatingFlag arguments)
-            [] -> False
-    | executable == "gh" =
-        case arguments of
-            "pr" : subcommand : _ ->
-                subcommand `elem` ["view", "list", "checks", "status", "diff"]
-            "repo" : "view" : _ -> True
-            "run" : subcommand : _ -> subcommand `elem` ["list", "view"]
-            "auth" : "status" : _ -> True
-            _ -> False
-    | otherwise = False
-  where
-    mutatingFlag argument =
-        argument `elem` ["-i", "--in-place", "--delete", "-delete"]
-    outputFlag argument =
-        argument == "-o"
-            || "--output" `Text.isPrefixOf` argument
-    findAction argument =
-        argument `elem`
-            [ "-delete", "-exec", "-execdir", "-ok", "-okdir"
-            , "-fprint", "-fprintf", "-fls"
-            ]
-    gitMutatingFlag argument =
-        outputFlag argument
-            || argument `elem`
-                [ "-d", "-D", "-m", "-M", "-c", "-C"
-                , "--delete", "--move", "--copy"
-                ]
-
-safeSed :: [Text] -> Bool
-safeSed = \case
-    "-n" : script : paths ->
-        safePrintScript script
-            && not (null paths)
-            && all (not . Text.isPrefixOf "-") paths
-    _ -> False
-  where
-    safePrintScript raw =
-        let script = Text.dropAround (`elem` ['\'', '"']) raw
-            withoutDigits = Text.filter
-                (\char -> char < '0' || char > '9')
-                script
-        in withoutDigits `elem` ["p", ",p"]
+    (typedStreamingTool "shell_command" (runShell env session planMode))
 
 shellDescription :: Text
 shellDescription =
@@ -260,44 +149,53 @@ shellDescription =
 runShell
     :: ToolEnv
     -> CodexShellSession
+    -> PlanModeEnv
     -> (Text -> IO ())
     -> ShellCommandArgs
     -> IO (Either Text Text)
-runShell env session emitOutput args
+runShell env session planMode emitOutput args
     | commandLooksLikeRmRf args.command =
         pure (Left (forbiddenRmRfReason args.command))
     | args.timeoutMs /= Nothing && args.yieldTimeMs /= Nothing =
         pure (Left "timeout_ms and yield_time_ms are mutually exclusive")
     | otherwise = do
-        workdir <- case args.workdir of
-            Nothing -> pure (Right env.toolCwd)
-            Just dir -> resolveUnderCwd env (fromText dir)
-        case workdir of
-            Left err -> pure (Left err)
-            Right dir -> case args.yieldTimeMs of
-                Just requestedYield -> do
-                    let yieldMs = clampMs requestedYield
-                    startCodexShellCommand
-                        session
-                        dir
-                        (Text.unpack args.command)
-                        yieldMs
-                        (\out err -> emitOutput (commandBody out err))
-                        >>= pure . fmap renderShellResult
-                Nothing -> do
-                    let timeoutMs = clampMs (fromMaybe 10000 args.timeoutMs)
-                    result <- runShellCommandStreaming
-                        env
-                        dir
-                        (Text.unpack args.command)
-                        timeoutMs
-                        (\out err -> emitOutput (commandBody out err))
-                    if result.commandCancelled
-                        then pure $ Left "Error: Command cancelled"
-                        else if result.commandTimedOut
-                        then pure $ Left $
-                            "Error: Command timed out after " <> Text.pack (show timeoutMs) <> "ms"
-                        else pure $ Right $ renderFinished result
+        active <- isPlanModeActive planMode
+        if active
+            then pure (Left "Rejected: shell commands are not allowed in plan mode.")
+            else do
+                workdir <- case args.workdir of
+                    Nothing -> pure (Right env.toolCwd)
+                    Just dir -> resolveUnderCwd env (fromText dir)
+                case workdir of
+                    Left err -> pure (Left err)
+                    Right dir -> case args.yieldTimeMs of
+                        Just requestedYield -> do
+                            let yieldMs = clampMs requestedYield
+                            startCodexShellCommand
+                                session
+                                dir
+                                (Text.unpack args.command)
+                                yieldMs
+                                (\out err -> emitOutput (commandBody out err))
+                                >>= pure . fmap renderShellResult
+                        Nothing -> do
+                            let timeoutMs =
+                                    clampMs (fromMaybe 10000 args.timeoutMs)
+                            result <- runShellCommandStreaming
+                                env
+                                dir
+                                (Text.unpack args.command)
+                                timeoutMs
+                                (\out err ->
+                                    emitOutput (commandBody out err))
+                            if result.commandCancelled
+                                then pure $ Left "Error: Command cancelled"
+                                else if result.commandTimedOut
+                                then pure $ Left $
+                                    "Error: Command timed out after "
+                                        <> Text.pack (show timeoutMs)
+                                        <> "ms"
+                                else pure $ Right $ renderFinished result
 
 data WriteStdinArgs = WriteStdinArgs
     { sessionId :: Int
@@ -311,8 +209,8 @@ instance FromJSON WriteStdinArgs where
         <*> optText object "chars"
         <*> optIntOrString object "yield_time_ms"
 
-writeStdinTool :: CodexShellSession -> AppTool
-writeStdinTool session =
+writeStdinTool :: CodexShellSession -> PlanModeEnv -> AppTool
+writeStdinTool session planMode =
     withToolResourceClaims writeStdinResourceClaims $
     jsonAppToolWithExecution "write_stdin" writeStdinDescription
         [ PropertySchema "session_id" PropertyInteger True $ Just
@@ -324,7 +222,7 @@ writeStdinTool session =
         ]
         (ClassifyReadOnly writeStdinIsReadOnly)
         TurnSequential
-        (typedTool "write_stdin" (runWriteStdin session))
+        (typedTool "write_stdin" (runWriteStdin session planMode))
 
 writeStdinResourceClaims
     :: ToolCall
@@ -351,15 +249,20 @@ writeStdinIsReadOnly call =
 
 runWriteStdin
     :: CodexShellSession
+    -> PlanModeEnv
     -> WriteStdinArgs
     -> IO (Either Text Text)
-runWriteStdin session args = do
-    let yieldMs = clampMs (fromMaybe 5000 args.yieldTimeMs)
-    fmap renderShellResult <$> continueCodexShellCommand
-        session
-        args.sessionId
-        (fromMaybe "" args.chars)
-        yieldMs
+runWriteStdin session planMode args = do
+    active <- isPlanModeActive planMode
+    if active
+        then pure (Left "Rejected: shell sessions are not available in plan mode.")
+        else do
+            let yieldMs = clampMs (fromMaybe 5000 args.yieldTimeMs)
+            fmap renderShellResult <$> continueCodexShellCommand
+                session
+                args.sessionId
+                (fromMaybe "" args.chars)
+                yieldMs
 
 clampMs :: Int -> Int
 clampMs = min 300000 . max 1
@@ -402,12 +305,12 @@ instance FromJSON ApplyPatchArgs where
         ApplyPatchArgs <$> (reqText object "input" <|> reqText object "patch" <|> reqText object "command")
     parseJSON _ = parseFail "apply_patch expects freeform patch text"
 
-applyPatchTool :: ToolEnv -> AppTool
-applyPatchTool env =
+applyPatchTool :: ToolEnv -> PlanModeEnv -> AppTool
+applyPatchTool env planMode =
     withToolResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
-        (typedTool "apply_patch" (runApplyPatch env))
+        (typedTool "apply_patch" (runApplyPatch env planMode))
 
 applyPatchResourceClaims
     :: ToolEnv
@@ -462,8 +365,18 @@ applyPatchDescription =
     \*** Delete File: path\n\
     \*** End Patch"
 
-runApplyPatch :: ToolEnv -> ApplyPatchArgs -> IO (Either Text Text)
-runApplyPatch env args = applyPatch env args.patch
+runApplyPatch
+    :: ToolEnv
+    -> PlanModeEnv
+    -> ApplyPatchArgs
+    -> IO (Either Text Text)
+runApplyPatch env planMode args = do
+    active <- isPlanModeActive planMode
+    if not active
+        then applyPatch env args.patch
+        else do
+            path <- planFilePath planMode
+            pure (Left (planModeBlockedEditMessage path))
 
 --------------------------------------------------------------------------------
 -- update_plan

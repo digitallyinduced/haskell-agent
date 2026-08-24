@@ -16,6 +16,10 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , dispatchToolCall
     )
+import Agent.Tools.Scheduling
+    ( ToolSchedulingPlan(..)
+    , schedulingPlansConflict
+    )
 import Agent.ToolDSL (PropertySchema(..))
 import Agent.Tools.MultiAgents
 import Agent.Tools.Types
@@ -23,6 +27,8 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , appToolHandlers
     , jsonToolParameters
+    , mkToolRegistry
+    , toolSchedulingPlanFor
     )
 import Control.Concurrent.STM
 import Control.Monad (unless)
@@ -35,6 +41,36 @@ fromFilePath = unsafeEncodeUtf
 
 spec :: Spec
 spec = describe "Agent.Tools.MultiAgents" do
+    it "uses pure task-path claims for registry and target mutations" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let context = rootContext registry Nothing
+        toolRegistry <- case mkToolRegistry (multiAgentTools context) of
+            Left err -> expectationFailure (Text.unpack err) >> fail "unreachable"
+            Right value -> pure value
+        firstSpawn <- toolSchedulingPlanFor toolRegistry
+            (spawnCall "worker_a")
+        secondSpawn <- toolSchedulingPlanFor toolRegistry
+            (spawnCall "worker_b")
+        first <- toolSchedulingPlanFor toolRegistry
+            (messageCall "send-a" "worker_a")
+        sameByPath <- toolSchedulingPlanFor toolRegistry
+            (messageCall "send-a-path" "/root/worker_a")
+        second <- toolSchedulingPlanFor toolRegistry
+            (messageCall "send-b" "worker_b")
+        listed <- toolSchedulingPlanFor toolRegistry
+            (ToolCall "list" "collaboration.list_agents" "{}"
+                FunctionCallKind False)
+        unknown <- toolSchedulingPlanFor toolRegistry sendMissingCall
+        schedulingPlansConflict firstSpawn secondSpawn `shouldBe` True
+        schedulingPlansConflict first second `shouldBe` False
+        schedulingPlansConflict first sameByPath `shouldBe` True
+        schedulingPlansConflict first listed `shouldBe` True
+        schedulingPlansConflict first unknown `shouldBe` True
+        unknown `shouldBe` ToolExclusive
+        closeSubagentRegistry registry
+
     it "keeps plaintext inter-agent content useful in Show output" do
         let rendered = show (PlainInterAgentContent "visible task")
         rendered `shouldContain` "PlainInterAgentContent"
@@ -369,6 +405,16 @@ spawnCall taskName = ToolCall
     , name = "collaboration.spawn_agent"
     , arguments =
         "{\"task_name\":\"" <> taskName <> "\",\"message\":\"task\"}"
+    , callKind = FunctionCallKind
+    , argumentsEncrypted = False
+    }
+
+messageCall :: Text -> Text -> ToolCall
+messageCall callId target = ToolCall
+    { callId
+    , name = "collaboration.send_message"
+    , arguments =
+        "{\"target\":\"" <> target <> "\",\"message\":\"hello\"}"
     , callKind = FunctionCallKind
     , argumentsEncrypted = False
     }
