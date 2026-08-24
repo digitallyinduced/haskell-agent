@@ -82,7 +82,8 @@ import Agent.CLI.Btw
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
-    ( formatImageSize
+    ( appendUniqueImageAttachments
+    , formatImageSize
     , loadImagesFromPastedText
     , nonEmptyClipboardImages
     , readClipboardImagesForPaste
@@ -6813,20 +6814,40 @@ queueAttachedImages
     -> [ImageAttachment]
     -> IO Text
 queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
-    modifyIORef' attachmentsRef (<> images)
-    pending <- readIORef attachmentsRef
+    (added, pendingCount) <- atomicModifyIORef' attachmentsRef \existing ->
+        let (pending, unique) =
+                appendUniqueImageAttachments existing images
+        in (pending, (unique, length pending))
     let sizes =
             Text.intercalate ", "
                 [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
-                | img <- images
+                | img <- added
                 ]
-    when showPreview (putImagePreview previewIdRef color images)
-    pure $
-        "attached "
-            <> sizes
-            <> " — send with next message ("
-            <> Text.pack (show (length pending))
-            <> " queued)"
+        duplicateCount = length images - length added
+        queued = Text.pack (show pendingCount)
+    when (showPreview && not (null added)) $
+        putImagePreview previewIdRef color added
+    pure $ case (added, duplicateCount) of
+        ([], _) ->
+            "image already attached — not added again ("
+                <> queued
+                <> " queued)"
+        (_, 0) ->
+            "attached "
+                <> sizes
+                <> " — send with next message ("
+                <> queued
+                <> " queued)"
+        _ ->
+            "attached "
+                <> sizes
+                <> "; skipped "
+                <> Text.pack (show duplicateCount)
+                <> " duplicate image"
+                <> (if duplicateCount == 1 then "" else "s")
+                <> " ("
+                <> queued
+                <> " queued)"
 
 queueClipboardImages
     :: IORef [ImageAttachment]
