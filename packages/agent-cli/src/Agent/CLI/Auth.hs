@@ -288,10 +288,10 @@ detectProvider Nothing = do
     grok <- lift hasGrokAuth
     openai <- lift hasOpenAiAuth
     openrouter <- lift hasOpenRouterAuth
-    if grok
-        then pure XAIProvider
-        else if openai
-            then pure OpenAIProvider
+    if openai
+        then pure OpenAIProvider
+        else if grok
+            then pure XAIProvider
             else if openrouter
                 then pure OpenRouterProvider
                 else throwE noAuthHint

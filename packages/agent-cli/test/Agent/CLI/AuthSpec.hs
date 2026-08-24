@@ -67,6 +67,30 @@ spec = do
             authErrorNeedsOnboarding "credential store is unreadable"
                 `shouldBe` False
 
+    describe "loadAuth" do
+        it "prefers OpenAI when automatic detection finds OpenAI and xAI auth" $
+            withTempHome \_ ->
+                withCleanOpenAiEnv $
+                withCleanGrokEnv $
+                withEnv "AGENT_BROKER_URL" Nothing do
+                    storeOpenAiAccount
+                        "openai"
+                        "openai-account"
+                        True
+                        "openai-token"
+                    storeManagedAccount
+                        SubscriptionBilled
+                        XAIProvider
+                        "xai"
+                        "xai-account"
+                        "Grok"
+                        True
+                        "xai-token"
+                    loadAuth Nothing >>= \case
+                        Left err -> expectationFailure (Text.unpack err)
+                        Right loaded ->
+                            loaded.loadedProvider `shouldBe` OpenAIProvider
+
     describe "probeLoadedAuth" do
         it "rejects auth whose accounts are currently cooling down" do
             let retryAt = UTCTime (fromGregorian 2026 8 21) 3600

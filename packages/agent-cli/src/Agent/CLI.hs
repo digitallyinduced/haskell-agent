@@ -1252,48 +1252,79 @@ runFullscreenRestartLoop
     loop options transition action =
         -- The notifier in 'runFullscreen' watches this whole tail-recursive
         -- chain, rather than stopping Brick after the first provider exits.
-        action >>= \case
-            RunRestart sessionId -> do
-                let nextOptions = restartSessionOptions options sessionId
-                prepared <- prepareAgentIteration
-                    fullscreenInputs
-                    sessionState
-                    (Just runtime)
-                    nextOptions
-                    Nothing
-                loop nextOptions Nothing prepared.preparedRun
-            RunSwitchProvider next -> do
-                let nextOptions = applyProviderTransition options next
-                prepared <- prepareAgentIteration
-                    fullscreenInputs
-                    sessionState
-                    (Just runtime)
-                    nextOptions
-                    (Just next)
-                loop nextOptions (Just next) prepared.preparedRun
-            RunProviderStartFailed apiError ->
-                case transition of
-                    Just failed
-                        | failed.transitionCause == AutomaticFallback ->
-                            continueAutomaticFallback
-                                (Just runtime) failed apiError >>= \case
-                                Just next -> do
-                                    let nextOptions =
-                                            applyProviderTransition options next
-                                    prepared <- prepareAgentIteration
-                                        fullscreenInputs
-                                        sessionState
-                                        (Just runtime)
-                                        nextOptions
-                                        (Just next)
-                                    loop
-                                        nextOptions
-                                        (Just next)
-                                        prepared.preparedRun
-                                Nothing ->
-                                    pure (RunProviderStartFailed apiError)
-                    _ -> pure (RunProviderStartFailed apiError)
-            result -> pure result
+        try @_ @StartupFailure action >>= \case
+            Left (StartupFailure message) ->
+                recoverStartup options transition (Text.pack message)
+            Right result -> case result of
+                RunRestart sessionId -> do
+                    let nextOptions = restartSessionOptions options sessionId
+                    retryStartup nextOptions Nothing
+                RunSwitchProvider next -> do
+                    let nextOptions = applyProviderTransition options next
+                    retryStartup nextOptions (Just next)
+                RunProviderStartFailed apiError ->
+                    case transition of
+                        Just failed
+                            | failed.transitionCause == AutomaticFallback ->
+                                continueAutomaticFallback
+                                    (Just runtime) failed apiError >>= \case
+                                    Just next -> do
+                                        let nextOptions =
+                                                applyProviderTransition
+                                                    options next
+                                        retryStartup nextOptions (Just next)
+                                    Nothing ->
+                                        recoverProviderStart
+                                            options transition apiError
+                        _ ->
+                            recoverProviderStart options transition apiError
+                other -> pure other
+
+    recoverProviderStart options transition apiError = do
+        now <- getCurrentTime
+        recoverStartup
+            options
+            transition
+            (formatApiErrorAt now apiError)
+
+    retryStartup options transition = do
+        emitUiEvent runtime $
+            UiSetNotice (Just (progressNotice "Retrying startup…"))
+        try @_ @StartupFailure
+            (prepareAgentIteration
+                fullscreenInputs
+                sessionState
+                (Just runtime)
+                options
+                transition) >>= \case
+                    Left (StartupFailure message) ->
+                        recoverStartup
+                            options transition (Text.pack message)
+                    Right prepared ->
+                        loop options transition prepared.preparedRun
+
+    recoverStartup options transition message = do
+        emitUiEvent runtime (UiSetNotice Nothing)
+        requestFullscreenChoiceWithBody
+            runtime
+            "Couldn’t start the agent"
+            message
+            0
+            [ ( "Retry"
+              , "Try loading credentials and account usage again"
+              )
+            , ( "Manage"
+              , "Connect, refresh, enable, or remove provider accounts"
+              )
+            , ("Exit", "Close the agent")
+            ] >>= \case
+                Just 0 ->
+                    retryStartup options transition
+                Just 1 -> do
+                    color <- resolveColor stderr
+                    withFullscreenSuspended runtime (runLoginManager color)
+                    retryStartup options transition
+                _ -> pure RunQuit
 
 runAgentInitialized
     :: CliOptions
