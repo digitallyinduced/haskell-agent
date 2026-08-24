@@ -199,6 +199,46 @@ spec = describe "fullscreen UI reducer" do
         state.uiActivity `shouldBe` "Writing…"
         state.uiNotice `shouldBe` Just (warningNotice message)
 
+    it "discards every response attempt when restarting effort after recovery" do
+        let initialPrompt =
+                initialUiState.uiPrompt
+                    { promptEffort = "low"
+                    }
+            state =
+                apply
+                    [ UiSetPrompt initialPrompt
+                    , UiUserSubmitted "try this"
+                    , UiLoop TurnStarted
+                    , UiLoop (TextDelta "failed partial")
+                    , UiLoop
+                        (ResponseRestarted
+                            "Connection interrupted; restarting.")
+                    , UiLoop (TextDelta "retried partial")
+                    , UiSetPromptEffort "high"
+                    , UiTurnRestarted
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockBody) blocks `shouldBe` ["try this"]
+        state.uiPrompt.promptEffort `shouldBe` "high"
+        state.uiRunning `shouldBe` False
+        state.uiActivity `shouldBe` "Restarting…"
+
+    it "uses the retry boundary for a non-streaming response fallback" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (TextDelta "failed partial")
+                    , UiLoop
+                        (ResponseRestarted
+                            "Connection interrupted; restarting.")
+                    , UiLoop
+                        (TurnFinished
+                            (emptyTurnOutput
+                                "r1" [] (Just "complete retry")))
+                    ]
+        map (.blockBody) (Foldable.toList state.uiBlocks)
+            `shouldBe` ["failed partial", "complete retry"]
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
