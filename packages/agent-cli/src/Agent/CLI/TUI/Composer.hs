@@ -589,12 +589,22 @@ handleComposerKey
             scrollConversationPage Down
         V.EvKey (V.KChar character) [] ->
             insertText (Text.singleton character)
-        V.EvPaste bytes ->
-            case decodePaste bytes of
-                pasted
-                    | Text.null pasted ->
-                        submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
-                    | otherwise -> insertPastedText pasted
+        V.EvPaste bytes -> do
+            let pasted = decodePaste bytes
+                before = Text.take ui.uiCursor ui.uiDraft
+                after = Text.drop ui.uiCursor ui.uiDraft
+                pastedDraft = before <> pasted <> after
+            if Text.null pasted
+                then submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
+                else do
+                    modifyUi
+                        (UiSetNotice
+                            (Just (progressNotice "Reading clipboard…")))
+                    submitRaw
+                        (ReplClipboardPasteOrText
+                            ui.uiDraft
+                            pasted
+                            pastedDraft)
         _ -> pure ()
   where
     submitRaw replLine = do
