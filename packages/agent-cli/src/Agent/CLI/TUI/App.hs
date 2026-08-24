@@ -1542,7 +1542,7 @@ fullscreenApp = App
         vScrollToEnd (viewportScroll ConversationViewport)
     , appAttrMap = \state ->
         if state.appRuntime.runtimeColor
-            then Theme.solarizedDark
+            then Theme.terminalDefault
             else Theme.monochrome
     }
 

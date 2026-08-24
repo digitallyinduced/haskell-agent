@@ -70,8 +70,8 @@ import Agent.CLI.Style
     , roleToolOutput
     , roleToolPath
     , roleWarn
-    , solarizedGreen
-    , solarizedRed
+    , terminalGreen
+    , terminalRed
     , motionGlyphSet
     , style
     )
@@ -117,7 +117,6 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
-import System.Console.ANSI (ConsoleLayer(..), SGR(..))
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
@@ -554,7 +553,7 @@ renderEventUnlocked config = \case
             (roleToolOutput config.renderColor (truncateToolOutput output))
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
--- Color mode also paints each line with 'agentBackground'.
+-- The terminal theme owns the default assistant background.
 renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
@@ -970,9 +969,9 @@ formatSearchReplaceDiff color arguments =
   where
     paintLine = \case
         SearchReplaceRemoved line ->
-            style color [SetRGBColor Foreground solarizedRed] ("  -" <> line)
+            style color [terminalRed] ("  -" <> line)
         SearchReplaceAdded line ->
-            style color [SetRGBColor Foreground solarizedGreen] ("  +" <> line)
+            style color [terminalGreen] ("  +" <> line)
 
 renderToolPath :: Bool -> Text -> Text
 renderToolPath color path =

@@ -8,13 +8,13 @@ module Agent.CLI.Markdown
 import Agent.CLI.Style
     ( agentBackground
     , osc8Link
-    , solarizedBase01
-    , solarizedBlue
-    , solarizedCyan
-    , solarizedGreen
-    , solarizedMagenta
-    , solarizedViolet
-    , solarizedYellow
+    , terminalBlue
+    , terminalCyan
+    , terminalGreen
+    , terminalMagenta
+    , terminalMuted
+    , terminalViolet
+    , terminalYellow
     , styleBase
     )
 import Agent.TUI.FencedCode
@@ -33,20 +33,18 @@ import Agent.TUI.TextWidth
     , displayTerminalText
     )
 import Data.Char (isAlphaNum, isAscii, isSpace)
-import Data.Colour (Colour)
 import Data.List (transpose)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Console.ANSI
     ( ConsoleIntensity(..)
-    , ConsoleLayer(..)
     , SGR(..)
     , Underlining(..)
     )
 
 -- | When @color@ is 'True', style a useful subset of GFM for a TTY.
 -- When 'False', return @text@ unchanged (pipes, redirects, tests).
--- Nested spans restore 'agentBackground' after each 'Reset'.
+-- Nested spans restore the terminal-owned 'agentBackground' after each 'Reset'.
 renderMarkdown :: Bool -> Text -> Text
 renderMarkdown color text
     | not color = text
@@ -57,7 +55,7 @@ renderMarkdown color text
     renderChunk (FenceBlock block) =
         let header
                 | Text.null block.fencedInfo = ""
-                | otherwise = md [fg solarizedCyan] block.fencedInfo <> "\n"
+                | otherwise = md [terminalCyan] block.fencedInfo <> "\n"
             body = renderFenceBody block.fencedBody
         in header <> body
 
@@ -80,10 +78,10 @@ renderFenceBody body =
             | otherwise = lines_
         rendered =
             Text.intercalate "\n"
-                (map (md [fg solarizedBase01]) actualLines)
+                (map (md [terminalMuted]) actualLines)
     in if endsWithNewline then rendered <> "\n" else rendered
 
--- | Style helper that keeps the agent line wash across nested SGR.
+-- | Style helper that restores the agent's terminal-default background.
 md :: [SGR] -> Text -> Text
 md = styleBase True agentBackground
 
@@ -114,10 +112,10 @@ renderBlocks = go
             let body =
                     renderInlineWith quoteStyle
                         (parseInline (Text.stripStart quote))
-            in (md [fg solarizedBase01] "│ " <> body)
+            in (md [terminalMuted] "│ " <> body)
                 : go rest
         | Block.isThematicBreak line =
-            md [fg solarizedBase01] (Text.replicate 40 "─")
+            md [terminalMuted] (Text.replicate 40 "─")
                 : go rest
         | Text.null (Text.strip line) = line : go rest
         | otherwise = styleInline line : go rest
@@ -129,33 +127,30 @@ headingPrefixStyle level =
 
 headingColor :: Int -> [SGR]
 headingColor = \case
-    1 -> [fg solarizedMagenta]
-    2 -> [fg solarizedCyan]
-    3 -> [fg solarizedBlue]
-    4 -> [fg solarizedYellow]
-    5 -> [fg solarizedGreen]
-    _ -> [fg solarizedViolet]
+    1 -> [terminalMagenta]
+    2 -> [terminalCyan]
+    3 -> [terminalBlue]
+    4 -> [terminalYellow]
+    5 -> [terminalGreen]
+    _ -> [terminalViolet]
 
 listMarkerStyle :: [SGR]
 listMarkerStyle =
     [ SetConsoleIntensity BoldIntensity
-    , fg solarizedCyan
+    , terminalCyan
     ]
-
-fg :: Colour Float -> SGR
-fg = SetRGBColor Foreground
 
 -- | Blockquote body: muted so it sits behind surrounding prose.
 quoteStyle :: [SGR]
-quoteStyle = [fg solarizedBase01]
+quoteStyle = [terminalMuted]
 
 renderTable :: [[Text]] -> [Text]
 renderTable [] = []
 renderTable rows@(headerCells : bodyCells) =
     let widths = columnWidths rows
-        top = md [fg solarizedBase01] (boxLine '┌' '┬' '┐' '─' widths)
-        mid = md [fg solarizedBase01] (boxLine '├' '┼' '┤' '─' widths)
-        bot = md [fg solarizedBase01] (boxLine '└' '┴' '┘' '─' widths)
+        top = md [terminalMuted] (boxLine '┌' '┬' '┐' '─' widths)
+        mid = md [terminalMuted] (boxLine '├' '┼' '┤' '─' widths)
+        bot = md [terminalMuted] (boxLine '└' '┴' '┘' '─' widths)
         headerRow = styleTableRow True widths headerCells
         bodyRows = map (styleTableRow False widths) bodyCells
     in [top, headerRow, mid] ++ bodyRows ++ [bot]
@@ -199,7 +194,7 @@ styleTableRow isHeader widths cells =
                 <> Text.replicate padding " "
                 <> " "
         parts = zipWith cellText widths (cells ++ repeat "")
-        bar = md [fg solarizedBase01] "│"
+        bar = md [terminalMuted] "│"
     in bar <> Text.intercalate bar (take (length widths) parts) <> bar
 
 styleInline :: Text -> Text
@@ -254,13 +249,13 @@ renderInlineWith base = Text.concat . map (go base)
 
     codeStyle =
         [ SetConsoleIntensity BoldIntensity
-        , fg solarizedCyan
+        , terminalCyan
         ]
     linkStyle =
-        [ fg solarizedBlue
+        [ terminalBlue
         , SetUnderlining SingleUnderline
         ]
-    urlStyle = [fg solarizedBase01]
+    urlStyle = [terminalMuted]
 
 -- | Split an inline markdown stream into a prefix that can be rendered without
 -- future input and a suffix beginning at a possibly incomplete construct.
