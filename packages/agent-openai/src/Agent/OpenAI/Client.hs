@@ -19,7 +19,7 @@ import Agent.OpenAI.Features
     ( betaFeaturesHeaderValue
     , remoteCompactionV2Feature
     )
-import Agent.OpenAI.Http (decodeCodexHttpBody)
+import Agent.OpenAI.Http (decodeCodexHttpBody, postCodexJson)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.Provider
     ( Credential(..)
@@ -29,7 +29,7 @@ import Agent.Provider
     )
 import Agent.Retry (handleSyncExceptions)
 import qualified Agent.Responses.Types as OpenAI
-import Control.Monad (forM_, when)
+import Control.Monad (forM_)
 import Control.Retry
     ( RetryPolicyM
     , exponentialBackoff
@@ -42,11 +42,9 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
-import qualified Network.URI as URI
-
-import OpenSSL
 import qualified System.IO.Streams as Streams
-import Network.Http.Client
+import Network.Http.Client (Response, getStatusCode)
+import qualified Network.Http.Client
 
 -- | ChatGPT Codex REST prefix. 'createCodexMessage' and
 -- 'createCodexMessageWithProvider' POST to @{defaultCodexBaseUrl}/responses@.
@@ -189,28 +187,20 @@ makeCodexRequest options baseUrl accessToken accountId request = do
     -- this field, so enforce it at the HTTP transport boundary.
     let requestBody = Aeson.toJSON
             (sanitizeCodexRequest request) { OpenAI.stream = Just True }
-        url = Text.dropWhileEnd (== '/') baseUrl <> "/responses"
-
-    case URI.parseURI (Text.unpack url) of
-        Nothing -> pure $ Left (JsonDecodeError ("Invalid URL: " <> url) "")
-        Just uri -> do
-            let path = Text.encodeUtf8 (Text.pack uri.uriPath)
-            withOpenSSL $
-                withConnection (establishConnection (Text.encodeUtf8 url)) $ \conn -> do
-                    let req = buildRequest1 $ do
-                                http POST path
-                                setContentType "application/json"
-                                Network.Http.Client.setHeader "Authorization" ("Bearer " <> Text.encodeUtf8 accessToken)
-                                -- ChatGPT's Codex backend requires this header.
-                                -- OpenAI-compatible proxies (llm-router) do not.
-                                when (not (Text.null (Text.strip accountId))) $
-                                    Network.Http.Client.setHeader "chatgpt-account-id" (Text.encodeUtf8 accountId)
-                                forM_ (betaFeaturesHeaderValue options.betaFeatures) \features ->
-                                    Network.Http.Client.setHeader
-                                        "x-codex-beta-features"
-                                        (Text.encodeUtf8 features)
-                    sendRequest conn req (jsonBody requestBody)
-                    receiveResponse conn responseHandler
+    postCodexJson
+        baseUrl
+        "/responses"
+        accessToken
+        accountId
+        addBetaFeaturesHeader
+        requestBody
+        responseHandler
+  where
+    addBetaFeaturesHeader req =
+        req *> forM_ (betaFeaturesHeaderValue options.betaFeatures) \features ->
+            Network.Http.Client.setHeader
+                "x-codex-beta-features"
+                (Text.encodeUtf8 features)
 
 responseHandler :: Response -> Streams.InputStream BS.ByteString -> IO (Either ApiError OpenAI.Response)
 responseHandler response stream = do

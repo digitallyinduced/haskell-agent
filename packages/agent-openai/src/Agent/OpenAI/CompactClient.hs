@@ -8,6 +8,7 @@ module Agent.OpenAI.CompactClient
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Client (defaultCodexBaseUrl)
 import Agent.OpenAI.Error (classifyHttpFailure)
+import Agent.OpenAI.Http (postCodexJson)
 import Agent.Responses.Types hiding (Response)
 import Agent.Provider
     ( Credential(..)
@@ -16,7 +17,6 @@ import Agent.Provider
     , runWithTokenProvider
     )
 import Control.Exception.Safe (tryAny)
-import Control.Monad (when)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -26,23 +26,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import qualified Data.Text.Encoding.Error as Text (lenientDecode)
-import Network.Http.Client
-    ( Method(POST)
-    , Response
-    , buildRequest1
-    , establishConnection
-    , getStatusCode
-    , http
-    , jsonBody
-    , receiveResponse
-    , sendRequest
-    , setContentType
-    , setHeader
-    , withConnection
-    )
-import OpenSSL (withOpenSSL)
+import Network.Http.Client (Response, getStatusCode)
 import qualified System.IO.Streams as Streams
-import qualified Network.URI as URI
 
 -- | Body for Codex @/responses/compact@ (subset of CompactionInput).
 data CompactRequest = CompactRequest
@@ -98,24 +83,14 @@ postCompact baseUrl credential request =
         Right result -> pure result
   where
     perform = do
-        let url = Text.dropWhileEnd (== '/') baseUrl <> "/responses/compact"
-            body = Aeson.toJSON request
-        case URI.parseURI (Text.unpack url) of
-            Nothing -> pure $ Left (JsonDecodeError ("Invalid URL: " <> url) "")
-            Just uri ->
-                withOpenSSL $
-                    withConnection (establishConnection (Text.encodeUtf8 url)) $ \conn -> do
-                        let path = Text.encodeUtf8 (Text.pack uri.uriPath)
-                            req = buildRequest1 $ do
-                                http POST path
-                                setContentType "application/json"
-                                setHeader "Authorization"
-                                    ("Bearer " <> Text.encodeUtf8 credential.accessToken)
-                                when (not (Text.null (Text.strip credential.accountId))) $
-                                    setHeader "chatgpt-account-id"
-                                        (Text.encodeUtf8 credential.accountId)
-                        sendRequest conn req (jsonBody body)
-                        receiveResponse conn compactResponseHandler
+        postCodexJson
+            baseUrl
+            "/responses/compact"
+            credential.accessToken
+            credential.accountId
+            id
+            (Aeson.toJSON request)
+            compactResponseHandler
 
 compactResponseHandler
     :: Response
