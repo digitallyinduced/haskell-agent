@@ -327,3 +327,17 @@ benchmark image-preview-latency-bench
                     , base >= 4.17 && < 5
                     , bytestring
                     , JuicyPixels
+
+benchmark clipboard-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ClipboardLatency.hs
+    ghc-options:      -O2
+    build-depends:    agent-cli
+                    , agent-core
+                    , base >= 4.17 && < 5
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , text

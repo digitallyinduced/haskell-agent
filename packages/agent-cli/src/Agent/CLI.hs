@@ -82,12 +82,10 @@ import Agent.CLI.Btw
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
-    ( ClipboardContent(..)
-    , formatImageSize
+    ( formatImageSize
     , loadImagesFromPastedText
     , nonEmptyClipboardImages
-    , readClipboard
-    , readClipboardImages
+    , readClipboardImagesForPaste
     , readClipboardImagesImageFirst
     )
 import Agent.CLI.Command
@@ -4377,44 +4375,12 @@ replWithDraft env@SessionEnv
                     ReplPaste pasteImmediate pasteCaption -> do
                         color <- resolveColor stdout
                         errColor <- resolveColor stderr
-                        imagesResult <- readClipboardImages
+                        imagesResult <- readClipboardImagesForPaste
                         case imagesResult of
                             Left err -> do
-                                -- Fall back to a richer clipboard sniff for better errors.
-                                content <- readClipboard
-                                let
-                                    message = case content of
-                                        ClipboardText _ ->
-                                            "clipboard has text, not an image \
-                                            \(paste text normally into the prompt)"
-                                        ClipboardPaths paths ->
-                                            "clipboard has file path(s), \
-                                            \but no loadable image: "
-                                                <> Text.intercalate
-                                                    ", " (map Text.pack paths)
-                                        ClipboardEmpty ->
-                                            err
-                                        ClipboardImage image ->
-                                            -- Shouldn't happen if readClipboardImages failed, but be safe.
-                                            "attached "
-                                                <> image.imageMime
-                                case content of
-                                    ClipboardImage image -> do
-                                        attachMessage <- queueAttachedImages
-                                            attachmentsRef
-                                            previewIdRef
-                                            color
-                                            (isNothing fullscreen)
-                                            [image]
-                                        syncFullscreenImagePreviews
-                                        displayInfo attachMessage $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    (glyphOk <> attachMessage))
-                                    _ ->
-                                        displayError message $
-                                            Text.hPutStrLn stderr
-                                                (roleError errColor message)
+                                displayError err $
+                                    Text.hPutStrLn stderr
+                                        (roleError errColor err)
                                 continue
                             Right [] -> do
                                 displayError "no image found on the clipboard" $
@@ -6651,30 +6617,14 @@ queueClipboardImages
     previewIdRef
     color
     showPreview = do
-    imagesResult <- readClipboardImages
+    imagesResult <- readClipboardImagesForPaste
     case imagesResult of
         Right images@(_:_) ->
             Right <$> queueAttachedImages
                 attachmentsRef previewIdRef color showPreview images
         Right [] ->
             pure (Left "no image found on the clipboard")
-        Left err -> reportClipboardImageError err
-  where
-    reportClipboardImageError err =
-        readClipboard >>= \case
-            ClipboardText _ ->
-                pure $ Left
-                    "clipboard has text, not an image \
-                    \(paste text normally into the prompt)"
-            ClipboardPaths paths ->
-                pure $ Left
-                    ("clipboard has file path(s), but no loadable image: "
-                        <> Text.intercalate ", " (map Text.pack paths))
-            ClipboardEmpty ->
-                pure (Left err)
-            ClipboardImage image ->
-                Right <$> queueAttachedImages
-                    attachmentsRef previewIdRef color showPreview [image]
+        Left err -> pure (Left err)
 
 putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
 putImagePreview previewIdRef color images = do
