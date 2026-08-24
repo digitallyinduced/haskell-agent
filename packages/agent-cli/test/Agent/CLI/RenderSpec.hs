@@ -2,7 +2,7 @@ module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
 import Agent.CLI.Style (motionGlyphSet)
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error (ApiError(..), ErrorType(..), credentialsExhausted)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -164,7 +164,7 @@ spec = do
                 retryAt = addUTCTime (5 * 86400 + 21 * 3600) now
                 rendered =
                     formatLoopErrorAt now
-                        (LoopTransport (CredentialsExhausted retryAt))
+                        (LoopTransport (credentialsExhausted retryAt))
             rendered `shouldSatisfy`
                 Text.isInfixOf
                     "All accounts for this provider are temporarily unavailable"
@@ -181,7 +181,7 @@ spec = do
                 rendered =
                     formatLoopErrorPersistedAt
                         (UTCTime (fromGregorian 2026 8 22) 0)
-                        (LoopTransport (CredentialsExhausted retryAt))
+                        (LoopTransport (credentialsExhausted retryAt))
             rendered `shouldSatisfy`
                 Text.isInfixOf "2026-08-27 21:00:00 UTC"
             rendered `shouldNotSatisfy` Text.isInfixOf "Try again in"

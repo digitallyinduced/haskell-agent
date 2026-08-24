@@ -45,6 +45,7 @@ import Agent.Provider
     , FailedCredential(..)
     , TokenProvider
     , accountFailureFromApiError
+    , accountFailureReason
     )
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
@@ -172,12 +173,16 @@ openAiResponseSenderReconnectingWhen observed markObservedFailure provider
     sendCurrent request previousResponseId onEvent =
         sendWsRequestWithEvents conn request previousResponseId onEvent
     sendFresh previousFailure request previousResponseId onEvent =
-        case previousFailure >>= accountFailureFromApiError of
-            Just failure ->
+        case previousFailure >>= \err ->
+                (\failure ->
+                    (failure, accountFailureReason err failure))
+                    <$> accountFailureFromApiError err of
+            Just (failure, failureReason) ->
                 withCodexWsRetryingAfter provider
                     FailedCredential
                         { credential = currentCredential
                         , failure
+                        , failureReason
                         }
                     (sendOnFresh request previousResponseId onEvent)
             Nothing ->

@@ -4,6 +4,7 @@ module Agent.CLI.Session
     , SessionMeta(..)
     , LegacySubagentTarget(..)
     , SessionTurn(..)
+    , SessionActivity(..)
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -11,6 +12,9 @@ module Agent.CLI.Session
     , newPendingPersistenceReserved
     , newActivePersistence
     , persistenceTempDir
+    , setPersistenceActivity
+    , clearPersistenceActivity
+    , loadSessionActivity
     , cleanupPendingPersistence
     , createSession
     , appendTurn
@@ -96,6 +100,7 @@ import System.Directory.OsPath
     , doesFileExist
     , listDirectory
     , removePathForcibly
+    , removeFile
     )
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
 import System.Posix.Files (setFileMode)
@@ -288,6 +293,32 @@ instance FromJSON SessionTurn where
             <*> o .: "items"
             <*> o .:? "usage"
 
+-- | Ephemeral progress for a running persisted session. This lives in the
+-- session temp directory rather than the transcript so polling clients can
+-- explain long waits without adding synthetic conversation turns.
+data SessionActivity = SessionActivity
+    { activityKind :: !Text
+    , activityMessage :: !Text
+    , activityRetryAt :: !(Maybe UTCTime)
+    , activityUpdatedAt :: !UTCTime
+    } deriving (Eq, Show)
+
+instance ToJSON SessionActivity where
+    toJSON activity = object
+        [ "kind" .= activity.activityKind
+        , "message" .= activity.activityMessage
+        , "retry_at" .= activity.activityRetryAt
+        , "updated_at" .= activity.activityUpdatedAt
+        ]
+
+instance FromJSON SessionActivity where
+    parseJSON = withObject "SessionActivity" \o ->
+        SessionActivity
+            <$> o .: "kind"
+            <*> o .: "message"
+            <*> o .:? "retry_at"
+            <*> o .: "updated_at"
+
 data SessionHandle = SessionHandle
     { sessionDir :: !OsPath
     , sessionTempDir :: !OsPath
@@ -339,7 +370,12 @@ newPendingPersistenceReserved spec sessionId tempDir = do
 newActivePersistence :: SessionHandle -> IO Persistence
 newActivePersistence handle = do
     ensurePrivateDir handle.sessionTempDir
-    PersistenceEnabled <$> newIORef (PersistenceActive handle)
+    persistence <-
+        PersistenceEnabled <$> newIORef (PersistenceActive handle)
+    -- A prior process may have died while a cooldown/retry marker was active.
+    -- Never attribute that stale activity to a newly resumed turn.
+    clearPersistenceActivity persistence
+    pure persistence
 
 persistenceTempDir :: Persistence -> IO (Maybe OsPath)
 persistenceTempDir = \case
@@ -348,6 +384,60 @@ persistenceTempDir = \case
         readIORef slotRef <&> \case
             PersistencePending _ _ tempDir -> Just tempDir
             PersistenceActive handle -> Just handle.sessionTempDir
+
+setPersistenceActivity
+    :: Persistence
+    -> Text
+    -> Text
+    -> Maybe UTCTime
+    -> IO ()
+setPersistenceActivity persistence kind message retryAt =
+    persistenceTempDir persistence >>= \case
+        Nothing -> pure ()
+        Just tempDir -> do
+            _ <- tryIO do
+                ensurePrivateDir tempDir
+                now <- getCurrentTime
+                writeLazyFileAtomically
+                    (sessionActivityPath tempDir)
+                    0o600
+                    (Aeson.encode SessionActivity
+                        { activityKind = kind
+                        , activityMessage = message
+                        , activityRetryAt = retryAt
+                        , activityUpdatedAt = now
+                        })
+            pure ()
+
+clearPersistenceActivity :: Persistence -> IO ()
+clearPersistenceActivity persistence =
+    persistenceTempDir persistence >>= mapM_ \tempDir -> do
+        _ <- tryIO (removeFile (sessionActivityPath tempDir))
+        pure ()
+
+loadSessionActivity
+    :: OsPath
+    -> Text
+    -> IO (Maybe SessionActivity)
+loadSessionActivity root sessionId =
+    case sessionTempDirForId root sessionId of
+        Left _ -> pure Nothing
+        Right tempDir -> do
+            let path = sessionActivityPath tempDir
+            exists <- doesFileExist path
+            if not exists
+                then pure Nothing
+                else
+                    tryIO (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
+                        <&> \case
+                            Left _ -> Nothing
+                            Right bytes ->
+                                either (const Nothing) Just
+                                    (Aeson.eitherDecode bytes)
+
+sessionActivityPath :: OsPath -> OsPath
+sessionActivityPath tempDir =
+    tempDir </> unsafeEncodeUtf "activity.json"
 
 -- | Remove scratch space only when a reserved session never became durable.
 cleanupPendingPersistence :: Persistence -> IO ()

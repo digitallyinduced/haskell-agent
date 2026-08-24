@@ -106,6 +106,22 @@ spec = describe "Agent.CLI.AgentSessions" do
             result `shouldSatisfy` Text.isInfixOf "\"assistant\":\"answer\""
             result `shouldNotSatisfy` Text.isInfixOf "\"items\""
 
+    it "includes ephemeral retry activity while a session is running" $
+        withTempEnv \env _ -> do
+            handle <- createSession (testCreate env.toolsRoot)
+            persistence <- newActivePersistence handle
+            setPersistenceActivity
+                persistence
+                "provider_cooldown"
+                "Waiting before retrying."
+                (Just fixedTime)
+            result <- runTool env "read_agent_session" $
+                "{\"session_id\":\"" <> handle.sessionMeta.metaId <> "\"}"
+            result `shouldSatisfy`
+                Text.isInfixOf "\"kind\":\"provider_cooldown\""
+            result `shouldSatisfy`
+                Text.isInfixOf "\"message\":\"Waiting before retrying.\""
+
     it "starts a follow-up turn and rejects messaging the current session" $
         withTempEnv \env launched -> do
             handle <- createSession (testCreate env.toolsRoot)
