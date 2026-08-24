@@ -47,19 +47,25 @@ data ApprovalPolicy
 data ApprovalAnswer
     = AllowOnce
     | AllowAlways
+    | AllowAll
     | Deny
     deriving (Eq, Show)
 
 -- | Parse a mutating-tool approval reply. Matching is case-insensitive
--- and ignores surrounding whitespace.
+-- and ignores surrounding whitespace, except uppercase @A@ is the short
+-- spelling for project-wide auto-approval while lowercase @a@ remembers only
+-- the current tool for this session.
 parseApprovalAnswer :: Text -> ApprovalAnswer
-parseApprovalAnswer raw = case Text.toLower (Text.strip raw) of
-    "y" -> AllowOnce
-    "yes" -> AllowOnce
-    "a" -> AllowAlways
-    "always" -> AllowAlways
-    "yolo" -> AllowAlways
-    _ -> Deny
+parseApprovalAnswer raw
+    | Text.strip raw == "A" = AllowAll
+    | otherwise = case Text.toLower (Text.strip raw) of
+        "y" -> AllowOnce
+        "yes" -> AllowOnce
+        "a" -> AllowAlways
+        "always" -> AllowAlways
+        "all" -> AllowAll
+        "yolo" -> AllowAll
+        _ -> Deny
 
 data CliOptions = CliOptions
     { optProvider :: !(Maybe Provider)

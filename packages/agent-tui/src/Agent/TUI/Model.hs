@@ -345,7 +345,7 @@ reduceUi event state = case event of
                 (\permission ->
                     permission
                         { permissionIndex =
-                            (permission.permissionIndex + delta) `mod` 3
+                            (permission.permissionIndex + delta) `mod` 4
                         })
                     <$> state.uiPermission
             }

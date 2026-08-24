@@ -202,13 +202,15 @@ spec = do
                 `shouldBe` PromptMutating
 
     describe "parseApprovalAnswer" do
-        it "allows once, always, or denies" do
+        it "allows once, remembers a tool, enables yolo, or denies" do
             parseApprovalAnswer "y" `shouldBe` AllowOnce
             parseApprovalAnswer "Yes" `shouldBe` AllowOnce
             parseApprovalAnswer "  Y  " `shouldBe` AllowOnce
             parseApprovalAnswer "a" `shouldBe` AllowAlways
             parseApprovalAnswer "ALWAYS" `shouldBe` AllowAlways
-            parseApprovalAnswer "yolo" `shouldBe` AllowAlways
+            parseApprovalAnswer "A" `shouldBe` AllowAll
+            parseApprovalAnswer "all" `shouldBe` AllowAll
+            parseApprovalAnswer "yolo" `shouldBe` AllowAll
             parseApprovalAnswer "" `shouldBe` Deny
             parseApprovalAnswer "n" `shouldBe` Deny
             parseApprovalAnswer "no" `shouldBe` Deny
