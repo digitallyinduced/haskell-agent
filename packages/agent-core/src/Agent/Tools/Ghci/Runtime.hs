@@ -8,6 +8,7 @@ module Agent.Tools.Ghci.Runtime
     , GhciOutcome(..)
     , GhciResult(..)
     , newGhciSession
+    , suspendGhciSession
     , closeGhciSession
     , evalGhci
     , classifyGhci
@@ -169,6 +170,20 @@ newGhciSession env = do
         , ghciRuntime = runtime
         , ghciMarkerSeed = seed
         }
+
+suspendGhciSession :: GhciSession -> IO ()
+suspendGhciSession session =
+    withGhciRuntime session do
+        current <- gets (.runtimeSessionState)
+        case current of
+            GhciRunning process -> do
+                liftIO (shutdownProcessBestEffort process)
+                modify' \runtime -> runtime
+                    { runtimeSessionState = GhciNotStarted
+                    , runtimeClassificationCache = Nothing
+                    }
+            GhciNotStarted -> pure ()
+            GhciClosed -> pure ()
 
 closeGhciSession :: GhciSession -> IO ()
 closeGhciSession session =

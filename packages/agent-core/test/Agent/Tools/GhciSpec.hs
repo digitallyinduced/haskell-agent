@@ -14,6 +14,7 @@ import Agent.Tools.Ghci
     , defaultGhciExtensions
     , evalGhci
     , newGhciSession
+    , suspendGhciSession
     , typeLooksEffectful
     )
 import Agent.Tools.Types (ToolEnv(..))
@@ -76,6 +77,24 @@ spec = describe "Agent.Tools.Ghci" do
             value <- evalGhci ghci "x" 10000
             value.ghciOk `shouldBe` True
             value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "releases the process when suspended and starts fresh on reuse" do
+        withTempEnv \env -> do
+            let pidFile = toFilePath env.toolCwd </> "suspended-child.pid"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                bind <- evalGhci ghci "let suspendedBinding = 42" 10000
+                bind.ghciOk `shouldBe` True
+                spawned <- evalGhci ghci (backgroundCommand pidFile) 10000
+                spawned.ghciOk `shouldBe` True
+                childPid <- read <$> readFile pidFile
+                processAlive childPid `shouldReturn` True
+                suspendGhciSession ghci
+                waitForProcessDeath childPid
+                missing <- evalGhci ghci "suspendedBinding" 10000
+                missing.ghciOk `shouldBe` False
+                recovered <- evalGhci ghci "6 * 7" 10000
+                recovered.ghciOk `shouldBe` True
+                recovered.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
 
     it "preloads concise command and file helpers" do
         withTempGhci \ghci -> do
