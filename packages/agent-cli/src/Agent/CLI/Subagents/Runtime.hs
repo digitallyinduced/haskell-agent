@@ -10,6 +10,7 @@ module Agent.CLI.Subagents.Runtime
     , persistSubagentSnapshotWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
+    , resolveChildModelAndEffort
     , runCodexSubagent
     , runHttpSubagent
     , validatePersistedSubagentTarget
@@ -559,20 +560,28 @@ runCodexSubagent runtime tokenProvider sendToRoot =
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
         parentParams <- readIORef runtime.subagentParams
-        let (model, effort) =
+        let (provisionalModel, _) =
                 resolveChildModelAndEffort
                     OpenAIProvider
                     parentParams
+                    (fromMaybe "" parentParams.model)
                     childModel
                     childEffort
         prepared <-
             prepareChild
                 runtime
                 OpenAIProvider
-                model
+                provisionalModel
                 (dialectId codexDialect)
                 env
                 sendToRoot
+        let (model, effort) =
+                resolveChildModelAndEffort
+                    OpenAIProvider
+                    parentParams
+                    prepared.preparedSession.subSessionEffectiveModel
+                    childModel
+                    childEffort
         sessionTmp <- readIORef runtime.subagentSessionTmp
         case activeSubagentTargetError
                 OpenAIProvider runtime.subagentConnection
@@ -664,24 +673,38 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
         childEffort <-
             lookupAgentReasoningEffort runtime.subagentTypes env.subId
         parentParams <- readIORef runtime.subagentParams
-        let (model, effort) =
+        let (provisionalModel, _) =
                 resolveChildModelAndEffort
                     provider
                     parentParams
+                    (fromMaybe "" parentParams.model)
                     childModel
                     childEffort
-            effectiveModel = runtime.subagentMapModel model
+            provisionalEffectiveModel =
+                runtime.subagentMapModel provisionalModel
         prepared <-
             prepareChild
                 runtime
                 provider
-                effectiveModel
+                provisionalEffectiveModel
                 (maybe
                     (dialectId dialect)
                     (dialectIdForModel provider . runtime.subagentMapModel)
                     childModel)
                 env
                 sendToRoot
+        let (model, effort) =
+                resolveChildModelAndEffort
+                    provider
+                    parentParams
+                    prepared.preparedSession.subSessionEffectiveModel
+                    childModel
+                    childEffort
+            effectiveModel =
+                maybe
+                    prepared.preparedSession.subSessionEffectiveModel
+                    runtime.subagentMapModel
+                    childModel
         sessionTmp <- readIORef runtime.subagentSessionTmp
         case activeSubagentTargetError
                 provider runtime.subagentConnection
@@ -871,17 +894,17 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
 resolveChildModelAndEffort
     :: Provider
     -> ResponseCreateParams
+    -> Text
     -> Maybe Text
     -> Maybe Text
     -> (Text, Text)
-resolveChildModelAndEffort provider parentParams childModel childEffort =
+resolveChildModelAndEffort
+        provider parentParams inheritedModel childModel childEffort =
     ( model
     , fromMaybe inheritedEffort childEffort
     )
   where
-    model = fromMaybe
-        (fromMaybe "" parentParams.model)
-        childModel
+    model = fromMaybe inheritedModel childModel
     inheritedEffort = case parentParams.reasoning of
         Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
         Nothing -> defaultEffortFor provider
