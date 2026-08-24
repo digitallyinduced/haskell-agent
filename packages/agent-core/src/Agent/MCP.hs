@@ -6,12 +6,15 @@
 -- have stopped.
 module Agent.MCP
     ( McpServerConfig(..)
+    , McpInitState(..)
+    , McpServerStatus(..)
     , McpToolRegistration(..)
     , McpFleet(..)
     , startMcpFleet
     , startMcpFleetWithProgress
     , closeMcpFleet
     , mcpFleetTools
+    , mcpFleetStatuses
     , normalizeMcpToolResult
     ) where
 
@@ -41,8 +44,10 @@ import Control.Concurrent.STM
     , TVar
     , atomically
     , modifyTVar'
+    , newEmptyTMVar
     , newEmptyTMVarIO
     , newTVarIO
+    , readTMVar
     , readTVar
     , readTVarIO
     , takeTMVar
@@ -55,6 +60,7 @@ import Control.Exception.Safe
     , finally
     , mask
     , onException
+    , throwIO
     , tryAny
     )
 import Control.Monad (unless, void, when)
@@ -139,15 +145,55 @@ data McpToolRegistration = McpToolRegistration
     , mcpRegistrationTool :: !AppTool
     }
 
+-- | Initialization state exposed to status and UI code. Reading this state
+-- never starts a process, performs a handshake, or sends an MCP request.
+data McpInitState
+    = McpPending
+    | McpInitializing
+    | McpReady
+    | McpFailed !Text
+    | McpClosed
+    deriving (Eq, Show)
+
+data McpServerStatus = McpServerStatus
+    { mcpStatusName :: !Text
+    , mcpStatusState :: !McpInitState
+    , mcpStatusToolCount :: !Int
+    } deriving (Eq, Show)
+
 data McpFleet = McpFleet
     { mcpFleetRegistrations :: ![McpToolRegistration]
     , mcpFleetWarnings :: ![Text]
     , mcpFleetClients :: ![McpClient]
+    , mcpFleetServerOrder :: ![Text]
+    , mcpFleetFailures :: !(Map.Map Text Text)
     , mcpFleetClosed :: !(MVar Bool)
     }
 
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
+
+-- | Snapshot server status without triggering initialization or other I/O.
+mcpFleetStatuses :: McpFleet -> IO [McpServerStatus]
+mcpFleetStatuses fleet = do
+    clientStatuses <- mapM mcpClientStatus fleet.mcpFleetClients
+    let byName =
+            Map.fromList
+                [ (status.mcpStatusName, status)
+                | status <- clientStatuses
+                ]
+    pure
+        [ case Map.lookup name byName of
+            Just status -> status
+            Nothing -> McpServerStatus
+                { mcpStatusName = name
+                , mcpStatusState =
+                    maybe McpPending McpFailed
+                        (Map.lookup name fleet.mcpFleetFailures)
+                , mcpStatusToolCount = 0
+                }
+        | name <- fleet.mcpFleetServerOrder
+        ]
 
 data McpClient = McpClient
     { clientConfig :: !McpServerConfig
@@ -162,7 +208,16 @@ data McpClient = McpClient
     , clientReader :: !(Async ())
     , clientStderrReader :: !(Async ())
     , clientClosed :: !(MVar Bool)
+    , clientLifecycle :: !(TVar McpClientLifecycle)
     }
+
+data McpClientLifecycle
+    = ClientPending
+    | ClientInitializing
+        !(TMVar (Either Text ([McpTool], [Text])))
+    | ClientReady ![McpTool] ![Text]
+    | ClientFailed !Text
+    | ClientClosed
 
 data CapturedStderr = CapturedStderr
     { stderrBytes :: !BS.ByteString
@@ -203,7 +258,6 @@ emptyInputSchema = object
 
 -- | Start every server independently. Ordinary server failures become
 -- warnings so one unavailable integration does not disable healthy servers.
--- Duplicate MCP tool names are fatal because dispatch would be ambiguous.
 startMcpFleet :: [McpServerConfig] -> IO McpFleet
 startMcpFleet = startMcpFleetWithProgress (const (pure ()))
 
@@ -215,6 +269,7 @@ startMcpFleetWithProgress
     -> [McpServerConfig]
     -> IO McpFleet
 startMcpFleetWithProgress reportActive configs = mask \restore -> do
+    validateServerNames configs
     closed <- newMVar False
     ownedClients <- newIORef []
     activeServers <- newMVar Set.empty
@@ -224,18 +279,18 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
                 (startServerTracked ownedClients activeServers)
                 configs)
             `onException` closeOwnedClients ownedClients
-    let (clients, registrations, warnings) =
-            foldr collectServerResult ([], [], []) results
+    let (clients, registrations, warnings, failures) =
+            foldr collectServerResult ([], [], [], Map.empty) results
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clients
+            , mcpFleetServerOrder = map (.mcpServerName) configs
+            , mcpFleetFailures = failures
             , mcpFleetClosed = closed
             }
-    case duplicateRegistration registrations of
-        Nothing -> pure fleet
-        Just err -> closeMcpFleet fleet >> ioError (userError (Text.unpack err))
+    pure fleet
   where
     startServerTracked ownedClients activeServers config = mask \restore -> do
         updateActive activeServers (Set.insert config.mcpServerName)
@@ -243,7 +298,15 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             attempt <- tryAny (restore (startServer config))
             case attempt of
                 Left exception ->
-                    pure (Left (startupWarning config exception))
+                    let err =
+                            redactConfiguredValues config
+                                (exceptionSummary exception)
+                    in pure
+                        (Left
+                            ( config
+                            , startupWarningFromText config err
+                            , err
+                            ))
                 Right result@(client, _, _) -> do
                     atomicModifyIORef' ownedClients \clients ->
                         (client : clients, ())
@@ -260,20 +323,42 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
         atomicModifyIORef' ownedClients (\clients -> ([], clients))
             >>= mapM_ closeMcpClient
 
-    collectServerResult result (clients, registrations, warnings) =
+    collectServerResult
+        :: Either (McpServerConfig, Text, Text)
+                (McpClient, [McpTool], [Text])
+            -> ( [McpClient]
+               , [McpToolRegistration]
+               , [Text]
+               , Map.Map Text Text
+               )
+            -> ( [McpClient]
+               , [McpToolRegistration]
+               , [Text]
+               , Map.Map Text Text
+               )
+    collectServerResult result
+        (clients, registrations, warnings, failures) =
         case result of
-            Left warning -> (clients, registrations, warning : warnings)
+            Left (config, warning, err) ->
+                ( clients
+                , registrations
+                , warning : warnings
+                , Map.insert config.mcpServerName err failures
+                )
             Right (client, tools, serverWarnings) ->
                 ( client : clients
                 , map (registrationFor client) tools <> registrations
                 , serverWarnings <> warnings
+                , failures
                 )
 
-    startServer config = do
+    startServer config = mask \restore -> do
         client <- startMcpClient config
-        flip onException (closeMcpClient client) do
-            (tools, warnings) <- discoverMcpTools client
-            pure (client, tools, warnings)
+        flip onException (closeMcpClient client) $ restore do
+            ensureMcpClientReady client >>= \case
+                Left err -> throwIO (userError (Text.unpack err))
+                Right (tools, warnings) ->
+                    pure (client, tools, warnings)
 
     registrationFor :: McpClient -> McpTool -> McpToolRegistration
     registrationFor client tool = McpToolRegistration
@@ -281,36 +366,24 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
         , mcpRegistrationTool = appToolFor client tool
         }
 
-    startupWarning :: McpServerConfig -> SomeException -> Text
-    startupWarning config exception =
+    startupWarningFromText :: McpServerConfig -> Text -> Text
+    startupWarningFromText config err =
         "MCP server "
             <> config.mcpServerName
             <> " failed to start: "
-            <> redactConfiguredValues config (exceptionSummary exception)
+            <> err
 
-duplicateRegistration :: [McpToolRegistration] -> Maybe Text
-duplicateRegistration = go Map.empty
+validateServerNames :: [McpServerConfig] -> IO ()
+validateServerNames = go Set.empty
   where
-    go
-        :: Map.Map Text Text
-        -> [McpToolRegistration]
-        -> Maybe Text
-    go _ [] = Nothing
-    go seen (registration : rest) =
-        let tool = registration.mcpRegistrationTool
-            name = tool.appToolName
-            server = registration.mcpRegistrationServer
-        in case Map.lookup name seen of
-            Nothing -> go (Map.insert name server seen) rest
-            Just previous ->
-                Just
-                    ( "duplicate MCP tool name "
-                        <> name
-                        <> " from servers "
-                        <> previous
-                        <> " and "
-                        <> server
-                    )
+    go :: Set.Set Text -> [McpServerConfig] -> IO ()
+    go _ [] = pure ()
+    go seen (config : rest)
+        | Set.member config.mcpServerName seen =
+            ioError . userError . Text.unpack $
+                "duplicate MCP server name: " <> config.mcpServerName
+        | otherwise =
+            go (Set.insert config.mcpServerName seen) rest
 
 closeMcpFleet :: McpFleet -> IO ()
 closeMcpFleet fleet =
@@ -322,7 +395,7 @@ closeMcpFleet fleet =
                 pure True
 
 startMcpClient :: McpServerConfig -> IO McpClient
-startMcpClient config = mask \restore -> do
+startMcpClient config = mask \_ -> do
     processEnvironment <- mergedEnvironment config.mcpServerEnv
     let processSpec =
             (proc config.mcpServerCommand config.mcpServerArgs)
@@ -347,6 +420,7 @@ startMcpClient config = mask \restore -> do
             writeLock <- newMVar ()
             stderrRef <- newIORef emptyCapturedStderr
             closed <- newMVar False
+            lifecycle <- newTVarIO ClientPending
             reader <- asyncWithUnmask \unmask ->
                 unmask (readerLoop output pending failure)
                     `finally` void (tryAny (hClose output))
@@ -366,9 +440,8 @@ startMcpClient config = mask \restore -> do
                     , clientReader = reader
                     , clientStderrReader = stderrReader
                     , clientClosed = closed
+                    , clientLifecycle = lifecycle
                     }
-                cleanup = closeMcpClient client
-            restore (initializeClient client) `onException` cleanup
             pure client
         _ -> do
             let (_, _, _, processHandle) = created
@@ -376,6 +449,100 @@ startMcpClient config = mask \restore -> do
             terminateProcessGroup groupId processHandle
             closeOptionalHandles created
             ioError (userError "MCP server did not provide all stdio pipes")
+
+data InitializeRole
+    = InitializeLeader
+        !(TMVar (Either Text ([McpTool], [Text])))
+    | InitializeWaiter
+        !(TMVar (Either Text ([McpTool], [Text])))
+    | InitializeComplete
+        !(Either Text ([McpTool], [Text]))
+
+-- | Initialize and discover one client exactly once. Concurrent callers wait
+-- on the same result. If the leader is cancelled, waiters are released and
+-- the partially initialized stdio client becomes terminally failed.
+ensureMcpClientReady
+    :: McpClient
+    -> IO (Either Text ([McpTool], [Text]))
+ensureMcpClientReady client = mask \restore -> do
+    role <- atomically do
+        readTVar client.clientLifecycle >>= \case
+            ClientPending -> do
+                completion <- newEmptyTMVar
+                writeTVar client.clientLifecycle
+                    (ClientInitializing completion)
+                pure (InitializeLeader completion)
+            ClientInitializing completion ->
+                pure (InitializeWaiter completion)
+            ClientReady tools warnings ->
+                pure (InitializeComplete (Right (tools, warnings)))
+            ClientFailed err ->
+                pure (InitializeComplete (Left err))
+            ClientClosed ->
+                pure (InitializeComplete (Left "MCP server closed"))
+    case role of
+        InitializeComplete result -> pure result
+        InitializeWaiter completion ->
+            restore (atomically (readTMVar completion))
+        InitializeLeader completion -> do
+            let cancelled = do
+                    atomically do
+                        state <- readTVar client.clientLifecycle
+                        case state of
+                            ClientInitializing current
+                                | current == completion ->
+                                    writeTVar client.clientLifecycle
+                                        (ClientFailed
+                                            "MCP initialization cancelled")
+                            _ -> pure ()
+                        void $
+                            tryPutTMVar completion
+                                (Left "MCP initialization cancelled")
+                    closeMcpClient client
+                initialize = do
+                    initializeClient client
+                    discoverMcpTools client
+            outcome <-
+                restore (tryAny initialize)
+                    `onException` cancelled
+            let result = case outcome of
+                    Left exception ->
+                        Left
+                            (redactConfiguredValues client.clientConfig
+                                (exceptionSummary exception))
+                    Right ready -> Right ready
+            atomically do
+                state <- readTVar client.clientLifecycle
+                case state of
+                    ClientClosed ->
+                        void $
+                            tryPutTMVar completion
+                                (Left "MCP server closed")
+                    ClientInitializing current
+                        | current == completion -> do
+                            writeTVar client.clientLifecycle case result of
+                                Left err -> ClientFailed err
+                                Right (tools, warnings) ->
+                                    ClientReady tools warnings
+                            void (tryPutTMVar completion result)
+                    _ -> void (tryPutTMVar completion result)
+            pure result
+
+mcpClientStatus :: McpClient -> IO McpServerStatus
+mcpClientStatus client = do
+    state <- readTVarIO client.clientLifecycle
+    pure McpServerStatus
+        { mcpStatusName = client.clientConfig.mcpServerName
+        , mcpStatusState = case state of
+            ClientPending -> McpPending
+            ClientInitializing _ -> McpInitializing
+            ClientReady _ _ -> McpReady
+            ClientFailed err -> McpFailed err
+            ClientClosed -> McpClosed
+        , mcpStatusToolCount = case state of
+            ClientReady tools _ -> length tools
+            _ -> 0
+        }
 
 initializeClient :: McpClient -> IO ()
 initializeClient client = do
@@ -448,11 +615,11 @@ discoverMcpTools client = go Nothing [] []
 
 appToolFor :: McpClient -> McpTool -> AppTool
 appToolFor client tool = AppTool
-    { appToolName = tool.discoveredName
+    { appToolName = qualifiedName
     , appToolDescription = tool.discoveredDescription
     , appToolSchema = RawJsonFunctionSchema tool.discoveredInputSchema
     , appToolHandler =
-        typedTool tool.discoveredName \arguments -> do
+        typedTool qualifiedName \arguments -> do
             let parameters = object
                     [ "name" .= tool.discoveredName
                     , "arguments" .= (arguments :: Value)
@@ -466,6 +633,18 @@ appToolFor client tool = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     }
+  where
+    qualifiedName = qualifiedMcpToolName
+        client.clientConfig.mcpServerName
+        tool.discoveredName
+
+qualifiedMcpToolName :: Text -> Text -> Text
+qualifiedMcpToolName serverName toolName =
+    escapeComponent serverName <> "__" <> escapeComponent toolName
+  where
+    escapeComponent =
+        Text.replace "__" "%5F%5F"
+            . Text.replace "%" "%25"
 
 normalizeMcpToolResult :: Value -> Either Text Text
 normalizeMcpToolResult result@(Object fields) =
@@ -670,6 +849,15 @@ closeMcpClient client =
         if closed
             then pure True
             else do
+                atomically do
+                    readTVar client.clientLifecycle >>= \case
+                        ClientInitializing completion -> do
+                            writeTVar client.clientLifecycle ClientClosed
+                            void $
+                                tryPutTMVar completion
+                                    (Left "MCP server closed")
+                        _ ->
+                            writeTVar client.clientLifecycle ClientClosed
                 void $ tryAny (hClose client.clientInput)
                 terminateProcessGroup client.clientGroupId client.clientProcess
                 stopWorker client.clientReader

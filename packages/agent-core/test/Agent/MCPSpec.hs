@@ -95,17 +95,20 @@ spec = describe "Agent.MCP" do
             bracket (pure fleet) closeMcpFleet \_ -> do
                 readIORef started `shouldReturn` [["fake"], []]
                 let tools = mcpFleetTools fleet
-                map (.appToolName) tools `shouldBe` ["echo_read"]
+                map (.appToolName) tools `shouldBe` ["fake__echo_read"]
                 fleet.mcpFleetWarnings `shouldBe`
                     ["MCP server fake skipped non-read-only tool mutate"]
-                Just tool <- pure (find ((== "echo_read") . (.appToolName)) tools)
+                mcpFleetStatuses fleet `shouldReturn`
+                    [McpServerStatus "fake" McpReady 1]
+                Just tool <-
+                    pure (find ((== "fake__echo_read") . (.appToolName)) tools)
                 case tool.appToolApproval of
                     AlwaysReadOnly -> pure ()
                     _ -> expectationFailure "expected read-only approval"
                 let dispatch ident message = dispatchToolCall
                         defaultLoopDispatch
                         (appToolHandlers tools)
-                        (functionToolCall ident "echo_read" message)
+                        (functionToolCall ident "fake__echo_read" message)
                 withAsync (dispatch "call-1" "{\"message\":\"first\"}") \first -> do
                     threadDelay 50000
                     second <- dispatch "call-2" "{\"message\":\"second\"}"
@@ -123,10 +126,45 @@ spec = describe "Agent.MCP" do
                 ]
             bracket (pure fleet) closeMcpFleet \_ -> do
                 map (.appToolName) (mcpFleetTools fleet)
-                    `shouldBe` ["first_read", "second_read"]
+                    `shouldBe`
+                        ["first__shared_read", "second__shared_read"]
                 updates <- readIORef progress
                 updates `shouldContain` [["first", "second"]]
                 last updates `shouldBe` []
+
+    it "reports failed configured servers without hiding healthy ones" $
+        withFakeServer \script -> do
+            fleet <- startMcpFleet
+                [ baseConfig "missing" "/definitely/not/an/mcp-server"
+                , baseConfig "healthy" script
+                ]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                statuses <- mcpFleetStatuses fleet
+                map (.mcpStatusName) statuses
+                    `shouldBe` ["missing", "healthy"]
+                case statuses of
+                    [ McpServerStatus "missing" (McpFailed _) 0
+                        , McpServerStatus "healthy" McpReady 1
+                        ] -> pure ()
+                    _ -> expectationFailure ("unexpected statuses: " <> show statuses)
+
+    it "rejects duplicate server names before spawning" do
+        startMcpFleet
+            [baseConfig "duplicate" "/bin/false", baseConfig "duplicate" "/bin/false"]
+            `shouldThrow` anyIOException
+
+    it "escapes qualified-name separators without collisions" $
+        withConcurrentFakeServer \script barrier -> do
+            fleet <- startMcpFleet
+                [ concurrentConfig script barrier "a"
+                , concurrentConfig script barrier "a__shared"
+                ]
+            bracket (pure fleet) closeMcpFleet \_ ->
+                map (.appToolName) (mcpFleetTools fleet)
+                    `shouldBe`
+                        [ "a__shared_read"
+                        , "a%5F%5Fshared__shared_read"
+                        ]
 
 withFakeServer :: (FilePath -> IO a) -> IO a
 withFakeServer action = do
@@ -146,6 +184,17 @@ concurrentConfig script barrier name = McpServerConfig
     { mcpServerName = name
     , mcpServerCommand = script
     , mcpServerArgs = [barrier, Text.unpack name]
+    , mcpServerCwd = Nothing
+    , mcpServerEnv = []
+    , mcpServerStartupTimeoutSeconds = 2
+    , mcpServerRequestTimeoutSeconds = 2
+    }
+
+baseConfig :: Text.Text -> FilePath -> McpServerConfig
+baseConfig name command = McpServerConfig
+    { mcpServerName = name
+    , mcpServerCommand = command
+    , mcpServerArgs = []
     , mcpServerCwd = Nothing
     , mcpServerEnv = []
     , mcpServerStartupTimeoutSeconds = 2
@@ -212,7 +261,7 @@ concurrentFakeServer =
     \      ;;\n\
     \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
     \    *'\"method\":\"tools/list\"'*)\n\
-    \      printf '%s\\n' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"${name}_read\\\",\\\"description\\\":\\\"Read.\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\"},\\\"annotations\\\":{\\\"readOnlyHint\\\":true}}]}}\"\n\
+    \      printf '%s\\n' \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"result\\\":{\\\"tools\\\":[{\\\"name\\\":\\\"shared_read\\\",\\\"description\\\":\\\"Read.\\\",\\\"inputSchema\\\":{\\\"type\\\":\\\"object\\\"},\\\"annotations\\\":{\\\"readOnlyHint\\\":true}}]}}\"\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

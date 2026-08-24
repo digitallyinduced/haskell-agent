@@ -2,7 +2,9 @@ module Main (main) where
 
 import Agent.MCP
     ( McpServerConfig(..)
+    , McpServerStatus(..)
     , closeMcpFleet
+    , mcpFleetStatuses
     , mcpFleetTools
     , startMcpFleet
     )
@@ -23,7 +25,8 @@ import Text.Printf (printf)
 
 data Workload
     = Sequential
-    | Fleet
+    | LegacyToolInspection
+    | LifecycleStatusInspection
 
 data Sample = Sample
     { wallMillis :: !Double
@@ -57,12 +60,13 @@ main =
         _ ->
             die $
                 "usage: mcp-startup-bench WORKLOAD SERVERS DELAY_MS SAMPLES\n"
-                    <> "workloads: sequential, fleet"
+                    <> "workloads: sequential, legacy-tools, lifecycle-status"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "sequential" -> pure Sequential
-    "fleet" -> pure Fleet
+    "legacy-tools" -> pure LegacyToolInspection
+    "lifecycle-status" -> pure LifecycleStatusInspection
     other -> die ("unknown workload: " <> other)
 
 parsePositive :: String -> String -> IO Int
@@ -79,11 +83,22 @@ runWorkload workload configs = case workload of
             (mapM (startMcpFleet . pure) configs)
             (mapM_ closeMcpFleet)
             (pure . sum . map (length . mcpFleetTools))
-    Fleet ->
+    -- Representative pre-refactor inspection: consumers derived readiness
+    -- from the fully materialized registration list after fleet startup.
+    LegacyToolInspection ->
         bracket
             (startMcpFleet configs)
             closeMcpFleet
             (pure . length . mcpFleetTools)
+    -- Refactored equivalent: inspect the explicit lifecycle snapshot after
+    -- the same fleet startup with the same server inputs.
+    LifecycleStatusInspection ->
+        bracket
+            (startMcpFleet configs)
+            closeMcpFleet
+            (\fleet -> do
+                statuses <- mcpFleetStatuses fleet
+                pure (sum (map (.mcpStatusToolCount) statuses)))
 
 measure :: IO Int -> IO Sample
 measure action = do
