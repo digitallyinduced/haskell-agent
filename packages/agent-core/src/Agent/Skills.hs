@@ -532,6 +532,7 @@ formatSkillCatalogContext maxChars catalog
                 [ "## Skills"
                 , "The following reusable skills are available in this session."
                 , "Use a skill when the user names it or the task clearly matches its description."
+                , "Users can explicitly invoke a skill with `$skill-name`."
                 , "After choosing a skill, read its SKILL.md from the listed path and follow it."
                 , "Resolve relative scripts, references, and assets from the skill directory."
                 , "Load only the resources needed for the task; do not carry skills across turns unless relevant again."
@@ -548,7 +549,7 @@ formatSkillCatalogContext maxChars catalog
 
 renderSkillLine :: Skill -> Text
 renderSkillLine skill =
-    "- "
+    "- $"
         <> skill.skillName
         <> ": "
         <> Text.replace "\n" " " skill.skillDescription
@@ -576,7 +577,7 @@ fitSkillLines budget = go budget []
 
 renderShortenedSkillLine :: Int -> Skill -> Maybe Text
 renderShortenedSkillLine remaining skill =
-    let prefix = "- " <> skill.skillName <> ": "
+    let prefix = "- $" <> skill.skillName <> ": "
         suffix = " (file: " <> toText skill.skillPath <> ")"
         available = remaining - Text.length prefix - Text.length suffix - 2
     in if available < 12

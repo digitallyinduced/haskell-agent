@@ -114,7 +114,9 @@ spec = describe "Agent.Skills" do
                 formatSkillCatalogContext 1000 (SkillCatalog [visible, hidden] [])
         case rendered of
             Just text -> do
-                text `shouldSatisfy` Text.isInfixOf "visible"
+                text `shouldSatisfy` Text.isInfixOf "$visible"
+                text `shouldSatisfy`
+                    Text.isInfixOf "explicitly invoke a skill with `$skill-name`"
                 text `shouldSatisfy` (not . Text.isInfixOf "hidden")
                 Text.length text `shouldSatisfy` (<= 1000)
             Nothing ->

@@ -377,6 +377,20 @@ spec = do
             Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)
             Text.unpack help `shouldSatisfy` ("skill · repo · agents" `isInfixOf`)
 
+        it "offers Codex-style dollar skill mentions inside prompts" do
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForWithSkills skills "please $dep" 11)
+                `shouldBe` Just ["$deploy"]
+            fmap
+                (\menu ->
+                    ( menu.slashMenuReplaceStart
+                    , menu.slashMenuReplaceEnd
+                    , map (.slashSuggestionReplacement)
+                        menu.slashMenuSuggestions
+                    ))
+                (slashMenuForWithSkills skills "please $dep later" 11)
+                `shouldBe` Just (7, 11, ["$deploy "])
+
         it "combines runtime skills and model ids" do
             slashCompletionCandidatesWithSkillsAndModels
                 skills

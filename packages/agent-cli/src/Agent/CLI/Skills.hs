@@ -246,13 +246,17 @@ formatSkillsListing color catalog invocations =
         , invocation.invocationSkill.skillPath == skill.skillPath
         ]
     render skill =
-        let names = namesFor skill
+        let slashNames = namesFor skill
+            dollarNames = dollarNamesFor skill
             invocationText =
-                if null names
-                    then case dollarNamesFor skill of
-                        dollar : _ -> dollar <> " only"
-                        [] -> "(model-only)"
-                    else Text.intercalate ", " names
+                case dollarNames of
+                    dollar : _ ->
+                        Text.intercalate ", "
+                            (dollar : slashNames)
+                    [] ->
+                        if null slashNames
+                            then "(model-only)"
+                            else Text.intercalate ", " slashNames
         in rolePrompt color invocationText
             <> "  "
             <> roleMuted color

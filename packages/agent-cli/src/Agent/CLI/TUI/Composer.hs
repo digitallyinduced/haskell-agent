@@ -80,12 +80,20 @@ drawSlashMenu state = case currentSlashMenu state of
         in padLeftRight 2 $
             withAttr Theme.borderAttr $
                 withBorderStyle unicodeRounded $
-                    Border.borderWithLabel (txt " Commands ") $
+                    Border.borderWithLabel (txt (menuLabel menu)) $
                         vBox $
                             zipWith
                                 (drawSlashRow selected)
                                 [start ..]
                                 suggestions
+  where
+    menuLabel menu =
+        case menu.slashMenuSuggestions of
+            suggestion : _
+                | "$" `Text.isPrefixOf`
+                    suggestion.slashSuggestionDisplay ->
+                        " Skills "
+            _ -> " Commands "
 
 drawSlashRow :: Int -> Int -> SlashSuggestion -> Widget Name
 drawSlashRow selected index suggestion =

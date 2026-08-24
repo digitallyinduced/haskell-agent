@@ -96,6 +96,15 @@ spec = describe "Agent.CLI.Skills" do
             , skillCommandSource = "user · agents"
             }
 
+    it "lists Codex dollar syntax before the slash compatibility alias" do
+        let invocation = SkillInvocation "deploy" fakeSkill True
+            listing =
+                formatSkillsListing
+                    False
+                    (SkillCatalog [fakeSkill] [])
+                    [invocation]
+        listing `shouldSatisfy` Text.isInfixOf "$deploy, /deploy"
+
     it "installs a deferred catalog, invocations, and startup context together" do
         context <- newIORef (Just "agents")
         catalogRef <- newIORef (SkillCatalog [] [])
