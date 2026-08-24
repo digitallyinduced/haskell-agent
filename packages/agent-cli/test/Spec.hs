@@ -56,7 +56,6 @@ import qualified Agent.CLI.StyleSpec as StyleSpec
 import qualified Agent.CLI.TimestampSpec as TimestampSpec
 import qualified Agent.CLI.TurnSpec as TurnSpec
 import qualified Agent.CLI.TerminalSpec as TerminalSpec
-import qualified Agent.TelegramSpec as TelegramSpec
 import qualified Agent.CLI.TextLayoutSpec as TextLayoutSpec
 import qualified Agent.CLI.ToolsSpec as ToolsSpec
 import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
@@ -119,7 +118,6 @@ main = hspec do
     TimestampSpec.spec
     TurnSpec.spec
     TerminalSpec.spec
-    TelegramSpec.spec
     TextLayoutSpec.spec
     SessionSpec.spec
     SessionStateSpec.spec
