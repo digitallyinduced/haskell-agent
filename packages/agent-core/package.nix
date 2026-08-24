@@ -1,8 +1,8 @@
 { mkDerivation, aeson, agent-responses-types, async, base
-, base64-bytestring, bytestring, containers, crypton-connection, directory
-, filepath, hspec, lib, process, resourcet, retry, safe-exceptions
-, scientific, stm, text, text-builder, time, tls, transformers, unix
-, vector, websockets, yaml
+, base64-bytestring, bytestring, containers, crypton-connection
+, directory, filepath, hspec, lib, process, resourcet, retry
+, safe-exceptions, scientific, stm, text, text-builder, time, tls
+, transformers, unix, vector, websockets, yaml
 }:
 mkDerivation {
   pname = "agent-core";
@@ -10,16 +10,18 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [
     aeson agent-responses-types async base base64-bytestring bytestring
-    containers crypton-connection directory filepath process resourcet retry
-    safe-exceptions scientific stm text time tls transformers unix vector
-    websockets yaml
+    containers crypton-connection directory filepath process resourcet
+    retry safe-exceptions scientific stm text time tls transformers
+    unix vector websockets yaml
   ];
-  benchmarkHaskellDepends = [ base text text-builder ];
   testHaskellDepends = [
     aeson agent-responses-types async base base64-bytestring bytestring
     containers crypton-connection directory filepath hspec retry
     safe-exceptions stm text time tls unix websockets yaml
   ];
+  benchmarkHaskellDepends = [
+    base bytestring directory safe-exceptions text text-builder unix
+  ];
   description = "Provider-neutral infrastructure for the agent harness";
-  license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
+  license = lib.meta.getLicenseFromSpdxId "MIT";
 }

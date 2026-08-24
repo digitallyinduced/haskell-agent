@@ -37,6 +37,7 @@ common common-opts
 
 library
     import:           common-opts
+    other-modules:    Agent.Subagents.Registry.Internal
     exposed-modules:  Agent.Auth.JWT
                     , Agent.Cancel
                     , Agent.Dialect
