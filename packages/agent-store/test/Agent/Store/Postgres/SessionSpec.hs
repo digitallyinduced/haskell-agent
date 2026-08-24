@@ -59,7 +59,8 @@ spec = describe "PostgreSQL session schema" do
             "CREATE TABLE IF NOT EXISTS harness.session_custom_tool_call_outputs"
         ddl `shouldContainBytes` "call_id text NOT NULL"
         ddl `shouldContainBytes` "arguments text NOT NULL"
-        ddl `shouldContainBytes` "output jsonb NOT NULL"
+        ddl `shouldContainBytes` "output_text text NOT NULL"
+        ddl `shouldNotContainBytes` "output jsonb NOT NULL"
         ddl `shouldContainBytes` "search_vector tsvector GENERATED ALWAYS"
         ddl `shouldContainBytes` "USING gin (search_vector)"
         ddl `shouldContainBytes` "session_events_immutable"
@@ -236,7 +237,7 @@ testTurn now = SessionTurn
         , FunctionCallOutputItem FunctionCallOutput
             { itemId = Just "item-output"
             , callId = "call-1"
-            , output = Aeson.object ["stdout" Aeson..= ("/tmp/project" :: String)]
+            , output = Aeson.String "{\"stdout\":\"/tmp/project\"}"
             , status = Just ItemCompleted
             , extraFields = testExtras "function-output"
             }

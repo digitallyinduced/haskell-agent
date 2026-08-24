@@ -29,6 +29,7 @@ import Agent.Store.Postgres.Managed
     )
 import Agent.Store.Postgres.Migrations
     ( Migration(..)
+    , coreMigrations
     , runMigrations
     )
 import Agent.Store.Postgres.Scope (customSchemaStatements)
@@ -100,6 +101,37 @@ spec =
                             Right () -> pure ()
                     ) `finally` cleanup
 
+        it "migrates typed tool outputs from JSONB to text" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations ownerPool
+                                        legacyTypedToolOutputMigrations
+                                        `shouldReturn` Right ()
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement ()
+                                            migratedToolOutputsStatement)
+                                        `shouldReturn`
+                                            Right (True, True, True, True)
+                                )
+                                (closeStorePool ownerPool)
+                    ) `finally` cleanup
+
 legacyMigrations :: [Migration]
 legacyMigrations =
     [ Migration
@@ -127,6 +159,41 @@ legacyMigrations =
             , "GRANT USAGE ON SCHEMA harness TO ha_runtime"
             , "GRANT SELECT ON harness.schema_migrations TO ha_runtime"
             ]
+        }
+    ]
+
+legacyTypedToolOutputMigrations :: [Migration]
+legacyTypedToolOutputMigrations =
+    [ Migration
+        { migrationVersion = 1
+        , migrationName = "initial harness storage"
+        , migrationStatements =
+            [ "CREATE TABLE harness.session_function_call_outputs (\
+              \ response_item_id uuid PRIMARY KEY,\
+              \ output jsonb NOT NULL\
+              \ )"
+            , "INSERT INTO harness.session_function_call_outputs\
+              \ (response_item_id, output) VALUES\
+              \ ('00000000-0000-0000-0000-000000000001', '\"plain\"')"
+            , "CREATE TABLE harness.session_custom_tool_call_outputs (\
+              \ response_item_id uuid PRIMARY KEY,\
+              \ output jsonb NOT NULL\
+              \ )"
+            , "INSERT INTO harness.session_custom_tool_call_outputs\
+              \ (response_item_id, output) VALUES\
+              \ ('00000000-0000-0000-0000-000000000002',\
+              \ '{\"nested\":true}')"
+            ]
+        }
+    , Migration
+        { migrationVersion = 2
+        , migrationName = "restricted harness runtime role"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 3
+        , migrationName = "typed relational session storage"
+        , migrationStatements = []
         }
     ]
 
@@ -165,6 +232,35 @@ serverStatement = Statement.preparable
         (,,,,)
             <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+            <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
+migratedToolOutputsStatement :: Statement () (Bool, Bool, Bool, Bool)
+migratedToolOutputsStatement = Statement.preparable
+    "SELECT\
+    \ EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'session_function_call_outputs'\
+    \     AND column_name = 'output_text'\
+    \     AND data_type = 'text'\
+    \ ),\
+    \ (SELECT output_text = 'plain'\
+    \   FROM harness.session_function_call_outputs),\
+    \ EXISTS (\
+    \   SELECT 1 FROM information_schema.columns\
+    \   WHERE table_schema = 'harness'\
+    \     AND table_name = 'session_custom_tool_call_outputs'\
+    \     AND column_name = 'output_text'\
+    \     AND data_type = 'text'\
+    \ ),\
+    \ (SELECT output_text::jsonb = '{\"nested\":true}'::jsonb\
+    \   FROM harness.session_custom_tool_call_outputs)"
+    Encoders.noParams
+    (Decoders.singleRow $
+        (,,,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))

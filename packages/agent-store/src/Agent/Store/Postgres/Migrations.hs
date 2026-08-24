@@ -109,6 +109,11 @@ coreMigrations =
             <> sessionSchemaStatements
             <> sessionRuntimeGrantStatements
         }
+    , Migration
+        { migrationVersion = 4
+        , migrationName = "text tool outputs"
+        , migrationStatements = [migrateToolOutputsToTextStatement]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty
@@ -140,6 +145,39 @@ prepareTypedSessionSchemaStatement =
     \     DROP TABLE IF EXISTS harness.structured_values CASCADE;\
     \     DROP FUNCTION IF EXISTS\
     \       harness.raise_normalized_value_error(text);\
+    \   END IF;\
+    \ END\
+    \ $ha$"
+
+migrateToolOutputsToTextStatement :: ByteString
+migrateToolOutputsToTextStatement =
+    "DO $ha$\
+    \ BEGIN\
+    \   IF EXISTS (\
+    \     SELECT 1 FROM information_schema.columns\
+    \     WHERE table_schema = 'harness'\
+    \       AND table_name = 'session_function_call_outputs'\
+    \       AND column_name = 'output'\
+    \   ) THEN\
+    \     ALTER TABLE harness.session_function_call_outputs\
+    \       ALTER COLUMN output TYPE text USING\
+    \         CASE WHEN jsonb_typeof(output) = 'string'\
+    \           THEN output #>> '{}' ELSE output::text END;\
+    \     ALTER TABLE harness.session_function_call_outputs\
+    \       RENAME COLUMN output TO output_text;\
+    \   END IF;\
+    \   IF EXISTS (\
+    \     SELECT 1 FROM information_schema.columns\
+    \     WHERE table_schema = 'harness'\
+    \       AND table_name = 'session_custom_tool_call_outputs'\
+    \       AND column_name = 'output'\
+    \   ) THEN\
+    \     ALTER TABLE harness.session_custom_tool_call_outputs\
+    \       ALTER COLUMN output TYPE text USING\
+    \         CASE WHEN jsonb_typeof(output) = 'string'\
+    \           THEN output #>> '{}' ELSE output::text END;\
+    \     ALTER TABLE harness.session_custom_tool_call_outputs\
+    \       RENAME COLUMN output TO output_text;\
     \   END IF;\
     \ END\
     \ $ha$"

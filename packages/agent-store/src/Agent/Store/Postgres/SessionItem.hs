@@ -7,8 +7,8 @@
 -- | Relational persistence for the response items attached to a session turn.
 --
 -- Stable fields have dedicated columns. JSONB is used only where the wire
--- type is intentionally open: provider extension fields, tool outputs, and
--- content-part leaves such as annotations.
+-- type is intentionally open: provider extension fields and content-part
+-- leaves such as annotations.
 module Agent.Store.Postgres.SessionItem
     ( sessionItemSchemaStatements
     , insertResponseItems
@@ -20,10 +20,12 @@ import Data.Aeson (FromJSON, ToJSON, Value(..))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
@@ -99,7 +101,7 @@ sessionItemSchemaStatements =
       \   harness.session_response_items(response_item_id) ON DELETE CASCADE,\
       \ provider_item_id text,\
       \ call_id text NOT NULL,\
-      \ output jsonb NOT NULL,\
+      \ output_text text NOT NULL,\
       \ status_name text,\
       \ extra_fields jsonb NOT NULL DEFAULT '{}'::jsonb\
       \   CHECK (jsonb_typeof(extra_fields) = 'object')\
@@ -127,7 +129,7 @@ sessionItemSchemaStatements =
       \ provider_item_id text,\
       \ call_id text NOT NULL,\
       \ tool_name text,\
-      \ output jsonb NOT NULL,\
+      \ output_text text NOT NULL,\
       \ status_name text,\
       \ extra_fields jsonb NOT NULL DEFAULT '{}'::jsonb\
       \   CHECK (jsonb_typeof(extra_fields) = 'object')\
@@ -227,7 +229,7 @@ data OutputParams = OutputParams
     , outputProviderId :: !(Maybe Text)
     , outputCallId :: !Text
     , outputName :: !(Maybe Text)
-    , outputValue :: !Value
+    , outputText :: !Text
     , outputStatus :: !(Maybe Text)
     , outputExtras :: !Value
     }
@@ -350,7 +352,7 @@ insertItem itemId = \case
                 , outputProviderId = value.itemId
                 , outputCallId = value.callId
                 , outputName = Nothing
-                , outputValue = value.output
+                , outputText = renderToolOutput value.output
                 , outputStatus = fmap enumText value.status
                 , outputExtras = Object value.extraFields
                 }
@@ -374,7 +376,7 @@ insertItem itemId = \case
                 , outputProviderId = value.itemId
                 , outputCallId = value.callId
                 , outputName = value.name
-                , outputValue = value.output
+                , outputText = renderToolOutput value.output
                 , outputStatus = fmap enumText value.status
                 , outputExtras = Object value.extraFields
                 }
@@ -540,6 +542,15 @@ enumText value = case Aeson.toJSON value of
     String text -> text
     _ -> ""
 
+-- Tool execution produces text. Keep compatibility with older/provider wire
+-- values by storing their JSON rendering rather than retaining a JSONB column.
+renderToolOutput :: Value -> Text
+renderToolOutput = \case
+    String text -> text
+    value ->
+        TextEncoding.decodeUtf8
+            (LazyByteString.toStrict (Aeson.encode value))
+
 insertBaseStatement :: Statement BaseParams Text
 insertBaseStatement = mkStatement
     "INSERT INTO harness.session_response_items\
@@ -606,13 +617,13 @@ callEncoder =
 insertFunctionOutputStatement :: Statement OutputParams ()
 insertFunctionOutputStatement = mkStatement
     "INSERT INTO harness.session_function_call_outputs\
-    \ (response_item_id, provider_item_id, call_id, output,\
+    \ (response_item_id, provider_item_id, call_id, output_text,\
     \ status_name, extra_fields)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6)"
     ( fieldParam (.outputItemId) textParam
         <> fieldParam (.outputProviderId) nullableTextParam
         <> fieldParam (.outputCallId) textParam
-        <> fieldParam (.outputValue) jsonbParam
+        <> fieldParam (.outputText) textParam
         <> fieldParam (.outputStatus) nullableTextParam
         <> fieldParam (.outputExtras) jsonbParam
     )
@@ -622,7 +633,7 @@ insertFunctionOutputStatement = mkStatement
 insertCustomOutputStatement :: Statement OutputParams ()
 insertCustomOutputStatement = mkStatement
     "INSERT INTO harness.session_custom_tool_call_outputs\
-    \ (response_item_id, provider_item_id, call_id, tool_name, output,\
+    \ (response_item_id, provider_item_id, call_id, tool_name, output_text,\
     \ status_name, extra_fields)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7)"
     outputEncoder
@@ -635,7 +646,7 @@ outputEncoder =
         <> fieldParam (.outputProviderId) nullableTextParam
         <> fieldParam (.outputCallId) textParam
         <> fieldParam (.outputName) nullableTextParam
-        <> fieldParam (.outputValue) jsonbParam
+        <> fieldParam (.outputText) textParam
         <> fieldParam (.outputStatus) nullableTextParam
         <> fieldParam (.outputExtras) jsonbParam
 
@@ -773,7 +784,7 @@ loadItemsSql =
     \ WHEN 'function_call_output' THEN\
     \   fo.extra_fields\
     \   || jsonb_build_object('type', 'function_call_output',\
-    \     'call_id', fo.call_id, 'output', fo.output)\
+    \     'call_id', fo.call_id, 'output', fo.output_text)\
     \   || jsonb_strip_nulls(jsonb_build_object(\
     \     'id', fo.provider_item_id, 'status', fo.status_name))\
     \ WHEN 'custom_tool_call' THEN\
@@ -785,7 +796,7 @@ loadItemsSql =
     \ WHEN 'custom_tool_call_output' THEN\
     \   co.extra_fields\
     \   || jsonb_build_object('type', 'custom_tool_call_output',\
-    \     'call_id', co.call_id, 'output', co.output)\
+    \     'call_id', co.call_id, 'output', co.output_text)\
     \   || jsonb_strip_nulls(jsonb_build_object(\
     \     'id', co.provider_item_id, 'name', co.tool_name,\
     \     'status', co.status_name))\
