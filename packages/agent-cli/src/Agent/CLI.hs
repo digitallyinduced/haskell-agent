@@ -4840,7 +4840,6 @@ replWithDraft env@SessionEnv
                                                 <> "started a fresh conversation"))
                                 continue
                             PersistenceEnabled slotRef -> do
-                                now <- getCurrentTime
                                 params <- readIORef paramsRef
                                 slot <- readIORef slotRef
                                 let model = currentModel params
@@ -4886,6 +4885,7 @@ replWithDraft env@SessionEnv
                                             sessionId
                                         pure ()
                                     PersistenceActive _ -> pure ()
+                                now <- getCurrentTime
                                 let turn = SessionTurn
                                         { turnAt = now
                                         , turnUserText = newSessionUserText
@@ -4898,17 +4898,10 @@ replWithDraft env@SessionEnv
                                         }
                                 handle' <- appendTurnKeepTitle handle turn
                                 let meta = handle'.sessionMeta
-                                        { metaLastResponseId = Nothing
-                                        , metaUpdatedAt = now
-                                        }
-                                writeSessionMeta
-                                    handle'.sessionPool
-                                    handle'.sessionMetaPath
-                                    meta
                                 env.sessionOnPersisted handle'
                                 env.sessionSetTempDir handle'.sessionTempDir
                                 writeIORef slotRef
-                                    (PersistenceActive handle'{sessionMeta = meta})
+                                    (PersistenceActive handle')
                                 writeIORef env.sessionTitleTurnCount 0
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
