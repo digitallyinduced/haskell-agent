@@ -11,6 +11,7 @@ module Claude.Agent.SDK.Types
     , addUsage
     , ModelUsage(..)
     , MessageOrigin(..)
+    , UserContentBlock(..)
     , ContentBlock(..)
     , UserMessage(..)
     , AssistantMessage(..)
@@ -27,6 +28,8 @@ module Claude.Agent.SDK.Types
 import Data.Aeson (Object, Value)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -168,6 +171,26 @@ data MessageOrigin = MessageOrigin
     { kind :: !Text
     , raw :: !Object
     } deriving (Eq, Show)
+
+-- | Content accepted in one streaming-input user message.
+data UserContentBlock
+    = UserTextBlock
+        { text :: !Text
+        }
+    | UserImageBlock
+        { mediaType :: !Text
+        , imageBytes :: !ByteString
+        }
+    deriving (Eq)
+
+instance Show UserContentBlock where
+    show UserTextBlock{text} =
+        "UserTextBlock { text = " <> show text <> " }"
+    show UserImageBlock{mediaType, imageBytes} =
+        "UserImageBlock { mediaType = " <> show mediaType
+            <> ", imageBytes = <redacted>"
+            <> ", imageByteLength = " <> show (ByteString.length imageBytes)
+            <> " }"
 
 data ContentBlock
     = TextBlock

@@ -22,6 +22,7 @@ import Agent.InterAgentMessage (renderInterAgentMessage)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
     , TurnInput(..)
@@ -78,12 +79,15 @@ import Claude.Agent.SDK.Errors
     ( ClaudeSDKError(..)
     , renderClaudeSDKError
     )
-import Claude.Agent.SDK.Query (queryTurnWithMessageValidator)
+import Claude.Agent.SDK.Query
+    ( queryTurnContentWithMessageValidator
+    )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , Message(..)
     , ResultMessage(..)
     , SystemMessage(..)
+    , UserContentBlock(..)
     , Usage(..)
     , messageHasParentToolUseId
     )
@@ -183,59 +187,60 @@ submitClaudeCodeTurn
     transcript
     inputs
     onEvent =
-    case flattenTurnInputs inputs of
-        Left err -> pure (Left err)
-        Right inputText -> do
-            params <- getParams
-            let previousSession =
-                    previous >>= canonicalClaudeSessionId
-            result <- withClaudeSDKTurn
-                session
-                (hostTranscriptMatches
-                    checkpoint
-                    transcript
-                    previousSession)
-                previousSession
-                params.model
-                (params.reasoning >>= (.effort))
-                \turn -> do
-                    history <- readIORef transcript
-                    messages <- newIORef []
-                    let prompt =
-                            buildClaudePrompt
-                                params
-                                (turnIsNewSession turn)
-                                history
-                                inputText
-                    awaitResult <-
-                        queryTurnWithMessageValidator
-                            turn
-                            prompt
-                            validateSubscriptionMessage
-                            (\message ->
-                                modifyIORef' messages (message :))
-                    case awaitResult of
-                        Left sdkError ->
-                            pure (Left sdkError)
-                        Right result -> do
-                            turnMessages <- reverse <$> readIORef messages
-                            case interpretClaudeTurn turnMessages result of
-                                Left message ->
-                                    pure $
-                                        Left ResultError
-                                            { subtype = "authentication_error"
-                                            , apiErrorStatus = Nothing
-                                            , errors = [message]
-                                            , result = Nothing
-                                            }
-                                Right completed -> do
-                                    completeTurn
-                                        turn
-                                        completed
-                                        result
-                                        inputs
-                                        onEvent
-            pure (either (Left . sdkErrorToApiError) Right result)
+    do
+        let (inputText, inputImages) = collectTurnInputs inputs
+        params <- getParams
+        let previousSession =
+                previous >>= canonicalClaudeSessionId
+        result <- withClaudeSDKTurn
+            session
+            (hostTranscriptMatches
+                checkpoint
+                transcript
+                previousSession)
+            previousSession
+            params.model
+            (params.reasoning >>= (.effort))
+            \turn -> do
+                history <- readIORef transcript
+                messages <- newIORef []
+                let prompt =
+                        buildClaudePrompt
+                            params
+                            (turnIsNewSession turn)
+                            history
+                            inputText
+                    content =
+                        claudeUserContent inputImages prompt
+                awaitResult <-
+                    queryTurnContentWithMessageValidator
+                        turn
+                        content
+                        validateSubscriptionMessage
+                        (\message ->
+                            modifyIORef' messages (message :))
+                case awaitResult of
+                    Left sdkError ->
+                        pure (Left sdkError)
+                    Right result -> do
+                        turnMessages <- reverse <$> readIORef messages
+                        case interpretClaudeTurn turnMessages result of
+                            Left message ->
+                                pure $
+                                    Left ResultError
+                                        { subtype = "authentication_error"
+                                        , apiErrorStatus = Nothing
+                                        , errors = [message]
+                                        , result = Nothing
+                                        }
+                            Right completed -> do
+                                completeTurn
+                                    turn
+                                    completed
+                                    result
+                                    inputs
+                                    onEvent
+        pure (either (Left . sdkErrorToApiError) Right result)
   where
     completeTurn
         :: ClaudeSDKTurn
@@ -267,32 +272,42 @@ submitClaudeCodeTurn
         mapM_ onEvent completed.events
         pure (Right (output, commit))
 
-flattenTurnInputs :: [TurnInput] -> Either ApiError Text
-flattenTurnInputs inputs =
-    Text.intercalate "\n\n" <$> traverse flatten inputs
+collectTurnInputs :: [TurnInput] -> (Text, [ImageAttachment])
+collectTurnInputs inputs =
+    ( Text.intercalate "\n\n" (concatMap inputText inputs)
+    , concatMap inputImages inputs
+    )
   where
-    flatten = \case
+    inputText = \case
         UserMessage text ->
-            Right text
+            [text]
         AgentMessage message ->
-            Right (renderInterAgentMessage message)
-        UserMultimodal{userText, userImages}
-            | null userImages ->
-                Right userText
-            | otherwise ->
-                Left ProviderError
-                    { errorType = InvalidImageError
-                    , message =
-                        "Claude Code subscription sessions do not support image attachments through this provider."
-                    , retryAfter = Nothing
-                    }
+            [renderInterAgentMessage message]
+        UserMultimodal{userText} ->
+            [userText]
         CompletedTool
             (ToolDispatch.ToolCallResult resultCallId resultOutput _) ->
-            Right $
+            pure $
                 "Host tool result for "
                     <> resultCallId
                     <> ":\n"
                     <> resultOutput
+    inputImages = \case
+        UserMultimodal{userImages} -> userImages
+        _ -> []
+
+claudeUserContent
+    :: [ImageAttachment]
+    -> Text
+    -> [UserContentBlock]
+claudeUserContent images prompt =
+    map imageBlock images <> [UserTextBlock prompt]
+  where
+    imageBlock ImageAttachment{imageMime, imageBytes} =
+        UserImageBlock
+            { mediaType = imageMime
+            , imageBytes
+            }
 
 buildClaudePrompt
     :: ResponseCreateParams

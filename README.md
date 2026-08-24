@@ -230,7 +230,8 @@ through Claude Code's bidirectional `stream-json` protocol. The thin
 `agent-claude` adapter enforces subscription authentication and translates SDK
 messages into provider-neutral harness events. Claude Code owns tool execution
 and context compaction; the harness renders its assistant and tool events and
-persists its session UUID.
+persists its session UUID. Clipboard and file image attachments are forwarded
+as structured multimodal content.
 
 The default permission mode is Claude Code's non-blocking `dontAsk` mode. Pass
 `--yolo` to bypass Claude Code's permission checks. Permission mode is fixed
