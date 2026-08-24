@@ -55,6 +55,23 @@ spec = do
             nonEmptyClipboardText (Right "") `shouldBe` Nothing
             nonEmptyClipboardText (Left "not text") `shouldBe` Nothing
 
+    describe "appendUniqueImageAttachments" do
+        let first = ImageAttachment "image/png" "same-image-bytes"
+            relabeled = ImageAttachment "image/jpeg" "same-image-bytes"
+            second = ImageAttachment "image/png" "other-image-bytes"
+
+        it "does not append an image already attached to the message" do
+            appendUniqueImageAttachments [first] [first]
+                `shouldBe` ([first], [])
+
+        it "compares bytes even if clipboard MIME metadata changes" do
+            appendUniqueImageAttachments [first] [relabeled]
+                `shouldBe` ([first], [])
+
+        it "deduplicates within one paste while preserving new image order" do
+            appendUniqueImageAttachments [] [first, first, second]
+                `shouldBe` ([first, second], [first, second])
+
     describe "loadImagesFromPastedText" do
         it "returns Nothing for ordinary prompt text" do
             result <- loadImagesFromPastedText "fix the bug in Main.hs"

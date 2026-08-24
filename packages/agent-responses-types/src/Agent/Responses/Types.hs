@@ -19,6 +19,7 @@ module Agent.Responses.Types
       -- * Items and content
     , ResponseItem(..)
     , ResponseItemType(..)
+    , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
     , ResponseRole(..)

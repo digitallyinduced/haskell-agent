@@ -9,9 +9,12 @@ import Agent.CLI.Subagents.Runtime
     , flushAllSubagentSnapshots
     , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
+    , prepareCollaborationSpawn
     , restoreAgentFromDisk
+    , resolveChildModelAndEffort
     , validatePersistedSubagentTarget
     )
+import Agent.CLI.Request (requestParams)
 import Agent.Responses.Types
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Subagents
@@ -23,6 +26,7 @@ import Agent.Subagents
     , newSubagentRegistry
     )
 import Agent.Subagents.TaskPath (parseTaskPath)
+import Agent.Tools.MultiAgents (CollaborationSpawnOptions(..))
 import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -49,6 +53,50 @@ toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
 spec = describe "Agent.CLI.SubagentStore" do
+    describe "nested subagent model inheritance" do
+        it "uses the immediate parent's effective model when no override is set" do
+            sessionsRef <- newIORef Map.empty
+            storeRootRef <- newIORef Nothing
+            typesRef <- newIORef Map.empty
+            forkSourceRef <- newIORef Nothing
+            let agentId = SubagentId "agent-nested"
+            prepareCollaborationSpawn
+                OpenAIProvider
+                "openai"
+                id
+                "gpt-5.6-luna"
+                CodexDialect
+                Nothing
+                sessionsRef
+                storeRootRef
+                typesRef
+                forkSourceRef
+                agentId
+                CollaborationSpawnOptions
+                    { collaborationModel = Nothing
+                    , collaborationReasoningEffort = Nothing
+                    , collaborationForkTurns = Nothing
+                    }
+            Just session <- Map.lookup agentId <$> readIORef sessionsRef
+            let rootParams = requestParams "gpt-5.6-sol" "" [] "medium"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                rootParams
+                session.subSessionEffectiveModel
+                Nothing
+                Nothing
+                `shouldBe` ("gpt-5.6-luna", "medium")
+
+        it "keeps an explicit child model override" do
+            let rootParams = requestParams "gpt-5.6-sol" "" [] "medium"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                rootParams
+                "gpt-5.6-luna"
+                (Just "gpt-5.6-nano")
+                (Just "high")
+                `shouldBe` ("gpt-5.6-nano", "high")
+
     it "round-trips transcript items and meta" do
         withTempDir \dir -> do
             let agentId = SubagentId "agent-test-1"

@@ -9,6 +9,7 @@ module Agent.CLI.Clipboard
     , readClipboardText
     , nonEmptyClipboardImages
     , nonEmptyClipboardText
+    , appendUniqueImageAttachments
     , loadImagesFromPastedText
     , formatImageSize
     ) where
@@ -20,6 +21,7 @@ import Control.Monad (filterM)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Char (toLower)
+import Data.List (foldl')
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
@@ -155,6 +157,21 @@ nonEmptyClipboardText :: Either Text Text -> Maybe Text
 nonEmptyClipboardText = \case
     Right text | not (Text.null text) -> Just text
     _ -> Nothing
+
+-- | Append only images whose bytes are not already attached. Comparing the
+-- payload rather than the MIME label also suppresses a repeated paste if the
+-- same clipboard bytes are reported with different metadata.
+appendUniqueImageAttachments
+    :: [ImageAttachment]
+    -> [ImageAttachment]
+    -> ([ImageAttachment], [ImageAttachment])
+appendUniqueImageAttachments existing incoming =
+    foldl' appendOne (existing, []) incoming
+  where
+    appendOne (allImages, added) image
+        | any (sameImage image) allImages = (allImages, added)
+        | otherwise = (allImages <> [image], added <> [image])
+    sameImage left right = left.imageBytes == right.imageBytes
 
 formatImageSize :: Int -> Text
 formatImageSize n

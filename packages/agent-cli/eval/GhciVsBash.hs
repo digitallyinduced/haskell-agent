@@ -10,6 +10,12 @@ import Agent.Responses.Types
     , FunctionCall(..)
     , ResponseItem(..)
     )
+import Agent.Store.Postgres
+    ( managedPostgresConfigFromEnv
+    , trustedPool
+    , withStore
+    )
+import Agent.Store.Types (renderStoreError)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson (ToJSON(..), encode, object, (.=))
@@ -432,10 +438,17 @@ runOne config trial task mode = do
     sessionData <- case sessionId of
         Nothing -> pure Nothing
         Just identifier -> do
-            loaded <- loadSession
-                (unsafeEncodeUtf sessionsDir)
-                identifier
-            case loaded of
+            storeConfig <-
+                managedPostgresConfigFromEnv (home </> ".haskell-agent")
+            loaded <- withStore storeConfig \store ->
+                    loadSession
+                        (trustedPool store)
+                        (unsafeEncodeUtf sessionsDir)
+                        identifier
+            let loadedResult = case loaded of
+                    Left err -> Left (renderStoreError err)
+                    Right result -> result
+            case loadedResult of
                 Left err -> do
                     hPutStrLn stderr ("could not load eval session: " <> Text.unpack err)
                     pure Nothing

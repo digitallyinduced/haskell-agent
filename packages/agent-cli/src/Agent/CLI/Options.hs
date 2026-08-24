@@ -5,6 +5,7 @@ module Agent.CLI.Options
     , CliOptions(..)
     , Command(..)
     , ScreenMode(..)
+    , StorageCommand(..)
     , defaultCliOptions
     , defaultEffortFor
     , isOneShot
@@ -29,7 +30,17 @@ data Command
     | Login
     | ListSessions
     | ShowSession Text
+    | Storage StorageCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+-- | Administrative commands for the harness-managed PostgreSQL server.
+data StorageCommand
+    = StorageStatus
+    | StorageStart
+    | StorageStop
+    | StorageMigrate
+    | StorageDoctor
     deriving (Eq, Show)
 
 data ScreenMode
@@ -90,9 +101,9 @@ data CliOptions = CliOptions
     , optSkills :: !Bool
       -- ^ Discover and expose filesystem skills (default: True).
     , optGhci :: !Bool
-      -- ^ Expose the persistent run_ghci tool (default: True).
+      -- ^ Expose the persistent run_ghci tool (default: False).
     , optBash :: !Bool
-      -- ^ Expose the provider's explicit shell execution tool (default: False).
+      -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -116,8 +127,8 @@ defaultCliOptions = CliOptions
     , optSaveSession = False
     , optAgentsMd = True
     , optSkills = True
-    , optGhci = True
-    , optBash = False
+    , optGhci = False
+    , optBash = True
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -161,6 +172,7 @@ parseArgs args
             then Right Login
             else Left "usage: agent-cli login"
     | take 1 args == ["sessions"] = parseSessionsCommand (drop 1 args)
+    | take 1 args == ["storage"] = parseStorageCommand (drop 1 args)
     | otherwise = RunAgent <$> parseOptions defaultCliOptions args
 
 parseSessionsCommand :: [String] -> Either String Command
@@ -172,6 +184,22 @@ parseSessionsCommand = \case
     other ->
         Left ("unknown sessions command: " <> unwords other
             <> "\nusage: agent-cli sessions [list|show <id>]")
+
+parseStorageCommand :: [String] -> Either String Command
+parseStorageCommand = \case
+    ["status"] -> Right (Storage StorageStatus)
+    ["start"] -> Right (Storage StorageStart)
+    ["stop"] -> Right (Storage StorageStop)
+    ["migrate"] -> Right (Storage StorageMigrate)
+    ["doctor"] -> Right (Storage StorageDoctor)
+    [] -> Left storageUsage
+    other ->
+        Left ("unknown storage command: " <> unwords other
+            <> "\n" <> storageUsage)
+
+storageUsage :: String
+storageUsage =
+    "usage: agent-cli storage <status|start|stop|migrate|doctor>"
 
 parseOptions :: CliOptions -> [String] -> Either String CliOptions
 parseOptions options = \case
@@ -302,6 +330,7 @@ usage = unlines
     , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
+    , "       agent-cli storage <status|start|stop|migrate|doctor>"
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
@@ -316,10 +345,10 @@ usage = unlines
     , "      --no-agents-md      Skip AGENTS.md discovery"
     , "      --skills            Discover Agent Skills (default)"
     , "      --no-skills         Disable skill discovery and invocation"
-    , "      --ghci              Enable the persistent GHCi tool (default)"
-    , "      --no-ghci           Disable the persistent GHCi tool"
-    , "      --bash              Enable explicit shell execution tools"
-    , "      --no-bash           Disable explicit shell execution tools (default)"
+    , "      --ghci              Enable the persistent GHCi tool"
+    , "      --no-ghci           Disable the persistent GHCi tool (default)"
+    , "      --bash              Enable explicit shell execution tools (default)"
+    , "      --no-bash           Disable explicit shell execution tools"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

@@ -1,6 +1,7 @@
 -- | Markdown subset conversion for Telegram HTML messages.
 module Agent.Telegram.Markdown
     ( markdownToTelegramHtml
+    , telegramRenderedLength
     , escapeTelegramHtml
     ) where
 
@@ -30,6 +31,26 @@ markdownToTelegramHtml input =
             || ('A' <= char && char <= 'Z')
             || ('0' <= char && char <= '9')
             || char `elem` ("-+#_" :: String)
+
+telegramRenderedLength :: Text -> Int
+telegramRenderedLength = go 0 . markdownToTelegramHtml
+  where
+    go count html
+        | Text.null html = count
+        | Just rest <- Text.stripPrefix "<br>" html =
+            go (count + 1) rest
+        | Just rest <- Text.stripPrefix "<" html =
+            case Text.breakOn ">" rest of
+                (_, afterTag)
+                    | Text.null afterTag -> go (count + 1) rest
+                    | otherwise -> go count (Text.drop 1 afterTag)
+        | Just rest <- Text.stripPrefix "&" html =
+            case Text.breakOn ";" rest of
+                (_, afterEntity)
+                    | Text.null afterEntity -> go (count + 1) rest
+                    | otherwise -> go (count + 1) (Text.drop 1 afterEntity)
+        | otherwise =
+            go (count + 1) (Text.drop 1 html)
 
 renderInline :: Text -> Text
 renderInline text

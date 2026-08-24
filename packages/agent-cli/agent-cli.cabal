@@ -62,6 +62,9 @@ library
                     , Agent.CLI.Command
                     , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
+                    , Agent.CLI.Database
+                    , Agent.CLI.Database.Store
+                    , Agent.CLI.Database.Storage
                     , Agent.CLI.Duration
                     , Agent.CLI.Dialects
                     , Agent.CLI.Error
@@ -77,6 +80,8 @@ library
                     , Agent.CLI.Interrupt
                     , Agent.CLI.Login
                     , Agent.CLI.ManagedTurn
+                    , Agent.CLI.LearnedSkills
+                    , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpManager
@@ -99,6 +104,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
                     , Agent.CLI.SessionLock
@@ -133,6 +139,7 @@ library
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
+                    , agent-store >= 0.1 && < 0.2
                     , agent-syntax >= 0.1 && < 0.2
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
@@ -157,6 +164,7 @@ library
                     , http-client
                     , http-client-tls
                     , http-types
+                    , hasql-pool >= 1.3 && < 2
                     , JuicyPixels
                     , mtl
                     , process >= 1.6.26
@@ -198,6 +206,7 @@ executable eval-ghci-vs-bash
     build-depends:    agent-cli
                     , agent-responses
                     , agent-responses-types
+                    , agent-store
                     , aeson >= 2.0
                     , base >= 4.17 && < 5
                     , bytestring
@@ -218,6 +227,7 @@ benchmark subagent-retention-bench
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
                     , agent-core
+                    , agent-store
                     , agent-responses
                     , aeson
                     , base >= 4.17 && < 5
@@ -227,6 +237,7 @@ benchmark subagent-retention-bench
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.CLI.AccountSelectionSpec
@@ -244,12 +255,14 @@ test-suite agent-cli-test
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
+                    , Agent.CLI.DatabaseSpec
                     , Agent.CLI.ErrorSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec
+                    , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.ModelPickerSpec
@@ -296,6 +309,7 @@ test-suite agent-cli-test
                     , agent-core
                     , agent-codex-dialect
                     , agent-grok-build-dialect
+                    , agent-store
                     , agent-tui
                     , agent-openai
                     , agent-openrouter

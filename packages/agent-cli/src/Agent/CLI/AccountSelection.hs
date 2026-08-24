@@ -227,4 +227,3 @@ refreshSelectableAccount account =
                                     , loginAccountId =
                                         credential.accountId
                                     }
-

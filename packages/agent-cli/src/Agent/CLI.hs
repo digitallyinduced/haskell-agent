@@ -93,7 +93,8 @@ import Agent.CLI.Btw
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
-    ( formatImageSize
+    ( appendUniqueImageAttachments
+    , formatImageSize
     , loadImagesFromPastedText
     , nonEmptyClipboardImages
     , readClipboardImagesForPaste
@@ -115,6 +116,24 @@ import Agent.CLI.Compaction
     , runResponsesCompactWith
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
+import Agent.CLI.Database (databaseTools)
+import Agent.CLI.Database.Store
+    ( DatabaseScopes
+    , databaseToolsEnvForStore
+    , deriveDatabaseScopes
+    )
+import Agent.CLI.Database.Storage
+    ( postgresStorageCommandEnv
+    , runStorageCommand
+    )
+import Agent.CLI.LearnedSkills
+    ( learnedSkillTools
+    , queueLearnedSkillContextWithOmissions
+    )
+import Agent.CLI.LearnedSkills.Store
+    ( learnedSkillToolsEnvForStore
+    , loadApplicableLearnedSkillsForStore
+    )
 import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
@@ -188,6 +207,17 @@ import Agent.CLI.Notification
     , notifyAttention
     )
 import Agent.CLI.Options
+import Agent.Store.Postgres
+    ( ManagedPostgresConfig
+    , Store
+    , closeStore
+    , managedPostgresConfigFromEnv
+    , openStore
+    , trustedPool
+    , withStore
+    )
+import Agent.Store.Types (renderStoreError)
+import Agent.Store.Postgres.Connection (StorePool)
 import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume
     ( ResumeEntry(..)
@@ -409,6 +439,7 @@ import Agent.Skills
     , SkillCatalog(..)
     , SkillInvocation(..)
     , SkillWarning(..)
+    , defaultSkillCatalogMaxChars
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -628,6 +659,7 @@ data AgentStepCache = AgentStepCache
 
 data StartupRuntime = StartupRuntime
     { startupToolEnv :: !ToolEnv
+    , startupDatabaseStore :: !Store
     , startupInterrupt :: !InterruptState
     , startupEscPaused :: !(IORef Bool)
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
@@ -716,6 +748,8 @@ devMainResume resumeId = do
             pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (Storage command) ->
+            runStorageAdmin command >> pure DevQuit
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
@@ -734,12 +768,27 @@ run = do
             runLoginManager color
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
+        Right (Storage command) -> runStorageAdmin command
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
             case result of
                 DevQuit -> pure ()
                 DevReload _ ->
                     die ":reload is only available under `repl` (nix develop)"
+
+runStorageAdmin :: StorageCommand -> IO ()
+runStorageAdmin command = do
+    home <- getHomeDirectory
+    config <- managedPostgresConfigForHome home
+    runStorageCommand (postgresStorageCommandEnv config) command >>= \case
+        Left err -> die (Text.unpack err)
+        Right message -> Text.putStrLn message
+
+managedPostgresConfigForHome :: OsPath -> IO ManagedPostgresConfig
+managedPostgresConfigForHome home = do
+    stateDirectory <-
+        decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
+    managedPostgresConfigFromEnv stateDirectory
 
 -- | Tear down and rebuild provider-specific auth, tools, prompt, and transport.
 -- Automatic transitions carry the exact failed turn in memory and commit
@@ -819,22 +868,31 @@ withRestoredCurrentDirectory action = do
 runListSessions :: IO ()
 runListSessions = do
     home <- getHomeDirectory
-    sessions <- listSessions (sessionsRoot home)
-    if null sessions
-        then putStrLn "No sessions in ~/.haskell-agent/sessions"
-        else mapM_ printSessionSummary sessions
+    withStoreForHome home \store -> do
+        sessions <- listSessions (trustedPool store) (sessionsRoot home)
+        if null sessions
+            then putStrLn "No sessions in ~/.haskell-agent/sessions"
+            else mapM_ printSessionSummary sessions
 
 runShowSession :: Text -> IO ()
 runShowSession sessionId = do
     home <- getHomeDirectory
-    loadSession (sessionsRoot home) sessionId >>= \case
-        Left err -> die (Text.unpack err)
-        Right (meta, turns) -> do
-            printSessionSummary meta
-            putStrLn ""
-            if null turns
-                then putStrLn "(empty transcript)"
-                else mapM_ printTurn turns
+    withStoreForHome home \store ->
+        loadSession (trustedPool store) (sessionsRoot home) sessionId >>= \case
+            Left err -> die (Text.unpack err)
+            Right (meta, turns) -> do
+                printSessionSummary meta
+                putStrLn ""
+                if null turns
+                    then putStrLn "(empty transcript)"
+                    else mapM_ printTurn turns
+
+withStoreForHome :: OsPath -> (Store -> IO a) -> IO a
+withStoreForHome home action = do
+    config <- managedPostgresConfigForHome home
+    withStore config action >>= \case
+        Left err -> die (Text.unpack (renderStoreError err))
+        Right value -> pure value
 
 printSessionSummary :: SessionMeta -> IO ()
 printSessionSummary meta =
@@ -1040,8 +1098,10 @@ prepareAgentIteration
         fullscreenInputs sessionState activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
+    databaseStoreRef <- newIORef (Nothing :: Maybe Store)
     let failPreparation message =
             readIORef resumeLockRef >>= mapM_ releaseSessionLock >>
+            readIORef databaseStoreRef >>= mapM_ closeStore >>
                 case activeFullscreen of
                     Nothing -> die message
                     Just _ -> throwIO (StartupFailure message)
@@ -1051,6 +1111,11 @@ prepareAgentIteration
     startupFinishedRef <- newIORef False
     home <- getHomeDirectory
     let root = sessionsRoot home
+    databaseConfig <- managedPostgresConfigForHome home
+    databaseStore <- openStore databaseConfig >>= \case
+        Left err -> failPreparation (Text.unpack (renderStoreError err))
+        Right store -> writeIORef databaseStoreRef (Just store) >> pure store
+    let sessionPool = trustedPool databaseStore
     resumed <- case options.optResume of
         Nothing -> pure Nothing
         Just sessionId -> do
@@ -1071,7 +1136,7 @@ prepareAgentIteration
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
-                    loadSession root sessionId >>= \case
+                    loadSession sessionPool root sessionId >>= \case
                         Left err -> do
                             signalManagedSessionReady (Left err)
                             failPreparation (Text.unpack err)
@@ -1221,6 +1286,7 @@ prepareAgentIteration
                         (\target -> readIORef agentSelectRef >>= ($ target))
                 let startup = StartupRuntime
                         { startupToolEnv = toolEnv
+                        , startupDatabaseStore = databaseStore
                         , startupInterrupt = interrupt
                         , startupEscPaused = escPaused
                         , startupUiRuntimeRef = uiRuntimeRef
@@ -1254,6 +1320,7 @@ prepareAgentIteration
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
             forM_ fullscreen resetFullscreenSessionActions
+            closeStore databaseStore
     pure PreparedAgent
         { preparedFullscreen = fullscreen
         , preparedRun = action `finally` cleanup
@@ -1408,6 +1475,12 @@ runAgentInitializedWithLock
                 Just runtime -> setFullscreenWindowTitle runtime title
                 Nothing -> setCliWindowTitle stdoutTty stdout title
     projectRoot <- resolveProjectRoot cwd
+    stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
+    projectRootPath <- decodeFS projectRoot
+    databaseScopes <-
+        deriveDatabaseScopes stateDirectory projectRootPath >>= \case
+            Left err -> startupDie startup (Text.unpack err)
+            Right scopes -> pure scopes
     projectSettings <- loadProjectSettings projectRoot
     catalog <-
         loadModelCatalog home >>= either
@@ -1972,6 +2045,7 @@ runAgentInitializedWithLock
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
     persist <-
         preparePersistence
+            (trustedPool startup.startupDatabaseStore)
             fullscreen options root
                 inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effort promptText resumed
@@ -2104,7 +2178,8 @@ runAgentInitializedWithLock
                                 writeIORef activeSessionLock (Just lock)
                                 mapM_ releaseSessionLock previous
         sessionToolsEnv = AgentSessionToolsEnv
-            { toolsRoot = root
+            { toolsPool = trustedPool startup.startupDatabaseStore
+            , toolsRoot = root
             , toolsProvider = provider
             , toolsConnection = inferredTarget.targetConnectionId
             , toolsModel = model
@@ -2127,16 +2202,33 @@ runAgentInitializedWithLock
             if progressiveMcp && not (null mcpServerConfigs)
                 then MCP.mcpFleetMetaTools mcpFleet
                 else MCP.mcpFleetTools mcpFleet
+        databaseToolsEnv =
+            databaseToolsEnvForStore
+                startup.startupDatabaseStore
+                databaseScopes
+                (readIORef persistSlotRef >>= currentSessionId)
+        learnedSkillToolsEnv =
+            learnedSkillToolsEnvForStore
+                startup.startupDatabaseStore
+                databaseScopes
+                (readIORef persistSlotRef >>= reservedSessionId)
         sessionTools = agentSessionTools sessionToolsEnv
         gatewayTools = maybe [] managedGatewayTools promptRequest
+        databaseAppTools = databaseTools databaseToolsEnv
+        learnedSkillAppTools = learnedSkillTools learnedSkillToolsEnv
         allTools =
-            coding.codingAppTools ++ mcpTools ++ sessionTools ++ gatewayTools
+            coding.codingAppTools ++ mcpTools ++ sessionTools
+                ++ gatewayTools
+                ++ databaseAppTools
+                ++ learnedSkillAppTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
                 ++ sessionTools
                 ++ gatewayTools
+                ++ databaseAppTools
+                ++ learnedSkillAppTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -2159,8 +2251,10 @@ runAgentInitializedWithLock
         case
                 mcpToolCollision
                     ( coding.codingAppTools
-                        ++ agentSessionTools sessionToolsEnv
+                        ++ sessionTools
                         ++ gatewayTools
+                        ++ databaseAppTools
+                        ++ learnedSkillAppTools
                     )
                     mcpFleet.mcpFleetRegistrations
             of
@@ -2529,7 +2623,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2593,7 +2687,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2654,7 +2748,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2726,7 +2820,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2755,7 +2849,8 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
                 pure (Right credential)
 
 preparePersistence
-    :: Maybe FullscreenRuntime
+    :: StorePool
+    -> Maybe FullscreenRuntime
     -> CliOptions
     -> OsPath
     -> ModelTarget
@@ -2766,7 +2861,7 @@ preparePersistence
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
 preparePersistence
-        fullscreen options root target
+        sessionPool fullscreen options root target
         retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
@@ -2808,7 +2903,8 @@ preparePersistence
                             }
                     | otherwise = meta
             let handle = SessionHandle
-                    { sessionDir = root </> fromText activeMeta.metaId
+                    { sessionPool = sessionPool
+                    , sessionDir = root </> fromText activeMeta.metaId
                     , sessionTempDir =
                         either
                             (error . Text.unpack)
@@ -2825,7 +2921,10 @@ preparePersistence
                     , sessionMeta = activeMeta
                     }
             when metadataChanged $
-                writeSessionMeta handle.sessionMetaPath activeMeta
+                writeSessionMeta
+                    handle.sessionPool
+                    handle.sessionMetaPath
+                    activeMeta
             let message = "session: " <> activeMeta.metaId <> " (resumed)"
             case fullscreen of
                 Nothing -> do
@@ -2840,7 +2939,8 @@ preparePersistence
                 -- Defer directory creation until the first successful turn so
                 -- an abandoned REPL does not leave empty session folders.
                 newPendingPersistence SessionCreate
-                    { createRoot = root
+                    { createPool = sessionPool
+                    , createRoot = root
                     , createTarget = target
                     , createCwd = cwd
                     , createEffort = effort
@@ -2996,6 +3096,7 @@ runSession
     -> ToolEnv
     -> PlanModeEnv
     -> StartupRuntime
+    -> DatabaseScopes
     -> Maybe ManagedTurnRequest
     -> Maybe PendingTurn
     -> [Provider]
@@ -3033,7 +3134,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3258,10 +3359,34 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
         (loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect selectAgent
     let installSkills context queueContext skills = do
+            before <- readIORef context
             installSkillToolRoots toolEnv skills
-            installSkillCatalogWithOmissions
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames queueContext context
                 skillsRef skillInvocationsRef skills
+            after <- readIORef context
+            pure
+                ( omitted
+                , max 0 (contextLength after - contextLength before)
+                )
+        installLearnedSkills context maximum =
+            loadApplicableLearnedSkillsForStore
+                startup.startupDatabaseStore
+                databaseScopes >>= \case
+                    Left err ->
+                        reportLearnedSkillWarning
+                            ("learned skills unavailable: " <> err)
+                    Right learnedSkills -> do
+                        omitted <-
+                            queueLearnedSkillContextWithOmissions
+                                maximum
+                                context
+                                learnedSkills
+                        when (omitted > 0) $
+                            reportLearnedSkillWarning
+                                ("learned skills: "
+                                    <> Text.pack (show omitted)
+                                    <> " omitted from model context due to the context budget")
         sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
@@ -3276,16 +3401,22 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
-            omitted <- installSkills freshAgents True freshSkills
+            (omitted, skillContextChars) <-
+                installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
+            installLearnedSkills
+                freshAgents
+                (defaultSkillCatalogMaxChars - skillContextChars)
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            omitted <- installSkills startupContext queueContext refreshed
+            (omitted, _) <-
+                installSkills startupContext queueContext refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
+        contextLength = maybe 0 Text.length
         formatSkillWarning warning =
             "skill ignored: "
                 <> toText warning.skillWarningPath
@@ -3295,6 +3426,14 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             "skills: "
                 <> Text.pack (show omitted)
                 <> " omitted from model context due to the catalog budget"
+        reportLearnedSkillWarning message =
+            case fullscreen of
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr $
+                        roleWarn color (glyphWarn <> message)
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
         reportSkillCatalog includeSummary catalog omitted =
             case fullscreen of
                 Nothing -> do
@@ -3534,6 +3673,8 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             , sessionPolicy = policyRef
             , sessionTranscript = transcriptRef
             , sessionPersist = persist
+            , sessionDatabasePool =
+                trustedPool startup.startupDatabaseStore
             , sessionTitleManager = titleManager
             , sessionTitleTurnCount = titleTurnCount
             , sessionPlanMode = planMode
@@ -3583,10 +3724,16 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             markStartupStage startup "Loading skills…"
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            omitted <- installSkills startupContext
-                (null initialTurns && not (isJust initialPrevious))
+            let queueInitialContext =
+                    null initialTurns && not (isJust initialPrevious)
+            (omitted, skillContextChars) <- installSkills startupContext
+                queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
+            when queueInitialContext $
+                installLearnedSkills
+                    startupContext
+                    (defaultSkillCatalogMaxChars - skillContextChars)
             finishStartup startup
         sessionAction = do
             initializeSkills
@@ -4029,7 +4176,10 @@ setSessionEffort env level = do
                             tempDir)
                 PersistenceActive handle -> do
                     let meta = handle.sessionMeta { metaEffort = level }
-                    writeSessionMeta handle.sessionMetaPath meta
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
 
@@ -4052,6 +4202,7 @@ replWithDraft env@SessionEnv
     , sessionPolicy = policyRef
     , sessionTranscript = transcriptRef
     , sessionPersist = persist
+    , sessionDatabasePool = databasePool
     , sessionPlanMode = planMode
     , sessionProjectRoot = projectRoot
     , sessionCwd = cwd
@@ -4797,7 +4948,7 @@ replWithDraft env@SessionEnv
                                             (renderAssistantText color answer)
                         continue
                     ReplResume maybeId -> do
-                        handleResume fullscreen maybeId persist >>= \case
+                        handleResume databasePool fullscreen maybeId persist >>= \case
                             Nothing -> continue
                             Just result -> pure result
                     ReplClear -> do
@@ -4832,7 +4983,10 @@ replWithDraft env@SessionEnv
                                                 , metaOutputTokens = 0
                                                 , metaCachedTokens = 0
                                                 }
-                                        writeSessionMeta handle'.sessionMetaPath meta
+                                        writeSessionMeta
+                                            handle'.sessionPool
+                                            handle'.sessionMetaPath
+                                            meta
                                         writeIORef slotRef
                                             (PersistenceActive handle'{sessionMeta = meta})
                                         pure
@@ -4856,7 +5010,6 @@ replWithDraft env@SessionEnv
                                                 <> "started a fresh conversation"))
                                 continue
                             PersistenceEnabled slotRef -> do
-                                now <- getCurrentTime
                                 params <- readIORef paramsRef
                                 slot <- readIORef slotRef
                                 let model = currentModel params
@@ -4873,7 +5026,8 @@ replWithDraft env@SessionEnv
                                                 }
                                         PersistenceActive handle ->
                                             SessionCreate
-                                                { createRoot =
+                                                { createPool = handle.sessionPool
+                                                , createRoot =
                                                     takeDirectory handle.sessionDir
                                                 , createTarget = ModelTarget
                                                     { targetProvider = provider
@@ -4901,6 +5055,7 @@ replWithDraft env@SessionEnv
                                             sessionId
                                         pure ()
                                     PersistenceActive _ -> pure ()
+                                now <- getCurrentTime
                                 let turn = SessionTurn
                                         { turnAt = now
                                         , turnUserText = newSessionUserText
@@ -4913,14 +5068,10 @@ replWithDraft env@SessionEnv
                                         }
                                 handle' <- appendTurnKeepTitle handle turn
                                 let meta = handle'.sessionMeta
-                                        { metaLastResponseId = Nothing
-                                        , metaUpdatedAt = now
-                                        }
-                                writeSessionMeta handle'.sessionMetaPath meta
                                 env.sessionOnPersisted handle'
                                 env.sessionSetTempDir handle'.sessionTempDir
                                 writeIORef slotRef
-                                    (PersistenceActive handle'{sessionMeta = meta})
+                                    (PersistenceActive handle')
                                 writeIORef env.sessionTitleTurnCount 0
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
@@ -5063,6 +5214,7 @@ replWithDraft env@SessionEnv
                                         updated <- resetSessionTitleToAuto handle
                                         writeIORef slotRef (PersistenceActive updated)
                                         loadSession
+                                            updated.sessionPool
                                             (takeDirectory updated.sessionDir)
                                             updated.sessionMeta.metaId
                                             >>= \case
@@ -5860,7 +6012,10 @@ applyModelChange
                             , metaTransportModel = Just transportModel
                             , metaDialect = dialectId
                             }
-                    writeSessionMeta handle.sessionMetaPath meta
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
     pure $
@@ -6402,7 +6557,10 @@ commitProviderTransition projectRoot (Just transition) persist = do
                             , metaLastResponseId = Nothing
                             , metaUpdatedAt = now
                             }
-                    writeSessionMeta handle.sessionMetaPath meta
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
 
@@ -6695,20 +6853,40 @@ queueAttachedImages
     -> [ImageAttachment]
     -> IO Text
 queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
-    modifyIORef' attachmentsRef (<> images)
-    pending <- readIORef attachmentsRef
+    (added, pendingCount) <- atomicModifyIORef' attachmentsRef \existing ->
+        let (pending, unique) =
+                appendUniqueImageAttachments existing images
+        in (pending, (unique, length pending))
     let sizes =
             Text.intercalate ", "
                 [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
-                | img <- images
+                | img <- added
                 ]
-    when showPreview (putImagePreview previewIdRef color images)
-    pure $
-        "attached "
-            <> sizes
-            <> " — send with next message ("
-            <> Text.pack (show (length pending))
-            <> " queued)"
+        duplicateCount = length images - length added
+        queued = Text.pack (show pendingCount)
+    when (showPreview && not (null added)) $
+        putImagePreview previewIdRef color added
+    pure $ case (added, duplicateCount) of
+        ([], _) ->
+            "image already attached — not added again ("
+                <> queued
+                <> " queued)"
+        (_, 0) ->
+            "attached "
+                <> sizes
+                <> " — send with next message ("
+                <> queued
+                <> " queued)"
+        _ ->
+            "attached "
+                <> sizes
+                <> "; skipped "
+                <> Text.pack (show duplicateCount)
+                <> " duplicate image"
+                <> (if duplicateCount == 1 then "" else "s")
+                <> " ("
+                <> queued
+                <> " queued)"
 
 queueClipboardImages
     :: IORef [ImageAttachment]
@@ -6769,11 +6947,12 @@ loadPrompt options =
     _ -> pure Nothing
 
 handleResume
-    :: Maybe FullscreenRuntime
+    :: StorePool
+    -> Maybe FullscreenRuntime
     -> Maybe Text
     -> Persistence
     -> IO (Maybe RunResult)
-handleResume fullscreen maybeId persist = do
+handleResume databasePool fullscreen maybeId persist = do
     color <- resolveColor stderr
     home <- getHomeDirectory
     let reportInfo message =
@@ -6797,7 +6976,7 @@ handleResume fullscreen maybeId persist = do
                     reportInfo ("already on session " <> sessionId)
                     pure Nothing
                 else
-                    loadSession root sessionId >>= \case
+                    loadSession databasePool root sessionId >>= \case
                         Left err -> do
                             reportError err
                             pure Nothing
@@ -6805,21 +6984,24 @@ handleResume fullscreen maybeId persist = do
     case maybeId of
         Just sessionId -> resume sessionId
         Nothing -> do
-            sessions <- listSessions root
+            sessions <- listSessions databasePool root
             currentId <- currentSessionId persist
-            pickResumeChoice fullscreen color root currentId sessions >>= \case
+            pickResumeChoice
+                databasePool fullscreen color root currentId sessions >>= \case
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
 
 pickResumeChoice
-    :: Maybe FullscreenRuntime
+    :: StorePool
+    -> Maybe FullscreenRuntime
     -> Bool
     -> OsPath
     -> Maybe Text
     -> [SessionMeta]
     -> IO (Maybe Text)
-pickResumeChoice fullscreen color root currentId sessions = case fullscreen of
-    Nothing -> pickResumeSession color root sessions
+pickResumeChoice databasePool fullscreen color root currentId sessions =
+  case fullscreen of
+    Nothing -> pickResumeSession databasePool color root sessions
     Just runtime -> do
         now <- getCurrentTime
         let browser =
@@ -6828,12 +7010,12 @@ pickResumeChoice fullscreen color root currentId sessions = case fullscreen of
                 | currentId == Just sessionId =
                     pure (Left "cannot delete the current session")
                 | otherwise =
-                    deleteSession root sessionId
+                    deleteSession databasePool root sessionId
         fmap (.resumeId)
             <$> requestFullscreenResume
                 runtime
                 browser
-                (loadResumeEntry root)
+                (loadResumeEntry databasePool root)
                 deleteEntry
 
 pickAgentChoice
@@ -6871,6 +7053,20 @@ currentSessionId = \case
         slot <- readIORef slotRef
         pure $ case slot of
             PersistencePending _ _ _ -> Nothing
+            PersistenceActive handle -> Just handle.sessionMeta.metaId
+
+-- | Return the stable id already reserved for a pending session as well as
+-- the id of an active one. Learned-skill evidence can safely record this id
+-- before the successful turn creates the corresponding session row.
+reservedSessionId
+    :: Persistence
+    -> IO (Maybe Text)
+reservedSessionId = \case
+    PersistenceDisabled -> pure Nothing
+    PersistenceEnabled slotRef -> do
+        slot <- readIORef slotRef
+        pure $ case slot of
+            PersistencePending _ sessionId _ -> Just sessionId
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
 -- | Build a root OpenAI backend plus an unlocked sender for manual compaction.

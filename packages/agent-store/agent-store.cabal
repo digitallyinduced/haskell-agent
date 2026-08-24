@@ -1,0 +1,90 @@
+cabal-version:      2.2
+name:               agent-store
+version:            0.1.0.0
+synopsis:           PostgreSQL persistence for the agent harness
+description:        Managed local PostgreSQL lifecycle, Hasql connections,
+                    migrations, durable harness state, and isolated
+                    agent-defined structured data.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Database
+build-type:         Simple
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    exposed-modules:  Agent.Store.Types
+                    , Agent.Store.SessionItem
+                    , Agent.Store.Postgres
+                    , Agent.Store.Postgres.Config
+                    , Agent.Store.Postgres.Connection
+                    , Agent.Store.Postgres.Custom
+                    , Agent.Store.Postgres.Managed
+                    , Agent.Store.Postgres.Migrations
+                    , Agent.Store.Postgres.Scope
+                    , Agent.Store.Postgres.Session
+                    , Agent.Store.Postgres.Skill
+    other-modules:    Agent.Store.Custom.QueryResult
+                    , Agent.Store.Postgres.Hasql
+                    , Agent.Store.Postgres.SessionItem
+    hs-source-dirs:   src
+    build-depends:    base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , contravariant
+                    , directory
+                    , filepath
+                    , filelock
+                    , hasql
+                    , hasql-pool
+                    , hasql-transaction
+                    , pqi-ffi
+                    , process
+                    , safe-exceptions
+                    , text
+                    , time
+                    , unix
+
+test-suite agent-store-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    ghc-options:      -threaded
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Agent.Store.Postgres.ConfigSpec
+                    , Agent.Store.Postgres.CustomSpec
+                    , Agent.Store.Postgres.ManagedSpec
+                    , Agent.Store.Postgres.ScopeSpec
+                    , Agent.Store.Postgres.SessionSpec
+                    , Agent.Store.Postgres.SkillSpec
+    build-depends:    agent-store
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , hspec
+                    , hasql
+                    , safe-exceptions
+                    , temporary
+                    , text
+                    , time

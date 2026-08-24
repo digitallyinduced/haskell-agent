@@ -3,6 +3,7 @@ module Agent.Responses.Types.Items
     ( ResponseInput(..)
     , ResponseItem(..)
     , ResponseItemType(..)
+    , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
     , FunctionCall(..)

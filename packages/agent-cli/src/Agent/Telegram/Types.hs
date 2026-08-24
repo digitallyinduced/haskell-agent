@@ -125,6 +125,7 @@ data TelegramConfig = TelegramConfig
     , telegramEffort :: !(Maybe Text)
     , telegramApprovalMode :: !TelegramApprovalMode
     , telegramAllowedUsers :: !(Set Integer)
+    , telegramRespondToAllGroupMessages :: !Bool
     } deriving (Eq, Show)
 
 instance ToJSON TelegramConfig where
@@ -135,6 +136,8 @@ instance ToJSON TelegramConfig where
         , "effort" .= config.telegramEffort
         , "approvalMode" .= config.telegramApprovalMode
         , "allowedUsers" .= Set.toList config.telegramAllowedUsers
+        , "respondToAllGroupMessages"
+            .= config.telegramRespondToAllGroupMessages
         ]
 
 instance FromJSON TelegramConfig where
@@ -156,6 +159,7 @@ instance FromJSON TelegramConfig where
             <*> o .:? "effort"
             <*> pure approvalMode
             <*> (Set.fromList <$> o .: "allowedUsers")
+            <*> (o .:? "respondToAllGroupMessages" .!= False)
 
 data TelegramSetupOptions = TelegramSetupOptions
     { setupProvider :: !(Maybe Provider)
@@ -164,6 +168,7 @@ data TelegramSetupOptions = TelegramSetupOptions
     , setupEffort :: !(Maybe Text)
     , setupApprovalMode :: !TelegramApprovalMode
     , setupAllowedUsers :: ![Integer]
+    , setupRespondToAllGroupMessages :: !Bool
     , setupStart :: !Bool
     } deriving (Eq, Show)
 
@@ -175,6 +180,7 @@ defaultTelegramSetupOptions = TelegramSetupOptions
     , setupEffort = Nothing
     , setupApprovalMode = TelegramApprovalPrompt
     , setupAllowedUsers = []
+    , setupRespondToAllGroupMessages = False
     , setupStart = False
     }
 

@@ -23,6 +23,7 @@ module Agent.Telegram
     , PendingChatAction(..)
     , emptyTelegramState
     , classifyTelegramUpdate
+    , classifyTelegramUpdateWithMode
     , storeUpdateAction
     , nextPendingAction
     , checkpointPendingVoiceTranscript
@@ -76,12 +77,23 @@ import Agent.Telegram.Bridge
     )
 import qualified Agent.Telegram.Client as TelegramClient
 import Agent.Telegram.Log (logTelegramEvent)
-import Agent.Telegram.Markdown (markdownToTelegramHtml)
+import Agent.Telegram.Markdown
+    ( markdownToTelegramHtml
+    , telegramRenderedLength
+    )
 import Agent.Telegram.Voice (transcribeWithCodex)
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider)
 import Control.Applicative ((<|>))
+import Agent.Store.Postgres
+    ( Store
+    , managedPostgresConfigFromEnv
+    , trustedPool
+    , withStore
+    )
+import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( replicateConcurrently_
@@ -182,8 +194,11 @@ splitTelegramText :: Int -> Text -> [Text]
 splitTelegramText limit text
     | limit < 1 = []
     | Text.null text = []
+    | telegramRenderedLength text <= limit = [text]
     | otherwise =
-        let (prefix, suffix) = Text.splitAt limit text
+        let fitting = largestFittingPrefix text
+            prefix = Text.take fitting text
+            suffix = Text.drop fitting text
             splitAtBoundary
                 | Text.null suffix = Text.length prefix
                 | otherwise =
@@ -192,6 +207,18 @@ splitTelegramText limit text
             (chunk, rest) = Text.splitAt splitAtBoundary text
         in chunk : splitTelegramText limit rest
   where
+    largestFittingPrefix value = search 1 (Text.length value)
+      where
+        search low high
+            | low >= high = low
+            | renderedLength midpoint <= limit = search midpoint high
+            | otherwise = search low (midpoint - 1)
+          where
+            midpoint = low + (high - low + 1) `div` 2
+
+        renderedLength =
+            telegramRenderedLength . (`Text.take` value)
+
     preferredBoundary prefix =
         let reverseIndex character =
                 (\index -> Text.length prefix - index - 1)
@@ -259,6 +286,8 @@ parseSetupOptions = go defaultTelegramSetupOptions
             go options { setupApprovalMode = TelegramApprovalYolo } rest
         "--deny-mutations" : rest ->
             go options { setupApprovalMode = TelegramApprovalDeny } rest
+        "--all-group-messages" : rest ->
+            go options { setupRespondToAllGroupMessages = True } rest
         "--start" : rest -> go options { setupStart = True } rest
         flag : _ -> Left ("unknown setup option: " <> flag <> "\n\n" <> telegramUsage)
 
@@ -292,6 +321,7 @@ telegramUsage = unlines
     , "  --yolo                auto-approve mutating agent tools"
     , "  --deny-mutations       deny mutating agent tools"
     , "                          default: ask with Telegram buttons"
+    , "  --all-group-messages  respond to every allowed-user group message"
     , "  --start               start the gateway after setup"
     ]
 
@@ -390,6 +420,8 @@ setupTelegram options = do
             , telegramEffort = options.setupEffort
             , telegramApprovalMode = options.setupApprovalMode
             , telegramAllowedUsers = allowedUsers
+            , telegramRespondToAllGroupMessages =
+                options.setupRespondToAllGroupMessages
             }
     createDirectoryIfMissing True directory
     setFileMode (unsafeToFilePath directory) 0o700
@@ -471,6 +503,16 @@ runConfiguredTelegram = do
 runTelegram :: TelegramConfig -> Text -> IO ()
 runTelegram config token = do
     home <- getHomeDirectory
+    databaseConfig <- managedPostgresConfigFromEnv
+        (unsafeToFilePath (home </> unsafeEncodeUtf ".haskell-agent"))
+    withStore databaseConfig
+        (\store -> runTelegramWithStore store home config token)
+        >>= either
+            (die . Text.unpack . renderStoreError)
+            pure
+
+runTelegramWithStore :: Store -> OsPath -> TelegramConfig -> Text -> IO ()
+runTelegramWithStore store home config token = do
     cwd <- makeAbsolute (unsafeEncodeUtf config.telegramCwd)
     catalog <- loadModelCatalog home >>= either
         (die . Text.unpack)
@@ -513,7 +555,10 @@ runTelegram config token = do
             { runtimeClient = client
             , runtimeBot = bot
             , runtimeAllowedUsers = config.telegramAllowedUsers
+            , runtimeRespondToAllGroupMessages =
+                config.telegramRespondToAllGroupMessages
             , runtimeGatewayDirectory = gatewayDir
+            , runtimePool = trustedPool store
             , runtimeSessionsRoot = root
             , runtimeStatePath = statePath
             , runtimeStateVar = stateVar
@@ -609,7 +654,9 @@ data TelegramRuntime = TelegramRuntime
     { runtimeClient :: !TelegramClient
     , runtimeBot :: !TelegramUser
     , runtimeAllowedUsers :: !(Set Integer)
+    , runtimeRespondToAllGroupMessages :: !Bool
     , runtimeGatewayDirectory :: !OsPath
+    , runtimePool :: !StorePool
     , runtimeSessionsRoot :: !OsPath
     , runtimeStatePath :: !OsPath
     , runtimeStateVar :: !(MVar TelegramState)
@@ -837,15 +884,15 @@ classifyUpdate runtime update =
                             (Map.lookup key state.outboundMessageIds)
                 pure $
                     if belongsToBot
-                        then classifyTelegramUpdate
-                            runtime.runtimeBot
+                        then classifyTelegramReaction
                             runtime.runtimeAllowedUsers
                             update
                         else IgnoreUpdate
         _ ->
-            pure (classifyTelegramUpdate
+            pure (classifyTelegramUpdateWithMode
                 runtime.runtimeBot
                 runtime.runtimeAllowedUsers
+                runtime.runtimeRespondToAllGroupMessages
                 update)
 
 classifyTelegramUpdate
@@ -853,32 +900,22 @@ classifyTelegramUpdate
     -> Set Integer
     -> TelegramUpdate
     -> TelegramUpdateAction
-classifyTelegramUpdate bot allowedUsers update =
-    case update of
-        TelegramUpdate
-            { updateMessage = Just message
-            , updateEditedMessage = _
-            , updateMessageReaction = _
-            , updateCallbackQuery = _
-            }
-            | Just sender <- message.messageFrom
-            , sender.userId `Set.member` allowedUsers ->
-                setActionUpdateId update.updateId
-                    (classifyMessage bot sender message)
-        TelegramUpdate
-            { updateMessage = Nothing
-            , updateEditedMessage = Just message
-            , updateMessageReaction = _
-            , updateCallbackQuery = _
-            }
-            | Just sender <- message.messageFrom
-            , sender.userId `Set.member` allowedUsers ->
-                setActionUpdateId update.updateId
-                    (classifyEditedMessage bot sender message)
-        TelegramUpdate
-            { updateMessageReaction = Just reaction
-            , updateCallbackQuery = _
-            }
+classifyTelegramUpdate bot allowedUsers =
+    classifyTelegramUpdateWithMode bot allowedUsers False
+
+setActionUpdateId :: Integer -> TelegramUpdateAction -> TelegramUpdateAction
+setActionUpdateId updateId = \case
+    QueueMediaTurn pending ->
+        QueueMediaTurn pending { pendingMediaUpdateId = updateId }
+    action -> action
+
+classifyTelegramReaction
+    :: Set Integer
+    -> TelegramUpdate
+    -> TelegramUpdateAction
+classifyTelegramReaction allowedUsers update =
+    case update.updateMessageReaction of
+        Just reaction
             | Just sender <- reaction.messageReactionUser
             , sender.userId `Set.member` allowedUsers ->
                 QueueTurn
@@ -889,6 +926,52 @@ classifyTelegramUpdate bot allowedUsers update =
                         }
                     (reactionMessageText reaction)
                     Nothing
+        _ -> IgnoreUpdate
+
+classifyTelegramUpdateWithMode
+    :: TelegramUser
+    -> Set Integer
+    -> Bool
+    -> TelegramUpdate
+    -> TelegramUpdateAction
+classifyTelegramUpdateWithMode bot allowedUsers respondToAllGroupMessages update =
+    case update of
+        TelegramUpdate
+            { updateMessage = Just message
+            , updateEditedMessage = _
+            , updateMessageReaction = _
+            , updateCallbackQuery = _
+            }
+            | Just sender <- message.messageFrom
+            , sender.userId `Set.member` allowedUsers ->
+                setActionUpdateId update.updateId
+                    (classifyMessageLike
+                        False
+                        bot
+                        sender
+                        respondToAllGroupMessages
+                        message)
+        TelegramUpdate
+            { updateMessage = Nothing
+            , updateEditedMessage = Just message
+            , updateMessageReaction = _
+            , updateCallbackQuery = _
+            }
+            | Just sender <- message.messageFrom
+            , sender.userId `Set.member` allowedUsers ->
+                setActionUpdateId update.updateId
+                    (classifyMessageLike
+                        True
+                        bot
+                        sender
+                        respondToAllGroupMessages
+                        message)
+        TelegramUpdate
+            { updateMessageReaction = Just reaction
+            , updateCallbackQuery = _
+            }
+            | reaction.messageReactionChat.telegramChatType == "private" ->
+                classifyTelegramReaction allowedUsers update
         TelegramUpdate
             { updateCallbackQuery = Just callback
             }
@@ -911,33 +994,14 @@ classifyTelegramUpdate bot allowedUsers update =
                     }
         _ -> IgnoreUpdate
 
-setActionUpdateId :: Integer -> TelegramUpdateAction -> TelegramUpdateAction
-setActionUpdateId updateId = \case
-    QueueMediaTurn pending ->
-        QueueMediaTurn pending { pendingMediaUpdateId = updateId }
-    action -> action
-
-classifyEditedMessage
-    :: TelegramUser
-    -> TelegramUser
-    -> TelegramMessage
-    -> TelegramUpdateAction
-classifyEditedMessage = classifyMessageLike True
-
-classifyMessage
-    :: TelegramUser
-    -> TelegramUser
-    -> TelegramMessage
-    -> TelegramUpdateAction
-classifyMessage = classifyMessageLike False
-
 classifyMessageLike
     :: Bool
     -> TelegramUser
     -> TelegramUser
+    -> Bool
     -> TelegramMessage
     -> TelegramUpdateAction
-classifyMessageLike edited bot sender message =
+classifyMessageLike edited bot sender respondToAllGroupMessages message =
     case message.messageChat.telegramChatType of
         "private" -> classifyPrivateMessage
         "group" -> classifyGroupMessage
@@ -988,6 +1052,8 @@ classifyMessageLike edited bot sender message =
             if hasTelegramMedia message
                 then queueMedia (attributeGroupText sender targetedText)
                 else queueText (attributeGroupText sender targetedText)
+        | respondToAllGroupMessages =
+            queueGroupReply
         | otherwise = IgnoreUpdate
 
     queueGroupReply =
@@ -1658,6 +1724,7 @@ runQueuedMediaTurn runtime pending = do
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
     priorTurnCount <- loadSessionHandle
+        runtime.runtimePool
         runtime.runtimeSessionsRoot
         handle.sessionMeta.metaId >>= \case
             Left err -> fail (Text.unpack err)
@@ -1678,6 +1745,7 @@ runQueuedMediaTurn runtime pending = do
         Left err -> fail (Text.unpack err)
         Right _ ->
             loadSessionHandle
+                runtime.runtimePool
                 runtime.runtimeSessionsRoot
                 handle.sessionMeta.metaId >>= \case
                     Left err -> fail (Text.unpack err)
@@ -2056,6 +2124,7 @@ runManagedAgentTurn
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
     priorTurnCount <- loadSessionHandle
+        runtime.runtimePool
         runtime.runtimeSessionsRoot
         handle.sessionMeta.metaId >>= \case
             Left err -> fail (Text.unpack err)
@@ -2075,6 +2144,7 @@ runManagedAgentTurn
             Left err -> fail (Text.unpack err)
             Right _ ->
                 loadSessionHandle
+                    runtime.runtimePool
                     runtime.runtimeSessionsRoot
                     handle.sessionMeta.metaId >>= \case
                         Left err -> fail (Text.unpack err)
@@ -2133,14 +2203,18 @@ sessionForPrompt runtime key prompt = do
     existing <- case lookupBinding key state of
         Nothing -> pure Nothing
         Just sessionId ->
-            loadSessionHandle runtime.runtimeSessionsRoot sessionId >>= \case
+            loadSessionHandle
+                runtime.runtimePool
+                runtime.runtimeSessionsRoot
+                sessionId >>= \case
                 Left _ -> pure Nothing
                 Right (handle, _) -> pure (Just handle)
     case existing of
         Just handle -> pure handle
         Nothing -> do
             handle <- createSession SessionCreate
-                { createRoot = runtime.runtimeSessionsRoot
+                { createPool = runtime.runtimePool
+                , createRoot = runtime.runtimeSessionsRoot
                 , createTarget = runtime.runtimeTarget
                 , createCwd = runtime.runtimeCwd
                 , createEffort = runtime.runtimeEffort
@@ -2188,10 +2262,8 @@ reply runtime pending
         sendTextReply
   where
     sendTextReply = do
-        -- Rich HTML entities can expand one source character to six bytes.
-        -- Keep source chunks conservative so the rendered message stays below
-        -- Telegram's 4096-character limit without splitting generated tags.
-        let chunks = case splitTelegramText 600 pending.pendingText of
+        -- Telegram accepts messages up to 4096 rendered characters.
+        let chunks = case splitTelegramText 4096 pending.pendingText of
                 [] -> ["(empty response)"]
                 values -> values
             checkpointKey =

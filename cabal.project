@@ -10,8 +10,15 @@ packages:
     packages/agent-openai
     packages/agent-xai
     packages/agent-openrouter
+    packages/agent-store
     packages/claude-agent-sdk-haskell
     packages/agent-claude
 
 tests: True
 multi-repl: True
+
+-- Keep local Cabal builds on the same Hasql API set as the Nix package set.
+constraints:
+    hasql == 2.0.1.0,
+    hasql-pool == 1.5.0.1,
+    hasql-transaction == 1.2.3.1

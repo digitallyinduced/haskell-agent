@@ -112,6 +112,20 @@ spec = do
             parseArgs ["sessions", "show", "2026-08-19-abcd1234"]
                 `shouldBe` Right (ShowSession "2026-08-19-abcd1234")
 
+        it "parses storage administration commands" do
+            parseArgs ["storage", "status"]
+                `shouldBe` Right (Storage StorageStatus)
+            parseArgs ["storage", "start"]
+                `shouldBe` Right (Storage StorageStart)
+            parseArgs ["storage", "stop"]
+                `shouldBe` Right (Storage StorageStop)
+            parseArgs ["storage", "migrate"]
+                `shouldBe` Right (Storage StorageMigrate)
+            parseArgs ["storage", "doctor"]
+                `shouldBe` Right (Storage StorageDoctor)
+            parseArgs ["storage"] `shouldSatisfy` isLeft
+            parseArgs ["storage", "vacuum"] `shouldSatisfy` isLeft
+
         it "parses --resume and --save-session" do
             parseArgs ["--resume", "2026-08-19-abcd1234"]
                 `shouldBe` Right (RunAgent defaultCliOptions
@@ -169,21 +183,23 @@ spec = do
                     , optSkills = True
                     })
 
-        it "keeps bash disabled by default and enables it explicitly" do
+        it "keeps bash enabled by default and disables it explicitly" do
             parseArgs []
                 `shouldBe` Right (RunAgent defaultCliOptions)
-            parseArgs ["--bash"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
-            parseArgs ["--bash", "--no-bash"]
+            defaultCliOptions.optBash `shouldBe` True
+            parseArgs ["--no-bash"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = False })
+            parseArgs ["--no-bash", "--bash"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
-        it "keeps ghci enabled by default and disables it explicitly" do
+        it "keeps ghci disabled by default and enables it explicitly" do
             parseArgs []
                 `shouldBe` Right (RunAgent defaultCliOptions)
-            parseArgs ["--no-ghci"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optGhci = False })
-            parseArgs ["--no-ghci", "--ghci"]
+            defaultCliOptions.optGhci `shouldBe` False
+            parseArgs ["--ghci"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optGhci = True })
+            parseArgs ["--ghci", "--no-ghci"]
+                `shouldBe` Right (RunAgent defaultCliOptions { optGhci = False })
 
     describe "resolveApprovalPolicy" do
         it "auto-approves one-shot scripts without a TTY" do

@@ -17,12 +17,14 @@ import qualified Agent.CLI.CompactionSpec as CompactionSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
+import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
+import qualified Agent.CLI.LearnedSkillsSpec as LearnedSkillsSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
@@ -82,12 +84,14 @@ main = hspec do
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
     DialectsSpec.spec
+    DatabaseSpec.spec
     ErrorSpec.spec
     GatewayBridgeSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
     InterruptSpec.spec
     LoginSpec.spec
+    LearnedSkillsSpec.spec
     MarkdownSpec.spec
     McpManagerSpec.spec
     ModelConfigSpec.spec

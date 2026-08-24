@@ -8,7 +8,7 @@ import Agent.CLI.Session
 import Agent.CLI.SessionLock
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopDispatch)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -20,6 +20,16 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , appToolHandlers
     )
+import Agent.Store.Postgres
+    ( closeStore
+    , defaultManagedPostgresConfig
+    , openStore
+    , storeConfig
+    , trustedPool
+    )
+import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Managed (stopManagedPostgres)
+import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (SomeException, bracket, finally, try)
 import Data.IORef
@@ -65,14 +75,13 @@ spec = describe "Agent.CLI.AgentSessions" do
             handle.sessionMeta.metaModel `shouldBe` "model-2"
             handle.sessionMeta.metaDialect `shouldBe` GrokBuildDialect
             handle.sessionMeta.metaEffort `shouldBe` "high"
-            loadSession env.toolsRoot handle.sessionMeta.metaId
+            loadSession env.toolsPool env.toolsRoot handle.sessionMeta.metaId
                 `shouldReturn` Right (handle.sessionMeta, [])
 
     it "inherits the active dialect and resolves explicit model overrides" $
         withTempEnv \env launched -> do
             let openRouterEnv = env
                     { toolsProvider = OpenRouterProvider
-                    , toolsConnection = "openrouter"
                     , toolsModel = "openai/gpt-5.1"
                     , toolsTransportModel = "openai/gpt-5.1"
                     , toolsDialect = GrokBuildDialect
@@ -91,7 +100,7 @@ spec = describe "Agent.CLI.AgentSessions" do
 
     it "reads recent turns without exposing raw response items" $
         withTempEnv \env _ -> do
-            handle <- createSession (testCreate env.toolsRoot)
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
             _ <- appendTurn handle SessionTurn
                 { turnAt = fixedTime
                 , turnUserText = "question"
@@ -109,7 +118,7 @@ spec = describe "Agent.CLI.AgentSessions" do
 
     it "includes ephemeral retry activity while a session is running" $
         withTempEnv \env _ -> do
-            handle <- createSession (testCreate env.toolsRoot)
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
             persistence <- newActivePersistence handle
             setPersistenceActivity
                 persistence
@@ -125,7 +134,7 @@ spec = describe "Agent.CLI.AgentSessions" do
 
     it "starts a follow-up turn and rejects messaging the current session" $
         withTempEnv \env launched -> do
-            handle <- createSession (testCreate env.toolsRoot)
+            handle <- createSession (testCreate env.toolsPool env.toolsRoot)
             let target = handle.sessionMeta.metaId
                 targetEnv = env { toolsCurrentSessionId = pure (Just "other") }
             result <- runTool targetEnv "send_agent_session_message" $
@@ -148,10 +157,10 @@ spec = describe "Agent.CLI.AgentSessions" do
             result `shouldSatisfy` Text.isInfixOf "invalid session id"
 
     it "serializes background turns with a cross-process session lock" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             script <- writeFakeAgent root
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManager root
                 first <- launchSessionTurn manager True ApproveAll True False handle "one"
                 first `shouldSatisfy` either (const False) (const True)
@@ -166,12 +175,12 @@ spec = describe "Agent.CLI.AgentSessions" do
                 closeSessionProcessManager manager
 
     it "forwards bash enablement to managed session turns" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             let argsPath = toFilePath root FilePath.</> "agent-args"
             script <- writeFakeAgentBody root
                 ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManager root
                 launched <-
                     launchSessionTurn manager True ApproveAll True True handle "one"
@@ -185,12 +194,12 @@ spec = describe "Agent.CLI.AgentSessions" do
                 closeSessionProcessManager manager
 
     it "forwards ghci disablement to managed session turns" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             let argsPath = toFilePath root FilePath.</> "agent-args"
             script <- writeFakeAgentBody root
                 ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManager root
                 launched <-
                     launchSessionTurn manager True ApproveAll False True handle "one"
@@ -204,12 +213,12 @@ spec = describe "Agent.CLI.AgentSessions" do
                 closeSessionProcessManager manager
 
     it "distinguishes managed deny from remote prompt approval" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             let argsPath = toFilePath root FilePath.</> "agent-args"
             script <- writeFakeAgentBody root
                 ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManager root
                 launchManagedTurnBounded
                     manager False DenyMutating True False Nothing handle
@@ -221,8 +230,8 @@ spec = describe "Agent.CLI.AgentSessions" do
                 closeSessionProcessManager manager
 
     it "keeps an advisory lock until its owner releases it" $
-        withTempDir "agent-session-lock-" \root -> do
-            handle <- createSession (testCreateAt root root)
+        withTempStoreDir "agent-session-lock-" \pool root -> do
+            handle <- createSession (testCreateAt pool root root)
             acquireSessionLock
                 handle.sessionDir
                 handle.sessionMeta.metaId >>= \case
@@ -249,8 +258,8 @@ spec = describe "Agent.CLI.AgentSessions" do
                             `shouldReturn` False
 
     it "releases an advisory lock when its process crashes" $
-        withTempDir "agent-session-lock-crash-" \root -> do
-            handle <- createSession (testCreateAt root root)
+        withTempStoreDir "agent-session-lock-crash-" \pool root -> do
+            handle <- createSession (testCreateAt pool root root)
             let marker = toFilePath root FilePath.</> "locked"
             pid <- forkProcess do
                 acquireSessionLock
@@ -283,17 +292,17 @@ spec = describe "Agent.CLI.AgentSessions" do
                     Right lock -> releaseSessionLock lock
 
     it "reports a managed child readiness failure" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             script <- writeFakeAgentError root "could not acquire lock"
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManager root
                 launchSessionTurn manager True ApproveAll True False handle "one"
                     `shouldReturn` Left "could not acquire lock"
                 closeSessionProcessManager manager
 
     it "does not expose gateway credentials to managed agent children" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "leaked"
             script <- writeFakeAgentBody root
                 ("if [ -n \"$TELEGRAM_BOT_TOKEN\" ] \
@@ -311,7 +320,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                         restoreEnv "TELEGRAM_BOT_TOKEN" oldToken
                         restoreEnv "TELEGRAM_ALLOWED_USERS" oldUsers)
                     \_ -> do
-                        handle <- createSession (testCreateAt root root)
+                        handle <- createSession (testCreateAt pool root root)
                         manager <- newSessionProcessManager root
                         launchSessionTurn
                             manager False ApproveAll True False handle "one"
@@ -323,24 +332,24 @@ spec = describe "Agent.CLI.AgentSessions" do
                         closeSessionProcessManager manager
 
     it "does not terminate background sessions when the manager closes" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "finished"
             script <- writeFakeAgentBody root
                 ("sleep 0.2\nprintf done > " <> shellQuote marker <> "\n")
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManager root
                 _ <- launchSessionTurn manager True ApproveAll True False handle "one"
                 closeSessionProcessManager manager
                 waitForFile marker
 
     it "terminates scoped gateway children when the manager closes" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "finished"
             script <- writeFakeAgentBody root
                 ("sleep 1\nprintf done > " <> shellQuote marker <> "\n")
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManagerWithLifetime
                     ScopedSessionProcesses
                     root
@@ -351,10 +360,10 @@ spec = describe "Agent.CLI.AgentSessions" do
                 Directory.doesFileExist marker `shouldReturn` False
 
     it "bounds a foreground managed gateway turn" $
-        withTempDir "agent-session-runtime-" \root -> do
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
             script <- writeFakeAgentBody root "sleep 1\n"
             withExecutableOverride script do
-                handle <- createSession (testCreateAt root root)
+                handle <- createSession (testCreateAt pool root root)
                 manager <- newSessionProcessManagerWithLifetime
                     ScopedSessionProcesses
                     root
@@ -381,13 +390,14 @@ withTempEnv
     :: (AgentSessionToolsEnv -> IORef [(SessionHandle, Text.Text)] -> IO a)
     -> IO a
 withTempEnv action =
-    withTempDir "agent-session-tools-" \root -> do
+    withTempStoreDir "agent-session-tools-" \pool root -> do
         launched <- newIORef []
         let launch handle message = do
                 modifyIORef' launched (<> [(handle, message)])
                 pure (Right "started")
             env = AgentSessionToolsEnv
-                { toolsRoot = root
+                { toolsPool = pool
+                , toolsRoot = root
                 , toolsProvider = XAIProvider
                 , toolsConnection = "xai"
                 , toolsModel = "model-1"
@@ -401,9 +411,10 @@ withTempEnv action =
                 }
         action env launched
 
-testCreate :: OsPath -> SessionCreate
-testCreate root = SessionCreate
-    { createRoot = root
+testCreate :: StorePool -> OsPath -> SessionCreate
+testCreate pool root = SessionCreate
+    { createPool = pool
+    , createRoot = root
     , createTarget = ModelTarget
         { targetProvider = XAIProvider
         , targetConnectionId = "xai"
@@ -417,8 +428,8 @@ testCreate root = SessionCreate
     , createTitleIsManual = False
     }
 
-testCreateAt :: OsPath -> OsPath -> SessionCreate
-testCreateAt root cwd = (testCreate root) { createCwd = cwd }
+testCreateAt :: StorePool -> OsPath -> OsPath -> SessionCreate
+testCreateAt pool root cwd = (testCreate pool root) { createCwd = cwd }
 
 writeFakeAgent :: OsPath -> IO FilePath
 writeFakeAgent root = do
@@ -498,16 +509,28 @@ restoreEnv name = \case
 fixedTime :: UTCTime
 fixedTime = UTCTime (fromGregorian 2026 8 21) (secondsToDiffTime 0)
 
-withTempDir :: String -> (OsPath -> IO a) -> IO a
-withTempDir prefix action = do
+withTempStoreDir :: String -> (StorePool -> OsPath -> IO a) -> IO a
+withTempStoreDir _prefix action = do
     tmp <- Directory.getTemporaryDirectory
     bracket
-        (mkdtemp (tmp FilePath.</> prefix))
+        (mkdtemp (tmp FilePath.</> "ha"))
         Directory.removeDirectoryRecursive
         \basePath -> do
-            let root =
-                    fromFilePath basePath
-                        </> fromFilePath ".haskell-agent"
-                        </> fromFilePath "sessions"
-            Directory.createDirectoryIfMissing True (toFilePath root)
-            action root
+            let
+                stateDirectory = basePath FilePath.</> ".haskell-agent"
+                sessionsDirectory =
+                    stateDirectory FilePath.</> "sessions"
+                config = defaultManagedPostgresConfig stateDirectory ""
+            Directory.createDirectoryIfMissing True sessionsDirectory
+            bracket
+                (openStore config >>= either
+                    (fail . Text.unpack . renderStoreError)
+                    pure)
+                (\store -> do
+                    closeStore store
+                    _ <- stopManagedPostgres (storeConfig store)
+                    pure ())
+                (\store ->
+                    action
+                        (trustedPool store)
+                        (fromFilePath sessionsDirectory))

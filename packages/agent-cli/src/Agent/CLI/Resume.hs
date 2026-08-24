@@ -47,6 +47,7 @@ import Agent.CLI.TextLayout
 import Agent.OsPath (toText)
 import Agent.Provider (providerSlug)
 import Agent.Responses.Types (ResponseItem(..))
+import Agent.Store.Postgres.Connection (StorePool)
 import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.List (nub)
@@ -111,9 +112,9 @@ resumeEntriesFrom = map (uncurry entryFrom)
 resumeEntryFromMeta :: SessionMeta -> ResumeEntry
 resumeEntryFromMeta meta = entryFromWith False meta []
 
-loadResumeEntry :: OsPath -> Text -> IO (Either Text ResumeEntry)
-loadResumeEntry root sessionId =
-    fmap (fmap (uncurry entryFrom)) (loadSession root sessionId)
+loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
+loadResumeEntry pool root sessionId =
+    fmap (fmap (uncurry entryFrom)) (loadSession pool root sessionId)
 
 entryFrom :: SessionMeta -> [SessionTurn] -> ResumeEntry
 entryFrom = entryFromWith True
@@ -518,10 +519,15 @@ formatOne color entry =
 
 -- | TTY picker; non-TTY prints the list. Confirm returns the session id.
 -- Loading is capped to the latest sessions so opening the picker stays cheap.
-pickResumeSession :: Bool -> OsPath -> [SessionMeta] -> IO (Maybe Text)
-pickResumeSession color root metas = do
+pickResumeSession
+    :: StorePool
+    -> Bool
+    -> OsPath
+    -> [SessionMeta]
+    -> IO (Maybe Text)
+pickResumeSession pool color root metas = do
     isTty <- hIsTerminalDevice stdin
-    loaded <- loadRecentSessions root metas
+    loaded <- loadRecentSessions pool root metas
     let entries = resumeEntriesFrom loaded
     if not isTty
         then do
@@ -540,10 +546,14 @@ pickResumeSession color root metas = do
                 Just (Just entry) -> Just entry.resumeId
                 _ -> Nothing
 
-loadRecentSessions :: OsPath -> [SessionMeta] -> IO [(SessionMeta, [SessionTurn])]
-loadRecentSessions root metas =
+loadRecentSessions
+    :: StorePool
+    -> OsPath
+    -> [SessionMeta]
+    -> IO [(SessionMeta, [SessionTurn])]
+loadRecentSessions pool root metas =
     forM (take 20 metas) \meta ->
-        loadSession root meta.metaId >>= \case
+        loadSession pool root meta.metaId >>= \case
             Right loaded -> pure loaded
             Left err ->
                 pure
