@@ -188,7 +188,9 @@ solarizedDark =
             `V.withStyle` V.bold)
         , (codeAttr, V.defAttr
             `V.withForeColor` rgb 42 161 152
-            `V.withBackColor` rgb 7 54 66)
+            -- Keep fenced code distinct from the terminal's Solarized
+            -- selection background so native drag selections stay visible.
+            `V.withBackColor` codeBlockBackground)
         , (dimAttr, V.defAttr
             `V.withForeColor` rgb 88 110 117
             `V.withBackColor` rgb 0 43 54)
@@ -305,7 +307,10 @@ codeColor :: Int -> Int -> Int -> V.Attr
 codeColor r g b =
     V.defAttr
         `V.withForeColor` rgb r g b
-        `V.withBackColor` rgb 7 54 66
+        `V.withBackColor` codeBlockBackground
+
+codeBlockBackground :: V.Color
+codeBlockBackground = rgb 0 43 54
 
 rgb :: Int -> Int -> Int -> V.Color
 rgb r g b =

@@ -3,10 +3,13 @@ module Agent.CLI.SkillsSpec (spec) where
 import Agent.CLI.Command (SkillCommand(..))
 import Agent.CLI.Options (CliOptions(..), defaultCliOptions)
 import Agent.CLI.Skills
-import System.OsPath (unsafeEncodeUtf)
+import System.OsPath (takeDirectory, unsafeEncodeUtf)
 import Agent.Skills
 import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
+import Agent.Tools.IO (resolveForRead, resolveUnderCwd)
+import Agent.Tools.Types (defaultToolEnv)
+import Data.Either (isLeft, isRight)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -34,6 +37,31 @@ spec = describe "Agent.CLI.Skills" do
                     catalog.catalogSkills
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
+
+    it "allows file tools to read packaged skills but not their parent directory" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        env <- defaultToolEnv (fromFilePath "/tmp")
+        installSkillToolRoots env catalog
+        telegram <- case
+                filter ((== "telegram-agent") . (.skillName))
+                    catalog.catalogSkills of
+            [skill] -> pure skill
+            skills ->
+                expectationFailure
+                    ("expected one packaged Telegram skill, got "
+                        <> show (length skills))
+                    >> fail "unreachable"
+        resolveForRead env telegram.skillPath
+            >>= (`shouldSatisfy` isRight)
+        resolveForRead env (takeDirectory telegram.skillDirectory)
+            >>= (`shouldSatisfy` isLeft)
+        resolveUnderCwd env telegram.skillPath
+            >>= (`shouldSatisfy` isLeft)
 
     it "loads the packaged add-model skill" do
         catalog <- loadSkillsCatalog

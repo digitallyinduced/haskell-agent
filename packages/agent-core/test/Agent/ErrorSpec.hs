@@ -29,3 +29,23 @@ spec = do
         retryDisposition
             (ProviderError InvalidRequestError "bad request" Nothing)
             `shouldBe` DoNotRetry
+
+  describe "credentialExhaustionReasonFromApiError" do
+    it "retains structured rate-limit metadata without provider bodies" do
+        credentialExhaustionReasonFromApiError
+            (ProviderError UsageLimitReached
+                "sensitive provider detail"
+                (Just 90))
+            `shouldBe` Just ExhaustedByRateLimit
+                { exhaustionErrorType = Just UsageLimitReached
+                , exhaustionStatusCode = Nothing
+                , exhaustionRetryAfter = Just 90
+                }
+
+    it "retains only the status for HTTP authentication failures" do
+        credentialExhaustionReasonFromApiError
+            (HttpError 401 "sensitive response body")
+            `shouldBe` Just ExhaustedByAuthentication
+                { exhaustionErrorType = Nothing
+                , exhaustionStatusCode = Just 401
+                }

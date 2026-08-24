@@ -55,7 +55,7 @@ import Control.Exception.Safe
     , onException
     , try
     )
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.State.Strict
     ( StateT
@@ -249,6 +249,8 @@ evalRawGhci session expression requestedTimeout = do
                 marker <- nextMarker session
                 sent <- liftIO $ try @_ @SomeException do
                     sendGhciInput process expression
+                    when (ghciInputResetsHelpers expression)
+                        (sendGhciHelpers process)
                     sendMarker process marker
                 case sent of
                     Left err -> do
@@ -444,7 +446,9 @@ startProcess session = mask \restore ->
             else do
                 marker <- nextMarker session
                 sent <- liftIO $
-                    try @_ @SomeException (sendMarker process marker)
+                    try @_ @SomeException do
+                        sendGhciHelpers process
+                        sendMarker process marker
                 case sent of
                     Left err -> do
                         liftIO (shutdownProcessBestEffort process)
@@ -616,6 +620,43 @@ waitForExit handle timeoutMs = go (max 1 timeoutMs)
 sendGhciInput :: GhciProcess -> Text -> IO ()
 sendGhciInput process expression =
     sendLine process (frameGhciInput expression)
+
+-- GHCi discards interactive bindings when its loaded module context changes.
+-- Reinstall the built-ins before framing completion for those commands.
+ghciInputResetsHelpers :: Text -> Bool
+ghciInputResetsHelpers expression =
+    case Text.uncons (Text.stripStart expression) of
+        Just (':', rest) ->
+            commandName rest `elem`
+                [ "load", "l", "reload", "r"
+                , "add", "unadd", "module", "m"
+                ]
+        _ -> False
+  where
+    commandName =
+        Text.toLower
+            . Text.takeWhile (not . (`elem` [' ', '\t', '\r', '\n']))
+
+-- | Install a tiny, provider-neutral scripting prelude. These bindings target
+-- the repetitive process and file operations seen in agent GHCi sessions while
+-- keeping argv-based execution as the default (rather than shell strings).
+sendGhciHelpers :: GhciProcess -> IO ()
+sendGhciHelpers process =
+    mapM_ (sendLine process)
+        [ "import qualified System.Process as AgentGhciProcess"
+        , "import qualified System.IO as AgentGhciIO"
+        , "import qualified Data.Text.IO as AgentGhciTextIO"
+        , "import qualified System.Directory as AgentGhciDirectory"
+        , "let cmdWithInput executable arguments input = AgentGhciProcess.readProcessWithExitCode executable arguments input"
+        , "let cmd executable arguments = cmdWithInput executable arguments \"\""
+        , "let cmdInWithInput directory executable arguments input = AgentGhciProcess.readCreateProcessWithExitCode ((AgentGhciProcess.proc executable arguments) { AgentGhciProcess.cwd = Just directory }) input"
+        , "let cmdIn directory executable arguments = cmdInWithInput directory executable arguments \"\""
+        , "let printCmdResult (exitCode, stdoutText, stderrText) = putStr stdoutText >> AgentGhciIO.hPutStr AgentGhciIO.stderr stderrText >> print exitCode"
+        , "let cmd_ executable arguments = cmd executable arguments >>= printCmdResult"
+        , "let cmdIn_ directory executable arguments = cmdIn directory executable arguments >>= printCmdResult"
+        , "let readText = AgentGhciTextIO.readFile; writeText = AgentGhciTextIO.writeFile; appendText = AgentGhciTextIO.appendFile"
+        , "let listFiles = AgentGhciDirectory.listDirectory; pathExists = AgentGhciDirectory.doesPathExist"
+        ]
 
 frameGhciInput :: Text -> Text
 frameGhciInput expression

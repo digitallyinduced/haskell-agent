@@ -3,7 +3,11 @@ module Agent.CLI.AuthSpec (spec) where
 import Agent.CLI.Auth
 import Agent.CLI.CredentialStore
 import qualified Agent.CLI.Login as Login
-import Agent.Error (ApiError(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , credentialsExhausted
+    )
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Agent.OpenAI.Auth (AuthState(..))
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -69,14 +73,14 @@ spec = do
                 exhausted = LoadedAuth
                     { loadedProvider = XAIProvider
                     , loadedTokenProvider = tokenProvider SubscriptionBilled \_ ->
-                        pure (Left (CredentialsExhausted retryAt))
+                        pure (Left (credentialsExhausted retryAt))
                     , loadedAccountLabel = pure . credentialAccountLabel
                     , loadedSelectionId = Nothing
                     , loadedOpenAiPool = Nothing
                     }
             result <- probeLoadedAuth exhausted
             case result of
-                Left err -> err `shouldBe` CredentialsExhausted retryAt
+                Left err -> err `shouldBe` credentialsExhausted retryAt
                 Right _ -> expectationFailure "expected exhausted auth"
 
         it "returns and seeds the credential used for the account display" do
@@ -394,6 +398,7 @@ spec = do
                             AccountRateLimited
                                 { retryAfterSeconds = Just 60
                                 }
+                        , failureReason = testRateLimitReason (Just 60)
                         })
                 >>= \case
                     Right credential ->
@@ -431,6 +436,7 @@ spec = do
                             AccountRateLimited
                                 { retryAfterSeconds = Just 60
                                 }
+                        , failureReason = testRateLimitReason (Just 60)
                         })
                 >>= \case
                     Right credential ->
@@ -649,8 +655,10 @@ spec = do
                     (const (pure (Right refreshedGrokTokens)))
                 getNextToken provider
                     (Just
-                        (FailedCredential staleManagedGrok
-                            AccountAuthenticationRejected))
+                        (FailedCredential
+                            staleManagedGrok
+                            AccountAuthenticationRejected
+                            testAuthenticationReason))
                     `shouldReturn` Right freshManagedGrok
 
         it "adopts a token rotated by another process without refreshing" $
@@ -678,8 +686,10 @@ spec = do
             result <- getNextToken
                 (staticCredentialProvider SubscriptionBilled staleGrok)
                 (Just
-                    (FailedCredential staleGrok
-                        (AccountRateLimited (Just 7))))
+                    (FailedCredential
+                        staleGrok
+                        (AccountRateLimited (Just 7))
+                        (testRateLimitReason (Just 7))))
             case result of
                 Left CredentialsExhausted{retryAt} ->
                     diffUTCTime retryAt before `shouldSatisfy` (>= 7)
@@ -718,6 +728,7 @@ spec = do
             reloaded <- getNextToken provider (Just FailedCredential
                 { credential = staleGrok
                 , failure = AccountAuthenticationRejected
+                , failureReason = testAuthenticationReason
                 })
             reloaded `shouldBe` Right freshGrok
             getNextToken provider Nothing `shouldReturn` Right freshGrok
@@ -730,6 +741,7 @@ spec = do
             result <- getNextToken provider (Just FailedCredential
                 { credential = staleGrok
                 , failure = AccountAuthenticationRejected
+                , failureReason = testAuthenticationReason
                 })
             case result of
                 Left (CredentialError message) ->
@@ -960,6 +972,19 @@ tokenObject accountId token = Aeson.object
     , "refresh_token" .= ("refresh-" <> accountId)
     , "account_id" .= accountId
     ]
+
+testAuthenticationReason :: CredentialExhaustionReason
+testAuthenticationReason = ExhaustedByAuthentication
+    { exhaustionErrorType = Nothing
+    , exhaustionStatusCode = Just 401
+    }
+
+testRateLimitReason :: Maybe Int -> CredentialExhaustionReason
+testRateLimitReason retryAfter = ExhaustedByRateLimit
+    { exhaustionErrorType = Nothing
+    , exhaustionStatusCode = Just 429
+    , exhaustionRetryAfter = retryAfter
+    }
 
 staleGrok :: Credential
 staleGrok = Credential

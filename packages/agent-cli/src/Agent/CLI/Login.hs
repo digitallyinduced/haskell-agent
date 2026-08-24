@@ -65,7 +65,12 @@ import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (toText, unsafeToFilePath)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
-import Agent.Provider (BillingMode(..), Provider(..), providerSlug)
+import Agent.Provider
+    ( BillingMode(..)
+    , Credential(..)
+    , Provider(..)
+    , providerSlug
+    )
 import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.XAI.Usage as XAI
 import Control.Applicative ((<|>))
@@ -858,7 +863,12 @@ refreshLoginAccount account
                                         (openAIUsage snapshot)
                                 }
         XAIProvider ->
-            XAI.fetchGrokUsage account.loginAccessToken >>= \case
+            XAI.fetchGrokUsage Credential
+                { accessToken = account.loginAccessToken
+                , accountId = account.loginAccountId
+                , leaseId = Nothing
+                , provider = XAIProvider
+                } >>= \case
                 Left err ->
                     pure account
                         { loginUsage = UsageUnavailable err }

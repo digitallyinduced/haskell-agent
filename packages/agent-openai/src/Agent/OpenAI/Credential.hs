@@ -7,7 +7,11 @@ module Agent.OpenAI.Credential
     ) where
 
 import qualified Agent.OpenAI.Auth as Auth
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason
+    , ErrorType(..)
+    )
 import Agent.Provider
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -21,16 +25,20 @@ poolTokenProviderWithBilling :: BillingMode -> Auth.Pool -> IO TokenProvider
 poolTokenProviderWithBilling billing pool =
     pure $ tokenProvider billing \failed -> case failed of
             Nothing -> acquireFromPool pool
-            Just FailedCredential { credential, failure } ->
+            Just FailedCredential { credential, failure, failureReason } ->
                 case failure of
                     AccountRateLimited { retryAfterSeconds } -> do
-                        Auth.reportRateLimit pool credential.accountId
+                        Auth.reportRateLimitWithReason
+                            pool
+                            credential.accountId
                             (max 1 <$> retryAfterSeconds)
+                            failureReason
                         acquireFromPool pool
                     AccountAuthenticationRejected -> do
                         state <- Auth.readAccountState pool credential.accountId
                         if maybe False (Text.null . (.refreshToken)) state
-                            then rejectStaticCredential pool credential.accountId
+                            then rejectStaticCredential
+                                pool credential.accountId failureReason
                             else do
                                 Auth.recoverAfterAuthFailure
                                     pool
@@ -41,10 +49,14 @@ poolTokenProviderWithBilling billing pool =
                                                 credentialFromAuthState refreshed
                                         Left _ -> acquireFromPool pool
 
-rejectStaticCredential :: Auth.Pool -> Text -> IO (Either ApiError Credential)
-rejectStaticCredential pool accountId = do
+rejectStaticCredential
+    :: Auth.Pool
+    -> Text
+    -> CredentialExhaustionReason
+    -> IO (Either ApiError Credential)
+rejectStaticCredential pool accountId reason = do
     accountIds <- Auth.allAccountIds pool
-    Auth.reportAuthBroken pool accountId
+    Auth.reportAuthBrokenWithReason pool accountId reason
     acquireFromPool pool >>= \case
         Left CredentialsExhausted{}
             | accountIds == [accountId] ->
@@ -64,12 +76,17 @@ staticBearerProvider apiKey = tokenProvider ApiBilled \failed -> case failed of
                 , leaseId = Nothing
                 , provider = OpenAIProvider
                 }
-        Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
+        Just FailedCredential
+            { failure = AccountRateLimited { retryAfterSeconds }
+            , failureReason
+            } -> do
             now <- getCurrentTime
             let seconds = max 1
                     (fromMaybe staticBearerRateLimitCooldownSeconds retryAfterSeconds)
             pure $ Left $ CredentialsExhausted
-                (addUTCTime (fromIntegral seconds) now)
+                { retryAt = addUTCTime (fromIntegral seconds) now
+                , exhaustionReasons = [failureReason]
+                }
         Just FailedCredential { failure = AccountAuthenticationRejected } ->
             pure $ Left $ ProviderError AuthenticationError
                 "static bearer token was rejected"

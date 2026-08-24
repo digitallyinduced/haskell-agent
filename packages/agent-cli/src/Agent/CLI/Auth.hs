@@ -421,11 +421,16 @@ reloadableFileCredentialProvider expectedProvider billing initial reload = do
                         writeIORef cache (Just credential)
                         pure (Right credential)
     pure $ tokenProvider billing \failed -> case failed of
-            Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
+            Just FailedCredential
+                { failure = AccountRateLimited { retryAfterSeconds }
+                , failureReason
+                } -> do
                 now <- getCurrentTime
                 let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
                 pure $ Left $ CredentialsExhausted
-                    (addUTCTime (fromIntegral seconds) now)
+                    { retryAt = addUTCTime (fromIntegral seconds) now
+                    , exhaustionReasons = [failureReason]
+                    }
             Just FailedCredential
                 { credential = rejected
                 , failure = AccountAuthenticationRejected
@@ -443,11 +448,14 @@ staticCredentialProvider billing credential =
         Nothing -> pure (Right credential)
         Just FailedCredential
             { failure = AccountRateLimited { retryAfterSeconds }
+            , failureReason
             } -> do
                 now <- getCurrentTime
                 let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
                 pure $ Left $ CredentialsExhausted
-                    (addUTCTime (fromIntegral seconds) now)
+                    { retryAt = addUTCTime (fromIntegral seconds) now
+                    , exhaustionReasons = [failureReason]
+                    }
         Just FailedCredential
             { failure = AccountAuthenticationRejected
             } ->

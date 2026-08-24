@@ -1,7 +1,12 @@
 module Agent.CLI.ErrorSpec (spec) where
 
 import Agent.CLI.Error
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , ErrorType(..)
+    , credentialsExhausted
+    )
 import Control.Monad (forM_)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -105,20 +110,20 @@ spec = do
                 (ProviderError RateLimitError "slow down" (Just 121))
                 `shouldSatisfy` Text.isInfixOf "Try again in 2m"
             formatApiErrorAt epoch
-                (CredentialsExhausted
+                (credentialsExhausted
                     (addUTCTime (5 * 86400 + 21 * 3600) epoch))
                 `shouldSatisfy` Text.isInfixOf "Try again in 5d 21h"
             formatApiError
-                (CredentialsExhausted
+                (credentialsExhausted
                     (addUTCTime (5 * 86400 + 21 * 3600) epoch))
                 `shouldSatisfy`
                     Text.isInfixOf "2026-08-27 21:00:00 UTC"
             formatApiError
-                (CredentialsExhausted (addUTCTime 37.4 epoch))
+                (credentialsExhausted (addUTCTime 37.4 epoch))
                 `shouldSatisfy`
                     Text.isInfixOf "2026-08-22 00:00:38 UTC"
             formatApiErrorAt epoch
-                (CredentialsExhausted epoch)
+                (credentialsExhausted epoch)
                 `shouldSatisfy` Text.isInfixOf "Try again now"
             formatApiErrorAt epoch
                 (ProviderError RateLimitError "slow down" (Just 0))
@@ -126,7 +131,7 @@ spec = do
 
         it "exposes live countdown framing only for credential exhaustion" do
             formatApiErrorRetryCountdownParts
-                (CredentialsExhausted (addUTCTime 60 epoch))
+                (credentialsExhausted (addUTCTime 60 epoch))
                 `shouldBe`
                     Just
                         ( "Provider unavailable.\n\
@@ -136,6 +141,29 @@ spec = do
             formatApiErrorRetryCountdownParts
                 (ProviderError RateLimitError "slow down" (Just 60))
                 `shouldBe` Nothing
+
+        it "renders redacted credential exhaustion causes" do
+            let rendered = formatApiErrorAt epoch $ CredentialsExhausted
+                    { retryAt = addUTCTime 60 epoch
+                    , exhaustionReasons =
+                        [ ExhaustedByRateLimit
+                            { exhaustionErrorType =
+                                Just UsageLimitReached
+                            , exhaustionStatusCode = Nothing
+                            , exhaustionRetryAfter = Nothing
+                            }
+                        , ExhaustedByAuthentication
+                            { exhaustionErrorType =
+                                Just AuthenticationError
+                            , exhaustionStatusCode = Just 401
+                            }
+                        ]
+                    }
+            rendered `shouldSatisfy`
+                Text.isInfixOf "Observed account failures"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "type usage_limit_reached"
+            rendered `shouldSatisfy` Text.isInfixOf "HTTP 401"
 
         it "bounds and sanitizes provider detail text" do
             let rendered =
@@ -179,7 +207,7 @@ sampleErrors =
     , JsonDecodeError "bad JSON" "raw body"
     , CredentialError "credential file is invalid"
     , ConnectionError "socket closed"
-    , CredentialsExhausted (addUTCTime 60 epoch)
+    , credentialsExhausted (addUTCTime 60 epoch)
     ]
         <> [ ProviderError errorType "provider detail" (Just 60)
            | errorType <- allErrorTypes

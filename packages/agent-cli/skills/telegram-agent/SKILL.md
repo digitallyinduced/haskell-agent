@@ -53,15 +53,22 @@ disables terminal echo and stores the token in a private gateway file.
 
 9. Tell the user to open their new bot and send `/start`. The bot supports
    `/new` for a fresh agent session and `/session` for the current session ID.
-   Text, voice messages, and message reactions are persisted before processing.
-   Voice transcription uses the user's existing Codex subscription, so Codex
-   must already be logged in on the machine running the gateway.
+   To use it in a group, add the bot and mention its `@username`, reply to one
+   of its messages, or address commands to it (for example
+   `/new@your_bot_username`). Each group or forum topic has a shared agent
+   session. Only messages from allowlisted users are accepted; ambient group
+   traffic is ignored. Text, voice messages, and private-chat message reactions
+   are persisted before processing. Voice transcription uses the user's
+   existing Codex subscription, so Codex must already be logged in on the
+   machine running the gateway.
 
 ## Telegram delivery behavior
 
 - The gateway shows typing and a native rich-message draft while an agent turn
   is running.
 - Agent Markdown is converted to Telegram-safe HTML, with a plain-text fallback.
+- Group and supergroup responses reply to the triggering message. Forum topics
+  are isolated from one another.
 - A reply containing exactly one supported Telegram reaction emoji is delivered
   as a reaction to the triggering message instead of as a separate message.
 - Inbound reaction changes become ordinary durable agent turns, including

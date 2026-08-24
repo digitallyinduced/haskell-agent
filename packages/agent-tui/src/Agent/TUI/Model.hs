@@ -167,6 +167,7 @@ data UiState = UiState
     , uiElapsedMillis :: !Int
     , uiCompletionRemainingMillis :: !Int
     , uiTurnStartBlock :: !Int
+    , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
     }
     deriving (Eq, Show)
@@ -237,6 +238,7 @@ initialUiState = UiState
     , uiElapsedMillis = 0
     , uiCompletionRemainingMillis = 0
     , uiTurnStartBlock = 0
+    , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
     }
 
@@ -396,6 +398,7 @@ reduceUi event state = case event of
             , uiBlockIndices = Map.empty
             , uiNextBlockId = 1
             , uiTurnStartBlock = 0
+            , uiAttemptStartBlock = 0
             , uiToolCalls = Map.empty
             , uiRetryCountdown = Nothing
             }
@@ -437,6 +440,7 @@ reduceUi event state = case event of
             , uiNoticeElapsedMillis = 0
             , uiCompletionRemainingMillis = 0
             , uiToolCalls = Map.empty
+            , uiAttemptStartBlock = state.uiTurnStartBlock
             }
 
 advanceUiTime :: Int -> UiState -> UiState
@@ -597,6 +601,7 @@ reduceLoop event state = case event of
             , uiElapsedMillis = 0
             , uiCompletionRemainingMillis = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
+            , uiAttemptStartBlock = Seq.length state.uiBlocks
             , uiToolCalls = Map.empty
             }
     ReasoningDelta delta ->
@@ -611,6 +616,15 @@ reduceLoop event state = case event of
         state
             { uiNotice = Just (warningNotice warning)
             , uiNoticeElapsedMillis = 0
+            }
+    ResponseRestarted message ->
+        let finalized = finalizeStreams state
+        in finalized
+            { uiRunning = True
+            , uiActivity = "Retrying response…"
+            , uiNotice = Just (warningNotice message)
+            , uiNoticeElapsedMillis = 0
+            , uiAttemptStartBlock = Seq.length finalized.uiBlocks
             }
     ToolStarted call ->
         let
@@ -663,7 +677,7 @@ reduceLoop event state = case event of
                     | not (Text.null (Text.strip text))
                     , not
                         (hasAssistantTextSince
-                            finalized.uiTurnStartBlock
+                            finalized.uiAttemptStartBlock
                             finalized) ->
                         appendBlock BlockAssistant "Assistant" text ""
                             BlockComplete Nothing finalized

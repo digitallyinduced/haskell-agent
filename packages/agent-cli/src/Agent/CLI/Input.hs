@@ -40,6 +40,12 @@ import Agent.CLI.Command
     , SlashSuggestion(..)
     , slashMenuForWithSkillsAndModels
     )
+import Agent.CLI.Input.Display
+import Agent.CLI.Input.History
+import Agent.CLI.Input.KeyDecoder
+import Agent.CLI.Input.Paste
+import Agent.CLI.Input.Picker
+import Agent.CLI.Input.Types
 import Agent.CLI.Interrupt
     ( IdleCtrlCResult(..)
     , InterruptState
@@ -51,20 +57,12 @@ import Agent.CLI.Terminal
     , emitTerminalSequence
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
-    , shiftEnterCsiBodies
     , stripAnsi
     )
-import Agent.Loop (ImageAttachment)
-import Agent.TUI.TextWidth (charCellWidth)
 import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
 import Control.Monad (unless, when)
-import Data.Bits ((.&.))
 import Data.Char
-    ( GeneralCategory(..)
-    , chr
-    , generalCategory
-    , isSpace
-    , ord
+    ( isSpace
     )
 import Data.List (isPrefixOf)
 import Data.Maybe (fromMaybe)
@@ -88,10 +86,8 @@ import System.Console.Haskeline.History
     , writeHistory
     )
 import System.Directory
-    ( createDirectoryIfMissing
-    , getHomeDirectory
+    ( getHomeDirectory
     )
-import System.FilePath (takeDirectory, (</>))
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -107,7 +103,6 @@ import System.IO
     , stdout
     )
 import System.IO.Error (isEOFError)
-import System.Posix.Files (setFileMode)
 import System.Posix.IO (stdInput)
 import System.Posix.Terminal
     ( TerminalMode(..)
@@ -119,137 +114,6 @@ import System.Posix.Terminal
     , withTime
     , withoutMode
     )
-import System.Posix.Types (FileMode)
-
--- | Outcome of an interactive REPL read.
-data ReplLine
-    = ReplEof
-    | ReplText Text
-    -- | Submitted text that arrived as a paste (bracketed paste, or a
-    -- multi-line / burst heuristic). @replText@ is the payload with CSI
-    -- paste wrappers stripped.
-    | ReplPasted Text
-    -- | Attach a native clipboard image while keeping the current draft.
-    | ReplClipboardPaste !Text !(Maybe [ImageAttachment])
-    -- | Classify a bracketed paste off the UI thread. If the clipboard contains
-    -- an image, attach it and keep the original draft; otherwise restore the
-    -- supplied draft with the pasted terminal text inserted.
-    | ReplClipboardPasteOrText !Text !Text
-    | ReplCycleMode Text
-    -- ^ Shift+Tab: cycle idle mode and keep the current draft.
-    | ReplChooseModel Text
-    -- ^ Fullscreen status click: open the model selector and keep the draft.
-    | ReplChooseEffort Text
-    -- ^ Fullscreen status click: open the effort selector and keep the draft.
-    | ReplChooseAccount Text
-    -- ^ Fullscreen status click: open the account selector and keep the draft.
-    | ReplQuitInterrupt
-    deriving (Eq, Show)
-
--- | Keep empty composers inert unless they have queued image attachments.
--- Providers expect a non-empty text part alongside image parts, so image-only
--- submissions receive a small synthetic prompt.
-submissionPromptText :: Int -> Text -> Maybe Text
-submissionPromptText attachmentCount text
-    | not (Text.null (Text.strip text)) = Just text
-    | attachmentCount > 0 = Just "The user attached an image."
-    | otherwise = Nothing
-
--- | Strip terminal bracketed-paste wrappers (raw @CSI 200~@ / @CSI 201~@,
--- or the printable sentinels used by older history/input versions) and decide
--- whether the buffer looks pasted rather than typed.
-classifyPastedText :: Text -> (Text, Bool)
-classifyPastedText raw =
-    let stripped = stripBracketedPaste raw
-        looksPasted =
-            raw /= stripped
-                || Text.count "\n" stripped >= 3
-    in (stripped, looksPasted)
-
--- | Compact prompt chip for a multi-line paste. Single-line pastes stay inline.
-formatPasteChip :: Text -> Text
-formatPasteChip text =
-    let n = max 1 (length (Text.lines text))
-    in if n < 4
-        then text
-        else "[Pasted: " <> Text.pack (show n) <> " lines]"
-
-stripBracketedPaste :: Text -> Text
-stripBracketedPaste text =
-    Text.filter (not . isPasteSentinel)
-        (Text.replace pasteEnd "" (Text.replace pasteStart "" text))
-  where
-    pasteStart = "\ESC[200~"
-    pasteEnd = "\ESC[201~"
-
-pasteStartSentinel, pasteEndSentinel :: Char
-pasteStartSentinel = '\x27E6'
-pasteEndSentinel = '\x27E7'
-
-isPasteSentinel :: Char -> Bool
-isPasteSentinel char =
-    char == pasteStartSentinel || char == pasteEndSentinel
-
--- | @~/.haskell-agent/history@ given the user's home directory.
-replHistoryPath :: FilePath -> FilePath
-replHistoryPath home = home </> ".haskell-agent" </> "history"
-
-readReplHistory :: IO [Text]
-readReplHistory = do
-    home <- getHomeDirectory
-    let path = replHistoryPath home
-    ensureHistoryParent path
-    history <- readHistory path `catchIO` \_ -> pure emptyHistory
-    pure (map Text.pack (historyLines history))
-
-appendReplHistory :: Text -> IO ()
-appendReplHistory text
-    | Text.all isSpace text = pure ()
-    | otherwise = do
-        home <- getHomeDirectory
-        let path = replHistoryPath home
-        ensureHistoryParent path
-        history <- readHistory path `catchIO` \_ -> pure emptyHistory
-        writeHistory path (addHistory (Text.unpack text) history)
-            `catchIO` \_ -> pure ()
-
--- | Keys understood by the multiple-choice TTY picker.
-data ChoiceKey
-    = ChoiceUp
-    | ChoiceDown
-    | ChoiceEnter
-    | ChoiceCancel
-    | ChoiceDigit Int
-    deriving (Eq, Show)
-
--- | Parse a short key / CSI sequence into a 'ChoiceKey'.
--- Used by the picker and unit tests; 'Nothing' means ignore and keep reading.
-parseChoiceKey :: String -> Maybe ChoiceKey
-parseChoiceKey = \case
-    "\n" -> Just ChoiceEnter
-    "\r" -> Just ChoiceEnter
-    "\ESC" -> Just ChoiceCancel
-    "\ESC[A" -> Just ChoiceUp
-    "\ESC[B" -> Just ChoiceDown
-    "\ESCOA" -> Just ChoiceUp
-    "\ESCOB" -> Just ChoiceDown
-    "k" -> Just ChoiceUp
-    "j" -> Just ChoiceDown
-    "q" -> Just ChoiceCancel
-    "Q" -> Just ChoiceCancel
-    [c]
-        | c >= '1' && c <= '9' ->
-            Just (ChoiceDigit (ord c - ord '0'))
-    _ -> Nothing
-
--- | Wrap highlight index for ↑ / ↓ (and j / k). Other keys leave @idx@ alone.
-choiceMoveIndex :: Int -> Int -> ChoiceKey -> Int
-choiceMoveIndex len idx key
-    | len <= 0 = 0
-    | otherwise = case key of
-        ChoiceUp -> if idx <= 0 then len - 1 else idx - 1
-        ChoiceDown -> if idx >= len - 1 then 0 else idx + 1
-        _ -> idx
 
 -- | Read a REPL prompt line. Persists history under 'replHistoryPath' when
 -- stdin is a TTY. 'ReplEof' means EOF; 'ReplQuitInterrupt' means a confirmed
@@ -314,105 +178,6 @@ readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = d
     classifySubmitted text =
         let (stripped, pasted) = classifyPastedText text
         in if pasted then ReplPasted stripped else ReplText stripped
-
-data EditorState = EditorState
-    { editorText :: !Text
-    , editorCursor :: !Int
-    , editorSelected :: !Int
-    , editorHistoryIndex :: !(Maybe Int)
-    , editorHistoryDraft :: !Text
-    , editorKillBuffer :: !Text
-    , editorPasted :: !Bool
-    , editorSlashEnabled :: !Bool
-    , editorSlashDismissed :: !Bool
-    , editorSkillCommands :: ![SkillCommand]
-    , editorModelIds :: ![Text]
-    }
-
-data DisplayCell = DisplayCell
-    { displayCellText :: !Text
-    , displayCellWidth :: !Int
-    }
-
-terminalTextWidth :: Text -> Int
-terminalTextWidth = cellsWidth . displayCells
-
-terminalCharWidth :: Char -> Int
-terminalCharWidth = (.displayCellWidth) . displayCell
-
-displayCells :: Text -> [DisplayCell]
-displayCells = map displayCell . Text.unpack
-
-displayCell :: Char -> DisplayCell
-displayCell char =
-    let shown = safeDisplayChar char
-    in DisplayCell
-        { displayCellText = shown
-        , displayCellWidth = textColumns shown
-        }
-
-safeDisplayChar :: Char -> Text
-safeDisplayChar char
-    | char == '\n' || char == '\r' = "↵"
-    | char == '\t' = "⇥"
-    | code >= 0 && code <= 0x1f =
-        Text.singleton (chr (0x2400 + code))
-    | code == 0x7f = "␡"
-    | code >= 0x80 && code <= 0x9f = "�"
-    | generalCategory char == Format = "�"
-    | otherwise = Text.singleton char
-  where
-    code = ord char
-
-textColumns :: Text -> Int
-textColumns = sum . map charColumns . Text.unpack
-
-charColumns :: Char -> Int
-charColumns = charCellWidth
-
-cellsWidth :: [DisplayCell] -> Int
-cellsWidth = sum . map (.displayCellWidth)
-
-renderCells :: [DisplayCell] -> Text
-renderCells = Text.concat . map (.displayCellText)
-
-takeColumns :: Int -> [DisplayCell] -> [DisplayCell]
-takeColumns width = go 0
-  where
-    go _ [] = []
-    go used (cell:rest)
-        | used + cell.displayCellWidth > width = []
-        | otherwise = cell : go (used + cell.displayCellWidth) rest
-
-takeSuffixColumns :: Int -> [DisplayCell] -> [DisplayCell]
-takeSuffixColumns width = reverse . takeColumns width . reverse
-
-data EditorKey
-    = EditorChar !Char
-    | EditorEnter
-    | EditorBackspace
-    | EditorDelete
-    | EditorLeft
-    | EditorRight
-    | EditorHome
-    | EditorEnd
-    | EditorUp
-    | EditorDown
-    | EditorTab
-    | EditorEscape
-    | EditorInterrupt
-    | EditorEof
-    | EditorKillStart
-    | EditorKillEnd
-    | EditorKillWord
-    | EditorYank
-    | EditorClearScreen
-    | EditorCycleMode
-    | EditorClipboardPaste !(Maybe [ImageAttachment])
-    | EditorPaste !Text
-    | EditorInputError !Text
-    | EditorIgnore
-    deriving (Eq, Show)
 
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
@@ -791,22 +556,6 @@ readEditorKey = do
                     | char >= ' ' -> pure (EditorChar char)
                     | otherwise -> pure EditorIgnore
 
-isClipboardPasteKey :: Char -> Bool
-isClipboardPasteKey = (== '\SYN')
-
-isClipboardPasteCsiBody :: String -> Bool
-isClipboardPasteCsiBody body =
-    case parseKittyKey body of
-        Just KittyKey{kittyCodepoint, kittyModifiers, kittyEvent}
-            | kittyEvent /= kittyRelease ->
-                kittyCodepoint == ord 'v'
-                    && (hasModifier kittyCtrl kittyModifiers
-                        || hasModifier kittySuper kittyModifiers)
-        _ -> False
-
-isShiftEnterCsiBody :: String -> Bool
-isShiftEnterCsiBody body = body `elem` shiftEnterCsiBodies
-
 readEscapeKey :: IO EditorKey
 readEscapeKey = do
     ready <- hWaitForInput stdin 25
@@ -865,21 +614,6 @@ readCsiKey =
                                     EditorClipboardPaste (Just attached)
                                 Nothing -> EditorPaste pasted
                 _ -> pure EditorIgnore
-
-data KittyKey = KittyKey
-    { kittyCodepoint :: !Int
-    , kittyModifiers :: !Int
-    , kittyEvent :: !Int
-    }
-
-kittyShift, kittyCtrl, kittySuper, kittyRelease :: Int
-kittyShift = 1
-kittyCtrl = 4
-kittySuper = 8
-kittyRelease = 3
-
-hasModifier :: Int -> Int -> Bool
-hasModifier modifier modifiers = modifiers .&. modifier /= 0
 
 readCsiBody :: IO (Either Text String)
 readCsiBody = go 0 []
@@ -942,22 +676,6 @@ readBracketedPaste = go 0 []
                     drainBracketedPaste (take (markerLength - 1) next)
             TimedOut -> pure ()
             TimedEof -> pure ()
-
--- | Validate input captured after a bracketed-paste start marker. The input
--- must contain an end marker, and the payload must fit the supplied limit.
-decodeBracketedPastePayload :: Int -> Text -> Either Text Text
-decodeBracketedPastePayload limit input =
-    let (payload, rest) = Text.breakOn (Text.pack bracketedPasteEnd) input
-    in if Text.null rest
-        then Left "bracketed paste is missing its end marker"
-        else if Text.length payload > max 0 limit
-            then Left "bracketed paste exceeds the size limit"
-            else Right payload
-
-data TimedRead
-    = TimedChar !Char
-    | TimedOut
-    | TimedEof
 
 readTimedChar :: Int -> IO TimedRead
 readTimedChar timeoutMs = do
@@ -1077,31 +795,6 @@ renderMenuRow width selected start localIndex suggestion =
         then "\ESC[1;36m" <> row <> "\ESC[0m"
         else "\ESC[2m" <> row <> "\ESC[0m"
 
-visibleEditorText :: Int -> Text -> Int -> (Text, Int)
-visibleEditorText available raw cursor =
-    let cells = displayCells raw
-        before = take cursor cells
-    in if cellsWidth cells <= available
-        then (renderCells cells, cellsWidth before)
-        else
-            let leftRoom = max 1 (available * 2 `div` 3)
-                visibleBefore = takeSuffixColumns leftRoom before
-                start = length before - length visibleBefore
-                shownCells = takeColumns available (drop start cells)
-            in (renderCells shownCells, cellsWidth visibleBefore)
-
-displayEditorText :: Text -> Text
-displayEditorText = renderCells . displayCells
-
-truncateDisplayText :: Int -> Text -> Text
-truncateDisplayText width text
-    | width <= 0 = ""
-    | cellsWidth cells <= width = renderCells cells
-    | width == 1 = "…"
-    | otherwise = renderCells (takeColumns (width - 1) cells) <> "…"
-  where
-    cells = displayCells text
-
 visibleWidth :: Text -> Int
 visibleWidth = terminalTextWidth . stripAnsi
 
@@ -1205,13 +898,6 @@ putChoiceLine handle line = do
     Text.hPutStr handle (Text.pack clearLineCode)
     Text.hPutStrLn handle line
     hFlush handle
-
--- | Map one approval keypress to the text 'parseApprovalAnswer' expects.
--- Enter / Return become empty (deny by default).
-approvalKeyText :: Char -> Text
-approvalKeyText c
-    | c == '\n' || c == '\r' = ""
-    | otherwise = Text.singleton c
 
 -- | Single-key approval on a TTY: disable canonical input, read one byte,
 -- echo it (except bare Enter), then restore the previous terminal state.
@@ -1343,94 +1029,3 @@ readRawLine = do
     if done
         then pure Nothing
         else Just <$> Text.getLine
-
-ensureHistoryParent :: FilePath -> IO ()
-ensureHistoryParent path = do
-    let dir = takeDirectory path
-    createDirectoryIfMissing True dir
-    -- Best-effort private mode; ignore failures on filesystems that refuse.
-    trySetMode dir 0o700
-
-parseKittyKey :: String -> Maybe KittyKey
-parseKittyKey body = do
-    raw <- stripFinal 'u' body
-    parseKittyKeyFields raw
-
-parseKittyKeyFields :: String -> Maybe KittyKey
-parseKittyKeyFields raw = do
-    let fields = splitFields ';' raw
-    codeField <- listAt 0 fields
-    let modifierField = fromMaybe "1" (listAt 1 fields)
-        modifierParts = splitFields ':' modifierField
-    codepoint <- readDecimal (takeWhile (/= ':') codeField)
-    encodedModifiers <- listAt 0 modifierParts >>= readDecimal
-    event <- maybe (Just 1) readDecimal (listAt 1 modifierParts)
-    pure KittyKey
-        { kittyCodepoint = codepoint
-        , kittyModifiers = max 0 (encodedModifiers - 1)
-        , kittyEvent = event
-        }
-
-decodeKittyEditorKey :: String -> Maybe EditorKey
-decodeKittyEditorKey body
-    | isClipboardPasteCsiBody body =
-        Just (EditorClipboardPaste Nothing)
-    | otherwise = do
-        KittyKey{kittyCodepoint, kittyModifiers, kittyEvent} <- parseKittyKey body
-        if kittyEvent == kittyRelease
-            then Just EditorIgnore
-            else Just (decodeKittyControl kittyModifiers kittyCodepoint)
-
-decodeKittyControl :: Int -> Int -> EditorKey
-decodeKittyControl modifiers codepoint
-    | codepoint == 9 && hasModifier kittyShift modifiers = EditorCycleMode
-    | hasModifier kittyCtrl modifiers = case codepoint of
-        97 -> EditorHome
-        98 -> EditorLeft
-        99 -> EditorInterrupt
-        100 -> EditorEof
-        101 -> EditorEnd
-        102 -> EditorRight
-        107 -> EditorKillEnd
-        108 -> EditorClearScreen
-        110 -> EditorDown
-        112 -> EditorUp
-        117 -> EditorKillStart
-        119 -> EditorKillWord
-        121 -> EditorYank
-        _ -> EditorIgnore
-    | codepoint == 27 = EditorEscape
-    | otherwise = EditorIgnore
-
-splitFields :: Eq a => a -> [a] -> [[a]]
-splitFields separator = go
-  where
-    go xs =
-        let (field, rest) = break (== separator) xs
-        in field : case rest of
-            [] -> []
-            _ : remaining -> go remaining
-
-listAt :: Int -> [a] -> Maybe a
-listAt index xs
-    | index < 0 = Nothing
-    | otherwise = case drop index xs of
-        value : _ -> Just value
-        [] -> Nothing
-
-stripFinal :: Eq a => a -> [a] -> Maybe [a]
-stripFinal suffix xs =
-    case reverse xs of
-        lastValue : rest
-            | lastValue == suffix -> Just (reverse rest)
-        _ -> Nothing
-
-readDecimal :: String -> Maybe Int
-readDecimal input =
-    case reads input of
-        [(value, "")] -> Just value
-        _ -> Nothing
-
-trySetMode :: FilePath -> FileMode -> IO ()
-trySetMode path mode =
-    setFileMode path mode `catchIO` \_ -> pure ()

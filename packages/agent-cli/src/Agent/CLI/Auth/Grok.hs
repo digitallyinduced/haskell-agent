@@ -101,11 +101,14 @@ managedGrokCredential metadata secret stateRef refresh failed = do
     case failed of
         Just FailedCredential
             { failure = AccountRateLimited { retryAfterSeconds }
+            , failureReason
             } -> do
                 now <- getCurrentTime
                 let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
                 pure $ Left $ CredentialsExhausted
-                    (addUTCTime (fromIntegral seconds) now)
+                    { retryAt = addUTCTime (fromIntegral seconds) now
+                    , exhaustionReasons = [failureReason]
+                    }
         Just FailedCredential
             { credential = rejected
             , failure = AccountAuthenticationRejected
