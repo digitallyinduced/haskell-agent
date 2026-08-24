@@ -556,9 +556,19 @@
                     agent-openrouter = agentOpenrouterPackage;
                     claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
                     agent-claude = agentClaudePackage;
+                } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+                    nixos-module = import ./nix/tests/telegram-module.nix {
+                        inherit self nixpkgs pkgs system;
+                    };
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;
             }
-        );
+        )
+        // {
+            nixosModules.telegram = import ./nix/modules/telegram.nix {
+                inherit self;
+            };
+            nixosModules.default = self.nixosModules.telegram;
+        };
 }

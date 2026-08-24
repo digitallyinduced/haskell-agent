@@ -175,6 +175,10 @@ Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
 direct secret entry to the interactive setup command, and start the configured
 gateway after setup is complete.
 
+On NixOS, use the flake's reusable multi-instance service module instead of
+maintaining the systemd and PostgreSQL runtime configuration by hand. See
+[`docs/nixos.md`](docs/nixos.md).
+
 ### Model catalog and local models
 
 The model picker is driven by a versioned catalog. The application ships its
