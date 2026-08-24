@@ -76,6 +76,27 @@ spec = describe "Agent.CLI.Skills" do
         map (.skillScope) matching `shouldBe` [BuiltinSkill]
         map (.skillModelInvocable) matching `shouldBe` [True]
 
+    it "loads the packaged post-task review as always-active context" do
+        catalog <- loadSkillsCatalog
+            defaultCliOptions
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            (fromFilePath "/tmp")
+            False
+        let matching =
+                filter ((== "post-task-learning-review") . (.skillName))
+                    catalog.catalogSkills
+        map (.skillScope) matching `shouldBe` [BuiltinSkill]
+        map (.skillContextMode) matching `shouldBe` [SkillContextAlways]
+        case formatSkillCatalogContext 8000 catalog of
+            (Just context, _) -> do
+                context `shouldSatisfy`
+                    Text.isInfixOf
+                        "Always-active skill: post-task-learning-review"
+                context `shouldSatisfy`
+                    Text.isInfixOf "Before the final response"
+            other -> expectationFailure ("unexpected skill context: " <> show other)
+
     it "queues skill metadata after existing startup context" do
         context <- newIORef (Just "agents")
         _ <- queueSkillCatalogContextWithOmissions
@@ -128,6 +149,7 @@ fakeSkill = Skill
     , skillShortDescription = Nothing
     , skillDefaultPrompt = Nothing
     , skillWhenToUse = Nothing
+    , skillContextMode = SkillContextOnDemand
     , skillArgumentHint = Just "<environment>"
     , skillUserInvocable = True
     , skillModelInvocable = True

@@ -4,6 +4,7 @@ module Agent.Skills
     , SkillCatalog(..)
     , SkillDiscoverOptions(..)
     , SkillInvocation(..)
+    , SkillContextMode(..)
     , SkillOrigin(..)
     , SkillScope(..)
     , SkillWarning(..)
@@ -76,6 +77,11 @@ data SkillScope
         }
     deriving (Eq, Ord, Show)
 
+data SkillContextMode
+    = SkillContextOnDemand
+    | SkillContextAlways
+    deriving (Eq, Ord, Show)
+
 data Skill = Skill
     { skillName :: !Text
     , skillDescription :: !Text
@@ -83,6 +89,7 @@ data Skill = Skill
     , skillShortDescription :: !(Maybe Text)
     , skillDefaultPrompt :: !(Maybe Text)
     , skillWhenToUse :: !(Maybe Text)
+    , skillContextMode :: !SkillContextMode
     , skillArgumentHint :: !(Maybe Text)
     , skillUserInvocable :: !Bool
     , skillModelInvocable :: !Bool
@@ -128,6 +135,7 @@ data Frontmatter = Frontmatter
     { fmName :: !Text
     , fmDescription :: !Text
     , fmWhenToUse :: !(Maybe Text)
+    , fmContextMode :: !SkillContextMode
     , fmArgumentHint :: !(Maybe Text)
     , fmUserInvocable :: !Bool
     , fmDisableModelInvocation :: !Bool
@@ -147,6 +155,7 @@ instance FromJSON Frontmatter where
             <$> o .: "name"
             <*> o .: "description"
             <*> o .:? "when-to-use"
+            <*> (o .:? "activation" .!= SkillContextOnDemand)
             <*> o .:? "argument-hint"
             <*> (o .:? "user-invocable" .!= True)
             <*> (o .:? "disable-model-invocation" .!= False)
@@ -156,6 +165,16 @@ instance FromJSON Frontmatter where
             <*> o .:? "license"
             <*> o .:? "compatibility"
             <*> pure metadata
+
+instance FromJSON SkillContextMode where
+    parseJSON = \case
+        String "always" -> pure SkillContextAlways
+        String "on-demand" -> pure SkillContextOnDemand
+        String value ->
+            fail
+                ("activation must be `always` or `on-demand`, got "
+                    <> Text.unpack value)
+        _ -> fail "activation must be a string"
 
 parseAllowedTools :: Maybe Value -> Parser [Text]
 parseAllowedTools = \case
@@ -300,7 +319,7 @@ loadSkillFile scope origin path = do
                                 (warning
                                     (Text.pack (prettyPrintParseException err)))
                         Right frontmatter ->
-                            case validateFrontmatter path frontmatter of
+                            case validateFrontmatter scope path frontmatter of
                                 Left err -> pure (Left (warning err))
                                 Right () -> do
                                     openAi <- loadOpenAiMetadata (takeDirectory path)
@@ -323,6 +342,7 @@ loadSkillFile scope origin path = do
                                         , skillDefaultPrompt =
                                             openAi >>= (.openAiDefaultPrompt)
                                         , skillWhenToUse = frontmatter.fmWhenToUse
+                                        , skillContextMode = frontmatter.fmContextMode
                                         , skillArgumentHint = argumentHint
                                         , skillUserInvocable = frontmatter.fmUserInvocable
                                         , skillModelInvocable = modelInvocable
@@ -364,8 +384,8 @@ splitFrontmatter text =
                 _ : body -> Right (Text.unlines yamlLines, Text.unlines body)
         _ -> Left "SKILL.md must start with YAML frontmatter"
 
-validateFrontmatter :: FilePath -> Frontmatter -> Either Text ()
-validateFrontmatter path frontmatter
+validateFrontmatter :: SkillScope -> FilePath -> Frontmatter -> Either Text ()
+validateFrontmatter scope path frontmatter
     | not (validSkillName frontmatter.fmName) =
         Left "skill name must be 1-64 lowercase letters, digits, or hyphens without edge/consecutive hyphens"
     | Text.length frontmatter.fmDescription < 1
@@ -373,6 +393,9 @@ validateFrontmatter path frontmatter
         Left "skill description must be 1-1024 characters"
     | Text.pack (takeFileName (takeDirectory path)) /= frontmatter.fmName =
         Left "skill name must match its parent directory"
+    | frontmatter.fmContextMode == SkillContextAlways
+        && scope /= BuiltinSkill =
+        Left "activation `always` is reserved for trusted built-in skills"
     | otherwise = Right ()
 
 validSkillName :: Text -> Bool
@@ -409,6 +432,26 @@ skillSortKey skill =
 modelVisibleSkills :: SkillCatalog -> [Skill]
 modelVisibleSkills catalog =
     filter (.skillModelInvocable) catalog.catalogSkills
+
+contextSkills :: SkillCatalog -> [Skill]
+contextSkills catalog =
+    alwaysSkills <> onDemandSkills
+  where
+    alwaysSkills =
+        Map.elems $
+            Map.fromListWith preferHigherPrecedence
+                [ (skill.skillName, skill)
+                | skill <- catalog.catalogSkills
+                , skill.skillContextMode == SkillContextAlways
+                ]
+    onDemandSkills =
+        [ skill
+        | skill <- modelVisibleSkills catalog
+        , skill.skillContextMode == SkillContextOnDemand
+        ]
+    preferHigherPrecedence left right
+        | skillSortKey left <= skillSortKey right = left
+        | otherwise = right
 
 buildSkillInvocations :: [Text] -> SkillCatalog -> [SkillInvocation]
 buildSkillInvocations reserved catalog =
@@ -531,6 +574,7 @@ formatSkillCatalogContext maxChars catalog
         let header = Text.unlines
                 [ "## Skills"
                 , "The following reusable skills are available in this session."
+                , "Always-active skills are included in full below and must be followed for every matching turn."
                 , "Use a skill when the user names it or the task clearly matches its description."
                 , "Users can explicitly invoke a skill with `$skill-name`."
                 , "After choosing a skill, read its SKILL.md from the listed path and follow it."
@@ -545,19 +589,27 @@ formatSkillCatalogContext maxChars catalog
             text = Text.take maxChars (header <> Text.unlines kept)
         in (Just text, omitted)
   where
-    skills = modelVisibleSkills catalog
+    skills = contextSkills catalog
 
 renderSkillLine :: Skill -> Text
 renderSkillLine skill =
-    "- $"
-        <> skill.skillName
-        <> ": "
-        <> Text.replace "\n" " " skill.skillDescription
-        <> maybe "" (\trigger -> " Trigger: " <> Text.replace "\n" " " trigger)
-            skill.skillWhenToUse
-        <> " (file: "
-        <> toText skill.skillPath
-        <> ")"
+    case skill.skillContextMode of
+        SkillContextAlways ->
+            Text.unlines
+                [ "### Always-active skill: " <> skill.skillName
+                , "SKILL.md: " <> toText skill.skillPath
+                , neutralizeSkillTags skill.skillBody
+                ]
+        SkillContextOnDemand ->
+            "- $"
+                <> skill.skillName
+                <> ": "
+                <> Text.replace "\n" " " skill.skillDescription
+                <> maybe "" (\trigger -> " Trigger: " <> Text.replace "\n" " " trigger)
+                    skill.skillWhenToUse
+                <> " (file: "
+                <> toText skill.skillPath
+                <> ")"
 
 fitSkillLines :: Int -> [Skill] -> ([Text], Int)
 fitSkillLines budget = go budget []
@@ -577,17 +629,20 @@ fitSkillLines budget = go budget []
 
 renderShortenedSkillLine :: Int -> Skill -> Maybe Text
 renderShortenedSkillLine remaining skill =
-    let prefix = "- $" <> skill.skillName <> ": "
-        suffix = " (file: " <> toText skill.skillPath <> ")"
-        available = remaining - Text.length prefix - Text.length suffix - 2
-    in if available < 12
-        then Nothing
-        else Just $
-            prefix
-                <> Text.take available
-                    (Text.replace "\n" " " skill.skillDescription)
-                <> "…"
-                <> suffix
+    case skill.skillContextMode of
+        SkillContextAlways -> Nothing
+        SkillContextOnDemand ->
+            let prefix = "- $" <> skill.skillName <> ": "
+                suffix = " (file: " <> toText skill.skillPath <> ")"
+                available = remaining - Text.length prefix - Text.length suffix - 2
+            in if available < 12
+                then Nothing
+                else Just $
+                    prefix
+                        <> Text.take available
+                            (Text.replace "\n" " " skill.skillDescription)
+                        <> "…"
+                        <> suffix
 
 formatSkillActivation :: SkillInvocation -> Text -> Text
 formatSkillActivation invocation arguments =

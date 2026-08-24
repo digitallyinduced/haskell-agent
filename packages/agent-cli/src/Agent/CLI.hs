@@ -120,8 +120,7 @@ import Agent.CLI.LearnedSkills
     , queueLearnedSkillContextWithOmissions
     )
 import Agent.CLI.LearnedSkills.Store
-    ( ensurePostTaskLearningSkillForStore
-    , learnedSkillToolsEnvForStore
+    ( learnedSkillToolsEnvForStore
     , loadApplicableLearnedSkillsForStore
     )
 import Agent.CLI.Error
@@ -3354,14 +3353,6 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                 ( omitted
                 , max 0 (contextLength after - contextLength before)
                 )
-        ensureDefaultLearnedSkill =
-            ensurePostTaskLearningSkillForStore
-                startup.startupDatabaseStore
-                databaseScopes >>= \case
-                    Left err ->
-                        reportLearnedSkillWarning
-                            ("default learned skill unavailable: " <> err)
-                    Right () -> pure ()
         installLearnedSkills context maximum =
             loadApplicableLearnedSkillsForStore
                 startup.startupDatabaseStore
@@ -3397,7 +3388,6 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             (omitted, skillContextChars) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
-            ensureDefaultLearnedSkill
             installLearnedSkills
                 freshAgents
                 (defaultSkillCatalogMaxChars - skillContextChars)
@@ -3721,7 +3711,6 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                 queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
-            ensureDefaultLearnedSkill
             when queueInitialContext $
                 installLearnedSkills
                     startupContext
