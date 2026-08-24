@@ -3298,6 +3298,7 @@ uiEventCanCompleteBlocks :: UiEvent -> Bool
 uiEventCanCompleteBlocks = \case
     UiLoop (ToolFinished _) -> True
     UiLoop (TurnFinished _) -> True
+    UiLoop (ResponseRestarted _) -> True
     UiSetAwaitingInput True -> True
     UiTurnEnded _ -> True
     _ -> False
@@ -3317,6 +3318,7 @@ uiEventRestartsMotionSchedule event previous next newFlashes =
     explicitReset = case event of
         UiLoop TurnStarted -> True
         UiLoop (WarningRaised _) -> True
+        UiLoop (ResponseRestarted _) -> True
         UiSetNotice (Just _) -> True
         UiInputPromoted _ -> True
         UiTurnRestarted -> True

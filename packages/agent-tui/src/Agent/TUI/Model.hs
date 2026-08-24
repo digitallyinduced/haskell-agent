@@ -612,6 +612,15 @@ reduceLoop event state = case event of
             { uiNotice = Just (warningNotice warning)
             , uiNoticeElapsedMillis = 0
             }
+    ResponseRestarted message ->
+        let finalized = finalizeStreams state
+        in finalized
+            { uiRunning = True
+            , uiActivity = "Retrying response…"
+            , uiNotice = Just (warningNotice message)
+            , uiNoticeElapsedMillis = 0
+            , uiTurnStartBlock = Seq.length finalized.uiBlocks
+            }
     ToolStarted call ->
         let
             kind = toolBlockKind call.name

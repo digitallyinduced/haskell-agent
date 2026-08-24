@@ -182,6 +182,23 @@ spec = describe "fullscreen UI reducer" do
                     (warningNotice
                         "Codex usage is low: primary 8% left.")
 
+    it "separates a partial response from its automatic retry" do
+        let message =
+                "Connection interrupted the response; restarting automatically."
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (TextDelta "partial")
+                    , UiLoop (ResponseRestarted message)
+                    , UiLoop (TextDelta "complete")
+                    ]
+            blocks = Foldable.toList state.uiBlocks
+        map (.blockBody) blocks `shouldBe` ["partial", "complete"]
+        map (.blockState) blocks
+            `shouldBe` [BlockComplete, BlockStreaming]
+        state.uiActivity `shouldBe` "Writing…"
+        state.uiNotice `shouldBe` Just (warningNotice message)
+
     it "matches tool completion by call id" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"git status\"}"
             result = ToolCallResult
