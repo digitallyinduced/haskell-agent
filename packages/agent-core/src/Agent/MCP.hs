@@ -12,8 +12,10 @@ module Agent.MCP
     , McpFleet(..)
     , startMcpFleet
     , startMcpFleetWithProgress
+    , startMcpFleetProgressive
     , closeMcpFleet
     , mcpFleetTools
+    , mcpFleetMetaTools
     , mcpFleetStatuses
     , normalizeMcpToolResult
     ) where
@@ -33,14 +35,21 @@ import Control.Concurrent.Async
     , mapConcurrently
     , waitCatch
     )
+import Control.Concurrent.QSem
+    ( newQSem
+    , signalQSem
+    , waitQSem
+    )
 import Control.Concurrent.MVar
     ( MVar
+    , modifyMVar
     , modifyMVar_
     , newMVar
     , withMVar
     )
 import Control.Concurrent.STM
-    ( TMVar
+    ( STM
+    , TMVar
     , TVar
     , atomically
     , modifyTVar'
@@ -57,13 +66,14 @@ import Control.Concurrent.STM
 import Control.Exception.Safe
     ( SomeException
     , displayException
+    , bracket_
     , finally
     , mask
     , onException
     , throwIO
     , tryAny
     )
-import Control.Monad (unless, void, when)
+import Control.Monad (forM, unless, void, when)
 import Data.Aeson
     ( FromJSON(..)
     , Value(..)
@@ -145,6 +155,11 @@ data McpToolRegistration = McpToolRegistration
     , mcpRegistrationTool :: !AppTool
     }
 
+data McpCatalogEntry = McpCatalogEntry
+    { catalogClient :: !McpClient
+    , catalogTool :: !McpTool
+    }
+
 -- | Initialization state exposed to status and UI code. Reading this state
 -- never starts a process, performs a handshake, or sends an MCP request.
 data McpInitState
@@ -167,6 +182,8 @@ data McpFleet = McpFleet
     , mcpFleetClients :: ![McpClient]
     , mcpFleetServerOrder :: ![Text]
     , mcpFleetFailures :: !(Map.Map Text Text)
+    , mcpFleetCatalog :: !(TVar (Map.Map Text McpCatalogEntry))
+    , mcpFleetWorkers :: !(MVar [Async ()])
     , mcpFleetClosed :: !(MVar Bool)
     }
 
@@ -281,6 +298,14 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             `onException` closeOwnedClients ownedClients
     let (clients, registrations, warnings, failures) =
             foldr collectServerResult ([], [], [], Map.empty) results
+    catalog <- newTVarIO $
+        Map.fromList
+            [ (registration.mcpRegistrationTool.appToolName, McpCatalogEntry client tool)
+            | Right (client, tools, _) <- results
+            , tool <- tools
+            , let registration = registrationFor client tool
+            ]
+    workers <- newMVar []
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
@@ -288,6 +313,8 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             , mcpFleetClients = clients
             , mcpFleetServerOrder = map (.mcpServerName) configs
             , mcpFleetFailures = failures
+            , mcpFleetCatalog = catalog
+            , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
             }
     pure fleet
@@ -385,12 +412,277 @@ validateServerNames = go Set.empty
         | otherwise =
             go (Set.insert config.mcpServerName seen) rest
 
+-- | Spawn configured stdio clients with bounded concurrency, then initialize
+-- and discover each server in tracked background workers. The fleet can be
+-- used immediately through 'mcpFleetMetaTools'.
+startMcpFleetProgressive
+    :: ([McpServerStatus] -> IO ())
+    -> [McpServerConfig]
+    -> IO McpFleet
+startMcpFleetProgressive reportStatuses configs = mask \restore -> do
+    validateServerNames configs
+    closed <- newMVar False
+    workers <- newMVar []
+    catalog <- newTVarIO Map.empty
+    ownedClients <- newIORef []
+    semaphore <- newQSem progressiveSpawnLimit
+    spawnResults <-
+        restore
+            (mapConcurrently
+                (startClientTracked ownedClients semaphore)
+                configs)
+            `onException` closeOwnedClients ownedClients
+    let clients =
+            [ client
+            | Right client <- spawnResults
+            ]
+        failures =
+            Map.fromList
+                [ (config.mcpServerName, err)
+                | (config, Left exception) <- zip configs spawnResults
+                , let err =
+                        redactConfiguredValues config
+                            (exceptionSummary exception)
+                ]
+        warnings =
+            [ "MCP server "
+                <> config.mcpServerName
+                <> " failed to start: "
+                <> err
+            | config <- configs
+            , Just err <- [Map.lookup config.mcpServerName failures]
+            ]
+        fleet = McpFleet
+            { mcpFleetRegistrations = []
+            , mcpFleetWarnings = warnings
+            , mcpFleetClients = clients
+            , mcpFleetServerOrder = map (.mcpServerName) configs
+            , mcpFleetFailures = failures
+            , mcpFleetCatalog = catalog
+            , mcpFleetWorkers = workers
+            , mcpFleetClosed = closed
+            }
+        initializeOne client = do
+            void (reportFleetStatuses reportStatuses fleet)
+            ensureMcpClientReadyWith
+                (publishCatalogEntries catalog client)
+                client >>= \case
+                Left _ -> pure ()
+                Right _ -> pure ()
+            void (reportFleetStatuses reportStatuses fleet)
+    spawned <- newIORef []
+    started <-
+        (forM clients \client -> do
+            worker <-
+                asyncWithUnmask \unmask ->
+                    unmask (initializeOne client)
+            atomicModifyIORef' spawned \current ->
+                (worker : current, ())
+            pure worker)
+            `onException`
+                (readIORef spawned >>= mapM_ stopWorker)
+    modifyMVar_ workers (pure . (started <>))
+    void (reportFleetStatuses reportStatuses fleet)
+    pure fleet
+        `onException` closeMcpFleet fleet
+  where
+    startClientTracked ownedClients semaphore config = mask \restore -> do
+        attempt <-
+            bracket_
+                (waitQSem semaphore)
+                (signalQSem semaphore)
+                (tryAny (restore (startMcpClient config)))
+        case attempt of
+            Left exception -> pure (Left exception)
+            Right client -> do
+                atomicModifyIORef' ownedClients \clients ->
+                    (client : clients, ())
+                pure (Right client)
+
+    closeOwnedClients ownedClients =
+        atomicModifyIORef' ownedClients (\clients -> ([], clients))
+            >>= mapM_ closeMcpClient
+
+    publishCatalogEntries catalog client tools =
+        modifyTVar' catalog \current ->
+            foldl
+                (\entries tool ->
+                    Map.insert
+                        (qualifiedMcpToolName
+                            client.clientConfig.mcpServerName
+                            tool.discoveredName)
+                        (McpCatalogEntry client tool)
+                        entries)
+                current
+                tools
+
+progressiveSpawnLimit :: Int
+progressiveSpawnLimit = 8
+
+reportFleetStatuses
+    :: ([McpServerStatus] -> IO ())
+    -> McpFleet
+    -> IO [McpServerStatus]
+reportFleetStatuses report fleet = do
+    statuses <- mcpFleetStatuses fleet
+    void (tryAny (report statuses))
+    pure statuses
+
+-- | Stable concise MCP tools backed by the fleet's background-populated
+-- catalog. These schemas do not change as servers become ready.
+mcpFleetMetaTools :: McpFleet -> [AppTool]
+mcpFleetMetaTools fleet =
+    [ mcpSearchTool fleet
+    , mcpCallTool fleet
+    ]
+
+mcpSearchTool :: McpFleet -> AppTool
+mcpSearchTool fleet = AppTool
+    { appToolName = "mcp_search"
+    , appToolDescription =
+        "Search currently available MCP tools. Servers may still be connecting."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "query" .= object ["type" .= ("string" :: Text)]
+            , "server" .= object ["type" .= ("string" :: Text)]
+            , "limit" .= object
+                [ "type" .= ("integer" :: Text)
+                , "minimum" .= (1 :: Int)
+                , "maximum" .= (50 :: Int)
+                ]
+            ]
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "mcp_search" \arguments -> do
+        entries <- readTVarIO fleet.mcpFleetCatalog
+        statuses <- mcpFleetStatuses fleet
+        let (query, server, limit) = searchArguments arguments
+            matches :: (Text, McpCatalogEntry) -> Bool
+            matches (name, entry) =
+                maybe True
+                    (\needle ->
+                        Text.toCaseFold needle
+                            `Text.isInfixOf`
+                                Text.toCaseFold
+                                    (name <> " "
+                                        <> entry.catalogTool.discoveredDescription))
+                    query
+                    && maybe True
+                        (== entry.catalogClient.clientConfig.mcpServerName)
+                        server
+            found = take limit (filter matches (Map.toAscList entries))
+            payload = object
+                [ "tools" .=
+                    [ object
+                        [ "name" .= name
+                        , "server" .=
+                            entry.catalogClient.clientConfig.mcpServerName
+                        , "description" .=
+                            entry.catalogTool.discoveredDescription
+                        , "inputSchema" .=
+                            entry.catalogTool.discoveredInputSchema
+                        ]
+                    | (name, entry) <- found
+                    ]
+                , "servers" .= map statusJson statuses
+                ]
+        pure (Right (compactJson payload))
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    }
+
+mcpCallTool :: McpFleet -> AppTool
+mcpCallTool fleet = AppTool
+    { appToolName = "mcp_call"
+    , appToolDescription =
+        "Call a currently available read-only MCP tool by its qualified server__tool name."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "name" .= object ["type" .= ("string" :: Text)]
+            , "arguments" .= object ["type" .= ("object" :: Text)]
+            ]
+        , "required" .= (["name"] :: [Text])
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "mcp_call" \arguments ->
+        case callArguments arguments of
+            Left err -> pure (Left err)
+            Right (name, toolArguments) -> do
+                entries <- readTVarIO fleet.mcpFleetCatalog
+                case Map.lookup name entries of
+                    Just entry ->
+                        callDiscoveredTool
+                            entry.catalogClient
+                            entry.catalogTool
+                            toolArguments
+                    Nothing -> do
+                        statuses <- mcpFleetStatuses fleet
+                        pure . Left $
+                            if any isConnecting statuses
+                                then
+                                    "MCP tool is not available yet; one or more servers are still connecting"
+                                else "Unknown MCP tool: " <> name
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    }
+
+searchArguments :: Value -> (Maybe Text, Maybe Text, Int)
+searchArguments (Object fields) =
+    ( textField "query"
+    , textField "server"
+    , case KeyMap.lookup "limit" fields >>= responseId of
+        Just value -> max 1 (min 50 value)
+        Nothing -> 20
+    )
+  where
+    textField name = case KeyMap.lookup name fields of
+        Just (String value)
+            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
+        _ -> Nothing
+searchArguments _ = (Nothing, Nothing, 20)
+
+callArguments :: Value -> Either Text (Text, Value)
+callArguments (Object fields) =
+    case KeyMap.lookup "name" fields of
+        Just (String name)
+            | not (Text.null (Text.strip name)) ->
+                Right
+                    ( Text.strip name
+                    , maybe (object []) id (KeyMap.lookup "arguments" fields)
+                    )
+        _ -> Left "mcp_call requires a non-empty name"
+callArguments _ = Left "mcp_call arguments must be an object"
+
+statusJson :: McpServerStatus -> Value
+statusJson status = object
+    [ "name" .= status.mcpStatusName
+    , "status" .= case status.mcpStatusState of
+        McpPending -> ("pending" :: Text)
+        McpInitializing -> "initializing"
+        McpReady -> "ready"
+        McpFailed _ -> "failed"
+        McpClosed -> "closed"
+    , "toolCount" .= status.mcpStatusToolCount
+    ]
+
+isConnecting :: McpServerStatus -> Bool
+isConnecting status = case status.mcpStatusState of
+    McpPending -> True
+    McpInitializing -> True
+    _ -> False
+
 closeMcpFleet :: McpFleet -> IO ()
 closeMcpFleet fleet =
     modifyMVar_ fleet.mcpFleetClosed \closed ->
         if closed
             then pure True
             else do
+                activeWorkers <-
+                    modifyMVar fleet.mcpFleetWorkers \workers ->
+                        pure ([], workers)
+                mapM_ stopWorker activeWorkers
                 mapM_ closeMcpClient fleet.mcpFleetClients
                 pure True
 
@@ -464,7 +756,13 @@ data InitializeRole
 ensureMcpClientReady
     :: McpClient
     -> IO (Either Text ([McpTool], [Text]))
-ensureMcpClientReady client = mask \restore -> do
+ensureMcpClientReady = ensureMcpClientReadyWith (const (pure ()))
+
+ensureMcpClientReadyWith
+    :: ([McpTool] -> STM ())
+    -> McpClient
+    -> IO (Either Text ([McpTool], [Text]))
+ensureMcpClientReadyWith publishReady client = mask \restore -> do
     role <- atomically do
         readTVar client.clientLifecycle >>= \case
             ClientPending -> do
@@ -520,10 +818,14 @@ ensureMcpClientReady client = mask \restore -> do
                                 (Left "MCP server closed")
                     ClientInitializing current
                         | current == completion -> do
-                            writeTVar client.clientLifecycle case result of
-                                Left err -> ClientFailed err
-                                Right (tools, warnings) ->
-                                    ClientReady tools warnings
+                            case result of
+                                Left err ->
+                                    writeTVar client.clientLifecycle
+                                        (ClientFailed err)
+                                Right (tools, warnings) -> do
+                                    publishReady tools
+                                    writeTVar client.clientLifecycle
+                                        (ClientReady tools warnings)
                             void (tryPutTMVar completion result)
                     _ -> void (tryPutTMVar completion result)
             pure result
@@ -620,16 +922,7 @@ appToolFor client tool = AppTool
     , appToolSchema = RawJsonFunctionSchema tool.discoveredInputSchema
     , appToolHandler =
         typedTool qualifiedName \arguments -> do
-            let parameters = object
-                    [ "name" .= tool.discoveredName
-                    , "arguments" .= (arguments :: Value)
-                    ]
-                timeoutMicros =
-                    secondsToMicros
-                        client.clientConfig.mcpServerRequestTimeoutSeconds
-            requestMcp client timeoutMicros "tools/call" parameters >>= \case
-                Left err -> pure (Left err)
-                Right result -> pure (normalizeMcpToolResult result)
+            callDiscoveredTool client tool arguments
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     }
@@ -645,6 +938,19 @@ qualifiedMcpToolName serverName toolName =
     escapeComponent =
         Text.replace "__" "%5F%5F"
             . Text.replace "%" "%25"
+
+callDiscoveredTool :: McpClient -> McpTool -> Value -> IO (Either Text Text)
+callDiscoveredTool client tool arguments = do
+    let parameters = object
+            [ "name" .= tool.discoveredName
+            , "arguments" .= arguments
+            ]
+        timeoutMicros =
+            secondsToMicros
+                client.clientConfig.mcpServerRequestTimeoutSeconds
+    requestMcp client timeoutMicros "tools/call" parameters >>= \case
+        Left err -> pure (Left err)
+        Right result -> pure (normalizeMcpToolResult result)
 
 normalizeMcpToolResult :: Value -> Either Text Text
 normalizeMcpToolResult result@(Object fields) =
