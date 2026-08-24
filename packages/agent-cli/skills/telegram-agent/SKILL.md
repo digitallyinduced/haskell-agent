@@ -28,7 +28,10 @@ disables terminal echo and stores the token in a private gateway file.
 4. Determine the desired provider and project working directory. The default
    approval mode asks through Telegram inline buttons. Use
    `--deny-mutations` when the user wants a read-only gateway, and only enable
-   `--yolo` when the user explicitly requests full auto-approval.
+   `--yolo` when the user explicitly requests full auto-approval. If the user
+   wants the agent to consider ambient group conversation, add
+   `--all-group-messages`. Tell them to disable the bot's group privacy through
+   BotFather's `/setprivacy`; the agent will then reply only when useful.
 5. Ask the user to run this command in their own interactive terminal:
 
    ```sh
@@ -60,9 +63,12 @@ disables terminal echo and stores the token in a private gateway file.
    of its messages, or address commands to it (for example
    `/new@your_bot_username`). Each group or forum topic has a shared agent
    session. Only messages from allowlisted users are accepted; ambient group
-   traffic is ignored. Text, edited messages, reactions, photos, documents,
-   audio, video, video notes, animations, stickers, locations, contacts,
-   venues, polls, dice, and voice messages are persisted before processing.
+   traffic is ignored unless setup used `--all-group-messages`. In that mode
+   each allowed-user message is considered, but the agent stays silent unless
+   a response would be useful. Text, edited messages, reactions, photos,
+   documents, audio, video, video notes, animations, stickers, locations,
+   contacts, venues, polls, dice, and voice messages are persisted before
+   processing.
    Voice transcription uses the user's existing Codex subscription, so Codex
    must already be logged in on the machine running the gateway.
 

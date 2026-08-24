@@ -139,7 +139,12 @@ Only messages from allowlisted Telegram users are handled. Repeat
 after an allowlist change. Private chats work directly. In groups and
 supergroups, mention the bot, use a command addressed to its username (for
 example `/new@your_bot`), or reply to one of its messages. Ambient group traffic
-and messages from non-allowlisted members are ignored.
+and messages from non-allowlisted members are ignored by default. Pass
+`--all-group-messages` during setup to let the agent consider every group
+message from an allowlisted user. It replies only when it judges that doing so
+would be useful; otherwise it stays silent. Telegram must also deliver ambient
+messages to the bot: use BotFather's `/setprivacy` command to disable privacy
+mode for that bot, then remove and re-add the bot to existing groups if needed.
 
 Each private chat, group, and forum topic is mapped to its own persisted agent
 session under `~/.haskell-agent`; `/new` starts a fresh session, `/session`
