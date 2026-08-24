@@ -31,8 +31,8 @@ module Agent.CLI.Input
     ) where
 
 import Agent.CLI.Clipboard
-    ( nonEmptyClipboardImages
-    , readClipboardImages
+    ( nonEmptyClipboardText
+    , readClipboardText
     )
 import Agent.CLI.Command
     ( SkillCommand
@@ -531,7 +531,7 @@ readEditorKey = do
             | isEOFError err -> pure EditorEof
             | otherwise -> throwIO err
         Right char
-            | isClipboardPasteKey char -> pure (EditorClipboardPaste Nothing)
+            | isClipboardPasteKey char -> readClipboardEditorKey
             | otherwise -> case char of
                 '\n' -> pure EditorEnter
                 '\r' -> pure EditorEnter
@@ -590,6 +590,7 @@ readCsiKey =
         Left err -> pure (EditorInputError err)
         Right body
             | isShiftEnterCsiBody body -> pure (EditorChar '\n')
+            | isClipboardPasteCsiBody body -> readClipboardEditorKey
             | Just key <- decodeKittyEditorKey body -> pure key
             | otherwise -> case body of
                 "A" -> pure EditorUp
@@ -606,14 +607,18 @@ readCsiKey =
                 "200~" ->
                     readBracketedPaste >>= \case
                         Left err -> pure (EditorInputError err)
-                        Right pasted -> do
-                            images <-
-                                nonEmptyClipboardImages <$> readClipboardImages
-                            pure $ case images of
-                                Just attached ->
-                                    EditorClipboardPaste (Just attached)
-                                Nothing -> EditorPaste pasted
+                        Right pasted
+                            | Text.null pasted ->
+                                pure (EditorClipboardPaste Nothing)
+                            | otherwise -> pure (EditorPaste pasted)
                 _ -> pure EditorIgnore
+
+readClipboardEditorKey :: IO EditorKey
+readClipboardEditorKey =
+    readClipboardText >>= \result ->
+        pure $ case nonEmptyClipboardText result of
+            Just text -> EditorPaste text
+            Nothing -> EditorClipboardPaste Nothing
 
 readCsiBody :: IO (Either Text String)
 readCsiBody = go 0 []

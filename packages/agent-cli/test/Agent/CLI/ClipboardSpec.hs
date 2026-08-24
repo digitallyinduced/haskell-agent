@@ -48,6 +48,13 @@ spec = do
             nonEmptyClipboardImages (Left "not an image")
                 `shouldBe` Nothing
 
+    describe "nonEmptyClipboardText" do
+        it "keeps successful text, including whitespace" do
+            nonEmptyClipboardText (Right "hello") `shouldBe` Just "hello"
+            nonEmptyClipboardText (Right "  ") `shouldBe` Just "  "
+            nonEmptyClipboardText (Right "") `shouldBe` Nothing
+            nonEmptyClipboardText (Left "not text") `shouldBe` Nothing
+
     describe "loadImagesFromPastedText" do
         it "returns Nothing for ordinary prompt text" do
             result <- loadImagesFromPastedText "fix the bug in Main.hs"

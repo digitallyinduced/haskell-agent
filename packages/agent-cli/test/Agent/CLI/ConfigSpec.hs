@@ -42,6 +42,7 @@ spec = describe "Agent.CLI.Config" do
             case result of
                 Left err -> expectationFailure (show err)
                 Right config -> do
+                    config.configMcpInitStrategy `shouldBe` McpInitAuto
                     Map.keys config.configMcpServers
                         `shouldBe` ["alpha", "zeta"]
                     Map.lookup "alpha" config.configMcpServers
@@ -64,6 +65,36 @@ spec = describe "Agent.CLI.Config" do
                             , mcpStartupTimeoutSeconds = 30
                             , mcpRequestTimeoutSeconds = 60
                             }
+
+    it "loads the MCP initialization strategy" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpInitStrategy\":\"progressive\"}"
+            result <- loadHarnessConfig home
+            fmap (.configMcpInitStrategy) result
+                `shouldBe` Right McpInitProgressive
+
+    it "rejects unknown MCP initialization strategies" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpInitStrategy\":\"eventually\"}"
+            result <- loadHarnessConfig home
+            result `shouldSatisfy` \case
+                Left err ->
+                    "unknown MCP initialization strategy"
+                        `Text.isInfixOf` err
+                Right _ -> False
+
+    describe "useProgressiveMcp" do
+        it "uses progressive startup for interactive auto mode" $
+            useProgressiveMcp McpInitAuto False `shouldBe` True
+
+        it "uses blocking startup for one-shot auto mode" $
+            useProgressiveMcp McpInitAuto True `shouldBe` False
+
+        it "honors explicit overrides" do
+            useProgressiveMcp McpInitProgressive True `shouldBe` True
+            useProgressiveMcp McpInitBlocking False `shouldBe` False
 
     it "rejects unsupported versions" $
         withTempDir "agent-config-" \home -> do

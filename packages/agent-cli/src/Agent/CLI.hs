@@ -9,6 +9,8 @@ module Agent.CLI
     , devArgs
     , devMain
     , devMainResume
+    , formatMcpModelNotice
+    , formatMcpProgress
     , formatReplStatusLine
     , formatRepositoryPath
     , formatStartupTimings
@@ -93,6 +95,7 @@ import Agent.CLI.Config
     ( HarnessConfig(..)
     , McpServerConfig(..)
     , loadHarnessConfig
+    , useProgressiveMcp
     )
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
@@ -532,7 +535,7 @@ import Control.Exception.Safe
     , throwIO
     , try
     )
-import Control.Monad (forM_, void, when)
+import Control.Monad (forM_, unless, void, when)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.List (elemIndex, findIndex, sortOn)
@@ -647,6 +650,7 @@ data StartupRuntime = StartupRuntime
     , startupStartedAt :: !UTCTime
     , startupTimings :: !(IORef [(Text, NominalDiffTime)])
     , startupSyntaxLoadDuration :: !(IORef (Maybe NominalDiffTime))
+    , startupFinished :: !(IORef Bool)
     , startupSessionState :: !SessionState
     }
 
@@ -910,6 +914,7 @@ markStartupStage startup label = do
 
 finishStartup :: StartupRuntime -> IO ()
 finishStartup startup = do
+    writeIORef startup.startupFinished True
     recordStartupTiming startup.startupStartedAt startup.startupTimings "ready"
     case startup.startupFullscreen of
         Nothing -> pure ()
@@ -1071,6 +1076,7 @@ prepareAgentIteration
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
     syntaxLoadDurationRef <- newIORef Nothing
+    startupFinishedRef <- newIORef False
     home <- getHomeDirectory
     let root = sessionsRoot home
     databaseConfig <- managedPostgresConfigForHome home
@@ -1265,6 +1271,7 @@ prepareAgentIteration
                         , startupStartedAt = startedAt
                         , startupTimings = startupTimingsRef
                         , startupSyntaxLoadDuration = syntaxLoadDurationRef
+                        , startupFinished = startupFinishedRef
                         , startupSessionState = sessionState
                         }
                 runAgentInitialized
@@ -1308,48 +1315,79 @@ runFullscreenRestartLoop
     loop options transition action =
         -- The notifier in 'runFullscreen' watches this whole tail-recursive
         -- chain, rather than stopping Brick after the first provider exits.
-        action >>= \case
-            RunRestart sessionId -> do
-                let nextOptions = restartSessionOptions options sessionId
-                prepared <- prepareAgentIteration
-                    fullscreenInputs
-                    sessionState
-                    (Just runtime)
-                    nextOptions
-                    Nothing
-                loop nextOptions Nothing prepared.preparedRun
-            RunSwitchProvider next -> do
-                let nextOptions = applyProviderTransition options next
-                prepared <- prepareAgentIteration
-                    fullscreenInputs
-                    sessionState
-                    (Just runtime)
-                    nextOptions
-                    (Just next)
-                loop nextOptions (Just next) prepared.preparedRun
-            RunProviderStartFailed apiError ->
-                case transition of
-                    Just failed
-                        | failed.transitionCause == AutomaticFallback ->
-                            continueAutomaticFallback
-                                (Just runtime) failed apiError >>= \case
-                                Just next -> do
-                                    let nextOptions =
-                                            applyProviderTransition options next
-                                    prepared <- prepareAgentIteration
-                                        fullscreenInputs
-                                        sessionState
-                                        (Just runtime)
-                                        nextOptions
-                                        (Just next)
-                                    loop
-                                        nextOptions
-                                        (Just next)
-                                        prepared.preparedRun
-                                Nothing ->
-                                    pure (RunProviderStartFailed apiError)
-                    _ -> pure (RunProviderStartFailed apiError)
-            result -> pure result
+        try @_ @StartupFailure action >>= \case
+            Left (StartupFailure message) ->
+                recoverStartup options transition (Text.pack message)
+            Right result -> case result of
+                RunRestart sessionId -> do
+                    let nextOptions = restartSessionOptions options sessionId
+                    retryStartup nextOptions Nothing
+                RunSwitchProvider next -> do
+                    let nextOptions = applyProviderTransition options next
+                    retryStartup nextOptions (Just next)
+                RunProviderStartFailed apiError ->
+                    case transition of
+                        Just failed
+                            | failed.transitionCause == AutomaticFallback ->
+                                continueAutomaticFallback
+                                    (Just runtime) failed apiError >>= \case
+                                    Just next -> do
+                                        let nextOptions =
+                                                applyProviderTransition
+                                                    options next
+                                        retryStartup nextOptions (Just next)
+                                    Nothing ->
+                                        recoverProviderStart
+                                            options transition apiError
+                        _ ->
+                            recoverProviderStart options transition apiError
+                other -> pure other
+
+    recoverProviderStart options transition apiError = do
+        now <- getCurrentTime
+        recoverStartup
+            options
+            transition
+            (formatApiErrorAt now apiError)
+
+    retryStartup options transition = do
+        emitUiEvent runtime $
+            UiSetNotice (Just (progressNotice "Retrying startup…"))
+        try @_ @StartupFailure
+            (prepareAgentIteration
+                fullscreenInputs
+                sessionState
+                (Just runtime)
+                options
+                transition) >>= \case
+                    Left (StartupFailure message) ->
+                        recoverStartup
+                            options transition (Text.pack message)
+                    Right prepared ->
+                        loop options transition prepared.preparedRun
+
+    recoverStartup options transition message = do
+        emitUiEvent runtime (UiSetNotice Nothing)
+        requestFullscreenChoiceWithBody
+            runtime
+            "Couldn’t start the agent"
+            message
+            0
+            [ ( "Retry"
+              , "Try loading credentials and account usage again"
+              )
+            , ( "Manage"
+              , "Connect, refresh, enable, or remove provider accounts"
+              )
+            , ("Exit", "Close the agent")
+            ] >>= \case
+                Just 0 ->
+                    retryStartup options transition
+                Just 1 -> do
+                    color <- resolveColor stderr
+                    withFullscreenSuspended runtime (runLoginManager color)
+                    retryStartup options transition
+                _ -> pure RunQuit
 
 runAgentInitialized
     :: CliOptions
@@ -1996,18 +2034,48 @@ runAgentInitializedWithLock
                 Map.toAscList harnessConfig.configMcpServers
             , config.mcpEnabled
             ]
+        progressiveMcp =
+            useProgressiveMcp
+                harnessConfig.configMcpInitStrategy
+                (isOneShot options)
+    mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
+    let reportProgressiveMcp statuses = do
+            finished <- readIORef startup.startupFinished
+            unless finished do
+                setStartupNotice startup.startupFullscreen
+                    (formatMcpProgress statuses)
+                -- A callback can race with finishStartup between the read and
+                -- the UI update. Clear a late notice if startup won the race.
+                readIORef startup.startupFinished >>= \nowFinished ->
+                    when nowFinished $
+                        forM_ startup.startupFullscreen \runtime ->
+                            emitUiEvent runtime (UiSetNotice Nothing)
+            let (connecting, _, _) = summarizeMcpStatuses statuses
+                isConnecting = connecting > 0
+            settled <-
+                atomicModifyIORef' mcpStatusPhaseRef \previous ->
+                    (Just isConnecting, previous == Just True && not isConnecting)
+            when (settled && not (null statuses)) $
+                atomicModifyIORef' pendingNotices \notices ->
+                    (notices <> [UserMessage (formatMcpModelNotice statuses)], ())
     mcpFleet <-
         try @_ @SomeException
-            (MCP.startMcpFleetWithProgress
-                (\names ->
-                    setStartupNotice startup.startupFullscreen
-                        (if null names
-                            then "Loading built-in tools…"
-                            else
-                                "Loading tools: "
-                                    <> Text.intercalate ", " names
-                                    <> "…"))
-                mcpServerConfigs)
+            (if progressiveMcp
+                then
+                    MCP.startMcpFleetProgressive
+                        reportProgressiveMcp
+                        mcpServerConfigs
+                else
+                    MCP.startMcpFleetWithProgress
+                        (\names ->
+                            setStartupNotice startup.startupFullscreen
+                                (if null names
+                                    then "Loading built-in tools…"
+                                    else
+                                        "Loading tools: "
+                                            <> Text.intercalate ", " names
+                                            <> "…"))
+                        mcpServerConfigs)
             >>= \case
             Left exception ->
                 startupDie startup
@@ -2076,7 +2144,10 @@ runAgentInitializedWithLock
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
-        mcpTools = MCP.mcpFleetTools mcpFleet
+        mcpTools =
+            if progressiveMcp && not (null mcpServerConfigs)
+                then MCP.mcpFleetMetaTools mcpFleet
+                else MCP.mcpFleetTools mcpFleet
         databaseToolsEnv =
             databaseToolsEnvForStore
                 startup.startupDatabaseStore
@@ -2859,6 +2930,78 @@ printResumeHint progName = \case
 
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
+
+summarizeMcpStatuses :: [MCP.McpServerStatus] -> (Int, Int, Int)
+summarizeMcpStatuses statuses =
+    ( length (filter isConnecting statuses)
+    , length (filter isReady statuses)
+    , length (filter isFailed statuses)
+    )
+  where
+    isConnecting status = case status.mcpStatusState of
+        MCP.McpPending -> True
+        MCP.McpInitializing -> True
+        _ -> False
+    isReady status = status.mcpStatusState == MCP.McpReady
+    isFailed status = case status.mcpStatusState of
+        MCP.McpFailed _ -> True
+        _ -> False
+
+formatMcpProgress :: [MCP.McpServerStatus] -> Text
+formatMcpProgress statuses =
+    let (connecting, ready, failed) = summarizeMcpStatuses statuses
+    in if null statuses || connecting == 0
+        then
+            "Loading built-in tools…"
+                <> if ready + failed == 0
+                    then ""
+                    else
+                        " MCP: "
+                            <> Text.pack (show ready)
+                            <> " ready"
+                            <> if failed == 0
+                                then ""
+                                else
+                                    ", "
+                                        <> Text.pack (show failed)
+                                        <> " unavailable"
+        else
+            "Loading built-in tools… MCP: "
+                <> Text.pack (show connecting)
+                <> " connecting, "
+                <> Text.pack (show ready)
+                <> " ready"
+
+formatMcpModelNotice :: [MCP.McpServerStatus] -> Text
+formatMcpModelNotice statuses =
+    let connecting =
+            [ status.mcpStatusName
+            | status <- statuses
+            , status.mcpStatusState
+                `elem` [MCP.McpPending, MCP.McpInitializing]
+            ]
+        ready =
+            [ status.mcpStatusName
+            | status <- statuses
+            , status.mcpStatusState == MCP.McpReady
+            ]
+        failed =
+            [ status.mcpStatusName
+            | status <- statuses
+            , case status.mcpStatusState of
+                MCP.McpFailed _ -> True
+                _ -> False
+            ]
+    in "<system-reminder>MCP status changed. "
+        <> statusPart "Connecting" connecting
+        <> statusPart "Ready" ready
+        <> statusPart "Unavailable" failed
+        <> "Use mcp_search to discover currently available MCP tools and "
+        <> "mcp_call to invoke one by its server__tool name.</system-reminder>"
+  where
+    statusPart _ [] = ""
+    statusPart label names =
+        label <> ": " <> Text.intercalate ", " names <> ". "
 
 isJustCwd :: CliOptions -> Bool
 isJustCwd options = case options.optCwd of
