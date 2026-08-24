@@ -514,6 +514,44 @@ spec = describe "runLoop" do
         execution.executionResult
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
 
+    it "retains committed state when the event pump fails during commit" do
+        commitStarted <- newEmptyMVar
+        sinkCanFail <- newEmptyMVar
+        state <- newIORef []
+        let committedState = [stateMarker]
+            backend = Backend \_state _prev _inputs _onEvent ->
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = committedState
+                    }
+        config0 <- testConfig backend
+        let config = config0
+                { loopBackendState = BackendStateStore
+                    { readBackendState = readIORef state
+                    , commitBackendState = \newState -> do
+                        putMVar commitStarted ()
+                        Exception.uninterruptibleMask_ do
+                            takeMVar sinkCanFail
+                            -- Give the outer race time to cancel the loop
+                            -- before the masked commit returns.
+                            threadDelay 30000
+                            writeIORef state newState
+                    }
+                , loopOnEvent = \case
+                    TurnStarted -> do
+                        takeMVar commitStarted
+                        putMVar sinkCanFail ()
+                        Exception.throwIO (userError "renderer exploded")
+                    _ -> pure ()
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        readIORef state `shouldReturn` committedState
+        execution.executionState `shouldBe` committedState
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionResult
+            `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
+
     it "marks a transport failure after streamed output as interrupted" do
         let backend = Backend \_state _prev _inputs onEvent -> do
                 onEvent (TextDelta "partial")

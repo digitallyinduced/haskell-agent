@@ -365,9 +365,11 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         Right (Right BackendResult{..})
                                             | not
                                                 (Text.null
-                                                    backendOutput.responseId) ->
+                                                    backendOutput.responseId) -> do
                                                 config.loopBackendState.commitBackendState
                                                     backendState
+                                                writeIORef progressRef
+                                                    (backendState, ResponseCommitted)
                                         _ -> pure ()
                                     pure result
                                 case raced of
