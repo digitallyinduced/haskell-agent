@@ -15,10 +15,12 @@ module Agent.Tools.Types
     , rawJsonAppToolWithExecution
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
+    , withToolResourceClaims
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
     , toolExecutionPolicyFor
+    , toolSchedulingPlanFor
     , dispatchRegisteredToolCall
     , jsonToolParameters
     , appToolHandlers
@@ -36,6 +38,13 @@ import Agent.ToolDispatch
     , dispatchToolHandler
     , handlerName
     )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    , ToolSchedulingPlan(..)
+    )
+import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
 import Data.IORef (IORef, newIORef, writeIORef)
@@ -68,6 +77,9 @@ data ToolExecutionPolicy
     | TurnSequential
     deriving (Eq, Show)
 
+type ToolResourceResolver =
+    ToolCall -> IO (Either Text [ToolResourceClaim])
+
 data AppTool = AppTool
     { appToolName :: !Text
     , appToolDescription :: !Text
@@ -75,6 +87,7 @@ data AppTool = AppTool
     , appToolHandler :: !ToolHandler
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
+    , appToolResourceClaims :: !(Maybe ToolResourceResolver)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -167,6 +180,7 @@ jsonAppToolWithExecution
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
+    , appToolResourceClaims = Nothing
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -198,7 +212,15 @@ rawJsonAppToolWithExecution
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
+    , appToolResourceClaims = Nothing
     }
+
+withToolResourceClaims
+    :: ToolResourceResolver
+    -> AppTool
+    -> AppTool
+withToolResourceClaims resolver tool =
+    tool { appToolResourceClaims = Just resolver }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -226,6 +248,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
+    , appToolResourceClaims = Nothing
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
@@ -265,6 +288,26 @@ toolExecutionPolicyFor :: ToolRegistry -> ToolCall -> ToolExecutionPolicy
 toolExecutionPolicyFor registry call =
     maybe TurnSequential (\tool -> tool.appToolExecution)
         (lookupRegisteredTool call.name registry)
+
+toolSchedulingPlanFor
+    :: ToolRegistry
+    -> ToolCall
+    -> IO ToolSchedulingPlan
+toolSchedulingPlanFor registry call =
+    case lookupRegisteredTool call.name registry of
+        Nothing -> pure ToolExclusive
+        Just tool -> case tool.appToolResourceClaims of
+            Just resolve -> do
+                resolved <- tryAny (resolve call)
+                pure $ case resolved of
+                    Left _ -> ToolExclusive
+                    Right (Left _) -> ToolExclusive
+                    Right (Right claims) -> ToolResourceClaims claims
+            Nothing -> pure $ case tool.appToolExecution of
+                ParallelSafe ->
+                    ToolResourceClaims
+                        [ToolResourceClaim ToolRead ToolAllPaths]
+                TurnSequential -> ToolExclusive
 
 dispatchRegisteredToolCall
     :: ToolDispatchConfig

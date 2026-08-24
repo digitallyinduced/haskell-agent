@@ -37,11 +37,14 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     )
+import Agent.Tools.Scheduling
+    ( ToolSchedulingPlan(..)
+    , schedulingPlansConflict
+    )
 import Agent.Tools.Types
-    ( ToolExecutionPolicy(..)
-    , ToolRegistry
+    ( ToolRegistry
     , dispatchRegisteredToolCall
-    , toolExecutionPolicyFor
+    , toolSchedulingPlanFor
     )
 import Control.Concurrent.Async
     ( Async
@@ -80,7 +83,7 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Data.Maybe (catMaybes, maybeToList)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -572,36 +575,104 @@ handleLoopEventFailure unexpected state progress = \case
     LoopEventAsyncFailure exception ->
         Exception.throwIO exception
 
--- | Preserve model order around stateful tools while retaining concurrency
--- for maximal consecutive runs of explicitly parallel-safe calls.
+-- | Preserve model order between conflicting calls while allowing independent
+-- calls from the same model turn to overlap. Results are returned in model
+-- order regardless of completion order.
 runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls config = go
+runToolCalls config calls = do
+    prepared <- prepareIndexedToolCalls config (zip [0..] calls)
+    scheduled <- traverse schedule prepared
+    go scheduled Map.empty
   where
-    go [] = pure []
-    go calls@(call : rest) =
-        case toolExecutionPolicyFor config.loopTools call of
-            ParallelSafe -> do
-                let (batch, remaining) =
-                        span
-                            ((== ParallelSafe)
-                                . toolExecutionPolicyFor config.loopTools)
-                            calls
-                prepared <- prepareToolCalls config batch
-                batchResults <-
-                    catMaybes
-                        <$> mapConcurrently
-                            (runPreparedToolCall config)
-                            prepared
-                continue batchResults remaining
-            TurnSequential -> do
-                result <- runOne config call
-                continue (maybeToList result) rest
+    schedule
+        :: IndexedPreparedToolCall
+        -> IO PreparedScheduledToolCall
+    schedule indexed = do
+        plan <- schedulingPlanForPrepared config indexed.prepared
+        pure PreparedScheduledToolCall
+            { index = indexed.index
+            , plan
+            , prepared = indexed.prepared
+            }
 
-    continue completed remaining = do
+    go
+        :: [PreparedScheduledToolCall]
+        -> Map.Map Int ToolCallResult
+        -> IO [ToolCallResult]
+    go [] completed =
+        pure (map snd (Map.toAscList completed))
+    go remaining completed = do
+        let ready = readyCalls remaining
+            readyIndexes = Map.fromList [(call.index, ()) | call <- ready]
+            pending =
+                filter
+                    (\scheduled ->
+                        Map.notMember scheduled.index readyIndexes)
+                    remaining
+        batchResults <-
+            mapConcurrently
+                (\scheduled -> do
+                    result <-
+                        runPreparedToolCall config scheduled.prepared
+                    pure (fmap (\value -> (scheduled.index, value)) result))
+                ready
+        let completed' =
+                foldr
+                    (\result acc ->
+                        maybe
+                            acc
+                            (\(index, value) -> Map.insert index value acc)
+                            result)
+                    completed
+                    batchResults
         cancelled <- isCancelled config.loopCancel
         if cancelled
-            then pure completed
-            else (completed <>) <$> go remaining
+            then pure (map snd (Map.toAscList completed'))
+            else go pending completed'
+
+data IndexedPreparedToolCall = IndexedPreparedToolCall
+    { index :: !Int
+    , prepared :: !PreparedToolCall
+    }
+
+data PreparedScheduledToolCall = PreparedScheduledToolCall
+    { index :: !Int
+    , plan :: !ToolSchedulingPlan
+    , prepared :: !PreparedToolCall
+    }
+
+readyCalls :: [PreparedScheduledToolCall] -> [PreparedScheduledToolCall]
+readyCalls calls =
+    [ call
+    | call <- calls
+    , not
+        (any
+            (\earlier ->
+                earlier.index < call.index
+                    && schedulingPlansConflict earlier.plan call.plan)
+            calls)
+    ]
+
+prepareIndexedToolCalls
+    :: LoopConfig
+    -> [(Int, ToolCall)]
+    -> IO [IndexedPreparedToolCall]
+prepareIndexedToolCalls _ [] = pure []
+prepareIndexedToolCalls config ((index, call) : rest) = do
+    cancelled <- isCancelled config.loopCancel
+    if cancelled
+        then pure []
+        else do
+            prepared <- prepareToolCall config call
+            cancelledAfter <- isCancelled config.loopCancel
+            if cancelledAfter
+                then pure []
+                else
+                    (IndexedPreparedToolCall
+                        { index
+                        , prepared
+                        } :)
+                        <$> prepareIndexedToolCalls config rest
 
 data ToolApproval
     = ToolApprovalDenied !Text
@@ -611,22 +682,18 @@ data ToolApproval
 data PreparedToolCall =
     PreparedToolCall !ToolCall !ToolApproval
 
-prepareToolCalls :: LoopConfig -> [ToolCall] -> IO [PreparedToolCall]
-prepareToolCalls _ [] = pure []
-prepareToolCalls config (call : rest) = do
-    cancelled <- isCancelled config.loopCancel
-    if cancelled
-        then pure []
-        else do
-            prepared <- prepareToolCall config call
-            cancelledAfter <- isCancelled config.loopCancel
-            if cancelledAfter
-                then pure []
-                else (prepared :) <$> prepareToolCalls config rest
-
-runOne :: LoopConfig -> ToolCall -> IO (Maybe ToolCallResult)
-runOne config call =
-    prepareToolCall config call >>= runPreparedToolCall config
+schedulingPlanForPrepared
+    :: LoopConfig
+    -> PreparedToolCall
+    -> IO ToolSchedulingPlan
+schedulingPlanForPrepared config (PreparedToolCall call approval) =
+    case approval of
+        ToolApprovalGranted ->
+            toolSchedulingPlanFor config.loopTools call
+        ToolApprovalDenied{} ->
+            pure ToolUnconstrained
+        ToolApprovalRejected ->
+            pure ToolUnconstrained
 
 -- | Approval may touch interactive or otherwise order-sensitive state, so it
 -- is prepared serially even when the resulting handlers may run concurrently.

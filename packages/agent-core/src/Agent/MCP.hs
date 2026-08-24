@@ -1107,6 +1107,7 @@ mcpSearchTool fleet = AppTool
         pure (Right (compactJson payload))
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
 
 callCatalogEntryWithReconnect
@@ -1240,6 +1241,7 @@ mcpCallTool fleet = AppTool
                                 else "Unknown MCP tool: " <> name
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
 
 searchArguments :: Value -> (Maybe Text, Maybe Text, Int)
@@ -1542,6 +1544,7 @@ appToolFor client tool = AppTool
             callDiscoveredTool client tool arguments
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
   where
     qualifiedName = qualifiedMcpToolName
