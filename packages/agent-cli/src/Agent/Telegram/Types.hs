@@ -265,10 +265,20 @@ instance FromJSON TelegramVoice where
 
 data TelegramUser = TelegramUser
     { userId :: !Integer
+    , userIsBot :: !Bool
+    , userFirstName :: !(Maybe Text)
+    , userLastName :: !(Maybe Text)
+    , userUsername :: !(Maybe Text)
     } deriving (Eq, Show)
 
 instance FromJSON TelegramUser where
-    parseJSON = withObject "TelegramUser" \o -> TelegramUser <$> o .: "id"
+    parseJSON = withObject "TelegramUser" \o ->
+        TelegramUser
+            <$> o .: "id"
+            <*> (o .:? "is_bot" .!= False)
+            <*> o .:? "first_name"
+            <*> o .:? "last_name"
+            <*> o .:? "username"
 
 data TelegramChat = TelegramChat
     { telegramChatId :: !Integer
@@ -286,6 +296,7 @@ data TelegramMessage = TelegramMessage
     , messageThread :: !(Maybe Integer)
     , messageText :: !(Maybe Text)
     , messageVoice :: !(Maybe TelegramVoice)
+    , messageReplyTo :: !(Maybe TelegramMessage)
     } deriving (Eq, Show)
 
 instance FromJSON TelegramMessage where
@@ -297,6 +308,7 @@ instance FromJSON TelegramMessage where
             <*> o .:? "message_thread_id"
             <*> o .:? "text"
             <*> o .:? "voice"
+            <*> o .:? "reply_to_message"
 
 data TelegramReactionType = TelegramReactionType
     { reactionType :: !Text

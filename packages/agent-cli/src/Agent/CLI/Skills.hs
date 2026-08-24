@@ -3,6 +3,7 @@ module Agent.CLI.Skills
     ( formatSkillsListing
     , installSkillCatalog
     , installSkillCatalogWithOmissions
+    , installSkillToolRoots
     , loadSkillsCatalog
     , loadSkillsCatalogQuiet
     , queueSkillCatalogContext
@@ -28,6 +29,7 @@ import Agent.CLI.Style
 import Agent.CLI.Terminal (resolveColor)
 import Agent.OsPath (toText)
 import Agent.Skills
+import Agent.Tools.Types (ToolEnv, setToolSkillRoots)
 import Control.Monad (void, when)
 import Data.IORef (IORef, modifyIORef', writeIORef)
 import Data.Maybe (fromMaybe)
@@ -184,6 +186,13 @@ installSkillCatalogWithOmissions reservedNames queueContext contextRef catalogRe
     if queueContext
         then queueSkillCatalogContextWithOmissions contextRef catalog
         else pure 0
+
+-- | Expose only the directories belonging to the current catalog. This lets
+-- models read SKILL.md and skill-relative resources even when packaged skills
+-- live outside the worktree (for example under /nix/store).
+installSkillToolRoots :: ToolEnv -> SkillCatalog -> IO ()
+installSkillToolRoots env catalog =
+    setToolSkillRoots env (map (.skillDirectory) catalog.catalogSkills)
 
 skillInvocationCommand :: SkillInvocation -> SkillCommand
 skillInvocationCommand invocation =

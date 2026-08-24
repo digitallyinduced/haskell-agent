@@ -15,7 +15,11 @@ import Agent.CLI.ProviderFallback
     , providerRecoveryPreference
     , rankedModels
     )
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , ErrorType(..)
+    , credentialsExhausted
+    )
 import Agent.Provider (BillingMode(..), Provider(..))
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
@@ -54,7 +58,7 @@ spec = do
 
     describe "fallbackCandidates" do
         let exhausted =
-                CredentialsExhausted
+                credentialsExhausted
                     (UTCTime (fromGregorian 2026 8 20) 0)
 
         it "selects the best model for each other provider" do
@@ -128,17 +132,17 @@ spec = do
 
         it "waits through a brief credential cooldown" do
             automaticCooldownRetryDelay now
-                (CredentialsExhausted (addUTCTime 60 now))
+                (credentialsExhausted (addUTCTime 60 now))
                 `shouldBe` Just 60
 
         it "retries immediately when the reset time has just passed" do
             automaticCooldownRetryDelay now
-                (CredentialsExhausted (addUTCTime (-1) now))
+                (credentialsExhausted (addUTCTime (-1) now))
                 `shouldBe` Just 0
 
         it "returns control for a long cooldown" do
             automaticCooldownRetryDelay now
-                (CredentialsExhausted (addUTCTime 121 now))
+                (credentialsExhausted (addUTCTime 121 now))
                 `shouldBe` Nothing
 
         it "does not retry authentication failures as cooldowns" do
@@ -151,17 +155,17 @@ spec = do
 
         it "retries a transient all-account cooldown before provider fallback" do
             providerRecoveryPreference True now
-                (CredentialsExhausted (addUTCTime 60 now))
+                (credentialsExhausted (addUTCTime 60 now))
                 `shouldBe` RetryCurrentProviderAfter 60
 
         it "falls back for a genuine long usage-window exhaustion" do
             providerRecoveryPreference True now
-                (CredentialsExhausted (addUTCTime 3600 now))
+                (credentialsExhausted (addUTCTime 3600 now))
                 `shouldBe` TryProviderFallback
 
         it "does not repeat the cooldown retry after its one retry allowance" do
             providerRecoveryPreference False now
-                (CredentialsExhausted (addUTCTime 60 now))
+                (credentialsExhausted (addUTCTime 60 now))
                 `shouldBe` TryProviderFallback
 
     describe "automaticRetryCountdownText" do

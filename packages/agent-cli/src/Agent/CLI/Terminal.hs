@@ -16,6 +16,8 @@ module Agent.CLI.Terminal
     , synchronizedOutputBegin
     , synchronizedOutputEnd
     , stripAnsi
+    , kittyCtrlVCsiBodies
+    , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPush
@@ -190,6 +192,21 @@ shiftEnterCsiBodies :: [String]
 shiftEnterCsiBodies =
     [ "27;2;13~"
     , "13;2u"
+    ]
+
+-- | CSI bodies emitted by Kitty's keyboard protocol for Ctrl+V and Cmd+V.
+--
+-- The longer key-code form includes the shifted and base-layout codepoints.
+-- Event type 1 is an explicit key press; terminals may omit it.
+kittyCtrlVCsiBodies, kittySuperVCsiBodies :: [String]
+kittyCtrlVCsiBodies = kittyModifiedVCsiBodies 5
+kittySuperVCsiBodies = kittyModifiedVCsiBodies 9
+
+kittyModifiedVCsiBodies :: Int -> [String]
+kittyModifiedVCsiBodies encodedModifier =
+    [ keyCode <> ";" <> show encodedModifier <> event <> "u"
+    | keyCode <- ["118", "118:86:86"]
+    , event <- ["", ":1"]
     ]
 
 -- | Push only Kitty's unambiguous-key flag. This is enough for an inline

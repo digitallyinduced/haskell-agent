@@ -2,7 +2,7 @@ module Agent.CLI.RenderSpec (spec) where
 
 import Agent.CLI.Render
 import Agent.CLI.Style (motionGlyphSet)
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error (ApiError(..), ErrorType(..), credentialsExhausted)
 import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -164,7 +164,7 @@ spec = do
                 retryAt = addUTCTime (5 * 86400 + 21 * 3600) now
                 rendered =
                     formatLoopErrorAt now
-                        (LoopTransport (CredentialsExhausted retryAt))
+                        (LoopTransport (credentialsExhausted retryAt))
             rendered `shouldSatisfy`
                 Text.isInfixOf
                     "All accounts for this provider are temporarily unavailable"
@@ -181,7 +181,7 @@ spec = do
                 rendered =
                     formatLoopErrorPersistedAt
                         (UTCTime (fromGregorian 2026 8 22) 0)
-                        (LoopTransport (CredentialsExhausted retryAt))
+                        (LoopTransport (credentialsExhausted retryAt))
             rendered `shouldSatisfy`
                 Text.isInfixOf "2026-08-27 21:00:00 UTC"
             rendered `shouldNotSatisfy` Text.isInfixOf "Try again in"
@@ -211,6 +211,19 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "/compact"
             rendered `shouldNotSatisfy`
                 Text.isInfixOf "ProviderError"
+
+        it "makes a mid-response transport stop explicit" do
+            let rendered =
+                    formatLoopError
+                        (LoopTransportAfterOutput
+                            (ConnectionError
+                                "WebSocket receive error: ParseException \"not enough bytes\""))
+            rendered `shouldSatisfy`
+                Text.isInfixOf "Response interrupted after partial output"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "nothing is still running"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "Send \"continue\" to continue the task"
 
         it "explains an incomplete provider response" do
             formatLoopError LoopNoResponseId
@@ -292,6 +305,38 @@ spec = do
                 body `shouldSatisfy`
                     Text.isInfixOf
                         "Codex usage is low: primary 8% left."
+
+        it "closes a partial Markdown stream before an automatic retry" do
+            withRenderConfig False True \config handle path -> do
+                let message =
+                        "Connection interrupted the response; restarting automatically."
+                renderEvent config TurnStarted
+                renderEvent config
+                    (TextDelta "partial\n```haskell\nunfinished")
+                renderEvent config (ResponseRestarted message)
+                renderEvent config (TextDelta "# Complete\n")
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Just "Complete"
+                    , tokenUsage = emptyTokenUsage
+                    })
+                activity <- readIORef config.renderActivityRef
+                activity `shouldBe` "Retrying response…"
+                hClose handle
+                body <- stripTerminalControls <$> Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "partial"
+                body `shouldSatisfy` Text.isInfixOf message
+                body `shouldSatisfy` Text.isInfixOf "Complete"
+                body `shouldSatisfy` (not . Text.isInfixOf "# Complete")
+                let partialIndex =
+                        Text.length (fst (Text.breakOn "partial" body))
+                    warningIndex =
+                        Text.length (fst (Text.breakOn message body))
+                    completeIndex =
+                        Text.length (fst (Text.breakOn "Complete" body))
+                partialIndex `shouldSatisfy` (< warningIndex)
+                warningIndex `shouldSatisfy` (< completeIndex)
 
         it "buffers reasoning summaries and commits one thinking block" do
             withRenderConfig True False \config handle path -> do

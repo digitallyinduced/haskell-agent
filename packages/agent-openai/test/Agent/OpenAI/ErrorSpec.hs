@@ -53,7 +53,7 @@ spec = do
             isPreviousResponseIdError
                 (ProviderError RateLimitError "usage window exhausted" (Just 60))
                 `shouldBe` False
-            isPreviousResponseIdError (CredentialsExhausted epoch) `shouldBe` False
+            isPreviousResponseIdError (credentialsExhausted epoch) `shouldBe` False
 
     describe "isResponseChainCompatibilityError" do
         it "detects unsupported inherited prompt cache retention" do

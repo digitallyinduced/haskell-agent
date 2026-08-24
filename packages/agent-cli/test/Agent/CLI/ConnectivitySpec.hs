@@ -97,19 +97,49 @@ spec = describe "withConnectionRecovery" do
                 }
         readIORef attempts `shouldReturn` 2
 
-    it "does not replay a submission after visible output streamed" do
+    it "restarts a submission after visible output streamed" do
         attempts <- newIORef (0 :: Int)
         waits <- newIORef []
+        events <- newIORef []
         let backend = withConnectionRecoveryUsing
                 (\attempt -> modifyIORef' waits (<> [attempt]))
-                (Backend \_ _ _ onEvent -> do
-                    modifyIORef' attempts (+ 1)
-                    onEvent (TextDelta "partial")
-                    pure (Left (ConnectionError "dropped")))
-        result <- backend.submitTurn [] Nothing [] (const (pure ()))
-        result `shouldBe` Left (ConnectionError "dropped")
-        readIORef attempts `shouldReturn` 1
-        readIORef waits `shouldReturn` []
+                (Backend \state _ _ onEvent -> do
+                    attempt <- atomicModifyIORef' attempts
+                        \n -> (n + 1, n + 1)
+                    if attempt == 1
+                        then do
+                            onEvent (TextDelta "partial")
+                            pure (Left (ConnectionError "dropped"))
+                        else do
+                            onEvent (TextDelta "complete")
+                            pure (Right
+                                BackendResult
+                                    { backendOutput =
+                                        emptyTurnOutput
+                                            "response"
+                                            []
+                                            (Just "complete")
+                                    , backendState = state
+                                    }))
+        result <- backend.submitTurn [] Nothing []
+            (\event -> modifyIORef' events (<> [event]))
+        result `shouldBe`
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "complete")
+                , backendState = []
+                }
+        readIORef attempts `shouldReturn` 2
+        readIORef waits `shouldReturn` [1]
+        readIORef events `shouldReturn`
+            [ TextDelta "partial"
+            , ActivityUpdated
+                "Connection lost; waiting for internet. Retrying automatically in 1s (Esc or Ctrl-C to cancel)…"
+            , ActivityUpdated "Checking internet connection…"
+            , ResponseRestarted
+                "Connection interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+            , TextDelta "complete"
+            ]
 
     it "does not duplicate queued inputs across reconnect attempts" do
         attempts <- newIORef (0 :: Int)

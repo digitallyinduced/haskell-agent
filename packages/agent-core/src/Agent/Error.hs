@@ -1,6 +1,7 @@
 module Agent.Error
     ( ApiError(..)
     , ErrorType(..)
+    , CredentialExhaustionReason(..)
     , RetryDisposition(..)
     , errorTypeFromText
     , errorTypeText
@@ -9,6 +10,9 @@ module Agent.Error
     , isInlineRetryableProviderError
     , isInlineRetryableProviderResponseError
     , apiErrorRetryAfter
+    , credentialExhaustionReasonFromApiError
+    , credentialsExhausted
+    , credentialsExhaustedWithReasons
     , credentialsExhaustedRetryAt
     ) where
 
@@ -41,6 +45,22 @@ data ErrorType
     | CyberPolicyError
     | MisalignmentPolicyViolation
     | UnknownErrorType !Text
+    deriving (Eq, Show)
+
+-- | Redacted, structured reason why a credential entered cooldown.
+--
+-- Provider response bodies and token material are deliberately excluded so
+-- this value is safe to retain in session errors and account snapshots.
+data CredentialExhaustionReason
+    = ExhaustedByRateLimit
+        { exhaustionErrorType :: !(Maybe ErrorType)
+        , exhaustionStatusCode :: !(Maybe Int)
+        , exhaustionRetryAfter :: !(Maybe Int)
+        }
+    | ExhaustedByAuthentication
+        { exhaustionErrorType :: !(Maybe ErrorType)
+        , exhaustionStatusCode :: !(Maybe Int)
+        }
     deriving (Eq, Show)
 
 -- | Whether retrying can help, and which layer should own the retry.
@@ -129,7 +149,10 @@ data ApiError
         }
     | CredentialError { credentialMessage :: !Text }
     | ConnectionError { exception :: !Text }
-    | CredentialsExhausted { retryAt :: !UTCTime }
+    | CredentialsExhausted
+        { retryAt :: !UTCTime
+        , exhaustionReasons :: ![CredentialExhaustionReason]
+        }
     deriving (Eq, Show)
 
 retryDisposition :: ApiError -> RetryDisposition
@@ -177,6 +200,61 @@ apiErrorRetryAfter :: ApiError -> Maybe Int
 apiErrorRetryAfter (ProviderError _ _ value) = value
 apiErrorRetryAfter _ = Nothing
 
+-- | Extract a token-safe account-cooldown reason from an upstream error.
+credentialExhaustionReasonFromApiError
+    :: ApiError
+    -> Maybe CredentialExhaustionReason
+credentialExhaustionReasonFromApiError = \case
+    HttpError 429 _ ->
+        Just ExhaustedByRateLimit
+            { exhaustionErrorType = Nothing
+            , exhaustionStatusCode = Just 429
+            , exhaustionRetryAfter = Nothing
+            }
+    ProviderError errorType _ retryAfter
+        | errorType `elem`
+            [ RateLimitError
+            , UsageLimitReached
+            , UsageBalanceExhausted
+            ] ->
+                Just ExhaustedByRateLimit
+                    { exhaustionErrorType = Just errorType
+                    , exhaustionStatusCode = Nothing
+                    , exhaustionRetryAfter = retryAfter
+                    }
+    HttpError status _
+        | status == 401 || status == 403 ->
+            Just ExhaustedByAuthentication
+                { exhaustionErrorType = Nothing
+                , exhaustionStatusCode = Just status
+                }
+    ProviderError AuthenticationError _ _ ->
+        Just ExhaustedByAuthentication
+            { exhaustionErrorType = Just AuthenticationError
+            , exhaustionStatusCode = Nothing
+            }
+    CredentialError{} ->
+        Just ExhaustedByAuthentication
+            { exhaustionErrorType = Nothing
+            , exhaustionStatusCode = Nothing
+            }
+    _ -> Nothing
+
+-- | Construct an exhaustion error when no more specific cooldown diagnostics
+-- are available.
+credentialsExhausted :: UTCTime -> ApiError
+credentialsExhausted retryAt =
+    credentialsExhaustedWithReasons retryAt []
+
+credentialsExhaustedWithReasons
+    :: UTCTime
+    -> [CredentialExhaustionReason]
+    -> ApiError
+credentialsExhaustedWithReasons retryAt exhaustionReasons = CredentialsExhausted
+    { retryAt
+    , exhaustionReasons
+    }
+
 credentialsExhaustedRetryAt :: ApiError -> Maybe UTCTime
-credentialsExhaustedRetryAt (CredentialsExhausted value) = Just value
+credentialsExhaustedRetryAt CredentialsExhausted{retryAt} = Just retryAt
 credentialsExhaustedRetryAt _ = Nothing

@@ -168,6 +168,12 @@ spec = do
             parseReplLine "/agents now"
                 `shouldBe` ReplCommandError "usage: /agents"
 
+        it "opens the MCP server manager" do
+            parseReplLine "/mcp" `shouldBe` ReplMcp
+            parseReplLine "/MCP" `shouldBe` ReplMcp
+            parseReplLine "/mcp now"
+                `shouldBe` ReplCommandError "usage: /mcp"
+
         it "lists slash commands with /help" do
             parseReplLine "/help" `shouldBe` ReplHelp Nothing
             parseReplLine "/help model" `shouldBe` ReplHelp (Just "model")
@@ -237,6 +243,7 @@ spec = do
                     , "copy-session"
                     , "terminal"
                     , "agents"
+                    , "mcp"
                     , "skills"
                     , "shell"
                     , "always-approve"
@@ -260,6 +267,7 @@ spec = do
                         && "/model" `elem` xs
                         && "/m" `elem` xs
                         && "/agents" `elem` xs
+                        && "/mcp" `elem` xs
                         && "/btw" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
@@ -332,6 +340,7 @@ spec = do
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
             listing `shouldSatisfy` ("/agents" `isInfixOf`)
+            listing `shouldSatisfy` ("/mcp" `isInfixOf`)
             listing `shouldSatisfy` ("/usage" `isInfixOf`)
             listing `shouldSatisfy` ("/worktree" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))

@@ -179,6 +179,7 @@ data SubagentRuntime = SubagentRuntime
     , subagentBashEnabled :: !(IORef Bool)
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
+    , subagentSkillRoots :: !(IORef [OsPath])
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentMcpTools :: ![AppTool]
     , subagentParams :: !(IORef ResponseCreateParams)
@@ -802,6 +803,8 @@ prepareChild
 prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
     childEnv <- defaultToolEnv env.subCwd
+    skillRoots <- readIORef runtime.subagentSkillRoots
+    writeIORef childEnv.toolSkillRoots skillRoots
     sessionTmp <- readIORef runtime.subagentSessionTmp
     setToolSessionTmp childEnv sessionTmp
     childPath <-

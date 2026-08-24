@@ -3,7 +3,11 @@ module Agent.OpenAI.CredentialSpec (spec) where
 import Agent.OpenAI.Auth (AuthState(..), newPool)
 import qualified Agent.OpenAI.Auth as Auth
 import Agent.OpenAI.Credential
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , ErrorType(..)
+    )
 import Agent.Provider
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -74,7 +78,15 @@ spec = do
             result `shouldBe` Right "acc-b"
             readIORef reportedFailures `shouldReturn`
                 [ Nothing
-                , failed (credentialFor "acc-a") (AccountRateLimited (Just 90))
+                , Just FailedCredential
+                    { credential = credentialFor "acc-a"
+                    , failure = AccountRateLimited (Just 90)
+                    , failureReason = ExhaustedByRateLimit
+                        { exhaustionErrorType = Just UsageLimitReached
+                        , exhaustionStatusCode = Nothing
+                        , exhaustionRetryAfter = Just 90
+                        }
+                    }
                 ]
 
         it "does not poison credentials after transport failures" do
@@ -155,6 +167,11 @@ spec = do
                 (Just FailedCredential
                     { credential = first
                     , failure = AccountRateLimited (Just 60)
+                    , failureReason = ExhaustedByRateLimit
+                        { exhaustionErrorType = Just RateLimitError
+                        , exhaustionStatusCode = Just 429
+                        , exhaustionRetryAfter = Just 60
+                        }
                     })
 
             second.accountId `shouldNotBe` first.accountId
@@ -370,7 +387,22 @@ expectCredential = \case
     Right credential -> pure credential
 
 failed :: Credential -> AccountFailure -> Maybe FailedCredential
-failed credential failure = Just FailedCredential { credential, failure }
+failed credential failure = Just FailedCredential
+    { credential
+    , failure
+    , failureReason = case failure of
+        AccountRateLimited{retryAfterSeconds} ->
+            ExhaustedByRateLimit
+                { exhaustionErrorType = Just RateLimitError
+                , exhaustionStatusCode = Nothing
+                , exhaustionRetryAfter = retryAfterSeconds
+                }
+        AccountAuthenticationRejected ->
+            ExhaustedByAuthentication
+                { exhaustionErrorType = Just AuthenticationError
+                , exhaustionStatusCode = Nothing
+                }
+    }
 
 credentialFor :: Text -> Credential
 credentialFor accountId = Credential

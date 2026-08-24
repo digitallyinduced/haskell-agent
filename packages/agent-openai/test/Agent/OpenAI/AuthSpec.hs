@@ -1,7 +1,12 @@
 module Agent.OpenAI.AuthSpec (spec) where
 
 import Agent.OpenAI.Auth
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , ErrorType(..)
+    , credentialsExhausted
+    )
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -51,6 +56,7 @@ spec = do
                 snapshot = AccountSnapshot
                     { snapshotAuth = auth
                     , snapshotCooldownUntil = Just epoch
+                    , snapshotCooldownReasons = []
                     }
                 rendered = show snapshot
             rendered `shouldContain` "snapshot-account"
@@ -281,7 +287,14 @@ spec = do
             reportRateLimit pool "only-acc" (Just 60)
             result <- getAccessToken pool
             case result of
-                Left (CredentialsExhausted _) -> pure ()
+                Left CredentialsExhausted{exhaustionReasons} ->
+                    exhaustionReasons `shouldBe`
+                        [ ExhaustedByRateLimit
+                            { exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Nothing
+                            , exhaustionRetryAfter = Just 60
+                            }
+                        ]
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
 
         it "discovers a broker account that became available after startup" $ do
@@ -379,17 +392,17 @@ spec = do
             result <- getAccessToken pool
 
             case result of
-                Left (CredentialsExhausted _) -> pure ()
+                Left CredentialsExhausted{} -> pure ()
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
 
         it "starts empty at the broker reset and discovers capacity later" $ do
             let initialReset = UTCTime (fromGregorian 2026 7 18) 0
-            discoveryResult <- newIORef (Left (CredentialsExhausted initialReset))
+            discoveryResult <- newIORef (Left (credentialsExhausted initialReset))
             let discover _ = readIORef discoveryResult
             pool <- newUnavailableDiscoveringPool initialReset neverRefresh discover
 
             first <- getAccessToken pool
-            first `shouldBe` Left (CredentialsExhausted initialReset)
+            first `shouldBe` Left (credentialsExhausted initialReset)
             allAccountIds pool `shouldReturn` []
 
             writeIORef discoveryResult (Right [mkFreshAuth "capacity-returned"])
@@ -401,10 +414,11 @@ spec = do
         it "updates an empty pool when the broker reports a later reset" $ do
             let initialReset = UTCTime (fromGregorian 2026 7 18) 0
                 laterReset = UTCTime (fromGregorian 2026 7 21) 0
-                discover _ = pure (Left (CredentialsExhausted laterReset))
+                discover _ = pure (Left (credentialsExhausted laterReset))
             pool <- newUnavailableDiscoveringPool initialReset neverRefresh discover
 
-            getAccessToken pool `shouldReturn` Left (CredentialsExhausted laterReset)
+            getAccessToken pool
+                `shouldReturn` Left (credentialsExhausted laterReset)
 
     describe "reportAuthBroken" $ do
         it "cools the account down" $ do

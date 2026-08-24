@@ -6,9 +6,10 @@ module Agent.CLI.Config
     , defaultHarnessConfig
     , harnessConfigPath
     , loadHarnessConfig
+    , saveHarnessConfig
     ) where
 
-import Agent.FileRetry (retryOnFileBusy)
+import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (unless, when)
@@ -25,8 +26,9 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory.OsPath (doesFileExist)
+import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
+import System.Posix.Files (setFileMode)
 
 harnessConfigSchemaVersion :: Int
 harnessConfigSchemaVersion = 1
@@ -68,11 +70,32 @@ instance Show McpServerConfig where
             <> show server.mcpRequestTimeoutSeconds
             <> " }"
 
+instance Aeson.ToJSON McpServerConfig where
+    toJSON server =
+        Aeson.object
+            [ "enabled" Aeson..= server.mcpEnabled
+            , "command" Aeson..= server.mcpCommand
+            , "args" Aeson..= server.mcpArgs
+            , "cwd" Aeson..= server.mcpCwd
+            , "env" Aeson..= server.mcpEnv
+            , "startupTimeoutSeconds"
+                Aeson..= server.mcpStartupTimeoutSeconds
+            , "requestTimeoutSeconds"
+                Aeson..= server.mcpRequestTimeoutSeconds
+            ]
+
 data HarnessConfig = HarnessConfig
     { configVersion :: !Int
     , configMcpServers :: !(Map Text McpServerConfig)
     }
     deriving (Eq, Show)
+
+instance Aeson.ToJSON HarnessConfig where
+    toJSON config =
+        Aeson.object
+            [ "version" Aeson..= config.configVersion
+            , "mcpServers" Aeson..= config.configMcpServers
+            ]
 
 defaultHarnessConfig :: HarnessConfig
 defaultHarnessConfig = HarnessConfig
@@ -138,6 +161,31 @@ loadHarnessConfig home = do
                             )
                     Right parsed -> Right parsed
                 validateHarnessConfig config
+
+-- | Persist the machine-wide harness configuration with owner-only
+-- permissions. The replacement is atomic so an interrupted edit cannot leave
+-- a partially-written JSON file for the next agent startup.
+saveHarnessConfig :: OsPath -> HarnessConfig -> IO (Either Text ())
+saveHarnessConfig home config =
+    case validateHarnessConfig config of
+        Left err -> pure (Left err)
+        Right valid -> do
+            let directory =
+                    home </> unsafeEncodeUtf ".haskell-agent"
+                path = harnessConfigPath home
+            result <- tryIO do
+                createDirectoryIfMissing True directory
+                setFileMode (unsafeToFilePath directory) 0o700
+                writeLazyFileAtomically path 0o600 (Aeson.encode valid)
+            pure case result of
+                Left exception ->
+                    Left
+                        ( "Failed to write "
+                            <> Text.pack (unsafeToFilePath path)
+                            <> ": "
+                            <> Text.pack (displayException exception)
+                        )
+                Right () -> Right ()
 
 validateHarnessConfig :: HarnessConfig -> Either Text HarnessConfig
 validateHarnessConfig config = do

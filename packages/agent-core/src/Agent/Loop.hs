@@ -48,6 +48,7 @@ import Control.Exception.Safe (SomeException, displayException, mask, tryAny)
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Maybe (catMaybes, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -173,6 +174,10 @@ data LoopEvent
     | ActivityUpdated Text
     -- | A persistent user-visible warning that must not replace live activity.
     | WarningRaised Text
+    -- | A streamed response was interrupted and its provider submission is
+    -- being retried. Renderers must close the partial stream before displaying
+    -- output from the new attempt.
+    | ResponseRestarted Text
     | TurnStarted
     | TurnFinished TurnOutput
     | ToolStarted ToolCall
@@ -206,6 +211,10 @@ data LoopResult = LoopResult
 
 data LoopError
     = LoopTransport ApiError
+    -- | The transport failed after text or reasoning was already exposed.
+    -- Connection-recovery backends normally retry these with a visible stream
+    -- boundary; this remains the terminal fallback for unwrapped backends.
+    | LoopTransportAfterOutput ApiError
     | LoopMaxTurns TurnOutput
     | LoopNoResponseId
     -- | An unexpected synchronous exception escaped a backend, approval
@@ -308,13 +317,20 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     then finish state progress (Left (LoopCancelled []))
                     else do
                         config.loopOnEvent TurnStarted
+                        outputSeen <- newIORef False
+                        let onBackendEvent event = do
+                                case event of
+                                    TextDelta _ -> writeIORef outputSeen True
+                                    ReasoningDelta _ -> writeIORef outputSeen True
+                                    _ -> pure ()
+                                config.loopOnEvent event
                         -- Race the model call against cancel so Ctrl-C / Esc
                         -- can stop reasoning mid-stream, not only between tools.
                         raced <- mask \restore -> do
                             result <- restore $ race
                                 (waitCancel config.loopCancel)
                                 (config.loopBackend.submitTurn
-                                    state prev inputs config.loopOnEvent)
+                                    state prev inputs onBackendEvent)
                             case result of
                                 Right (Right BackendResult{..})
                                     | not
@@ -327,8 +343,12 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         case raced of
                             Left () ->
                                 finish state progress (Left (LoopCancelled []))
-                            Right (Left err) ->
-                                finish state progress (Left (LoopTransport err))
+                            Right (Left err) -> do
+                                emitted <- readIORef outputSeen
+                                finish state progress $ Left $
+                                    if emitted
+                                        then LoopTransportAfterOutput err
+                                        else LoopTransport err
                             Right (Right BackendResult{backendOutput = turn})
                                 | Text.null turn.responseId ->
                                     finish state progress (Left LoopNoResponseId)

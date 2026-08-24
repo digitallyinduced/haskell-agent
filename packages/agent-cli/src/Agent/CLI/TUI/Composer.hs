@@ -36,12 +36,12 @@ import Agent.CLI.Input
     , appendReplHistory
     , displayEditorText
     , submissionPromptText
-    , terminalCharWidth
-    , terminalTextWidth
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Options (reasoningEfforts)
 import qualified Agent.CLI.TUI.Bridge as Bridge
+import Agent.CLI.TUI.Composer.Buffer
+import Agent.CLI.TUI.Composer.Edit
 import Agent.CLI.TUI.Types
 import qualified Agent.TUI.Theme as Theme
 import Agent.TUI.Model
@@ -49,118 +49,22 @@ import Brick
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import qualified Brick.Widgets.Border.Style as BorderStyle
-import Control.Concurrent.STM
-    ( STM
-    , atomically
-    , newTVarIO
-    , readTVar
-    , retry
-    , orElse
-    , writeTVar
-    )
+import Control.Concurrent.STM (atomically)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Data.ByteString (ByteString)
-import Data.Char (isControl)
 import Data.List (elemIndex, intersperse)
 import Data.Maybe (fromMaybe)
-import Data.Sequence (Seq, ViewL(..), ViewR(..))
+import Data.Sequence (ViewL(..))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
-import Data.Text.Encoding.Error (lenientDecode)
 import qualified Graphics.Vty as V
 
 type ApplyLocalUiEvent =
     UiEvent
     -> (AppState -> AppState)
     -> EventM Name AppState ()
-
-newFullscreenInputBuffer :: IO FullscreenInputBuffer
-newFullscreenInputBuffer =
-    FullscreenInputBuffer <$> newTVarIO Seq.empty
-
-queuedFullscreenInputDisplays
-    :: FullscreenInputBuffer
-    -> IO (Seq Text)
-queuedFullscreenInputDisplays inputBuffer =
-    atomically do
-        queued <- readFullscreenInputs inputBuffer
-        pure $ foldMap
-            (\input ->
-                if input.fullscreenInputQueued
-                    then maybe Seq.empty Seq.singleton input.fullscreenInputDisplay
-                    else Seq.empty)
-            queued
-
-readFullscreenInputs
-    :: FullscreenInputBuffer
-    -> STM (Seq FullscreenInput)
-readFullscreenInputs (FullscreenInputBuffer inputs) =
-    readTVar inputs
-
-appendFullscreenInput
-    :: FullscreenInputBuffer
-    -> FullscreenInput
-    -> STM ()
-appendFullscreenInput (FullscreenInputBuffer inputs) input = do
-    queued <- readTVar inputs
-    writeTVar inputs (queued Seq.|> input)
-
--- | Put an interruptive prompt ahead of already queued prompts. Clipboard
--- actions entered after the last submitted prompt belong to the current draft,
--- so keep that trailing prelude immediately before the promoted prompt.
-promoteFullscreenInput
-    :: FullscreenInputBuffer
-    -> FullscreenInput
-    -> STM ()
-promoteFullscreenInput (FullscreenInputBuffer inputs) input = do
-    queued <- readTVar inputs
-    let (remaining, prelude) = splitTrailingPromptPrelude queued
-    writeTVar inputs $
-        prelude Seq.>< Seq.singleton input Seq.>< remaining
-
-splitTrailingPromptPrelude
-    :: Seq FullscreenInput
-    -> (Seq FullscreenInput, Seq FullscreenInput)
-splitTrailingPromptPrelude = go Seq.empty
-  where
-    go prelude queued =
-        case Seq.viewr queued of
-            remaining :> input
-                | isPromptPrelude input ->
-                    go (input Seq.<| prelude) remaining
-            _ -> (queued, prelude)
-
-isPromptPrelude :: FullscreenInput -> Bool
-isPromptPrelude input =
-    case input.fullscreenInputLine of
-        ReplClipboardPaste _ _ -> True
-        ReplClipboardPasteOrText _ _ -> True
-        _ -> False
-
-takeFullscreenInput
-    :: FullscreenInputBuffer
-    -> STM FullscreenInput
-takeFullscreenInput (FullscreenInputBuffer inputs) = do
-    queued <- readTVar inputs
-    case Seq.viewl queued of
-        EmptyL -> retry
-        input :< rest -> do
-            writeTVar inputs rest
-            pure input
-
--- | Prefer a prompt that has already been queued over a simultaneous
--- session-level wakeup, so provider restarts cannot consume and lose Enter.
-takeFullscreenInputOr
-    :: FullscreenInputBuffer
-    -> STM wake
-    -> STM (Either wake FullscreenInput)
-takeFullscreenInputOr inputBuffer wake =
-    (Right <$> takeFullscreenInput inputBuffer)
-        `orElse` (Left <$> wake)
 
 drawSlashMenu :: AppState -> Widget Name
 drawSlashMenu state = case currentSlashMenu state of
@@ -373,114 +277,6 @@ renderDraft focused height state =
     renderRow row
         | Text.null row = txt " "
         | otherwise = txt (displayEditorText row)
-
--- | Visually wrap a draft without changing its underlying text. The cursor
--- offset is measured in the original text and returned in wrapped row/column
--- coordinates. Long unbroken text is split at terminal cell boundaries.
-wrapDraft :: Int -> Text -> Int -> ([Text], (Int, Int))
-wrapDraft requestedWidth text requestedCursor =
-    let width = max 1 requestedWidth
-        cursor = max 0 (min (Text.length text) requestedCursor)
-        (rowsRev, currentRev, currentWidth, currentRow, cursorLocation) =
-            go width cursor 0 [] [] 0 0 Nothing (Text.unpack text)
-        (finalRowsRev, finalCurrentRev, finalRow, finalColumn)
-            | cursor == Text.length text && currentWidth >= width =
-                (finishRow rowsRev currentRev, [], currentRow + 1, 0)
-            | otherwise =
-                (rowsRev, currentRev, currentRow, currentWidth)
-        rows = reverse (Text.pack (reverse finalCurrentRev) : finalRowsRev)
-        location =
-            fromMaybe
-                (finalRow, finalColumn)
-                cursorLocation
-    in (rows, location)
-  where
-    go
-        :: Int
-        -> Int
-        -> Int
-        -> [Text]
-        -> [Char]
-        -> Int
-        -> Int
-        -> Maybe (Int, Int)
-        -> [Char]
-        -> ([Text], [Char], Int, Int, Maybe (Int, Int))
-    go _ _ _ rowsRev currentRev currentWidth currentRow location [] =
-        (rowsRev, currentRev, currentWidth, currentRow, location)
-    go width cursor index rowsRev currentRev currentWidth currentRow location
-        (character : rest)
-        | character == '\n' =
-            let atVisualBoundary = currentWidth >= width
-                rowsAfterBoundary
-                    | atVisualBoundary = finishRow rowsRev currentRev
-                    | otherwise = rowsRev
-                rowAfterBoundary
-                    | atVisualBoundary = currentRow + 1
-                    | otherwise = currentRow
-                columnAfterBoundary
-                    | atVisualBoundary = 0
-                    | otherwise = currentWidth
-                location' =
-                    recordCursor
-                        cursor
-                        index
-                        (rowAfterBoundary, columnAfterBoundary)
-                        location
-                (nextRows, nextRow)
-                    | atVisualBoundary =
-                        (rowsAfterBoundary, rowAfterBoundary)
-                    | otherwise =
-                        (finishRow rowsAfterBoundary currentRev, currentRow + 1)
-            in go
-                width cursor (index + 1) nextRows [] 0 nextRow location' rest
-        | otherwise =
-            let characterWidth = terminalCharWidth character
-                shouldWrap =
-                    characterWidth > 0
-                        && ( currentWidth >= width
-                            || (currentWidth > 0
-                                && currentWidth + characterWidth > width)
-                           )
-                rows' =
-                    if shouldWrap
-                        then finishRow rowsRev currentRev
-                        else rowsRev
-                currentRev' = if shouldWrap then [] else currentRev
-                currentWidth' = if shouldWrap then 0 else currentWidth
-                currentRow' = if shouldWrap then currentRow + 1 else currentRow
-                location' =
-                    recordCursor
-                        cursor
-                        index
-                        (currentRow', currentWidth')
-                        location
-            in go
-                width
-                cursor
-                (index + 1)
-                rows'
-                (character : currentRev')
-                (currentWidth' + characterWidth)
-                currentRow'
-                location'
-                rest
-
-    finishRow rowsRev currentRev =
-        Text.pack (reverse currentRev) : rowsRev
-
-    recordCursor cursor index location = \case
-        Nothing
-            | cursor == index -> Just location
-        previous -> previous
-
-draftCursorLocation :: Text -> Int -> (Int, Int)
-draftCursorLocation text cursor =
-    let before = Text.take cursor text
-        rows = Text.splitOn "\n" before
-    in case reverse rows of
-        [] -> (0, 0)
-        lastRow : rest -> (length rest, terminalTextWidth lastRow)
 
 drawComposerStatus :: AppState -> Widget Name
 drawComposerStatus state =
@@ -1076,15 +872,6 @@ applyComposerUiEvent uiEvent state =
             UiSetDraft text _ -> text
             _ -> state.appHistoryDraft
         }
-
-decodePaste :: ByteString -> Text
-decodePaste =
-    Text.filter
-        (\character ->
-            character == '\n'
-                || character == '\t'
-                || not (isControl character))
-        . Text.decodeUtf8With lenientDecode
 
 currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state

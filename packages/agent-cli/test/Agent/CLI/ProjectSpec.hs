@@ -8,6 +8,7 @@ import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.Text as Text
 import qualified System.Directory as Directory
 import System.Directory.OsPath
@@ -119,6 +120,41 @@ spec = describe "Agent.CLI.Project" do
                     `shouldBe` Just GrokBuildDialect
                 projectModelFor OpenAIProvider settings `shouldBe` Nothing
 
+        it "remembers one successful account per provider without storing secrets" $
+            withTempDir "agent-project-" \root -> do
+                saveProjectAccount root OpenAIProvider
+                    "managed:openai-1" "chatgpt-account-1"
+                saveProjectAccount root XAIProvider
+                    "managed:xai-1" "grok-account-1"
+
+                settings <- loadProjectSettings root
+                projectAccountFor OpenAIProvider settings
+                    `shouldBe` Just ProjectAccount
+                        { projectAccountProvider = OpenAIProvider
+                        , projectAccountSelectionId = "managed:openai-1"
+                        , projectAccountId = "chatgpt-account-1"
+                        }
+                projectAccountFor XAIProvider settings
+                    `shouldBe` Just ProjectAccount
+                        { projectAccountProvider = XAIProvider
+                        , projectAccountSelectionId = "managed:xai-1"
+                        , projectAccountId = "grok-account-1"
+                        }
+                bytes <- LBS.readFile
+                    (toFilePath (projectSettingsPath root))
+                Text.isInfixOf "secret" (Text.pack (LBS8.unpack bytes))
+                    `shouldBe` False
+
+                saveProjectAccount root OpenAIProvider
+                    "managed:openai-2" "chatgpt-account-2"
+                updated <- loadProjectSettings root
+                projectAccountFor OpenAIProvider updated
+                    `shouldBe` Just ProjectAccount
+                        { projectAccountProvider = OpenAIProvider
+                        , projectAccountSelectionId = "managed:openai-2"
+                        , projectAccountId = "chatgpt-account-2"
+                        }
+
         it "loads legacy OpenRouter settings with the old Grok dialect" $
             withTempDir "agent-project-" \root -> do
                 let dir = root </> fromFilePath ".haskell-agent"
@@ -153,6 +189,7 @@ spec = describe "Agent.CLI.Project" do
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
                 settings.settingsLastModel `shouldBe` Nothing
+                settings.settingsLastAccounts `shouldBe` []
 
         it "ignores an unknown remembered dialect without resetting approval" $
             withTempDir "agent-project-" \root -> do

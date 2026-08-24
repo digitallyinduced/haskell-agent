@@ -144,6 +144,9 @@ ghciGuidance =
         , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
         , "The session enables GHC2021 plus BlockArguments, OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, and RecordWildCards."
         , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
+        , "Useful built-ins: cmd/cmdIn capture argv-based commands, cmd_/cmdIn_ print their output, and readText/writeText/appendText/listFiles/pathExists cover common file operations."
+        , "Examples: cmd \"git\" [\"status\",\"--short\"]; cmdIn \"/repo\" \"git\" [\"diff\",\"--check\"]; text <- readText \"input.txt\"."
+        , "Imports are standalone GHCi statements, never lines inside a do block. Split imports, reusable bindings, and execution across calls instead of building one giant expression."
         , "Prefer shell tools (run_terminal_cmd or shell_command) for OS commands, package installs, servers, and anything that is not Haskell evaluation."
         , "Drive GHCi with complete expressions; do not expect interactive human input."
         ]
@@ -169,6 +172,9 @@ ghciGuidanceForTools dialect available
             , "run_ghci keeps a persistent GHCi session: bindings and loaded modules stick across calls."
             , "The session enables GHC2021 plus BlockArguments, OverloadedStrings, OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, and RecordWildCards."
             , "Pure expressions do not need user approval; IO and side-effecting GHCi commands do."
+            , "Useful built-ins: cmd/cmdIn capture argv-based commands, cmd_/cmdIn_ print their output, and readText/writeText/appendText/listFiles/pathExists cover common file operations."
+            , "Examples: cmd \"git\" [\"status\",\"--short\"]; cmdIn \"/repo\" \"git\" [\"diff\",\"--check\"]; text <- readText \"input.txt\"."
+            , "Imports are standalone GHCi statements, never lines inside a do block. Split imports, reusable bindings, and execution across calls instead of building one giant expression."
             ]
                 <> shellGuidance
                 <> [ "Drive GHCi with complete expressions; do not expect interactive human input."

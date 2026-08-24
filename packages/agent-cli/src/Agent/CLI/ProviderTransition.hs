@@ -6,6 +6,7 @@ module Agent.CLI.ProviderTransition
     , TurnResult(..)
     , applyProviderTransition
     , setPendingExitAfter
+    , transitionCommitsImmediately
     ) where
 
 import Agent.CLI.Models (ModelTarget(..))
@@ -69,3 +70,10 @@ applyProviderTransition options transition =
 setPendingExitAfter :: Bool -> PendingTurn -> PendingTurn
 setPendingExitAfter exitAfter pending =
     pending { pendingExitAfter = exitAfter }
+
+-- | Manual selections become the project/session target immediately.
+-- Automatic fallbacks remain provisional until their replacement backend
+-- completes a request successfully, including fallbacks chosen at startup.
+transitionCommitsImmediately :: ProviderTransition -> Bool
+transitionCommitsImmediately transition =
+    transition.transitionCause == ManualTransition

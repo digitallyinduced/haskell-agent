@@ -180,6 +180,12 @@ spec = describe "systemPrompt" do
                     day
                     False
         ghciOnly `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "cmd \"git\" [\"status\",\"--short\"]"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "Imports are standalone GHCi statements"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "instead of building one giant expression"
         ghciOnly `shouldNotSatisfy` Text.isInfixOf "shell_command"
         bashOnly `shouldSatisfy` Text.isInfixOf "shell_command"
         bashOnly `shouldNotSatisfy` Text.isInfixOf "run_ghci"
