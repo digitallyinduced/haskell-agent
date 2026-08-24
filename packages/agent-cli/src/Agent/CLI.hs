@@ -356,7 +356,10 @@ import Agent.Claude
     )
 import Agent.Loop
 import qualified Agent.MCP as MCP
-import Agent.Error (ApiError(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    )
 import Agent.Dialect
     ( Dialect
     , DialectId
@@ -3495,7 +3498,9 @@ waitAndRetryPendingTurn
     -> PendingTurn
     -> IO RunResult
 waitAndRetryPendingTurn env delay pending = do
-    let cancel = env.sessionLoop.loopCancel
+    startedAt <- getCurrentTime
+    let retryAt = addUTCTime (max 0 delay) startedAt
+        cancel = env.sessionLoop.loopCancel
         renderCountdown seconds =
             let message = automaticRetryCountdownText seconds
             in case env.sessionFullscreen of
@@ -3505,9 +3510,7 @@ waitAndRetryPendingTurn env delay pending = do
                 Nothing ->
                     renderEvent env.sessionRender (ActivityUpdated message)
         waitForCancel = do
-            startedAt <- getCurrentTime
-            let retryAt = addUTCTime (max 0 delay) startedAt
-                poll lastShown = do
+            let poll lastShown = do
                     now <- getCurrentTime
                     let remaining = max 0 (diffUTCTime retryAt now)
                         seconds = max 0 (ceiling remaining)
@@ -3535,6 +3538,11 @@ waitAndRetryPendingTurn env delay pending = do
             Just _ -> waitForCancel
             Nothing ->
                 withEscCancel cancel env.sessionEscPaused waitForCancel
+    setPersistenceActivity
+        env.sessionPersist
+        "provider_cooldown"
+        "Provider temporarily unavailable; waiting before automatically retrying the pending turn."
+        (Just retryAt)
     resetCancel cancel
     case env.sessionFullscreen of
         Just _ -> pure ()
@@ -3543,6 +3551,7 @@ waitAndRetryPendingTurn env delay pending = do
         (withTurnCancel env.sessionInterrupt cancel waitAction)
             `finally` do
                 resetCancel cancel
+                clearPersistenceActivity env.sessionPersist
                 case env.sessionFullscreen of
                     Just _ -> pure ()
                     Nothing -> clearThinking env.sessionRender
@@ -3572,8 +3581,14 @@ waitAndRetryPendingTurn env delay pending = do
                     color <- resolveColor stderr
                     putTextLn stderr
                         (roleMuted color (glyphOk <> "retrying turn"))
+            setPersistenceActivity
+                env.sessionPersist
+                "provider_retry"
+                "Retrying the pending turn after the provider cooldown."
+                Nothing
             runPendingTurnWithCooldownRetry
                 False RestartPendingTurn env pending
+                `finally` clearPersistenceActivity env.sessionPersist
 
 reportProviderUnavailable
     :: Maybe FullscreenRuntime
@@ -5996,6 +6011,10 @@ reloadAuth provider maybeTokenProvider =
                     getNextToken tokenProvider (Just FailedCredential
                         { credential = current
                         , failure = AccountAuthenticationRejected
+                        , failureReason = ExhaustedByAuthentication
+                            { exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Nothing
+                            }
                         }) >>= \case
                         Left err -> do
                             now <- getCurrentTime

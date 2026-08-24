@@ -65,6 +65,42 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` "Resume this session with: 'it'\\''s' --resume id"
 
     describe "createSession/appendTurn/loadSession" do
+        it "round-trips and clears ephemeral session activity" $
+            withTempDir "agent-session-activity-" \root -> do
+                handle <- createSession (testCreate root)
+                persistence <- newActivePersistence handle
+                setPersistenceActivity
+                    persistence
+                    "provider_cooldown"
+                    "Waiting before retrying."
+                    (Just fixedTime)
+
+                activity <-
+                    loadSessionActivity root handle.sessionMeta.metaId
+                activity `shouldSatisfy` maybe False
+                    (\current ->
+                        current.activityKind == "provider_cooldown"
+                            && current.activityMessage
+                                == "Waiting before retrying."
+                            && current.activityRetryAt == Just fixedTime)
+
+                clearPersistenceActivity persistence
+                loadSessionActivity root handle.sessionMeta.metaId
+                    `shouldReturn` Nothing
+
+        it "clears stale activity when a session is resumed" $
+            withTempDir "agent-session-activity-resume-" \root -> do
+                handle <- createSession (testCreate root)
+                persistence <- newActivePersistence handle
+                setPersistenceActivity
+                    persistence
+                    "provider_retry"
+                    "Retrying."
+                    Nothing
+                _ <- newActivePersistence handle
+                loadSessionActivity root handle.sessionMeta.metaId
+                    `shouldReturn` Nothing
+
         it "round-trips meta and transcript items with private modes" $
             withTempDir "agent-sessions-" \root -> do
                 handle <- createSession (testCreate root)

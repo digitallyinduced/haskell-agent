@@ -19,7 +19,9 @@ module Agent.OpenAI.Auth
 
       -- * Cooldown management
     , reportRateLimit
+    , reportRateLimitWithReason
     , reportAuthBroken
+    , reportAuthBrokenWithReason
     , refreshAfterAuthFailure
     , recoverAfterAuthFailure
     , authFailureRetrySeconds
@@ -46,7 +48,13 @@ module Agent.OpenAI.Auth
     , deriveEmail
     ) where
 
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , ErrorType(..)
+    , credentialExhaustionReasonFromApiError
+    , credentialsExhaustedWithReasons
+    )
 import Agent.OpenAI.Auth.JWT
     ( deriveAccountId
     , deriveEmail
@@ -71,7 +79,7 @@ import Data.IORef
     , newIORef
     , readIORef
     )
-import Data.List (find)
+import Data.List (find, nub)
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -87,9 +95,14 @@ import Data.Time.Clock
 -- State
 --------------------------------------------------------------------------------
 
+data AccountCooldown = AccountCooldown
+    { cooldownUntil :: !UTCTime
+    , cooldownReason :: !CredentialExhaustionReason
+    }
+
 data AccountCooldowns = AccountCooldowns
-    { cooldownRateLimitUntil :: !(Maybe UTCTime)
-    , cooldownAuthBrokenUntil :: !(Maybe UTCTime)
+    { cooldownRateLimit :: !(Maybe AccountCooldown)
+    , cooldownAuthBroken :: !(Maybe AccountCooldown)
     }
 
 -- | All mutable state for one account. Auth, cooldowns, and recovery
@@ -115,7 +128,8 @@ type AccountDiscovery = [Text] -> IO (Either ApiError [AuthState])
 
 data PoolState = PoolState
     { stateEntries :: ![AccountEntry]
-    , stateEmptyRetryAt :: !(Maybe UTCTime)
+    , stateEmptyExhaustion
+        :: !(Maybe (UTCTime, [CredentialExhaustionReason]))
     , stateCounter :: !Int
     , stateDiscovery :: !(Maybe (MVar Bool))
     }
@@ -203,7 +217,7 @@ buildPool initial emptyRetryAt refresh discovery = do
     let offset = floor (toRational (utctDayTime now) * 1000) :: Int
     state <- newIORef PoolState
         { stateEntries = entries
-        , stateEmptyRetryAt = emptyRetryAt
+        , stateEmptyExhaustion = (, []) <$> emptyRetryAt
         , stateCounter = offset `mod` max 1 (length entries)
         , stateDiscovery = Nothing
         }
@@ -243,28 +257,40 @@ getAccessTokenWithDiscovery pool allowDiscovery = do
     let accountIdsAtCheckout = map (.entryAccountId) entries
     result <- go (length entries)
     case result of
-        Left exhausted@CredentialsExhausted{retryAt = previousRetryAt}
+        Left exhausted@CredentialsExhausted
+            { retryAt = previousRetryAt
+            , exhaustionReasons = previousReasons
+            }
             | allowDiscovery ->
                 discoverAdditionalAccounts pool accountIdsAtCheckout >>= \case
                     True -> getAccessTokenWithDiscovery pool False
                     False -> do
                         current <- readIORef pool.poolState
                         if null current.stateEntries
-                            then pure $ Left $ CredentialsExhausted $
-                                fromMaybe previousRetryAt
-                                    current.stateEmptyRetryAt
+                            then
+                                let (retryAt, reasons) =
+                                        fromMaybe
+                                            (previousRetryAt, previousReasons)
+                                            current.stateEmptyExhaustion
+                                in pure $ Left $
+                                    credentialsExhaustedWithReasons
+                                        retryAt reasons
                             else pure (Left exhausted)
         _ -> pure result
   where
     go attemptsLeft
         | attemptsLeft <= 0 = do
             pickAccount pool >>= \case
-                Left earliest -> pure $ Left (CredentialsExhausted earliest)
+                Left (earliest, reasons) ->
+                    pure $ Left $
+                        credentialsExhaustedWithReasons earliest reasons
                 Right _ -> pure $ Left $ ConnectionError
                     "Agent.OpenAI.Auth.getAccessToken: failover budget exhausted"
         | otherwise =
             pickAccount pool >>= \case
-                Left earliest -> pure $ Left (CredentialsExhausted earliest)
+                Left (earliest, reasons) ->
+                    pure $ Left $
+                        credentialsExhaustedWithReasons earliest reasons
                 Right entry ->
                     currentAuthState pool entry >>= \case
                         Right state ->
@@ -273,7 +299,10 @@ getAccessTokenWithDiscovery pool allowDiscovery = do
                             | CredentialsExhausted{} <- err ->
                                 go (attemptsLeft - 1)
                             | isAuthError err -> do
-                                reportAuthBroken pool entry.entryAccountId
+                                reportAuthBrokenWithReason
+                                    pool
+                                    entry.entryAccountId
+                                    (authReasonFromApiError err)
                                 go (attemptsLeft - 1)
                             | otherwise -> pure (Left err)
 
@@ -288,8 +317,9 @@ currentAuthState pool entry =
             let updated = expireCooldowns now current
             in (updated, updated)
         case effectiveCooldown state.accountCooldowns of
-            Just until_ ->
-                pure (Left (CredentialsExhausted until_))
+            Just (until_, reasons) ->
+                pure $ Left $
+                    credentialsExhaustedWithReasons until_ reasons
             Nothing ->
                 if needsRefresh state.accountAuth now
                     then refreshEntry pool entry state.accountAuth
@@ -312,7 +342,7 @@ refreshEntryAfterAuthFailure
     -> IO (Either ApiError AuthState)
 refreshEntryAfterAuthFailure =
     refreshEntryWithCooldownTransition \cooldowns ->
-        cooldowns { cooldownAuthBrokenUntil = Nothing }
+        cooldowns { cooldownAuthBroken = Nothing }
 
 refreshEntryWithCooldownTransition
     :: (AccountCooldowns -> AccountCooldowns)
@@ -396,8 +426,13 @@ finishDiscovery
 finishDiscovery outcome candidates current =
     let withoutOwner = current { stateDiscovery = Nothing }
     in case outcome of
-        Just (Left CredentialsExhausted{retryAt}) ->
-            (withoutOwner { stateEmptyRetryAt = Just retryAt }, False)
+        Just (Left CredentialsExhausted{retryAt, exhaustionReasons}) ->
+            ( withoutOwner
+                { stateEmptyExhaustion =
+                    Just (retryAt, exhaustionReasons)
+                }
+            , False
+            )
         Just (Right _) ->
             appendEntries candidates withoutOwner
         _ ->
@@ -411,8 +446,8 @@ appendEntries candidates current =
     in
         ( current
             { stateEntries = current.stateEntries <> reverse newEntries
-            , stateEmptyRetryAt =
-                if added then Nothing else current.stateEmptyRetryAt
+            , stateEmptyExhaustion =
+                if added then Nothing else current.stateEmptyExhaustion
             }
         , added
         )
@@ -433,31 +468,40 @@ discoverAccounts pool = do
 -- Selection and cooldowns
 --------------------------------------------------------------------------------
 
-pickAccount :: Pool -> IO (Either UTCTime AccountEntry)
+pickAccount
+    :: Pool
+    -> IO
+        (Either
+            (UTCTime, [CredentialExhaustionReason])
+            AccountEntry)
 pickAccount pool = do
     now <- getCurrentTime
-    (entries, startIdx, emptyRetryAt) <-
+    (entries, startIdx, emptyExhaustion) <-
         atomicModifyIORef' pool.poolState selectStart
     case entries of
-        [] -> pure (Left (fromMaybe now emptyRetryAt))
+        [] -> pure (Left (fromMaybe (now, []) emptyExhaustion))
         _ -> do
             available <- tryFrom entries startIdx now 0
             case available of
                 Just entry -> pure (Right entry)
                 Nothing -> do
-                    expirations <- fmap catMaybes $ forM entries \entry ->
+                    cooldowns <- fmap catMaybes $ forM entries \entry ->
                         effectiveCooldown . (.accountCooldowns)
                             <$> readIORef entry.entryState
-                    case expirations of
-                        [] -> pure (Left now)
+                    case cooldowns of
+                        [] -> pure (Left (now, []))
                         (first : rest) ->
-                            pure (Left (minimum (first : rest)))
+                            let active = first : rest
+                            in pure $ Left
+                                ( minimum (map fst active)
+                                , nub (concatMap snd active)
+                                )
   where
     selectStart current =
         case current.stateEntries of
             [] ->
                 ( current
-                , ([], 0, current.stateEmptyRetryAt)
+                , ([], 0, current.stateEmptyExhaustion)
                 )
             entries ->
                 let n = length entries
@@ -465,7 +509,7 @@ pickAccount pool = do
                     nextCounter = (current.stateCounter + 1) `mod` n
                 in
                     ( current { stateCounter = nextCounter }
-                    , (entries, startIdx, current.stateEmptyRetryAt)
+                    , (entries, startIdx, current.stateEmptyExhaustion)
                     )
 
     tryFrom entries startIdx now offset
@@ -481,41 +525,73 @@ pickAccount pool = do
                 Just _ -> tryFrom entries startIdx now (offset + 1)
 
 reportRateLimit :: Pool -> Text -> Maybe Int -> IO ()
-reportRateLimit pool limitedAccountId retryAfter = do
+reportRateLimit pool limitedAccountId retryAfter =
+    reportRateLimitWithReason
+        pool
+        limitedAccountId
+        retryAfter
+        ExhaustedByRateLimit
+            { exhaustionErrorType = Nothing
+            , exhaustionStatusCode = Nothing
+            , exhaustionRetryAfter = retryAfter
+            }
+
+reportRateLimitWithReason
+    :: Pool
+    -> Text
+    -> Maybe Int
+    -> CredentialExhaustionReason
+    -> IO ()
+reportRateLimitWithReason pool limitedAccountId retryAfter reason = do
     now <- getCurrentTime
     let seconds = fromMaybe rateLimitCooldownSeconds retryAfter
         until_ = addUTCTime (fromIntegral seconds) now
     updateAccountLocked pool limitedAccountId \current ->
         current
             { accountCooldowns = current.accountCooldowns
-                { cooldownRateLimitUntil =
-                    extendCooldown until_
-                        current.accountCooldowns.cooldownRateLimitUntil
+                { cooldownRateLimit =
+                    extendCooldown until_ reason
+                        current.accountCooldowns.cooldownRateLimit
                 }
             }
 
 reportAuthBroken :: Pool -> Text -> IO ()
-reportAuthBroken pool brokenAccountId = do
+reportAuthBroken pool brokenAccountId =
+    reportAuthBrokenWithReason pool brokenAccountId genericAuthReason
+
+reportAuthBrokenWithReason
+    :: Pool
+    -> Text
+    -> CredentialExhaustionReason
+    -> IO ()
+reportAuthBrokenWithReason pool brokenAccountId reason = do
     now <- getCurrentTime
     updateAccountLocked pool brokenAccountId $
-        setAuthBrokenCooldownTransition now
+        setAuthBrokenCooldownTransition now reason
 
-setAuthBrokenCooldownAt :: Pool -> Text -> UTCTime -> IO ()
-setAuthBrokenCooldownAt pool accountId now =
-    updateAccount pool accountId (setAuthBrokenCooldownTransition now)
+setAuthBrokenCooldownAt
+    :: Pool
+    -> Text
+    -> UTCTime
+    -> CredentialExhaustionReason
+    -> IO ()
+setAuthBrokenCooldownAt pool accountId now reason =
+    updateAccount pool accountId
+        (setAuthBrokenCooldownTransition now reason)
 
 setAuthBrokenCooldownTransition
     :: UTCTime
+    -> CredentialExhaustionReason
     -> AccountState
     -> AccountState
-setAuthBrokenCooldownTransition now current =
+setAuthBrokenCooldownTransition now reason current =
     let until_ =
             addUTCTime (fromIntegral authFailureRetrySeconds) now
     in current
         { accountCooldowns = current.accountCooldowns
-            { cooldownAuthBrokenUntil =
-                extendCooldown until_
-                    current.accountCooldowns.cooldownAuthBrokenUntil
+            { cooldownAuthBroken =
+                extendCooldown until_ reason
+                    current.accountCooldowns.cooldownAuthBroken
             }
         }
 
@@ -537,7 +613,10 @@ refreshAfterAuthFailure pool rejectedAccountId =
                     Left err -> do
                         now <- getCurrentTime
                         setAuthBrokenCooldownAt
-                            pool rejectedAccountId now
+                            pool
+                            rejectedAccountId
+                            now
+                            (authReasonFromApiError err)
                         pure (Left err)
 
 -- | Recover a specifically rejected token. Recovery ownership and throttling
@@ -568,8 +647,11 @@ recoverAfterAuthFailure pool rejectedAccountId rejectedAccessToken =
                     AuthAlreadyRecovered current ->
                         pure (Right current)
                     AuthRecoveryCoolingDown retryAt -> do
-                        setAuthBrokenCooldownAt pool rejectedAccountId now
-                        pure (Left (CredentialsExhausted retryAt))
+                        setAuthBrokenCooldownAt
+                            pool rejectedAccountId now genericAuthReason
+                        pure $ Left $
+                            credentialsExhaustedWithReasons
+                                retryAt [genericAuthReason]
                     AuthRecoveryOwner stale ->
                         refreshEntryAfterAuthFailure
                             pool entry stale >>= \case
@@ -577,7 +659,10 @@ recoverAfterAuthFailure pool rejectedAccountId rejectedAccessToken =
                                 pure (Right refreshed)
                             Left err -> do
                                 setAuthBrokenCooldownAt
-                                    pool rejectedAccountId now
+                                    pool
+                                    rejectedAccountId
+                                    now
+                                    (authReasonFromApiError err)
                                 pure (Left err)
 
 data AuthRecoveryDecision
@@ -622,6 +707,7 @@ readAccountState pool targetAccountId =
 data AccountSnapshot = AccountSnapshot
     { snapshotAuth :: !AuthState
     , snapshotCooldownUntil :: !(Maybe UTCTime)
+    , snapshotCooldownReasons :: ![CredentialExhaustionReason]
     }
     deriving (Show)
 
@@ -633,7 +719,9 @@ snapshotAccounts pool = do
         pure AccountSnapshot
             { snapshotAuth = state.accountAuth
             , snapshotCooldownUntil =
-                effectiveCooldown state.accountCooldowns
+                fst <$> effectiveCooldown state.accountCooldowns
+            , snapshotCooldownReasons =
+                maybe [] snd (effectiveCooldown state.accountCooldowns)
             }
 
 getAccessTokenForAccount
@@ -655,8 +743,9 @@ getAccessTokenForAccount pool targetAccountId =
                         , effectiveCooldown updated.accountCooldowns
                         )
                 case cooldown of
-                    Just until_ ->
-                        pure (Left (CredentialsExhausted until_))
+                    Just (until_, reasons) ->
+                        pure $ Left $
+                            credentialsExhaustedWithReasons until_ reasons
                     Nothing -> do
                         state <- (.accountAuth) <$> readIORef entry.entryState
                         if needsRefresh state now
@@ -716,37 +805,64 @@ atomicModifyAccount entry =
 
 emptyCooldowns :: AccountCooldowns
 emptyCooldowns = AccountCooldowns
-    { cooldownRateLimitUntil = Nothing
-    , cooldownAuthBrokenUntil = Nothing
+    { cooldownRateLimit = Nothing
+    , cooldownAuthBroken = Nothing
     }
 
-extendCooldown :: UTCTime -> Maybe UTCTime -> Maybe UTCTime
-extendCooldown until_ =
-    Just . maybe until_ (max until_)
+extendCooldown
+    :: UTCTime
+    -> CredentialExhaustionReason
+    -> Maybe AccountCooldown
+    -> Maybe AccountCooldown
+extendCooldown until_ reason = \case
+    Just current
+        | current.cooldownUntil > until_ -> Just current
+    _ ->
+        Just AccountCooldown
+            { cooldownUntil = until_
+            , cooldownReason = reason
+            }
 
 expireCooldowns :: UTCTime -> AccountState -> AccountState
 expireCooldowns now current =
     current
         { accountCooldowns = AccountCooldowns
-            { cooldownRateLimitUntil =
-                keepFuture current.accountCooldowns.cooldownRateLimitUntil
-            , cooldownAuthBrokenUntil =
-                keepFuture current.accountCooldowns.cooldownAuthBrokenUntil
+            { cooldownRateLimit =
+                keepFuture current.accountCooldowns.cooldownRateLimit
+            , cooldownAuthBroken =
+                keepFuture current.accountCooldowns.cooldownAuthBroken
             }
         }
   where
     keepFuture cooldown
-        | maybe False (> now) cooldown = cooldown
+        | maybe False ((> now) . (.cooldownUntil)) cooldown = cooldown
         | otherwise = Nothing
 
-effectiveCooldown :: AccountCooldowns -> Maybe UTCTime
+effectiveCooldown
+    :: AccountCooldowns
+    -> Maybe (UTCTime, [CredentialExhaustionReason])
 effectiveCooldown cooldowns =
     case catMaybes
-        [ cooldowns.cooldownRateLimitUntil
-        , cooldowns.cooldownAuthBrokenUntil
+        [ cooldowns.cooldownRateLimit
+        , cooldowns.cooldownAuthBroken
         ] of
         [] -> Nothing
-        (first : rest) -> Just (maximum (first : rest))
+        active ->
+            Just
+                ( maximum (map (.cooldownUntil) active)
+                , nub (map (.cooldownReason) active)
+                )
+
+genericAuthReason :: CredentialExhaustionReason
+genericAuthReason = ExhaustedByAuthentication
+    { exhaustionErrorType = Nothing
+    , exhaustionStatusCode = Nothing
+    }
+
+authReasonFromApiError :: ApiError -> CredentialExhaustionReason
+authReasonFromApiError err =
+    fromMaybe genericAuthReason
+        (credentialExhaustionReasonFromApiError err)
 
 isAuthError :: ApiError -> Bool
 isAuthError (HttpError 401 _) = True

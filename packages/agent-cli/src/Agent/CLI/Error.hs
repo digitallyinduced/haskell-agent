@@ -16,10 +16,13 @@ module Agent.CLI.Error
 import Agent.CLI.Duration (formatDuration)
 import Agent.Error
     ( ApiError(..)
+    , CredentialExhaustionReason(..)
     , ErrorType(..)
+    , errorTypeText
     )
 import Control.Exception.Safe (Exception, displayException)
 import Data.Char (isControl)
+import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime)
@@ -94,23 +97,83 @@ formatApiErrorWith maybeNow retryPresentation = \case
             "The operation could not be completed."
             details
             [action]
-    CredentialsExhausted{retryAt} ->
-        let (prefix, suffix) = credentialsExhaustedRetryParts
+    CredentialsExhausted{retryAt, exhaustionReasons} ->
+        let (prefix, suffix) =
+                credentialsExhaustedRetryParts exhaustionReasons
         in prefix <> credentialsRetryGuidance maybeNow retryAt <> suffix
 
 -- | Static text around the live retry phrase for errors with an absolute
 -- credential reset deadline. The TUI inserts @Try again in …@ and updates it.
 formatApiErrorRetryCountdownParts :: ApiError -> Maybe (Text, Text)
 formatApiErrorRetryCountdownParts = \case
-    CredentialsExhausted{} -> Just credentialsExhaustedRetryParts
+    CredentialsExhausted{exhaustionReasons} ->
+        Just (credentialsExhaustedRetryParts exhaustionReasons)
     _ -> Nothing
 
-credentialsExhaustedRetryParts :: (Text, Text)
-credentialsExhaustedRetryParts =
+credentialsExhaustedRetryParts
+    :: [CredentialExhaustionReason]
+    -> (Text, Text)
+credentialsExhaustedRetryParts reasons =
     ( "Provider unavailable.\n\
       \All accounts for this provider are temporarily unavailable.\n"
     , ", or choose another provider with /model."
+        <> exhaustionReasonDetails reasons
     )
+
+exhaustionReasonDetails :: [CredentialExhaustionReason] -> Text
+exhaustionReasonDetails reasons =
+    case nub (map formatExhaustionReason reasons) of
+        [] -> ""
+        rendered ->
+            "\nObserved account failures: "
+                <> Text.intercalate "; " rendered
+                <> "."
+
+formatExhaustionReason :: CredentialExhaustionReason -> Text
+formatExhaustionReason = \case
+    ExhaustedByRateLimit
+        { exhaustionErrorType
+        , exhaustionStatusCode
+        , exhaustionRetryAfter
+        } ->
+            "rate or usage limit"
+                <> formatReasonMetadata
+                    exhaustionErrorType
+                    exhaustionStatusCode
+                    exhaustionRetryAfter
+    ExhaustedByAuthentication
+        { exhaustionErrorType
+        , exhaustionStatusCode
+        } ->
+            "authentication rejected or credential refresh failed"
+                <> formatReasonMetadata
+                    exhaustionErrorType
+                    exhaustionStatusCode
+                    Nothing
+
+formatReasonMetadata
+    :: Maybe ErrorType
+    -> Maybe Int
+    -> Maybe Int
+    -> Text
+formatReasonMetadata maybeErrorType maybeStatus maybeRetryAfter =
+    case details of
+        [] -> ""
+        _ -> " (" <> Text.intercalate ", " details <> ")"
+  where
+    details =
+        maybe [] (\value -> ["type " <> errorTypeText value]) maybeErrorType
+            <> maybe
+                []
+                (\value -> ["HTTP " <> Text.pack (show value)])
+                maybeStatus
+            <> maybe
+                []
+                (\value ->
+                    [ "provider retry-after "
+                        <> formatDuration (fromIntegral value)
+                    ])
+                maybeRetryAfter
 
 formatProviderError
     :: RetryPresentation
