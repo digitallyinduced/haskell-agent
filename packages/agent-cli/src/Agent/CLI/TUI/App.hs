@@ -2533,17 +2533,18 @@ drawBlock state block =
                             (txtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
-                    timestampedMessage block.blockTimestamp $
-                        withAttr Theme.assistantAttr
-                            (markdownWidgetWithSyntaxHighlighting
-                                state.appSyntaxHighlighter
-                                (\codeIndex ->
-                                    cached
-                                        (CodeBlockCache
-                                            block.blockId
-                                            codeIndex))
-                                (codeBlockHeader state block.blockId)
-                                block.blockBody)
+                    padRight (Pad 1) $
+                        timestampedMessage block.blockTimestamp $
+                            withAttr Theme.assistantAttr
+                                (markdownWidgetWithSyntaxHighlighting
+                                    state.appSyntaxHighlighter
+                                    (\codeIndex ->
+                                        cached
+                                            (CodeBlockCache
+                                                block.blockId
+                                                codeIndex))
+                                    (codeBlockHeader state block.blockId)
+                                    block.blockBody)
             BlockThinking ->
                 accentBlock (thinkingBlockAttr state block)
                     (blockStateGlyph state block <> block.blockTitle)
