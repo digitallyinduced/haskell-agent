@@ -151,6 +151,9 @@ main = do
     ensureExecutionEnvironment
     prepareResultsDirectory config.resultsDir
     Text.writeFile (config.resultsDir </> "prompt.txt") todoPrompt
+    Text.writeFile (config.resultsDir </> "provided-flake.nix") providedFlake
+    Text.writeFile (config.resultsDir </> "provided-flake.lock") providedFlakeLock
+    prebuildProvidedFlake config.resultsDir
     versions <- collectVersions config
     let scheduled =
             [ (trial, runner)
@@ -233,11 +236,14 @@ usage = unlines
 
 todoPrompt :: Text
 todoPrompt = Text.unlines
-    [ "Build a complete Haskell todo application in the empty workspace."
+    [ "Build a complete Haskell todo application in the provided workspace."
     , "Do not only explain the solution: create all files and verify the app."
+    , "A prebuilt `flake.nix` and its lock file are already present."
     , ""
     , "Requirements:"
-    , "- Use a Nix flake for all dependencies and a development environment."
+    , "- Do not edit, replace, delete, or regenerate `flake.nix` or `flake.lock`."
+    , "- Implement the server in `app/Main.hs`, which the provided flake runs."
+    , "- You may create other project files, but they must not require flake changes."
     , "- Use GHC 9.10."
     , "- `nix run` must build and start the application."
     , "- The application is an HTTP server."
@@ -265,6 +271,108 @@ rlmTodoPrompt =
         "- Use the RLM worker helpers for delegated inspection and implementation; do not use web search."
         todoPrompt
 
+providedFlake :: Text
+providedFlake = Text.unlines
+    [ "{"
+    , "  description = \"Prebuilt GHC 9.10 environment for the todo eval\";"
+    , ""
+    , "  inputs.nixpkgs.url ="
+    , "    \"github:NixOS/nixpkgs/afe3d8ac4395617bdcdac9f188ac8717a062e014\";"
+    , ""
+    , "  outputs = { self, nixpkgs }:"
+    , "    let"
+    , "      systems = [ \"x86_64-linux\" \"aarch64-linux\" \"aarch64-darwin\" ];"
+    , "      forAllSystems = nixpkgs.lib.genAttrs systems;"
+    , "      packagesFor = system:"
+    , "        let"
+    , "          pkgs = import nixpkgs { inherit system; };"
+    , "          ghcEnv = pkgs.haskellPackages.ghcWithPackages (hpkgs: with hpkgs; ["
+    , "            aeson"
+    , "            http-types"
+    , "            wai"
+    , "            warp"
+    , "          ]);"
+    , "        in { inherit pkgs ghcEnv; };"
+    , "    in {"
+    , "      packages = forAllSystems (system:"
+    , "        let env = packagesFor system; in {"
+    , "          default = env.pkgs.writeShellApplication {"
+    , "            name = \"todo-server\";"
+    , "            runtimeInputs = [ env.ghcEnv ];"
+    , "            text = ''exec runghc app/Main.hs'';"
+    , "          };"
+    , "        });"
+    , ""
+    , "      devShells = forAllSystems (system:"
+    , "        let env = packagesFor system; in {"
+    , "          default = env.pkgs.mkShell {"
+    , "            packages = [ env.ghcEnv env.pkgs.cabal-install env.pkgs.curl ];"
+    , "          };"
+    , "        });"
+    , "    };"
+    , "}"
+    ]
+
+providedFlakeLock :: Text
+providedFlakeLock = Text.unlines
+    [ "{"
+    , "  \"nodes\": {"
+    , "    \"nixpkgs\": {"
+    , "      \"locked\": {"
+    , "        \"lastModified\": 1787111413,"
+    , "        \"narHash\": \"sha256-sFosWtq21eHGJRnTc/hvf4M1obRgLEUMNm/IzllkHMA=\","
+    , "        \"owner\": \"NixOS\","
+    , "        \"repo\": \"nixpkgs\","
+    , "        \"rev\": \"afe3d8ac4395617bdcdac9f188ac8717a062e014\","
+    , "        \"type\": \"github\""
+    , "      },"
+    , "      \"original\": {"
+    , "        \"owner\": \"NixOS\","
+    , "        \"repo\": \"nixpkgs\","
+    , "        \"rev\": \"afe3d8ac4395617bdcdac9f188ac8717a062e014\","
+    , "        \"type\": \"github\""
+    , "      }"
+    , "    },"
+    , "    \"root\": {"
+    , "      \"inputs\": {"
+    , "        \"nixpkgs\": \"nixpkgs\""
+    , "      }"
+    , "    }"
+    , "  },"
+    , "  \"root\": \"root\","
+    , "  \"version\": 7"
+    , "}"
+    ]
+
+prebuildProvidedFlake :: FilePath -> IO ()
+prebuildProvidedFlake resultsRoot = do
+    let fixture = resultsRoot </> "prebuilt-flake"
+    resetDirectory fixture
+    createDirectoryIfMissing True (fixture </> "app")
+    Text.writeFile (fixture </> "flake.nix") providedFlake
+    Text.writeFile (fixture </> "flake.lock") providedFlakeLock
+    Text.writeFile (fixture </> "app" </> "Main.hs")
+        "main :: IO ()\nmain = pure ()\n"
+    putStrLn "Prebuilding the shared Nix flake before timed runs..."
+    runRequired fixture "nix" ["build", "path:."]
+    runRequired fixture "nix"
+        ["develop", "path:.", "-c", "ghc", "--numeric-version"]
+
+runRequired :: FilePath -> FilePath -> [String] -> IO ()
+runRequired workingDirectory executable args =
+    readCreateProcessWithExitCode
+        (proc executable args) { cwd = Just workingDirectory }
+        ""
+        >>= \case
+            (ExitSuccess, _, _) -> pure ()
+            (_, stdoutText, stderrText) -> do
+                hPutStrLn stderr $
+                    unwords (executable : args)
+                        <> " failed while preparing the eval fixture:\n"
+                        <> stdoutText
+                        <> stderrText
+                exitFailure
+
 runOne :: Config -> Int -> Runner -> IO RunResult
 runOne config trial runner = do
     let runName = "todo-trial-" <> show trial <> "-" <> runnerSlug runner
@@ -274,6 +382,8 @@ runOne config trial runner = do
         port = 38000 + trial * 10 + runnerOffset runner
     resetDirectory workspace
     createDirectoryIfMissing True (takeDirectory stdoutLog)
+    Text.writeFile (workspace </> "flake.nix") providedFlake
+    Text.writeFile (workspace </> "flake.lock") providedFlakeLock
     _ <- readProcessWithExitCode "git" ["-C", workspace, "init", "--quiet"] ""
     home <- getHomeDirectory
     executionEnv <- executionEnvironment
@@ -528,8 +638,19 @@ executionEnvironment = getEnvironment
 gradeTodo :: FilePath -> Int -> IO (Bool, Text)
 gradeTodo workspace port = do
     flakeExists <- doesFileExist (workspace </> "flake.nix")
-    ghcCheck <- if not flakeExists
-        then pure (False, "missing flake.nix")
+    lockExists <- doesFileExist (workspace </> "flake.lock")
+    flakeUnchanged <- if flakeExists
+        then (== providedFlake) <$> Text.readFile (workspace </> "flake.nix")
+        else pure False
+    lockUnchanged <- if lockExists
+        then (== providedFlakeLock) <$> Text.readFile (workspace </> "flake.lock")
+        else pure False
+    let fixtureUnchanged = flakeUnchanged && lockUnchanged
+    ghcCheck <- if not fixtureUnchanged
+        then pure
+            ( False
+            , "provided flake fixture was modified or removed"
+            )
         else do
             ghcResult <- timeout (5 * 60 * 1000000) $
                 readCreateProcessWithExitCode
@@ -544,11 +665,17 @@ gradeTodo workspace port = do
                     (False, "nix develop failed: " <> oneLine (Text.pack err))
                 Nothing -> (False, "nix develop timed out")
     mvarCheck <- workspaceUsesMVar workspace
-    httpCheck <- if flakeExists
+    httpCheck <- if fixtureUnchanged
         then runHttpGrade workspace port
-        else pure (False, "cannot run app without flake.nix")
+        else pure (False, "cannot run app with a modified flake fixture")
     let checks =
-            [ ("ghc-9.10", fst ghcCheck, snd ghcCheck)
+            [ ( "flake-unchanged"
+              , fixtureUnchanged
+              , if fixtureUnchanged
+                    then "provided flake.nix and flake.lock preserved exactly"
+                    else "provided flake.nix or flake.lock was modified or removed"
+              )
+            , ("ghc-9.10", fst ghcCheck, snd ghcCheck)
             , ("mvar", mvarCheck, if mvarCheck then "MVar found in Haskell source" else "no MVar found in Haskell source")
             , ("http-crud", fst httpCheck, snd httpCheck)
             ]

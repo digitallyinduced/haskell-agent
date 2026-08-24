@@ -1,7 +1,7 @@
 # agent-cli vs Codex: real-world Haskell todo app
 
 This eval gives `agent-cli` and Codex the same model, reasoning effort, prompt,
-empty Git workspace, automatic approval policy, and timeout. The task is to
+workspace fixture, automatic approval policy, and timeout. The task is to
 build a GHC 9.10 HTTP todo server with a Nix flake and in-memory `MVar`
 persistence.
 
@@ -22,6 +22,14 @@ RLM worker usage is included in the root session totals. Read-only workers may
 run concurrently; coding workers are serialized to avoid overlapping edits.
 The packaged `agent-cli` puts GHC on `PATH`, because RLM mode requires the
 persistent GHCi coordinator.
+
+Every workspace starts with the same pinned `flake.nix` and `flake.lock`. The
+fixture exposes GHC 9.10 plus Aeson, WAI, Warp, and http-types, and runs
+`app/Main.hs`. The evaluator builds the fixture and development environment
+before starting any timed agent run. Agents are told not to change either
+flake file, and the grader requires both files to remain byte-for-byte
+identical. This removes dependency selection and first-use Nix compilation
+from the timed comparison while leaving the Haskell implementation task open.
 
 The evaluator records:
 
@@ -72,13 +80,14 @@ The eval makes real model requests and may incur usage charges.
 
 The external grader verifies that:
 
-1. `nix develop -c ghc --numeric-version` reports GHC 9.10.
-2. Haskell source uses `MVar`.
-3. `PORT=<isolated-port> nix run` starts an HTTP server.
-4. `GET /tasks` initially returns an empty JSON array.
-5. Two `POST /tasks` requests return HTTP 201 with exact task fields and
+1. The provided `flake.nix` and `flake.lock` are unchanged.
+2. `nix develop -c ghc --numeric-version` reports GHC 9.10.
+3. Haskell source uses `MVar`.
+4. `PORT=<isolated-port> nix run` starts an HTTP server.
+5. `GET /tasks` initially returns an empty JSON array.
+6. Two `POST /tasks` requests return HTTP 201 with exact task fields and
    produce persistent in-memory state.
-6. `DELETE /tasks/:id` returns HTTP 204 and the following `GET` reflects the
+7. `DELETE /tasks/:id` returns HTTP 204 and the following `GET` reflects the
    deletion.
 
 The grader uses a fresh process and workspace for every run. A solution only
