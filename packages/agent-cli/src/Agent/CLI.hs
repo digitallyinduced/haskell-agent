@@ -18,6 +18,11 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
+import Agent.CLI.AccountSelection
+    ( SelectedAccount(..)
+    , providerSupportsUsageAccountSelection
+    , selectProviderAccount
+    )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , authErrorNeedsOnboarding
@@ -185,11 +190,14 @@ import Agent.CLI.Progress
     , wrapOscForTmux
     )
 import Agent.CLI.Project
-    ( ProjectModel(..)
+    ( ProjectAccount(..)
+    , ProjectModel(..)
     , ProjectSettings(..)
     , loadProjectSettings
+    , projectAccountFor
     , projectModelProvider
     , resolveProjectRoot
+    , saveProjectAccount
     , saveProjectModel
     )
 import Agent.CLI.Prompt
@@ -205,7 +213,10 @@ import Agent.CLI.ProviderFallback
     , ProviderRecoveryPreference(..)
     , providerRecoveryPreference
     )
-import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
+import Agent.CLI.ProviderAvailability
+    ( probeLoadedAutomaticAvailability
+    , probeLoadedAvailability
+    )
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , ProviderTransition(..)
@@ -213,6 +224,7 @@ import Agent.CLI.ProviderTransition
     , TurnResult(..)
     , applyProviderTransition
     , setPendingExitAfter
+    , transitionCommitsImmediately
     )
 import Agent.CLI.SessionState (SessionState(..), newSessionState)
 import Agent.CLI.Render
@@ -1348,7 +1360,7 @@ runAgentInitializedWithLock
                 CustomResponsesConnection responses -> Just
                     (connection.connectionId, responses)
                 BuiltinConnection _ -> Nothing
-    (loaded, customBearerToken) <- case customResponses of
+    (initialLoaded, customBearerToken) <- case customResponses of
         Nothing -> do
             builtinLoaded <-
                 loadStartupAuth startup transition requestedProvider
@@ -1390,6 +1402,51 @@ runAgentInitializedWithLock
                     }
                 , if Text.null token then Nothing else Just token
                 )
+    (loaded, startupAccountIds) <- case customResponses of
+        Just _ -> pure (initialLoaded, Nothing)
+        Nothing
+            | Just active <- transition
+            , Just selectionId <- active.transitionAccountSelectionId ->
+                pure
+                    ( initialLoaded
+                    , Just
+                        ( selectionId
+                        , fromMaybe selectionId active.transitionAccountId
+                        )
+                    )
+            | not
+                (providerSupportsUsageAccountSelection
+                    initialLoaded.loadedProvider) ->
+                        pure (initialLoaded, Nothing)
+            | otherwise -> do
+                let provider = initialLoaded.loadedProvider
+                    rememberedIds = fmap
+                        (\account ->
+                            ( account.projectAccountSelectionId
+                            , account.projectAccountId
+                            ))
+                        (projectAccountFor provider projectSettings)
+                selectProviderAccount
+                    provider
+                    Nothing
+                    rememberedIds >>= \case
+                        Left err ->
+                            startupDie startup (Text.unpack err)
+                        Right selected ->
+                            loadSelectedAccountAuth
+                                provider
+                                selected.selectedSelectionId
+                                selected.selectedAccountId
+                                >>= either
+                                    (startupDie startup . Text.unpack)
+                                    (\selectedLoaded ->
+                                        pure
+                                            ( selectedLoaded
+                                            , Just
+                                                ( selected.selectedSelectionId
+                                                , selected.selectedAccountId
+                                                )
+                                            ))
     case (transitionTarget, resumed) of
         (Just target, _)
             | loaded.loadedProvider /= target.targetProvider ->
@@ -1415,9 +1472,20 @@ runAgentInitializedWithLock
                     \billing to API-credit billing"
         _ -> pure ()
     activeAccountRef <- newIORef ""
-    activeAccountIdRef <- newIORef ""
-    activeSelectionRef <- newIORef ""
-    preferredOpenAiAccountRef <- newIORef Nothing
+    activeAccountIdRef <-
+        newIORef (maybe "" snd startupAccountIds)
+    activeSelectionRef <-
+        newIORef $
+            maybe
+                (fromMaybe "" loaded.loadedSelectionId)
+                fst
+                startupAccountIds
+    preferredOpenAiAccountRef <-
+        newIORef $
+            case (loaded.loadedProvider, startupAccountIds) of
+                (OpenAIProvider, Just (_, accountId))
+                    | not (Text.null accountId) -> Just accountId
+                _ -> Nothing
     let selectableTokenProvider =
             case loaded.loadedOpenAiPool of
                 Just pool ->
@@ -2496,8 +2564,10 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
         getNextToken provider failed >>= \case
             Left err -> pure (Left err)
             Right credential -> do
+                previousAccountId <- readIORef accountIdRef
                 writeIORef accountIdRef credential.accountId
-                writeIORef selectionRef credential.accountId
+                when (previousAccountId /= credential.accountId) $
+                    writeIORef selectionRef credential.accountId
                 resolveLabel credential >>= writeIORef accountRef
                 pure (Right credential)
 
@@ -3456,6 +3526,16 @@ finishTurnWithCooldownRetry
 finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         writeIORef env.sessionUnavailableProviders []
+        selectionId <- readIORef env.sessionAccountSelectionId
+        accountId <- readIORef env.sessionAccountId
+        when
+            (not (Text.null (Text.strip selectionId))
+                && not (Text.null (Text.strip accountId))) $
+            saveProjectAccount
+                env.sessionProjectRoot
+                env.sessionProvider
+                selectionId
+                accountId
         case env.sessionFullscreen of
             Nothing -> putTrailingNewline env.sessionPrinted
             Just _ -> pure ()
@@ -5745,7 +5825,7 @@ chooseAutomaticProviderTransition
                     tryCandidates
                         (markUnavailable choice.modelTarget.targetProvider unavailable)
                         rest
-                Right () -> do
+                Right selected -> do
                     let message =
                             providerSlug current
                             <> " unavailable; trying this turn with "
@@ -5761,8 +5841,10 @@ chooseAutomaticProviderTransition
                             emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice.modelTarget
-                        , transitionAccountSelectionId = Nothing
-                        , transitionAccountId = Nothing
+                        , transitionAccountSelectionId =
+                            (.selectedSelectionId) <$> selected
+                        , transitionAccountId =
+                            (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Just pending
                         , transitionUnavailableProviders = unavailable
@@ -5802,7 +5884,7 @@ chooseStartupProviderTransition
                     tryCandidates
                         (markUnavailable choice.modelTarget.targetProvider unavailable)
                         rest
-                Right () -> do
+                Right selected -> do
                     let message =
                             providerSlug current
                             <> " account unavailable; switched to "
@@ -5813,8 +5895,10 @@ chooseStartupProviderTransition
                         emitUiEvent runtime (UiSystemMessage message)
                     pure $ Just ProviderTransition
                         { transitionTarget = choice.modelTarget
-                        , transitionAccountSelectionId = Nothing
-                        , transitionAccountId = Nothing
+                        , transitionAccountSelectionId =
+                            (.selectedSelectionId) <$> selected
+                        , transitionAccountId =
+                            (.selectedAccountId) <$> selected
                         , transitionSessionId = sessionId
                         , transitionPendingTurn = Nothing
                         , transitionUnavailableProviders = unavailable
@@ -5852,27 +5936,69 @@ validateProviderTarget choice =
         `notElem` map builtinConnectionId
             [OpenAIProvider, XAIProvider, OpenRouterProvider]
     then pure (Right ())
-    else fmap (() <$) (loadValidatedProviderTarget choice)
+    else fmap (() <$) $
+        loadValidatedProviderTarget probeLoadedAvailability choice
 
 validateAutomaticProviderTarget
     :: BillingMode
     -> ModelOption
-    -> IO (Either Text ())
-validateAutomaticProviderTarget sourceBilling choice =
-    loadValidatedProviderTarget choice >>= \case
-        Left err -> pure (Left err)
-        Right loaded
-            | allowsAutomaticBillingFallback
-                sourceBilling
-                (tokenProviderBillingMode loaded.loadedTokenProvider) ->
-                    pure (Right ())
-            | otherwise ->
-                pure $ Left
-                    "automatic fallback from subscription billing to API \
-                    \credits is disabled"
+    -> IO (Either Text (Maybe SelectedAccount))
+validateAutomaticProviderTarget sourceBilling choice = do
+    let provider = choice.modelTarget.targetProvider
+    if not (providerSupportsUsageAccountSelection provider)
+        then fmap (Nothing <$) $
+            loadValidatedProviderTarget
+                probeLoadedAutomaticAvailability
+                choice
+        else do
+            cwd <- getCurrentDirectory
+            projectRoot <- resolveProjectRoot cwd
+            settings <- loadProjectSettings projectRoot
+            let rememberedIds = fmap
+                    (\account ->
+                        ( account.projectAccountSelectionId
+                        , account.projectAccountId
+                        ))
+                    (projectAccountFor provider settings)
+                requiredBilling = case sourceBilling of
+                    SubscriptionBilled -> Just SubscriptionBilled
+                    ApiBilled -> Nothing
+            selectProviderAccount
+                provider
+                requiredBilling
+                rememberedIds >>= \case
+                    Left err -> pure (Left err)
+                    Right selected ->
+                        loadSelectedAccountAuth
+                            provider
+                            selected.selectedSelectionId
+                            selected.selectedAccountId >>= \case
+                                Left err -> pure (Left err)
+                                Right loaded ->
+                                    probeLoadedAutomaticAvailability loaded >>= \case
+                                        Left err -> do
+                                            now <- getCurrentTime
+                                            pure $ Left $
+                                                "cannot switch to "
+                                                    <> providerSlug provider
+                                                    <> ": "
+                                                    <> formatApiErrorInlineAt now err
+                                        Right usable
+                                            | allowsAutomaticBillingFallback
+                                                sourceBilling
+                                                (tokenProviderBillingMode
+                                                    usable.loadedTokenProvider) ->
+                                                    pure (Right (Just selected))
+                                            | otherwise ->
+                                                pure $ Left
+                                                    "automatic fallback from subscription \
+                                                    \billing to API credits is disabled"
 
-loadValidatedProviderTarget :: ModelOption -> IO (Either Text LoadedAuth)
-loadValidatedProviderTarget choice =
+loadValidatedProviderTarget
+    :: (LoadedAuth -> IO (Either ApiError LoadedAuth))
+    -> ModelOption
+    -> IO (Either Text LoadedAuth)
+loadValidatedProviderTarget probeAvailability choice =
     if not
         (providerSupportsDialect
             choice.modelTarget.targetProvider
@@ -5890,7 +6016,7 @@ loadValidatedProviderTarget choice =
                 <> ": "
                 <> err
         Right loaded ->
-            probeLoadedAvailability loaded >>= \case
+            probeAvailability loaded >>= \case
                 Left err -> do
                     now <- getCurrentTime
                     pure $ Left $
@@ -5963,8 +6089,7 @@ prepareTransitionBackend
     -> IO Backend
 prepareTransitionBackend _ Nothing _ backend = pure backend
 prepareTransitionBackend projectRoot (Just transition) persist backend
-    | transition.transitionCause == ManualTransition
-        || isNothing transition.transitionPendingTurn = do
+    | transitionCommitsImmediately transition = do
         commitProviderTransition projectRoot (Just transition) persist
         pure backend
     | otherwise = do

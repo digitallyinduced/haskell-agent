@@ -7,6 +7,8 @@
 module Agent.CLI.ProviderAvailability
     ( openAiUsageFailure
     , openRouterUsageFailure
+    , probeLoadedAutomaticAvailability
+    , probeLoadedAutomaticAvailabilityWith
     , probeLoadedAvailability
     , probeLoadedAvailabilityWith
     , xaiUsageFailure
@@ -40,7 +42,7 @@ probeLoadedAvailability loaded =
     checkCredential credential = case credential.provider of
         XAIProvider
             | billing == SubscriptionBilled ->
-                XAI.fetchGrokUsage credential.accessToken >>= \case
+                XAI.fetchGrokUsage credential >>= \case
                     Left _ -> pure Nothing
                     Right snapshot -> do
                         now <- getCurrentTime
@@ -62,6 +64,40 @@ probeLoadedAvailability loaded =
                 Left _ -> pure Nothing
                 Right snapshot -> pure (openRouterUsageFailure snapshot)
         _ -> pure Nothing
+
+-- | Automatic fallback must not send a model request merely because the Grok
+-- usage endpoint could not be checked. Manual selection and ordinary startup
+-- keep the tolerant probe above, but fallback requires a conclusive billing
+-- response and skips xAI when that response is unavailable or unreadable.
+probeLoadedAutomaticAvailability
+    :: LoadedAuth
+    -> IO (Either ApiError LoadedAuth)
+probeLoadedAutomaticAvailability loaded
+    | loaded.loadedProvider == XAIProvider
+        , tokenProviderBillingMode loaded.loadedTokenProvider
+            == SubscriptionBilled =
+                probeLoadedAutomaticAvailabilityWith check loaded
+    | otherwise = probeLoadedAvailability loaded
+  where
+    check credential =
+        XAI.fetchGrokUsage credential >>= \case
+            Left err -> pure (Left err)
+            Right snapshot -> do
+                now <- getCurrentTime
+                pure (Right (xaiUsageFailure now snapshot))
+
+-- | Injectable strict usage probe used by automatic Grok fallback.
+probeLoadedAutomaticAvailabilityWith
+    :: (Credential -> IO (Either Text (Maybe ApiError)))
+    -> LoadedAuth
+    -> IO (Either ApiError LoadedAuth)
+probeLoadedAutomaticAvailabilityWith check =
+    probeLoadedAvailabilityWith \credential ->
+        check credential >>= \case
+            Left err ->
+                pure $ Just $ ConnectionError
+                    ("Could not verify Grok usage: " <> err)
+            Right failure -> pure failure
 
 -- | Injectable core used by tests. Returning 'Nothing' means the credential
 -- is usable or the remote check was inconclusive. A returned provider error is
