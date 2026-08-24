@@ -2,6 +2,7 @@ module Agent.GrokBuild.Dialect.TaskControl
     ( getTaskOutputTool
     , waitTasksTool
     , killTaskTool
+    , validateTaskIds
     ) where
 
 import Agent.Subagents
@@ -80,28 +81,16 @@ runGetTaskOutput
     -> TaskOutputArgs
     -> IO (Either Text Text)
 runGetTaskOutput session multi args
-    | null resolvedIds =
-        pure (Left "Provide a non-empty task_ids list.")
-    | length resolvedIds > maxTaskOutputIds =
-        pure $ Left $
-            "task_ids exceeds maximum of "
-                <> Text.pack (show maxTaskOutputIds)
-                <> " entries."
-    | otherwise = do
-        entries <- mapConcurrently
-            (runOneTaskOutput session multi effectiveTimeout)
-            resolvedIds
-        pure $ Right $ case entries of
-            [entry] -> entry.output
-            _ -> formatMultiTaskOutput waits entries
+    = case validateTaskIds args.taskIds of
+        Left err -> pure (Left err)
+        Right resolvedIds -> do
+            entries <- mapConcurrently
+                (runOneTaskOutput session multi effectiveTimeout)
+                resolvedIds
+            pure $ Right $ case entries of
+                [entry] -> entry.output
+                _ -> formatMultiTaskOutput waits entries
   where
-    resolvedIds =
-        nub
-            [ stripped
-            | taskId <- args.taskIds
-            , let stripped = Text.strip taskId
-            , not (Text.null stripped)
-            ]
     waits = maybe False (> 0) args.timeoutMs
     effectiveTimeout
         | waits = Just (min maxTaskOutputWaitMs (fromMaybe 0 args.timeoutMs))
@@ -238,26 +227,15 @@ runWaitTasks
     -> WaitTasksArgs
     -> IO (Either Text Text)
 runWaitTasks session multi args
-    | null taskIds = pure (Left "Provide a non-empty task_ids list.")
-    | length taskIds > maxTaskOutputIds =
-        pure $ Left $
-            "task_ids exceeds maximum of "
-                <> Text.pack (show maxTaskOutputIds)
-                <> " entries."
-    | otherwise = do
-        started <- getCurrentTime
-        waitLoop started
+    = case validateTaskIds args.waitTaskIds of
+        Left err -> pure (Left err)
+        Right taskIds -> do
+            started <- getCurrentTime
+            waitLoop taskIds started
   where
-    taskIds =
-        nub
-            [ stripped
-            | taskId <- args.waitTaskIds
-            , let stripped = Text.strip taskId
-            , not (Text.null stripped)
-            ]
     timeoutMs = min maxTaskOutputWaitMs
         (max 1 (fromMaybe maxTaskOutputWaitMs args.waitTimeoutMs))
-    waitLoop started = do
+    waitLoop taskIds started = do
         entries <- mapConcurrently
             (runOneTaskOutput session multi Nothing)
             taskIds
@@ -270,7 +248,25 @@ runWaitTasks session multi args
                 floor (realToFrac (diffUTCTime now started) * (1000 :: Double))
         if satisfied || elapsedMs >= timeoutMs
             then pure $ Right $ formatWaitResult args.waitMode completed entries
-            else threadDelay 50000 >> waitLoop started
+            else threadDelay 50000 >> waitLoop taskIds started
+
+validateTaskIds :: [Text] -> Either Text [Text]
+validateTaskIds taskIds
+    | null resolvedIds = Left "Provide a non-empty task_ids list."
+    | length resolvedIds > maxTaskOutputIds =
+        Left $
+            "task_ids exceeds maximum of "
+                <> Text.pack (show maxTaskOutputIds)
+                <> " entries."
+    | otherwise = Right resolvedIds
+  where
+    resolvedIds =
+        nub
+            [ stripped
+            | taskId <- taskIds
+            , let stripped = Text.strip taskId
+            , not (Text.null stripped)
+            ]
 
 formatWaitResult :: WaitMode -> Int -> [TaskOutputEntry] -> Text
 formatWaitResult mode completed entries =

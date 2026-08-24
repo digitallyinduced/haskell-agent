@@ -9,6 +9,7 @@ import Agent.GrokBuild.Dialect.Runtime
     ( GrokCodingTools(..)
     , newGrokCodingTools
     )
+import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
 import Control.Exception.Safe (bracket)
@@ -24,6 +25,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Grok Build dialect" do
+    it "normalizes and validates task id lists consistently" do
+        validateTaskIds [" task-1 ", "", "task-1", "task-2"]
+            `shouldBe` Right ["task-1", "task-2"]
+        validateTaskIds [" ", "\t"]
+            `shouldBe` Left "Provide a non-empty task_ids list."
+        validateTaskIds (map (("task-" <>) . Text.pack . show) [1 .. 21 :: Int])
+            `shouldBe`
+                Left "task_ids exceeds maximum of 20 entries."
+
     it "renders the Grok Build tool contract" do
         let prompt =
                 grokSystemPrompt
