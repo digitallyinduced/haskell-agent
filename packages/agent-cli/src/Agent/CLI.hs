@@ -733,14 +733,16 @@ runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options = do
     fullscreenInputs <- newFullscreenInputBuffer
     sessionState <- newSessionState
+    mcpSupervisor <- MCP.newMcpSupervisor
     withRestoredCurrentDirectory
-        (go fullscreenInputs sessionState options Nothing)
+        (go mcpSupervisor fullscreenInputs sessionState options Nothing)
+        `finally` MCP.closeMcpSupervisor mcpSupervisor
   where
-    go fullscreenInputs sessionState current transition =
-        runAgent fullscreenInputs sessionState current transition >>= \case
+    go mcpSupervisor fullscreenInputs sessionState current transition =
+        runAgent mcpSupervisor fullscreenInputs sessionState current transition >>= \case
             RunResumeSession sessionId ->
                 newSessionState >>= \nextState ->
-                    go fullscreenInputs nextState
+                    go mcpSupervisor fullscreenInputs nextState
                         current
                             { optProvider = Nothing
                             , optModel = Nothing
@@ -754,7 +756,7 @@ runAgentWithRestarts options = do
                         Nothing
             RunSwitchWorktree path provider model effort ->
                 newSessionState >>= \nextState ->
-                    go fullscreenInputs nextState
+                    go mcpSupervisor fullscreenInputs nextState
                         current
                             { optProvider = Just provider
                             , optModel = Just model
@@ -767,11 +769,11 @@ runAgentWithRestarts options = do
                             }
                         Nothing
             RunSwitchProvider next ->
-                go fullscreenInputs sessionState
+                go mcpSupervisor fullscreenInputs sessionState
                     (applyProviderTransition current next)
                     (Just next)
             RunRestart sessionId ->
-                go fullscreenInputs sessionState
+                go mcpSupervisor fullscreenInputs sessionState
                     (restartSessionOptions current sessionId)
                     Nothing
             RunProviderStartFailed apiError ->
@@ -781,7 +783,7 @@ runAgentWithRestarts options = do
                             continueAutomaticFallback
                                 Nothing failed apiError >>= \case
                                 Just next ->
-                                    go fullscreenInputs sessionState
+                                    go mcpSupervisor fullscreenInputs sessionState
                                         (applyProviderTransition current next)
                                         (Just next)
                                 Nothing -> do
@@ -971,20 +973,22 @@ formatRepositoryPath home cwd
     cwdText = toText cwd
 
 runAgent
-    :: FullscreenInputBuffer
+    :: MCP.McpSupervisor
+    -> FullscreenInputBuffer
     -> SessionState
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO RunResult
-runAgent fullscreenInputs sessionState options transition = do
+runAgent mcpSupervisor fullscreenInputs sessionState options transition = do
     prepared <-
         prepareAgentIteration
-            fullscreenInputs sessionState Nothing options transition
+            mcpSupervisor fullscreenInputs sessionState Nothing options transition
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
                 runFullscreen runtime $
                     runFullscreenRestartLoop
+                        mcpSupervisor
                         fullscreenInputs
                         sessionState
                         runtime
@@ -1009,13 +1013,15 @@ runAgent fullscreenInputs sessionState options transition = do
 -- alternate screen until the whole provider-restart chain finishes. Session
 -- resumes still return to 'runAgentWithRestarts' and start a fresh UI.
 prepareAgentIteration
-    :: FullscreenInputBuffer
+    :: MCP.McpSupervisor
+    -> FullscreenInputBuffer
     -> SessionState
     -> Maybe FullscreenRuntime
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO PreparedAgent
 prepareAgentIteration
+        mcpSupervisor
         fullscreenInputs sessionState activeFullscreen options transition = do
     forM_ activeFullscreen resetFullscreenSessionActions
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
@@ -1220,7 +1226,15 @@ prepareAgentIteration
                         , startupSessionState = sessionState
                         }
                 runAgentInitialized
-                    options transition home root resumed resumeLock cwd startup
+                    mcpSupervisor
+                    options
+                    transition
+                    home
+                    root
+                    resumed
+                    resumeLock
+                    cwd
+                    startup
         cleanup = do
             writeIORef uiRuntimeRef Nothing
             writeIORef cancelToolRef (pure ())
@@ -1243,7 +1257,8 @@ resetFullscreenSessionActions runtime =
         (const (pure ()))
 
 runFullscreenRestartLoop
-    :: FullscreenInputBuffer
+    :: MCP.McpSupervisor
+    -> FullscreenInputBuffer
     -> SessionState
     -> FullscreenRuntime
     -> CliOptions
@@ -1251,6 +1266,7 @@ runFullscreenRestartLoop
     -> IO RunResult
     -> IO RunResult
 runFullscreenRestartLoop
+    mcpSupervisor
     fullscreenInputs
     sessionState
     runtime =
@@ -1299,6 +1315,7 @@ runFullscreenRestartLoop
             UiSetNotice (Just (progressNotice "Retrying startup…"))
         try @_ @StartupFailure
             (prepareAgentIteration
+                mcpSupervisor
                 fullscreenInputs
                 sessionState
                 (Just runtime)
@@ -1334,7 +1351,8 @@ runFullscreenRestartLoop
                 _ -> pure RunQuit
 
 runAgentInitialized
-    :: CliOptions
+    :: MCP.McpSupervisor
+    -> CliOptions
     -> Maybe ProviderTransition
     -> OsPath
     -> OsPath
@@ -1343,13 +1361,15 @@ runAgentInitialized
     -> OsPath
     -> StartupRuntime
     -> IO RunResult
-runAgentInitialized options transition home root resumed resumeLock cwd startup =
+runAgentInitialized
+        mcpSupervisor options transition home root resumed resumeLock cwd startup =
     runAgentInitializedWithLock
-        options transition home root resumed resumeLock cwd startup
+        mcpSupervisor options transition home root resumed resumeLock cwd startup
         `onException` mapM_ releaseSessionLock resumeLock
 
 runAgentInitializedWithLock
-    :: CliOptions
+    :: MCP.McpSupervisor
+    -> CliOptions
     -> Maybe ProviderTransition
     -> OsPath
     -> OsPath
@@ -1359,6 +1379,7 @@ runAgentInitializedWithLock
     -> StartupRuntime
     -> IO RunResult
 runAgentInitializedWithLock
+        mcpSupervisor
         options transition home root resumed resumeLock cwd startup = do
     let baseToolEnv = startup.startupToolEnv
         interrupt = startup.startupInterrupt
@@ -1957,7 +1978,9 @@ runAgentInitializedWithLock
                 { MCP.mcpServerName = label
                 , MCP.mcpServerCommand = Text.unpack config.mcpCommand
                 , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
-                , MCP.mcpServerCwd = Text.unpack <$> config.mcpCwd
+                , MCP.mcpServerCwd =
+                    Just $
+                        maybe (unsafeToFilePath cwd) Text.unpack config.mcpCwd
                 , MCP.mcpServerEnv =
                     [ (Text.unpack name, Text.unpack value)
                     | (name, value) <- Map.toAscList config.mcpEnv
@@ -1995,15 +2018,17 @@ runAgentInitializedWithLock
             when (settled && not (null statuses)) $
                 atomicModifyIORef' pendingNotices \notices ->
                     (notices <> [UserMessage (formatMcpModelNotice statuses)], ())
-    mcpFleet <-
+    mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
                 then
-                    MCP.startMcpFleetProgressive
+                    MCP.acquireMcpFleetProgressive
+                        mcpSupervisor
                         reportProgressiveMcp
                         mcpServerConfigs
                 else
-                    MCP.startMcpFleetWithProgress
+                    MCP.acquireMcpFleetWithProgress
+                        mcpSupervisor
                         (\names ->
                             setStartupNotice startup.startupFullscreen
                                 (if null names
@@ -2017,7 +2042,8 @@ runAgentInitializedWithLock
             Left exception ->
                 startupDie startup
                     ("Failed to initialize MCP tools: " <> show exception)
-            Right fleet -> pure fleet
+            Right lease -> pure lease
+    let mcpFleet = mcpLease.mcpLeaseFleet
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
@@ -2028,7 +2054,8 @@ runAgentInitializedWithLock
             secretHooks
             multiCtx
             agentTypesRef
-            `onException` (MCP.closeMcpFleet mcpFleet >> cleanupScratch)
+            `onException`
+                (MCP.releaseMcpFleetLease mcpLease >> cleanupScratch)
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -2106,7 +2133,7 @@ runAgentInitializedWithLock
                 Nothing -> pure ()
             closeSessionProcessManager sessionProcessManager
             readIORef activeSessionLock >>= mapM_ releaseSessionLock
-            MCP.closeMcpFleet mcpFleet
+            MCP.releaseMcpFleetLease mcpLease
             coding.codingClose
             cleanupScratch
     flip finally closeAll do

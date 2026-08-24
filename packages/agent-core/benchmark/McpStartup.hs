@@ -2,13 +2,17 @@ module Main (main) where
 
 import Agent.MCP
     ( McpFleet
+    , McpFleetLease(..)
     , McpInitState(..)
     , McpServerConfig(..)
     , McpServerStatus(..)
-    , McpServerStatus(..)
+    , acquireMcpFleet
     , closeMcpFleet
+    , closeMcpSupervisor
     , mcpFleetStatuses
     , mcpFleetTools
+    , newMcpSupervisor
+    , releaseMcpFleetLease
     , startMcpFleet
     , startMcpFleetProgressive
     )
@@ -34,6 +38,7 @@ data Workload
     | LifecycleStatusInspection
     | ProgressiveReady
     | ProgressiveSettled
+    | SupervisorReuse
 
 data Sample = Sample
     { wallMillis :: !Double
@@ -55,7 +60,7 @@ main =
                         ]
                 samples <- forM [1 .. sampleCount] \_ -> do
                     performGC
-                    measure (runWorkload workload configs)
+                    measureWorkload workload configs
                 let medianSample = median samples
                 printf
                     "%s,%d,%d,%.3f,%.3f\n"
@@ -67,7 +72,7 @@ main =
         _ ->
             die $
                 "usage: mcp-startup-bench WORKLOAD SERVERS DELAY_MS SAMPLES\n"
-                    <> "workloads: sequential, legacy-tools, lifecycle-status, progressive-ready, progressive-settled"
+                    <> "workloads: sequential, legacy-tools, lifecycle-status, progressive-ready, progressive-settled, supervisor-reuse"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
@@ -76,6 +81,7 @@ parseWorkload = \case
     "lifecycle-status" -> pure LifecycleStatusInspection
     "progressive-ready" -> pure ProgressiveReady
     "progressive-settled" -> pure ProgressiveSettled
+    "supervisor-reuse" -> pure SupervisorReuse
     other -> die ("unknown workload: " <> other)
 
 parsePositive :: String -> String -> IO Int
@@ -118,6 +124,20 @@ runWorkload workload configs = case workload of
             (startMcpFleetProgressive (const (pure ())) configs)
             closeMcpFleet
             awaitSettled
+    SupervisorReuse ->
+        error "SupervisorReuse is measured with a prewarmed supervisor"
+
+measureWorkload :: Workload -> [McpServerConfig] -> IO Sample
+measureWorkload SupervisorReuse configs =
+    bracket newMcpSupervisor closeMcpSupervisor \supervisor -> do
+        first <- acquireMcpFleet supervisor configs
+        releaseMcpFleetLease first
+        measure do
+            second <- acquireMcpFleet supervisor configs
+            let checksum = length (mcpFleetTools second.mcpLeaseFleet)
+            releaseMcpFleetLease second
+            pure checksum
+measureWorkload workload configs = measure (runWorkload workload configs)
 
 awaitSettled :: McpFleet -> IO Int
 awaitSettled fleet = do
