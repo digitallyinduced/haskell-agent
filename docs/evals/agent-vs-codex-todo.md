@@ -9,11 +9,19 @@ This compares the two product configurations, not identical tool schemas or
 system prompts. Codex runs ephemerally with user config and exec-policy rules
 disabled; both runners still use their own built-in coding-agent contracts.
 
-The revised evaluator disables agent-cli subagents and its GHCi tool, enables
-its explicit Bash tool, and requires both runners to personally build and
-exercise the application before finishing. This prevents unreported
-child-model usage and gives both runners a shell-based execution path on hosts
-without `ghci` in the ambient `PATH`.
+The evaluator has three runners:
+
+- `agent-cli`: disables subagents and GHCi, enables the explicit Bash tool, and
+  requires the root agent to implement and verify the application itself;
+- `agent-cli-rlm`: gives the root only the GHCi tool plus `rlmQuery`,
+  `rlmQueryMany`, and `rlmCode` helpers backed by in-process subagents;
+- `codex`: runs Codex exec with matching model, effort, approval, and task
+  constraints.
+
+RLM worker usage is included in the root session totals. Read-only workers may
+run concurrently; coding workers are serialized to avoid overlapping edits.
+The packaged `agent-cli` puts GHC on `PATH`, because RLM mode requires the
+persistent GHCi coordinator.
 
 The evaluator records:
 
@@ -54,9 +62,9 @@ eval_bin=$(nix develop -c cabal list-bin agent-cli:exe:eval-agent-vs-codex-todo)
   --results-dir "eval-results/agent-vs-codex-todo-$(date +%Y%m%d-%H%M%S)"
 ```
 
-Run order alternates by trial to reduce ordering bias. Use
-`--runner agent-cli` or `--runner codex` for a focused smoke test. Results
-directories must be new or empty.
+Run order alternates by trial to reduce ordering bias. Use `--runner
+agent-cli`, `--runner agent-cli-rlm`, or `--runner codex` for a focused smoke
+test. Results directories must be new or empty.
 
 The eval makes real model requests and may incur usage charges.
 
@@ -78,6 +86,45 @@ counts as successful when both the agent exits cleanly and every grader check
 passes.
 
 ## Results: August 24, 2026
+
+### In-process RLM prototype: `gpt-5.6-terra`
+
+A one-trial smoke comparison was run on `office-builder` with medium effort
+and a 1,200-second timeout. All three corrected runners passed their own
+verification and the independent grader.
+
+| runner | pass | seconds | input | uncached | cached | output |
+|---|---:|---:|---:|---:|---:|---:|
+| agent-cli | yes | 206.61 | 371,798 | 28,886 | 342,912 | 6,545 |
+| agent-cli RLM, warm Nix cache | yes | 248.30 | 155,518 | 49,790 | 105,728 | 9,342 |
+| Codex | yes | 713.20 | 1,886,187 | 111,851 | 1,774,336 | 9,637 |
+
+Against direct agent-cli in this sample, RLM used 58.2% fewer total input
+tokens and 69.2% fewer cached-input tokens, but 72.4% more uncached input,
+42.7% more output, and 20.2% more time. Against Codex, RLM used 91.8% fewer
+total input tokens, 94.0% fewer cached tokens, 55.5% fewer uncached tokens,
+3.1% fewer output tokens, and 65.2% less time.
+
+The first corrected RLM run took 835.26 seconds with 333,778 input tokens
+(245,504 cached), 9,133 output tokens, and still passed. Its generated flake
+selected a Nix package set that was not warm on the host. The first GHC version
+check exhausted the command timeout while Nix built dependencies, then the
+retry succeeded. After warming that exact package set, the second RLM run took
+248.30 seconds. This makes the timing result unsuitable as a controlled
+performance conclusion: model choices changed the generated flake, and
+first-use Nix closure cost dominated both the cold RLM run and the Codex run.
+The token reduction is less sensitive to that host-cache artifact, but this is
+still only one successful trial per configuration and needs repetition.
+
+Transcript inspection explains the token shape. The RLM root made one
+read-only inspection call, delegated the initial implementation to a coding
+worker, inspected the result locally, and used a second coding worker for a
+focused API correction. The root then performed the required Nix and HTTP
+checks itself. This kept large implementation contexts inside short-lived
+workers instead of replaying them through every root turn, substantially
+reducing cached-context amplification. It also added uncached prompts and
+worker responses, explaining why uncached input and output increased relative
+to direct agent-cli.
 
 ### Revised self-verifying run: `gpt-5.6-sol`
 
