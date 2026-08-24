@@ -58,14 +58,16 @@ import Agent.Tools.PlanMode
     , isPlanModeActive
     , writePlanTool
     )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , ToolAccess(..)
     , ToolExecutionPolicy(..)
     , ToolEnv(..)
-    , ToolResource(..)
-    , ToolResourceClaim(..)
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     , jsonTool

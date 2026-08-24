@@ -11,13 +11,15 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
-    , ToolAccess(..)
     , ToolExecutionPolicy(..)
-    , ToolResource(..)
-    , ToolResourceClaim(..)
     , jsonTool
     , withToolResourceClaims
     )

@@ -36,11 +36,13 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     )
+import Agent.Tools.Scheduling
+    ( ToolSchedulingPlan(..)
+    , schedulingPlansConflict
+    )
 import Agent.Tools.Types
     ( ToolRegistry
-    , ToolSchedulingPlan(..)
     , dispatchRegisteredToolCall
-    , schedulingPlansConflict
     , toolSchedulingPlanFor
     )
 import Control.Concurrent.Async (mapConcurrently, race)

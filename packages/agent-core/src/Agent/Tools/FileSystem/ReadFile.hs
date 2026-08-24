@@ -10,13 +10,15 @@ import Agent.ToolDispatch
     , typedTool
     )
 import Agent.Tools.IO (readTextFile, resolveForRead)
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv
-    , ToolAccess(..)
     , ToolExecutionPolicy(..)
-    , ToolResource(..)
-    , ToolResourceClaim(..)
     , jsonTool
     , withToolResourceClaims
     )

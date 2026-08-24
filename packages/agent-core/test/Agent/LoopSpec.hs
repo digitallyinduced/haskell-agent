@@ -6,19 +6,21 @@ import Agent.Loop
 import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    , ToolSchedulingPlan(..)
+    , schedulingPlansConflict
+    )
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
-    , ToolAccess(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
-    , ToolResource(..)
-    , ToolResourceClaim(..)
     , jsonAppToolWithExecution
     , mkToolRegistry
-    , schedulingPlansConflict
     , toolExecutionPolicyFor
-    , ToolSchedulingPlan(..)
     , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)

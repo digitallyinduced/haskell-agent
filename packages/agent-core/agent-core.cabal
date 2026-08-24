@@ -78,6 +78,7 @@ library
                     , Agent.Tools.MultiAgents
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
+                    , Agent.Tools.Scheduling
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src

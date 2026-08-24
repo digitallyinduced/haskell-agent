@@ -9,11 +9,11 @@ import Agent.Codex.Dialect.Runtime
 import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.ToolDispatch (customToolCall, functionToolCall)
+import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Types
     ( AppTool(..)
     , defaultToolEnv
     , mkToolRegistry
-    , schedulingPlansConflict
     , toolSchedulingPlanFor
     )
 import Control.Exception.Safe (bracket)
