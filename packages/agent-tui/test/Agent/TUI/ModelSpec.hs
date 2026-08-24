@@ -17,6 +17,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen UI reducer" do
+    it "cycles across all four permission choices" do
+        let shown = reduceUi (UiPermissionShown "write a file") initialUiState
+            moved count = iterate (reduceUi (UiPermissionMoved 1)) shown !! count
+        fmap (.permissionIndex) shown.uiPermission `shouldBe` Just 0
+        fmap (.permissionIndex) (moved 1).uiPermission `shouldBe` Just 1
+        fmap (.permissionIndex) (moved 2).uiPermission `shouldBe` Just 2
+        fmap (.permissionIndex) (moved 3).uiPermission `shouldBe` Just 3
+        fmap (.permissionIndex) (moved 4).uiPermission `shouldBe` Just 0
+
     it "retains user, reasoning, and assistant blocks across a turn" do
         let state =
                 apply

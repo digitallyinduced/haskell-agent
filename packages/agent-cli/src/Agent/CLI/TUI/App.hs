@@ -2741,6 +2741,7 @@ drawPermission state permission =
                                             (permissionRow permission.permissionIndex)
                                             [0 ..]
                                             [ "Allow once"
+                                            , "Always approve all tools for this project"
                                             , "Always allow this tool this session"
                                             , "Deny"
                                             ]
@@ -3796,6 +3797,7 @@ handlePermissionKey = \case
     V.EvKey V.KBackTab [] -> movePermission (-1)
     V.EvKey (V.KChar '\t') [] -> movePermission 1
     V.EvKey (V.KChar 'y') [] -> resolvePermission PermissionAllowOnce
+    V.EvKey (V.KChar 'A') [] -> resolvePermission PermissionAllowAll
     V.EvKey (V.KChar 'a') [] -> resolvePermission PermissionAllowTool
     V.EvKey (V.KChar 'n') [] -> resolvePermission PermissionDeny
     V.EvKey V.KEsc [] -> resolvePermission PermissionDeny
@@ -3818,7 +3820,8 @@ handlePermissionKey = \case
 permissionChoiceAt :: Int -> PermissionChoice
 permissionChoiceAt = \case
     0 -> PermissionAllowOnce
-    1 -> PermissionAllowTool
+    1 -> PermissionAllowAll
+    2 -> PermissionAllowTool
     _ -> PermissionDeny
 
 resolvePermission

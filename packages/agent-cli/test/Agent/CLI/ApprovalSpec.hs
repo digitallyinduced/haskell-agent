@@ -3,6 +3,7 @@ module Agent.CLI.ApprovalSpec (spec) where
 import Agent.CLI.Approval
     ( ApprovalNotice(..)
     , approveToolDecisionWithReporter
+    , approveToolDecisionWithReporterAndPersistence
     , childApprove
     )
 import Agent.CLI.Options (ApprovalPolicy(..))
@@ -212,6 +213,25 @@ spec = do
             readIORef notices `shouldReturn`
                 [ApprovalSuccess "✓ always allow write this session"]
             readIORef allowed `shouldReturn` Set.singleton "write"
+
+        it "enables and persists project-wide auto-approval from a prompt" do
+            policy <- newIORef PromptMutating
+            allowed <- newIORef Set.empty
+            plan <- newPlanModeEnv (unsafeEncodeUtf "/tmp/approval-test") Nothing
+            notices <- newIORef []
+            persisted <- newIORef (0 :: Int)
+
+            approveToolDecisionWithReporterAndPersistence
+                (\_ -> pure (Just PermissionAllowAll))
+                (\notice -> modifyIORef' notices (<> [notice]))
+                (modifyIORef' persisted (+ 1))
+                policy allowed (registry [mutatingTool]) plan mutatingCall
+                `shouldReturn` Right True
+
+            readIORef policy `shouldReturn` ApproveAll
+            readIORef persisted `shouldReturn` 1
+            readIORef notices `shouldReturn`
+                [ApprovalSuccess "✓ auto-approve on (saved for project)"]
 
         it "shares remembered approval across public and internal Grok aliases" do
             policy <- newIORef PromptMutating

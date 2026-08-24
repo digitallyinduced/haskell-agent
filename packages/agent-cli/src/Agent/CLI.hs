@@ -72,7 +72,7 @@ import Agent.CLI.AgentSessions
 import Agent.CLI.Approval
     ( ApprovalNotice(..)
     , approveToolDecision
-    , approveToolDecisionWithReporter
+    , approveToolDecisionWithReporterAndPersistence
     , toggleAlwaysApprove
     )
 import Agent.CLI.Btw
@@ -202,6 +202,7 @@ import Agent.CLI.Project
     , projectModelProvider
     , resolveProjectRoot
     , saveProjectAccount
+    , saveProjectAutoApprove
     , saveProjectModel
     )
 import Agent.CLI.Prompt
@@ -3373,9 +3374,10 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                     Nothing ->
                         withStdinPaused escPaused $
                             approveToolDecision
-                                policyRef allowedToolsRef toolRegistry planMode call
+                                policyRef allowedToolsRef toolRegistry planMode
+                                projectRoot call
                     Just runtime ->
-                        approveToolDecisionWithReporter
+                        approveToolDecisionWithReporterAndPersistence
                             (requestFullscreenPermission runtime)
                             (\case
                                 ApprovalWarning _ -> pure ()
@@ -3384,6 +3386,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                                         (UiSetNotice
                                             (Just
                                                 (successNotice message))))
+                            (saveProjectAutoApprove projectRoot True)
                             policyRef
                             allowedToolsRef
                             toolRegistry

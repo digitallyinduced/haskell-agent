@@ -4,6 +4,7 @@ module Agent.CLI.Approval
     , approveToolDecision
     , approveToolDecisionWith
     , approveToolDecisionWithReporter
+    , approveToolDecisionWithReporterAndPersistence
     , childApprove
     , toggleAlwaysApprove
     ) where
@@ -64,13 +65,22 @@ approveToolDecision
     -> IORef (Set Text)
     -> ToolRegistry
     -> PlanModeEnv
+    -> OsPath
     -> ToolCall
     -> IO (Either Text Bool)
-approveToolDecision policyRef allowedToolsRef tools planMode call = do
-    approveToolDecisionWith
+approveToolDecision policyRef allowedToolsRef tools planMode projectRoot call = do
+    approveToolDecisionWithReporterAndPersistence
         (\requested -> do
             color <- resolveColor stderr
             promptPermission color requested)
+        (\case
+            ApprovalWarning message -> do
+                color <- resolveColor stderr
+                putTextLn stderr (roleWarn color message)
+            ApprovalSuccess message -> do
+                color <- resolveColor stderr
+                putTextLn stderr (roleSuccess color message))
+        (saveProjectAutoApprove projectRoot True)
         policyRef
         allowedToolsRef
         tools
@@ -86,13 +96,14 @@ approveToolDecisionWith
     -> ToolCall
     -> IO (Either Text Bool)
 approveToolDecisionWith requestPermission =
-    approveToolDecisionWithReporter requestPermission \case
+    approveToolDecisionWithReporterAndPersistence requestPermission (\case
         ApprovalWarning message -> do
             color <- resolveColor stderr
             putTextLn stderr (roleWarn color message)
         ApprovalSuccess message -> do
             color <- resolveColor stderr
-            putTextLn stderr (roleSuccess color message)
+            putTextLn stderr (roleSuccess color message))
+        (pure ())
 
 approveToolDecisionWithReporter
     :: (ToolCall -> IO (Maybe PermissionChoice))
@@ -103,7 +114,20 @@ approveToolDecisionWithReporter
     -> PlanModeEnv
     -> ToolCall
     -> IO (Either Text Bool)
-approveToolDecisionWithReporter requestPermission report policyRef allowedToolsRef tools planMode call = do
+approveToolDecisionWithReporter requestPermission report =
+    approveToolDecisionWithReporterAndPersistence requestPermission report (pure ())
+
+approveToolDecisionWithReporterAndPersistence
+    :: (ToolCall -> IO (Maybe PermissionChoice))
+    -> (ApprovalNotice -> IO ())
+    -> IO ()
+    -> IORef ApprovalPolicy
+    -> IORef (Set Text)
+    -> ToolRegistry
+    -> PlanModeEnv
+    -> ToolCall
+    -> IO (Either Text Bool)
+approveToolDecisionWithReporterAndPersistence requestPermission report persistAlwaysApprove policyRef allowedToolsRef tools planMode call = do
     policy <- readIORef policyRef
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
@@ -143,6 +167,16 @@ approveToolDecisionWithReporter requestPermission report policyRef allowedToolsR
                                             requestPermission call >>= \case
                                                 Nothing -> pure (Right False)
                                                 Just PermissionAllowOnce ->
+                                                    pure (Right True)
+                                                Just PermissionAllowAll -> do
+                                                    atomicModifyIORef' policyRef $
+                                                        const (ApproveAll, ())
+                                                    persistAlwaysApprove
+                                                    report $
+                                                        ApprovalSuccess
+                                                            (glyphOk
+                                                                <> "auto-approve on \
+                                                                   \(saved for project)")
                                                     pure (Right True)
                                                 Just PermissionAllowTool -> do
                                                     modifyIORef' allowedToolsRef

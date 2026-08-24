@@ -25,6 +25,7 @@ import System.IO (hIsTerminalDevice, stderr, stdin)
 
 data PermissionChoice
     = PermissionAllowOnce
+    | PermissionAllowAll
     | PermissionAllowTool
     | PermissionDeny
     deriving (Eq, Show)
@@ -38,6 +39,7 @@ data PermissionState = PermissionState
 permissionLabels :: [Text]
 permissionLabels =
     [ "Allow once"
+    , "Always approve all tools for this project"
     , "Always allow this tool this session"
     , "Deny"
     ]
@@ -55,11 +57,13 @@ applyPermissionKey key state = case key of
     PickerKeyConfirm -> Left (choiceFromIndex state.permIndex)
     PickerKeyUp -> Right state { permIndex = move (-1) state.permIndex }
     PickerKeyDown -> Right state { permIndex = move 1 state.permIndex }
-    PickerKeyChar c -> case Text.toLower (Text.singleton c) of
-        "y" -> Left PermissionAllowOnce
-        "a" -> Left PermissionAllowTool
-        "n" -> Left PermissionDeny
-        _ -> Right state
+    PickerKeyChar 'A' -> Left PermissionAllowAll
+    PickerKeyChar c ->
+        case Text.toLower (Text.singleton c) of
+            "y" -> Left PermissionAllowOnce
+            "a" -> Left PermissionAllowTool
+            "n" -> Left PermissionDeny
+            _ -> Right state
     PickerKeyBackspace -> Right state
   where
     n = length permissionLabels
@@ -68,7 +72,8 @@ applyPermissionKey key state = case key of
 choiceFromIndex :: Int -> PermissionChoice
 choiceFromIndex = \case
     0 -> PermissionAllowOnce
-    1 -> PermissionAllowTool
+    1 -> PermissionAllowAll
+    2 -> PermissionAllowTool
     _ -> PermissionDeny
 
 renderPermissionFrame :: Bool -> PermissionState -> Text
@@ -82,7 +87,7 @@ renderPermissionFrame color state =
                 permissionLabels
         footer =
             roleMuted color
-                "↑↓/jk or scroll · click/enter · y once · a this tool · n/esc deny"
+                "↑↓/jk or scroll · click/enter · y once · A all · a this tool · n/esc deny"
     in Text.intercalate "\n" (header : rows <> [footer])
 
 renderRow :: Bool -> Bool -> Text -> Text
@@ -91,8 +96,9 @@ renderRow color selected label =
         body = if selected then roleSuccess color label else roleMuted color label
     in cursor <> body
 
--- | TTY card; non-TTY keeps cooked @y/n/a@. @a@ on a pipe is still
--- project-wide always-approve so scripts keep working.
+-- | TTY card; non-TTY keeps cooked @y/n/a/A@. Uppercase @A@, @all@, or
+-- @yolo@ enables project-wide auto-approval; lowercase @a@ remembers only the
+-- current tool for this session.
 promptPermission :: Bool -> ToolCall -> IO (Maybe PermissionChoice)
 promptPermission color call = do
     isTty <- hIsTerminalDevice stdin
@@ -111,10 +117,11 @@ promptPermission color call = do
 cooked :: Bool -> Text -> IO (Maybe PermissionChoice)
 cooked color summary = do
     let question =
-            roleWarn color (glyphWarn <> summary <> " [y/N/a] ")
+            roleWarn color (glyphWarn <> summary <> " [y/N/a/A] ")
     readApprovalLine question >>= \case
         Nothing -> pure Nothing
         Just raw -> pure $ Just $ case parseApprovalAnswer raw of
             AllowOnce -> PermissionAllowOnce
             AllowAlways -> PermissionAllowTool
+            AllowAll -> PermissionAllowAll
             Deny -> PermissionDeny
