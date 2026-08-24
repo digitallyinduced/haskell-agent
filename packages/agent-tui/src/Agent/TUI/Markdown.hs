@@ -1,6 +1,7 @@
 -- | Lightweight fullscreen Markdown block rendering.
 module Agent.TUI.Markdown
     ( Inline(..)
+    , codeWidgetWithSyntaxHighlighting
     , inlinePlainText
     , markdownWidget
     , markdownWidgetWithCodeControls
@@ -79,6 +80,17 @@ markdownWidgetWithSyntaxHighlighting syntaxHighlighter cacheCode codeHeader inpu
         concatMap
             (renderChunk syntaxHighlighter cacheCode codeHeader)
             (fenceChunks input)
+
+-- | Render a standalone code body with the same width bounding and optional
+-- syntax highlighting used by fenced Markdown blocks.
+codeWidgetWithSyntaxHighlighting
+    :: Maybe SyntaxHighlighter
+    -> Text
+    -> Text
+    -> Widget n
+codeWidgetWithSyntaxHighlighting syntaxHighlighter language =
+    renderCodeBodyWith wrapStyledCode syntaxHighlighter language
+        . codeBodyLines
 
 renderChunk
     :: Maybe SyntaxHighlighter
@@ -159,7 +171,16 @@ renderCodeBody
     -> Text
     -> [Text]
     -> Widget n
-renderCodeBody syntaxHighlighter language bodyLines =
+renderCodeBody =
+    renderCodeBodyWith wrapStyled
+
+renderCodeBodyWith
+    :: (Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]])
+    -> Maybe SyntaxHighlighter
+    -> Text
+    -> [Text]
+    -> Widget n
+renderCodeBodyWith wrapLine syntaxHighlighter language bodyLines =
     -- Keep tokenization inside the render action. Brick's 'cached' inspects a
     -- widget's size policy before consulting its cache; returning a concrete
     -- vBox here would therefore force tokenization on every streamed redraw.
@@ -186,7 +207,7 @@ renderCodeBody syntaxHighlighter language bodyLines =
             contentWidth =
                 max 1 (availableWidth - 2 * horizontalPadding)
             rows =
-                concatMap (wrapStyled contentWidth) styledLines
+                concatMap (wrapLine contentWidth) styledLines
             image =
                 V.vertCat
                     [ renderCodeRow
@@ -562,6 +583,49 @@ wrapStyled width spans =
     finalize (rows, _) =
         let ordered = map (groupStyledCells . reverse) (reverse rows)
         in if null ordered then [[]] else ordered
+
+-- | Prefer source whitespace as a wrap point without deleting it. The
+-- whitespace stays at the end of the previous visual row, so concatenating
+-- the rendered payload reconstructs the original code exactly. Tokens wider
+-- than the viewport still hard-wrap.
+wrapStyledCode :: Int -> [(V.Attr, Text)] -> [[(V.Attr, Text)]]
+wrapStyledCode width spans =
+    map groupStyledCells (wrapCells (styledCells spans))
+  where
+    width' = max 1 width
+
+    wrapCells [] = [[]]
+    wrapCells remaining =
+        let (fitting, overflow) = takeFitting remaining
+        in case overflow of
+            [] -> [fitting]
+            _ ->
+                case lastSpaceIndex fitting of
+                    Just index
+                        | index > 0 ->
+                            let (line, nextPrefix) =
+                                    splitAt (index + 1) fitting
+                            in line : wrapCells (nextPrefix <> overflow)
+                    _ -> fitting : wrapCells overflow
+
+    takeFitting = go 0 []
+      where
+        go _ taken [] = (reverse taken, [])
+        go used taken allCells@((attr, character) : rest)
+            | used > 0
+            , used + cellWidth > width' =
+                (reverse taken, allCells)
+            | otherwise =
+                go (used + cellWidth) ((attr, character) : taken) rest
+          where
+            cellWidth = terminalCharWidth character
+
+    lastSpaceIndex =
+        List.foldl'
+            (\found (index, (_, character)) ->
+                if isSpace character then Just index else found)
+            Nothing
+            . zip [0 :: Int ..]
 
 -- | Table cells prefer word boundaries, but still hard-wrap an individual
 -- token that is wider than its column.

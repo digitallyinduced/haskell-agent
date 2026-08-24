@@ -5,10 +5,13 @@ packages:
     packages/agent-grok-build-dialect
     packages/agent-syntax
     packages/agent-tui
+    packages/agent-responses-types
     packages/agent-responses
     packages/agent-openai
     packages/agent-xai
     packages/agent-openrouter
+    packages/claude-agent-sdk-haskell
+    packages/agent-claude
 
 tests: True
 multi-repl: True

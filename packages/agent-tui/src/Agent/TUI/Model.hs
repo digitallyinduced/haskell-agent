@@ -5,6 +5,7 @@ module Agent.TUI.Model
     , BlockState(..)
     , Focus(..)
     , NoticeKind(..)
+    , RetryCountdown(..)
     , PermissionOverlay(..)
     , PromptState(..)
     , UiBlock(..)
@@ -35,7 +36,8 @@ module Agent.TUI.Model
 import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
-    , summarizeToolCall
+    , toolCallInput
+    , toolCallTitle
     )
 import Agent.TUI.Motion
     ( completionStatusDurationMillis
@@ -85,6 +87,15 @@ data UiNotice = UiNotice
     { noticeKind :: !NoticeKind
     , noticeText :: !Text
     , noticeTransient :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | A live retry deadline attached to one retained error block.
+data RetryCountdown = RetryCountdown
+    { retryCountdownBlockId :: !BlockId
+    , retryCountdownPrefix :: !Text
+    , retryCountdownRemainingMillis :: !Int
+    , retryCountdownSuffix :: !Text
     }
     deriving (Eq, Show)
 
@@ -140,6 +151,8 @@ data UiState = UiState
     , uiQueuedInputs :: !(Seq Text)
     , uiFocus :: !Focus
     , uiSelectedBlock :: !(Maybe BlockId)
+    , uiSelectedBlockIndex :: !(Maybe Int)
+    , uiBlockIndices :: !(Map.Map BlockId Int)
     , uiFollow :: !Bool
     , uiRunning :: !Bool
     , uiAwaitingInput :: !Bool
@@ -149,11 +162,12 @@ data UiState = UiState
     , uiCwd :: !Text
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
+    , uiRetryCountdown :: !(Maybe RetryCountdown)
     , uiNoticeElapsedMillis :: !Int
     , uiElapsedMillis :: !Int
     , uiCompletionRemainingMillis :: !Int
     , uiTurnStartBlock :: !Int
-    , uiToolCalls :: !(Map.Map Text ToolCall)
+    , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
     }
     deriving (Eq, Show)
 
@@ -172,6 +186,7 @@ data UiEvent
     | UiSetNotice !(Maybe UiNotice)
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId
+    | UiActivateBlock !BlockId
     | UiToggleSelected
     | UiFocusChanged !Focus
     | UiPermissionShown !Text
@@ -181,6 +196,8 @@ data UiEvent
     | UiAssistantHistory !Text
     | UiSystemMessage !Text
     | UiErrorMessage !Text
+    -- | Append an error whose retry guidance counts down in place.
+    | UiRetryCountdown !Text !Int !Text
     | UiConversationCleared
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
@@ -196,6 +213,8 @@ initialUiState = UiState
     , uiQueuedInputs = Seq.empty
     , uiFocus = FocusComposer
     , uiSelectedBlock = Nothing
+    , uiSelectedBlockIndex = Nothing
+    , uiBlockIndices = Map.empty
     , uiFollow = True
     , uiRunning = False
     , uiAwaitingInput = False
@@ -213,6 +232,7 @@ initialUiState = UiState
     , uiCwd = ""
     , uiPermission = Nothing
     , uiNotice = Nothing
+    , uiRetryCountdown = Nothing
     , uiNoticeElapsedMillis = 0
     , uiElapsedMillis = 0
     , uiCompletionRemainingMillis = 0
@@ -303,6 +323,8 @@ reduceUi event state = case event of
         moveSelection delta state
     UiSelectBlock ident ->
         selectBlock ident state
+    UiActivateBlock ident ->
+        toggleSelected (selectBlock ident state)
     UiToggleSelected ->
         toggleSelected state
     UiFocusChanged focus ->
@@ -340,13 +362,42 @@ reduceUi event state = case event of
     UiSystemMessage message ->
         appendBlock BlockSystem "System" message "" BlockComplete Nothing state
     UiErrorMessage message ->
-        appendBlock BlockError "Error" message "" BlockFailed Nothing state
+        (appendBlock BlockError "Error" message "" BlockFailed Nothing state)
+            { uiRetryCountdown = Nothing }
+    UiRetryCountdown prefix remainingMillis suffix ->
+        let
+            ident = BlockId state.uiNextBlockId
+            remaining = max 0 remainingMillis
+            withBlock =
+                appendBlock
+                    BlockError
+                    "Error"
+                    (retryCountdownText prefix remaining suffix)
+                    ""
+                    BlockFailed
+                    Nothing
+                    state
+        in withBlock
+            { uiRetryCountdown =
+                if remaining == 0
+                    then Nothing
+                    else Just RetryCountdown
+                        { retryCountdownBlockId = ident
+                        , retryCountdownPrefix = prefix
+                        , retryCountdownRemainingMillis = remaining
+                        , retryCountdownSuffix = suffix
+                        }
+            }
     UiConversationCleared ->
         state
             { uiBlocks = Seq.empty
             , uiSelectedBlock = Nothing
+            , uiSelectedBlockIndex = Nothing
+            , uiBlockIndices = Map.empty
             , uiNextBlockId = 1
             , uiTurnStartBlock = 0
+            , uiToolCalls = Map.empty
+            , uiRetryCountdown = Nothing
             }
     UiSetFollow follow ->
         state
@@ -357,12 +408,28 @@ reduceUi event state = case event of
                         (Seq.length state.uiBlocks - 1)
                         state.uiBlocks
                     else state.uiSelectedBlock
+            , uiSelectedBlockIndex =
+                if follow
+                    then
+                        if Seq.null state.uiBlocks
+                            then Nothing
+                            else Just (Seq.length state.uiBlocks - 1)
+                    else state.uiSelectedBlockIndex
             }
     UiTurnEnded terminalState ->
         finalizeTurn terminalState state
     UiTurnRestarted ->
-        state
-            { uiBlocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+        let blocks = Seq.take state.uiTurnStartBlock state.uiBlocks
+            selected =
+                selectionAfterTruncate
+                    blocks
+                    state.uiSelectedBlockIndex
+        in state
+            { uiBlocks = blocks
+            , uiSelectedBlock = (.blockId) . snd <$> selected
+            , uiSelectedBlockIndex = fst <$> selected
+            , uiBlockIndices =
+                Map.filter (< Seq.length blocks) state.uiBlockIndices
             , uiRunning = False
             , uiActivity = "Restarting…"
             , uiNotice =
@@ -391,7 +458,9 @@ advanceUiTime rawElapsedMillis state =
             , maybe False (.noticeTransient) state.uiNotice =
                 Nothing
             | otherwise = state.uiNotice
-    in state
+        countdown =
+            advanceRetryCountdown elapsedMillis state
+    in countdown
         { uiElapsedMillis =
             if state.uiRunning
                 then state.uiElapsedMillis + elapsedMillis
@@ -411,6 +480,8 @@ uiNeedsTick :: UiState -> Bool
 uiNeedsTick state =
     state.uiRunning
         || state.uiCompletionRemainingMillis > 0
+        || maybe False ((> 0) . (.retryCountdownRemainingMillis))
+            state.uiRetryCountdown
         || maybe False noticeNeedsTick state.uiNotice
   where
     noticeNeedsTick notice =
@@ -419,11 +490,20 @@ uiNeedsTick state =
 uiNextDeadlineMillis :: UiState -> Maybe Int
 uiNextDeadlineMillis state =
     minimumMaybe $
-        completionDeadline <> noticeDeadline
+        completionDeadline <> countdownDeadline <> noticeDeadline
   where
     completionDeadline =
         [state.uiCompletionRemainingMillis
         | state.uiCompletionRemainingMillis > 0]
+    countdownDeadline =
+        case state.uiRetryCountdown of
+            Just countdown ->
+                [ min
+                    countdown.retryCountdownRemainingMillis
+                    (millisecondsUntilNextDisplayedSecond
+                        countdown.retryCountdownRemainingMillis)
+                ]
+            Nothing -> []
     noticeDeadline =
         case state.uiNotice of
             Just notice
@@ -436,6 +516,74 @@ uiNextDeadlineMillis state =
                 []
     minimumMaybe [] = Nothing
     minimumMaybe values = Just (minimum values)
+
+advanceRetryCountdown :: Int -> UiState -> UiState
+advanceRetryCountdown elapsedMillis state =
+    case state.uiRetryCountdown of
+        Nothing -> state
+        Just countdown ->
+            let
+                remaining =
+                    max 0
+                        ( countdown.retryCountdownRemainingMillis
+                            - elapsedMillis
+                        )
+                body =
+                    retryCountdownText
+                        countdown.retryCountdownPrefix
+                        remaining
+                        countdown.retryCountdownSuffix
+                blocks =
+                    case Map.lookup
+                        countdown.retryCountdownBlockId
+                        state.uiBlockIndices of
+                        Nothing -> state.uiBlocks
+                        Just index ->
+                            Seq.adjust
+                                (\block -> block { blockBody = body })
+                                index
+                                state.uiBlocks
+            in state
+                { uiBlocks = blocks
+                , uiRetryCountdown =
+                    if remaining == 0
+                        then Nothing
+                        else Just countdown
+                            { retryCountdownRemainingMillis = remaining }
+                }
+
+retryCountdownText :: Text -> Int -> Text -> Text
+retryCountdownText prefix remainingMillis suffix =
+    prefix
+        <> (if remainingMillis <= 0
+                then "Try again now"
+                else
+                    "Try again in "
+                        <> formatCountdownSeconds
+                            ((remainingMillis + 999) `div` 1000))
+        <> suffix
+
+formatCountdownSeconds :: Int -> Text
+formatCountdownSeconds rawSeconds =
+    let
+        total = max 0 rawSeconds
+        hours = total `div` 3600
+        minutes = (total `mod` 3600) `div` 60
+        seconds = total `mod` 60
+        showText = Text.pack . show
+        pad2 value
+            | value < 10 = "0" <> showText value
+            | otherwise = showText value
+    in if hours > 0
+        then showText hours <> "h" <> pad2 minutes <> "m" <> pad2 seconds <> "s"
+        else if minutes > 0
+            then showText minutes <> "m" <> pad2 seconds <> "s"
+            else showText seconds <> "s"
+
+millisecondsUntilNextDisplayedSecond :: Int -> Int
+millisecondsUntilNextDisplayedSecond remainingMillis =
+    let remainder = remainingMillis `mod` 1000
+    in if remainder == 0 then 1000 else remainder
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
@@ -467,32 +615,46 @@ reduceLoop event state = case event of
     ToolStarted call ->
         let
             kind = toolBlockKind call.name
+            title = toolCallTitle call
+            blockIndex = Seq.length state.uiBlocks
             body = case call.name of
                 "search_replace" ->
                     formatSearchReplaceDiff call.arguments
                 _ -> ""
-        in appendBlock kind (summarizeToolCall call) body ""
+            detail = toolCallInput call
+        in appendBlock kind title body detail
             BlockRunning (Just call.callId)
             state
                 { uiRunning = True
                 , uiAwaitingInput = False
-                , uiActivity = summarizeToolCall call
-                , uiToolCalls = Map.insert call.callId call state.uiToolCalls
+                , uiActivity = title
+                , uiToolCalls =
+                    Map.insert
+                        call.callId
+                        (blockIndex, call)
+                        state.uiToolCalls
                 }
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
-        let displayed = case Map.lookup result.callId state.uiToolCalls of
+        let activeCall = Map.lookup result.callId state.uiToolCalls
+            displayed = case activeCall of
                 Nothing -> result
-                Just call ->
+                Just (_, call) ->
                     result
                         { output = formatToolOutput call result.output }
-        in completeTool displayed state
-            { uiRunning = True
-            , uiAwaitingInput = False
-            , uiActivity = "Thinking…"
-            , uiToolCalls = Map.delete result.callId state.uiToolCalls
-            }
+            next =
+                state
+                    { uiRunning = True
+                    , uiAwaitingInput = False
+                    , uiActivity = "Thinking…"
+                    , uiToolCalls =
+                        Map.delete result.callId state.uiToolCalls
+                    }
+        in case activeCall of
+            Nothing -> next
+            Just (blockIndex, _) ->
+                completeTool blockIndex displayed next
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
@@ -546,7 +708,8 @@ appendBlock
     -> UiState
     -> UiState
 appendBlock kind title body detail blockState callId state =
-    let ident = BlockId state.uiNextBlockId
+    let index = Seq.length state.uiBlocks
+        ident = BlockId state.uiNextBlockId
         block = UiBlock
             { blockId = ident
             , blockKind = kind
@@ -562,13 +725,15 @@ appendBlock kind title body detail blockState callId state =
         { uiBlocks = state.uiBlocks Seq.|> block
         , uiNextBlockId = state.uiNextBlockId + 1
         , uiSelectedBlock = Just ident
+        , uiSelectedBlockIndex = Just index
+        , uiBlockIndices = Map.insert ident index state.uiBlockIndices
         }
 
-completeTool :: ToolCallResult -> UiState -> UiState
-completeTool result state =
+completeTool :: Int -> ToolCallResult -> UiState -> UiState
+completeTool blockIndex result state =
     state
         { uiBlocks =
-            fmap
+            Seq.adjust
                 (\block ->
                     if block.blockCallId == Just result.callId
                         then block
@@ -576,21 +741,26 @@ completeTool result state =
                             , blockState = toolResultState result.output
                             }
                         else block)
+                blockIndex
                 state.uiBlocks
         }
 
 updateToolOutput :: Text -> Text -> UiState -> UiState
 updateToolOutput callId output state =
-    state
-        { uiBlocks =
-            fmap
-                (\block ->
-                    if block.blockCallId == Just callId
-                        && block.blockState == BlockRunning
-                        then block { blockBody = output }
-                        else block)
-                state.uiBlocks
-        }
+    case Map.lookup callId state.uiToolCalls of
+        Nothing -> state
+        Just (blockIndex, _) ->
+            state
+                { uiBlocks =
+                    Seq.adjust
+                        (\block ->
+                            if block.blockCallId == Just callId
+                                && block.blockState == BlockRunning
+                                then block { blockBody = output }
+                                else block)
+                        blockIndex
+                        state.uiBlocks
+                }
 
 finalizeTurn :: BlockState -> UiState -> UiState
 finalizeTurn terminalState state =
@@ -666,10 +836,15 @@ hasAssistantTextSince start =
 moveSelection :: Int -> UiState -> UiState
 moveSelection delta state =
     case Seq.lookup next blocks of
-        Nothing -> state { uiSelectedBlock = Nothing }
+        Nothing ->
+            state
+                { uiSelectedBlock = Nothing
+                , uiSelectedBlockIndex = Nothing
+                }
         Just block ->
             state
                 { uiSelectedBlock = Just block.blockId
+                , uiSelectedBlockIndex = Just next
                 , uiFollow = next == lastIndex
                 }
   where
@@ -679,22 +854,24 @@ moveSelection delta state =
 
 selectBlock :: BlockId -> UiState -> UiState
 selectBlock ident state =
-    case Seq.findIndexL ((== ident) . (.blockId)) state.uiBlocks of
+    case Map.lookup ident state.uiBlockIndices of
         Nothing -> state
-        Just index ->
-            state
-                { uiSelectedBlock = Just ident
-                , uiFollow = index == Seq.length state.uiBlocks - 1
-                }
+        Just index -> case Seq.lookup index state.uiBlocks of
+            Just block
+                | block.blockId == ident ->
+                    state
+                        { uiSelectedBlock = Just ident
+                        , uiSelectedBlockIndex = Just index
+                        , uiFollow =
+                            index == Seq.length state.uiBlocks - 1
+                        }
+            _ -> state
 
 selectedBlockIndex :: UiState -> Int
 selectedBlockIndex state =
-    case state.uiSelectedBlock of
-        Nothing -> max 0 (Seq.length state.uiBlocks - 1)
-        Just ident ->
-            case Seq.findIndexL ((== ident) . (.blockId)) state.uiBlocks of
-                Nothing -> max 0 (Seq.length state.uiBlocks - 1)
-                Just index -> index
+    maybe fallback fst (selectedBlockEntry state)
+  where
+    fallback = max 0 (Seq.length state.uiBlocks - 1)
 
 -- | Delete whitespace and the previous non-whitespace word before the cursor.
 deleteWordBefore :: Text -> Int -> (Text, Int)
@@ -765,19 +942,41 @@ moveWordRight text cursor =
 
 toggleSelected :: UiState -> UiState
 toggleSelected state =
-    case state.uiSelectedBlock of
+    case selectedBlockEntry state of
         Nothing -> state
-        Just ident ->
+        Just (index, _) ->
             state
                 { uiBlocks =
-                    fmap
+                    Seq.adjust
                         (\block ->
-                            if block.blockId == ident
-                                then block
-                                    { blockExpanded = not block.blockExpanded }
-                                else block)
+                            block
+                                { blockExpanded = not block.blockExpanded })
+                        index
                         state.uiBlocks
                 }
+
+selectedBlockEntry :: UiState -> Maybe (Int, UiBlock)
+selectedBlockEntry state = do
+    ident <- state.uiSelectedBlock
+    index <- state.uiSelectedBlockIndex
+    storedIndex <- Map.lookup ident state.uiBlockIndices
+    block <- Seq.lookup index state.uiBlocks
+    if storedIndex == index && block.blockId == ident
+        then Just (index, block)
+        else Nothing
+
+selectionAfterTruncate
+    :: Seq UiBlock
+    -> Maybe Int
+    -> Maybe (Int, UiBlock)
+selectionAfterTruncate blocks selected =
+    case selected of
+        Just index
+            | Just block <- Seq.lookup index blocks ->
+                Just (index, block)
+        _ ->
+            let index = Seq.length blocks - 1
+            in (\block -> (index, block)) <$> Seq.lookup index blocks
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName

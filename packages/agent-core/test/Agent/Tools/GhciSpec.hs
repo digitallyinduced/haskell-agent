@@ -18,7 +18,7 @@ import Agent.Tools.Ghci
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
 import Control.Exception.Safe (SomeException, bracket, try)
 import Data.Either (isRight)
 import qualified Data.Text as Text
@@ -73,6 +73,23 @@ spec = describe "Agent.Tools.Ghci" do
             value <- evalGhci ghci "x" 10000
             value.ghciOk `shouldBe` True
             value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "serializes concurrent evaluations through the shared runtime state" do
+        withTempGhci \ghci -> do
+            results <- mapConcurrently
+                (\n -> evalGhci ghci
+                    (Text.pack (show n) <> " * " <> Text.pack (show n))
+                    10000)
+                [1 :: Int .. 8]
+            map (.ghciOutcome) results
+                `shouldBe` replicate 8 GhciCompleted
+            map (.ghciOk) results
+                `shouldBe` replicate 8 True
+            mapM_
+                (\(n, result) ->
+                    result.ghciOutput `shouldSatisfy`
+                        Text.isInfixOf (Text.pack (show (n * n))))
+                (zip [1 :: Int ..] results)
 
     it "supports multiline bindings and do blocks" do
         withTempGhci \ghci -> do

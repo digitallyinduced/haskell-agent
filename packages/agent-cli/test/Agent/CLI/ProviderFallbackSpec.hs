@@ -11,6 +11,8 @@ import Agent.CLI.ProviderFallback
     , automaticCooldownRetryDelay
     , automaticRetryCountdownText
     , fallbackCandidates
+    , ProviderRecoveryPreference(..)
+    , providerRecoveryPreference
     , rankedModels
     )
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -79,6 +81,13 @@ spec = do
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
+        it "never automatically enters or leaves the Claude Code provider" do
+            fallbackCandidates catalog [] ClaudeCodeProvider exhausted
+                `shouldBe` []
+            map (.modelTarget.targetProvider)
+                (fallbackCandidates catalog [] OpenAIProvider exhausted)
+                `shouldSatisfy` (ClaudeCodeProvider `notElem`)
+
         it "skips providers already found unavailable" do
             map (.modelTarget.targetProvider)
                 (fallbackCandidates catalog [OpenAIProvider] XAIProvider exhausted)
@@ -136,6 +145,24 @@ spec = do
             automaticCooldownRetryDelay now
                 (ProviderError AuthenticationError "expired" Nothing)
                 `shouldBe` Nothing
+
+    describe "providerRecoveryPreference" do
+        let now = UTCTime (fromGregorian 2026 8 21) 0
+
+        it "retries a transient all-account cooldown before provider fallback" do
+            providerRecoveryPreference True now
+                (CredentialsExhausted (addUTCTime 60 now))
+                `shouldBe` RetryCurrentProviderAfter 60
+
+        it "falls back for a genuine long usage-window exhaustion" do
+            providerRecoveryPreference True now
+                (CredentialsExhausted (addUTCTime 3600 now))
+                `shouldBe` TryProviderFallback
+
+        it "does not repeat the cooldown retry after its one retry allowance" do
+            providerRecoveryPreference False now
+                (CredentialsExhausted (addUTCTime 60 now))
+                `shouldBe` TryProviderFallback
 
     describe "automaticRetryCountdownText" do
         it "shows the remaining wait in seconds" do

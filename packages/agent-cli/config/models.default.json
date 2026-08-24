@@ -12,6 +12,10 @@
     "openrouter": {
       "api": "builtin",
       "provider": "openrouter"
+    },
+    "claude-code": {
+      "api": "builtin",
+      "provider": "claude-code"
     }
   },
   "models": [
@@ -22,6 +26,18 @@
       "label": "default · frontier",
       "default": true,
       "fallback_priority": 0
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "connection": "openai",
+      "dialect": "codex",
+      "label": "balanced"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "connection": "openai",
+      "dialect": "codex",
+      "label": "fast · low cost"
     },
     {
       "id": "grok-4.6",
@@ -38,6 +54,25 @@
       "label": "default · frontier · free · coding · 1M context",
       "default": true,
       "fallback_priority": 20
+    },
+    {
+      "id": "sonnet",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "default · subscription",
+      "default": true
+    },
+    {
+      "id": "opus",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "previous frontier · subscription"
+    },
+    {
+      "id": "fable",
+      "connection": "claude-code",
+      "dialect": "claude-code",
+      "label": "frontier · subscription"
     }
   ]
 }

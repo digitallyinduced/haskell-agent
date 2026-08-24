@@ -45,7 +45,9 @@ import Agent.CLI.AgentViewport
     , responseItemStepPreviews
     )
 import Agent.CLI.SessionTitle
-    ( SessionTitleResult(..)
+    ( SessionTitleEvent(..)
+    , SessionTitleFailure(..)
+    , SessionTitleResult(..)
     , invalidateSessionTitles
     , requestSessionTitle
     , waitForSessionTitleResults
@@ -99,6 +101,7 @@ import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
+    , formatApiErrorRetryCountdownParts
     )
 import Agent.CLI.ImagePreview
     ( detectImagePreviewProtocol
@@ -190,17 +193,17 @@ import Agent.CLI.Project
     , saveProjectModel
     )
 import Agent.CLI.Prompt
-    ( secretInputGuidance
-    , subscriptionSubagentModelGuidance
+    ( subscriptionSubagentModelGuidance
     , systemPromptForTools
     )
-import Agent.CLI.Request (requestParams, setRequestInstructions)
+import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , automaticCooldownRetryDelay
     , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
+    , ProviderRecoveryPreference(..)
+    , providerRecoveryPreference
     )
 import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
 import Agent.CLI.ProviderTransition
@@ -290,6 +293,8 @@ import Agent.CLI.Dialects
     , filterGhciTools
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
+    , isBashToolName
+    , isGhciToolName
     )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
@@ -340,6 +345,15 @@ import Agent.CLI.Worktree
     , worktreeRoot
     )
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Claude
+    ( ClaudeCodeAuth(..)
+    , ClaudeCodeOptions(..)
+    , ClaudeCodePermission(..)
+    , claudeCodeOneShotBackend
+    , defaultClaudeCodeOptions
+    , loadClaudeCodeAuth
+    , withClaudeCodeBackend
+    )
 import Agent.Loop
 import qualified Agent.MCP as MCP
 import Agent.Error (ApiError(..))
@@ -425,7 +439,7 @@ import Agent.Subagents
 import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
 import Agent.TextBuffer (emptyTextBuffer)
-import Agent.ToolDispatch (canonicalToolName)
+import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
@@ -1445,6 +1459,7 @@ runAgentInitializedWithLock
                         let fallback = case loaded.loadedProvider of
                                 XAIProvider -> "Grok"
                                 OpenRouterProvider -> "OpenRouter"
+                                ClaudeCodeProvider -> "Claude Code"
                             selectionId = fromMaybe "" loaded.loadedSelectionId
                         writeIORef activeAccountRef fallback
                         writeIORef activeSelectionRef selectionId
@@ -1679,6 +1694,9 @@ runAgentInitializedWithLock
             options.optEffort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
+        claudeBypassEnabled =
+            not options.optNoYolo
+                && (options.optYolo || projectSettings.settingsAutoApprove)
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
@@ -1816,6 +1834,8 @@ runAgentInitializedWithLock
                         pure ()
                     Nothing -> pure ()
         Nothing -> pure ()
+    ghciEnabledRef <- newIORef options.optGhci
+    bashEnabledRef <- newIORef options.optBash
     let claimCurrentSession handle = do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
@@ -1840,19 +1860,23 @@ runAgentInitializedWithLock
             , toolsEffort = effort
             , toolsCurrentSessionId =
                 readIORef persistSlotRef >>= currentSessionId
-            , toolsLaunchTurn =
+            , toolsLaunchTurn = \handle message -> do
+                ghciEnabled <- readIORef ghciEnabledRef
+                bashEnabled <- readIORef bashEnabledRef
                 launchSessionTurn sessionProcessManager
                     (not (isOneShot options)) policy
-                    options.optGhci options.optBash
+                    ghciEnabled bashEnabled handle message
             , toolsSessionStatus =
                 sessionProcessStatus sessionProcessManager
             }
         mcpTools = MCP.mcpFleetTools mcpFleet
+        sessionTools = agentSessionTools sessionToolsEnv
+        allTools = coding.codingAppTools ++ mcpTools ++ sessionTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
-                ++ agentSessionTools sessionToolsEnv
+                ++ sessionTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -1903,6 +1927,8 @@ runAgentInitializedWithLock
         paramsRef <- newIORef params
         let subagentRuntime = SubagentRuntime
                 { subagentOptions = options
+                , subagentGhciEnabled = ghciEnabledRef
+                , subagentBashEnabled = bashEnabledRef
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
                 , subagentParams = paramsRef
@@ -2209,17 +2235,15 @@ runAgentInitializedWithLock
                                             tokenProvider
                                             activeConnectionRef
                                             (readIORef paramsRef)
-                                            transcriptRef
                                             contextTokensRef
                                             recordCompactionUsage
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
-                                    btwBackend privateParams privateTranscript =
+                                    btwBackend privateParams =
                                         freshOpenAiBackend
                                             tokenProvider
                                             (readIORef privateParams)
-                                            privateTranscript
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
@@ -2239,7 +2263,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2279,18 +2303,18 @@ runAgentInitializedWithLock
                                         dialect
                                         XAIProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef childTranscript ->
+                                        (\childParamsRef ->
                                             xaiBackend xaiOptions tokenProvider
-                                                (readIORef childParamsRef) childTranscript)
+                                                (readIORef childParamsRef))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         xaiBackend xaiOptions tokenProvider
-                                            (readIORef paramsRef) transcriptRef
-                            btwBackend privateParams privateTranscript =
+                                            (readIORef paramsRef)
+                            btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
-                                    (readIORef privateParams) privateTranscript
+                                    (readIORef privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     runProviderCompactWith
@@ -2303,11 +2327,72 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                    ClaudeCodeProvider -> do
+                        claudeAuth <-
+                            loadClaudeCodeAuth
+                                >>= either (startupDie startup . Text.unpack) pure
+                        let permission =
+                                if claudeBypassEnabled
+                                    then ClaudeCodeBypass
+                                    else ClaudeCodeDontAsk
+                            claudeOptions =
+                                (defaultClaudeCodeOptions
+                                    claudeAuth.executable
+                                    (unsafeToFilePath cwd))
+                                    { permission
+                                    , safeMode = True
+                                    }
+                            compactRunner _ =
+                                pure $ Left
+                                    "Claude Code manages its own context; /compact is unavailable."
+                            btwBackend privateParams =
+                                Backend \state previous inputs onEvent -> do
+                                    privateTranscript <- newIORef state
+                                    let privateBackend =
+                                            claudeCodeOneShotBackend
+                                                claudeOptions
+                                                    { permission =
+                                                        ClaudeCodeDontAsk
+                                                    }
+                                                (readIORef privateParams)
+                                                privateTranscript
+                                    privateBackend.submitTurn
+                                        state
+                                        previous
+                                        inputs
+                                        onEvent
+                        if claudeBypassEnabled
+                            then pure ()
+                            else
+                                case fullscreen of
+                                    Just runtime ->
+                                        emitUiEvent runtime
+                                            (UiSystemMessage
+                                                "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
+                                    Nothing -> do
+                                        color <- resolveColor stderr
+                                        putTextLn stderr $
+                                            roleWarn color $
+                                                glyphWarn
+                                                    <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
+                        writeIORef activeAccountRef claudeAuth.accountLabel
+                        withClaudeCodeBackend
+                            claudeOptions
+                            initialPrevious
+                            (readIORef paramsRef)
+                            transcriptRef
+                            \backend -> do
+                                activeBackend <-
+                                    prepareTransitionBackend
+                                        projectRoot transition persist backend
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
+                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
-                        let makeBackend params transcript =
+                        let makeBackend params =
                                 case customGenericOptions of
                                     Just genericOptions ->
                                         genericResponsesBackendWith
@@ -2323,10 +2408,9 @@ runAgentInitializedWithLock
                                                     request
                                                     onEvent)
                                             params
-                                            transcript
                                     Nothing ->
                                         openRouterBackend openRouterOptions
-                                            tokenProvider params transcript
+                                            tokenProvider params
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -2335,18 +2419,18 @@ runAgentInitializedWithLock
                                         dialect
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef childTranscript ->
+                                        (\childParamsRef ->
                                             makeBackend
-                                                (readIORef childParamsRef) childTranscript)
+                                                (readIORef childParamsRef))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         makeBackend
-                                            (readIORef paramsRef) transcriptRef
-                            btwBackend privateParams privateTranscript =
+                                            (readIORef paramsRef)
+                            btwBackend privateParams =
                                 makeBackend
-                                    (readIORef privateParams) privateTranscript
+                                    (readIORef privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     case customGenericOptions of
@@ -2376,7 +2460,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -2565,6 +2649,8 @@ runSession
     -> Dialect
     -> ApprovalPolicy
     -> [AppTool]
+    -> IORef Bool
+    -> IORef Bool
     -> ToolEnv
     -> PlanModeEnv
     -> StartupRuntime
@@ -2605,7 +2691,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy tools toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -2617,7 +2703,8 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
           case fullscreen of
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdout title
-      showGeneratedTitle SessionTitleResult{..} =
+      showTitleEvent = \case
+        SessionTitleGenerated SessionTitleResult{..} ->
           case persist of
               PersistenceDisabled -> pure ()
               PersistenceEnabled slotRef ->
@@ -2630,8 +2717,30 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                                       (cliWindowTitle handle.sessionMeta.metaCwd
                                           (Just resultTitle))
                       _ -> pure ()
-  withSessionTitleManager btwBackend paramsRef showGeneratedTitle \titleManager -> do
-    toolRegistry <- requireToolRegistry tools
+        SessionTitleFailed SessionTitleFailure{..} ->
+          case persist of
+              PersistenceDisabled -> pure ()
+              PersistenceEnabled slotRef ->
+                  readIORef slotRef >>= \case
+                      PersistenceActive handle
+                          | handle.sessionMeta.metaId == failureSessionId
+                          , not handle.sessionMeta.metaTitleIsManual ->
+                              withMVar ioLock \_ -> do
+                                  let message =
+                                          "session title generation failed: "
+                                              <> failureMessage
+                                  case fullscreen of
+                                      Just runtime ->
+                                          emitUiEvent runtime
+                                              (UiErrorMessage message)
+                                      Nothing -> do
+                                          color <- resolveColor stderr
+                                          putTextLn stderr
+                                              (roleWarn color
+                                                  (glyphWarn <> message))
+                      _ -> pure ()
+  withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
+    toolRegistry <- requireToolRegistry allTools
     printed <- newIORef False
     let attachmentsRef = startup.startupSessionState.sessionAttachments
         previewIdRef = startup.startupSessionState.sessionPreviewId
@@ -2932,34 +3041,52 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                         writeIORef activityRef "Running tool…"
                     _ -> pure ()
                 emitUiEvent runtime (UiLoop event)
+        shellToolAllowed call = do
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            let toolName = canonicalToolName call.name
+            pure $
+                (not (isGhciToolName toolName) || ghciEnabled)
+                    && (not (isBashToolName toolName) || bashEnabled)
+        approveRegisteredTool call =
+            withMVar ioLock \_ ->
+                case fullscreen of
+                    Nothing ->
+                        withStdinPaused escPaused $
+                            approveToolDecision
+                                policyRef allowedToolsRef toolRegistry planMode call
+                    Just runtime ->
+                        approveToolDecisionWithReporter
+                            (requestFullscreenPermission runtime)
+                            (\case
+                                ApprovalWarning _ -> pure ()
+                                ApprovalSuccess message ->
+                                    emitUiEvent runtime
+                                        (UiSetNotice
+                                            (Just
+                                                (successNotice message))))
+                            policyRef
+                            allowedToolsRef
+                            toolRegistry
+                            planMode
+                            call
         config = LoopConfig
             { loopBackend = backend
+            , loopBackendState = BackendStateStore
+                { readBackendState = readIORef transcriptRef
+                , commitBackendState = writeIORef transcriptRef
+                }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->
-                withMVar ioLock \_ ->
-                    case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode call
-                        Just runtime ->
-                            approveToolDecisionWithReporter
-                                (requestFullscreenPermission runtime)
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
+                shellToolAllowed call >>= \case
+                    False ->
+                        pure (Left
+                            ("Tool " <> call.name
+                                <> " is disabled by the current /shell setting."))
+                    True -> approveRegisteredTool call
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -2979,18 +3106,57 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
                     Nothing -> pure ()
                 Nothing -> pure ()
             finishSubagentTurn rootTurnId
+        activeShellTools ghciEnabled bashEnabled =
+            filterGhciTools ghciEnabled
+                (filterBashTools bashEnabled allTools)
+        currentShellMode = do
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            pure $ case (ghciEnabled, bashEnabled) of
+                (True, False) -> ShellGhci
+                (False, True) -> ShellBash
+                (True, True) -> ShellBoth
+                (False, False) -> ShellNone
+        shellModeFlags = \case
+            ShellGhci -> (True, False)
+            ShellBash -> (False, True)
+            ShellBoth -> (True, True)
+            ShellNone -> (False, False)
+        shellModeLabel = \case
+            ShellGhci -> "ghci"
+            ShellBash -> "bash"
+            ShellBoth -> "ghci + bash"
+            ShellNone -> "none"
+        refreshShellParams ghciEnabled bashEnabled = do
+            sessionTmp <- readIORef toolEnv.toolSessionTmp
+            today <- utctDay <$> getCurrentTime
+            let enabledTools = activeShellTools ghciEnabled bashEnabled
+                instructionText =
+                    systemPromptForTools
+                        dialect
+                        (map (.appToolName) enabledTools)
+                        cwd
+                        sessionTmp
+                        today
+                        (isOneShot options)
+                toolSchemas = schemasFromAppTools dialect enabledTools
+            modifyIORef' paramsRef \ResponseCreateParams{..} ->
+                ResponseCreateParams
+                    { instructions = Just instructionText
+                    , tools = Just toolSchemas
+                    , ..
+                    }
+        setShellMode mode = do
+            let (ghciEnabled, bashEnabled) = shellModeFlags mode
+            writeIORef ghciEnabledRef ghciEnabled
+            writeIORef bashEnabledRef bashEnabled
+            refreshShellParams ghciEnabled bashEnabled
+            pure ("shell tools: " <> shellModeLabel mode)
         setSessionTempDir tempDir = do
             setToolSessionTmp toolEnv (Just tempDir)
-            today <- utctDay <$> getCurrentTime
-            modifyIORef' paramsRef $
-                setRequestInstructions
-                    (systemPromptForTools
-                        dialect
-                        (map (.appToolName) tools)
-                        cwd
-                        (Just tempDir)
-                        today
-                        (isOneShot options))
+            ghciEnabled <- readIORef ghciEnabledRef
+            bashEnabled <- readIORef bashEnabledRef
+            refreshShellParams ghciEnabled bashEnabled
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
@@ -3021,6 +3187,8 @@ runSession catalog connectionId options provider dialect policy tools toolEnv pl
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
+            , sessionShellMode = currentShellMode
+            , sessionSetShellMode = setShellMode
             , sessionEscPaused = escPaused
             , sessionDraft = startup.startupSessionState.sessionDraft
             , sessionAttachments = attachmentsRef
@@ -3139,6 +3307,8 @@ loadSelectedAccountAuth provider selectionId accountId =
                                     loaded.loadedTokenProvider
                             , loadedSelectionId = Just accountId
                             }
+        ClaudeCodeProvider ->
+            loadAuth (Just ClaudeCodeProvider)
         _ -> loadAuthForAccount provider selectionId
 
 runCredentialOnboarding
@@ -3305,22 +3475,25 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
         finishTurnWithCooldownRetry allowCooldownRetry env exitAfter result
     TurnProviderUnavailable apiError pending ->
         let pending' = setPendingExitAfter exitAfter pending
-        in requestAutomaticProviderFallback env apiError pending' >>= \case
-            Just providerTransition ->
-                pure (RunSwitchProvider providerTransition)
-            Nothing -> do
-                now <- getCurrentTime
-                case automaticCooldownRetryDelay now apiError of
-                    Just delay | allowCooldownRetry ->
-                        waitAndRetryPendingTurn env delay pending'
-                    _ -> do
-                        reportProviderUnavailable
-                            env.sessionFullscreen apiError
-                        if exitAfter
-                            then exitFailure
-                            else do
-                                notifyAttention stderr InputRequested
-                                replWithDraft env pending.pendingPromptText
+        in do
+            now <- getCurrentTime
+            case providerRecoveryPreference
+                    allowCooldownRetry now apiError of
+                RetryCurrentProviderAfter delay ->
+                    waitAndRetryPendingTurn env delay pending'
+                TryProviderFallback ->
+                    requestAutomaticProviderFallback env apiError pending'
+                        >>= \case
+                        Just providerTransition ->
+                            pure (RunSwitchProvider providerTransition)
+                        Nothing -> do
+                            reportProviderUnavailable
+                                env.sessionFullscreen apiError
+                            if exitAfter
+                                then exitFailure
+                                else do
+                                    notifyAttention stderr InputRequested
+                                    replWithDraft env pending.pendingPromptText
 
 continueAfterTurn :: SessionEnv -> IO RunResult
 continueAfterTurn env = do
@@ -3423,15 +3596,29 @@ reportProviderUnavailable
     -> IO ()
 reportProviderUnavailable fullscreen apiError = do
     now <- getCurrentTime
-    let message =
-            "No usable fallback provider account is available.\n"
-            <> formatApiErrorAt now apiError
+    let leading = "No usable fallback provider account is available.\n"
+        message = leading <> formatApiErrorAt now apiError
     case fullscreen of
         Nothing -> do
             color <- resolveColor stderr
             putTextLn stderr (roleError color message)
         Just runtime ->
-            emitUiEvent runtime (UiErrorMessage message)
+            case (apiError, formatApiErrorRetryCountdownParts apiError) of
+                (CredentialsExhausted{retryAt}, Just (prefix, suffix)) ->
+                    let remainingMillis =
+                            max 0
+                                (ceiling
+                                    ( realToFrac (diffUTCTime retryAt now)
+                                        * 1000
+                                        :: Double
+                                    ))
+                    in emitUiEvent runtime
+                        (UiRetryCountdown
+                            (leading <> prefix)
+                            remainingMillis
+                            suffix)
+                _ ->
+                    emitUiEvent runtime (UiErrorMessage message)
 
 setSessionEffort :: SessionEnv -> Text -> IO ()
 setSessionEffort env level = do
@@ -3626,23 +3813,31 @@ replWithDraft env@SessionEnv
             -- Confirmed double Ctrl-C: rethrow so withInterruptResume prints
             -- the --resume hint and the process exits.
             throwIO UserInterrupt
-        ReplCycleMode keptDraft -> do
-            let next = cycleReplInteraction planState policy
-            applyReplMode planMode policyRef projectRoot next
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime $
-                        UiSetNotice $
-                            Just $
-                                infoNotice
-                                    ("Switched to "
-                                        <> replModeLabel next
-                                        <> " mode.")
-                Nothing -> do
-                    -- Minimal editor advanced a line; replace its old chrome.
-                    putStr "\ESC[2A\r\ESC[J"
-                    hFlush stdout
-            continueWith keptDraft
+        ReplCycleMode keptDraft
+            | provider == ClaudeCodeProvider -> do
+                let message =
+                        "Claude Code permissions are fixed when the provider starts; restart with --yolo or --no-yolo to change them."
+                color <- resolveColor stderr
+                displayInfo message $
+                    putTextLn stderr (roleMuted color message)
+                continueWith keptDraft
+            | otherwise -> do
+                let next = cycleReplInteraction planState policy
+                applyReplMode planMode policyRef projectRoot next
+                case fullscreen of
+                    Just runtime ->
+                        emitUiEvent runtime $
+                            UiSetNotice $
+                                Just $
+                                    infoNotice
+                                        ("Switched to "
+                                            <> replModeLabel next
+                                            <> " mode.")
+                    Nothing -> do
+                        -- Minimal editor advanced a line; replace its old chrome.
+                        putStr "\ESC[2A\r\ESC[J"
+                        hFlush stdout
+                continueWith keptDraft
         ReplClipboardPaste keptDraft clipboardPasteImages -> do
             case clipboardPasteImages of
                 Just images@(_:_) -> do
@@ -3811,6 +4006,23 @@ replWithDraft env@SessionEnv
                                 formatSkillsListing color current invocations
                         displayInfo (formatSkillsListing False current invocations) $
                             Text.putStrLn listing
+                        continue
+                    ReplShowShell -> do
+                        mode <- env.sessionShellMode
+                        let message = "shell tools: " <> case mode of
+                                ShellGhci -> "ghci"
+                                ShellBash -> "bash"
+                                ShellBoth -> "ghci + bash"
+                                ShellNone -> "none"
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
+                        continue
+                    ReplSetShell mode -> do
+                        message <- env.sessionSetShellMode mode
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplPaste pasteImmediate pasteCaption -> do
                         color <- resolveColor stdout
@@ -4034,12 +4246,20 @@ replWithDraft env@SessionEnv
                                     Text.putStrLn
                                         (roleMuted color (glyphOk <> message))
                                 continue
-                    ReplToggleAlwaysApprove -> do
-                        message <- toggleAlwaysApprove policyRef projectRoot
-                        color <- resolveColor stderr
-                        displayInfo message $
-                            putTextLn stderr (roleMuted color message)
-                        continue
+                    ReplToggleAlwaysApprove
+                        | provider == ClaudeCodeProvider -> do
+                            let message =
+                                    "Claude Code permissions are fixed for this provider session; restart with --yolo or --no-yolo."
+                            color <- resolveColor stderr
+                            displayInfo message $
+                                putTextLn stderr (roleMuted color message)
+                            continue
+                        | otherwise -> do
+                            message <- toggleAlwaysApprove policyRef projectRoot
+                            color <- resolveColor stderr
+                            displayInfo message $
+                                putTextLn stderr (roleMuted color message)
+                            continue
                     ReplCompact focus -> do
                         color <- resolveColor stderr
                         result <-
@@ -4095,6 +4315,14 @@ replWithDraft env@SessionEnv
                                         writeIORef slotRef
                                             (PersistenceActive handle')
                                 continue
+                    ReplPlan _
+                        | provider == ClaudeCodeProvider -> do
+                            let message =
+                                    "Outer plan mode is unavailable for Claude Code because its tools run inside the Claude CLI."
+                            color <- resolveColor stderr
+                            displayInfo message $
+                                putTextLn stderr (roleMuted color message)
+                            continue
                     ReplPlan maybeDescription ->
                         enterPlanFromSlash env maybeDescription >>= \case
                             Just providerSwitch ->
@@ -4589,7 +4817,13 @@ replWithDraft env@SessionEnv
                                         selectedAccountId
                                         selectedLabel
                                         _
+                                            -- Claude exposes display metadata,
+                                            -- not a stable account identity.
+                                            -- Revalidate and restart even when
+                                            -- the synthetic id still matches.
                                             | selectedProvider == provider
+                                            , selectedProvider
+                                                /= ClaudeCodeProvider
                                             , selectedAccountId
                                                 == currentAccountId ->
                                                 displayInfo
@@ -4795,28 +5029,57 @@ loadAllAccountPickerOptions :: Provider -> IO [AccountPickerOption]
 loadAllAccountPickerOptions currentProvider = do
     discovered <- discoverSelectableLoginAccounts
     refreshed <- mapConcurrently refreshLoginAccount discovered
+    claudeAuth <- loadClaudeCodeAuth
     now <- getCurrentTime
-    let ordered =
+    let providerAccounts =
+            [ AccountPickerAccount
+                account.loginProvider
+                (accountBillingMode account.loginProvider account.loginBilling)
+                (loginAccountSelectionId account)
+                account.loginAccountId
+                account.loginLabel
+                (formatLoginUsageSummary account.loginProvider now account)
+            | account <- deduplicateAccounts refreshed
+            , account.loginProvider /= ClaudeCodeProvider
+            ]
+        claudeAccounts = case claudeAuth of
+            Left _ -> []
+            Right auth ->
+                [ AccountPickerAccount
+                    ClaudeCodeProvider
+                    SubscriptionBilled
+                    "claude-code"
+                    "claude-code"
+                    auth.accountLabel
+                    (Text.intercalate " · " $
+                        ["subscription"]
+                            <> maybeToList auth.subscriptionType
+                            <> ["usage via `claude /status`"])
+                ]
+        ordered =
             sortOn
-                (\account ->
-                    ( account.loginProvider /= currentProvider
-                    , providerOrder account.loginProvider
-                    , Text.toLower account.loginLabel
-                    ))
-                (deduplicateAccounts refreshed)
+                (\case
+                    AccountPickerAccount optionProvider _ _ _ label _ ->
+                        ( optionProvider /= currentProvider
+                        , providerOrder optionProvider
+                        , Text.toLower label
+                        )
+                    AccountPickerConnect optionProvider ->
+                        ( True
+                        , providerOrder optionProvider
+                        , ""
+                        ))
+                (providerAccounts <> claudeAccounts)
     pure $
-        [ AccountPickerAccount
-            account.loginProvider
-            (accountBillingMode account.loginProvider account.loginBilling)
-            (loginAccountSelectionId account)
-            account.loginAccountId
-            account.loginLabel
-            (formatLoginUsageSummary account.loginProvider now account)
-        | account <- ordered
-        ]
+        ordered
             <> map AccountPickerConnect
-                [OpenAIProvider, XAIProvider, OpenRouterProvider]
+                [ OpenAIProvider
+                , XAIProvider
+                , OpenRouterProvider
+                , ClaudeCodeProvider
+                ]
   where
+    maybeToList = maybe [] pure
     deduplicateAccounts = foldr addUnique []
     addUnique account accounts
         | any (samePickerAccount account) accounts = accounts
@@ -4831,10 +5094,12 @@ loadAllAccountPickerOptions currentProvider = do
         OpenAIProvider -> 0 :: Int
         XAIProvider -> 1
         OpenRouterProvider -> 2
+        ClaudeCodeProvider -> 3
 
 accountBillingMode :: Provider -> AccountBilling -> BillingMode
 accountBillingMode provider = case provider of
     OpenRouterProvider -> const ApiBilled
+    ClaudeCodeProvider -> const SubscriptionBilled
     _ -> \case
         SubscriptionBilling _ -> SubscriptionBilled
         ApiCreditsBilling -> ApiBilled
@@ -5081,6 +5346,18 @@ accountUsageText color provider tokenProvider openAiPool = do
                             pure $
                                 roleMuted color
                                     "usage: no OpenAI credentials loaded"
+        ClaudeCodeProvider ->
+            loadClaudeCodeAuth >>= \case
+                Left err ->
+                    pure (roleError color ("usage: " <> err))
+                Right auth ->
+                    pure $
+                        roleMuted color $
+                            "usage: Claude Code "
+                                <> fromMaybe "subscription" auth.subscriptionType
+                                <> " · "
+                                <> auth.accountLabel
+                                <> " (run `claude /status` for live limits)"
         _ ->
             pure $
                 roleMuted color
@@ -5677,8 +5954,8 @@ commitBackendOnSuccess
     -> Backend
     -> Backend
 commitBackendOnSuccess projectRoot committed transition persist (Backend submit) =
-    Backend \previous inputs onEvent -> do
-        result <- submit previous inputs onEvent
+    Backend \state previous inputs onEvent -> do
+        result <- submit state previous inputs onEvent
         case result of
             Right _ -> do
                 shouldCommit <- atomicModifyIORef' committed \done ->
@@ -5694,38 +5971,47 @@ markUnavailable provider unavailable
     | otherwise = unavailable <> [provider]
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO (Either Text Text)
-reloadAuth provider = \case
-    Nothing ->
-        pure $ Right $
-            "reload-auth: OpenAI WebSocket auth is fixed for this process; "
-                <> "restart after refreshing ~/.codex/auth.json "
-                <> "(OAuth pools already rotate on handshake failure)"
-    Just tokenProvider ->
-        -- Force a disk/env re-read by rejecting the credential that is
-        -- actually active. Switchable providers intentionally ignore failures
-        -- from older accounts, so a fabricated empty account id is insufficient.
-        getNextToken tokenProvider Nothing >>= \case
-            Left err -> do
-                now <- getCurrentTime
-                pure $ Left $
-                    "reload-auth failed: " <> formatApiErrorInlineAt now err
-            Right current ->
-                getNextToken tokenProvider (Just FailedCredential
-                    { credential = current
-                    , failure = AccountAuthenticationRejected
-                    }) >>= \case
-                    Left err -> do
-                        now <- getCurrentTime
-                        pure $ Left $
-                            "reload-auth failed: "
-                                <> formatApiErrorInlineAt now err
-                    Right credential ->
-                        pure $ Right $
-                            "auth reloaded ("
-                                <> providerSlug provider
-                                <> " account "
-                                <> credential.accountId
-                                <> ")"
+reloadAuth ClaudeCodeProvider _ =
+    loadClaudeCodeAuth >>= \case
+        Left err -> pure (Left ("reload-auth failed: " <> err))
+        Right auth ->
+            pure $ Right $
+                "auth status rechecked (claude-code account "
+                    <> auth.accountLabel
+                    <> ")"
+reloadAuth provider maybeTokenProvider =
+    case maybeTokenProvider of
+        Nothing ->
+            pure $ Right $
+                "reload-auth: OpenAI WebSocket auth is fixed for this process; "
+                    <> "restart after refreshing ~/.codex/auth.json "
+                    <> "(OAuth pools already rotate on handshake failure)"
+        Just tokenProvider ->
+            -- Force a disk/env re-read by rejecting the credential that is
+            -- actually active. Switchable providers intentionally ignore failures
+            -- from older accounts, so a fabricated empty account id is insufficient.
+            getNextToken tokenProvider Nothing >>= \case
+                Left err -> do
+                    now <- getCurrentTime
+                    pure $ Left $
+                        "reload-auth failed: " <> formatApiErrorInlineAt now err
+                Right current ->
+                    getNextToken tokenProvider (Just FailedCredential
+                        { credential = current
+                        , failure = AccountAuthenticationRejected
+                        }) >>= \case
+                        Left err -> do
+                            now <- getCurrentTime
+                            pure $ Left $
+                                "reload-auth failed: "
+                                    <> formatApiErrorInlineAt now err
+                        Right credential ->
+                            pure $ Right $
+                                "auth reloaded ("
+                                    <> providerSlug provider
+                                    <> " account "
+                                    <> credential.accountId
+                                    <> ")"
 
 
 requestReload
@@ -6086,12 +6372,11 @@ lockedOpenAiSession
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
     -> IO ResponseCreateParams
-    -> IORef [ResponseItem]
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession compactThreshold wsLock provider activeConnection
-        getParams transcript contextTokens
+        getParams contextTokens
         recordCompactionUsage =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
@@ -6123,7 +6408,7 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 onEvent
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWith sendResponse getParams transcript
+                openAiBackendWith sendResponse getParams
         compactSender request =
             sendAuxiliary request Nothing (const (pure ()))
         compactingBackend =
@@ -6132,12 +6417,11 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 compactSender
                 recordCompactionUsage
                 getParams
-                transcript
                 contextTokens
                 baseBackend
-        serializedBackend = Backend \previous inputs onEvent ->
+        serializedBackend = Backend \state previous inputs onEvent ->
             withMVar wsLock \_ ->
-                compactingBackend.submitTurn previous inputs onEvent
+                compactingBackend.submitTurn state previous inputs onEvent
     in (compactSender, serializedBackend)
 
 -- | Drop live conversation state without touching persisted session files.

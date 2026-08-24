@@ -106,6 +106,7 @@ library
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
+                    , Agent.CLI.TurnState
                     , Agent.CLI.Usage
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
@@ -115,7 +116,9 @@ library
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
+                    , agent-claude >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
+                    , agent-responses-types >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , ansi-terminal >= 1.0
@@ -171,6 +174,7 @@ executable eval-ghci-vs-bash
     ghc-options:      -threaded -rtsopts
     build-depends:    agent-cli
                     , agent-responses
+                    , agent-responses-types
                     , aeson >= 2.0
                     , base >= 4.17 && < 5
                     , bytestring
@@ -268,7 +272,9 @@ test-suite agent-cli-test
                     , agent-tui
                     , agent-openai
                     , agent-openrouter
+                    , agent-claude
                     , agent-responses
+                    , agent-responses-types
                     , agent-xai
                     , aeson
                     , ansi-terminal

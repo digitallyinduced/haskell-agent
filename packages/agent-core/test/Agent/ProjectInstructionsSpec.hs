@@ -118,6 +118,31 @@ spec = describe "Agent.ProjectInstructions" do
                         , "project\n"
                         ]
 
+        it "loads a direct Claude compatibility home" do
+            withTempDir \dir -> do
+                let claudeHome = dir </> ".claude"
+                createDirectoryIfMissing True (dir </> ".git")
+                createDirectoryIfMissing True (claudeHome </> "rules")
+                writeFile (claudeHome </> "Claude.md") "claude home\n"
+                writeFile
+                    (claudeHome </> "rules" </> "project.md")
+                    "claude rule\n"
+                writeFile (dir </> "AGENTS.md") "project\n"
+                let options = defaultDiscoverOptions
+                        { discoverGlobalDir =
+                            Just (fromFilePath claudeHome)
+                        }
+                loaded <-
+                    discoverProjectInstructions
+                        options
+                        (fromFilePath dir)
+                map (.instructionContent) (loadedInstructionFiles loaded)
+                    `shouldBe`
+                        [ "claude home\n"
+                        , "claude rule\n"
+                        , "project\n"
+                        ]
+
         it "waits for a transient lock instead of dropping instructions" do
             withTempDir checkLockedInstructions
 

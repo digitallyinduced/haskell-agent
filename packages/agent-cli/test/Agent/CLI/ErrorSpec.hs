@@ -124,6 +124,19 @@ spec = do
                 (ProviderError RateLimitError "slow down" (Just 0))
                 `shouldSatisfy` Text.isInfixOf "Try again now"
 
+        it "exposes live countdown framing only for credential exhaustion" do
+            formatApiErrorRetryCountdownParts
+                (CredentialsExhausted (addUTCTime 60 epoch))
+                `shouldBe`
+                    Just
+                        ( "Provider unavailable.\n\
+                          \All accounts for this provider are temporarily unavailable.\n"
+                        , ", or choose another provider with /model."
+                        )
+            formatApiErrorRetryCountdownParts
+                (ProviderError RateLimitError "slow down" (Just 60))
+                `shouldBe` Nothing
+
         it "bounds and sanitizes provider detail text" do
             let rendered =
                     formatApiErrorAt epoch

@@ -23,6 +23,7 @@ module Agent.Dialect
     , codexDialect
     , grokBuildDialect
     , genericResponsesDialect
+    , claudeCodeDialect
     , dialectForId
     , dialectIdForModel
     , dialectForModel
@@ -43,6 +44,7 @@ data DialectId
     = CodexDialect
     | GrokBuildDialect
     | GenericResponsesDialect
+    | ClaudeCodeDialect
     deriving (Eq, Ord, Show)
 
 -- | Runtime tool implementation family.
@@ -52,18 +54,21 @@ data DialectId
 data ToolSurface
     = CodexToolSurface
     | GrokBuildToolSurface
+    | ClaudeCodeToolSurface
     deriving (Eq, Show)
 
 -- | JSON function-schema convention presented to the model.
 data FunctionSchemaStyle
     = StrictFunctionSchemas
     | LooseFunctionSchemas
+    | NoFunctionSchemas
     deriving (Eq, Show)
 
 -- | Whether model-facing tools are flat or grouped into a namespace.
 data ToolLayout
     = FlatToolLayout
     | CollaborationNamespaceLayout
+    | NoHostToolLayout
     deriving (Eq, Show)
 
 -- | Base system-prompt family.
@@ -71,6 +76,7 @@ data PromptStyle
     = CodexPromptStyle
     | GrokBuildPromptStyle
     | GenericResponsesPromptStyle
+    | ClaudeCodePromptStyle
     deriving (Eq, Show)
 
 -- | How discovered project instructions are presented to the model.
@@ -84,6 +90,7 @@ data InstructionHomeStyle
     = CodexInstructionHome
     | GrokInstructionHome
     | HarnessInstructionHome
+    | ClaudeInstructionHome
     deriving (Eq, Show)
 
 -- | Model-facing child-agent tool and prompt protocol.
@@ -91,6 +98,7 @@ data ChildAgentProtocol
     = CodexCollaborationProtocol
     | GrokTaskProtocol
     | GenericTaskProtocol
+    | NoHostChildAgentProtocol
     deriving (Eq, Show)
 
 -- | Complete static selection of model-facing behavior.
@@ -171,11 +179,27 @@ genericResponsesDialect = Dialect
     , dialectChildAgentProtocol = GenericTaskProtocol
     }
 
+-- | Claude Code owns its tools and child agents inside the CLI process. The
+-- outer harness supplies no model-facing tool schema and only translates the
+-- validated structured stream.
+claudeCodeDialect :: Dialect
+claudeCodeDialect = Dialect
+    { dialectId = ClaudeCodeDialect
+    , dialectToolSurface = ClaudeCodeToolSurface
+    , dialectFunctionSchemaStyle = NoFunctionSchemas
+    , dialectToolLayout = NoHostToolLayout
+    , dialectPromptStyle = ClaudeCodePromptStyle
+    , dialectProjectInstructionStyle = CodexProjectInstructions
+    , dialectInstructionHomeStyle = ClaudeInstructionHome
+    , dialectChildAgentProtocol = NoHostChildAgentProtocol
+    }
+
 dialectForId :: DialectId -> Dialect
 dialectForId = \case
     CodexDialect -> codexDialect
     GrokBuildDialect -> grokBuildDialect
     GenericResponsesDialect -> genericResponsesDialect
+    ClaudeCodeDialect -> claudeCodeDialect
 
 -- | Resolve the default dialect for a provider/model target.
 --
@@ -185,6 +209,7 @@ dialectIdForModel :: Provider -> Text -> DialectId
 dialectIdForModel provider model = case provider of
     OpenAIProvider -> CodexDialect
     XAIProvider -> GrokBuildDialect
+    ClaudeCodeProvider -> ClaudeCodeDialect
     OpenRouterProvider
         | "x-ai/" `Text.isPrefixOf` normalized -> GrokBuildDialect
         | "openai/" `Text.isPrefixOf` normalized -> CodexDialect
@@ -205,6 +230,7 @@ legacyDialectIdForProvider = \case
     OpenAIProvider -> CodexDialect
     XAIProvider -> GrokBuildDialect
     OpenRouterProvider -> GrokBuildDialect
+    ClaudeCodeProvider -> ClaudeCodeDialect
 
 -- | Whether a provider transport can carry a model-facing dialect.
 --
@@ -214,7 +240,8 @@ providerSupportsDialect :: Provider -> DialectId -> Bool
 providerSupportsDialect provider dialect = case provider of
     OpenAIProvider -> dialect == CodexDialect
     XAIProvider -> dialect == GrokBuildDialect
-    OpenRouterProvider -> True
+    OpenRouterProvider -> dialect /= ClaudeCodeDialect
+    ClaudeCodeProvider -> dialect == ClaudeCodeDialect
 
 -- | Current public Grok Build names for stable internal tool identifiers.
 grokBuildPublicToolName :: Text -> Text
@@ -241,6 +268,7 @@ dialectSlug = \case
     CodexDialect -> "codex"
     GrokBuildDialect -> "grok-build"
     GenericResponsesDialect -> "generic-responses"
+    ClaudeCodeDialect -> "claude-code"
 
 parseDialect :: Text -> Maybe DialectId
 parseDialect raw = case Text.toLower (Text.strip raw) of
@@ -249,4 +277,6 @@ parseDialect raw = case Text.toLower (Text.strip raw) of
     "grok" -> Just GrokBuildDialect
     "generic-responses" -> Just GenericResponsesDialect
     "generic" -> Just GenericResponsesDialect
+    "claude-code" -> Just ClaudeCodeDialect
+    "claude" -> Just ClaudeCodeDialect
     _ -> Nothing

@@ -117,7 +117,6 @@ import Agent.Subagents.TaskPath
     , taskPathRoot
     , taskPathText
     )
-import System.IO.Unsafe (unsafePerformIO)
 
 data SubagentRecord = SubagentRecord
     { recordId :: !SubagentId
@@ -206,6 +205,7 @@ data SubagentRegistry = SubagentRegistry
     , registryOnSettledRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
     , registryCwd :: !OsPath
     , registryClosed :: !(TVar Bool)
+    , registryNextSubagentId :: !(TVar Int)
     , registryNextRootTurnId :: !(TVar Word64)
     , registryAbortedRootTurns :: !(TVar (Set RootTurnId))
     , registryLifecycle :: !(MVar ())
@@ -225,6 +225,7 @@ newSubagentRegistry config cwd run onEvent = do
     waitCursors <- newTVarIO Map.empty
     activeWaits <- newTVarIO Map.empty
     closed <- newTVarIO False
+    nextSubagentId <- newTVarIO 0
     nextRootTurnId <- newTVarIO 0
     abortedRootTurns <- newTVarIO Set.empty
     lifecycle <- newMVar ()
@@ -247,6 +248,7 @@ newSubagentRegistry config cwd run onEvent = do
         , registryOnSettledRef = onSettledRef
         , registryCwd = cwd
         , registryClosed = closed
+        , registryNextSubagentId = nextSubagentId
         , registryNextRootTurnId = nextRootTurnId
         , registryAbortedRootTurns = abortedRootTurns
         , registryLifecycle = lifecycle
@@ -370,7 +372,7 @@ spawnSubagentWithCwdPreparedForTurn
 spawnSubagentWithCwdPreparedForTurn
         registry rootTurnId childCwd beforeStart
         parentId parentDepth message nickname = do
-    agentId <- newSubagentId
+    agentId <- newSubagentId registry
     fmap (fmap fst) $
         spawnSubagentAtWithIdPreparedForTurn
             registry rootTurnId childCwd beforeStart agentId
@@ -447,7 +449,7 @@ spawnSubagentAtWithCwdPreparedForTurn
 spawnSubagentAtWithCwdPreparedForTurn
         registry rootTurnId childCwd beforeStart
         parentId parentPath parentDepth taskName content nickname = do
-    agentId <- newSubagentId
+    agentId <- newSubagentId registry
     spawnSubagentAtWithIdPreparedForTurn
         registry rootTurnId childCwd beforeStart agentId
         parentId parentPath parentDepth taskName content nickname
@@ -1387,7 +1389,7 @@ restoreSubagentResolvedWithCwd
     case result of
         Left err -> pure (Left err)
         Right restored -> do
-            restoreSubagentIndex restored
+            restoreSubagentIndex registry restored
             pure (Right restored)
   where
     normalizedStatus = case restoredStatus of
@@ -1528,25 +1530,25 @@ readStatusSTM registry agentId = do
         Nothing -> pure NotFound
         Just record -> phaseStatus <$> readTVar record.recordPhase
 
-newSubagentId :: IO SubagentId
-newSubagentId = do
-    n <- atomicModifyIORef' subagentIdCounter \i -> (i + 1, i + 1)
+newSubagentId :: SubagentRegistry -> IO SubagentId
+newSubagentId registry = do
+    n <- atomically do
+        current <- readTVar registry.registryNextSubagentId
+        let next = current + 1
+        writeTVar registry.registryNextSubagentId next
+        pure next
     now <- getCurrentTime
     let micros = floor (utcTimeToPOSIXSeconds now * 1000000) :: Integer
         hex = showHex (micros `mod` 0x100000000) ""
         pad = replicate (8 - length hex) '0' <> hex
     pure $ SubagentId $ Text.pack ("agent-" <> pad <> "-" <> show n)
 
-subagentIdCounter :: IORef Int
-subagentIdCounter = unsafePerformIO (newIORef (0 :: Int))
-{-# NOINLINE subagentIdCounter #-}
-
-restoreSubagentIndex :: SubagentId -> IO ()
-restoreSubagentIndex agentId =
+restoreSubagentIndex :: SubagentRegistry -> SubagentId -> IO ()
+restoreSubagentIndex registry agentId =
     case TextRead.decimal (snd (Text.breakOnEnd "-" agentId.unSubagentId)) of
         Right (index, rest) | Text.null rest ->
-            atomicModifyIORef' subagentIdCounter
-                (\current -> (max current index, ()))
+            atomically $
+                modifyTVar' registry.registryNextSubagentId (max index)
         _ -> pure ()
 
 getTaskPath :: SubagentRegistry -> SubagentId -> IO (Maybe TaskPath)

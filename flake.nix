@@ -39,6 +39,15 @@
                     ];
                 };
 
+                agentResponsesTypesSource = nix-filter.lib {
+                    root = ./packages/agent-responses-types;
+                    include = [
+                        "src"
+                        "agent-responses-types.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
                 agentCodexDialectSource = nix-filter.lib {
                     root = ./packages/agent-codex-dialect;
                     include = [
@@ -56,6 +65,28 @@
                         "src"
                         "test"
                         "agent-grok-build-dialect.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
+                claudeAgentSdkHaskellSource = nix-filter.lib {
+                    root = ./packages/claude-agent-sdk-haskell;
+                    include = [
+                        "src"
+                        "test"
+                        "claude-agent-sdk-haskell.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
+                agentClaudeSource = nix-filter.lib {
+                    root = ./packages/agent-claude;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-claude.cabal"
                         "LICENSE"
                         "README.md"
                     ];
@@ -182,9 +213,17 @@
                                         '';
                                 });
                         agent-core =
-                            pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
+                            pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
-                            };
+                            })
+                            [
+                                pkgs.git
+                                pkgs.ripgrep
+                            ];
+                        agent-responses-types = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
+                            src = agentResponsesTypesSource;
+                        };
                         agent-codex-dialect = pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-codex-dialect/package.nix { })
                             {
@@ -207,6 +246,12 @@
                         };
                         agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
+                        };
+                        claude-agent-sdk-haskell = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
+                            src = claudeAgentSdkHaskellSource;
+                        };
+                        agent-claude = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude/package.nix { }) {
+                            src = agentClaudeSource;
                         };
                         agent-tui =
                             (pkgs.haskell.lib.overrideSrc
@@ -233,10 +278,13 @@
                 agentCodexDialectPackage = haskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = haskellPackages.agent-grok-build-dialect;
                 agentSyntaxPackage = haskellPackages.agent-syntax;
+                agentResponsesTypesPackage = haskellPackages.agent-responses-types;
                 agentResponsesPackage = haskellPackages.agent-responses;
                 agentOpenaiPackage = haskellPackages.agent-openai;
                 agentXaiPackage = haskellPackages.agent-xai;
                 agentOpenrouterPackage = haskellPackages.agent-openrouter;
+                claudeAgentSdkHaskellPackage = haskellPackages.claude-agent-sdk-haskell;
+                agentClaudePackage = haskellPackages.agent-claude;
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentCliPackage = haskellPackages.agent-cli;
                 agentCliExecutable =
@@ -335,10 +383,13 @@
                 packages.agent-syntax = agentSyntaxPackage;
                 packages.agent-tui = agentTuiPackage;
                 packages.skylighting-syntaxes = skylightingSyntaxes;
+                packages.agent-responses-types = agentResponsesTypesPackage;
                 packages.agent-responses = agentResponsesPackage;
                 packages.agent-openai = agentOpenaiPackage;
                 packages.agent-xai = agentXaiPackage;
                 packages.agent-openrouter = agentOpenrouterPackage;
+                packages.claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
+                packages.agent-claude = agentClaudePackage;
                 packages.agent-openai-login = agentOpenaiExecutables;
 
                 apps.default = flake-utils.lib.mkApp {
@@ -362,10 +413,13 @@
                         packages.agent-grok-build-dialect
                         packages.agent-syntax
                         packages.agent-tui
+                        packages.agent-responses-types
                         packages.agent-responses
                         packages.agent-openai
                         packages.agent-xai
                         packages.agent-openrouter
+                        packages.claude-agent-sdk-haskell
+                        packages.agent-claude
                     ];
                     withHoogle = false;
                     doBenchmark = true;
@@ -394,10 +448,13 @@
                     agent-grok-build-dialect = agentGrokBuildDialectPackage;
                     agent-syntax = agentSyntaxPackage;
                     agent-tui = agentTuiPackage;
+                    agent-responses-types = agentResponsesTypesPackage;
                     agent-responses = agentResponsesPackage;
                     agent-openai = agentOpenaiPackage;
                     agent-xai = agentXaiPackage;
                     agent-openrouter = agentOpenrouterPackage;
+                    claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
+                    agent-claude = agentClaudePackage;
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

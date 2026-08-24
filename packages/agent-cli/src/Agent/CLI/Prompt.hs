@@ -64,6 +64,8 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
         CodexPromptStyle -> codexSystemPrompt cwd today
         GenericResponsesPromptStyle ->
             genericSystemPrompt cwd today isNonInteractive
+        ClaudeCodePromptStyle ->
+            claudeCodeSystemPrompt cwd today
 
 -- | Render a child prompt against the final filtered application-tool set.
 -- @web_search@ is server-side and remains available independently.
@@ -103,6 +105,8 @@ systemPromptForTools
                 cwd
                 today
                 isNonInteractive
+        ClaudeCodePromptStyle ->
+            claudeCodeSystemPrompt cwd today
 
 -- | Tell the model about its second filesystem sandbox root without changing
 -- the project/worktree used for relative paths.
@@ -150,10 +154,13 @@ ghciGuidanceForDialect dialect =
         GrokBuildPromptStyle ->
             Text.replace "run_terminal_cmd" "run_terminal_command"
                 ghciGuidance
-        _ -> ghciGuidance
+        CodexPromptStyle -> ghciGuidance
+        GenericResponsesPromptStyle -> ghciGuidance
+        ClaudeCodePromptStyle -> ""
 
 ghciGuidanceForTools :: Dialect -> [Text] -> Text
 ghciGuidanceForTools dialect available
+    | dialectPromptStyle dialect == ClaudeCodePromptStyle = ""
     | "run_ghci" `notElem` available = ""
     | otherwise =
         Text.unlines $
@@ -173,7 +180,11 @@ ghciGuidanceForTools dialect available
             | "run_terminal_cmd" `elem` available
                 || "run_terminal_command" `elem` available
             ]
-        _ -> filter (`elem` available) ["run_terminal_cmd", "shell_command"]
+        CodexPromptStyle ->
+            filter (`elem` available) ["run_terminal_cmd", "shell_command"]
+        GenericResponsesPromptStyle ->
+            filter (`elem` available) ["run_terminal_cmd", "shell_command"]
+        ClaudeCodePromptStyle -> []
     shellGuidance = case shellNames of
         [] -> []
         names ->
@@ -181,6 +192,19 @@ ghciGuidanceForTools dialect available
                 <> Text.intercalate " or " names
                 <> ") for OS commands, package installs, servers, and anything that is not Haskell evaluation."
             ]
+
+claudeCodeSystemPrompt :: OsPath -> Day -> Text
+claudeCodeSystemPrompt cwd today =
+    Text.unlines
+        [ "You are Claude Code running as the model and tool runtime for an independent agent harness."
+        , "Work in " <> toText cwd <> "."
+        , "Today's date is " <> Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today) <> "."
+        , ""
+        , "Use Claude Code's built-in tools directly. The outer harness renders Claude Code's"
+        , "validated structured output and does not execute tool calls on your behalf."
+        , "Follow any AGENTS.md instructions supplied in user context."
+        , "Be concise in user-visible responses."
+        ]
 
 genericSystemPrompt :: OsPath -> Day -> Bool -> Text
 genericSystemPrompt cwd today isNonInteractive =

@@ -1,7 +1,11 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
-import Agent.Dialect (codexDialect, grokBuildDialect)
+import Agent.Dialect
+    ( claudeCodeDialect
+    , codexDialect
+    , grokBuildDialect
+    )
 import Agent.Loop (LoopError(..))
 import Agent.Responses.Types
 import Agent.Subagents
@@ -47,6 +51,10 @@ spec = describe "schemasFromAppTools" do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Just True
             other -> expectationFailure ("expected function tool, got " <> show other)
+
+    it "does not advertise harness tools to the Claude Code subprocess" do
+        schemasFromAppTools claudeCodeDialect [jsonTool, patchTool]
+            `shouldBe` []
 
     it "projects current Grok Build public tool and parameter names" do
         let task = jsonAppTool "task"

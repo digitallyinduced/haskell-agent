@@ -48,6 +48,9 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "xai"
             frame `shouldSatisfy` Text.isInfixOf "openai"
             frame `shouldSatisfy` Text.isInfixOf "openrouter"
+            frame `shouldSatisfy` Text.isInfixOf "claude-code"
+            defaultModelFor catalog XAIProvider
+                `shouldSatisfy` maybe False (\model -> Text.isInfixOf model frame)
             frame `shouldSatisfy` Text.isInfixOf "grok-4.6"
             frame `shouldSatisfy` Text.isInfixOf "enter"
             frame `shouldSatisfy` Text.isInfixOf "filter"
@@ -63,9 +66,12 @@ spec = do
                     "gpt-5.6-sol"
                     CodexDialect
             listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-sol"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-terra"
+            listing `shouldSatisfy` Text.isInfixOf "gpt-5.6-luna"
             listing `shouldSatisfy` Text.isInfixOf "openai"
             listing `shouldSatisfy` Text.isInfixOf "grok-4.6"
             listing `shouldSatisfy` Text.isInfixOf "openrouter"
+            listing `shouldSatisfy` Text.isInfixOf "claude-code"
 
         it "shows the dialect of OpenRouter's mapped transport model" do
             withEnv

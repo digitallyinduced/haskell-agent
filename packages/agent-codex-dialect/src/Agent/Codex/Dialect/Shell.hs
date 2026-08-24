@@ -38,7 +38,6 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (SomeException, mask, onException, try)
 import Control.Monad (void, when)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -56,17 +55,17 @@ data CodexShellResult
 data ManagedCommand = ManagedCommand
     { managedRunning :: !RunningCommand
     , managedLock :: !(MVar ())
-    , managedCursor :: !(IORef RunningOutputCursor)
+    , managedCursor :: !(MVar RunningOutputCursor)
     }
 
 data SessionStore = SessionStore
-    { storeCommands :: !(Map Int ManagedCommand)
+    { storeNextId :: !Int
+    , storeCommands :: !(Map Int ManagedCommand)
     }
 
 data CodexShellSession = CodexShellSession
     { sessionEnv :: !ToolEnv
     , sessionCommands :: !(MVar (Maybe SessionStore))
-    , sessionNextId :: !(IORef Int)
     }
 
 maxManagedCommands :: Int
@@ -75,12 +74,12 @@ maxManagedCommands = 64
 newCodexShellSession :: ToolEnv -> IO CodexShellSession
 newCodexShellSession env = do
     commands <- newMVar $ Just SessionStore
-        { storeCommands = Map.empty }
-    nextId <- newIORef 0
+        { storeNextId = 0
+        , storeCommands = Map.empty
+        }
     pure CodexShellSession
         { sessionEnv = env
         , sessionCommands = commands
-        , sessionNextId = nextId
         }
 
 -- | Stop and join every retained command. Closing is idempotent.
@@ -241,17 +240,10 @@ runningResult commandId task = do
         }
 
 takeRunningOutput :: ManagedCommand -> IO (Text, Text)
-takeRunningOutput task = do
-    cursor <- readIORef task.managedCursor
+takeRunningOutput task =
+  modifyMVar task.managedCursor \cursor -> do
     (output, nextCursor) <- runningOutputSince task.managedRunning cursor
-    writeIORef task.managedCursor nextCursor
-    pure output
-
-nextCommandId :: CodexShellSession -> IO Int
-nextCommandId session =
-    atomicModifyIORef' session.sessionNextId \current ->
-        let next = current + 1
-        in (next, next)
+    pure (nextCursor, output)
 
 startManagedCommand
     :: CodexShellSession
@@ -280,16 +272,17 @@ startManagedCommand session workdir command =
                         Right running -> do
                             prepared <-
                                 (do
-                                    commandId <- nextCommandId session
+                                    let commandId = store.storeNextId + 1
                                     task <- ManagedCommand running
                                         <$> newMVar ()
-                                        <*> newIORef initialRunningOutputCursor
+                                        <*> newMVar initialRunningOutputCursor
                                     pure (commandId, task))
                                     `onException` stopShellCommand running
                             let (commandId, task) = prepared
                             pure
                                 ( Just store
-                                    { storeCommands =
+                                    { storeNextId = commandId
+                                    , storeCommands =
                                         Map.insert
                                             commandId
                                             task

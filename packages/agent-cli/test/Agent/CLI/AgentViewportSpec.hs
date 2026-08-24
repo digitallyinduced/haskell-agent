@@ -34,6 +34,30 @@ spec = do
                         , "  viewing /root/alpha/gamma · /agents to switch"
                         ]
 
+        it "computes nested sibling guides across the hierarchy" do
+            let entries =
+                    [ rootEntry
+                    , child "alpha" "/root/alpha" "running"
+                    , child "one" "/root/alpha/one" "running"
+                    , child "deep" "/root/alpha/one/deep" "done"
+                    , child "two" "/root/alpha/two" "done"
+                    , child "beta" "/root/beta" "running"
+                    , child "leaf" "/root/beta/leaf" "done"
+                    ]
+            renderAgentTree False AgentRoot entries
+                `shouldBe`
+                    Text.intercalate "\n"
+                        [ "agents"
+                        , "› ▾ root  ● active"
+                        , "  ├─ alpha  ● running"
+                        , "  │  ├─ one  ● running"
+                        , "  │  │  └─ deep  ✓ done"
+                        , "  │  └─ two  ✓ done"
+                        , "  └─ beta  ● running"
+                        , "     └─ leaf  ✓ done"
+                        , "  viewing /root · /agents to switch"
+                        ]
+
     describe "agent viewport selection" do
         let entries =
                 [ rootEntry

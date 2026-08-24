@@ -9,6 +9,7 @@ module Agent.CLI.Error
     , formatApiErrorInline
     , formatApiErrorInlineAt
     , formatApiErrorPersistedAt
+    , formatApiErrorRetryCountdownParts
     , formatException
     ) where
 
@@ -94,13 +95,22 @@ formatApiErrorWith maybeNow retryPresentation = \case
             details
             [action]
     CredentialsExhausted{retryAt} ->
-        message
-            "Provider unavailable."
-            []
-            [ "All accounts for this provider are temporarily unavailable."
-            , credentialsRetryGuidance maybeNow retryAt
-                <> ", or choose another provider with /model."
-            ]
+        let (prefix, suffix) = credentialsExhaustedRetryParts
+        in prefix <> credentialsRetryGuidance maybeNow retryAt <> suffix
+
+-- | Static text around the live retry phrase for errors with an absolute
+-- credential reset deadline. The TUI inserts @Try again in …@ and updates it.
+formatApiErrorRetryCountdownParts :: ApiError -> Maybe (Text, Text)
+formatApiErrorRetryCountdownParts = \case
+    CredentialsExhausted{} -> Just credentialsExhaustedRetryParts
+    _ -> Nothing
+
+credentialsExhaustedRetryParts :: (Text, Text)
+credentialsExhaustedRetryParts =
+    ( "Provider unavailable.\n\
+      \All accounts for this provider are temporarily unavailable.\n"
+    , ", or choose another provider with /model."
+    )
 
 formatProviderError
     :: RetryPresentation

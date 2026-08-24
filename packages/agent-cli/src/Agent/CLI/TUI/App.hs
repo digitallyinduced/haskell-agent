@@ -116,7 +116,8 @@ import Agent.CLI.TUI.ImagePreview
     , renderTuiImagePreview
     )
 import Agent.TUI.Markdown
-    ( markdownWidget
+    ( codeWidgetWithSyntaxHighlighting
+    , markdownWidget
     , markdownWidgetWithSyntaxHighlighting
     )
 import Agent.Syntax
@@ -2460,8 +2461,11 @@ drawBlock state block =
                     (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockShell ->
-                accentBlock (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                accentCodeBlock
+                    state.appSyntaxHighlighter
+                    (statusAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle)
+                    block.blockDetail
                     (visibleShellBody block)
             BlockEdit ->
                 accentBlock (statusAttr state block)
@@ -2527,6 +2531,10 @@ cacheableBlock :: AppState -> UiBlock -> Bool
 cacheableBlock state block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        && maybe
+            True
+            ((/= block.blockId) . (.retryCountdownBlockId))
+            state.appUi.uiRetryCountdown
         && not (blockFlashing state block)
 
 blockStateGlyph :: AppState -> UiBlock -> Text
@@ -2554,14 +2562,39 @@ blockStateGlyph state block = case block.blockState of
 
 accentBlock :: AttrName -> Text -> Text -> Widget Name
 accentBlock accent title body =
+    accentBlockWithSections accent title $
+        if Text.null (Text.strip body)
+            then []
+            else [txtWrap body]
+
+accentCodeBlock
+    :: Maybe SyntaxHighlighter
+    -> AttrName
+    -> Text
+    -> Text
+    -> Text
+    -> Widget Name
+accentCodeBlock syntaxHighlighter accent title code body =
+    accentBlockWithSections accent title $
+        [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
+        | not (Text.null (Text.strip code))
+        ]
+            <> [ txtWrap body
+               | not (Text.null (Text.strip body))
+               ]
+
+accentBlockWithSections
+    :: AttrName
+    -> Text
+    -> [Widget Name]
+    -> Widget Name
+accentBlockWithSections accent title sections =
     hBox
         [ withAttr accent (txt "❙")
         , padLeft (Pad 2) $
             vBox $
-                [withAttr accent (txt title)]
-                    <> if Text.null (Text.strip body)
-                        then []
-                        else [padTop (Pad 1) (txtWrap body)]
+                [withAttr accent (txtWrap title)]
+                    <> map (padTop (Pad 1)) sections
         ]
 
 visibleBody :: UiBlock -> Text
@@ -3909,7 +3942,7 @@ handleMouseDown name button =
         V.BLeft -> case name of
             ConversationBlock ident ->
                 applyLocalUiEventWith
-                    (UiSelectBlock ident)
+                    (UiActivateBlock ident)
                     (applyUiEvent (UiFocusChanged FocusScrollback))
             ComposerArea ->
                 applyLocalUiEvent (UiFocusChanged FocusComposer)
