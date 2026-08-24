@@ -49,6 +49,7 @@ import Agent.Store.Postgres.Connection
     , openRoleStorePool
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Sql (quoteIdentifier, quoteLiteral)
 import Agent.Store.Types (StoreError)
 
 data ScopeKind
@@ -410,11 +411,3 @@ kindPrefix = \case
     UserScope -> "u"
     RepositoryScope -> "r"
     CheckoutScope -> "c"
-
-quoteIdentifier :: Text -> Text
-quoteIdentifier value =
-    "\"" <> Text.replace "\"" "\"\"" value <> "\""
-
-quoteLiteral :: Text -> Text
-quoteLiteral value =
-    "'" <> Text.replace "'" "''" value <> "'"
