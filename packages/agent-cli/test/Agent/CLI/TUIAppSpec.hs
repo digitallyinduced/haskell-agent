@@ -160,7 +160,8 @@ spec = do
                   , V.EvKey V.KEnter [V.MShift]
                   )
                 ]
-            mappings `shouldContain`
+            mapM_
+                (\mapping -> mappings `shouldContain` [mapping])
                 [ ( Nothing
                   , "\ESC[118;5u"
                   , V.EvKey (V.KChar 'v') [V.MCtrl]
