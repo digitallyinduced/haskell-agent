@@ -188,7 +188,11 @@ legacyTypedToolOutputMigrations =
     , Migration
         { migrationVersion = 2
         , migrationName = "restricted harness runtime role"
-        , migrationStatements = []
+        , migrationStatements =
+            [ "CREATE ROLE ha_runtime LOGIN\
+              \ NOSUPERUSER NOCREATEDB NOCREATEROLE\
+              \ NOINHERIT NOREPLICATION NOBYPASSRLS"
+            ]
         }
     , Migration
         { migrationVersion = 3

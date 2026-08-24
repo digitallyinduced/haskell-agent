@@ -31,6 +31,10 @@ import Agent.Store.Postgres.Hasql (mkStatement)
 import Agent.Store.Postgres.Connection
 import Agent.Store.Postgres.Scope (customSchemaStatements)
 import Agent.Store.Postgres.Session (sessionSchemaStatements)
+import Agent.Store.Postgres.Skill
+    ( learnedSkillRuntimeGrantStatements
+    , learnedSkillSchemaStatements
+    )
 import Agent.Store.Types
 
 data Migration = Migration
@@ -113,6 +117,13 @@ coreMigrations =
         { migrationVersion = 4
         , migrationName = "text tool outputs"
         , migrationStatements = [migrateToolOutputsToTextStatement]
+        }
+    , Migration
+        { migrationVersion = 5
+        , migrationName = "versioned learned skills"
+        , migrationStatements =
+            learnedSkillSchemaStatements
+            <> learnedSkillRuntimeGrantStatements
         }
     ]
 

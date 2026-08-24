@@ -78,6 +78,8 @@ library
                     , Agent.CLI.Input.Picker
                     , Agent.CLI.Interrupt
                     , Agent.CLI.Login
+                    , Agent.CLI.LearnedSkills
+                    , Agent.CLI.LearnedSkills.Store
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpManager
@@ -251,6 +253,7 @@ test-suite agent-cli-test
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec
+                    , Agent.CLI.LearnedSkillsSpec
                     , Agent.CLI.MarkdownSpec
                     , Agent.CLI.McpManagerSpec
                     , Agent.CLI.ModelPickerSpec

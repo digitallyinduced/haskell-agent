@@ -44,6 +44,7 @@ library
                     , Agent.Store.Postgres.Migrations
                     , Agent.Store.Postgres.Scope
                     , Agent.Store.Postgres.Session
+                    , Agent.Store.Postgres.Skill
     other-modules:    Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.SessionItem
     hs-source-dirs:   src
@@ -77,6 +78,8 @@ test-suite agent-store-test
                     , Agent.Store.Postgres.ManagedSpec
                     , Agent.Store.Postgres.ScopeSpec
                     , Agent.Store.Postgres.SessionSpec
+                    , Agent.Store.Postgres.SkillSpec
+                    , Agent.Store.Postgres.SkillSpec
     build-depends:    agent-store
                     , agent-responses-types
                     , aeson

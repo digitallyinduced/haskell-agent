@@ -2,6 +2,8 @@
 module Agent.CLI.Database.Store
     ( DatabaseScopes
     , deriveDatabaseScopes
+    , scopeForDatabase
+    , applicableDatabaseScopes
     , databaseToolsEnvForStore
     ) where
 
@@ -92,14 +94,14 @@ databaseToolsEnvForStore
     -> DatabaseToolsEnv
 databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
     { databaseDescribeScope = \selected ->
-        withScopeDatabase store (scopeFor scopes selected) \database pool ->
+        withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
             fmap toJSON <$> inspectCustomSchema pool database
     , databaseRunQuery = \selected sql ->
-        withScopeDatabase store (scopeFor scopes selected) \database pool ->
+        withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
             fmap toJSON <$> queryCustom
                 pool database defaultQueryLimits sql
     , databaseRunExecute = \selected purpose sql ->
-        withScopeDatabase store (scopeFor scopes selected) \database pool -> do
+        withScopeDatabase store (scopeForDatabase scopes selected) \database pool -> do
             sessionId <- currentSessionId
             fmap toJSON <$> executeCustom
                 (storePool (trustedPool store))
@@ -143,11 +145,18 @@ withScopeDatabase store scope action =
 
 type HasqlPool = Hasql.Pool.Pool
 
-scopeFor :: DatabaseScopes -> DatabaseScope -> Scope
-scopeFor scopes = \case
+scopeForDatabase :: DatabaseScopes -> DatabaseScope -> Scope
+scopeForDatabase scopes = \case
     DatabaseUserScope -> scopes.userScope
     DatabaseRepositoryScope -> scopes.repositoryScope
     DatabaseCheckoutScope -> scopes.checkoutScope
+
+applicableDatabaseScopes :: DatabaseScopes -> [Scope]
+applicableDatabaseScopes scopes =
+    [ scopes.userScope
+    , scopes.repositoryScope
+    , scopes.checkoutScope
+    ]
 
 stableScopeId :: Text -> Either Text ScopeId
 stableScopeId identity =

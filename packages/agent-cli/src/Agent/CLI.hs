@@ -108,12 +108,21 @@ import Agent.CLI.Compaction
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Database (databaseTools)
 import Agent.CLI.Database.Store
-    ( databaseToolsEnvForStore
+    ( DatabaseScopes
+    , databaseToolsEnvForStore
     , deriveDatabaseScopes
     )
 import Agent.CLI.Database.Storage
     ( postgresStorageCommandEnv
     , runStorageCommand
+    )
+import Agent.CLI.LearnedSkills
+    ( learnedSkillTools
+    , queueLearnedSkillContextWithOmissions
+    )
+import Agent.CLI.LearnedSkills.Store
+    ( learnedSkillToolsEnvForStore
+    , loadApplicableLearnedSkillsForStore
     )
 import Agent.CLI.Error
     ( formatApiErrorAt
@@ -416,6 +425,7 @@ import Agent.Skills
     , SkillCatalog(..)
     , SkillInvocation(..)
     , SkillWarning(..)
+    , defaultSkillCatalogMaxChars
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -2153,17 +2163,25 @@ runAgentInitializedWithLock
                 startup.startupDatabaseStore
                 databaseScopes
                 (readIORef persistSlotRef >>= currentSessionId)
+        learnedSkillToolsEnv =
+            learnedSkillToolsEnvForStore
+                startup.startupDatabaseStore
+                databaseScopes
+                (readIORef persistSlotRef >>= reservedSessionId)
         sessionTools = agentSessionTools sessionToolsEnv
         databaseAppTools = databaseTools databaseToolsEnv
+        learnedSkillAppTools = learnedSkillTools learnedSkillToolsEnv
         allTools =
             coding.codingAppTools ++ mcpTools ++ sessionTools
                 ++ databaseAppTools
+                ++ learnedSkillAppTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
                 ++ mcpTools
                 ++ sessionTools
                 ++ databaseAppTools
+                ++ learnedSkillAppTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
@@ -2185,7 +2203,11 @@ runAgentInitializedWithLock
     flip finally closeAll do
         case
                 mcpToolCollision
-                    (coding.codingAppTools ++ sessionTools ++ databaseAppTools)
+                    ( coding.codingAppTools
+                        ++ sessionTools
+                        ++ databaseAppTools
+                        ++ learnedSkillAppTools
+                    )
                     mcpFleet.mcpFleetRegistrations
             of
                 Just err ->
@@ -2551,7 +2573,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2615,7 +2637,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2676,7 +2698,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2748,7 +2770,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -3024,6 +3046,7 @@ runSession
     -> ToolEnv
     -> PlanModeEnv
     -> StartupRuntime
+    -> DatabaseScopes
     -> Maybe Text
     -> Maybe PendingTurn
     -> [Provider]
@@ -3061,7 +3084,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3286,10 +3309,34 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
         (loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect selectAgent
     let installSkills context queueContext skills = do
+            before <- readIORef context
             installSkillToolRoots toolEnv skills
-            installSkillCatalogWithOmissions
+            omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames queueContext context
                 skillsRef skillInvocationsRef skills
+            after <- readIORef context
+            pure
+                ( omitted
+                , max 0 (contextLength after - contextLength before)
+                )
+        installLearnedSkills context maximum =
+            loadApplicableLearnedSkillsForStore
+                startup.startupDatabaseStore
+                databaseScopes >>= \case
+                    Left err ->
+                        reportLearnedSkillWarning
+                            ("learned skills unavailable: " <> err)
+                    Right learnedSkills -> do
+                        omitted <-
+                            queueLearnedSkillContextWithOmissions
+                                maximum
+                                context
+                                learnedSkills
+                        when (omitted > 0) $
+                            reportLearnedSkillWarning
+                                ("learned skills: "
+                                    <> Text.pack (show omitted)
+                                    <> " omitted from model context due to the context budget")
         sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
@@ -3304,16 +3351,22 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
-            omitted <- installSkills freshAgents True freshSkills
+            (omitted, skillContextChars) <-
+                installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
+            installLearnedSkills
+                freshAgents
+                (defaultSkillCatalogMaxChars - skillContextChars)
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            omitted <- installSkills startupContext queueContext refreshed
+            (omitted, _) <-
+                installSkills startupContext queueContext refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
+        contextLength = maybe 0 Text.length
         formatSkillWarning warning =
             "skill ignored: "
                 <> toText warning.skillWarningPath
@@ -3323,6 +3376,14 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             "skills: "
                 <> Text.pack (show omitted)
                 <> " omitted from model context due to the catalog budget"
+        reportLearnedSkillWarning message =
+            case fullscreen of
+                Nothing -> do
+                    color <- resolveColor stderr
+                    putTextLn stderr $
+                        roleWarn color (glyphWarn <> message)
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
         reportSkillCatalog includeSummary catalog omitted =
             case fullscreen of
                 Nothing -> do
@@ -3596,10 +3657,16 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             markStartupStage startup "Loading skills…"
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            omitted <- installSkills startupContext
-                (null initialTurns && not (isJust initialPrevious))
+            let queueInitialContext =
+                    null initialTurns && not (isJust initialPrevious)
+            (omitted, skillContextChars) <- installSkills startupContext
+                queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
+            when queueInitialContext $
+                installLearnedSkills
+                    startupContext
+                    (defaultSkillCatalogMaxChars - skillContextChars)
             finishStartup startup
         sessionAction = do
             initializeSkills
@@ -6868,6 +6935,20 @@ currentSessionId = \case
         slot <- readIORef slotRef
         pure $ case slot of
             PersistencePending _ _ _ -> Nothing
+            PersistenceActive handle -> Just handle.sessionMeta.metaId
+
+-- | Return the stable id already reserved for a pending session as well as
+-- the id of an active one. Learned-skill evidence can safely record this id
+-- before the successful turn creates the corresponding session row.
+reservedSessionId
+    :: Persistence
+    -> IO (Maybe Text)
+reservedSessionId = \case
+    PersistenceDisabled -> pure Nothing
+    PersistenceEnabled slotRef -> do
+        slot <- readIORef slotRef
+        pure $ case slot of
+            PersistencePending _ sessionId _ -> Just sessionId
             PersistenceActive handle -> Just handle.sessionMeta.metaId
 
 -- | Build a root OpenAI backend plus an unlocked sender for manual compaction.
