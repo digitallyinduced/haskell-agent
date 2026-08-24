@@ -10,6 +10,14 @@ module Agent.MCP
     , McpServerStatus(..)
     , McpToolRegistration(..)
     , McpFleet(..)
+    , McpSupervisor
+    , McpFleetLease(..)
+    , newMcpSupervisor
+    , acquireMcpFleet
+    , acquireMcpFleetWithProgress
+    , acquireMcpFleetProgressive
+    , releaseMcpFleetLease
+    , closeMcpSupervisor
     , startMcpFleet
     , startMcpFleetWithProgress
     , startMcpFleetProgressive
@@ -97,6 +105,7 @@ import Data.IORef
     , readIORef
     )
 import qualified Data.Map.Strict as Map
+import Data.List (find, sortOn)
 import Data.Maybe (catMaybes, isJust)
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
@@ -106,6 +115,7 @@ import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Vector as Vector
 import System.Environment (getEnvironment)
+import System.Directory (getCurrentDirectory)
 import System.IO
     ( BufferMode(..)
     , Handle
@@ -179,13 +189,495 @@ data McpServerStatus = McpServerStatus
 data McpFleet = McpFleet
     { mcpFleetRegistrations :: ![McpToolRegistration]
     , mcpFleetWarnings :: ![Text]
-    , mcpFleetClients :: ![McpClient]
+    , mcpFleetClients :: !(TVar (Map.Map Text McpClient))
     , mcpFleetServerOrder :: ![Text]
     , mcpFleetFailures :: !(Map.Map Text Text)
     , mcpFleetCatalog :: !(TVar (Map.Map Text McpCatalogEntry))
+    , mcpFleetReconnects :: !(Map.Map Text (MVar ()))
     , mcpFleetWorkers :: !(MVar [Async ()])
     , mcpFleetClosed :: !(MVar Bool)
     }
+
+data McpSupervisor = McpSupervisor
+    { supervisorState :: !(MVar McpSupervisorState)
+    }
+
+data McpSupervisorState = McpSupervisorState
+    { supervisorClosed :: !Bool
+    , supervisorNextLeaseId :: !Int
+    , supervisorEntries :: ![McpSupervisorEntry]
+    , supervisorPending :: ![McpSupervisorPending]
+    }
+
+data McpSupervisorEntry = McpSupervisorEntry
+    { supervisorEntryId :: !Int
+    , supervisorEntryProgressive :: !Bool
+    , supervisorEntryConfigs :: ![McpServerConfig]
+    , supervisorEntryFleet :: !McpFleet
+    , supervisorEntryLeases :: !Int
+    }
+
+data McpSupervisorPending = McpSupervisorPending
+    { supervisorPendingId :: !Int
+    , supervisorPendingProgressive :: !Bool
+    , supervisorPendingConfigs :: ![McpServerConfig]
+    , supervisorPendingResult :: !(TMVar (Either Text McpFleet))
+    , supervisorPendingWorker ::
+        !(TMVar (Async (Either Text McpFleet)))
+    , supervisorPendingLeases :: !Int
+    }
+
+data McpAcquireDecision
+    = UseReady !(Int, McpFleet)
+    | WaitPending !Int !(TMVar (Either Text McpFleet))
+    | StartPending
+        !Int
+        !(TMVar (Either Text McpFleet))
+        !(TMVar (Async (Either Text McpFleet)))
+
+data McpFleetLease = McpFleetLease
+    { mcpLeaseFleet :: !McpFleet
+    , mcpLeaseRelease :: !(IO ())
+    }
+
+-- | A process-scoped cache of MCP fleets. Released leases remain warm for a
+-- later provider/session rebuild; changed configurations replace idle fleets,
+-- and 'closeMcpSupervisor' performs the final deterministic shutdown.
+newMcpSupervisor :: IO McpSupervisor
+newMcpSupervisor =
+    McpSupervisor <$> newMVar McpSupervisorState
+        { supervisorClosed = False
+        , supervisorNextLeaseId = 1
+        , supervisorEntries = []
+        , supervisorPending = []
+        }
+
+acquireMcpFleet
+    :: McpSupervisor
+    -> [McpServerConfig]
+    -> IO McpFleetLease
+acquireMcpFleet supervisor configs =
+    resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor False
+        (startMcpFleetWithProgress (const (pure ())))
+
+acquireMcpFleetWithProgress
+    :: McpSupervisor
+    -> ([Text] -> IO ())
+    -> [McpServerConfig]
+    -> IO McpFleetLease
+acquireMcpFleetWithProgress supervisor report configs =
+    resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor False
+        (startMcpFleetWithProgress report)
+
+acquireMcpFleetProgressive
+    :: McpSupervisor
+    -> ([McpServerStatus] -> IO ())
+    -> [McpServerConfig]
+    -> IO McpFleetLease
+acquireMcpFleetProgressive supervisor report configs =
+    resolveEffectiveCwds configs >>= acquireMcpFleetWith supervisor True
+        (startMcpFleetProgressive report)
+
+acquireMcpFleetWith
+    :: McpSupervisor
+    -> Bool
+    -> ([McpServerConfig] -> IO McpFleet)
+    -> [McpServerConfig]
+    -> IO McpFleetLease
+acquireMcpFleetWith supervisor progressive start configs =
+  mask \restore -> do
+    (decision, obsolete) <-
+        modifyMVar supervisor.supervisorState \state ->
+            if state.supervisorClosed
+                then ioError (userError "MCP supervisor closed")
+                else do
+                    (healthyEntries, failedIdle) <-
+                        partitionReusable state.supervisorEntries
+                    matching <- findMatching healthyEntries
+                    case matching of
+                        Just entry -> do
+                            let retained = entry
+                                    { supervisorEntryLeases =
+                                        entry.supervisorEntryLeases + 1
+                                    }
+                                otherIdle =
+                                    idleExcept entry.supervisorEntryId
+                                        healthyEntries
+                                removed = failedIdle <> otherIdle
+                            pure
+                                ( state
+                                    { supervisorEntries =
+                                        replaceEntry retained
+                                            (withoutEntries removed
+                                                healthyEntries)
+                                    }
+                                , ( UseReady
+                                        ( entry.supervisorEntryId
+                                        , entry.supervisorEntryFleet
+                                        )
+                                  , map (.supervisorEntryFleet) removed
+                                  )
+                                )
+                        Nothing ->
+                            case findPending state.supervisorPending of
+                                Just pending -> do
+                                    let retained = pending
+                                            { supervisorPendingLeases =
+                                                pending.supervisorPendingLeases + 1
+                                            }
+                                    pure
+                                        ( state
+                                            { supervisorEntries = healthyEntries
+                                            , supervisorPending =
+                                                replacePending retained
+                                                    state.supervisorPending
+                                            }
+                                        , ( WaitPending
+                                                pending.supervisorPendingId
+                                                pending.supervisorPendingResult
+                                          , map (.supervisorEntryFleet) failedIdle
+                                          )
+                                        )
+                                Nothing -> do
+                                    completion <- newEmptyTMVarIO
+                                    workerSlot <- newEmptyTMVarIO
+                                    let pending = McpSupervisorPending
+                                            { supervisorPendingId =
+                                                state.supervisorNextLeaseId
+                                            , supervisorPendingProgressive =
+                                                progressive
+                                            , supervisorPendingConfigs = configs
+                                            , supervisorPendingResult = completion
+                                            , supervisorPendingWorker = workerSlot
+                                            , supervisorPendingLeases = 1
+                                            }
+                                        healthyIdle = filter isIdle healthyEntries
+                                        removed = failedIdle <> healthyIdle
+                                    pure
+                                        ( state
+                                            { supervisorNextLeaseId =
+                                                state.supervisorNextLeaseId + 1
+                                            , supervisorEntries =
+                                                filter (not . isIdle) healthyEntries
+                                            , supervisorPending =
+                                                pending : state.supervisorPending
+                                            }
+                                        , ( StartPending
+                                                pending.supervisorPendingId
+                                                completion
+                                                workerSlot
+                                          , map (.supervisorEntryFleet) removed
+                                          )
+                                        )
+    case decision of
+        UseReady acquired -> do
+            mapM_ closeMcpFleet obsolete
+            makeLease acquired
+        WaitPending entryId completion -> do
+            mapM_ closeMcpFleet obsolete
+            result <-
+                restore (atomically (readTMVar completion))
+                    `onException` releaseSupervisorEntry supervisor entryId
+            either (ioError . userError . Text.unpack)
+                (\fleet -> makeLease (entryId, fleet))
+                result
+        StartPending entryId completion workerSlot -> do
+            worker <-
+                asyncWithUnmask \unmask ->
+                    tryAny (unmask (start configs)) >>= \case
+                        Left exception ->
+                            pure (Left (exceptionSummary exception))
+                        Right fleet -> pure (Right fleet)
+            atomically $ void (tryPutTMVar workerSlot worker)
+            mapM_ closeMcpFleet obsolete
+            outcome <-
+                restore (waitCatch worker)
+                    `onException` do
+                        cancel worker
+                        void (waitCatch worker)
+                        failPending entryId completion
+                            "MCP fleet startup cancelled"
+            case outcome of
+                Left exception -> do
+                    let err = exceptionSummary exception
+                    failPending entryId completion err
+                    ioError (userError (Text.unpack err))
+                Right (Left err) -> do
+                    failPending entryId completion err
+                    ioError (userError (Text.unpack err))
+                Right (Right fleet) -> do
+                    accepted <-
+                        publishPending entryId completion fleet
+                            `onException` closeMcpFleet fleet
+                    if accepted
+                        then makeLease (entryId, fleet)
+                        else do
+                            closeMcpFleet fleet
+                            ioError (userError "MCP supervisor closed")
+  where
+    makeLease :: (Int, McpFleet) -> IO McpFleetLease
+    makeLease (entryId, fleet) = do
+        released <- newIORef False
+        let release =
+                atomicModifyIORef' released (\done -> (True, done))
+                    >>= \alreadyReleased ->
+                        unless alreadyReleased $
+                            releaseSupervisorEntry supervisor entryId
+        pure McpFleetLease
+            { mcpLeaseFleet = fleet
+            , mcpLeaseRelease = release
+            }
+
+    findPending :: [McpSupervisorPending] -> Maybe McpSupervisorPending
+    findPending = go
+      where
+        go
+            :: [McpSupervisorPending]
+            -> Maybe McpSupervisorPending
+        go [] = Nothing
+        go (pending : rest)
+            | pending.supervisorPendingProgressive == progressive
+            , sameServerConfigs pending.supervisorPendingConfigs configs =
+                Just pending
+            | otherwise = go rest
+
+    replacePending
+        :: McpSupervisorPending
+        -> [McpSupervisorPending]
+        -> [McpSupervisorPending]
+    replacePending replacement =
+        map \pending ->
+            if pending.supervisorPendingId == replacement.supervisorPendingId
+                then replacement
+                else pending
+
+    failPending
+        :: Int
+        -> TMVar (Either Text McpFleet)
+        -> Text
+        -> IO ()
+    failPending entryId completion err =
+        modifyMVar_ supervisor.supervisorState \state -> do
+            atomically $ void (tryPutTMVar completion (Left err))
+            pure state
+                { supervisorPending =
+                    filter
+                        ((/= entryId) . (.supervisorPendingId))
+                        state.supervisorPending
+                }
+
+    publishPending
+        :: Int
+        -> TMVar (Either Text McpFleet)
+        -> McpFleet
+        -> IO Bool
+    publishPending entryId completion fleet =
+        modifyMVar supervisor.supervisorState \state ->
+            case find
+                ((== entryId) . (.supervisorPendingId))
+                state.supervisorPending of
+                Nothing -> do
+                    atomically $
+                        void (tryPutTMVar completion
+                            (Left "MCP supervisor closed"))
+                    pure (state, False)
+                Just pending
+                    | state.supervisorClosed -> do
+                        atomically $
+                            void (tryPutTMVar completion
+                                (Left "MCP supervisor closed"))
+                        pure
+                            ( state
+                                { supervisorPending =
+                                    filter
+                                        ((/= entryId) . (.supervisorPendingId))
+                                        state.supervisorPending
+                                }
+                            , False
+                            )
+                    | otherwise -> do
+                        let entry = McpSupervisorEntry
+                                { supervisorEntryId = entryId
+                                , supervisorEntryProgressive = progressive
+                                , supervisorEntryConfigs = configs
+                                , supervisorEntryFleet = fleet
+                                , supervisorEntryLeases =
+                                    pending.supervisorPendingLeases
+                                }
+                        atomically $
+                            void (tryPutTMVar completion (Right fleet))
+                        pure
+                            ( state
+                                { supervisorEntries =
+                                    entry : state.supervisorEntries
+                                , supervisorPending =
+                                    filter
+                                        ((/= entryId) . (.supervisorPendingId))
+                                        state.supervisorPending
+                                }
+                            , True
+                            )
+
+    findMatching
+        :: [McpSupervisorEntry]
+        -> IO (Maybe McpSupervisorEntry)
+    findMatching = go
+      where
+        go :: [McpSupervisorEntry] -> IO (Maybe McpSupervisorEntry)
+        go [] = pure Nothing
+        go (entry : rest)
+            | entry.supervisorEntryProgressive /= progressive
+                || not
+                    (sameServerConfigs
+                        entry.supervisorEntryConfigs configs) =
+                    go rest
+            | otherwise = do
+                statuses <- mcpFleetStatuses entry.supervisorEntryFleet
+                if all statusReusable statuses
+                    then pure (Just entry)
+                    else go rest
+
+    replaceEntry
+        :: McpSupervisorEntry
+        -> [McpSupervisorEntry]
+        -> [McpSupervisorEntry]
+    replaceEntry replacement =
+        map \entry ->
+            if entry.supervisorEntryId == replacement.supervisorEntryId
+                then replacement
+                else entry
+
+    isIdle :: McpSupervisorEntry -> Bool
+    isIdle entry = entry.supervisorEntryLeases == 0
+
+    idleExcept :: Int -> [McpSupervisorEntry] -> [McpSupervisorEntry]
+    idleExcept retainedId =
+        filter \entry ->
+            isIdle entry && entry.supervisorEntryId /= retainedId
+
+    withoutEntries
+        :: [McpSupervisorEntry]
+        -> [McpSupervisorEntry]
+        -> [McpSupervisorEntry]
+    withoutEntries removed =
+        filter \entry ->
+            all
+                ((/= entry.supervisorEntryId) . (.supervisorEntryId))
+                removed
+
+    partitionReusable
+        :: [McpSupervisorEntry]
+        -> IO ([McpSupervisorEntry], [McpSupervisorEntry])
+    partitionReusable = go [] []
+      where
+        go
+            :: [McpSupervisorEntry]
+            -> [McpSupervisorEntry]
+            -> [McpSupervisorEntry]
+            -> IO ([McpSupervisorEntry], [McpSupervisorEntry])
+        go healthy failed [] =
+            pure (reverse healthy, reverse failed)
+        go healthy failed (entry : rest) = do
+            statuses <- mcpFleetStatuses entry.supervisorEntryFleet
+            let reusable =
+                    all
+                        (\status -> case status.mcpStatusState of
+                            McpFailed _ -> False
+                            McpClosed -> False
+                            _ -> True)
+                        statuses
+            if reusable || entry.supervisorEntryLeases > 0
+                then go (entry : healthy) failed rest
+                else go healthy (entry : failed) rest
+
+    statusReusable :: McpServerStatus -> Bool
+    statusReusable status = case status.mcpStatusState of
+        McpFailed _ -> False
+        McpClosed -> False
+        _ -> True
+
+releaseMcpFleetLease :: McpFleetLease -> IO ()
+releaseMcpFleetLease = (.mcpLeaseRelease)
+
+releaseSupervisorEntry :: McpSupervisor -> Int -> IO ()
+releaseSupervisorEntry supervisor entryId = do
+    modifyMVar_ supervisor.supervisorState \state ->
+        pure state
+            { supervisorEntries =
+                map releaseOne state.supervisorEntries
+            , supervisorPending =
+                map releasePending state.supervisorPending
+            }
+  where
+    releaseOne :: McpSupervisorEntry -> McpSupervisorEntry
+    releaseOne entry
+        | entry.supervisorEntryId == entryId =
+            entry
+                { supervisorEntryLeases =
+                    max 0 (entry.supervisorEntryLeases - 1)
+                }
+        | otherwise = entry
+
+    releasePending :: McpSupervisorPending -> McpSupervisorPending
+    releasePending pending
+        | pending.supervisorPendingId == entryId =
+            pending
+                { supervisorPendingLeases =
+                    max 0 (pending.supervisorPendingLeases - 1)
+                }
+        | otherwise = pending
+
+closeMcpSupervisor :: McpSupervisor -> IO ()
+closeMcpSupervisor supervisor = do
+    (fleets, pending) <-
+        modifyMVar supervisor.supervisorState \state ->
+            if state.supervisorClosed
+                then pure (state, ([], []))
+                else
+                    pure
+                        ( state
+                            { supervisorClosed = True
+                            , supervisorEntries = []
+                            , supervisorPending = []
+                            }
+                        , ( map (.supervisorEntryFleet)
+                                state.supervisorEntries
+                          , state.supervisorPending
+                          )
+                        )
+    atomically $
+        mapM_
+            (\entry ->
+                void (tryPutTMVar entry.supervisorPendingResult
+                    (Left "MCP supervisor closed")))
+            pending
+    mapM_
+        (\entry -> do
+            worker <- atomically
+                (readTMVar entry.supervisorPendingWorker)
+            cancel worker
+            void (waitCatch worker))
+        pending
+    mapM_ closeMcpFleet fleets
+
+resolveEffectiveCwds :: [McpServerConfig] -> IO [McpServerConfig]
+resolveEffectiveCwds configs = do
+    current <- getCurrentDirectory
+    pure
+        [ case config.mcpServerCwd of
+            Just _ -> config
+            Nothing -> config { mcpServerCwd = Just current }
+        | config <- configs
+        ]
+
+sameServerConfigs :: [McpServerConfig] -> [McpServerConfig] -> Bool
+sameServerConfigs left right =
+    map normalize left == map normalize right
+  where
+    normalize config =
+        config
+            { mcpServerEnv = sortOn fst config.mcpServerEnv
+            }
 
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
@@ -193,7 +685,8 @@ mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
 -- | Snapshot server status without triggering initialization or other I/O.
 mcpFleetStatuses :: McpFleet -> IO [McpServerStatus]
 mcpFleetStatuses fleet = do
-    clientStatuses <- mapM mcpClientStatus fleet.mcpFleetClients
+    clients <- Map.elems <$> readTVarIO fleet.mcpFleetClients
+    clientStatuses <- mapM mcpClientStatus clients
     let byName =
             Map.fromList
                 [ (status.mcpStatusName, status)
@@ -305,15 +798,26 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             , tool <- tools
             , let registration = registrationFor client tool
             ]
+    clientsVar <- newTVarIO $
+        Map.fromList
+            [ (client.clientConfig.mcpServerName, client)
+            | client <- clients
+            ]
     workers <- newMVar []
+    reconnects <- Map.fromList <$> mapM
+        (\config -> do
+            lock <- newMVar ()
+            pure (config.mcpServerName, lock))
+        configs
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
             , mcpFleetWarnings = warnings
-            , mcpFleetClients = clients
+            , mcpFleetClients = clientsVar
             , mcpFleetServerOrder = map (.mcpServerName) configs
             , mcpFleetFailures = failures
             , mcpFleetCatalog = catalog
+            , mcpFleetReconnects = reconnects
             , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
             }
@@ -425,6 +929,12 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
     workers <- newMVar []
     catalog <- newTVarIO Map.empty
     ownedClients <- newIORef []
+    clientsVar <- newTVarIO Map.empty
+    reconnects <- Map.fromList <$> mapM
+        (\config -> do
+            lock <- newMVar ()
+            pure (config.mcpServerName, lock))
+        configs
     semaphore <- newQSem progressiveSpawnLimit
     spawnResults <-
         restore
@@ -455,10 +965,11 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
         fleet = McpFleet
             { mcpFleetRegistrations = []
             , mcpFleetWarnings = warnings
-            , mcpFleetClients = clients
+            , mcpFleetClients = clientsVar
             , mcpFleetServerOrder = map (.mcpServerName) configs
             , mcpFleetFailures = failures
             , mcpFleetCatalog = catalog
+            , mcpFleetReconnects = reconnects
             , mcpFleetWorkers = workers
             , mcpFleetClosed = closed
             }
@@ -470,6 +981,12 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
                 Left _ -> pure ()
                 Right _ -> pure ()
             void (reportFleetStatuses reportStatuses fleet)
+    atomically $
+        writeTVar clientsVar $
+            Map.fromList
+                [ (client.clientConfig.mcpServerName, client)
+                | client <- clients
+                ]
     spawned <- newIORef []
     started <-
         (forM clients \client -> do
@@ -592,6 +1109,105 @@ mcpSearchTool fleet = AppTool
     , appToolExecution = ParallelSafe
     }
 
+callCatalogEntryWithReconnect
+    :: McpFleet
+    -> Text
+    -> McpCatalogEntry
+    -> Value
+    -> IO (Either Text Text)
+callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
+    callDiscoveredTool entry.catalogClient entry.catalogTool arguments
+        >>= \case
+            Right result -> pure (Right result)
+            Left originalError -> do
+                failed <- readTVarIO entry.catalogClient.clientFailure
+                case failed of
+                    Nothing -> pure (Left originalError)
+                    Just _ ->
+                        -- Stable meta-tool handlers can transparently replace
+                        -- a failed stdio transport and retry the read-only
+                        -- call once. The per-server lock makes this
+                        -- single-flight across concurrent calls.
+                        reconnectCatalogEntry fleet qualifiedName entry
+                            >>= \case
+                                Left reconnectError ->
+                                    pure . Left $
+                                        originalError
+                                            <> "; MCP reconnect failed: "
+                                            <> reconnectError
+                                Right replacement ->
+                                    callDiscoveredTool
+                                        replacement.catalogClient
+                                        replacement.catalogTool
+                                        arguments
+
+reconnectCatalogEntry
+    :: McpFleet
+    -> Text
+    -> McpCatalogEntry
+    -> IO (Either Text McpCatalogEntry)
+reconnectCatalogEntry fleet qualifiedName failedEntry =
+    case Map.lookup serverName fleet.mcpFleetReconnects of
+        Nothing -> pure (Left "MCP server is not supervised")
+        Just reconnectLock ->
+            withMVar reconnectLock \_ ->
+                withMVar fleet.mcpFleetClosed \closed ->
+                    if closed
+                        then pure (Left "MCP server closed")
+                        else do
+                            current <- readTVarIO fleet.mcpFleetCatalog
+                            case Map.lookup qualifiedName current of
+                                Just replacement
+                                    | replacement.catalogClient.clientFailure
+                                        /= failedEntry.catalogClient.clientFailure ->
+                                            pure (Right replacement)
+                                _ -> restart current
+  where
+    serverName =
+        failedEntry.catalogClient.clientConfig.mcpServerName
+    config = failedEntry.catalogClient.clientConfig
+
+    restart _ = do
+        started <- tryAny (startMcpClient config)
+        case started of
+            Left exception ->
+                pure . Left $
+                    redactConfiguredValues config
+                        (exceptionSummary exception)
+            Right replacementClient ->
+                ensureMcpClientReady replacementClient >>= \case
+                    Left err -> do
+                        closeMcpClient replacementClient
+                        pure (Left err)
+                    Right (tools, _) -> do
+                        let replacementEntries =
+                                Map.fromList
+                                    [ ( qualifiedMcpToolName
+                                            serverName tool.discoveredName
+                                      , McpCatalogEntry replacementClient tool
+                                      )
+                                    | tool <- tools
+                                    ]
+                        previousClient <- atomically do
+                            clients <- readTVar fleet.mcpFleetClients
+                            currentCatalog <- readTVar fleet.mcpFleetCatalog
+                            let withoutServer =
+                                    Map.filter
+                                        ((/= serverName)
+                                            . (.clientConfig.mcpServerName)
+                                            . (.catalogClient))
+                                        currentCatalog
+                            writeTVar fleet.mcpFleetClients
+                                (Map.insert serverName replacementClient clients)
+                            writeTVar fleet.mcpFleetCatalog
+                                (replacementEntries <> withoutServer)
+                            pure (Map.lookup serverName clients)
+                        mapM_ closeMcpClient previousClient
+                        case Map.lookup qualifiedName replacementEntries of
+                            Nothing ->
+                                pure (Left "MCP tool disappeared after reconnect")
+                            Just replacement -> pure (Right replacement)
+
 mcpCallTool :: McpFleet -> AppTool
 mcpCallTool fleet = AppTool
     { appToolName = "mcp_call"
@@ -613,10 +1229,8 @@ mcpCallTool fleet = AppTool
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 case Map.lookup name entries of
                     Just entry ->
-                        callDiscoveredTool
-                            entry.catalogClient
-                            entry.catalogTool
-                            toolArguments
+                        callCatalogEntryWithReconnect
+                            fleet name entry toolArguments
                     Nothing -> do
                         statuses <- mcpFleetStatuses fleet
                         pure . Left $
@@ -683,7 +1297,8 @@ closeMcpFleet fleet =
                     modifyMVar fleet.mcpFleetWorkers \workers ->
                         pure ([], workers)
                 mapM_ stopWorker activeWorkers
-                mapM_ closeMcpClient fleet.mcpFleetClients
+                clients <- Map.elems <$> readTVarIO fleet.mcpFleetClients
+                mapM_ closeMcpClient clients
                 pure True
 
 startMcpClient :: McpServerConfig -> IO McpClient
@@ -833,14 +1448,16 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
 mcpClientStatus :: McpClient -> IO McpServerStatus
 mcpClientStatus client = do
     state <- readTVarIO client.clientLifecycle
+    transportFailure <- readTVarIO client.clientFailure
     pure McpServerStatus
         { mcpStatusName = client.clientConfig.mcpServerName
-        , mcpStatusState = case state of
-            ClientPending -> McpPending
-            ClientInitializing _ -> McpInitializing
-            ClientReady _ _ -> McpReady
-            ClientFailed err -> McpFailed err
-            ClientClosed -> McpClosed
+        , mcpStatusState = case (state, transportFailure) of
+            (ClientClosed, _) -> McpClosed
+            (_, Just err) -> McpFailed err
+            (ClientPending, _) -> McpPending
+            (ClientInitializing _, _) -> McpInitializing
+            (ClientReady _ _, _) -> McpReady
+            (ClientFailed err, _) -> McpFailed err
         , mcpStatusToolCount = case state of
             ClientReady tools _ -> length tools
             _ -> 0
