@@ -48,6 +48,7 @@ library
                     , Claude.Agent.SDK.Internal.Query
                     , Claude.Agent.SDK.Internal.Transport.SubprocessCLI
     build-depends:    base                  >= 4.17 && < 5
+                    , agent-process        >= 0.1 && < 0.2
                     , aeson                 >= 2.0
                     , async
                     , base64-bytestring

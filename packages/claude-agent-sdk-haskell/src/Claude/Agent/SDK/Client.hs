@@ -44,6 +44,7 @@ import Claude.Agent.SDK.Types
     , Usage(..)
     , addUsage
     , emptyUsage
+    , modelUsageToUsage
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
@@ -935,17 +936,6 @@ cumulativeUsage modelUsage =
                     addUsage
                     emptyUsage
                     (map modelUsageToUsage entries)
-
-modelUsageToUsage :: ModelUsage -> Usage
-modelUsageToUsage modelUsage =
-    Usage
-        { inputTokens =
-            modelUsage.inputTokens
-                + modelUsage.cacheCreationInputTokens
-                + modelUsage.cacheReadInputTokens
-        , outputTokens = modelUsage.outputTokens
-        , cachedTokens = modelUsage.cacheReadInputTokens
-        }
 
 usageDelta :: Usage -> Usage -> Usage
 usageDelta previous current
