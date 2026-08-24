@@ -297,6 +297,7 @@
                                 (old.postInstall or "")
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
+                                        --prefix PATH : "${pkgs.lib.makeBinPath [ haskellPackages.ghc ]}" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}"
                                 '';

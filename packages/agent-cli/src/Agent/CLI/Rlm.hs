@@ -131,8 +131,8 @@ rlmGhciHelpers runtime =
             "let rlmStart = \\mode prompt -> do { (p,h) <- AgentRlmIO.openTempFile "
                 <> mailbox
                 <> " \"rlm-\"; AgentRlmIO.hPutStr h (mode ++ \"\\n\" ++ prompt); "
-                <> "AgentRlmIO.hClose h; let req = p ++ \".req\" in AgentRlmDir.renameFile p req; "
-                <> "pure (req, AgentRlmPath.dropExtension req ++ \".resp\") }"
+                <> "AgentRlmIO.hClose h; AgentRlmDir.renameFile p (p ++ \".req\"); "
+                <> "pure (p ++ \".req\", p ++ \".resp\") }"
         query =
             "let rlmQuery = \\prompt -> rlmStart \"readonly\" prompt >>= rlmAwait; "
                 <> "rlmCode = \\prompt -> rlmStart \"coding\" prompt >>= rlmAwait; "
