@@ -79,7 +79,7 @@ passes.
 
 ## Results: August 24, 2026
 
-### Revised self-verifying run
+### Revised self-verifying run: `gpt-5.6-sol`
 
 The revised suite was run on `office-builder` with the same model, medium
 effort, three trials, and 900-second per-run timeout. agent-cli used
@@ -113,6 +113,32 @@ after creating its plan, produced no project files, and reached the 900-second
 timeout. This revised result supports a narrower conclusion than the original:
 agent-cli still has materially lower cached-context amplification, but it was
 not faster or more reliable in this sample.
+
+### Revised self-verifying run: `gpt-5.6-terra`
+
+The same corrected suite was also run on `office-builder` with
+`gpt-5.6-terra`, medium effort, three trials, and the same 900-second timeout.
+All six runs self-verified without delegation and passed the independent
+grader.
+
+| runner | passed | median successful seconds | median input | median uncached | median output | median cached |
+|---|---:|---:|---:|---:|---:|---:|
+| agent-cli | 3/3 | 348.18 | 507,968 | 53,952 | 11,088 | 454,016 |
+| Codex | 3/3 | 240.18 | 579,451 | 55,675 | 5,482 | 523,776 |
+
+agent-cli used 12.3% fewer total input tokens, 13.3% fewer cached-input
+tokens, and 3.1% fewer uncached-input tokens. It used 102.3% more output
+tokens and took 45.0% longer at the median. Unlike the `gpt-5.6-sol` run,
+agent-cli completed all three trials.
+
+| trial | runner | pass | seconds | input | uncached | cached | output |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 1 | agent-cli | yes | 350.99 | 717,087 | 65,311 | 651,776 | 11,088 |
+| 1 | Codex | yes | 240.18 | 579,451 | 55,675 | 523,776 | 5,482 |
+| 2 | Codex | yes | 285.41 | 948,267 | 60,971 | 887,296 | 8,260 |
+| 2 | agent-cli | yes | 348.18 | 507,968 | 53,952 | 454,016 | 11,702 |
+| 3 | agent-cli | yes | 208.74 | 373,138 | 46,994 | 326,144 | 7,311 |
+| 3 | Codex | yes | 141.61 | 359,581 | 28,317 | 331,264 | 4,781 |
 
 ### Original run
 
