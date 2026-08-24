@@ -59,6 +59,7 @@ import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 data CodingTools = CodingTools
     { codingAppTools :: ![AppTool]
     , codingPlanMode :: !PlanModeEnv
+    , codingSuspendGhci :: !(IO ())
     , codingClose :: !(IO ())
     , codingAgentTypes :: !GrokSubagentSpecs
     }
@@ -88,10 +89,11 @@ codingToolsForWithTypes
     secretStore <- traverse (newSecretStore env) secretHooks
     let closeSecrets = mapM_ closeSecretStore secretStore
         secretTools = maybe [] (pure . askSecretTool) secretStore
-        finish tools plan close agentTypes =
+        finish tools plan suspendGhci close agentTypes =
             CodingTools
                 { codingAppTools = tools <> secretTools
                 , codingPlanMode = plan
+                , codingSuspendGhci = suspendGhci
                 , codingClose = close `finally` closeSecrets
                 , codingAgentTypes = agentTypes
                 }
@@ -102,6 +104,7 @@ codingToolsForWithTypes
                 finish
                     coding.codexAppTools
                     coding.codexPlanMode
+                    coding.codexSuspendGhci
                     coding.codexClose
                     typesRef
         GrokBuildToolSurface -> do
@@ -110,6 +113,7 @@ codingToolsForWithTypes
                 finish
                     coding.grokAppTools
                     coding.grokPlanMode
+                    coding.grokSuspendGhci
                     coding.grokClose
                     coding.grokAgentTypes
         ClaudeCodeToolSurface -> do
@@ -118,6 +122,7 @@ codingToolsForWithTypes
                 finish
                     []
                     plan
+                    (pure ())
                     (pure ())
                     typesRef
 

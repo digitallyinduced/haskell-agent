@@ -13,7 +13,11 @@ import Agent.ResourceScope
     , closeResourceScope
     , newResourceScope
     )
-import Agent.Tools.Ghci (closeGhciSession, newGhciSession)
+import Agent.Tools.Ghci
+    ( closeGhciSession
+    , newGhciSession
+    , suspendGhciSession
+    )
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks, newPlanModeEnv)
 import Agent.Tools.Types (AppTool, ToolEnv(..))
@@ -22,6 +26,7 @@ import Control.Exception.Safe (onException)
 data CodexCodingTools = CodexCodingTools
     { codexAppTools :: ![AppTool]
     , codexPlanMode :: !PlanModeEnv
+    , codexSuspendGhci :: !(IO ())
     , codexClose :: !(IO ())
     }
 
@@ -44,5 +49,6 @@ newCodexCodingTools env hooks multi = do
         pure CodexCodingTools
             { codexAppTools = tools
             , codexPlanMode = plan
+            , codexSuspendGhci = suspendGhciSession ghci
             , codexClose = closeResourceScope resources
             }

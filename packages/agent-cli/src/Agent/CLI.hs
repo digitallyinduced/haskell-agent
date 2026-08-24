@@ -2605,7 +2605,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2669,7 +2669,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2730,7 +2730,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2802,7 +2802,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -3071,6 +3071,7 @@ runSession
     -> Dialect
     -> ApprovalPolicy
     -> [AppTool]
+    -> IO ()
     -> [MCP.McpToolRegistration]
     -> [Text]
     -> IORef Bool
@@ -3116,7 +3117,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools suspendGhci mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes prompt pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3616,6 +3617,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             let (ghciEnabled, bashEnabled) = shellModeFlags mode
             writeIORef ghciEnabledRef ghciEnabled
             writeIORef bashEnabledRef bashEnabled
+            unless ghciEnabled suspendGhci
             refreshShellParams ghciEnabled bashEnabled
             pure ("shell tools: " <> shellModeLabel mode)
         setSessionTempDir tempDir = do
