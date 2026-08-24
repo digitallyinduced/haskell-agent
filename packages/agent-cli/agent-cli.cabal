@@ -41,7 +41,10 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Agent.CLI.TUI.Composer.Buffer
+    other-modules:    Agent.CLI.Auth.Grok
+                    , Agent.CLI.Auth.OpenAI
+                    , Agent.CLI.Auth.Types
+                    , Agent.CLI.TUI.Composer.Buffer
                     , Agent.CLI.TUI.Composer.Edit
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
