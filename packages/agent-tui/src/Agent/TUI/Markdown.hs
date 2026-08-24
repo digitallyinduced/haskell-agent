@@ -512,7 +512,11 @@ inlineWidgetWithAttr plainAttr inlines =
                         ]
                     | row <- rows
                     ]
-        pure B.emptyResult { B.image = rendered }
+            boundedImage
+                | V.imageWidth rendered > width =
+                    V.cropRight width rendered
+                | otherwise = rendered
+        pure B.emptyResult { B.image = boundedImage }
 
 data InlineContext = InlineContext
     { inlineStrong :: !Bool
