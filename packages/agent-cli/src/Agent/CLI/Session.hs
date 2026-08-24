@@ -67,6 +67,7 @@ import Agent.Dialect
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
+import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (renderStoreError)
@@ -476,7 +477,7 @@ createReservedSession spec sessionId tempDir = do
         (sessionDirForId spec.createRoot sessionId)
     createDirectory dir
     setFileMode (unsafeToFilePath dir) 0o700
-    now <- getCurrentTime
+    now <- normalizePostgresTimestamp <$> getCurrentTime
     let title = case spec.createTitleHint of
             Just hint | not (Text.null hint) -> hint
             _ -> "untitled"
@@ -564,7 +565,7 @@ appendTurnWithMetaTransition
     -> IO SessionHandle
 appendTurnWithMetaTransition handle turn transition = do
     let pool = handle.sessionPool
-    now <- getCurrentTime
+    now <- normalizePostgresTimestamp <$> getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
             { metaUpdatedAt = now
@@ -605,7 +606,7 @@ applyTurnMetadata turn meta =
 addSessionUsage :: TokenUsage -> SessionHandle -> IO SessionHandle
 addSessionUsage usage handle = do
     let pool = handle.sessionPool
-    now <- getCurrentTime
+    now <- normalizePostgresTimestamp <$> getCurrentTime
     let meta0 = handle.sessionMeta
         meta = meta0
             { metaUpdatedAt = now

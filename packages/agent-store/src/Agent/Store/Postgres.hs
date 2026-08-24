@@ -13,6 +13,7 @@ module Agent.Store.Postgres
     , provisioningPool
     , trustedPool
     , scopePool
+    , normalizePostgresTimestamp
     ) where
 
 import Control.Concurrent.MVar
@@ -20,6 +21,11 @@ import Control.Exception.Safe (bracket, mask, onException)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import Data.Time.Clock
+    ( UTCTime(..)
+    , diffTimeToPicoseconds
+    , picosecondsToDiffTime
+    )
 
 import Agent.Store.Postgres.Config
 import Agent.Store.Postgres.Connection
@@ -114,3 +120,14 @@ scopePool store role =
                     Left err -> pure (pools, Left err)
                     Right pool ->
                         pure (Map.insert role pool pools, Right pool)
+
+-- | Match PostgreSQL's @timestamptz@ microsecond precision before retaining
+-- timestamps in application state.
+normalizePostgresTimestamp :: UTCTime -> UTCTime
+normalizePostgresTimestamp (UTCTime day dayTime) =
+    UTCTime day
+        (picosecondsToDiffTime
+            (diffTimeToPicoseconds dayTime `div` picosecondsPerMicrosecond
+                * picosecondsPerMicrosecond))
+  where
+    picosecondsPerMicrosecond = 1000000

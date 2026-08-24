@@ -49,7 +49,7 @@ spec = describe "PostgreSQL learned skill storage" do
         ddl `shouldNotContainBytes` "jsonb"
 
     it "creates, searches, updates, archives, and rolls back scoped skills" $
-        withSystemTempDirectory "learned-skills" \stateDirectory -> do
+        withSystemTempDirectory "ha" \stateDirectory -> do
             let
                 config = defaultManagedPostgresConfig stateDirectory ""
                 cleanup = do
@@ -58,7 +58,7 @@ spec = describe "PostgreSQL learned skill storage" do
             withOpenStore config exerciseStore `finally` cleanup
 
     it "keeps learned skills available after the store is reopened" $
-        withSystemTempDirectory "learned-skills-reopen" \stateDirectory -> do
+        withSystemTempDirectory "ha" \stateDirectory -> do
             let
                 config = defaultManagedPostgresConfig stateDirectory ""
                 scope = testScope UserScope '4'

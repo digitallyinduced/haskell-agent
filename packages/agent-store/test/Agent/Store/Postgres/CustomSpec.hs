@@ -45,7 +45,7 @@ spec = describe "custom PostgreSQL SQL normalization" do
                 }
 
     it "returns typed catalogs and JSON text only at the query boundary" $
-        withSystemTempDirectory "hs-custom" \stateDirectory -> do
+        withSystemTempDirectory "ha" \stateDirectory -> do
             let
                 config = defaultManagedPostgresConfig stateDirectory ""
                 cleanup = do

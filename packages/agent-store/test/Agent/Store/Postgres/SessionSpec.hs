@@ -6,13 +6,15 @@ import Control.Exception.Safe (finally)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.Text (Text)
-import Data.Time.Clock (UTCTime)
+import Data.Time.Calendar (fromGregorian)
+import Data.Time.Clock (UTCTime(..), picosecondsToDiffTime)
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
 
 import Agent.Store.Postgres
     ( closeStore
     , defaultManagedPostgresConfig
+    , normalizePostgresTimestamp
     , openStore
     , trustedPool
     )
@@ -22,6 +24,16 @@ import Agent.Store.SessionItem (StoredResponseItem(..))
 
 spec :: Spec
 spec = describe "PostgreSQL session schema" do
+    it "normalizes timestamps to PostgreSQL microsecond precision" do
+        let timestamp = UTCTime
+                (fromGregorian 2026 8 24)
+                (picosecondsToDiffTime 467640816000)
+        normalizePostgresTimestamp timestamp
+            `shouldBe`
+                UTCTime
+                    (fromGregorian 2026 8 24)
+                    (picosecondsToDiffTime 467640000000)
+
     it "uses typed session, turn, tool-call, and tool-output tables" do
         let ddl = ByteString.intercalate "\n" sessionSchemaStatements
         ddl `shouldContainBytes` "DEFAULT pg_catalog.uuidv7()"
