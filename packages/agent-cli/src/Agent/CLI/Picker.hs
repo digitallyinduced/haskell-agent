@@ -50,7 +50,7 @@ import System.IO
 import System.IO.Error (isEOFError)
 import System.Posix.IO (stdInput)
 import System.Posix.Terminal
-    ( TerminalState(..)
+    ( TerminalState(Immediately)
     , getTerminalAttributes
     , setTerminalAttributes
     )
