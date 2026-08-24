@@ -46,6 +46,7 @@ library
                     , Agent.CLI.Auth.Types
                     , Agent.CLI.TUI.Composer.Buffer
                     , Agent.CLI.TUI.Composer.Edit
+                    , Agent.CLI.TUI.Motion
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AccountSelection
