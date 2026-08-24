@@ -33,6 +33,13 @@ spec = do
                     ]
 
     describe "syntax theme attributes" do
+        it "keeps native text selection visible over fenced code" do
+            let background attribute =
+                    V.attrBackColor
+                        (attrMapLookup attribute Theme.solarizedDark)
+            background Theme.codeAttr
+                `shouldNotBe` background Theme.selectedAttr
+
         it "keeps every Solarized syntax class on the code-block background" do
             let codeBackground =
                     V.attrBackColor
