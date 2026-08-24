@@ -18,6 +18,7 @@ import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import Agent.MCP (McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
 import System.OsPath (OsPath)
@@ -52,6 +53,8 @@ data SessionEnv = SessionEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
     , sessionHome :: !OsPath
+    , sessionMcpRegistrations :: ![McpToolRegistration]
+    , sessionMcpWarnings :: ![Text]
     , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)

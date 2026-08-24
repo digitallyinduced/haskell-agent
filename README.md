@@ -276,6 +276,12 @@ Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
 }
 ```
 
+In an interactive session, `/mcp` opens a local-server manager. Use the arrow
+keys or `j`/`k` to navigate, Enter to inspect discovered tools, `a` to add a
+server, Space to enable or disable it, `x` to remove it, and `r` to restart the
+MCP runtime. Saved changes restart the runtime while resuming the same session.
+Environment variable values are never displayed.
+
 The harness starts enabled servers once per root session and shares their tools
 with subagents. MCP tool names are preserved, so they must not collide with
 built-in or other configured tools. Only tools explicitly annotated

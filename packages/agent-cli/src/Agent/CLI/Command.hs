@@ -67,6 +67,7 @@ data ReplAction
     | ReplCopySession
     | ReplShowTerminal
     | ReplAgents
+    | ReplMcp
     | ReplSkills !Bool
     | ReplShowShell
     | ReplSetShell !ShellMode
@@ -138,6 +139,7 @@ slashCommands =
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
+    , cmd "mcp" [] "/mcp" "Manage local MCP servers" False
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
     , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
@@ -282,6 +284,10 @@ parseSlash skills line = case Text.words line of
                 if null args
                     then ReplAgents
                     else ReplCommandError "usage: /agents"
+            "mcp" ->
+                if null args
+                    then ReplMcp
+                    else ReplCommandError "usage: /mcp"
             "skills" -> case args of
                 [] -> ReplSkills False
                 ["reload"] -> ReplSkills True

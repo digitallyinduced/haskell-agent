@@ -65,6 +65,7 @@ library
                     , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
+                    , Agent.CLI.McpManager
                     , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
                     , Agent.CLI.Notification
@@ -226,6 +227,7 @@ test-suite agent-cli-test
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
+                    , Agent.CLI.McpManagerSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
