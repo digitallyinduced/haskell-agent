@@ -19,6 +19,7 @@ import Agent.CLI.CredentialStore
     , loadManagedCredentials
     , updateManagedCredentialSecret
     )
+import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.Error (ApiError(..))
 import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -64,7 +65,6 @@ import System.Directory.OsPath
     )
 import System.IO (SeekMode(AbsoluteSeek))
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
-import qualified System.OsPath as OsPath
 import System.Posix.Files (setFileMode)
 import System.Posix.IO
     ( LockRequest(Unlock, WriteLock)
@@ -77,7 +77,6 @@ import System.Posix.IO
     , waitToSetLock
     )
 import System.Posix.Types (Fd)
-import qualified System.Process.Environment.OsString as Environment
 
 -- | Pin normal checkouts to one OpenAI pool account until that credential is
 -- reported as failed. A failure for the selected credential clears the pin
@@ -550,15 +549,6 @@ openaiAccountIdForToken token = do
             <|> (fromIdToken >>= OpenAI.deriveAccountId)
             <|> OpenAI.deriveAccountId token
 
-lookupNonEmpty :: String -> IO (Maybe Text)
-lookupNonEmpty name = do
-    value <- Environment.getEnv (OsPath.unsafeEncodeUtf name)
-    pure $ case value of
-        Just raw
-            | Right text <- OsPath.decodeUtf raw
-            , not (null text) ->
-                Just (Text.pack text)
-        _ -> Nothing
 
 noAuthHint :: Text
 noAuthHint =

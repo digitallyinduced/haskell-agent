@@ -44,6 +44,7 @@ import Agent.CLI.Error
     ( formatApiErrorInlineAt
     , formatException
     )
+import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.CLI.Input (readApprovalLine)
 import Agent.CLI.Picker
     ( PickerKey(..)
@@ -93,7 +94,6 @@ import qualified Data.Text.IO as Text
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
-import System.Environment (lookupEnv)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 import System.IO
     ( hFlush
@@ -1034,10 +1034,3 @@ creditLines usage =
         [ ("credits remaining " <>) <$> usage.creditsRemaining
         , ("used " <>) <$> usage.creditsUsed
         ]
-
-lookupNonEmpty :: String -> IO (Maybe Text)
-lookupNonEmpty name = do
-    value <- lookupEnv name
-    pure case value of
-        Just text | not (null text) -> Just (Text.pack text)
-        _ -> Nothing

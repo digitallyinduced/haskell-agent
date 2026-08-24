@@ -54,6 +54,7 @@ import Agent.CLI.CredentialStore
     , ManagedSecret(..)
     , loadManagedCredentials
     )
+import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.Error (ApiError(..))
 import qualified Agent.Claude.Auth as ClaudeCode
 import Agent.Provider
@@ -63,6 +64,7 @@ import Agent.Provider
     , FailedCredential(..)
     , Provider(..)
     , TokenProvider
+    , credentialsExhaustedForRateLimit
     , getNextToken
     , providerSlug
     , seedTokenProvider
@@ -85,11 +87,9 @@ import Data.List (find)
 import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Time.Clock (addUTCTime, getCurrentTime)
+import Data.Time.Clock (getCurrentTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.OsPath (unsafeEncodeUtf, (</>))
-import qualified System.OsPath as OsPath
-import qualified System.Process.Environment.OsString as Environment
 
 loadAuth :: Maybe Provider -> IO (Either Text LoadedAuth)
 loadAuth requested = runExceptT do
@@ -421,22 +421,17 @@ reloadableFileCredentialProvider expectedProvider billing initial reload = do
                         writeIORef cache (Just credential)
                         pure (Right credential)
     pure $ tokenProvider billing \failed -> case failed of
-            Just FailedCredential
-                { failure = AccountRateLimited { retryAfterSeconds }
-                , failureReason
-                } -> do
-                now <- getCurrentTime
-                let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
-                pure $ Left $ CredentialsExhausted
-                    { retryAt = addUTCTime (fromIntegral seconds) now
-                    , exhaustionReasons = [failureReason]
-                    }
-            Just FailedCredential
-                { credential = rejected
-                , failure = AccountAuthenticationRejected
-                } -> do
-                writeIORef cache Nothing
-                loadFresh (Just rejected.accessToken)
+            Just reported -> credentialsExhaustedForRateLimit reported >>= \case
+                Just err -> pure (Left err)
+                Nothing -> case reported of
+                    FailedCredential
+                        { credential = rejected
+                        , failure = AccountAuthenticationRejected
+                        } -> do
+                            writeIORef cache Nothing
+                            loadFresh (Just rejected.accessToken)
+                    _ -> pure $ Left $ CredentialError
+                        "unsupported credential failure"
             Nothing ->
                 readIORef cache >>= \case
                     Just credential -> pure (Right credential)
@@ -446,31 +441,10 @@ staticCredentialProvider :: BillingMode -> Credential -> TokenProvider
 staticCredentialProvider billing credential =
     tokenProvider billing \failed -> case failed of
         Nothing -> pure (Right credential)
-        Just FailedCredential
-            { failure = AccountRateLimited { retryAfterSeconds }
-            , failureReason
-            } -> do
-                now <- getCurrentTime
-                let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
-                pure $ Left $ CredentialsExhausted
-                    { retryAt = addUTCTime (fromIntegral seconds) now
-                    , exhaustionReasons = [failureReason]
-                    }
-        Just FailedCredential
-            { failure = AccountAuthenticationRejected
-            } ->
-                pure $ Left $ CredentialError
-                    "static credential was rejected"
-
-lookupNonEmpty :: String -> IO (Maybe Text)
-lookupNonEmpty name = do
-    value <- Environment.getEnv (OsPath.unsafeEncodeUtf name)
-    pure $ case value of
-        Just raw
-            | Right text <- OsPath.decodeUtf raw
-            , not (null text) ->
-                Just (Text.pack text)
-        _ -> Nothing
+        Just reported -> credentialsExhaustedForRateLimit reported >>= \case
+            Just err -> pure (Left err)
+            Nothing -> pure $ Left $ CredentialError
+                "static credential was rejected"
 
 noAuthHint :: Text
 noAuthHint =

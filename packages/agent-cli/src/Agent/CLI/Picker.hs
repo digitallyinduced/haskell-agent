@@ -18,6 +18,7 @@ import Agent.CLI.Terminal
     , emitTerminalSequence
     , kittyKeyboardPop
     , kittyKeyboardPush
+    , rawAttrs
     , stripAnsi
     , withSynchronizedOutput
     )
@@ -49,15 +50,9 @@ import System.IO
 import System.IO.Error (isEOFError)
 import System.Posix.IO (stdInput)
 import System.Posix.Terminal
-    ( TerminalAttributes
-    , TerminalMode(..)
-    , TerminalState(..)
+    ( TerminalState(..)
     , getTerminalAttributes
     , setTerminalAttributes
-    , withMinInput
-    , withMode
-    , withTime
-    , withoutMode
     )
 
 data PickerKey
@@ -349,15 +344,6 @@ readCsiTail = go []
         if char >= '@' && char <= '~'
             then pure (reverse accumulated)
             else go accumulated
-
-rawAttrs :: TerminalAttributes -> TerminalAttributes
-rawAttrs oldTerm =
-    flip withMinInput 1
-        . flip withTime 0
-        . flip withoutMode EnableEcho
-        . flip withoutMode ProcessInput
-        . flip withMode KeyboardInterrupts
-        $ oldTerm
 
 frameTop :: Handle -> Int -> IO (Maybe Int)
 frameTop handle lineCount =
