@@ -2932,7 +2932,12 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
     writeIORef startup.startupAgentSnapshot
         (loadAgentSnapshot False)
     writeIORef startup.startupAgentSelect selectAgent
-    let sessionReset = do
+    let installSkills context queueContext skills = do
+            installSkillToolRoots toolEnv skills
+            installSkillCatalogWithOmissions
+                reservedSlashNames queueContext context
+                skillsRef skillInvocationsRef skills
+        sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
             writeIORef lastAssistantRef Nothing
@@ -2946,20 +2951,14 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
-            installSkillToolRoots toolEnv freshSkills
-            omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames True freshAgents
-                skillsRef skillInvocationsRef freshSkills
+            omitted <- installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            installSkillToolRoots toolEnv refreshed
-            omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames queueContext startupContext
-                skillsRef skillInvocationsRef refreshed
+            omitted <- installSkills startupContext queueContext refreshed
             when queueContext $
                 reportSkillCatalog True refreshed omitted
         formatSkillWarning warning =
@@ -3240,10 +3239,9 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
             markStartupStage startup "Loading skills…"
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames
+            omitted <- installSkills startupContext
                 (null initialTurns && not (isJust initialPrevious))
-                startupContext skillsRef skillInvocationsRef skills
+                skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
             finishStartup startup
         sessionAction = do
