@@ -5,7 +5,7 @@ import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
-import Agent.Tools.IO (listDirectoryEntries, resolveUnderCwd)
+import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
@@ -48,7 +48,7 @@ maxListItems :: Int
 maxListItems = 200
 
 runListDir :: ToolEnv -> ListDirArgs -> IO (Either Text Text)
-runListDir env args = resolveUnderCwd env (fromText args.targetDirectory) >>= \case
+runListDir env args = resolveForRead env (fromText args.targetDirectory) >>= \case
     Left err -> pure (Left err)
     Right path -> doesDirectoryExist path >>= \case
         False -> pure $ Left $

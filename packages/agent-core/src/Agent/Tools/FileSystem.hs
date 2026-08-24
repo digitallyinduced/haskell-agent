@@ -4,6 +4,7 @@ module Agent.Tools.FileSystem
     , listDirectoryEntries
     , readTextFile
     , renameTextFile
+    , resolveForRead
     , resolveUnderCwd
     , writeTextFile
     ) where
@@ -45,12 +46,28 @@ import System.IO.Error (isDoesNotExistError)
 -- that canonicalizes outside the cwd or an explicitly allowed root, including
 -- via symlinks. Relative paths are always cwd-relative.
 resolveUnderCwd :: ToolEnv -> OsPath -> IO (Either Text OsPath)
-resolveUnderCwd env requested = do
+resolveUnderCwd env requested =
+    resolveWithRoots env requested []
+
+-- | Resolve a read-only tool path, additionally allowing resources belonging
+-- to the current skill catalog. Mutating tools deliberately continue to use
+-- 'resolveUnderCwd', so discovering a user skill does not make it editable.
+resolveForRead :: ToolEnv -> OsPath -> IO (Either Text OsPath)
+resolveForRead env requested = do
+    skillRoots <- readIORef env.toolSkillRoots
+    resolveWithRoots env requested skillRoots
+
+resolveWithRoots
+    :: ToolEnv
+    -> OsPath
+    -> [OsPath]
+    -> IO (Either Text OsPath)
+resolveWithRoots env requested extraRoots = do
     absCwd <- canonicalizePath env.toolCwd
     configuredRoots <- readIORef env.toolAllowedRoots
     sessionTmp <- readIORef env.toolSessionTmp
     allowedRoots <- mapM canonicalizePath
-        (configuredRoots <> maybe [] pure sessionTmp)
+        (configuredRoots <> extraRoots <> maybe [] pure sessionTmp)
     let combined
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
