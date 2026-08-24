@@ -1,7 +1,12 @@
 module Agent.OpenAI.AuthSpec (spec) where
 
 import Agent.OpenAI.Auth
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , ErrorType(..)
+    , credentialsExhausted
+    )
 import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
@@ -51,6 +56,7 @@ spec = do
                 snapshot = AccountSnapshot
                     { snapshotAuth = auth
                     , snapshotCooldownUntil = Just epoch
+                    , snapshotCooldownReasons = []
                     }
                 rendered = show snapshot
             rendered `shouldContain` "snapshot-account"
@@ -281,7 +287,14 @@ spec = do
             reportRateLimit pool "only-acc" (Just 60)
             result <- getAccessToken pool
             case result of
-                Left (CredentialsExhausted _) -> pure ()
+                Left CredentialsExhausted{exhaustionReasons} ->
+                    exhaustionReasons `shouldBe`
+                        [ ExhaustedByRateLimit
+                            { exhaustionErrorType = Nothing
+                            , exhaustionStatusCode = Nothing
+                            , exhaustionRetryAfter = Just 60
+                            }
+                        ]
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
 
         it "discovers a broker account that became available after startup" $ do
@@ -318,6 +331,55 @@ spec = do
             allAccountIds pool
                 `shouldReturn` ["initial-account", "new-account"]
 
+        it "shares one in-flight discovery without locking pool inspection" do
+            discoveryCalls <- newIORef (0 :: Int)
+            discoveryStarted <- newEmptyMVar
+            releaseDiscovery <- newEmptyMVar
+            let discover excluded = do
+                    excluded `shouldBe` ["initial-account"]
+                    modifyIORef' discoveryCalls (+ 1)
+                    putMVar discoveryStarted ()
+                    takeMVar releaseDiscovery
+                    pure (Right [mkFreshAuth "discovered-account"])
+            pool <- newDiscoveringPool
+                [mkFreshAuth "initial-account"]
+                neverRefresh
+                discover
+
+            withAsync (discoverAccounts pool) \firstDiscovery -> do
+                takeMVar discoveryStarted
+                withAsync (discoverAccounts pool) \secondDiscovery -> do
+                    inspected <- timeout concurrencyProbeMicros
+                        (allAccountIds pool)
+                    inspected `shouldBe` Just ["initial-account"]
+                    putMVar releaseDiscovery ()
+                    wait firstDiscovery `shouldReturn` True
+                    wait secondDiscovery `shouldReturn` True
+
+            readIORef discoveryCalls `shouldReturn` 1
+            allAccountIds pool
+                `shouldReturn`
+                    ["initial-account", "discovered-account"]
+
+        it "releases discovery ownership when the callback throws" do
+            discoveryCalls <- newIORef (0 :: Int)
+            let discover _ = do
+                    call <- atomicModifyIORef' discoveryCalls \count ->
+                        (count + 1, count + 1)
+                    if call == 1
+                        then ioError (userError "broker crashed")
+                        else pure
+                            (Right [mkFreshAuth "recovered-account"])
+            pool <- newDiscoveringPool
+                [mkFreshAuth "initial-account"]
+                neverRefresh
+                discover
+
+            discoverAccounts pool `shouldThrow` anyIOException
+            timeout concurrencyProbeMicros (discoverAccounts pool)
+                `shouldReturn` Just True
+            readIORef discoveryCalls `shouldReturn` 2
+
         it "keeps the precise local reset when broker discovery is unavailable" $ do
             let brokerUnavailable _ =
                     pure (Left (HttpError 503 "broker temporarily unavailable"))
@@ -330,17 +392,17 @@ spec = do
             result <- getAccessToken pool
 
             case result of
-                Left (CredentialsExhausted _) -> pure ()
+                Left CredentialsExhausted{} -> pure ()
                 other -> expectationFailure ("expected CredentialsExhausted, got " <> show other)
 
         it "starts empty at the broker reset and discovers capacity later" $ do
             let initialReset = UTCTime (fromGregorian 2026 7 18) 0
-            discoveryResult <- newIORef (Left (CredentialsExhausted initialReset))
+            discoveryResult <- newIORef (Left (credentialsExhausted initialReset))
             let discover _ = readIORef discoveryResult
             pool <- newUnavailableDiscoveringPool initialReset neverRefresh discover
 
             first <- getAccessToken pool
-            first `shouldBe` Left (CredentialsExhausted initialReset)
+            first `shouldBe` Left (credentialsExhausted initialReset)
             allAccountIds pool `shouldReturn` []
 
             writeIORef discoveryResult (Right [mkFreshAuth "capacity-returned"])
@@ -352,10 +414,11 @@ spec = do
         it "updates an empty pool when the broker reports a later reset" $ do
             let initialReset = UTCTime (fromGregorian 2026 7 18) 0
                 laterReset = UTCTime (fromGregorian 2026 7 21) 0
-                discover _ = pure (Left (CredentialsExhausted laterReset))
+                discover _ = pure (Left (credentialsExhausted laterReset))
             pool <- newUnavailableDiscoveringPool initialReset neverRefresh discover
 
-            getAccessToken pool `shouldReturn` Left (CredentialsExhausted laterReset)
+            getAccessToken pool
+                `shouldReturn` Left (credentialsExhausted laterReset)
 
     describe "reportAuthBroken" $ do
         it "cools the account down" $ do
@@ -436,6 +499,27 @@ spec = do
             outcome <- forceRefresh pool "does-not-exist"
             outcome `shouldSatisfy` isLeft
 
+        it "rejects refreshes that change account identity" do
+            let startState = mkFreshAuth "acc"
+                changedIdentity =
+                    (mkFreshAuth "other")
+                        { accessToken = (mkFreshAuth "rotated").accessToken }
+            pool <- newPool [startState] (const (pure (Right changedIdentity)))
+
+            forceRefresh pool "acc" >>= \case
+                Left CredentialError{} -> pure ()
+                other -> expectationFailure
+                    ("expected account identity error, got " <> show other)
+            readAccountState pool "acc" >>= \case
+                Just current -> do
+                    current.accountId `shouldBe` startState.accountId
+                    current.accessToken `shouldBe` startState.accessToken
+                    current.refreshToken `shouldBe` startState.refreshToken
+                Nothing ->
+                    expectationFailure "original account disappeared"
+            readAccountState pool "other" >>= \other ->
+                other `shouldSatisfy` isNothing
+
     describe "refreshAfterAuthFailure" $ do
         it "rotates a rejected unexpired token and caches the replacement" $ do
             callCounter <- newIORef (0 :: Int)
@@ -455,6 +539,51 @@ spec = do
             readIORef callCounter `shouldReturn` 1
             token <- getAccessToken pool
             fmap fst token `shouldBe` Right rotated.accessToken
+
+        it "does not erase a concurrent rate-limit cooldown after recovery" do
+            refreshStarted <- newEmptyMVar
+            releaseRefresh <- newEmptyMVar
+            let startState = mkFreshAuth "acc"
+                rotated = startState
+                    { accessToken = (mkFreshAuth "rotated").accessToken
+                    , refreshToken = "rotated-refresh"
+                    }
+                refresh _ = do
+                    putMVar refreshStarted ()
+                    takeMVar releaseRefresh
+                    pure (Right rotated)
+            pool <- newPool [startState] refresh
+            beforeCooldown <- getCurrentTime
+            cooldownReportStarted <- newEmptyMVar
+
+            withAsync (refreshAfterAuthFailure pool "acc") \recovery -> do
+                takeMVar refreshStarted
+                withAsync
+                    (putMVar cooldownReportStarted ()
+                        >> reportRateLimit pool "acc" (Just 3600))
+                    \cooldownReport -> do
+                        takeMVar cooldownReportStarted
+                        putMVar releaseRefresh ()
+                        wait recovery >>= \case
+                            Right recovered -> do
+                                recovered.accountId
+                                    `shouldBe` rotated.accountId
+                                recovered.accessToken
+                                    `shouldBe` rotated.accessToken
+                            Left err ->
+                                expectationFailure
+                                    ("expected successful recovery, got "
+                                        <> show err)
+                        wait cooldownReport
+
+            [snapshot] <- snapshotAccounts pool
+            snapshot.snapshotAuth.accountId
+                `shouldBe` rotated.accountId
+            snapshot.snapshotAuth.accessToken
+                `shouldBe` rotated.accessToken
+            snapshot.snapshotCooldownUntil
+                `shouldSatisfy`
+                    maybe False (> addUTCTime 3500 beforeCooldown)
 
         it "cools a rejected account when forced refresh fails" $ do
             let states = [mkFreshAuth "broken", mkFreshAuth "healthy"]

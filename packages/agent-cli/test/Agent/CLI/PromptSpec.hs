@@ -2,7 +2,8 @@ module Agent.CLI.PromptSpec (spec) where
 
 import Agent.CLI.Prompt
 import Agent.Dialect
-    ( codexDialect
+    ( claudeCodeDialect
+    , codexDialect
     , genericResponsesDialect
     , grokBuildDialect
     )
@@ -64,6 +65,20 @@ spec = describe "systemPrompt" do
         openai `shouldSatisfy` Text.isInfixOf "<proposed_plan>"
         grok `shouldSatisfy` Text.isInfixOf "2026-08-19"
         grok `shouldSatisfy` Text.isInfixOf "/tmp/repo"
+
+    it "uses Claude Code's own tool runtime prompt" do
+        let claude =
+                systemPrompt
+                    claudeCodeDialect
+                    (fromFilePath "/tmp/repo")
+                    Nothing
+                    (fromGregorian 2026 8 19)
+                    False
+        claude `shouldSatisfy` Text.isInfixOf "Claude Code's built-in tools"
+        claude `shouldSatisfy` Text.isInfixOf "validated structured output"
+        claude `shouldNotSatisfy` Text.isInfixOf "local Claude Code transcript"
+        claude `shouldSatisfy` Text.isInfixOf "/tmp/repo"
+        claude `shouldNotSatisfy` Text.isInfixOf "run_ghci"
 
     it "uses a neutral identity for generic Responses models" do
         let generic =
@@ -165,6 +180,12 @@ spec = describe "systemPrompt" do
                     day
                     False
         ghciOnly `shouldSatisfy` Text.isInfixOf "Prefer ghci for scripting"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "cmd \"git\" [\"status\",\"--short\"]"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "Imports are standalone GHCi statements"
+        ghciOnly `shouldSatisfy` Text.isInfixOf
+            "instead of building one giant expression"
         ghciOnly `shouldNotSatisfy` Text.isInfixOf "shell_command"
         bashOnly `shouldSatisfy` Text.isInfixOf "shell_command"
         bashOnly `shouldNotSatisfy` Text.isInfixOf "run_ghci"

@@ -4,7 +4,7 @@ import Agent.OsPath (fromText)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.IO (readTextFile, resolveUnderCwd)
+import Agent.Tools.IO (readTextFile, resolveForRead)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv
@@ -61,7 +61,7 @@ maxReadTokens :: Int
 maxReadTokens = 25000
 
 runReadFile :: ToolEnv -> ReadFileArgs -> IO (Either Text Text)
-runReadFile env args = resolveUnderCwd env (fromText args.targetFile) >>= \case
+runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
     Left err -> pure (Left err)
     Right path
         | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile ->

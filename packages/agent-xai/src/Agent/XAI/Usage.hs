@@ -6,6 +6,7 @@ module Agent.XAI.Usage
     ) where
 
 import Control.Exception.Safe (tryAny)
+import Agent.Provider (Credential(..))
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:))
 import Data.Aeson.Types (Parser)
@@ -54,8 +55,8 @@ decodeGrokUsage body = case Aeson.eitherDecode body of
         Left "Grok returned an unreadable usage response."
     Right snapshot -> Right snapshot
 
-fetchGrokUsage :: Text -> IO (Either Text GrokUsageSnapshot)
-fetchGrokUsage accessToken =
+fetchGrokUsage :: Credential -> IO (Either Text GrokUsageSnapshot)
+fetchGrokUsage credential =
     tryAny requestUsage >>= \case
         Left _ ->
             pure $ Left
@@ -74,8 +75,12 @@ fetchGrokUsage accessToken =
                 "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
         httpLBS
             $ setRequestHeader
-                "Authorization"
-                ["Bearer " <> Text.encodeUtf8 accessToken]
+                "X-Auth-Token"
+                ["Bearer " <> Text.encodeUtf8 credential.accessToken]
+            $ setRequestHeader "X-XAI-Token-Auth" ["true"]
+            $ setRequestHeader
+                "x-userid"
+                [Text.encodeUtf8 credential.accountId]
             $ setRequestHeader "Accept" ["application/json"]
             $ setRequestHeader "x-grok-client-mode" ["shell"]
             $ setRequestHeader "x-grok-client-version" ["0.2.118"]

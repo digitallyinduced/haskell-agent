@@ -72,6 +72,9 @@ ghciDescription =
     "Evaluate Haskell in a persistent GHCi session for this agent.\n\
     \Bindings and loaded modules persist across calls.\n\
     \Pure expressions auto-approve; IO and side-effecting GHCi commands need approval.\n\
+    \Built-in helpers: cmd/cmdIn capture argv-based commands; cmd_/cmdIn_ print their output; \
+    \readText/writeText/appendText, listFiles, and pathExists handle common file tasks.\n\
+    \Imports must be separate GHCi statements, not lines inside a do block. Split setup and execution across calls.\n\
     \Prefer this over shell tools for calculations, type exploration, and small Haskell scripts.\n\
     \The session starts with GHC2021 plus BlockArguments, OverloadedStrings, \
     \OverloadedRecordDot, DuplicateRecordFields, NoFieldSelectors, LambdaCase, \

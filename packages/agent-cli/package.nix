@@ -1,12 +1,12 @@
-{ mkDerivation, aeson, agent-codex-dialect, agent-core
-, agent-grok-build-dialect, agent-openai, agent-openrouter
-, agent-responses, agent-responses-types, agent-store, agent-syntax
-, agent-tui, agent-xai, hasql-pool
-, ansi-terminal, async, base, base64-bytestring, brick, bytestring
-, colour, containers, directory, filelock, filepath, haskeline, hspec
-, http-client, http-client-tls, JuicyPixels, lib, mtl, process
-, safe-exceptions, stm, text, time
-, transformers, unix, vector, vty, vty-crossplatform
+{ mkDerivation, aeson, agent-claude, agent-codex-dialect
+, agent-core, agent-grok-build-dialect, agent-openai
+, agent-openrouter, agent-responses, agent-responses-types
+, agent-store, agent-syntax, agent-tui, agent-xai, ansi-terminal
+, async, base, base64-bytestring, brick, bytestring, colour
+, containers, directory, filelock, filepath, haskeline, hasql-pool
+, hspec, http-client, http-client-tls, JuicyPixels, lib, mtl
+, process, safe-exceptions, stm, text, time, transformers, unix
+, vector, vty, vty-crossplatform
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -14,27 +14,34 @@ mkDerivation {
   src = ./.;
   isLibrary = true;
   isExecutable = true;
+  enableSeparateDataOutput = true;
   libraryHaskellDepends = [
-    aeson agent-codex-dialect agent-core agent-grok-build-dialect
-    agent-openai agent-openrouter agent-responses agent-responses-types
-    agent-store agent-syntax agent-tui agent-xai ansi-terminal async base
-    base64-bytestring brick bytestring colour containers directory filelock
-    filepath haskeline hasql-pool http-client http-client-tls JuicyPixels mtl
-    process safe-exceptions stm text
-    time transformers unix vector vty vty-crossplatform
+    aeson agent-claude agent-codex-dialect agent-core
+    agent-grok-build-dialect agent-openai agent-openrouter
+    agent-responses agent-responses-types agent-store agent-syntax
+    agent-tui agent-xai ansi-terminal async base base64-bytestring
+    brick bytestring colour containers directory filelock filepath
+    haskeline hasql-pool http-client http-client-tls JuicyPixels mtl
+    process safe-exceptions stm text time transformers unix vector vty
+    vty-crossplatform
   ];
   executableHaskellDepends = [
-    aeson agent-responses agent-responses-types agent-store base bytestring
-    containers directory filepath process safe-exceptions text time unix
+    aeson agent-responses agent-responses-types agent-store base
+    bytestring containers directory filepath process safe-exceptions
+    text time unix
   ];
   testHaskellDepends = [
-    aeson agent-codex-dialect agent-core agent-grok-build-dialect
-    agent-openai agent-responses agent-responses-types agent-store agent-tui
-    agent-xai ansi-terminal base brick bytestring colour containers directory
-    filepath haskeline hspec JuicyPixels process safe-exceptions stm
-    text time transformers unix vty
+    aeson agent-claude agent-codex-dialect agent-core
+    agent-grok-build-dialect agent-openai agent-openrouter
+    agent-responses agent-responses-types agent-store agent-tui
+    agent-xai ansi-terminal async base brick bytestring colour
+    containers directory filepath haskeline hspec JuicyPixels process
+    safe-exceptions stm text time transformers unix vty
+  ];
+  benchmarkHaskellDepends = [
+    aeson agent-core agent-responses agent-store base bytestring
+    containers JuicyPixels text
   ];
   description = "Command-line interface for the universal agent harness";
-  license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
-  mainProgram = "agent-cli";
+  license = lib.meta.getLicenseFromSpdxId "MIT";
 }

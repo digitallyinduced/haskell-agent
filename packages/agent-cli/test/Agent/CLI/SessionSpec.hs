@@ -67,6 +67,44 @@ spec = describe "Agent.CLI.Session" do
                 `shouldBe` "Resume this session with: 'it'\\''s' --resume id"
 
     describe "PostgreSQL session persistence" do
+        it "round-trips and clears ephemeral session activity" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                handle <- createSession (testCreate pool root)
+                persistence <- newActivePersistence handle
+                setPersistenceActivity
+                    persistence
+                    "provider_cooldown"
+                    "Waiting before retrying."
+                    (Just fixedTime)
+
+                activity <-
+                    loadSessionActivity root handle.sessionMeta.metaId
+                activity `shouldSatisfy` maybe False
+                    (\current ->
+                        current.activityKind == "provider_cooldown"
+                            && current.activityMessage
+                                == "Waiting before retrying."
+                            && current.activityRetryAt == Just fixedTime)
+
+                clearPersistenceActivity persistence
+                loadSessionActivity root handle.sessionMeta.metaId
+                    `shouldReturn` Nothing
+
+        it "clears stale activity when a session is resumed" $
+            withTempStore \store root -> do
+                let pool = trustedPool store
+                handle <- createSession (testCreate pool root)
+                persistence <- newActivePersistence handle
+                setPersistenceActivity
+                    persistence
+                    "provider_retry"
+                    "Retrying."
+                    Nothing
+                _ <- newActivePersistence handle
+                loadSessionActivity root handle.sessionMeta.metaId
+                    `shouldReturn` Nothing
+
         it "round-trips metadata, provider items, usage, and compaction markers" $
             withTempStore \store root -> do
                 let pool = trustedPool store

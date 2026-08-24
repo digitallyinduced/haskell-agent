@@ -1,0 +1,85 @@
+cabal-version:      2.2
+name:               claude-agent-sdk-haskell
+version:            0.1.0.0
+synopsis:           Haskell SDK for the Claude Agent SDK stream protocol
+description:        Typed query and client APIs over the official Claude Code
+                    CLI, following Anthropic's Claude Agent SDK architecture.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Development
+build-type:         Simple
+extra-source-files: README.md
+
+common common-opts
+    default-language: GHC2021
+    default-extensions: OverloadedStrings
+                      , OverloadedRecordDot
+                      , DuplicateRecordFields
+                      , NoFieldSelectors
+                      , LambdaCase
+                      , BlockArguments
+                      , RecordWildCards
+                      , NamedFieldPuns
+                      , NumericUnderscores
+                      , TypeApplications
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Werror=missing-fields
+                      -Wno-unused-do-bind
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    hs-source-dirs:   src
+    exposed-modules:  Claude.Agent.SDK
+                    , Claude.Agent.SDK.Client
+                    , Claude.Agent.SDK.Errors
+                    , Claude.Agent.SDK.Query
+                    , Claude.Agent.SDK.Transport
+                    , Claude.Agent.SDK.Types
+    other-modules:    Claude.Agent.SDK.Internal.MessageParser
+                    , Claude.Agent.SDK.Internal.Process
+                    , Claude.Agent.SDK.Internal.Query
+                    , Claude.Agent.SDK.Internal.Transport.SubprocessCLI
+    build-depends:    base                  >= 4.17 && < 5
+                    , aeson                 >= 2.0
+                    , async
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , directory
+                    , entropy
+                    , process               >= 1.6.26
+                    , safe-exceptions
+                    , scientific
+                    , text
+                    , unix
+                    , uuid-types
+
+test-suite claude-agent-sdk-haskell-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    other-modules:    Claude.Agent.SDK.ClientSpec
+                    , Claude.Agent.SDK.QuerySpec
+                    , Claude.Agent.SDK.TestSupport
+    ghc-options:      -threaded
+    build-depends:    base >= 4.17 && < 5
+                    , claude-agent-sdk-haskell
+                    , aeson
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec
+                    , safe-exceptions
+                    , scientific
+                    , text
+                    , unix

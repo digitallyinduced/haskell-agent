@@ -7,6 +7,7 @@ import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.AgentViewport (AgentViewportEnv)
 import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.CLI.Command (ShellMode)
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
@@ -17,6 +18,7 @@ import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import Agent.MCP (McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
 import System.OsPath (OsPath)
@@ -53,6 +55,8 @@ data SessionEnv = SessionEnv
     , sessionProjectRoot :: !OsPath
     , sessionCwd :: !OsPath
     , sessionHome :: !OsPath
+    , sessionMcpRegistrations :: ![McpToolRegistration]
+    , sessionMcpWarnings :: ![Text]
     , sessionSetTempDir :: !(OsPath -> IO ())
     , sessionTokenProvider :: !(Maybe TokenProvider)
     , sessionOpenAiPool :: !(Maybe OpenAI.Pool)
@@ -60,7 +64,10 @@ data SessionEnv = SessionEnv
     , sessionSkills :: !(IORef SkillCatalog)
     , sessionSkillInvocations :: !(IORef [SkillInvocation])
     , sessionRefreshSkills :: !(Bool -> IO ())
+    , sessionShellMode :: !(IO ShellMode)
+    , sessionSetShellMode :: !(ShellMode -> IO Text)
     , sessionEscPaused :: !(IORef Bool)
+    , sessionDraft :: !(IORef Text)
     , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState

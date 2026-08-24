@@ -446,6 +446,15 @@ spec = describe "runLoop" do
         execution.executionResult
             `shouldBe` Left (LoopUnexpected "user error (renderer exploded)")
 
+    it "marks a transport failure after streamed output as interrupted" do
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (TextDelta "partial")
+                pure (Left (ConnectionError "down"))
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe`
+            Left (LoopTransportAfterOutput (ConnectionError "down"))
+
     it "turns synchronous backend exceptions into a failed turn" do
         config <- testConfig $ Backend \_state _prev _inputs _onEvent ->
             Exception.throwIO (userError "backend exploded")

@@ -19,20 +19,21 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "\ESC["
             out `shouldSatisfy` (not . Text.isPrefixOf "λ")
 
-        it "restores a base wash after nested styling" do
+        it "uses the terminal default background after nested styling" do
             let out = styleBase True agentBackground [] "hi"
-            -- Reset then reopen Solarized base03 (combined into one SGR sequence).
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;0;43;54m"
+            out `shouldSatisfy` (not . Text.isInfixOf "48;")
 
     describe "paintBackgroundLines" do
         it "leaves text unchanged when color is off" do
             paintBackgroundLines False agentBackground "a\nb" `shouldBe` "a\nb"
 
-        it "paints each line and preserves a trailing newline" do
-            let out = paintBackgroundLines True agentBackground "a\nb\n"
-            Text.count "\ESC[48;2;0;43;54m" out `shouldBe` 2
-            out `shouldSatisfy` Text.isSuffixOf "\n"
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0K"
+        it "leaves lines on the terminal theme's default background" do
+            paintBackgroundLines True agentBackground "a\nb\n"
+                `shouldBe` "a\nb\n"
+
+        it "does not erase with the terminal default background" do
+            paintBackgroundLines True agentBackground "text"
+                `shouldSatisfy` (not . Text.isInfixOf "\ESC[K")
 
     describe "roles" do
         it "keeps tool labels readable with color off" do
@@ -42,11 +43,10 @@ spec = do
             roleError False "boom" `shouldBe` "boom"
             roleMuted False "session: 1" `shouldBe` "session: 1"
 
-        it "keeps the user wash under the prompt glyph" do
+        it "uses the terminal cyan slot without forcing a background" do
             let out = rolePrompt True "λ"
-            -- Background may share an SGR sequence with bold/cyan attrs (truecolor).
-            out `shouldSatisfy` Text.isInfixOf "48;2;7;54;66"
-            out `shouldSatisfy` Text.isInfixOf "\ESC[0;48;2;7;54;66m"
+            out `shouldSatisfy` Text.isInfixOf "\ESC[1;36m"
+            out `shouldSatisfy` (not . Text.isInfixOf "48;")
 
     describe "chrome glyphs" do
         it "exposes the shared Unicode markers" do

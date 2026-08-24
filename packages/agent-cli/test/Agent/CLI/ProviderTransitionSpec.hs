@@ -30,16 +30,6 @@ spec = do
                     (transition (Just "session-1") Nothing)
             transitioned.optResume `shouldBe` Just "session-1"
 
-        it "retains an unsubmitted draft across a provider rebuild" do
-            let switched =
-                    (transition Nothing Nothing)
-                        { transitionCause = ManualTransition
-                        , transitionDraft = "unfinished prompt"
-                        }
-            providerTransitionDraft (Just switched)
-                `shouldBe` "unfinished prompt"
-            providerTransitionDraft Nothing `shouldBe` ""
-
     describe "setPendingExitAfter" do
         it "preserves the plan state while changing exit behavior" do
             let pending = PendingTurn
@@ -51,6 +41,17 @@ spec = do
                 updated = setPendingExitAfter True pending
             updated.pendingExitAfter `shouldBe` True
             updated.pendingPlanState `shouldBe` PlanActive
+
+    describe "transitionCommitsImmediately" do
+        it "keeps a startup automatic fallback provisional" do
+            transitionCommitsImmediately (transition Nothing Nothing)
+                `shouldBe` False
+
+        it "commits a manual selection immediately" do
+            let manual =
+                    (transition Nothing Nothing)
+                        { transitionCause = ManualTransition }
+            transitionCommitsImmediately manual `shouldBe` True
 
 transition
     :: Maybe Text
@@ -68,7 +69,6 @@ transition sessionId pending = ProviderTransition
     , transitionAccountId = Nothing
     , transitionSessionId = sessionId
     , transitionPendingTurn = pending
-    , transitionDraft = ""
     , transitionUnavailableProviders = [XAIProvider]
     , transitionCause = AutomaticFallback
     , transitionAutomaticBilling = Just SubscriptionBilled

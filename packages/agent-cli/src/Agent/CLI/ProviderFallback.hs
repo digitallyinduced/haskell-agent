@@ -6,6 +6,8 @@ module Agent.CLI.ProviderFallback
     , fallbackCandidates
     , isProviderUnavailable
     , isUsageExhausted
+    , ProviderRecoveryPreference(..)
+    , providerRecoveryPreference
     , rankedModels
     ) where
 
@@ -18,11 +20,22 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
 
--- | Keep brief provider cooldowns invisible to the user when no fallback
--- account is available. Longer waits return control to the prompt instead of
--- making the CLI appear hung.
+-- | Keep brief provider cooldowns invisible to the user. Longer waits are
+-- eligible for cross-provider fallback instead of making the CLI appear hung.
 maxAutomaticCooldownWait :: NominalDiffTime
 maxAutomaticCooldownWait = 120
+
+-- | Whether a provider-unavailable turn should first wait for the current
+-- provider or immediately enter cross-provider fallback.
+--
+-- A brief 'CredentialsExhausted' window commonly represents a transient 429
+-- shared by otherwise usable accounts. Retrying it first prevents that
+-- temporary cooldown from being recorded as permanent provider exhaustion by
+-- the fallback chain. Long usage-window resets still fall back immediately.
+data ProviderRecoveryPreference
+    = RetryCurrentProviderAfter !NominalDiffTime
+    | TryProviderFallback
+    deriving (Eq, Show)
 
 -- | Automatic fallback may use another subscription account, but must never
 -- turn subscription exhaustion into API-credit spending. Manual provider
@@ -45,6 +58,17 @@ automaticCooldownRetryDelay now = \case
             then Just delay
             else Nothing
     _ -> Nothing
+
+providerRecoveryPreference
+    :: Bool
+    -> UTCTime
+    -> ApiError
+    -> ProviderRecoveryPreference
+providerRecoveryPreference allowCooldownRetry now err =
+    case automaticCooldownRetryDelay now err of
+        Just delay
+            | allowCooldownRetry -> RetryCurrentProviderAfter delay
+        _ -> TryProviderFallback
 
 -- | Live status text for a brief automatic provider retry. Keep the remaining
 -- time in seconds so a one-minute cooldown visibly counts down instead of
@@ -81,11 +105,14 @@ fallbackCandidates
     -> ApiError
     -> [ModelOption]
 fallbackCandidates catalog unavailable current err
+    | current == ClaudeCodeProvider = []
     | not (isProviderUnavailable err) = []
     | otherwise =
         filter
             (\option ->
                 option.modelTarget.targetProvider /= current
+                    && option.modelTarget.targetProvider
+                        /= ClaudeCodeProvider
                     && option.modelTarget.targetProvider `notElem` unavailable)
             (nubBy sameProvider (rankedModels catalog))
   where

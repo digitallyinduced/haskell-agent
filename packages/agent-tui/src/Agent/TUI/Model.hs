@@ -5,6 +5,7 @@ module Agent.TUI.Model
     , BlockState(..)
     , Focus(..)
     , NoticeKind(..)
+    , RetryCountdown(..)
     , PermissionOverlay(..)
     , PromptState(..)
     , UiBlock(..)
@@ -35,7 +36,8 @@ module Agent.TUI.Model
 import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
-    , summarizeToolCall
+    , toolCallInput
+    , toolCallTitle
     )
 import Agent.TUI.Motion
     ( completionStatusDurationMillis
@@ -85,6 +87,15 @@ data UiNotice = UiNotice
     { noticeKind :: !NoticeKind
     , noticeText :: !Text
     , noticeTransient :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | A live retry deadline attached to one retained error block.
+data RetryCountdown = RetryCountdown
+    { retryCountdownBlockId :: !BlockId
+    , retryCountdownPrefix :: !Text
+    , retryCountdownRemainingMillis :: !Int
+    , retryCountdownSuffix :: !Text
     }
     deriving (Eq, Show)
 
@@ -151,10 +162,12 @@ data UiState = UiState
     , uiCwd :: !Text
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
+    , uiRetryCountdown :: !(Maybe RetryCountdown)
     , uiNoticeElapsedMillis :: !Int
     , uiElapsedMillis :: !Int
     , uiCompletionRemainingMillis :: !Int
     , uiTurnStartBlock :: !Int
+    , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
     }
     deriving (Eq, Show)
@@ -174,6 +187,7 @@ data UiEvent
     | UiSetNotice !(Maybe UiNotice)
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId
+    | UiActivateBlock !BlockId
     | UiToggleSelected
     | UiFocusChanged !Focus
     | UiPermissionShown !Text
@@ -183,6 +197,8 @@ data UiEvent
     | UiAssistantHistory !Text
     | UiSystemMessage !Text
     | UiErrorMessage !Text
+    -- | Append an error whose retry guidance counts down in place.
+    | UiRetryCountdown !Text !Int !Text
     | UiConversationCleared
     | UiSetFollow !Bool
     | UiTurnEnded !BlockState
@@ -217,10 +233,12 @@ initialUiState = UiState
     , uiCwd = ""
     , uiPermission = Nothing
     , uiNotice = Nothing
+    , uiRetryCountdown = Nothing
     , uiNoticeElapsedMillis = 0
     , uiElapsedMillis = 0
     , uiCompletionRemainingMillis = 0
     , uiTurnStartBlock = 0
+    , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
     }
 
@@ -307,6 +325,8 @@ reduceUi event state = case event of
         moveSelection delta state
     UiSelectBlock ident ->
         selectBlock ident state
+    UiActivateBlock ident ->
+        toggleSelected (selectBlock ident state)
     UiToggleSelected ->
         toggleSelected state
     UiFocusChanged focus ->
@@ -344,7 +364,32 @@ reduceUi event state = case event of
     UiSystemMessage message ->
         appendBlock BlockSystem "System" message "" BlockComplete Nothing state
     UiErrorMessage message ->
-        appendBlock BlockError "Error" message "" BlockFailed Nothing state
+        (appendBlock BlockError "Error" message "" BlockFailed Nothing state)
+            { uiRetryCountdown = Nothing }
+    UiRetryCountdown prefix remainingMillis suffix ->
+        let
+            ident = BlockId state.uiNextBlockId
+            remaining = max 0 remainingMillis
+            withBlock =
+                appendBlock
+                    BlockError
+                    "Error"
+                    (retryCountdownText prefix remaining suffix)
+                    ""
+                    BlockFailed
+                    Nothing
+                    state
+        in withBlock
+            { uiRetryCountdown =
+                if remaining == 0
+                    then Nothing
+                    else Just RetryCountdown
+                        { retryCountdownBlockId = ident
+                        , retryCountdownPrefix = prefix
+                        , retryCountdownRemainingMillis = remaining
+                        , retryCountdownSuffix = suffix
+                        }
+            }
     UiConversationCleared ->
         state
             { uiBlocks = Seq.empty
@@ -353,7 +398,9 @@ reduceUi event state = case event of
             , uiBlockIndices = Map.empty
             , uiNextBlockId = 1
             , uiTurnStartBlock = 0
+            , uiAttemptStartBlock = 0
             , uiToolCalls = Map.empty
+            , uiRetryCountdown = Nothing
             }
     UiSetFollow follow ->
         state
@@ -393,6 +440,7 @@ reduceUi event state = case event of
             , uiNoticeElapsedMillis = 0
             , uiCompletionRemainingMillis = 0
             , uiToolCalls = Map.empty
+            , uiAttemptStartBlock = state.uiTurnStartBlock
             }
 
 advanceUiTime :: Int -> UiState -> UiState
@@ -414,7 +462,9 @@ advanceUiTime rawElapsedMillis state =
             , maybe False (.noticeTransient) state.uiNotice =
                 Nothing
             | otherwise = state.uiNotice
-    in state
+        countdown =
+            advanceRetryCountdown elapsedMillis state
+    in countdown
         { uiElapsedMillis =
             if state.uiRunning
                 then state.uiElapsedMillis + elapsedMillis
@@ -434,6 +484,8 @@ uiNeedsTick :: UiState -> Bool
 uiNeedsTick state =
     state.uiRunning
         || state.uiCompletionRemainingMillis > 0
+        || maybe False ((> 0) . (.retryCountdownRemainingMillis))
+            state.uiRetryCountdown
         || maybe False noticeNeedsTick state.uiNotice
   where
     noticeNeedsTick notice =
@@ -442,11 +494,20 @@ uiNeedsTick state =
 uiNextDeadlineMillis :: UiState -> Maybe Int
 uiNextDeadlineMillis state =
     minimumMaybe $
-        completionDeadline <> noticeDeadline
+        completionDeadline <> countdownDeadline <> noticeDeadline
   where
     completionDeadline =
         [state.uiCompletionRemainingMillis
         | state.uiCompletionRemainingMillis > 0]
+    countdownDeadline =
+        case state.uiRetryCountdown of
+            Just countdown ->
+                [ min
+                    countdown.retryCountdownRemainingMillis
+                    (millisecondsUntilNextDisplayedSecond
+                        countdown.retryCountdownRemainingMillis)
+                ]
+            Nothing -> []
     noticeDeadline =
         case state.uiNotice of
             Just notice
@@ -460,6 +521,74 @@ uiNextDeadlineMillis state =
     minimumMaybe [] = Nothing
     minimumMaybe values = Just (minimum values)
 
+advanceRetryCountdown :: Int -> UiState -> UiState
+advanceRetryCountdown elapsedMillis state =
+    case state.uiRetryCountdown of
+        Nothing -> state
+        Just countdown ->
+            let
+                remaining =
+                    max 0
+                        ( countdown.retryCountdownRemainingMillis
+                            - elapsedMillis
+                        )
+                body =
+                    retryCountdownText
+                        countdown.retryCountdownPrefix
+                        remaining
+                        countdown.retryCountdownSuffix
+                blocks =
+                    case Map.lookup
+                        countdown.retryCountdownBlockId
+                        state.uiBlockIndices of
+                        Nothing -> state.uiBlocks
+                        Just index ->
+                            Seq.adjust
+                                (\block -> block { blockBody = body })
+                                index
+                                state.uiBlocks
+            in state
+                { uiBlocks = blocks
+                , uiRetryCountdown =
+                    if remaining == 0
+                        then Nothing
+                        else Just countdown
+                            { retryCountdownRemainingMillis = remaining }
+                }
+
+retryCountdownText :: Text -> Int -> Text -> Text
+retryCountdownText prefix remainingMillis suffix =
+    prefix
+        <> (if remainingMillis <= 0
+                then "Try again now"
+                else
+                    "Try again in "
+                        <> formatCountdownSeconds
+                            ((remainingMillis + 999) `div` 1000))
+        <> suffix
+
+formatCountdownSeconds :: Int -> Text
+formatCountdownSeconds rawSeconds =
+    let
+        total = max 0 rawSeconds
+        hours = total `div` 3600
+        minutes = (total `mod` 3600) `div` 60
+        seconds = total `mod` 60
+        showText = Text.pack . show
+        pad2 value
+            | value < 10 = "0" <> showText value
+            | otherwise = showText value
+    in if hours > 0
+        then showText hours <> "h" <> pad2 minutes <> "m" <> pad2 seconds <> "s"
+        else if minutes > 0
+            then showText minutes <> "m" <> pad2 seconds <> "s"
+            else showText seconds <> "s"
+
+millisecondsUntilNextDisplayedSecond :: Int -> Int
+millisecondsUntilNextDisplayedSecond remainingMillis =
+    let remainder = remainingMillis `mod` 1000
+    in if remainder == 0 then 1000 else remainder
+
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
     TurnStarted ->
@@ -472,6 +601,7 @@ reduceLoop event state = case event of
             , uiElapsedMillis = 0
             , uiCompletionRemainingMillis = 0
             , uiTurnStartBlock = Seq.length state.uiBlocks
+            , uiAttemptStartBlock = Seq.length state.uiBlocks
             , uiToolCalls = Map.empty
             }
     ReasoningDelta delta ->
@@ -487,20 +617,31 @@ reduceLoop event state = case event of
             { uiNotice = Just (warningNotice warning)
             , uiNoticeElapsedMillis = 0
             }
+    ResponseRestarted message ->
+        let finalized = finalizeStreams state
+        in finalized
+            { uiRunning = True
+            , uiActivity = "Retrying response…"
+            , uiNotice = Just (warningNotice message)
+            , uiNoticeElapsedMillis = 0
+            , uiAttemptStartBlock = Seq.length finalized.uiBlocks
+            }
     ToolStarted call ->
         let
             kind = toolBlockKind call.name
+            title = toolCallTitle call
             blockIndex = Seq.length state.uiBlocks
             body = case call.name of
                 "search_replace" ->
                     formatSearchReplaceDiff call.arguments
                 _ -> ""
-        in appendBlock kind (summarizeToolCall call) body ""
+            detail = toolCallInput call
+        in appendBlock kind title body detail
             BlockRunning (Just call.callId)
             state
                 { uiRunning = True
                 , uiAwaitingInput = False
-                , uiActivity = summarizeToolCall call
+                , uiActivity = title
                 , uiToolCalls =
                     Map.insert
                         call.callId
@@ -536,7 +677,7 @@ reduceLoop event state = case event of
                     | not (Text.null (Text.strip text))
                     , not
                         (hasAssistantTextSince
-                            finalized.uiTurnStartBlock
+                            finalized.uiAttemptStartBlock
                             finalized) ->
                         appendBlock BlockAssistant "Assistant" text ""
                             BlockComplete Nothing finalized

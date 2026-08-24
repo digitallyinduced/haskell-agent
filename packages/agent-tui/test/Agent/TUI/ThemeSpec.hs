@@ -10,8 +10,8 @@ import Test.Hspec
 spec :: Spec
 spec = do
     describe "structural theme attributes" do
-        it "keeps active chrome and controls on the Solarized neutral ramp" do
-            map solarizedForeground
+        it "uses the terminal ANSI palette without fixing a background" do
+            map terminalForeground
                 [ Theme.borderActiveAttr
                 , Theme.controlLinkAttr
                 , Theme.controlLinkHoverAttr
@@ -22,28 +22,30 @@ spec = do
                 , Theme.lambdaSparkAttr
                 ]
                 `shouldBe`
-                    [ V.SetTo (V.RGBColor 101 123 131)
-                    , V.SetTo (V.RGBColor 101 123 131)
-                    , V.SetTo (V.RGBColor 131 148 150)
-                    , V.SetTo (V.RGBColor 147 161 161)
-                    , V.SetTo (V.RGBColor 69 94 100)
-                    , V.SetTo (V.RGBColor 88 110 117)
-                    , V.SetTo (V.RGBColor 101 123 131)
-                    , V.SetTo (V.RGBColor 131 148 150)
+                    [ V.Default
+                    , V.SetTo V.brightBlack
+                    , V.Default
+                    , V.Default
+                    , V.SetTo V.brightBlack
+                    , V.SetTo V.brightBlack
+                    , V.Default
+                    , V.SetTo V.brightWhite
                     ]
 
     describe "syntax theme attributes" do
-        it "keeps every Solarized syntax class on the code-block background" do
-            let codeBackground =
-                    V.attrBackColor
-                        (attrMapLookup Theme.codeAttr Theme.solarizedDark)
+        it "leaves every syntax background to the terminal theme" do
             map
                 ( V.attrBackColor
-                    . (`attrMapLookup` Theme.solarizedDark)
+                    . (`attrMapLookup` Theme.terminalDefault)
                     . Theme.syntaxClassAttr
                 )
                 allSyntaxClasses
-                `shouldBe` replicate (length allSyntaxClasses) codeBackground
+                `shouldBe` replicate (length allSyntaxClasses) V.Default
+
+        it "uses reverse video for selections on light and dark themes" do
+            V.attrStyle
+                (attrMapLookup Theme.selectedAttr Theme.terminalDefault)
+                `shouldBe` V.SetTo V.reverseVideo
 
         it "does not introduce colors in monochrome mode" do
             map
@@ -60,9 +62,9 @@ spec = do
                         (length allSyntaxClasses)
                         (V.Default, V.Default)
 
-solarizedForeground :: AttrName -> V.MaybeDefault V.Color
-solarizedForeground =
-    V.attrForeColor . (`attrMapLookup` Theme.solarizedDark)
+terminalForeground :: AttrName -> V.MaybeDefault V.Color
+terminalForeground =
+    V.attrForeColor . (`attrMapLookup` Theme.terminalDefault)
 
 allSyntaxClasses :: [SyntaxClass]
 allSyntaxClasses = [minBound .. maxBound]

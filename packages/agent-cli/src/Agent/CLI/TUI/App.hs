@@ -99,10 +99,14 @@ import Agent.CLI.Resume
     , toggleResumeExpanded
     , visibleResumeBrowser
     )
-import Agent.CLI.Render (formatElapsed, summarizeToolCall)
+import Agent.CLI.Render (formatElapsed)
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
-import Agent.CLI.Terminal (shiftEnterCsiBodies)
+import Agent.CLI.Terminal
+    ( kittyCtrlVCsiBodies
+    , kittySuperVCsiBodies
+    , shiftEnterCsiBodies
+    )
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import qualified Agent.CLI.TUI.Composer as Composer
@@ -116,7 +120,8 @@ import Agent.CLI.TUI.ImagePreview
     , renderTuiImagePreview
     )
 import Agent.TUI.Markdown
-    ( markdownWidget
+    ( codeWidgetWithSyntaxHighlighting
+    , markdownWidget
     , markdownWidgetWithSyntaxHighlighting
     )
 import Agent.Syntax
@@ -136,6 +141,7 @@ import Agent.TUI.Motion
     , quietIndicator
     , waitingIndicator
     )
+import Agent.TUI.Presentation (permissionToolCallPrompt)
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -473,7 +479,7 @@ readFullscreenLineOrWithModels
 
 -- | Fullscreen Vty configuration, including enhanced-keyboard encodings that
 -- are not present in the default terminfo input table. Without these entries,
--- Vty emits the payload of Shift+Enter sequences as printable characters.
+-- Vty emits the payload of modified-key sequences as printable characters.
 fullscreenVtyConfig :: V.VtyUserConfig
 fullscreenVtyConfig =
     V.defaultConfig
@@ -485,6 +491,16 @@ fullscreenVtyConfig =
               )
             | body <- shiftEnterCsiBodies
             ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'v') [modifier]
+                 )
+               | (modifier, bodies) <-
+                    [ (V.MCtrl, kittyCtrlVCsiBodies)
+                    , (V.MMeta, kittySuperVCsiBodies)
+                    ]
+               , body <- bodies
+               ]
         }
 
 requestFullscreenPermission
@@ -493,7 +509,7 @@ requestFullscreenPermission
     -> IO (Maybe PermissionChoice)
 requestFullscreenPermission runtime call = do
     reply <- newEmptyTMVarIO
-    let summary = summarizeToolCall call
+    let summary = permissionToolCallPrompt call
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
@@ -1527,7 +1543,7 @@ fullscreenApp = App
         vScrollToEnd (viewportScroll ConversationViewport)
     , appAttrMap = \state ->
         if state.appRuntime.runtimeColor
-            then Theme.solarizedDark
+            then Theme.terminalDefault
             else Theme.monochrome
     }
 
@@ -2460,8 +2476,11 @@ drawBlock state block =
                     (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
                     (visibleBody block)
             BlockShell ->
-                accentBlock (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                accentCodeBlock
+                    state.appSyntaxHighlighter
+                    (statusAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle)
+                    block.blockDetail
                     (visibleShellBody block)
             BlockEdit ->
                 accentBlock (statusAttr state block)
@@ -2527,6 +2546,10 @@ cacheableBlock :: AppState -> UiBlock -> Bool
 cacheableBlock state block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
+        && maybe
+            True
+            ((/= block.blockId) . (.retryCountdownBlockId))
+            state.appUi.uiRetryCountdown
         && not (blockFlashing state block)
 
 blockStateGlyph :: AppState -> UiBlock -> Text
@@ -2554,14 +2577,39 @@ blockStateGlyph state block = case block.blockState of
 
 accentBlock :: AttrName -> Text -> Text -> Widget Name
 accentBlock accent title body =
+    accentBlockWithSections accent title $
+        if Text.null (Text.strip body)
+            then []
+            else [txtWrap body]
+
+accentCodeBlock
+    :: Maybe SyntaxHighlighter
+    -> AttrName
+    -> Text
+    -> Text
+    -> Text
+    -> Widget Name
+accentCodeBlock syntaxHighlighter accent title code body =
+    accentBlockWithSections accent title $
+        [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
+        | not (Text.null (Text.strip code))
+        ]
+            <> [ txtWrap body
+               | not (Text.null (Text.strip body))
+               ]
+
+accentBlockWithSections
+    :: AttrName
+    -> Text
+    -> [Widget Name]
+    -> Widget Name
+accentBlockWithSections accent title sections =
     hBox
         [ withAttr accent (txt "❙")
         , padLeft (Pad 2) $
             vBox $
-                [withAttr accent (txt title)]
-                    <> if Text.null (Text.strip body)
-                        then []
-                        else [padTop (Pad 1) (txtWrap body)]
+                [withAttr accent (txtWrap title)]
+                    <> map (padTop (Pad 1)) sections
         ]
 
 visibleBody :: UiBlock -> Text
@@ -2686,7 +2734,7 @@ drawPermission state permission =
                         (waitingOverlayLabel state "Permission") $
                         padAll 1 $
                             vBox
-                                [ txtWrap ("Allow " <> permission.permissionSummary <> "?")
+                                [ txtWrap permission.permissionSummary
                                 , padTop (Pad 1) $
                                     vBox $
                                         zipWith
@@ -3265,6 +3313,7 @@ uiEventCanCompleteBlocks :: UiEvent -> Bool
 uiEventCanCompleteBlocks = \case
     UiLoop (ToolFinished _) -> True
     UiLoop (TurnFinished _) -> True
+    UiLoop (ResponseRestarted _) -> True
     UiSetAwaitingInput True -> True
     UiTurnEnded _ -> True
     _ -> False
@@ -3284,6 +3333,7 @@ uiEventRestartsMotionSchedule event previous next newFlashes =
     explicitReset = case event of
         UiLoop TurnStarted -> True
         UiLoop (WarningRaised _) -> True
+        UiLoop (ResponseRestarted _) -> True
         UiSetNotice (Just _) -> True
         UiInputPromoted _ -> True
         UiTurnRestarted -> True
@@ -3909,7 +3959,7 @@ handleMouseDown name button =
         V.BLeft -> case name of
             ConversationBlock ident ->
                 applyLocalUiEventWith
-                    (UiSelectBlock ident)
+                    (UiActivateBlock ident)
                     (applyUiEvent (UiFocusChanged FocusScrollback))
             ComposerArea ->
                 applyLocalUiEvent (UiFocusChanged FocusComposer)

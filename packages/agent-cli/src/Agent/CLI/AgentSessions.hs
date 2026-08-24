@@ -16,10 +16,12 @@ import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Error (formatException)
 import Agent.CLI.Session
     ( SessionCreate(..)
+    , SessionActivity
     , SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
     , createSession
+    , loadSessionActivity
     , loadSession
     , sessionTempDirForId
     , sessionTitleFromPrompt
@@ -484,10 +486,14 @@ runReadAgentSession env args =
         Left err -> pure (Left err)
         Right (meta, turns) -> do
             status <- env.toolsSessionStatus args.sessionId
+            activity <-
+                if status == "running"
+                    then loadSessionActivity env.toolsRoot args.sessionId
+                    else pure Nothing
             let limit = min 100 (max 1 (fromMaybe 20 args.limit))
                 recent = drop (max 0 (length turns - limit)) turns
             pure $ Right $ encodeJson $ object
-                [ "session" .= sessionJson meta status
+                [ "session" .= sessionJson meta status activity
                 , "turns" .= map turnJson recent
                 ]
 
@@ -571,8 +577,8 @@ statusAfterLaunch env sessionId launchResult
     | "completed session " `Text.isPrefixOf` launchResult = pure "completed"
     | otherwise = env.toolsSessionStatus sessionId
 
-sessionJson :: SessionMeta -> Text -> Value
-sessionJson meta status = object
+sessionJson :: SessionMeta -> Text -> Maybe SessionActivity -> Value
+sessionJson meta status activity = object
     [ "id" .= meta.metaId
     , "status" .= status
     , "title" .= meta.metaTitle
@@ -584,6 +590,7 @@ sessionJson meta status = object
     , "cwd" .= unsafeToFilePath meta.metaCwd
     , "created_at" .= meta.metaCreatedAt
     , "updated_at" .= meta.metaUpdatedAt
+    , "activity" .= activity
     ]
 
 turnJson :: SessionTurn -> Value

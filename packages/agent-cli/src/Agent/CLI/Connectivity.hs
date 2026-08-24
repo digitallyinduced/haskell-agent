@@ -36,11 +36,10 @@ withConnectionRecovery =
     withConnectionRecoveryUsing
         (threadDelay . reconnectDelayMicros)
 
--- | Injectable variant used by tests.
---
--- Retrying stops once response text/reasoning has streamed. Replaying after
--- visible output could duplicate it; those rare mid-stream failures continue
--- through the existing error path instead.
+-- | Injectable variant used by tests. If a response already streamed, emit a
+-- structural restart boundary before the next attempt. Providers may generate
+-- a different continuation when replayed, so renderers keep the failed partial
+-- attempt visible rather than trying to splice or silently deduplicate it.
 withConnectionRecoveryUsing
     :: (Int -> IO ())
     -> Backend
@@ -54,14 +53,15 @@ withConnectionRecoveryUsing waitBeforeRetry (Backend submit) =
                     onEvent event
                 didStream <- readIORef streamed
                 case result of
-                    Left ConnectionError{}
-                        | not didStream -> do
-                            onEvent (ActivityUpdated (waitingMessage attempt))
-                            waitBeforeRetry attempt
-                            onEvent
-                                (ActivityUpdated
-                                    "Checking internet connection…")
-                            go (attempt + 1)
+                    Left ConnectionError{} -> do
+                        onEvent (ActivityUpdated (waitingMessage attempt))
+                        waitBeforeRetry attempt
+                        onEvent
+                            (ActivityUpdated
+                                "Checking internet connection…")
+                        when didStream $
+                            onEvent (ResponseRestarted restartMessage)
+                        go (attempt + 1)
                     _ -> pure result
         in go 1
 
@@ -76,6 +76,11 @@ waitingMessage attempt =
     "Connection lost; waiting for internet. Retrying automatically in "
         <> formatDelay (reconnectDelayMicros attempt)
         <> " (Esc or Ctrl-C to cancel)…"
+
+restartMessage :: Text
+restartMessage =
+    "Connection interrupted the response; restarting automatically. "
+        <> "The new attempt may repeat partial output shown above."
 
 formatDelay :: Int -> Text
 formatDelay micros =

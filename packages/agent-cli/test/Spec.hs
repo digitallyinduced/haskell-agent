@@ -2,6 +2,7 @@ module Main (main) where
 
 import Test.Hspec (hspec)
 
+import qualified Agent.CLI.AccountSelectionSpec as AccountSelectionSpec
 import qualified Agent.CLI.AgentSessionsSpec as AgentSessionsSpec
 import qualified Agent.CLI.AgentViewportSpec as AgentViewportSpec
 import qualified Agent.CLI.ApprovalSpec as ApprovalSpec
@@ -23,6 +24,7 @@ import qualified Agent.CLI.InputSpec as InputSpec
 import qualified Agent.CLI.InterruptSpec as InterruptSpec
 import qualified Agent.CLI.LoginSpec as LoginSpec
 import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
+import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
@@ -44,6 +46,7 @@ import qualified Agent.CLI.ReplStatusSpec as ReplStatusSpec
 import qualified Agent.CLI.ResumeSpec as ResumeSpec
 import qualified Agent.CLI.SecretSpec as SecretSpec
 import qualified Agent.CLI.SessionSpec as SessionSpec
+import qualified Agent.CLI.SessionStateSpec as SessionStateSpec
 import qualified Agent.CLI.SessionTitleSpec as SessionTitleSpec
 import qualified Agent.CLI.SkillsSpec as SkillsSpec
 import qualified Agent.CLI.SubagentStoreSpec as SubagentStoreSpec
@@ -64,6 +67,7 @@ import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
 
 main :: IO ()
 main = hspec do
+    AccountSelectionSpec.spec
     AgentViewportSpec.spec
     AgentSessionsSpec.spec
     ApprovalSpec.spec
@@ -85,6 +89,7 @@ main = hspec do
     InterruptSpec.spec
     LoginSpec.spec
     MarkdownSpec.spec
+    McpManagerSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec
     ModelsSpec.spec
@@ -112,6 +117,7 @@ main = hspec do
     TelegramSpec.spec
     TextLayoutSpec.spec
     SessionSpec.spec
+    SessionStateSpec.spec
     SessionTitleSpec.spec
     SkillsSpec.spec
     SubagentStoreSpec.spec

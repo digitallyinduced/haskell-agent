@@ -41,8 +41,14 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Paths_agent_cli
+    other-modules:    Agent.CLI.Auth.Grok
+                    , Agent.CLI.Auth.OpenAI
+                    , Agent.CLI.Auth.Types
+                    , Agent.CLI.TUI.Composer.Buffer
+                    , Agent.CLI.TUI.Composer.Edit
+                    , Paths_agent_cli
     exposed-modules:  Agent.CLI
+                    , Agent.CLI.AccountSelection
                     , Agent.CLI.AgentSessions
                     , Agent.CLI.AgentViewport
                     , Agent.CLI.Approval
@@ -64,10 +70,17 @@ library
                     , Agent.CLI.Error
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.Input
+                    , Agent.CLI.Input.Types
+                    , Agent.CLI.Input.Display
+                    , Agent.CLI.Input.Paste
+                    , Agent.CLI.Input.History
+                    , Agent.CLI.Input.KeyDecoder
+                    , Agent.CLI.Input.Picker
                     , Agent.CLI.Interrupt
                     , Agent.CLI.Login
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
+                    , Agent.CLI.McpManager
                     , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
                     , Agent.CLI.Notification
@@ -88,6 +101,7 @@ library
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
                     , Agent.CLI.SessionEnv
+                    , Agent.CLI.SessionState
                     , Agent.CLI.SessionLock
                     , Agent.CLI.SessionTitle
                     , Agent.CLI.Secret
@@ -98,6 +112,9 @@ library
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
                     , Agent.Telegram
+                    , Agent.Telegram.Markdown
+                    , Agent.Telegram.Types
+                    , Agent.Telegram.Voice
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
@@ -119,6 +136,7 @@ library
                     , agent-tui >= 0.1 && < 0.2
                     , agent-openai >= 0.1 && < 0.2
                     , agent-openrouter >= 0.1 && < 0.2
+                    , agent-claude >= 0.1 && < 0.2
                     , agent-responses >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , agent-xai >= 0.1 && < 0.2
@@ -212,7 +230,8 @@ test-suite agent-cli-test
     ghc-options:      -threaded
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.CLI.ApprovalSpec
+    other-modules:    Agent.CLI.AccountSelectionSpec
+                    , Agent.CLI.ApprovalSpec
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
@@ -233,6 +252,7 @@ test-suite agent-cli-test
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec
                     , Agent.CLI.MarkdownSpec
+                    , Agent.CLI.McpManagerSpec
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
@@ -260,6 +280,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionStateSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec
                     , Agent.CLI.SubagentStoreSpec
@@ -279,6 +300,7 @@ test-suite agent-cli-test
                     , agent-tui
                     , agent-openai
                     , agent-openrouter
+                    , agent-claude
                     , agent-responses
                     , agent-responses-types
                     , agent-xai

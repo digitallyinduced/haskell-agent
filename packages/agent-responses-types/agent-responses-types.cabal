@@ -44,6 +44,13 @@ common common-opts
 library
     import:           common-opts
     exposed-modules:  Agent.Responses.Types
+                    , Agent.Responses.Types.Content
+                    , Agent.Responses.Types.Items
+                    , Agent.Responses.Types.Request
+                    , Agent.Responses.Types.Response
+                    , Agent.Responses.Types.Streaming
+                    , Agent.Responses.Types.Tools
+    other-modules:    Agent.Responses.Types.Common
     hs-source-dirs:   src
     build-depends:    base       >= 4.14 && < 5
                     , aeson      >= 2.0

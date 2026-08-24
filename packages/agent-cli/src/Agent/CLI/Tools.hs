@@ -33,6 +33,7 @@ import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (find, partition)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -56,37 +57,49 @@ schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
 schemasFromAppTools dialect tools = case dialectToolLayout dialect of
     CollaborationNamespaceLayout ->
         let (multi, rest) = partition isMultiAgentTool tools
-            base = webSearchTool : map (schemaFromAppTool dialect) rest
+            base = webSearchTool : mapMaybe (schemaFromAppTool dialect) rest
         in if null multi
             then base
             else base ++ [multiAgentNamespaceTool multi]
     FlatToolLayout ->
-        webSearchTool : map (schemaFromAppTool dialect) tools
+        webSearchTool : mapMaybe (schemaFromAppTool dialect) tools
+    NoHostToolLayout ->
+        []
 
 isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
-schemaFromAppTool :: Dialect -> AppTool -> ResponseTool
-schemaFromAppTool dialect tool = case tool.appToolSchema of
-    JsonFunctionSchema parameters ->
-        let build = case dialectFunctionSchemaStyle dialect of
-                StrictFunctionSchemas -> buildTool
-                LooseFunctionSchemas -> buildGrokTool
-            (name, description, projectedParameters) =
+schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
+schemaFromAppTool dialect tool =
+    case tool.appToolSchema of
+        JsonFunctionSchema parameters ->
+            case dialectFunctionSchemaStyle dialect of
+                NoFunctionSchemas ->
+                    Nothing
+                StrictFunctionSchemas ->
+                    Just (buildSchema buildTool parameters)
+                LooseFunctionSchemas ->
+                    Just (buildSchema buildGrokTool parameters)
+        RawJsonFunctionSchema parameters ->
+            Just (FunctionToolValue FunctionTool
+                { name = tool.appToolName
+                , description = Just tool.appToolDescription
+                , parameters = Just parameters
+                , strict = case dialectFunctionSchemaStyle dialect of
+                    StrictFunctionSchemas -> Just False
+                    LooseFunctionSchemas -> Nothing
+                    NoFunctionSchemas -> Nothing
+                , extraFields = KeyMap.empty
+                })
+        FreeformApplyPatchSchema ->
+            case dialectFunctionSchemaStyle dialect of
+                NoFunctionSchemas -> Nothing
+                _ -> Just (applyPatchCustomTool tool.appToolName tool.appToolDescription)
+  where
+    buildSchema build parameters =
+        let (name, description, projectedParameters) =
                 projectFunctionTool dialect tool parameters
         in build name description projectedParameters
-    RawJsonFunctionSchema parameters ->
-        FunctionToolValue FunctionTool
-            { name = tool.appToolName
-            , description = Just tool.appToolDescription
-            , parameters = Just parameters
-            , strict = case dialectFunctionSchemaStyle dialect of
-                StrictFunctionSchemas -> Just False
-                LooseFunctionSchemas -> Nothing
-            , extraFields = KeyMap.empty
-            }
-    FreeformApplyPatchSchema ->
-        applyPatchCustomTool tool.appToolName tool.appToolDescription
 
 projectFunctionTool
     :: Dialect

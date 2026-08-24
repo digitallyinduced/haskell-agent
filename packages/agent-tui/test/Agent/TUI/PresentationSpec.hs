@@ -41,6 +41,46 @@ spec = describe "tool presentation" do
                 "{\"prompt\":\"Enter token\",\"purpose\":\"Configure Telegram\"}")
             `shouldBe` "Requested secret Configure Telegram"
 
+    it "separates GHCi expressions from their compact retained heading" do
+        let call =
+                functionToolCall
+                    "ghci"
+                    "run_ghci"
+                    "{\"expression\":\"do { putStrLn \\\"one\\\"; putStrLn \\\"two\\\" }\"}"
+        toolCallTitle call `shouldBe` "$ ghci"
+        toolCallInput call
+            `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
+        summarizeToolCall call
+            `shouldBe` "$ do { putStrLn \"one\"; putStrLn \"two\" }"
+        permissionToolCallPrompt call
+            `shouldBe`
+                "Evaluate this Haskell code in GHCi?\n\n\
+                \do { putStrLn \"one\"; putStrLn \"two\" }"
+
+    it "shows complete multiline code and shell commands for permission" do
+        permissionToolCallPrompt
+            (functionToolCall
+                "ghci"
+                "run_ghci"
+                "{\"expression\":\"do\\n  putStrLn \\\"one\\\"\\n  putStrLn \\\"two\\\"\"}")
+            `shouldBe`
+                "Evaluate this Haskell code in GHCi?\n\n\
+                \do\n  putStrLn \"one\"\n  putStrLn \"two\""
+        permissionToolCallPrompt
+            (functionToolCall
+                "shell"
+                "shell_command"
+                "{\"command\":\"git status --short\\ngit diff --check\"}")
+            `shouldBe`
+                "Run this shell command?\n\ngit status --short\ngit diff --check"
+        permissionToolCallPrompt
+            (functionToolCall
+                "shell"
+                "shell_command"
+                "{\"command\":\"printf '\\u001b]0;owned\\u0007'\"}")
+            `shouldBe`
+                "Run this shell command?\n\nprintf '␛]0;owned␇'"
+
     it "falls back to the safe prompt text for ask_secret detail" do
         toolDetail
             (functionToolCall

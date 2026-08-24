@@ -1,8 +1,10 @@
 -- | Shared ANSI roles for TTY chrome and markdown. Callers pass a color
 -- flag; when 'False' (pipes, 'NO_COLOR', tests) text is unchanged.
 --
--- Palette is Solarized Dark (Ethan Schoonover): truecolor RGB, not the
--- 256-color approximation, so washes match a Solarized terminal theme.
+-- Semantic colors use the terminal's configurable ANSI palette, while
+-- foreground and background remain at their terminal defaults. This lets
+-- Ghostty and other terminal themes control both light/dark appearance and
+-- the actual accent colors.
 module Agent.CLI.Style
     ( style
     , styleBase
@@ -38,15 +40,15 @@ module Agent.CLI.Style
     , detectColorLevel
     , adaptSgr
     , osc8Link
-    , solarizedCyan
-    , solarizedMagenta
-    , solarizedYellow
-    , solarizedRed
-    , solarizedGreen
-    , solarizedBlue
-    , solarizedViolet
-    , solarizedOrange
-    , solarizedBase01
+    , terminalCyan
+    , terminalMagenta
+    , terminalYellow
+    , terminalRed
+    , terminalGreen
+    , terminalBlue
+    , terminalViolet
+    , terminalOrange
+    , terminalMuted
     , cliWindowTitle
     , setCliWindowTitle
     ) where
@@ -56,7 +58,7 @@ import Agent.TUI.Motion
     , foregroundSpinnerFrames
     )
 import Data.Colour (Colour)
-import Data.Colour.SRGB (RGB(..), sRGB24, toSRGB24)
+import Data.Colour.SRGB (RGB(..), toSRGB24)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Word (Word8)
@@ -64,50 +66,35 @@ import System.Console.ANSI
     ( ConsoleIntensity(..)
     , ConsoleLayer(..)
     , SGR(..)
+    , Color(..)
+    , ColorIntensity(..)
     , hSetTitle
     )
-import System.Console.ANSI.Codes
-    ( clearFromCursorToLineEndCode
-    , setSGRCode
-    )
+import System.Console.ANSI.Codes (setSGRCode)
 import System.Environment (lookupEnv)
 import System.OsPath (OsPath)
 import System.IO (Handle)
 import System.IO.Unsafe (unsafePerformIO)
 
--- Solarized Dark (https://ethanschoonover.com/solarized/)
-solarizedBase03, solarizedBase02, solarizedBase01 :: Colour Float
-solarizedBase03 = sRGB24 0x00 0x2b 0x36
-solarizedBase02 = sRGB24 0x07 0x36 0x42
-solarizedBase01 = sRGB24 0x58 0x6e 0x75
+terminalCyan, terminalMagenta, terminalYellow, terminalRed :: SGR
+terminalGreen, terminalBlue, terminalViolet, terminalOrange, terminalMuted :: SGR
+terminalCyan = SetColor Foreground Dull Cyan
+terminalMagenta = SetColor Foreground Dull Magenta
+terminalYellow = SetColor Foreground Dull Yellow
+terminalRed = SetColor Foreground Dull Red
+terminalGreen = SetColor Foreground Dull Green
+terminalBlue = SetColor Foreground Dull Blue
+terminalViolet = SetColor Foreground Vivid Magenta
+terminalOrange = SetColor Foreground Vivid Yellow
+terminalMuted = SetColor Foreground Vivid Black
 
-solarizedYellow, solarizedOrange, solarizedRed :: Colour Float
-solarizedYellow = sRGB24 0xb5 0x89 0x00
-solarizedOrange = sRGB24 0xcb 0x4b 0x16
-solarizedRed = sRGB24 0xdc 0x32 0x2f
-
-solarizedMagenta, solarizedViolet, solarizedBlue :: Colour Float
-solarizedMagenta = sRGB24 0xd3 0x36 0x82
-solarizedViolet = sRGB24 0x6c 0x71 0xc4
-solarizedBlue = sRGB24 0x26 0x8b 0xd2
-
-solarizedCyan, solarizedGreen :: Colour Float
-solarizedCyan = sRGB24 0x2a 0xa1 0x98
-solarizedGreen = sRGB24 0x85 0x99 0x00
-
-fg :: Colour Float -> SGR
-fg = SetRGBColor Foreground
-
-bg :: Colour Float -> SGR
-bg = SetRGBColor Background
-
--- | Solarized base02 strip behind the REPL prompt and typed input.
+-- | Prompt background. Empty means the terminal theme's default background.
 userBackground :: [SGR]
-userBackground = [bg solarizedBase02]
+userBackground = []
 
--- | Solarized base03 strip behind assistant stdout lines.
+-- | Assistant background. Empty means the terminal theme's default background.
 agentBackground :: [SGR]
-agentBackground = [bg solarizedBase03]
+agentBackground = []
 
 -- | Apply SGR attributes when @color@ is 'True'; otherwise return @text@.
 -- Ends with a full 'Reset'.
@@ -136,8 +123,13 @@ endBackground color
     | not color = ""
     | otherwise = Text.pack (setSGRCode [Reset])
 
--- | Prefix each line with @bg@, extend the wash to the terminal edge via
--- clear-to-EOL, then reset. Preserves a trailing newline on @text@.
+-- | Prefix each line with @bg@, then reset. Preserves a trailing newline on
+-- @text@.
+--
+-- Do not use erase-to-end-of-line to extend the wash. Some terminals erase
+-- with their configured default background rather than the active SGR
+-- background, which leaves visible patches when that default differs from the
+-- agent palette.
 paintBackgroundLines :: Bool -> [SGR] -> Text -> Text
 paintBackgroundLines color bgAttrs text
     | not color || null bgAttrs || Text.null text = text
@@ -155,67 +147,66 @@ paintLine :: [SGR] -> Text -> Text
 paintLine bgAttrs line =
     Text.pack (setSGRCode bgAttrs)
         <> line
-        <> Text.pack clearFromCursorToLineEndCode
         <> Text.pack (setSGRCode [Reset])
 
 rolePrompt :: Bool -> Text -> Text
 rolePrompt color =
     styleBase color userBackground
         [ SetConsoleIntensity BoldIntensity
-        , fg solarizedCyan
+        , terminalCyan
         ]
 
 roleToolArrow :: Bool -> Text -> Text
-roleToolArrow color = style color [fg solarizedBase01]
+roleToolArrow color = style color [terminalMuted]
 
 roleToolName :: Bool -> Text -> Text
 roleToolName color =
     style color
         [ SetConsoleIntensity BoldIntensity
-        , fg solarizedMagenta
+        , terminalMagenta
         ]
 
 roleToolDetail :: Bool -> Text -> Text
-roleToolDetail color = style color [fg solarizedBase01]
+roleToolDetail color = style color [terminalMuted]
 
--- | File paths on tool rows (Solarized orange).
+-- | File paths on tool rows.
 roleToolPath :: Bool -> Text -> Text
-roleToolPath color = style color [fg solarizedOrange]
+roleToolPath color = style color [terminalOrange]
 
--- | Shell / GHCi command text on tool rows (Solarized yellow).
+-- | Shell / GHCi command text on tool rows.
 roleToolCommand :: Bool -> Text -> Text
-roleToolCommand color = style color [fg solarizedYellow]
+roleToolCommand color = style color [terminalYellow]
 
 roleToolOutput :: Bool -> Text -> Text
-roleToolOutput color = style color [fg solarizedBase01]
+roleToolOutput color = style color [terminalMuted]
 
 roleThinking :: Bool -> Text -> Text
 roleThinking color =
     style color
-        [ fg solarizedYellow
+        [ terminalYellow
         ]
 
 roleError :: Bool -> Text -> Text
 roleError color =
     style color
         [ SetConsoleIntensity BoldIntensity
-        , fg solarizedRed
+        , terminalRed
         ]
 
 roleWarn :: Bool -> Text -> Text
 roleWarn color =
     style color
         [ SetConsoleIntensity BoldIntensity
-        , fg solarizedYellow
+        , terminalYellow
         ]
 
 roleMuted :: Bool -> Text -> Text
-roleMuted color = style color [fg solarizedBase01]
+roleMuted color = style color [terminalMuted]
 
 roleSuccess :: Bool -> Text -> Text
 roleSuccess color =
     style color
-        [ fg solarizedGreen
+        [ terminalGreen
         ]
 
 supportsUnicodeChrome :: Bool

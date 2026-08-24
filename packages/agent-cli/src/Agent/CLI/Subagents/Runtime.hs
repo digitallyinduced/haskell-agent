@@ -26,6 +26,7 @@ import Agent.CLI.Options
     )
 import Agent.CLI.Prompt
     ( sessionTempGuidance
+    , systemPrompt
     , systemPromptForTools
     )
 import Agent.CLI.Request (requestParams)
@@ -174,8 +175,11 @@ type SubagentStoreRoot = IORef (Maybe OsPath)
 -- | Provider-neutral dependencies shared by all child-agent backends.
 data SubagentRuntime = SubagentRuntime
     { subagentOptions :: !CliOptions
+    , subagentGhciEnabled :: !(IORef Bool)
+    , subagentBashEnabled :: !(IORef Bool)
     , subagentPolicy :: !ApprovalPolicy
     , subagentPlanHooks :: !PlanModeHooks
+    , subagentSkillRoots :: !(IORef [OsPath])
     , subagentSessionTmp :: !(IORef (Maybe OsPath))
     , subagentMcpTools :: ![AppTool]
     , subagentParams :: !(IORef ResponseCreateParams)
@@ -587,11 +591,11 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     coding.codingPlanMode
                 flip finally coding.codingClose do
                     today <- utctDay <$> getCurrentTime
+                    ghciEnabled <- readIORef runtime.subagentGhciEnabled
+                    bashEnabled <- readIORef runtime.subagentBashEnabled
                     let codingTools =
-                            filterGhciTools runtime.subagentOptions.optGhci $
-                                filterBashTools
-                                    runtime.subagentOptions.optBash
-                                    coding.codingAppTools
+                            filterGhciTools ghciEnabled $
+                                filterBashTools bashEnabled coding.codingAppTools
                         tools =
                             codingTools <> runtime.subagentMcpTools
                         baseInstructions =
@@ -704,12 +708,15 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             GrokTaskProtocol ->
                                 filterChildGrokTools agentType coding.codingAppTools
                             GenericTaskProtocol ->
-                                filterChildGrokTools agentType coding.codingAppTools
-                        codingTools =
-                            filterGhciTools runtime.subagentOptions.optGhci $
-                                filterBashTools
-                                    runtime.subagentOptions.optBash
-                                    childTools
+                                filterChildGrokTools
+                                    agentType coding.codingAppTools
+                            NoHostChildAgentProtocol ->
+                                []
+                    ghciEnabled <- readIORef runtime.subagentGhciEnabled
+                    bashEnabled <- readIORef runtime.subagentBashEnabled
+                    let codingTools =
+                            filterGhciTools ghciEnabled $
+                                filterBashTools bashEnabled childTools
                         tools =
                             codingTools <> runtime.subagentMcpTools
                         baseInstructions =
@@ -744,6 +751,13 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         sessionTmp
                                         today
                                         True
+                                NoHostChildAgentProtocol ->
+                                    systemPrompt
+                                        childDialect
+                                        env.subCwd
+                                        sessionTmp
+                                        today
+                                        True
                         instructions =
                             baseInstructions
                                 <> "\n\n"
@@ -755,6 +769,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         ""
                                     GenericTaskProtocol ->
                                         genericSubagentSuffix agentType env.subId
+                                    NoHostChildAgentProtocol ->
+                                        ""
                         childParams = requestParams model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -787,6 +803,8 @@ prepareChild
 prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoot = do
     parentParams <- readIORef runtime.subagentParams
     childEnv <- defaultToolEnv env.subCwd
+    skillRoots <- readIORef runtime.subagentSkillRoots
+    writeIORef childEnv.toolSkillRoots skillRoots
     sessionTmp <- readIORef runtime.subagentSessionTmp
     setToolSessionTmp childEnv sessionTmp
     childPath <-
@@ -840,6 +858,7 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
                     CodexCollaborationProtocol -> sendToRoot
                     GrokTaskProtocol -> Nothing
                     GenericTaskProtocol -> Nothing
+                    NoHostChildAgentProtocol -> Nothing
             , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
             }
     pure PreparedChild

@@ -18,12 +18,17 @@ staticApiKeyProvider :: Text -> TokenProvider
 staticApiKeyProvider apiKey = tokenProvider ApiBilled \failed -> case failed of
         Nothing ->
             pure $ Right (credentialFromApiKey apiKey)
-        Just FailedCredential { failure = AccountRateLimited { retryAfterSeconds } } -> do
+        Just FailedCredential
+            { failure = AccountRateLimited { retryAfterSeconds }
+            , failureReason
+            } -> do
             now <- getCurrentTime
             let seconds = max 1
                     (fromMaybe staticApiKeyRateLimitCooldownSeconds retryAfterSeconds)
             pure $ Left $ CredentialsExhausted
-                (addUTCTime (fromIntegral seconds) now)
+                { retryAt = addUTCTime (fromIntegral seconds) now
+                , exhaustionReasons = [failureReason]
+                }
         Just FailedCredential { failure = AccountAuthenticationRejected } ->
             pure $ Left $ ProviderError AuthenticationError
                 "static OpenRouter API key was rejected"

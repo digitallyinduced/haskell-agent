@@ -49,6 +49,16 @@ spec = do
             parseReplLine ":yolo" `shouldBe` ReplToggleAlwaysApprove
             parseReplLine ":always-approve" `shouldBe` ReplToggleAlwaysApprove
 
+        it "shows or selects the runtime shell tools" do
+            parseReplLine "/shell" `shouldBe` ReplShowShell
+            parseReplLine "/shell ghci" `shouldBe` ReplSetShell ShellGhci
+            parseReplLine "/shell BASH" `shouldBe` ReplSetShell ShellBash
+            parseReplLine "/shell both" `shouldBe` ReplSetShell ShellBoth
+            parseReplLine "/shell none" `shouldBe` ReplSetShell ShellNone
+            parseReplLine "/shell fish"
+                `shouldBe` ReplCommandError
+                    "usage: /shell [ghci|bash|both|none]"
+
         it "rejects extra args on /always-approve" do
             parseReplLine "/always-approve now"
                 `shouldBe` ReplCommandError "usage: /always-approve"
@@ -158,6 +168,12 @@ spec = do
             parseReplLine "/agents now"
                 `shouldBe` ReplCommandError "usage: /agents"
 
+        it "opens the MCP server manager" do
+            parseReplLine "/mcp" `shouldBe` ReplMcp
+            parseReplLine "/MCP" `shouldBe` ReplMcp
+            parseReplLine "/mcp now"
+                `shouldBe` ReplCommandError "usage: /mcp"
+
         it "lists slash commands with /help" do
             parseReplLine "/help" `shouldBe` ReplHelp Nothing
             parseReplLine "/help model" `shouldBe` ReplHelp (Just "model")
@@ -227,7 +243,9 @@ spec = do
                     , "copy-session"
                     , "terminal"
                     , "agents"
+                    , "mcp"
                     , "skills"
+                    , "shell"
                     , "always-approve"
                     ]
 
@@ -249,6 +267,7 @@ spec = do
                         && "/model" `elem` xs
                         && "/m" `elem` xs
                         && "/agents" `elem` xs
+                        && "/mcp" `elem` xs
                         && "/btw" `elem` xs)
             slashCompletionCandidates "" "/mo" `shouldBe` ["/model"]
             slashCompletionCandidates "ledom/" "high" `shouldBe` []
@@ -272,6 +291,8 @@ spec = do
                 `shouldBe` ["qwen-local"]
             slashCompletionCandidates "emaner/" "-"
                 `shouldBe` ["--auto"]
+            slashCompletionCandidates "llehs/" "b"
+                `shouldBe` ["bash", "both"]
 
         it "does not complete ordinary prompts" do
             slashCompletionCandidates "" "help" `shouldBe` []
@@ -319,6 +340,7 @@ spec = do
             listing `shouldSatisfy` ("(/m)" `isInfixOf`)
             listing `shouldSatisfy` ("/btw <QUESTION>" `isInfixOf`)
             listing `shouldSatisfy` ("/agents" `isInfixOf`)
+            listing `shouldSatisfy` ("/mcp" `isInfixOf`)
             listing `shouldSatisfy` ("/usage" `isInfixOf`)
             listing `shouldSatisfy` ("/worktree" `isInfixOf`)
             Text.unpack (formatSlashHelp False (Just "effort"))
@@ -354,6 +376,20 @@ spec = do
             let help = formatSlashHelpWithSkills False skills (Just "deploy")
             Text.unpack help `shouldSatisfy` ("Deploy the service" `isInfixOf`)
             Text.unpack help `shouldSatisfy` ("skill · repo · agents" `isInfixOf`)
+
+        it "offers Codex-style dollar skill mentions inside prompts" do
+            fmap (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForWithSkills skills "please $dep" 11)
+                `shouldBe` Just ["$deploy"]
+            fmap
+                (\menu ->
+                    ( menu.slashMenuReplaceStart
+                    , menu.slashMenuReplaceEnd
+                    , map (.slashSuggestionReplacement)
+                        menu.slashMenuSuggestions
+                    ))
+                (slashMenuForWithSkills skills "please $dep later" 11)
+                `shouldBe` Just (7, 11, ["$deploy "])
 
         it "combines runtime skills and model ids" do
             slashCompletionCandidatesWithSkillsAndModels

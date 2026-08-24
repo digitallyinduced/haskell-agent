@@ -18,6 +18,10 @@ import System.OsPath
     , unsafeEncodeUtf
     )
 import System.Posix.Temp (mkdtemp)
+import System.Posix.Files
+    ( fileMode
+    , getFileStatus
+    )
 import Test.Hspec
 
 spec :: Spec
@@ -90,6 +94,43 @@ spec = describe "Agent.CLI.Config" do
                     "Invalid " `Text.isPrefixOf` err
                         && "config.json" `Text.isInfixOf` err
                 Right _ -> False
+
+    it "atomically saves a private, loadable MCP configuration" $
+        withTempDir "agent-config-" \home -> do
+            let server = McpServerConfig
+                    { mcpEnabled = True
+                    , mcpCommand = "nix"
+                    , mcpArgs = ["run", "/tmp/seo-mcp"]
+                    , mcpCwd = Just "/tmp"
+                    , mcpEnv = Map.fromList [("TOKEN", "secret")]
+                    , mcpStartupTimeoutSeconds = 90
+                    , mcpRequestTimeoutSeconds = 45
+                    }
+                config = defaultHarnessConfig
+                    { configMcpServers = Map.singleton "seo-mcp" server
+                    }
+            saveHarnessConfig home config `shouldReturn` Right ()
+            loadHarnessConfig home `shouldReturn` Right config
+            status <- getFileStatus (filePath (harnessConfigPath home))
+            fileMode status `shouldBe` 0o100600
+
+    it "validates before saving" $
+        withTempDir "agent-config-" \home -> do
+            let broken = defaultHarnessConfig
+                    { configMcpServers =
+                        Map.singleton "broken" McpServerConfig
+                            { mcpEnabled = True
+                            , mcpCommand = ""
+                            , mcpArgs = []
+                            , mcpCwd = Nothing
+                            , mcpEnv = Map.empty
+                            , mcpStartupTimeoutSeconds = 30
+                            , mcpRequestTimeoutSeconds = 60
+                            }
+                    }
+            saveHarnessConfig home broken
+                `shouldReturn`
+                    Left "MCP server 'broken' has an empty command"
 
 writeConfig :: OsPath -> LBS.ByteString -> IO ()
 writeConfig home bytes = do

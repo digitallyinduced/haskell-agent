@@ -5,5 +5,5 @@ mkDerivation {
   src = ./.;
   libraryHaskellDepends = [ aeson base scientific text ];
   description = "Canonical wire types for Responses-compatible APIs";
-  license = lib.licenses.bsd3;
+  license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
 }

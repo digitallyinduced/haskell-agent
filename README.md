@@ -4,9 +4,10 @@
 
 **An independent agent harness, written in Haskell.**
 
-`haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI, and
-OpenRouter models with first-class GHCi integration and a runtime designed
-around types, pure functions, explicit effects, and composable concurrency.
+`haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI,
+OpenRouter, and Claude Code models with first-class GHCi integration and a
+runtime designed around types, pure functions, explicit effects, and
+composable concurrency.
 
 ## Try it out
 
@@ -88,6 +89,17 @@ For bash-only operation, disable GHCi explicitly:
 agent-cli --no-ghci --bash
 ```
 
+During an interactive session, switch the available shell tools without
+restarting:
+
+```console
+/shell ghci
+/shell bash
+```
+
+Use `/shell` to show the current selection. `/shell both` and `/shell none`
+are also supported.
+
 Run a one-shot task:
 
 ```console
@@ -101,8 +113,9 @@ Start in an isolated Git worktree:
 agent-cli --worktree
 ```
 
-Use `--provider openai`, `--provider xai`, or `--provider openrouter` to
-override automatic provider detection.
+Use `--provider openai`, `--provider xai`, `--provider openrouter`, or
+`--provider claude-code` to override automatic provider detection. Claude Code
+is selected explicitly rather than by auto-detection.
 
 ### Telegram
 
@@ -120,11 +133,16 @@ Setup reads the BotFather token without terminal echo, validates it against
 Telegram, and stores it separately from the non-secret gateway configuration.
 Never paste the bot token into an agent conversation.
 
-Only allowlisted private-chat text messages are handled. Each chat is mapped
-to a persisted agent session under `~/.haskell-agent`; `/new` starts a fresh
-session and `/session` shows the current session ID. Mutating tools are denied
-unless setup is run with `--yolo`. Use `agent-telegram stop` to stop the
-background gateway.
+Only messages from allowlisted Telegram users are handled. Private chats work
+directly. In groups and supergroups, mention the bot, use a command addressed
+to its username (for example `/new@your_bot`), or reply to one of its messages.
+Ambient group traffic and messages from non-allowlisted members are ignored.
+Each private chat, group, and forum topic is mapped to its own persisted agent
+session under `~/.haskell-agent`; `/new` starts a fresh session and `/session`
+shows the current session ID. Group replies include the sender's identity in
+the agent prompt and are posted as replies to the triggering Telegram message.
+Mutating tools are denied unless setup is run with `--yolo`. Use
+`agent-telegram stop` to stop the background gateway.
 
 Incoming updates and pending replies are persisted before they are processed.
 Polling continues while agent turns run, conversations are processed in order,
@@ -198,7 +216,49 @@ naturally and let the agent activate it.
 
 ### Authentication
 
-Works with your Codex subscription, Grok subscription, and provider API keys.
+Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
+
+### Claude Code subscription
+
+Install Claude Code, authenticate it with a first-party Claude subscription,
+and select the provider:
+
+```console
+claude auth login
+agent-cli --provider claude-code --model sonnet
+```
+
+The reusable
+[`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md)
+package keeps one `claude -p` process alive and exchanges structured messages
+through Claude Code's bidirectional `stream-json` protocol. The thin
+`agent-claude` adapter enforces subscription authentication and translates SDK
+messages into provider-neutral harness events. Claude Code owns tool execution
+and context compaction; the harness renders its assistant and tool events and
+persists its session UUID. Clipboard and file image attachments are forwarded
+as structured multimodal content.
+
+The default permission mode is Claude Code's non-blocking `dontAsk` mode. Pass
+`--yolo` to bypass Claude Code's permission checks. Permission mode is fixed
+when the child process starts, and the harness's dynamic auto-approve,
+plan-mode, and `/compact` controls are unavailable for this provider.
+
+The integration disables Claude-specific project and user customizations and
+MCP servers so it cannot block on hidden prompts. It also rejects API-key and
+third-party cloud authentication, keeping this path restricted to first-party
+subscription sessions.
+
+Anthropic's [June 15, 2026 subscription-policy
+update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+says that Claude Agent SDK, `claude -p`, and third-party app usage currently
+draw from Claude subscription usage limits. Anthropic's current
+[Agent SDK documentation](https://platform.claude.com/docs/en/agent-sdk/overview)
+also says third-party developers need prior approval to offer Claude.ai login
+or subscription rate limits in their products. Technical availability does
+not replace that approval requirement; consult the linked documents for
+current terms. See
+[`packages/agent-claude/README.md`](packages/agent-claude/README.md)
+for implementation and embedding details.
 
 ### Local MCP servers
 
@@ -220,6 +280,12 @@ Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
   }
 }
 ```
+
+In an interactive session, `/mcp` opens a local-server manager. Use the arrow
+keys or `j`/`k` to navigate, Enter to inspect discovered tools, `a` to add a
+server, Space to enable or disable it, `x` to remove it, and `r` to restart the
+MCP runtime. Saved changes restart the runtime while resuming the same session.
+Environment variable values are never displayed.
 
 The harness starts enabled servers once per root session and shares their tools
 with subagents. MCP tool names are preserved, so they must not collide with
@@ -275,9 +341,9 @@ hardware and perform general digital work.
 Coding is not one temporary vertical on the way to a broader agent. It is the
 substrate that makes a general computer agent possible.
 
-That is also why this project does not wrap one vendor CLI or bind its core
-runtime to one model family. The goal is an independent system that can use
-the best available model while preserving one coherent tool, session,
+That is also why this project does not depend on one vendor CLI or bind its
+core runtime to one model family. The goal is an independent system that can
+use the best available model while preserving one coherent tool, session,
 permission, and agent environment.
 
 ### Why Haskell
@@ -350,17 +416,23 @@ execute only after the runtime has established the required guarantees.
                                |
                     canonical Responses model
                                |
-          +--------------------+--------------------+
-          |                    |                    |
-     agent-openai          agent-xai        agent-openrouter
-          |                    |                    |
-   OpenAI / ChatGPT            xAI              OpenRouter
+       +---------------+---------------+---------------+
+       |               |               |               |
+ agent-openai      agent-xai    agent-openrouter  agent-claude
+       |               |               |               |
+OpenAI / ChatGPT       xAI          OpenRouter      Claude Code
 ```
 
 The provider-neutral loop sees typed turns, tool calls, tool results, usage,
 and streamed events. Provider packages own wire formats, authentication,
 transport, and provider-specific continuation. Presentation consumes the same
 events through renderer-independent state.
+
+`agent-claude` delegates its generic process transport, protocol decoding, and
+session client to
+[`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md),
+leaving subscription policy and `Agent.Loop` translation in the provider
+adapter.
 
 Model targets resolve independently to a provider transport and a model-facing
 dialect. OpenAI models use the Codex dialect, xAI models use the Grok Build

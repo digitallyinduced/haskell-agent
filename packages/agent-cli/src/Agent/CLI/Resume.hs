@@ -333,6 +333,7 @@ resumeSourceLabel = \case
     ResumeProvider "openai" -> "OpenAI"
     ResumeProvider "xai" -> "xAI"
     ResumeProvider "openrouter" -> "OpenRouter"
+    ResumeProvider "claude-code" -> "Claude Code"
     ResumeProvider provider -> provider
 
 groupResumeEntries :: [ResumeEntry] -> [(Text, [ResumeEntry])]

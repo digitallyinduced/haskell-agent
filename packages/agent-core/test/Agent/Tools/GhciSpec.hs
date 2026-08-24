@@ -18,11 +18,14 @@ import Agent.Tools.Ghci
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
 import Control.Exception.Safe (SomeException, bracket, try)
 import Data.Either (isRight)
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( getTemporaryDirectory
+    , removeDirectoryRecursive
+    )
 import System.FilePath ((</>))
 import System.Posix.Signals (nullSignal, signalProcess)
 import System.Posix.Temp (mkdtemp)
@@ -73,6 +76,67 @@ spec = describe "Agent.Tools.Ghci" do
             value <- evalGhci ghci "x" 10000
             value.ghciOk `shouldBe` True
             value.ghciOutput `shouldSatisfy` Text.isInfixOf "42"
+
+    it "preloads concise command and file helpers" do
+        withTempGhci \ghci -> do
+            command <- evalGhci ghci
+                "cmd \"printf\" [\"helper-output\"]"
+                10000
+            command.ghciOk `shouldBe` True
+            command.ghciOutput
+                `shouldSatisfy` Text.isInfixOf "helper-output"
+
+            let outputPath = "helper-output.txt" :: FilePath
+            written <- evalGhci ghci
+                ("writeText " <> Text.pack (show outputPath)
+                    <> " \"hello from helper\"")
+                10000
+            written.ghciOk `shouldBe` True
+            readBack <- evalGhci ghci
+                ("readText " <> Text.pack (show outputPath))
+                10000
+            readBack.ghciOk `shouldBe` True
+            readBack.ghciOutput
+                `shouldSatisfy` Text.isInfixOf "hello from helper"
+
+    it "runs commands in an explicit working directory" do
+        withTempEnv \env ->
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                result <- evalGhci ghci
+                    "cmdIn \".\" \"pwd\" []"
+                    10000
+                result.ghciOk `shouldBe` True
+                result.ghciOutput `shouldSatisfy`
+                    Text.isInfixOf (Text.pack (toFilePath env.toolCwd))
+
+    it "restores helpers after loading a module clears interactive bindings" do
+        withTempEnv \env -> do
+            writeFile (toFilePath env.toolCwd </> "Loaded.hs")
+                "module Loaded where\nanswer = 42\n"
+            bracket (newGhciSession env) closeGhciSession \ghci -> do
+                loaded <- evalGhci ghci ":load Loaded.hs" 10000
+                loaded.ghciOk `shouldBe` True
+                command <- evalGhci ghci "cmd \"printf\" [\"restored\"]" 10000
+                command.ghciOk `shouldBe` True
+                command.ghciOutput
+                    `shouldSatisfy` Text.isInfixOf "restored"
+
+    it "serializes concurrent evaluations through the shared runtime state" do
+        withTempGhci \ghci -> do
+            results <- mapConcurrently
+                (\n -> evalGhci ghci
+                    (Text.pack (show n) <> " * " <> Text.pack (show n))
+                    10000)
+                [1 :: Int .. 8]
+            map (.ghciOutcome) results
+                `shouldBe` replicate 8 GhciCompleted
+            map (.ghciOk) results
+                `shouldBe` replicate 8 True
+            mapM_
+                (\(n, result) ->
+                    result.ghciOutput `shouldSatisfy`
+                        Text.isInfixOf (Text.pack (show (n * n))))
+                (zip [1 :: Int ..] results)
 
     it "supports multiline bindings and do blocks" do
         withTempGhci \ghci -> do

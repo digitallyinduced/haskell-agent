@@ -5,6 +5,10 @@ module Agent.CLI.Dialects
     , filterBashTools
     , filterChildGrokTools
     , filterGhciTools
+    , isBashTool
+    , isBashToolName
+    , isGhciTool
+    , isGhciToolName
     , formatAgentsMdForDialect
     , globalAgentsHomeDir
     ) where
@@ -34,14 +38,18 @@ import Agent.GrokBuild.Dialect.Task
     )
 import Agent.ProjectInstructions (LoadedAgentsMd)
 import Agent.Tools.MultiAgents (MultiAgentContext)
-import Agent.Tools.PlanMode (PlanModeEnv, PlanModeHooks)
+import Agent.Tools.PlanMode
+    ( PlanModeEnv
+    , PlanModeHooks
+    , newPlanModeEnv
+    )
 import Agent.Tools.Secret
     ( SecretPromptHooks
     , askSecretTool
     , closeSecretStore
     , newSecretStore
     )
-import Agent.Tools.Types (AppTool(..), ToolEnv)
+import Agent.Tools.Types (AppTool(..), ToolEnv(..))
 import Control.Exception.Safe (finally, onException)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
@@ -104,19 +112,39 @@ codingToolsForWithTypes
                     coding.grokPlanMode
                     coding.grokClose
                     coding.grokAgentTypes
+        ClaudeCodeToolSurface -> do
+            plan <- newPlanModeEnv env.toolCwd planHooks
+            pure $
+                finish
+                    []
+                    plan
+                    (pure ())
+                    typesRef
 
 filterChildGrokTools :: Text -> [AppTool] -> [AppTool]
 filterChildGrokTools = filterGrokToolsForType
 
 filterBashTools :: Bool -> [AppTool] -> [AppTool]
 filterBashTools True = id
-filterBashTools False = filter \tool ->
-    tool.appToolName `notElem`
-        ["shell_command", "write_stdin", "run_terminal_cmd"]
+filterBashTools False = filter (not . isBashTool)
 
 filterGhciTools :: Bool -> [AppTool] -> [AppTool]
 filterGhciTools True = id
-filterGhciTools False = filter ((/= "run_ghci") . (.appToolName))
+filterGhciTools False = filter (not . isGhciTool)
+
+isBashTool :: AppTool -> Bool
+isBashTool = isBashToolName . (.appToolName)
+
+isBashToolName :: Text -> Bool
+isBashToolName name =
+    name `elem`
+        ["shell_command", "write_stdin", "run_terminal_cmd"]
+
+isGhciTool :: AppTool -> Bool
+isGhciTool = isGhciToolName . (.appToolName)
+
+isGhciToolName :: Text -> Bool
+isGhciToolName = (== "run_ghci")
 
 formatAgentsMdForDialect :: Dialect -> OsPath -> LoadedAgentsMd -> Maybe Text
 formatAgentsMdForDialect dialect cwd loaded =
@@ -130,3 +158,4 @@ globalAgentsHomeDir dialect home =
         CodexInstructionHome -> unsafeEncodeUtf ".codex"
         GrokInstructionHome -> unsafeEncodeUtf ".grok"
         HarnessInstructionHome -> unsafeEncodeUtf ".haskell-agent"
+        ClaudeInstructionHome -> unsafeEncodeUtf ".claude"

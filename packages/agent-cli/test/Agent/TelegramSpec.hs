@@ -160,6 +160,147 @@ spec = describe "Agent.Telegram" do
                     Nothing -> False
                 Left _ -> False
 
+    describe "Telegram group chats" do
+        let bot = TelegramUser
+                { userId = 999
+                , userIsBot = True
+                , userFirstName = Just "Harness"
+                , userLastName = Nothing
+                , userUsername = Just "HarnessBot"
+                }
+            allowedUsers = Set.singleton 456
+            classify bytes = do
+                update <- (eitherDecode (LBS.pack bytes)
+                    :: Either String TelegramUpdate)
+                    `shouldReturnRight` "Telegram update should decode"
+                pure (classifyTelegramUpdate bot allowedUsers update)
+
+        it "routes an allowed mention into the shared group session" do
+            action <- classify
+                "{\"update_id\":22,\"message\":{\
+                \\"message_id\":80,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\",\
+                \\"username\":\"marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"@HarnessBot please summarize\"}}"
+            action `shouldBe`
+                QueueTurn
+                    80
+                    (TelegramChatKey (-1001) Nothing)
+                    "[Telegram group message from Marc, @marc, user 456]\n\
+                    \please summarize"
+                    Nothing
+
+        it "keeps forum topics as separate conversations" do
+            action <- classify
+                "{\"update_id\":23,\"message\":{\
+                \\"message_id\":81,\"message_thread_id\":7,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1002,\"type\":\"supergroup\"},\
+                \\"text\":\"@harnessbot check this\"}}"
+            action `shouldBe`
+                QueueTurn
+                    81
+                    (TelegramChatKey (-1002) (Just 7))
+                    "[Telegram group message from Marc, user 456]\ncheck this"
+                    Nothing
+
+        it "accepts commands addressed to this bot without changing them" do
+            action <- classify
+                "{\"update_id\":24,\"message\":{\
+                \\"message_id\":82,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/new@HarnessBot\"}}"
+            action `shouldBe`
+                QueueTurn
+                    82
+                    (TelegramChatKey (-1001) Nothing)
+                    "/new@HarnessBot"
+                    Nothing
+
+        it "accepts text and voice replies to the bot" do
+            textAction <- classify
+                "{\"update_id\":25,\"message\":{\
+                \\"message_id\":83,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"continue\",\
+                \\"reply_to_message\":{\"message_id\":70,\
+                \\"from\":{\"id\":999,\"is_bot\":true,\
+                \\"username\":\"HarnessBot\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
+            textAction `shouldBe`
+                QueueTurn
+                    83
+                    (TelegramChatKey (-1001) Nothing)
+                    "[Telegram group message from Marc, user 456]\ncontinue"
+                    Nothing
+
+            commandAction <- classify
+                "{\"update_id\":26,\"message\":{\
+                \\"message_id\":84,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/new\",\
+                \\"reply_to_message\":{\"message_id\":70,\
+                \\"from\":{\"id\":999,\"is_bot\":true},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
+            commandAction `shouldBe`
+                QueueTurn
+                    84
+                    (TelegramChatKey (-1001) Nothing)
+                    "/new"
+                    Nothing
+
+            voiceAction <- classify
+                "{\"update_id\":27,\"message\":{\
+                \\"message_id\":85,\"message_thread_id\":7,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1002,\"type\":\"supergroup\"},\
+                \\"voice\":{\"file_id\":\"voice-file\",\"duration\":4},\
+                \\"reply_to_message\":{\"message_id\":71,\
+                \\"from\":{\"id\":999,\"is_bot\":true,\
+                \\"username\":\"HarnessBot\"},\
+                \\"chat\":{\"id\":-1002,\"type\":\"supergroup\"}}}}"
+            voiceAction `shouldBe`
+                QueueTurn
+                    85
+                    (TelegramChatKey (-1002) (Just 7))
+                    "[Telegram group message from Marc, user 456]\n\
+                    \[Voice message]"
+                    (Just (TelegramVoice "voice-file" 4 Nothing Nothing))
+
+        it "ignores ambient group traffic, other bots' commands, and blocked users" do
+            ambient <- classify
+                "{\"update_id\":27,\"message\":{\
+                \\"message_id\":85,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"hello everyone\"}}"
+            ambient `shouldBe` IgnoreUpdate
+
+            otherBot <- classify
+                "{\"update_id\":28,\"message\":{\
+                \\"message_id\":86,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/new@OtherBot\"}}"
+            otherBot `shouldBe` IgnoreUpdate
+
+            repliedOtherBot <- classify
+                "{\"update_id\":29,\"message\":{\
+                \\"message_id\":87,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/new@OtherBot\",\
+                \\"reply_to_message\":{\"message_id\":70,\
+                \\"from\":{\"id\":999,\"is_bot\":true},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
+            repliedOtherBot `shouldBe` IgnoreUpdate
+
+            blocked <- classify
+                "{\"update_id\":30,\"message\":{\
+                \\"message_id\":88,\"from\":{\"id\":123},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"@HarnessBot hello\"}}"
+            blocked `shouldBe` IgnoreUpdate
+
     describe "durable queue state" do
         it "loads state written before pending turns were introduced" do
             let decoded = eitherDecode

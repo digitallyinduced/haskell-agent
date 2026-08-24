@@ -65,7 +65,12 @@ import qualified Agent.OpenAI.Login as OpenAILogin
 import Agent.OsPath (toText, unsafeToFilePath)
 import qualified Agent.OpenAI.Usage as OpenAI
 import qualified Agent.OpenRouter.Usage as OpenRouter
-import Agent.Provider (BillingMode(..), Provider(..), providerSlug)
+import Agent.Provider
+    ( BillingMode(..)
+    , Credential(..)
+    , Provider(..)
+    , providerSlug
+    )
 import qualified Agent.XAI.Auth as XAIAuth
 import qualified Agent.XAI.Usage as XAI
 import Control.Applicative ((<|>))
@@ -372,6 +377,7 @@ managedLoginAccount now (metadata, secret) =
                 XAIAuth.emailFromToken secret.secretPayload
             ManagedOpenAIAuthJson -> Nothing
         OpenRouterProvider -> Nothing
+        ClaudeCodeProvider -> Nothing
     openAIAuth = case metadata.managedAuthKind of
         ManagedOpenAIAuthJson ->
             openaiAuthStateFromJson now
@@ -475,12 +481,21 @@ connectProviderAccount color = \case
     OpenAIProvider -> connectOpenAI color
     XAIProvider -> connectXAI color
     OpenRouterProvider -> connectOpenRouter color
+    ClaudeCodeProvider -> do
+        printLoginMessage color False
+            "Claude Code subscriptions are managed by `claude auth login`"
+        pure Nothing
 
 pickConnectProvider :: Bool -> IO (Maybe Provider)
 pickConnectProvider color =
     join <$> runOverlay render step (0 :: Int)
   where
-    providers = [OpenAIProvider, XAIProvider, OpenRouterProvider]
+    providers =
+        [ OpenAIProvider
+        , XAIProvider
+        , OpenRouterProvider
+        , ClaudeCodeProvider
+        ]
     render index =
         Text.intercalate "\n" $
             [rolePrompt color "connect account"]
@@ -848,7 +863,12 @@ refreshLoginAccount account
                                         (openAIUsage snapshot)
                                 }
         XAIProvider ->
-            XAI.fetchGrokUsage account.loginAccessToken >>= \case
+            XAI.fetchGrokUsage Credential
+                { accessToken = account.loginAccessToken
+                , accountId = account.loginAccountId
+                , leaseId = Nothing
+                , provider = XAIProvider
+                } >>= \case
                 Left err ->
                     pure account
                         { loginUsage = UsageUnavailable err }
@@ -896,6 +916,12 @@ refreshLoginAccount account
                                             <|> snapshot.keyUsage)
                                 }
                         }
+        ClaudeCodeProvider ->
+            pure account
+                { loginUsage =
+                    UsageUnavailable
+                        "Use `claude auth status` for Claude Code subscription auth."
+                }
   where
     formatAmount = fmap (("$" <>) . Text.pack . show)
 

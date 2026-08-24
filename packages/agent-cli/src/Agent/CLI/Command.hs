@@ -1,6 +1,7 @@
 -- | Interactive REPL slash commands.
 module Agent.CLI.Command
     ( ReplAction(..)
+    , ShellMode(..)
     , SkillCommand(..)
     , SlashCommand(..)
     , SlashMenu(..)
@@ -30,7 +31,7 @@ import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Responses.Types
 
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Char (isSpace)
+import Data.Char (isAlphaNum, isSpace)
 import Data.List (find, isPrefixOf, sortOn)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down(..))
@@ -66,7 +67,10 @@ data ReplAction
     | ReplCopySession
     | ReplShowTerminal
     | ReplAgents
+    | ReplMcp
     | ReplSkills !Bool
+    | ReplShowShell
+    | ReplSetShell !ShellMode
     | ReplInvokeSkill !Text !Text
     | ReplHelp (Maybe Text)
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
@@ -80,6 +84,13 @@ data ReplAction
       -- ^ Start a fresh persisted session id with empty history.
     | ReplUsage
     | ReplCommandError Text
+    deriving (Eq, Show)
+
+data ShellMode
+    = ShellGhci
+    | ShellBash
+    | ShellBoth
+    | ShellNone
     deriving (Eq, Show)
 
 data SkillCommand = SkillCommand
@@ -117,7 +128,7 @@ slashCommands =
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
     , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
-    , cmd "reload-auth" [] "/reload-auth" "Re-read xAI/OpenRouter credentials" False
+    , cmd "reload-auth" [] "/reload-auth" "Re-read provider credentials" False
     , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
     , cmd "attachments" [] "/attachments" "List queued clipboard images" False
     , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images" False
@@ -128,7 +139,9 @@ slashCommands =
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
     , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
+    , cmd "mcp" [] "/mcp" "Manage local MCP servers" False
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
+    , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
     ]
   where
@@ -271,10 +284,15 @@ parseSlash skills line = case Text.words line of
                 if null args
                     then ReplAgents
                     else ReplCommandError "usage: /agents"
+            "mcp" ->
+                if null args
+                    then ReplMcp
+                    else ReplCommandError "usage: /mcp"
             "skills" -> case args of
                 [] -> ReplSkills False
                 ["reload"] -> ReplSkills True
                 _ -> ReplCommandError "usage: /skills [reload]"
+            "shell" -> parseShellCommand args
             "always-approve" ->
                 if null args
                     then ReplToggleAlwaysApprove
@@ -338,6 +356,17 @@ parseEffortCommand = \case
         Right effort -> ReplSetEffort effort
         Left err -> ReplCommandError (Text.pack err)
     _ -> ReplCommandError "usage: /effort [none|low|medium|high|xhigh|max]"
+
+parseShellCommand :: [Text] -> ReplAction
+parseShellCommand = \case
+    [] -> ReplShowShell
+    [raw] -> case Text.toLower raw of
+        "ghci" -> ReplSetShell ShellGhci
+        "bash" -> ReplSetShell ShellBash
+        "both" -> ReplSetShell ShellBoth
+        "none" -> ReplSetShell ShellNone
+        _ -> ReplCommandError "usage: /shell [ghci|bash|both|none]"
+    _ -> ReplCommandError "usage: /shell [ghci|bash|both|none]"
 
 parseModelCommand :: [Text] -> ReplAction
 parseModelCommand = \case
@@ -494,6 +523,7 @@ argCompletions :: [Text] -> SlashCommand -> [Text]
 argCompletions modelIds spec = case spec.slashName of
     "effort" -> reasoningEfforts
     "model" -> modelIds
+    "shell" -> ["ghci", "bash", "both", "none"]
     "help" -> map (.slashName) slashCommands
     "rename" -> ["--auto"]
     "paste" -> ["--send"]
@@ -535,13 +565,69 @@ slashMenuForWithSkillsAndModels
     -> Int
     -> Maybe SlashMenu
 slashMenuForWithSkillsAndModels skills modelIds text cursor
-    | cursor < 1 || not (Text.isPrefixOf "/" text) = Nothing
-    | otherwise =
+    | cursor < 1 = Nothing
+    | Text.isPrefixOf "/" text =
         let commandToken = Text.takeWhile (not . isSpace) text
             commandEnd = Text.length commandToken
         in if cursor <= commandEnd
             then commandMenu skills (Text.take cursor text) commandEnd
             else argumentMenu modelIds commandToken commandEnd text cursor
+    | otherwise =
+        skillMentionMenu skills text cursor
+
+skillMentionMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
+skillMentionMenu skills text cursor = do
+    let before = Text.take cursor text
+        token = Text.takeWhileEnd (not . isSpace) before
+        replaceStart = cursor - Text.length token
+    queryToken <- Text.stripPrefix "$" token
+    if Text.any (not . mentionNameChar) queryToken
+        then Nothing
+        else do
+            let query = Text.toLower queryToken
+                scored =
+                    mapMaybe
+                        (\(order, skill) -> do
+                            (score, positions) <-
+                                fuzzyMatch query
+                                    (Text.toLower skill.skillCommandName)
+                            pure (score, order, skill, positions))
+                        (zip [0 :: Int ..] skills)
+                ordered
+                    | Text.null query = scored
+                    | otherwise =
+                        sortOn
+                            (\(score, order, _, _) -> (Down score, order))
+                            scored
+                rows =
+                    [ SlashSuggestion
+                        { slashSuggestionDisplay =
+                            "$" <> skill.skillCommandName
+                        , slashSuggestionReplacement =
+                            "$" <> skill.skillCommandName <> " "
+                        , slashSuggestionSummary =
+                            skill.skillCommandSummary
+                                <> " · skill · "
+                                <> skill.skillCommandSource
+                        , slashSuggestionTakesArguments = True
+                        , slashSuggestionMatchPositions = map (+ 1) positions
+                        }
+                    | (_, _, skill, positions) <- ordered
+                    ]
+                replaceEnd =
+                    cursor
+                        + Text.length
+                            (Text.takeWhile mentionNameChar (Text.drop cursor text))
+            if null rows
+                then Nothing
+                else Just SlashMenu
+                    { slashMenuReplaceStart = replaceStart
+                    , slashMenuReplaceEnd = replaceEnd
+                    , slashMenuSuggestions = rows
+                    }
+  where
+    mentionNameChar char =
+        not (isSpace char) && (char == '-' || char == ':' || isAlphaNum char)
 
 commandMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 commandMenu skills token replaceEnd =

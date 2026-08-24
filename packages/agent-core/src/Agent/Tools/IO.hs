@@ -5,6 +5,7 @@ module Agent.Tools.IO
     , combineCommandOutput
     , commandResultOutput
     , formatCommandResult
+    , resolveForRead
     , resolveUnderCwd
     , readTextFile
     , writeTextFile
@@ -32,6 +33,7 @@ import Agent.Tools.FileSystem
     , listDirectoryEntries
     , readTextFile
     , renameTextFile
+    , resolveForRead
     , resolveUnderCwd
     , writeTextFile
     )

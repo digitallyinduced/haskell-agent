@@ -1,6 +1,10 @@
 module Agent.OpenRouter.CredentialSpec (spec) where
 
-import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Error
+    ( ApiError(..)
+    , CredentialExhaustionReason(..)
+    , ErrorType(..)
+    )
 import Agent.OpenRouter.Credential
 import Agent.Provider
 import Data.Time.Clock (addUTCTime, getCurrentTime)
@@ -28,6 +32,11 @@ spec = describe "staticApiKeyProvider" do
             (Just FailedCredential
                 { credential = first
                 , failure = AccountRateLimited (Just 90)
+                , failureReason = ExhaustedByRateLimit
+                    { exhaustionErrorType = Just RateLimitError
+                    , exhaustionStatusCode = Just 429
+                    , exhaustionRetryAfter = Just 90
+                    }
                 })
         case exhausted of
             Left CredentialsExhausted { retryAt } ->
@@ -41,6 +50,10 @@ spec = describe "staticApiKeyProvider" do
             (Just FailedCredential
                 { credential = first
                 , failure = AccountAuthenticationRejected
+                , failureReason = ExhaustedByAuthentication
+                    { exhaustionErrorType = Just AuthenticationError
+                    , exhaustionStatusCode = Just 401
+                    }
                 })
         case rejected of
             Left (ProviderError AuthenticationError _ _) -> pure ()

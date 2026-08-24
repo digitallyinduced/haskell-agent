@@ -70,8 +70,8 @@ import Agent.CLI.Style
     , roleToolOutput
     , roleToolPath
     , roleWarn
-    , solarizedGreen
-    , solarizedRed
+    , terminalGreen
+    , terminalRed
     , motionGlyphSet
     , style
     )
@@ -117,7 +117,6 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
-import System.Console.ANSI (ConsoleLayer(..), SGR(..))
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
@@ -493,6 +492,21 @@ renderEventUnlocked config = \case
         putTextLn config.renderStderr
             (roleWarn config.renderColor (glyphWarn <> warning))
         when visible (startThinkingSpinnerUnlocked config)
+    ResponseRestarted message -> do
+        commitThinkingUnlocked config
+        if config.renderColor
+            then do
+                didPrint <- finalizeAssistantBuffer config Nothing
+                when didPrint (putTextLn config.renderStdout "")
+            else do
+                Text.hPutStr config.renderStdout "\n"
+                hFlush config.renderStdout
+                writeIORef config.renderMarkdownState emptyMarkdownStreamState
+                writeIORef config.renderLiveActive False
+        writeIORef config.renderActivityRef "Retrying response…"
+        putTextLn config.renderStderr
+            (roleWarn config.renderColor (glyphWarn <> message))
+        startThinkingSpinnerUnlocked config
     TurnStarted -> do
         writeIORef config.renderMarkdownState emptyMarkdownStreamState
         writeIORef config.renderLiveActive False
@@ -539,7 +553,7 @@ renderEventUnlocked config = \case
             (roleToolOutput config.renderColor (truncateToolOutput output))
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
--- Color mode also paints each line with 'agentBackground'.
+-- The terminal theme owns the default assistant background.
 renderAssistantText :: Bool -> Text -> Text
 renderAssistantText color text =
     paintBackgroundLines color agentBackground (renderMarkdown color text)
@@ -955,9 +969,9 @@ formatSearchReplaceDiff color arguments =
   where
     paintLine = \case
         SearchReplaceRemoved line ->
-            style color [SetRGBColor Foreground solarizedRed] ("  -" <> line)
+            style color [terminalRed] ("  -" <> line)
         SearchReplaceAdded line ->
-            style color [SetRGBColor Foreground solarizedGreen] ("  +" <> line)
+            style color [terminalGreen] ("  +" <> line)
 
 renderToolPath :: Bool -> Text -> Text
 renderToolPath color path =
@@ -1006,6 +1020,8 @@ formatLoopErrorColoredAt color now =
 formatLoopErrorPersistedAt :: UTCTime -> LoopError -> Text
 formatLoopErrorPersistedAt now = \case
     LoopTransport err -> formatApiErrorPersistedAt now err
+    LoopTransportAfterOutput err ->
+        formatInterruptedResponse (formatApiErrorPersistedAt now err)
     LoopMaxTurns turn ->
         "Stopped: maximum turns reached."
             <> maybe "" ("\n" <>) turn.assistantText
@@ -1024,6 +1040,13 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
                 <> case maybeNow of
                     Nothing -> formatApiError err
                     Just now -> formatApiErrorAt now err
+    LoopTransportAfterOutput err ->
+        roleError color $
+            glyphErr
+                <> formatInterruptedResponse
+                    (case maybeNow of
+                        Nothing -> formatApiError err
+                        Just now -> formatApiErrorAt now err)
     LoopMaxTurns turn ->
         roleError color (glyphErr <> "stopped: max turns reached")
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
@@ -1040,3 +1063,10 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
                 <> "\nRetry the message.")
     LoopCancelled _ ->
         roleMuted color (glyphCancel <> "cancelled")
+
+formatInterruptedResponse :: Text -> Text
+formatInterruptedResponse details =
+    "Response interrupted after partial output.\n"
+        <> "The turn has stopped; nothing is still running.\n"
+        <> details
+        <> "\nSend \"continue\" to continue the task, or retry your last message."

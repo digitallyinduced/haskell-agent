@@ -15,8 +15,8 @@ import Agent.CLI.Notification
     )
 import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
-import Agent.CLI.Render (summarizeToolCall)
 import Agent.CLI.Style (glyphWarn, roleMuted, roleSuccess, roleWarn)
+import Agent.TUI.Presentation (permissionToolCallPrompt)
 import Agent.ToolDispatch (ToolCall)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -74,7 +74,7 @@ choiceFromIndex = \case
 renderPermissionFrame :: Bool -> PermissionState -> Text
 renderPermissionFrame color state =
     let header =
-            roleWarn color (glyphWarn <> "Allow " <> state.permSummary <> "?")
+            roleWarn color (glyphWarn <> state.permSummary)
         rows =
             zipWith
                 (\i label -> renderRow color (i == state.permIndex) label)
@@ -96,7 +96,7 @@ renderRow color selected label =
 promptPermission :: Bool -> ToolCall -> IO (Maybe PermissionChoice)
 promptPermission color call = do
     isTty <- hIsTerminalDevice stdin
-    let summary = summarizeToolCall call
+    let summary = permissionToolCallPrompt call
     if not isTty
         then cooked color summary
         else do
@@ -111,7 +111,7 @@ promptPermission color call = do
 cooked :: Bool -> Text -> IO (Maybe PermissionChoice)
 cooked color summary = do
     let question =
-            roleWarn color (glyphWarn <> "Allow " <> summary <> "? [y/N/a] ")
+            roleWarn color (glyphWarn <> summary <> " [y/N/a] ")
     readApprovalLine question >>= \case
         Nothing -> pure Nothing
         Just raw -> pure $ Just $ case parseApprovalAnswer raw of
