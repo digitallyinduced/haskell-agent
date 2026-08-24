@@ -4,6 +4,7 @@ import Agent.CLI.Auth (LoadedAuth(..), staticCredentialProvider)
 import Agent.CLI.ProviderAvailability
     ( openAiUsageFailure
     , openRouterUsageFailure
+    , probeLoadedAutomaticAvailabilityWith
     , probeLoadedAvailabilityWith
     , xaiUsageFailure
     )
@@ -155,3 +156,55 @@ spec = do
                 Right _ ->
                     expectationFailure
                         "expected credential exhaustion, got usable auth"
+
+    describe "probeLoadedAutomaticAvailabilityWith" do
+        it "rejects Grok fallback when usage cannot be verified" do
+            let loaded = xaiLoadedAuth
+            result <- probeLoadedAutomaticAvailabilityWith
+                (const (pure (Left "billing unavailable")))
+                loaded
+            case result of
+                Left (ConnectionError message) ->
+                    message `shouldBe`
+                        "Could not verify Grok usage: billing unavailable"
+                Left err ->
+                    expectationFailure
+                        ("expected connection failure, got " <> show err)
+                Right _ ->
+                    expectationFailure
+                        "expected unverifiable Grok usage to be rejected"
+
+        it "rejects exhausted Grok fallback before a model request" do
+            let exhausted =
+                    ProviderError
+                        UsageLimitReached
+                        "exhausted"
+                        (Just 60)
+            result <- probeLoadedAutomaticAvailabilityWith
+                (const (pure (Right (Just exhausted))))
+                xaiLoadedAuth
+            case result of
+                Left CredentialsExhausted{} -> pure ()
+                Left err ->
+                    expectationFailure
+                        ("expected credential exhaustion, got " <> show err)
+                Right _ ->
+                    expectationFailure
+                        "expected exhausted Grok fallback to be rejected"
+
+xaiLoadedAuth :: LoadedAuth
+xaiLoadedAuth =
+    let credential = Credential
+            { accessToken = "token"
+            , accountId = "account"
+            , leaseId = Nothing
+            , provider = XAIProvider
+            }
+    in LoadedAuth
+        { loadedProvider = XAIProvider
+        , loadedTokenProvider =
+            staticCredentialProvider SubscriptionBilled credential
+        , loadedAccountLabel = const (pure "account")
+        , loadedOpenAiPool = Nothing
+        , loadedSelectionId = Nothing
+        }

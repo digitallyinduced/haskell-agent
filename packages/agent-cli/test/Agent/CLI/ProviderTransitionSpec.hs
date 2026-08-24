@@ -42,6 +42,17 @@ spec = do
             updated.pendingExitAfter `shouldBe` True
             updated.pendingPlanState `shouldBe` PlanActive
 
+    describe "transitionCommitsImmediately" do
+        it "keeps a startup automatic fallback provisional" do
+            transitionCommitsImmediately (transition Nothing Nothing)
+                `shouldBe` False
+
+        it "commits a manual selection immediately" do
+            let manual =
+                    (transition Nothing Nothing)
+                        { transitionCause = ManualTransition }
+            transitionCommitsImmediately manual `shouldBe` True
+
 transition
     :: Maybe Text
     -> Maybe PendingTurn

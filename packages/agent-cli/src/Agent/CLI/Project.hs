@@ -1,15 +1,18 @@
 -- | Project-scoped settings under @<project>/.haskell-agent/settings.json@.
 module Agent.CLI.Project
-    ( ProjectModel(..)
+    ( ProjectAccount(..)
+    , ProjectModel(..)
     , ProjectSettings(..)
     , defaultProjectSettings
     , loadProjectSettings
     , projectDialectFor
+    , projectAccountFor
     , projectModelFor
     , projectModelProvider
     , projectSettingsPath
     , resolveProjectRoot
     , saveProjectAutoApprove
+    , saveProjectAccount
     , saveProjectModel
     ) where
 
@@ -33,6 +36,7 @@ import Data.Aeson
     , withObject
     , (.:)
     , (.:?)
+    , (.!=)
     , (.=)
     )
 import qualified Data.Aeson as Aeson
@@ -40,7 +44,7 @@ import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath
@@ -67,10 +71,19 @@ data ProjectModel = ProjectModel
     { projectModelTarget :: !ModelTarget
     } deriving (Eq, Show)
 
+-- | Stable account identity remembered for one project/provider.  Secrets and
+-- usage responses are deliberately excluded.
+data ProjectAccount = ProjectAccount
+    { projectAccountProvider :: !Provider
+    , projectAccountSelectionId :: !Text
+    , projectAccountId :: !Text
+    } deriving (Eq, Show)
+
 data ProjectSettings = ProjectSettings
     { settingsVersion :: !Int
     , settingsAutoApprove :: !Bool
     , settingsLastModel :: !(Maybe ProjectModel)
+    , settingsLastAccounts :: ![ProjectAccount]
     } deriving (Eq, Show)
 
 defaultProjectSettings :: ProjectSettings
@@ -78,7 +91,31 @@ defaultProjectSettings = ProjectSettings
     { settingsVersion = settingsSchemaVersion
     , settingsAutoApprove = False
     , settingsLastModel = Nothing
+    , settingsLastAccounts = []
     }
+
+instance ToJSON ProjectAccount where
+    toJSON account = object
+        [ "provider" .= providerSlug account.projectAccountProvider
+        , "selectionId" .= account.projectAccountSelectionId
+        , "accountId" .= account.projectAccountId
+        ]
+
+instance FromJSON ProjectAccount where
+    parseJSON = withObject "ProjectAccount" \o -> do
+        providerText <- o .: "provider"
+        provider <- case parseProvider providerText of
+            Just parsed -> pure parsed
+            Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
+        selectionId <- o .: "selectionId"
+        accountId <- o .:? "accountId" .!= ""
+        if Text.null (Text.strip selectionId)
+            then fail "account selection id must not be empty"
+            else pure ProjectAccount
+                { projectAccountProvider = provider
+                , projectAccountSelectionId = selectionId
+                , projectAccountId = accountId
+                }
 
 instance ToJSON ProjectModel where
     toJSON model = object
@@ -132,6 +169,7 @@ instance ToJSON ProjectSettings where
         [ "version" .= settings.settingsVersion
         , "autoApprove" .= settings.settingsAutoApprove
         , "lastModel" .= settings.settingsLastModel
+        , "lastAccounts" .= settings.settingsLastAccounts
         ]
 
 instance FromJSON ProjectSettings where
@@ -139,6 +177,7 @@ instance FromJSON ProjectSettings where
         version <- fromMaybe settingsSchemaVersion <$> o .:? "version"
         autoApprove <- fromMaybe False <$> o .:? "autoApprove"
         lastModelValue <- o .:? "lastModel"
+        lastAccountsValue <- o .:? "lastAccounts"
         pure ProjectSettings
             { settingsVersion = version
             , settingsAutoApprove = autoApprove
@@ -146,6 +185,8 @@ instance FromJSON ProjectSettings where
             -- unrelated project settings such as auto-approve.
             , settingsLastModel =
                 lastModelValue >>= parseMaybe parseJSON
+            , settingsLastAccounts =
+                maybe [] (mapMaybe (parseMaybe parseJSON)) lastAccountsValue
             }
 
 -- | Settings root for the checkout that contains @cwd@.
@@ -180,6 +221,38 @@ saveProjectAutoApprove :: OsPath -> Bool -> IO ()
 saveProjectAutoApprove projectRoot autoApprove =
     updateProjectSettings projectRoot \settings ->
         settings { settingsAutoApprove = autoApprove }
+
+-- | Remember the last successfully used account for a provider.
+saveProjectAccount
+    :: OsPath
+    -> Provider
+    -> Text
+    -> Text
+    -> IO ()
+saveProjectAccount projectRoot provider selectionId accountId =
+    updateProjectSettings projectRoot \settings ->
+        settings
+            { settingsLastAccounts =
+                ProjectAccount
+                    { projectAccountProvider = provider
+                    , projectAccountSelectionId = selectionId
+                    , projectAccountId = accountId
+                    }
+                    : filter
+                        ((/= provider) . (.projectAccountProvider))
+                        settings.settingsLastAccounts
+            }
+
+projectAccountFor
+    :: Provider
+    -> ProjectSettings
+    -> Maybe ProjectAccount
+projectAccountFor provider settings =
+    case filter
+        ((== provider) . (.projectAccountProvider))
+        settings.settingsLastAccounts of
+        account : _ -> Just account
+        [] -> Nothing
 
 -- | Remember the most recently selected provider/model pair for this project.
 saveProjectModel
