@@ -1,6 +1,7 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.TUI.App
     ( advanceCompletionFlashes
     , agentEntryWindow
@@ -8,9 +9,12 @@ import Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceRowColumns
     , choiceClosesOnUiTransition
     , elapsedMillisSince
+    , fullscreenBounds
     , fullscreenVtyConfig
+    , fullscreenSurface
     , motionDemandFor
     , lambdaArtWidget
     , nativeProgressKeepaliveDue
@@ -33,10 +37,13 @@ import Agent.CLI.TUI.Types
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
     ( VScrollbarRenderer(..)
+    , Widget
     , hLimit
     , renderWidget
+    , txt
     , vLimit
     )
+import qualified Brick.Types as B
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -196,12 +203,63 @@ spec = do
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
 
+        it "paints an exact terminal-sized backing surface" do
+            let image =
+                    V.picImage $
+                        renderWidget
+                            Nothing
+                            [ ( fullscreenSurface $
+                                    vLimit 1 $
+                                        hLimit 20 $
+                                            txt "content that exceeds the terminal"
+                              ) :: Widget ()
+                            ]
+                            (8, 4)
+            V.imageWidth image `shouldBe` 8
+            V.imageHeight image `shouldBe` 4
+
+        it "crops oversized overlay layers to the terminal" do
+            let oversized :: Widget ()
+                oversized =
+                    B.Widget B.Greedy B.Greedy $
+                        pure
+                            B.emptyResult
+                                { B.image =
+                                    V.charFill V.defAttr 'x' (20 :: Int) 10
+                                }
+                image =
+                    V.picImage $
+                        renderWidget
+                            Nothing
+                            [fullscreenBounds oversized]
+                            (8, 4)
+            V.imageWidth image `shouldBe` 8
+            V.imageHeight image `shouldBe` 4
+
     describe "resume search cursor" do
         it "uses terminal cells for wide and combining characters" do
             resumeSearchCursorColumn "search: " "漢"
                 `shouldBe` 10
             resumeSearchCursorColumn "search: " "e\x0301"
                 `shouldBe` 9
+
+    describe "choice row layout" do
+        it "keeps long labels and details separated inside the row width" do
+            let (label, detail) =
+                    choiceRowColumns
+                        57
+                        "  openrouter · stealth/ox-alpha · generic-responses"
+                        "default · frontier · free · coding"
+            terminalTextWidth label
+                + 2
+                + terminalTextWidth detail
+                `shouldSatisfy` (<= 57)
+            label `shouldSatisfy` Text.isSuffixOf "…"
+            detail `shouldSatisfy` Text.isSuffixOf "…"
+
+        it "preserves both columns when they already fit" do
+            choiceRowColumns 40 "› model" "default"
+                `shouldBe` ("› model", "default")
 
     describe "onboarding layout" do
         it "uses the complete 18-row surface when it fits" do

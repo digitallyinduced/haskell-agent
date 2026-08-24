@@ -54,6 +54,16 @@ spec = describe "fullscreen Markdown rendering" do
             spans = concat (renderSpanRows 100 ("PR: " <> url))
         spans `shouldSatisfy` any (hasUrl url)
 
+    it "keeps a wide inline glyph inside a one-cell render context" do
+        let image =
+                V.picImage $
+                    renderWidget
+                        Nothing
+                        [markdownWidget "界" :: Widget ()]
+                        (1, 2)
+        V.imageWidth image `shouldSatisfy` (<= 1)
+        V.imageHeight image `shouldSatisfy` (<= 2)
+
     it "parses links nested inside strong and emphasis spans" do
         parseInline
             "**[PR #316](https://example.com/316)** and *[docs](https://example.com)*"

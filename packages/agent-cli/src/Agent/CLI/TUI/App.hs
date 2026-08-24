@@ -8,6 +8,7 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , completionFlashTransitions
     , conversationScrollbarRenderer
+    , choiceRowColumns
     , choiceClosesOnUiTransition
     , elapsedMillisSince
     , emitUiEvent
@@ -38,7 +39,9 @@ module Agent.CLI.TUI.App
     , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
+    , fullscreenBounds
     , fullscreenVtyConfig
+    , fullscreenSurface
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
@@ -1550,40 +1553,110 @@ fullscreenApp = App
 
 drawApp :: AppState -> [Widget Name]
 drawApp state =
-    let mainLayers = stickyPromptLayers state <> [drawMain state]
-        interactiveLayers =
-            agentPopoverLayers state
-                <> imagePreviewLayers
-                    state.appRuntime.runtimeNativeImagePreviews
-                    state.appImagePreviews
-                <> mainLayers
-        dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
-    in
-    case state.appResume of
-        Just resume ->
-            drawResume state resume : dimmedMainLayers
-        Nothing ->
-            case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-                (Just prompt, _, _) ->
-                    drawTextPrompt state prompt : dimmedMainLayers
-                (Nothing, Just choice, _) ->
-                    drawChoice state choice : dimmedMainLayers
-                (Nothing, Nothing, Just permission) ->
-                    drawPermission state permission : dimmedMainLayers
-                (Nothing, Nothing, Nothing) -> interactiveLayers
+    map fullscreenBounds $
+        case state.appResume of
+            Just resume ->
+                drawResume state resume : dimmedMainLayers
+            Nothing ->
+                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
+                    (Just prompt, _, _) ->
+                        drawTextPrompt state prompt : dimmedMainLayers
+                    (Nothing, Just choice, _) ->
+                        drawChoice state choice : dimmedMainLayers
+                    (Nothing, Nothing, Just permission) ->
+                        drawPermission state permission : dimmedMainLayers
+                    (Nothing, Nothing, Nothing) -> interactiveLayers
+  where
+    mainLayers = stickyPromptLayers state <> [drawMain state]
+    interactiveLayers =
+        agentPopoverLayers state
+            <> imagePreviewLayers
+                state.appRuntime.runtimeNativeImagePreviews
+                state.appImagePreviews
+            <> mainLayers
+    dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
 
 drawMain :: AppState -> Widget Name
 drawMain state =
-    withAttr Theme.baseAttr $
-        vBox
-            [ drawHeader state
-            , drawWorkspace state
-            , drawNotice state
-            , Composer.drawQueuedInputs state.appUi
-            , Composer.drawSlashMenu state
-            , drawFollowStatus state.appUi
-            , Composer.drawComposer state
-            , drawFooter state
+    fullscreenSurface $
+        withAttr Theme.baseAttr $
+            vBox
+                [ drawHeader state
+                , drawWorkspace state
+                , drawNotice state
+                , Composer.drawQueuedInputs state.appUi
+                , Composer.drawSlashMenu state
+                , drawFollowStatus state.appUi
+                , Composer.drawComposer state
+                , drawFooter state
+                ]
+
+-- | Crop a top-level layer to the terminal without filling its unused cells.
+-- Overlay layers must remain transparent, but custom widgets can otherwise
+-- return images (and cursors) outside the render context and make Vty wrap
+-- terminal rows.
+fullscreenBounds :: Widget n -> Widget n
+fullscreenBounds widget =
+    B.Widget B.Greedy B.Greedy do
+        context <- B.getContext
+        result <- B.render widget
+        let width = max 0 context.availWidth
+            height = max 0 context.availHeight
+            cursorInBounds cursor =
+                let Location (column, row) = cursor.cursorLocation
+                in column >= 0
+                    && column < width
+                    && row >= 0
+                    && row < height
+        pure
+            result
+                { B.image = V.crop width height result.image
+                , B.cursors = filter cursorInBounds result.cursors
+                }
+
+-- | Bound the retained main layer to the terminal and explicitly paint every
+-- cell. Some terminals can retain cells from an older, wider layout when a
+-- later Brick image is narrower; an over-wide image can instead trigger
+-- terminal-side wrapping and shift subsequent rows. Keeping the backing layer
+-- exactly the render-context size prevents both failure modes.
+fullscreenSurface :: Widget n -> Widget n
+fullscreenSurface widget =
+    B.Widget B.Greedy B.Greedy do
+        context <- B.getContext
+        base <- B.lookupAttrName Theme.baseAttr
+        result <- B.render widget
+        let width = max 0 context.availWidth
+            height = max 0 context.availHeight
+            cropped = V.crop width height result.image
+            widthPadded =
+                padImageRight
+                    base
+                    (width - V.imageWidth cropped)
+                    cropped
+            padded =
+                padImageBottom
+                    base
+                    width
+                    (height - V.imageHeight widthPadded)
+                    widthPadded
+        pure result { B.image = padded }
+
+padImageRight :: V.Attr -> Int -> V.Image -> V.Image
+padImageRight attr amount image
+    | amount <= 0 || V.imageHeight image <= 0 = image
+    | otherwise =
+        V.horizCat
+            [ image
+            , V.charFill attr ' ' amount (V.imageHeight image)
+            ]
+
+padImageBottom :: V.Attr -> Int -> Int -> V.Image -> V.Image
+padImageBottom attr width amount image
+    | amount <= 0 || width <= 0 = image
+    | otherwise =
+        V.vertCat
+            [ image
+            , V.charFill attr ' ' width amount
             ]
 
 imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]
@@ -3152,11 +3225,19 @@ choiceRow appState selected index (label, detail) =
     let prefix = if selected == index then "› " else "  "
         name = ChoiceRow index
         row =
-            hBox
-                [ txt (prefix <> label)
-                , vLimit 1 (fill ' ')
-                , withAttr Theme.mutedAttr (txt detail)
-                ]
+            Widget Greedy Fixed do
+                context <- getContext
+                let (shownLabel, shownDetail) =
+                        choiceRowColumns
+                            context.availWidth
+                            (prefix <> label)
+                            detail
+                render $
+                    hBox
+                        [ txt shownLabel
+                        , vLimit 1 (fill ' ')
+                        , withAttr Theme.mutedAttr (txt shownDetail)
+                        ]
         styled =
             if selected == index
                 then withAttr Theme.selectedAttr row
@@ -3165,6 +3246,31 @@ choiceRow appState selected index (label, detail) =
             Nothing -> styled
             Just attr -> forceAttr attr row
     in clickable name interactive
+
+-- | Fit a choice label and its right-aligned detail into one terminal row.
+-- When both do not fit, the label gets roughly two thirds of the available
+-- cells and the detail gets the rest; short columns donate their unused space.
+choiceRowColumns :: Int -> Text -> Text -> (Text, Text)
+choiceRowColumns width label detail
+    | width <= 0 = ("", "")
+    | Text.null detail = (truncateDisplayText width label, "")
+    | labelWidth + choiceRowGap + detailWidth <= width = (label, detail)
+    | width <= choiceRowGap + 1 = (truncateDisplayText width label, "")
+    | otherwise =
+        ( truncateDisplayText labelBudget label
+        , truncateDisplayText detailBudget detail
+        )
+  where
+    choiceRowGap = 2
+    labelWidth = terminalTextWidth label
+    detailWidth = terminalTextWidth detail
+    contentBudget = width - choiceRowGap
+    preferredDetailBudget =
+        min detailWidth (max 1 (contentBudget `div` 3))
+    labelBudget =
+        min labelWidth (contentBudget - preferredDetailBudget)
+    detailBudget =
+        min detailWidth (contentBudget - labelBudget)
 
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
