@@ -15,7 +15,12 @@ import Agent.Tools.Ghci (GhciSession, runGhciTool)
 import Agent.Tools.FileSystem.Grep (grepTool)
 import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
+import Agent.GrokBuild.Dialect.Goal (GoalRuntime, updateGoalTool)
 import Agent.GrokBuild.Dialect.Monitor (monitorTool)
+import Agent.GrokBuild.Dialect.Scheduler
+    ( SchedulerRuntime
+    , schedulerTools
+    )
 import Agent.GrokBuild.Dialect.SearchReplace (searchReplaceTool)
 import Agent.GrokBuild.Dialect.Shell
     ( GrokSession(..)
@@ -34,7 +39,8 @@ import Agent.GrokBuild.Dialect.TaskControl
     )
 import Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool)
 import Agent.GrokBuild.Dialect.Todo (todoWriteTool)
-import Agent.Tools.MultiAgents (MultiAgentContext)
+import Agent.GrokBuild.Dialect.Workflow (WorkflowRuntime, workflowTool)
+import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , askUserQuestionTool
@@ -50,10 +56,14 @@ grokTools
     :: GrokSession
     -> GhciSession
     -> PlanModeEnv
+    -> GoalRuntime
+    -> Maybe SchedulerRuntime
+    -> Maybe WorkflowRuntime
     -> Maybe MultiAgentContext
     -> GrokSubagentSpecs
     -> [AppTool]
-grokTools session ghci planMode multi typesRef =
+grokTools
+        session ghci planMode goals scheduler workflows multi typesRef =
     let env = session.grokEnv
         base =
             [ runGhciTool ghci
@@ -71,6 +81,17 @@ grokTools session ghci planMode multi typesRef =
             , exitPlanModeTool planMode
             , askUserQuestionTool planMode
             ]
-    in case multi of
-        Nothing -> base
-        Just ctx -> base ++ [taskTool env.toolCwd ctx typesRef]
+        isChild =
+            maybe False
+                (\ctx -> maybe False (const True) ctx.multiSelfId)
+                multi
+        rootRuntimeTools
+            | isChild = []
+            | otherwise =
+                [updateGoalTool goals]
+                    <> maybe [] schedulerTools scheduler
+                    <> maybe [] (pure . workflowTool) workflows
+        taskTools = case multi of
+            Nothing -> []
+            Just ctx -> [taskTool env.toolCwd ctx typesRef]
+    in base <> rootRuntimeTools <> taskTools

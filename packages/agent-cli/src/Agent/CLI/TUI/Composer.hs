@@ -36,7 +36,7 @@ import Agent.CLI.Command
     , SlashMenu(..)
     , SlashSuggestion(..)
     , parseReplLine
-    , slashMenuForWithSkillsAndModels
+    , slashMenuForCatalog
     )
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -941,9 +941,8 @@ currentSlashMenu :: AppState -> Maybe SlashMenu
 currentSlashMenu state
     | state.appSlashDismissed = Nothing
     | otherwise =
-        slashMenuForWithSkillsAndModels
-            state.appSkillCommands
-            state.appModelIds
+        slashMenuForCatalog
+            state.appSlashCatalog
             state.appUi.uiDraft
             state.appUi.uiCursor
 

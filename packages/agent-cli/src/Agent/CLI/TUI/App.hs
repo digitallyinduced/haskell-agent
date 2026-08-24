@@ -25,8 +25,10 @@ module Agent.CLI.TUI.App
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineWithCatalog
     , readFullscreenLineWithModels
     , readFullscreenLineOr
+    , readFullscreenLineOrWithCatalog
     , readFullscreenLineOrWithModels
     , repositoryHeaderText
     , resumeSearchCursorColumn
@@ -82,6 +84,8 @@ import Agent.CLI.ImagePreview
     )
 import Agent.CLI.Command
     ( SkillCommand
+    , SlashCatalog(..)
+    , defaultSlashCatalog
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Resume
@@ -444,6 +448,19 @@ readFullscreenLine runtime skills prompt initial = do
         Left impossible -> pure impossible
         Right line -> pure line
 
+readFullscreenLineWithCatalog
+    :: FullscreenRuntime
+    -> SlashCatalog
+    -> PromptState
+    -> Text
+    -> IO ReplLine
+readFullscreenLineWithCatalog runtime catalog prompt initial = do
+    result <- readFullscreenLineOrWithCatalog
+        runtime catalog prompt initial retry
+    case result of
+        Left impossible -> pure impossible
+        Right line -> pure line
+
 readFullscreenLineWithModels
     :: FullscreenRuntime
     -> [SkillCommand]
@@ -482,8 +499,26 @@ readFullscreenLineOrWithModels
     -> IO (Either wake ReplLine)
 readFullscreenLineOrWithModels
         runtime skills modelIds prompt initial wake = do
-    enqueueAppEvent runtime (AppSetSkillCommands skills)
-    enqueueAppEvent runtime (AppSetModelIds modelIds)
+    readFullscreenLineOrWithCatalog
+        runtime
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            , slashCatalogModelIds = modelIds
+            }
+        prompt
+        initial
+        wake
+
+readFullscreenLineOrWithCatalog
+    :: FullscreenRuntime
+    -> SlashCatalog
+    -> PromptState
+    -> Text
+    -> STM wake
+    -> IO (Either wake ReplLine)
+readFullscreenLineOrWithCatalog
+        runtime catalog prompt initial wake = do
+    enqueueAppEvent runtime (AppSetSlashCatalog catalog)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
     -- running. Non-empty explicit drafts (for example after cycling mode or
@@ -665,8 +700,7 @@ runFullscreen runtime workerAction = do
             , appHistoryIndex = Nothing
             , appHistoryDraft = ""
             , appKillBuffer = ""
-            , appSkillCommands = []
-            , appModelIds = []
+            , appSlashCatalog = defaultSlashCatalog
             , appImagePreviews = []
             , appAgentSelected = initialAgent
             , appAgentEntries = initialAgents
@@ -3502,24 +3536,43 @@ handleEventInner event = case event of
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
+    AppEvent (AppSetSlashCatalog catalog) -> do
+        state <- get
+        if state.appSlashCatalog == catalog
+            then pure ()
+            else modify' \current -> current
+                { appSlashCatalog = catalog
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
     AppEvent (AppSetSkillCommands skills) -> do
         state <- get
-        if state.appSkillCommands == skills
+        if state.appSlashCatalog.slashCatalogSkills == skills
             then pure ()
-            else modify' \current -> current
-                { appSkillCommands = skills
-                , appSlashIndex = 0
-                , appSlashDismissed = False
-                }
+            else
+                let catalog =
+                        state.appSlashCatalog
+                            { slashCatalogSkills = skills
+                            }
+                in modify' \current -> current
+                    { appSlashCatalog = catalog
+                    , appSlashIndex = 0
+                    , appSlashDismissed = False
+                    }
     AppEvent (AppSetModelIds modelIds) -> do
         state <- get
-        if state.appModelIds == modelIds
+        if state.appSlashCatalog.slashCatalogModelIds == modelIds
             then pure ()
-            else modify' \current -> current
-                { appModelIds = modelIds
-                , appSlashIndex = 0
-                , appSlashDismissed = False
-                }
+            else
+                let catalog =
+                        state.appSlashCatalog
+                            { slashCatalogModelIds = modelIds
+                            }
+                in modify' \current -> current
+                    { appSlashCatalog = catalog
+                    , appSlashIndex = 0
+                    , appSlashDismissed = False
+                    }
     AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get

@@ -7,6 +7,7 @@ module Agent.GrokBuild.Dialect.Task
     , filterGrokToolsForType
     , knownSubagentTypes
     , defaultSubagentType
+    , runtimeSubagentType
     , GrokSubagentSpec(..)
     , GrokSubagentSpecs
     , isSubagentIdText
@@ -17,6 +18,7 @@ module Agent.GrokBuild.Dialect.Task
     , lookupAgentType
     , lookupAgentModel
     , lookupAgentReasoningEffort
+    , spawnManagedGrokSubagent
     ) where
 
 import Agent.InterAgentMessage (plainInterAgentContent)
@@ -65,6 +67,11 @@ import System.OsPath (OsPath, isAbsolute, normalise, (</>))
 
 defaultSubagentType :: Text
 defaultSubagentType = "general-purpose"
+
+-- | Internal type for scheduler/workflow children. It retains the normal
+-- coding surface but cannot recursively delegate or access root runtimes.
+runtimeSubagentType :: Text
+runtimeSubagentType = "runtime-bounded"
 
 knownSubagentTypes :: [Text]
 knownSubagentTypes = ["general-purpose", "explore", "plan"]
@@ -366,6 +373,33 @@ resumeTask ctx typesRef args resumeId = do
                                                     timedOut
                                                     (Map.lookup agentId statuses)
 
+-- | Spawn a detached Grok-managed child without going through the public
+-- @task@ argument parser. Session-owned runtimes such as the scheduler and
+-- workflow launcher use this so their child is not cancelled when the
+-- currently active root turn aborts, and so they retain the real subagent id
+-- rather than parsing model-facing formatted output.
+spawnManagedGrokSubagent
+    :: OsPath
+    -> MultiAgentContext
+    -> GrokSubagentSpecs
+    -> GrokSubagentSpec
+    -> Text
+    -> Maybe Text
+    -> IO (Either Text SubagentId)
+spawnManagedGrokSubagent childCwd ctx typesRef spec prompt nickname
+    | Text.null (Text.strip prompt) =
+        pure (Left "subagent prompt must be non-empty")
+    | otherwise =
+        spawnSubagentWithCwdPreparedForTurn
+            ctx.multiRegistry
+            Nothing
+            childCwd
+            (\agentId -> recordAgentSpec typesRef agentId spec >> pure mempty)
+            ctx.multiSelfId
+            ctx.multiDepth
+            prompt
+            nickname
+
 formatTaskStarted :: SubagentId -> TaskArgs -> Maybe OsPath -> Text
 formatTaskStarted agentId args worktreePath =
     "Subagent started in background.\n\
@@ -454,8 +488,20 @@ filterGrokToolsForType :: Text -> [AppTool] -> [AppTool]
 filterGrokToolsForType agentType tools = case agentType of
     "explore" -> filter ((`elem` exploreNames) . (.appToolName)) tools
     "plan" -> filter ((`elem` planNames) . (.appToolName)) tools
-    _ -> tools
+    "runtime-bounded" ->
+        filter ((`notElem` runtimeHiddenNames) . (.appToolName)) tools
+    _ -> filter ((`notElem` rootOnlyNames) . (.appToolName)) tools
   where
+    rootOnlyNames :: [Text]
+    rootOnlyNames =
+        [ "scheduler_create"
+        , "scheduler_delete"
+        , "scheduler_list"
+        , "update_goal"
+        , "workflow"
+        ]
+    runtimeHiddenNames :: [Text]
+    runtimeHiddenNames = "task" : rootOnlyNames
     exploreNames :: [Text]
     exploreNames =
         [ "read_file"

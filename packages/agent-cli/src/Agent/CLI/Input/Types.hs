@@ -9,7 +9,7 @@ module Agent.CLI.Input.Types
     , TimedRead(..)
     ) where
 
-import Agent.CLI.Command (SkillCommand)
+import Agent.CLI.Command (SlashCatalog)
 import Agent.Loop (ImageAttachment)
 import Data.Text (Text)
 
@@ -49,8 +49,7 @@ data EditorState = EditorState
     , editorPasted :: !Bool
     , editorSlashEnabled :: !Bool
     , editorSlashDismissed :: !Bool
-    , editorSkillCommands :: ![SkillCommand]
-    , editorModelIds :: ![Text]
+    , editorSlashCatalog :: !SlashCatalog
     }
 
 data DisplayCell = DisplayCell
