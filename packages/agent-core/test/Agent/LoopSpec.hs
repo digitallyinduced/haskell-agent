@@ -838,6 +838,38 @@ spec = describe "runLoop" do
                 crashed.output `shouldSatisfy` Text.isInfixOf "crashed"
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
+    it "keeps looping after a handler returns a validation error" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "shell_command"
+                    "{\"timeout_ms\":1000,\"yield_time_ms\":1000}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "retried")
+            ]
+        let handlers =
+                [ noArgsTool "shell_command" $
+                    pure (Left
+                        "timeout_ms and yield_time_ms are mutually exclusive")
+                ]
+        config0 <- testConfig backend
+        result <- runLoop
+            config0 { loopTools = registryFromHandlers handlers }
+            Nothing
+            "go"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "retried"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [_, (Just "resp-1", [CompletedTool failed])] ->
+                failed.output `shouldBe`
+                    "Error: timeout_ms and yield_time_ms are mutually exclusive"
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
     it "surfaces a transport Left as LoopTransport" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -957,7 +989,34 @@ spec = describe "runLoop" do
         result `shouldBe`
             Left (LoopUnexpected "user error (backend exploded)")
 
-    it "turns synchronous approval exceptions into a failed turn" do
+    it "keeps looping after a synchronous approval exception" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "recovered")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopApprove = \_ ->
+                    Exception.throwIO (userError "approval exploded")
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "recovered"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [_, (Just "resp-1", [CompletedTool failed])] ->
+                failed.output `shouldBe`
+                    "Tool echo could not be prepared: user error (approval exploded)"
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "does not turn asynchronous approval cancellation into tool output" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
             [ Right $ emptyTurnOutput "resp-1"
@@ -967,11 +1026,10 @@ spec = describe "runLoop" do
         config0 <- testConfig backend
         let config = config0
                 { loopApprove = \_ ->
-                    Exception.throwIO (userError "approval exploded")
+                    Exception.throwIO Exception.ThreadKilled
                 }
-        result <- runLoop config Nothing "hello"
-        result `shouldBe`
-            Left (LoopUnexpected "user error (approval exploded)")
+        runLoop config Nothing "hello"
+            `shouldThrow` (== Exception.ThreadKilled)
 
     it "does not turn asynchronous backend cancellation into a failed turn" do
         config <- testConfig $ Backend \_state _prev _inputs _onEvent ->
