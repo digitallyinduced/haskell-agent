@@ -74,6 +74,8 @@ data ReplAction
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplShowSession
     | ReplShowSessionInfo
+    | ReplAfk (Maybe Text)
+    -- ^ Hand the active session to tmux, optionally on @host:path@.
     | ReplWorktree
     | ReplRename Text
     | ReplRenameAuto
@@ -167,6 +169,7 @@ slashCommands =
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
+    , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
     , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
@@ -339,6 +342,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplShowSessionInfo
                     else ReplCommandError "usage: /session-info"
+            "afk" -> case args of
+                [] -> ReplAfk Nothing
+                [target] -> ReplAfk (Just target)
+                _ -> ReplCommandError "usage: /afk [HOST:PATH]"
             "worktree" ->
                 if null args
                     then ReplWorktree

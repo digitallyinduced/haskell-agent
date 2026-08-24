@@ -30,6 +30,8 @@ data Command
     | Login
     | ListSessions
     | ShowSession Text
+    | WaitSession Text
+    | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | RunAgent CliOptions
     deriving (Eq, Show)
@@ -180,6 +182,10 @@ parseSessionsCommand = \case
     [] -> Right ListSessions
     ["list"] -> Right ListSessions
     ["show", sessionId] -> Right (ShowSession (Text.pack sessionId))
+    ["wait", sessionId] -> Right (WaitSession (Text.pack sessionId))
+    ["import"] -> Right (ImportSession Nothing)
+    ["import", "--cwd", cwd] ->
+        Right (ImportSession (Just (unsafeEncodeUtf cwd)))
     ["show"] -> Left "usage: agent-cli sessions show <session-id>"
     other ->
         Left ("unknown sessions command: " <> unwords other

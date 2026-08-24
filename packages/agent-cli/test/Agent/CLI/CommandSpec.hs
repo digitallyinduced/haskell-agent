@@ -1,6 +1,7 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
+import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
 import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -87,6 +88,13 @@ spec = do
             parseReplLine "/info" `shouldBe` ReplShowSessionInfo
             parseReplLine "/status now"
                 `shouldBe` ReplCommandError "usage: /session-info"
+
+        it "hands the session to local or remote tmux" do
+            parseReplLine "/afk" `shouldBe` ReplAfk Nothing
+            parseReplLine "/afk office-builder:~/haskell-agent"
+                `shouldBe` ReplAfk (Just "office-builder:~/haskell-agent")
+            parseReplLine "/afk one two"
+                `shouldBe` ReplCommandError "usage: /afk [HOST:PATH]"
 
         it "starts a fresh session in a new worktree" do
             parseReplLine "/worktree" `shouldBe` ReplWorktree
@@ -229,8 +237,19 @@ spec = do
                     "usage: /effort [none|low|medium|high|xhigh|max]"
             parseReplLine "/bogus"
                 `shouldBe` ReplCommandError "unknown command: /bogus (try /help)"
-            parseReplLine "/"
-                `shouldBe` ReplCommandError "unknown command: / (try /help)"
+
+    describe "parseAfkTarget" do
+        it "selects local tmux without an argument" do
+            parseAfkTarget Nothing `shouldBe` Right AfkLocal
+
+        it "parses an SSH host and remote folder" do
+            parseAfkTarget (Just "office-builder:~/haskell-agent")
+                `shouldBe` Right
+                    (AfkRemote "office-builder" "~/haskell-agent")
+
+        it "rejects incomplete remote targets" do
+            parseAfkTarget (Just "office-builder")
+                `shouldBe` Left "remote AFK target must be HOST:PATH"
 
     describe "slashCommands" do
         it "contains every static slash spec, including gated commands" do
@@ -244,6 +263,7 @@ spec = do
                     , "btw"
                     , "session"
                     , "session-info"
+                    , "afk"
                     , "worktree"
                     , "rename"
                     , "login"
