@@ -294,7 +294,8 @@ drawComposerStatus :: AppState -> Widget Name
 drawComposerStatus state =
     hBox $
         intersperse (withAttr Theme.mutedAttr (txt " · ")) $
-            modelAndEffort
+            accountLimit
+                <> modelAndEffort
                 <> [ modeControl
                    | not (Text.null mode)
                    ]
@@ -307,6 +308,14 @@ drawComposerStatus state =
     prompt = state.appUi.uiPrompt
     mode = prompt.promptMode
     account = prompt.promptAccount
+    accountLimit =
+        [ withAttr
+            (if limitStatus.promptLimitWarning
+                then Theme.syntaxWarningAttr
+                else Theme.successAttr)
+            (txt limitStatus.promptLimitText)
+        | limitStatus <- maybeToList prompt.promptLimitStatus
+        ]
     modelControl =
         clickable ComposerModel $
             forceAttr
@@ -331,6 +340,10 @@ drawComposerStatus state =
             forceAttr
                 (controlAttr state ComposerAccount Theme.controlLinkAttr)
                 (txt account)
+
+    maybeToList = \case
+        Nothing -> []
+        Just value -> [value]
 
 handlePromptControlClick
     :: ApplyLocalUiEvent

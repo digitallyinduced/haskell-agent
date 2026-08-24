@@ -3,6 +3,9 @@ module Agent.CLI.UsageSpec (spec) where
 import Agent.CLI.Usage
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.Usage
+import qualified Agent.OpenRouter.Usage as OpenRouter
+import Agent.TUI.Model (PromptLimitStatus(..))
+import qualified Agent.XAI.Usage as XAI
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime)
@@ -77,6 +80,66 @@ spec = do
                 (Left (ConnectionError "offline"))
                 `shouldBe` "usage unavailable"
 
+    describe "composer limit status" do
+        it "uses OpenAI's weekly window ahead of its 5-hour window" do
+            formatOpenAiLimitStatus sampleSnapshot
+                `shouldBe`
+                    Just PromptLimitStatus
+                        { promptLimitText = "Weekly limit left: 28%"
+                        , promptLimitWarning = False
+                        }
+
+        it "falls back to OpenAI's 5-hour window" do
+            let snapshot = UsageSnapshot
+                    { planType = sampleSnapshot.planType
+                    , rateLimit =
+                        Just UsageLimit
+                            { allowed = True
+                            , limitReached = False
+                            , primaryWindow = Just sampleWindow
+                            , secondaryWindow = Nothing
+                            }
+                    , additionalRateLimits = []
+                    }
+            formatOpenAiLimitStatus snapshot
+                `shouldBe`
+                    Just PromptLimitStatus
+                        { promptLimitText = "5h limit left: 69%"
+                        , promptLimitWarning = False
+                        }
+
+        it "formats Grok's weekly reserve" do
+            formatGrokLimitStatus XAI.GrokUsageSnapshot
+                { XAI.usedPercent = 96
+                , XAI.periodType = "USAGE_PERIOD_TYPE_WEEKLY"
+                , XAI.windowSeconds = 604800
+                , XAI.resetsAt = epoch
+                }
+                `shouldBe`
+                    Just PromptLimitStatus
+                        { promptLimitText = "Weekly limit left: 4%"
+                        , promptLimitWarning = True
+                        }
+
+        it "formats an OpenRouter key limit as a percentage" do
+            formatOpenRouterLimitStatus sampleOpenRouterUsage
+                `shouldBe`
+                    Just PromptLimitStatus
+                        { promptLimitText = "Key limit left: 25%"
+                        , promptLimitWarning = False
+                        }
+
+        it "falls back to the OpenRouter credit balance" do
+            formatOpenRouterLimitStatus sampleOpenRouterUsage
+                { OpenRouter.keyLimit = Nothing
+                , OpenRouter.keyLimitRemaining = Nothing
+                }
+                `shouldBe`
+                    Just PromptLimitStatus
+                        { promptLimitText = "Credits left: $37.50"
+                        , promptLimitWarning = False
+                        }
+
 sampleWindow :: UsageWindow
 sampleWindow = UsageWindow
     { usedPercent = 31
@@ -100,6 +163,17 @@ sampleSnapshot = UsageSnapshot
             }
         }
     , additionalRateLimits = []
+    }
+
+sampleOpenRouterUsage :: OpenRouter.OpenRouterUsage
+sampleOpenRouterUsage = OpenRouter.OpenRouterUsage
+    { OpenRouter.keyLabel = Just "coding"
+    , OpenRouter.keyUsage = Just 75
+    , OpenRouter.keyLimit = Just 100
+    , OpenRouter.keyLimitRemaining = Just 25
+    , OpenRouter.isFreeTier = Just False
+    , OpenRouter.totalCredits = Just 50
+    , OpenRouter.totalUsage = Just 12.5
     }
 
 epoch :: UTCTime

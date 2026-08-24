@@ -30,6 +30,7 @@ spec = do
         it "classifies exhausted Grok usage with its reset delay" do
             xaiUsageFailure now XAI.GrokUsageSnapshot
                 { usedPercent = 100
+                , periodType = "USAGE_PERIOD_TYPE_WEEKLY"
                 , windowSeconds = 3600
                 , resetsAt = addUTCTime 90 now
                 }
@@ -43,6 +44,7 @@ spec = do
         it "leaves Grok credentials usable below the limit" do
             xaiUsageFailure now XAI.GrokUsageSnapshot
                 { usedPercent = 99
+                , periodType = "USAGE_PERIOD_TYPE_WEEKLY"
                 , windowSeconds = 3600
                 , resetsAt = addUTCTime 90 now
                 }

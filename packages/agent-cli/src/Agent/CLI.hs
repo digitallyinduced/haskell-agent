@@ -352,6 +352,9 @@ import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
     ( AccountUsageLine(..)
     , formatDuration
+    , formatGrokLimitStatus
+    , formatOpenAiLimitStatus
+    , formatOpenRouterLimitStatus
     , formatUsageReport
     )
 import Agent.CLI.Worktree
@@ -484,9 +487,11 @@ import Agent.Tools.Types
     )
 import Agent.OpenRouter.LoopBackend (openRouterBackend)
 import qualified Agent.OpenRouter as OpenRouter
+import qualified Agent.OpenRouter.Usage as OpenRouterUsage
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
+import qualified Agent.XAI.Usage as XAIUsage
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (link, mapConcurrently, waitSTM, withAsync)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
@@ -3743,6 +3748,7 @@ buildPromptState params planState policy account accountSelectable usage attachm
         , promptAccount = account
         , promptAccountSelectable = accountSelectable
         , promptUsage = usage
+        , promptLimitStatus = Nothing
         , promptAttachments = attachments
         }
 
@@ -4060,16 +4066,26 @@ replWithDraft env@SessionEnv
                         (isJust selectAccount)
                         usage
                         (length pendingAttachments)
-            readIORef startupUnavailableRef >>= \case
-                Nothing ->
-                    Right
-                        <$> readFullscreenLineWithModels
-                            runtime skillCommands (catalogModelIds catalog)
-                            promptState draft
-                Just unavailable ->
-                    readFullscreenLineOrWithModels
-                        runtime skillCommands (catalogModelIds catalog)
-                        promptState draft unavailable
+                readPrompt =
+                    readIORef startupUnavailableRef >>= \case
+                        Nothing ->
+                            Right
+                                <$> readFullscreenLineWithModels
+                                    runtime
+                                    skillCommands
+                                    (catalogModelIds catalog)
+                                    promptState
+                                    draft
+                        Just unavailable ->
+                            readFullscreenLineOrWithModels
+                                runtime
+                                skillCommands
+                                (catalogModelIds catalog)
+                                promptState
+                                draft
+                                unavailable
+            withAsync (refreshAccountLimit runtime) \_ ->
+                readPrompt
         Nothing -> Right <$> withMVar render.renderLock \_ -> do
             -- The inline editor redraws its ANSI frame with several writes.
             -- Keep the renderer out for the complete prompt lifetime so a
@@ -4147,6 +4163,53 @@ replWithDraft env@SessionEnv
                 policy
                 mline
   where
+    refreshAccountLimit runtime =
+        case (provider, tokenProvider) of
+            (XAIProvider, Just tokens)
+                | tokenProviderBillingMode tokens == SubscriptionBilled ->
+                    refreshWith
+                        tokens
+                        XAIUsage.fetchGrokUsage
+                        formatGrokLimitStatus
+            (OpenAIProvider, Just tokens)
+                | tokenProviderBillingMode tokens == SubscriptionBilled ->
+                    getNextToken tokens Nothing >>= \case
+                        Left _ -> pure ()
+                        Right credential
+                            | Text.null (Text.strip credential.accountId) ->
+                                pure ()
+                            | otherwise ->
+                                fetchUsage
+                                    credential.accessToken
+                                    credential.accountId >>= \case
+                                        Left _ -> pure ()
+                                        Right snapshot ->
+                                            publish
+                                                (formatOpenAiLimitStatus snapshot)
+            (OpenRouterProvider, Just tokens) ->
+                getNextToken tokens Nothing >>= \case
+                    Left _ -> pure ()
+                    Right credential ->
+                        OpenRouterUsage.fetchOpenRouterUsage
+                            credential.accessToken >>= \case
+                                Left _ -> pure ()
+                                Right snapshot ->
+                                    publish
+                                        (formatOpenRouterLimitStatus snapshot)
+            _ -> pure ()
+      where
+        refreshWith tokens fetch formatStatus =
+            getNextToken tokens Nothing >>= \case
+                Left _ -> pure ()
+                Right credential ->
+                    fetch credential >>= \case
+                        Left _ -> pure ()
+                        Right snapshot -> publish (formatStatus snapshot)
+        publish limitStatus =
+            forM_
+                limitStatus
+                (emitUiEvent runtime . UiSetPromptLimitStatus . Just)
+
     handleReplLine skillCommands skillInvocations stdoutColor planState policy = \case
         ReplEof -> do
             when (isNothing fullscreen) $
