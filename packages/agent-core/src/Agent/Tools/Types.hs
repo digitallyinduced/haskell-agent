@@ -6,6 +6,7 @@ module Agent.Tools.Types
     , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
+    , setToolSkillRoots
     , setToolSessionTmp
     , jsonTool
     , jsonAppTool
@@ -88,6 +89,10 @@ data ToolEnv = ToolEnv
     , toolAllowedRoots :: !(IORef [OsPath])
       -- | Additional non-session filesystem roots. The current
       -- 'toolSessionTmp' is always allowed implicitly.
+    , toolSkillRoots :: !(IORef [OsPath])
+      -- | Directories belonging to the currently discovered skill catalog.
+      -- Kept separate so catalog refreshes can replace them without
+      -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
     , toolStdoutCap :: !Int
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
@@ -98,14 +103,20 @@ defaultToolEnv :: OsPath -> IO ToolEnv
 defaultToolEnv cwd = do
     cancel <- newCancelFlag
     allowedRoots <- newIORef []
+    skillRoots <- newIORef []
     sessionTmp <- newIORef Nothing
     pure ToolEnv
         { toolCwd = dropTrailingPathSeparator cwd
         , toolAllowedRoots = allowedRoots
+        , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
         , toolStdoutCap = 100000
         , toolCancel = cancel
         }
+
+-- | Replace the directories exposed for the current skill catalog.
+setToolSkillRoots :: ToolEnv -> [OsPath] -> IO ()
+setToolSkillRoots env = writeIORef env.toolSkillRoots
 
 -- | Change the private scratch directory used by subsequent filesystem and
 -- shell calls. The resolver treats this value as an allowed root directly, so

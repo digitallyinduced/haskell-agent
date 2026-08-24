@@ -235,6 +235,7 @@ import Agent.CLI.SessionLock
 import Agent.CLI.Skills
     ( formatSkillsListing
     , installSkillCatalogWithOmissions
+    , installSkillToolRoots
     , loadSkillsCatalogQuiet
     , reservedSlashNames
     , skillInvocationCommand
@@ -1946,6 +1947,7 @@ runAgentInitializedWithLock
                 , subagentBashEnabled = bashEnabledRef
                 , subagentPolicy = policy
                 , subagentPlanHooks = planHooks
+                , subagentSkillRoots = toolEnv.toolSkillRoots
                 , subagentParams = paramsRef
                 , subagentMcpTools = mcpTools
                 , subagentRegistry = registry
@@ -2944,6 +2946,7 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
+            installSkillToolRoots toolEnv freshSkills
             omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames True freshAgents
                 skillsRef skillInvocationsRef freshSkills
@@ -2953,6 +2956,7 @@ runSession catalog connectionId options provider dialect policy allTools ghciEna
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
+            installSkillToolRoots toolEnv refreshed
             omitted <- installSkillCatalogWithOmissions
                 reservedSlashNames queueContext startupContext
                 skillsRef skillInvocationsRef refreshed

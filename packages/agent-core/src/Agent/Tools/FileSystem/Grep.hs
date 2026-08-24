@@ -4,7 +4,7 @@ import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.Tools.IO (resolveUnderCwd)
+import Agent.Tools.IO (resolveForRead)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
@@ -99,7 +99,7 @@ grepDescription =
 runGrep :: ToolEnv -> GrepArgs -> IO (Either Text Text)
 runGrep env args = do
     let searchRoot = maybe env.toolCwd fromText args.path
-    resolveUnderCwd env searchRoot >>= \case
+    resolveForRead env searchRoot >>= \case
         Left err -> pure (Left err)
         Right path -> findExecutable "rg" >>= \case
             Nothing -> pure $ Left
