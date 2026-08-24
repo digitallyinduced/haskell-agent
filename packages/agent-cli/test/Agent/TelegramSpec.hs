@@ -12,6 +12,7 @@ import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Text as Text
 import Agent.Provider (Provider(..))
 import qualified System.Timeout as Timeout
 import Test.Hspec
@@ -65,6 +66,27 @@ spec = describe "Agent.Telegram" do
         it "keeps messages within the requested limit" do
             splitTelegramText 4 "abcdefghij"
                 `shouldBe` ["abcd", "efgh", "ij"]
+
+        it "does not split a message at the rendered limit" do
+            splitTelegramText 4096 (Text.replicate 4096 "a")
+                `shouldBe` [Text.replicate 4096 "a"]
+
+        it "does not count HTML escaping toward the rendered limit" do
+            splitTelegramText 4096 (Text.replicate 4096 "<")
+                `shouldBe` [Text.replicate 4096 "<"]
+
+        it "splits only when escaped text exceeds the rendered limit" do
+            splitTelegramText 4096 (Text.replicate 4097 "<")
+                `shouldBe`
+                    [ Text.replicate 4096 "<"
+                    , "<"
+                    ]
+
+        it "does not count link markup toward the rendered limit" do
+            let link = "[site](https://example.com/"
+                    <> Text.replicate 4096 "a"
+                    <> ")"
+            splitTelegramText 4 link `shouldBe` [link]
 
         it "does not emit an empty message" do
             splitTelegramText 4 "" `shouldBe` []
