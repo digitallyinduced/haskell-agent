@@ -32,6 +32,12 @@ import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Responses.Types (ResponseItem)
+import Agent.TextBuffer
+    ( TextBuffer
+    , appendTextBuffer
+    , emptyTextBuffer
+    , textBufferToText
+    )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
@@ -56,15 +62,21 @@ import Control.Concurrent.Async
 import Control.Concurrent.STM
     ( TBQueue
     , TMVar
+    , STM
+    , TVar
     , atomically
     , newEmptyTMVarIO
+    , newTVar
     , newTBQueueIO
+    , modifyTVar'
     , orElse
     , putTMVar
     , readTBQueue
     , readTMVar
+    , readTVar
     , retry
     , tryPutTMVar
+    , writeTVar
     , writeTBQueue
     )
 import Control.Exception (AsyncException, toException)
@@ -468,7 +480,13 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
 
 data LoopEventCommand
     = DeliverLoopEvent !LoopEvent
+    | DeliverCoalescedLoopEvent !CoalescedLoopEvent
     | FlushLoopEvents !(TMVar ())
+
+data CoalescedLoopEvent
+    = CoalescedTextDelta !(TVar TextBuffer)
+    | CoalescedReasoningDelta !(TVar TextBuffer)
+    | CoalescedToolOutput !Text !(TVar Text)
 
 data LoopEventFailure
     = LoopEventSyncFailure !SomeException
@@ -477,6 +495,7 @@ data LoopEventFailure
 data LoopEventPump = LoopEventPump
     { eventPumpQueue :: !(TBQueue LoopEventCommand)
     , eventPumpFailure :: !(TMVar LoopEventFailure)
+    , eventPumpTail :: !(TVar (Maybe CoalescedLoopEvent))
     , eventPumpSink :: !(LoopEvent -> IO ())
     }
 
@@ -487,9 +506,11 @@ newLoopEventPump :: (LoopEvent -> IO ()) -> IO LoopEventPump
 newLoopEventPump sink = do
     queue <- newTBQueueIO (fromIntegral loopEventQueueCapacity)
     failure <- newEmptyTMVarIO
+    tailEvent <- atomically (newTVar Nothing)
     pure LoopEventPump
         { eventPumpQueue = queue
         , eventPumpFailure = failure
+        , eventPumpTail = tailEvent
         , eventPumpSink = sink
         }
 
@@ -498,27 +519,44 @@ runLoopEventPump pump = go
   where
     go =
         atomically (readTBQueue pump.eventPumpQueue) >>= \case
-            DeliverLoopEvent event -> do
-                outcome <-
-                    (tryAny (pump.eventPumpSink event) >>= \case
-                        Left exception ->
-                            pure (Left (LoopEventSyncFailure exception))
-                        Right () -> pure (Right ()))
-                    `catchAsync` \(exception :: AsyncException) ->
-                        pure (Left (LoopEventAsyncFailure exception))
-                case outcome of
-                    Right () -> go
-                    Left failure -> do
-                        atomically $
-                            void (tryPutTMVar pump.eventPumpFailure failure)
-                        atomically retry
+            DeliverLoopEvent event ->
+                deliver event
+            DeliverCoalescedLoopEvent pending -> do
+                event <- atomically do
+                    current <- readTVar pump.eventPumpTail
+                    whenSTM (sameCoalescedEvent current pending) $
+                        writeTVar pump.eventPumpTail Nothing
+                    materializeCoalescedEvent pending
+                deliver event
             FlushLoopEvents flushed -> do
                 atomically (putTMVar flushed ())
                 go
+    deliver event = do
+        (tryAny (pump.eventPumpSink event) >>= \case
+            Right () -> go
+            Left exception -> do
+                atomically $
+                    recordLoopEventFailure
+                        pump
+                        (LoopEventSyncFailure exception)
+                atomically retry)
+            `catchAsync` \(exception :: AsyncException) -> do
+                atomically $
+                    recordLoopEventFailure
+                        pump
+                        (LoopEventAsyncFailure exception)
+                Exception.throwIO exception
 
 emitLoopEvent :: LoopEventPump -> LoopEvent -> IO ()
-emitLoopEvent pump event =
-    enqueueLoopEventCommand pump (DeliverLoopEvent event)
+emitLoopEvent pump = \case
+    TextDelta text ->
+        enqueueTextDelta pump False text
+    ReasoningDelta text ->
+        enqueueTextDelta pump True text
+    ToolOutputUpdated callId output ->
+        enqueueToolOutput pump callId output
+    event ->
+        enqueueLoopEventCommand pump (DeliverLoopEvent event)
 
 flushLoopEvents :: LoopEventPump -> IO (Either LoopEventFailure ())
 flushLoopEvents pump = do
@@ -540,8 +578,96 @@ enqueueLoopEventCommand pump command =
     atomically
         ( (Left <$> readTMVar pump.eventPumpFailure)
             `orElse`
-          (writeTBQueue pump.eventPumpQueue command >> pure (Right ()))
+          (do
+            clearEventPumpTail pump
+            writeTBQueue pump.eventPumpQueue command
+            pure (Right ()))
         ) >>= either throwLoopEventFailure pure
+
+enqueueTextDelta :: LoopEventPump -> Bool -> Text -> IO ()
+enqueueTextDelta pump reasoning text =
+    atomically
+        ( (Left <$> readTMVar pump.eventPumpFailure)
+            `orElse`
+          (do
+            current <- readTVar pump.eventPumpTail
+            case current of
+                Just (CoalescedTextDelta buffer)
+                    | not reasoning -> do
+                        modifyTVar' buffer (appendTextBuffer text)
+                        pure (Right ())
+                Just (CoalescedReasoningDelta buffer)
+                    | reasoning -> do
+                        modifyTVar' buffer (appendTextBuffer text)
+                        pure (Right ())
+                _ -> do
+                    buffer <- newTVar
+                        (appendTextBuffer text emptyTextBuffer)
+                    let pending =
+                            if reasoning
+                                then CoalescedReasoningDelta buffer
+                                else CoalescedTextDelta buffer
+                    writeTVar pump.eventPumpTail (Just pending)
+                    writeTBQueue pump.eventPumpQueue
+                        (DeliverCoalescedLoopEvent pending)
+                    pure (Right ()))
+        ) >>= either throwLoopEventFailure pure
+
+enqueueToolOutput :: LoopEventPump -> Text -> Text -> IO ()
+enqueueToolOutput pump callId output =
+    atomically
+        ( (Left <$> readTMVar pump.eventPumpFailure)
+            `orElse`
+          (do
+            current <- readTVar pump.eventPumpTail
+            case current of
+                Just (CoalescedToolOutput currentId snapshot)
+                    | currentId == callId -> do
+                        writeTVar snapshot output
+                        pure (Right ())
+                _ -> do
+                    snapshot <- newTVar output
+                    let pending = CoalescedToolOutput callId snapshot
+                    writeTVar pump.eventPumpTail (Just pending)
+                    writeTBQueue pump.eventPumpQueue
+                        (DeliverCoalescedLoopEvent pending)
+                    pure (Right ()))
+        ) >>= either throwLoopEventFailure pure
+
+sameCoalescedEvent
+    :: Maybe CoalescedLoopEvent
+    -> CoalescedLoopEvent
+    -> Bool
+sameCoalescedEvent current pending =
+    case (current, pending) of
+        (Just (CoalescedTextDelta left), CoalescedTextDelta right) ->
+            left == right
+        (Just (CoalescedReasoningDelta left), CoalescedReasoningDelta right) ->
+            left == right
+        ( Just (CoalescedToolOutput leftId left)
+          , CoalescedToolOutput rightId right
+          ) ->
+            leftId == rightId && left == right
+        _ -> False
+
+materializeCoalescedEvent :: CoalescedLoopEvent -> STM LoopEvent
+materializeCoalescedEvent = \case
+    CoalescedTextDelta buffer ->
+        TextDelta . textBufferToText <$> readTVar buffer
+    CoalescedReasoningDelta buffer ->
+        ReasoningDelta . textBufferToText <$> readTVar buffer
+    CoalescedToolOutput callId snapshot ->
+        ToolOutputUpdated callId <$> readTVar snapshot
+
+clearEventPumpTail :: LoopEventPump -> STM ()
+clearEventPumpTail pump =
+    readTVar pump.eventPumpTail >>= \case
+        Nothing -> pure ()
+        Just _ -> writeTVar pump.eventPumpTail Nothing
+
+whenSTM :: Bool -> STM () -> STM ()
+whenSTM True action = action
+whenSTM False _ = pure ()
 
 waitLoopEventFailure :: Async () -> LoopEventPump -> IO LoopEventFailure
 waitLoopEventFailure worker pump =
@@ -574,6 +700,10 @@ handleLoopEventFailure unexpected state progress = \case
         unexpected state progress exception
     LoopEventAsyncFailure exception ->
         Exception.throwIO exception
+
+recordLoopEventFailure :: LoopEventPump -> LoopEventFailure -> STM ()
+recordLoopEventFailure pump failure =
+    void (tryPutTMVar pump.eventPumpFailure failure)
 
 -- | Preserve model order between conflicting calls while allowing independent
 -- calls from the same model turn to overlap. Results are returned in model

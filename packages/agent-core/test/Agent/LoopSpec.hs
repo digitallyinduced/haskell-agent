@@ -24,7 +24,7 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent.Async (cancel, wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -213,7 +213,7 @@ spec = describe "runLoop" do
         backendFinished <- newEmptyMVar
         let backend = Backend \_state _prev _inputs onEvent -> do
                 putMVar backendStarted ()
-                mapM_ (const (onEvent (TextDelta "x"))) [1 .. 300 :: Int]
+                mapM_ (const (onEvent (WarningRaised "x"))) [1 .. 300 :: Int]
                 putMVar backendFinished ()
                 pure $ Right BackendResult
                     { backendOutput =
@@ -241,6 +241,97 @@ spec = describe "runLoop" do
                 , turnsUsed = 1
                 , tokenUsage = emptyTokenUsage
                 }
+
+    it "coalesces adjacent deltas while preserving event boundaries" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        events <- newIORef []
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (TextDelta "a")
+                onEvent (TextDelta "b")
+                onEvent (WarningRaised "boundary")
+                onEvent (ReasoningDelta "r1")
+                onEvent (ReasoningDelta "r2")
+                onEvent (TextDelta "c")
+                onEvent (TextDelta "d")
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent event = do
+                modifyIORef' events (event :)
+                case event of
+                    TurnStarted -> do
+                        putMVar sinkStarted ()
+                        takeMVar releaseSink
+                    _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            takeMVar backendFinished
+            putMVar releaseSink ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , TextDelta "ab"
+            , WarningRaised "boundary"
+            , ReasoningDelta "r1r2"
+            , TextDelta "cd"
+            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
+            ]
+
+    it "keeps only the latest adjacent tool-output snapshot per call" do
+        sinkStarted <- newEmptyMVar
+        releaseSink <- newEmptyMVar
+        backendFinished <- newEmptyMVar
+        events <- newIORef []
+        let backend = Backend \_state _prev _inputs onEvent -> do
+                onEvent (ToolOutputUpdated "c1" "a")
+                onEvent (ToolOutputUpdated "c1" "ab")
+                onEvent (ToolOutputUpdated "c2" "x")
+                onEvent (ToolOutputUpdated "c2" "xy")
+                onEvent (ToolOutputUpdated "c1" "abc")
+                putMVar backendFinished ()
+                pure $ Right BackendResult
+                    { backendOutput =
+                        emptyTurnOutput "resp-1" [] (Just "done")
+                    , backendState = []
+                    }
+            onEvent event = do
+                modifyIORef' events (event :)
+                case event of
+                    TurnStarted -> do
+                        putMVar sinkStarted ()
+                        takeMVar releaseSink
+                    _ -> pure ()
+        config0 <- testConfig backend
+        let config = config0 { loopOnEvent = onEvent }
+        withAsync (runLoop config Nothing "go") \running -> do
+            takeMVar sinkStarted
+            takeMVar backendFinished
+            putMVar releaseSink ()
+            wait running `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-1"
+                , finalText = Just "done"
+                , turnsUsed = 1
+                , tokenUsage = emptyTokenUsage
+                }
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , ToolOutputUpdated "c1" "ab"
+            , ToolOutputUpdated "c2" "xy"
+            , ToolOutputUpdated "c1" "abc"
+            , TurnFinished (emptyTurnOutput "resp-1" [] (Just "done"))
+            ]
 
     it "dispatches consecutive parallel-safe tool calls concurrently" do
         firstStarted <- newEmptyMVar
@@ -901,6 +992,21 @@ spec = describe "runLoop" do
             (runLoop config Nothing "hello"
                 `shouldThrow` (== Exception.ThreadKilled))
             `shouldReturn` Just ()
+
+    it "can be cancelled while the event sink is running" do
+        sinkStarted <- newEmptyMVar
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [Right (emptyTurnOutput "resp-1" [] (Just "done"))]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \_ -> do
+                    putMVar sinkStarted ()
+                    threadDelay maxBound
+                }
+        withAsync (runLoop config Nothing "hello") \running -> do
+            takeMVar sinkStarted
+            timeout 1000000 (cancel running) `shouldReturn` Just ()
 
     it "emits TurnStarted and TurnFinished around each backend submit" do
         events <- newIORef []
