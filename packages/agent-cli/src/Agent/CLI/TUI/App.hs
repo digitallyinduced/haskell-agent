@@ -102,6 +102,7 @@ import Agent.CLI.Resume
 import Agent.CLI.Render (formatElapsed)
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( kittyCtrlVCsiBodies
     , kittySuperVCsiBodies
@@ -2454,19 +2455,22 @@ drawBlock state block =
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
-                    padAll 1 (txtWrap block.blockBody)
+                    padAll 1 $
+                        timestampedMessage block.blockTimestamp
+                            (txtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
-                    withAttr Theme.assistantAttr
-                        (markdownWidgetWithSyntaxHighlighting
-                            state.appSyntaxHighlighter
-                            (\codeIndex ->
-                                cached
-                                    (CodeBlockCache
-                                        block.blockId
-                                        codeIndex))
-                            (codeBlockHeader state block.blockId)
-                            block.blockBody)
+                    timestampedMessage block.blockTimestamp $
+                        withAttr Theme.assistantAttr
+                            (markdownWidgetWithSyntaxHighlighting
+                                state.appSyntaxHighlighter
+                                (\codeIndex ->
+                                    cached
+                                        (CodeBlockCache
+                                            block.blockId
+                                            codeIndex))
+                                (codeBlockHeader state block.blockId)
+                                block.blockBody)
             BlockThinking ->
                 accentBlock (thinkingBlockAttr state block)
                     (blockStateGlyph state block <> block.blockTitle)
@@ -2514,6 +2518,15 @@ drawBlock state block =
                 (codeCopyCacheState state block.blockId))
             rendered
         else rendered
+
+timestampedMessage :: Text -> Widget Name -> Widget Name
+timestampedMessage timestamp body
+    | Text.null timestamp = body
+    | otherwise =
+        hBox
+            [ padRight Max body
+            , withAttr Theme.mutedAttr (txt ("  " <> timestamp))
+            ]
 
 codeBlockHeader :: AppState -> BlockId -> Int -> Text -> Widget Name
 codeBlockHeader state blockId codeIndex language =
@@ -3156,6 +3169,7 @@ choiceRow appState selected index (label, detail) =
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
     initial <- get
+    timestamp <- liftIO currentShortMessageTimestamp
     renderedContentHeight <-
         if any isSubmittedPrompt uiEvents
             then conversationUnpaddedContentHeight
@@ -3163,7 +3177,7 @@ handleUiEvents uiEvents = do
     let
         (final, nativeProgress, shouldFollow, shouldInvalidate) =
             foldl'
-                (applyOne renderedContentHeight)
+                (applyOne timestamp renderedContentHeight)
                 (initial, Nothing, False, False)
                 uiEvents
     put final
@@ -3182,16 +3196,25 @@ handleUiEvents uiEvents = do
                 vScrollToEnd (viewportScroll ConversationViewport)
   where
     applyOne
+        timestamp
         renderedContentHeight
         (state, previousProgress, followed, invalidated)
         uiEvent =
             let
-                next =
+                unstamped =
                     applyUiEvent uiEvent $
                         applyConversationUiEvent
                             renderedContentHeight
                             uiEvent
                             state
+                next =
+                    unstamped
+                        { appUi =
+                            timestampNewMessageBlocks
+                                (Seq.length state.appUi.uiBlocks)
+                                timestamp
+                                unstamped.appUi
+                        }
                 progress =
                     case Bridge.nativeProgressSignal
                         (userActionPending next)

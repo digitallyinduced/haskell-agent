@@ -25,6 +25,7 @@ module Agent.TUI.Model
     , moveWordRight
     , reduceUi
     , selectedBlockIndex
+    , timestampNewMessageBlocks
     , progressNotice
     , successNotice
     , uiNextDeadlineMillis
@@ -113,6 +114,7 @@ data UiBlock = UiBlock
     , blockKind :: !BlockKind
     , blockTitle :: !Text
     , blockBody :: !Text
+    , blockTimestamp :: !Text
     , blockDetail :: !Text
     , blockState :: !BlockState
     , blockExpanded :: !Bool
@@ -729,6 +731,7 @@ appendBlock kind title body detail blockState callId state =
             , blockKind = kind
             , blockTitle = title
             , blockBody = body
+            , blockTimestamp = ""
             , blockDetail = detail
             , blockState
             , blockExpanded =
@@ -742,6 +745,24 @@ appendBlock kind title body detail blockState callId state =
         , uiSelectedBlockIndex = Just index
         , uiBlockIndices = Map.insert ident index state.uiBlockIndices
         }
+
+-- | Attach one captured wall-clock label to newly appended conversation
+-- messages. Tool and status blocks deliberately remain unstamped.
+timestampNewMessageBlocks :: Int -> Text -> UiState -> UiState
+timestampNewMessageBlocks firstNewIndex timestamp state
+    | Text.null timestamp = state
+    | otherwise =
+        state
+            { uiBlocks =
+                Seq.mapWithIndex
+                    (\index block ->
+                        if index >= firstNewIndex
+                            && Text.null block.blockTimestamp
+                            && block.blockKind `elem` [BlockUser, BlockAssistant]
+                            then block { blockTimestamp = timestamp }
+                            else block)
+                    state.uiBlocks
+            }
 
 completeTool :: Int -> ToolCallResult -> UiState -> UiState
 completeTool blockIndex result state =

@@ -42,6 +42,25 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` ["hello", "checking", "answer"]
         state.uiRunning `shouldBe` False
 
+    it "timestamps only newly appended user and assistant messages" do
+        let existing =
+                reduceUi (UiUserSubmitted "old prompt") initialUiState
+            appended =
+                applyFrom
+                    existing
+                    [ UiLoop TurnStarted
+                    , UiLoop (ReasoningDelta "thinking")
+                    , UiLoop (TextDelta "answer")
+                    ]
+            stamped =
+                timestampNewMessageBlocks
+                    (length existing.uiBlocks)
+                    "1:53 PM"
+                    appended
+            blocks = Foldable.toList stamped.uiBlocks
+        map (.blockTimestamp) blocks
+            `shouldBe` ["", "", "1:53 PM"]
+
     it "selects and expands a clicked reasoning block in one action" do
         let before =
                 apply
