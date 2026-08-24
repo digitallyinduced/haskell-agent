@@ -293,12 +293,17 @@
                             nativeBuildInputs =
                                 (old.nativeBuildInputs or [ ])
                                 ++ [ pkgs.makeWrapper ];
+                            disallowedRequisites = pkgs.lib.remove
+                                haskellPackages.ghc
+                                (old.disallowedRequisites or [ ]);
                             postInstall =
                                 (old.postInstall or "")
                                 + ''
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
-                                            "${skylightingSyntaxDirectory}"
+                                            "${skylightingSyntaxDirectory}" \
+                                        --prefix PATH : \
+                                            "${pkgs.lib.makeBinPath [ haskellPackages.ghc ]}"
                                 '';
                         });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
