@@ -3354,7 +3354,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                 ( omitted
                 , max 0 (contextLength after - contextLength before)
                 )
-        installLearnedSkills context maximum = do
+        ensureDefaultLearnedSkill =
             ensurePostTaskLearningSkillForStore
                 startup.startupDatabaseStore
                 databaseScopes >>= \case
@@ -3362,6 +3362,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                         reportLearnedSkillWarning
                             ("default learned skill unavailable: " <> err)
                     Right () -> pure ()
+        installLearnedSkills context maximum =
             loadApplicableLearnedSkillsForStore
                 startup.startupDatabaseStore
                 databaseScopes >>= \case
@@ -3396,6 +3397,7 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
             (omitted, skillContextChars) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
+            ensureDefaultLearnedSkill
             installLearnedSkills
                 freshAgents
                 (defaultSkillCatalogMaxChars - skillContextChars)
@@ -3719,11 +3721,11 @@ runSession catalog connectionId options provider dialect policy allTools mcpRegi
                 queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
-            -- Learned-skill instructions are startup context, not persisted
-            -- response items, so resumed sessions need them installed again.
-            installLearnedSkills
-                startupContext
-                (defaultSkillCatalogMaxChars - skillContextChars)
+            ensureDefaultLearnedSkill
+            when queueInitialContext $
+                installLearnedSkills
+                    startupContext
+                    (defaultSkillCatalogMaxChars - skillContextChars)
             finishStartup startup
         sessionAction = do
             initializeSkills
