@@ -3,14 +3,23 @@ module Agent.Tools.FileSystem.ListDir (listDirTool) where
 import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
+    , ToolAccess(..)
     , ToolExecutionPolicy(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
     , jsonTool
+    , withToolResourceClaims
     )
 import Data.Aeson (FromJSON(..))
 import Data.List (sortOn)
@@ -26,13 +35,30 @@ instance FromJSON ListDirArgs where
     parseJSON = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
 
 listDirTool :: ToolEnv -> AppTool
-listDirTool env = jsonTool "list_dir" listDirDescription
+listDirTool env = withToolResourceClaims (listDirClaims env) $
+    jsonTool "list_dir" listDirDescription
     [ PropertySchema "target_directory" PropertyString True $ Just
         "Path to a directory within an allowed filesystem root. Relative paths use the workspace root; absolute paths may resolve within the workspace or session temp directory."
     ]
     True
     ParallelSafe
     (typedTool "list_dir" (runListDir env))
+
+listDirClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+listDirClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text ListDirArgs
+    of
+        Left err -> pure (Left err)
+        Right args ->
+            resolveForRead env (fromText args.targetDirectory)
+                >>= pure . fmap
+                    (\path ->
+                        [ToolResourceClaim ToolRead (ToolPathTree path)])
 
 listDirDescription :: Text
 listDirDescription =

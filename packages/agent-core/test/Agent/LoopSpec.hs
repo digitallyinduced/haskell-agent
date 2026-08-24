@@ -7,12 +7,19 @@ import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Types
-    ( ApprovalRule(..)
+    ( AppTool
+    , ApprovalRule(..)
+    , ToolAccess(..)
     , ToolExecutionPolicy(..)
     , ToolRegistry
+    , ToolResource(..)
+    , ToolResourceClaim(..)
     , jsonAppToolWithExecution
     , mkToolRegistry
+    , schedulingPlansConflict
     , toolExecutionPolicyFor
+    , ToolSchedulingPlan(..)
+    , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.Async (wait, withAsync)
@@ -29,6 +36,7 @@ import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Timeout (timeout)
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
@@ -317,6 +325,260 @@ spec = describe "runLoop" do
                     , turnsUsed = 2
                     , tokenUsage = emptyTokenUsage
                     }
+
+    it "runs disjoint resource writes concurrently" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        release <- newEmptyMVar
+        let blocked started = do
+                putMVar started ()
+                readMVar release
+                pure (Right "ok")
+            tools =
+                [ resourceTool "first" "file:a" (blocked firstStarted)
+                , resourceTool "second" "file:b" (blocked secondStarted)
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "second" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go")
+            \running -> do
+                (timeout concurrencyProbeMicros do
+                        takeMVar firstStarted
+                        takeMVar secondStarted)
+                    `shouldReturn` Just ()
+                putMVar release ()
+                result <- wait running
+                result `shouldSatisfy` either (const False) (const True)
+
+    it "returns concurrent tool results in model order" do
+        firstStarted <- newEmptyMVar
+        secondFinished <- newEmptyMVar
+        releaseFirst <- newEmptyMVar
+        let first = do
+                putMVar firstStarted ()
+                takeMVar releaseFirst
+                pure (Right "first")
+            second = do
+                putMVar secondFinished ()
+                pure (Right "second")
+            tools =
+                [ resourceTool "first" "file:a" first
+                , resourceTool "second" "file:b" second
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "second" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go")
+            \running -> do
+                timeout concurrencyProbeMicros (takeMVar firstStarted)
+                    `shouldReturn` Just ()
+                timeout concurrencyProbeMicros (takeMVar secondFinished)
+                    `shouldReturn` Just ()
+                putMVar releaseFirst ()
+                result <- wait running
+                result `shouldSatisfy` either (const False) (const True)
+        seen <- readIORef submissions
+        seen `shouldBe`
+            [ (Nothing, [UserMessage "go"])
+            , (Just "resp-1",
+                [ CompletedTool (functionResult "c1" "first")
+                , CompletedTool (functionResult "c2" "second")
+                ])
+            ]
+
+    it "serializes conflicting resource writes" do
+        firstStarted <- newEmptyMVar
+        secondStarted <- newEmptyMVar
+        releaseFirst <- newEmptyMVar
+        let first = do
+                putMVar firstStarted ()
+                takeMVar releaseFirst
+                pure (Right "first")
+            second = putMVar secondStarted () >> pure (Right "second")
+            tools =
+                [ resourceTool "first" "file:a" first
+                , resourceTool "second" "file:a" second
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "second" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go")
+            \running -> do
+                timeout concurrencyProbeMicros (takeMVar firstStarted)
+                    `shouldReturn` Just ()
+                tryReadMVar secondStarted `shouldReturn` Nothing
+                putMVar releaseFirst ()
+                timeout concurrencyProbeMicros (takeMVar secondStarted)
+                    `shouldReturn` Just ()
+                result <- wait running
+                result `shouldSatisfy` either (const False) (const True)
+
+    it "lets an independent later call bypass a blocked conflicting call" do
+        firstStarted <- newEmptyMVar
+        conflictingStarted <- newEmptyMVar
+        independentStarted <- newEmptyMVar
+        releaseFirst <- newEmptyMVar
+        let first = do
+                putMVar firstStarted ()
+                takeMVar releaseFirst
+                pure (Right "first")
+            conflicting =
+                putMVar conflictingStarted () >> pure (Right "conflicting")
+            independent =
+                putMVar independentStarted () >> pure (Right "independent")
+            tools =
+                [ resourceTool "first" "file:a" first
+                , resourceTool "conflicting" "file:a" conflicting
+                , resourceTool "independent" "file:b" independent
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "conflicting" "{}"
+                , functionToolCall "c3" "independent" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        withAsync
+            (runLoop
+                config0 { loopTools = registryFromTools tools }
+                Nothing
+                "go")
+            \running -> do
+                timeout concurrencyProbeMicros (takeMVar firstStarted)
+                    `shouldReturn` Just ()
+                timeout concurrencyProbeMicros (takeMVar independentStarted)
+                    `shouldReturn` Just ()
+                tryReadMVar conflictingStarted `shouldReturn` Nothing
+                putMVar releaseFirst ()
+                timeout concurrencyProbeMicros (takeMVar conflictingStarted)
+                    `shouldReturn` Just ()
+                result <- wait running
+                result `shouldSatisfy` either (const False) (const True)
+
+    it "evaluates dynamic-call approvals serially in model order" do
+        approvalOrder <- newIORef []
+        releaseFirst <- newEmptyMVar
+        firstStarted <- newEmptyMVar
+        let first = do
+                putMVar firstStarted ()
+                takeMVar releaseFirst
+                pure (Right "first")
+            tools =
+                [ resourceTool "first" "file:a" first
+                , resourceTool "conflicting" "file:a" (pure (Right "second"))
+                , resourceTool "independent" "file:b" (pure (Right "third"))
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "conflicting" "{}"
+                , functionToolCall "c3" "independent" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call -> do
+                    modifyIORef' approvalOrder (<> [call.name])
+                    pure (Right True)
+                }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (takeMVar firstStarted)
+                `shouldReturn` Just ()
+            readIORef approvalOrder
+                `shouldReturn` ["first", "conflicting", "independent"]
+            putMVar releaseFirst ()
+            result <- wait running
+            result `shouldSatisfy` either (const False) (const True)
+
+    it "does not resolve resources for a rejected tool call" do
+        resolverCalls <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "guarded" "{}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let tool =
+                withToolResourceClaims
+                    (\_ -> do
+                        modifyIORef' resolverCalls (+ 1)
+                        pure (Right []))
+                    (jsonAppToolWithExecution
+                        "guarded"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        TurnSequential
+                        (noArgsTool "guarded" (pure (Right "unexpected"))))
+            config = config0
+                { loopTools = registryFromTools [tool]
+                , loopApprove = \_ -> pure (Right False)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldSatisfy` either (const False) (const True)
+        readIORef resolverCalls `shouldReturn` 0
+
+    it "detects overlapping filesystem resource claims" do
+        let root = unsafeEncodeUtf "/workspace/src"
+            file = unsafeEncodeUtf "/workspace/src/Main.hs"
+            other = unsafeEncodeUtf "/workspace/test/Spec.hs"
+            readTree =
+                ToolResourceClaims
+                    [ToolResourceClaim ToolRead (ToolPathTree root)]
+            writeFile path =
+                ToolResourceClaims
+                    [ToolResourceClaim ToolWrite (ToolPath path)]
+        schedulingPlansConflict readTree (writeFile file) `shouldBe` True
+        schedulingPlansConflict readTree (writeFile other) `shouldBe` False
+        schedulingPlansConflict
+            (ToolResourceClaims
+                [ToolResourceClaim ToolRead ToolAllPaths])
+            (writeFile other)
+            `shouldBe` True
 
     it "treats unknown tools as sequential" do
         toolExecutionPolicyFor
@@ -722,6 +984,26 @@ registryFromPolicies tools =
             handler
         | (execution, handler) <- tools
         ]
+
+registryFromTools :: [AppTool] -> ToolRegistry
+registryFromTools =
+    either (error . Text.unpack) id . mkToolRegistry
+
+resourceTool :: Text -> Text -> IO (Either Text Text) -> AppTool
+resourceTool name resource action =
+    withToolResourceClaims
+        (\_ ->
+            pure $ Right
+                [ ToolResourceClaim ToolWrite
+                    (ToolNamedResource resource)
+                ])
+        (jsonAppToolWithExecution
+            name
+            ""
+            []
+            AlwaysReadOnly
+            TurnSequential
+            (noArgsTool name action))
 
 concurrencyProbeMicros :: Int
 concurrencyProbeMicros = 5000000

@@ -3,6 +3,10 @@ module Agent.Tools.Types
     , ToolSchema(..)
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
+    , ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    , ToolSchedulingPlan(..)
     , ToolRegistry
     , ToolEnv(..)
     , defaultToolEnv
@@ -15,10 +19,13 @@ module Agent.Tools.Types
     , rawJsonAppToolWithExecution
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
+    , withToolResourceClaims
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
     , toolExecutionPolicyFor
+    , toolSchedulingPlanFor
+    , schedulingPlansConflict
     , dispatchRegisteredToolCall
     , jsonToolParameters
     , appToolHandlers
@@ -36,6 +43,7 @@ import Agent.ToolDispatch
     , dispatchToolHandler
     , handlerName
     )
+import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
 import Data.Aeson (Value)
 import Data.IORef (IORef, newIORef, writeIORef)
@@ -43,6 +51,13 @@ import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (OsPath, dropTrailingPathSeparator)
+import System.OsPath
+    ( equalFilePath
+    , isAbsolute
+    , makeRelative
+    , splitDirectories
+    , unsafeEncodeUtf
+    )
 
 -- | Provider-facing schema. The sum prevents freeform tools from carrying
 -- meaningless JSON parameters.
@@ -68,6 +83,32 @@ data ToolExecutionPolicy
     | TurnSequential
     deriving (Eq, Show)
 
+data ToolAccess
+    = ToolRead
+    | ToolWrite
+    deriving (Eq, Show)
+
+data ToolResource
+    = ToolAllPaths
+    | ToolPath !OsPath
+    | ToolPathTree !OsPath
+    | ToolNamedResource !Text
+    deriving (Eq, Show)
+
+data ToolResourceClaim = ToolResourceClaim
+    { claimAccess :: !ToolAccess
+    , claimResource :: !ToolResource
+    } deriving (Eq, Show)
+
+data ToolSchedulingPlan
+    = ToolUnconstrained
+    | ToolResourceClaims ![ToolResourceClaim]
+    | ToolExclusive
+    deriving (Eq, Show)
+
+type ToolResourceResolver =
+    ToolCall -> IO (Either Text [ToolResourceClaim])
+
 data AppTool = AppTool
     { appToolName :: !Text
     , appToolDescription :: !Text
@@ -75,6 +116,7 @@ data AppTool = AppTool
     , appToolHandler :: !ToolHandler
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
+    , appToolResourceClaims :: !(Maybe ToolResourceResolver)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -167,6 +209,7 @@ jsonAppToolWithExecution
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
+    , appToolResourceClaims = Nothing
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -198,7 +241,15 @@ rawJsonAppToolWithExecution
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
+    , appToolResourceClaims = Nothing
     }
+
+withToolResourceClaims
+    :: ToolResourceResolver
+    -> AppTool
+    -> AppTool
+withToolResourceClaims resolver tool =
+    tool { appToolResourceClaims = Just resolver }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -226,6 +277,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
+    , appToolResourceClaims = Nothing
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
@@ -265,6 +317,74 @@ toolExecutionPolicyFor :: ToolRegistry -> ToolCall -> ToolExecutionPolicy
 toolExecutionPolicyFor registry call =
     maybe TurnSequential (\tool -> tool.appToolExecution)
         (lookupRegisteredTool call.name registry)
+
+toolSchedulingPlanFor
+    :: ToolRegistry
+    -> ToolCall
+    -> IO ToolSchedulingPlan
+toolSchedulingPlanFor registry call =
+    case lookupRegisteredTool call.name registry of
+        Nothing -> pure ToolExclusive
+        Just tool -> case tool.appToolResourceClaims of
+            Just resolve -> do
+                resolved <- tryAny (resolve call)
+                pure $ case resolved of
+                    Left _ -> ToolExclusive
+                    Right (Left _) -> ToolExclusive
+                    Right (Right claims) -> ToolResourceClaims claims
+            Nothing -> pure $ case tool.appToolExecution of
+                ParallelSafe ->
+                    ToolResourceClaims
+                        [ToolResourceClaim ToolRead ToolAllPaths]
+                TurnSequential -> ToolExclusive
+
+schedulingPlansConflict
+    :: ToolSchedulingPlan
+    -> ToolSchedulingPlan
+    -> Bool
+schedulingPlansConflict ToolExclusive _ = True
+schedulingPlansConflict _ ToolExclusive = True
+schedulingPlansConflict ToolUnconstrained _ = False
+schedulingPlansConflict _ ToolUnconstrained = False
+schedulingPlansConflict (ToolResourceClaims left) (ToolResourceClaims right) =
+    or
+        [ claimsConflict leftClaim rightClaim
+        | leftClaim <- left
+        , rightClaim <- right
+        ]
+
+claimsConflict :: ToolResourceClaim -> ToolResourceClaim -> Bool
+claimsConflict left right =
+    resourcesOverlap left.claimResource right.claimResource
+        && (left.claimAccess == ToolWrite || right.claimAccess == ToolWrite)
+
+resourcesOverlap :: ToolResource -> ToolResource -> Bool
+resourcesOverlap ToolAllPaths ToolAllPaths = True
+resourcesOverlap ToolAllPaths ToolPath{} = True
+resourcesOverlap ToolAllPaths ToolPathTree{} = True
+resourcesOverlap ToolPath{} ToolAllPaths = True
+resourcesOverlap ToolPathTree{} ToolAllPaths = True
+resourcesOverlap (ToolNamedResource left) (ToolNamedResource right) =
+    left == right
+resourcesOverlap (ToolPath left) (ToolPath right) =
+    equalFilePath left right
+resourcesOverlap (ToolPathTree left) (ToolPath right) =
+    pathInside left right
+resourcesOverlap (ToolPath left) (ToolPathTree right) =
+    pathInside right left
+resourcesOverlap (ToolPathTree left) (ToolPathTree right) =
+    pathInside left right || pathInside right left
+resourcesOverlap _ _ = False
+
+pathInside :: OsPath -> OsPath -> Bool
+pathInside root path
+    | equalFilePath root path = True
+    | otherwise =
+        let relative = makeRelative root path
+        in not (isAbsolute relative)
+            && case splitDirectories relative of
+                first : _ -> first /= unsafeEncodeUtf ".."
+                [] -> True
 
 dispatchRegisteredToolCall
     :: ToolDispatchConfig

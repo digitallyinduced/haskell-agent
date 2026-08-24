@@ -6,6 +6,7 @@
 -- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Codex.Dialect.Tools
     ( codexTools
+    , shellCommandIsReadOnly
     ) where
 
 import Agent.OsPath (fromText)
@@ -23,11 +24,16 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , decodeToolArguments
     , toolArgumentsValue
     , typedStreamingTool
     , typedTool
     )
-import Agent.Codex.Dialect.ApplyPatch (applyPatch)
+import Agent.Codex.Dialect.ApplyPatch
+    ( Hunk(..)
+    , applyPatch
+    , parsePatch
+    )
 import Agent.Codex.Dialect.Shell
     ( CodexShellResult(..)
     , CodexShellSession
@@ -55,11 +61,15 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
+    , ToolAccess(..)
     , ToolExecutionPolicy(..)
     , ToolEnv(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     , jsonTool
+    , withToolResourceClaims
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Value(..), withObject)
@@ -68,6 +78,8 @@ import Data.Aeson.Types (parseFail)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified System.FilePath as FilePath
+import System.OsPath (unsafeEncodeUtf)
 
 codexTools
     :: ToolEnv
@@ -111,7 +123,9 @@ instance FromJSON ShellCommandArgs where
         <*> optIntOrString object "yield_time_ms"
 
 shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
-shellCommandTool env session = jsonTool "shell_command" shellDescription
+shellCommandTool env session =
+    withToolResourceClaims (shellCommandResourceClaims env) $
+    jsonTool "shell_command" shellDescription
     [ PropertySchema "command" PropertyString True $ Just
         "Shell script to run in the user's default shell."
     , PropertySchema "workdir" PropertyString False $ Just
@@ -124,6 +138,116 @@ shellCommandTool env session = jsonTool "shell_command" shellDescription
     False
     TurnSequential
     (typedStreamingTool "shell_command" (runShell env session))
+
+shellCommandResourceClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+shellCommandResourceClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text ShellCommandArgs
+    of
+        Left err -> pure (Left err)
+        Right args
+            | args.yieldTimeMs /= Nothing ->
+                pure (Left "yielding shell commands remain exclusive")
+            | not (shellCommandIsReadOnly args.command) ->
+                pure (Left "shell command is not in the read-only allowlist")
+            | otherwise -> do
+                let requested = maybe env.toolCwd fromText args.workdir
+                resolveUnderCwd env requested
+                    >>= pure . fmap
+                        (\_ ->
+                            [ ToolResourceClaim
+                                ToolRead
+                                ToolAllPaths
+                            ])
+
+shellCommandIsReadOnly :: Text -> Bool
+shellCommandIsReadOnly command
+    | Text.null stripped = False
+    | Text.any (`elem` forbiddenChars) stripped = False
+    | "$(" `Text.isInfixOf` stripped = False
+    | "`" `Text.isInfixOf` stripped = False
+    | "$" `Text.isInfixOf` stripped = False
+    | otherwise =
+        case Text.words stripped of
+            [] -> False
+            executable : arguments ->
+                allowedCommand
+                    (Text.pack
+                        (FilePath.takeFileName (Text.unpack executable)))
+                    arguments
+  where
+    stripped = Text.strip command
+    forbiddenChars = ['\n', '\r', ';', '&', '|', '>', '<']
+
+allowedCommand :: Text -> [Text] -> Bool
+allowedCommand executable arguments
+    | executable `elem`
+        [ "cat", "head", "tail", "grep", "rg", "fd", "ls"
+        , "pwd", "wc", "stat", "file", "jq", "sort", "uniq", "cut"
+        , "tr", "realpath", "basename", "dirname", "which", "du", "df"
+        , "nl", "ps", "test", "diff", "printf", "echo"
+        ] =
+        not (any mutatingFlag arguments)
+            && not (executable == "sort" && any outputFlag arguments)
+    | executable == "find" =
+        not (any findAction arguments)
+    | executable == "sed" =
+        safeSed arguments
+    | executable == "git" =
+        case arguments of
+            subcommand : _ ->
+                subcommand `elem`
+                    [ "diff", "log", "show", "rev-parse"
+                    , "ls-files", "blame", "grep", "merge-base", "rev-list"
+                    , "symbolic-ref", "ls-remote"
+                    ]
+                    && not (any gitMutatingFlag arguments)
+            [] -> False
+    | executable == "gh" =
+        case arguments of
+            "pr" : subcommand : _ ->
+                subcommand `elem` ["view", "list", "checks", "status", "diff"]
+            "repo" : "view" : _ -> True
+            "run" : subcommand : _ -> subcommand `elem` ["list", "view"]
+            "auth" : "status" : _ -> True
+            _ -> False
+    | otherwise = False
+  where
+    mutatingFlag argument =
+        argument `elem` ["-i", "--in-place", "--delete", "-delete"]
+    outputFlag argument =
+        argument == "-o"
+            || "--output" `Text.isPrefixOf` argument
+    findAction argument =
+        argument `elem`
+            [ "-delete", "-exec", "-execdir", "-ok", "-okdir"
+            , "-fprint", "-fprintf", "-fls"
+            ]
+    gitMutatingFlag argument =
+        outputFlag argument
+            || argument `elem`
+                [ "-d", "-D", "-m", "-M", "-c", "-C"
+                , "--delete", "--move", "--copy"
+                ]
+
+safeSed :: [Text] -> Bool
+safeSed = \case
+    "-n" : script : paths ->
+        safePrintScript script
+            && not (null paths)
+            && all (not . Text.isPrefixOf "-") paths
+    _ -> False
+  where
+    safePrintScript raw =
+        let script = Text.dropAround (`elem` ['\'', '"']) raw
+            withoutDigits = Text.filter
+                (\char -> char < '0' || char > '9')
+                script
+        in withoutDigits `elem` ["p", ",p"]
 
 shellDescription :: Text
 shellDescription =
@@ -187,6 +311,7 @@ instance FromJSON WriteStdinArgs where
 
 writeStdinTool :: CodexShellSession -> AppTool
 writeStdinTool session =
+    withToolResourceClaims writeStdinResourceClaims $
     jsonAppToolWithExecution "write_stdin" writeStdinDescription
         [ PropertySchema "session_id" PropertyInteger True $ Just
             "Identifier returned by shell_command for a running command."
@@ -198,6 +323,20 @@ writeStdinTool session =
         (ClassifyReadOnly writeStdinIsReadOnly)
         TurnSequential
         (typedTool "write_stdin" (runWriteStdin session))
+
+writeStdinResourceClaims
+    :: ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+writeStdinResourceClaims call =
+    pure $ do
+        args <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text WriteStdinArgs
+        Right
+            [ ToolResourceClaim ToolWrite $
+                ToolNamedResource
+                    ("shell-session:" <> Text.pack (show args.sessionId))
+            ]
 
 writeStdinDescription :: Text
 writeStdinDescription =
@@ -263,9 +402,48 @@ instance FromJSON ApplyPatchArgs where
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
+    withToolResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
         (typedTool "apply_patch" (runApplyPatch env))
+
+applyPatchResourceClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+applyPatchResourceClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text ApplyPatchArgs
+    of
+        Left err -> pure (Left err)
+        Right args ->
+            case parsePatch args.patch of
+                Left err -> pure (Left err)
+                Right hunks -> do
+                    claims <- traverse (claimsForHunk env) hunks
+                    pure (concat <$> sequence claims)
+
+claimsForHunk
+    :: ToolEnv
+    -> Hunk
+    -> IO (Either Text [ToolResourceClaim])
+claimsForHunk env = \case
+    AddFile path _ -> one path
+    DeleteFile path -> one path
+    UpdateFile path moveTo _ -> do
+        source <- one path
+        destination <- maybe
+            (pure (Right []))
+            one
+            moveTo
+        pure ((<>) <$> source <*> destination)
+  where
+    one path =
+        resolveUnderCwd env (unsafeEncodeUtf path)
+            >>= pure . fmap
+                (\resolved ->
+                    [ToolResourceClaim ToolWrite (ToolPath resolved)])
 
 applyPatchDescription :: Text
 applyPatchDescription =

@@ -212,6 +212,7 @@ fake name = AppTool
     , appToolHandler = noArgsTool name (pure (Right "ok"))
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
 
 raceArgs :: Text

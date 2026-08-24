@@ -3,13 +3,22 @@ module Agent.Tools.FileSystem.Grep (grepTool) where
 import Agent.OsPath (fromText, toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    )
 import Agent.Tools.IO (resolveForRead)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
+    , ToolAccess(..)
     , ToolExecutionPolicy(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
     , jsonTool
+    , withToolResourceClaims
     )
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
@@ -60,7 +69,8 @@ parseOutputMode = \case
     _ -> GrepContent
 
 grepTool :: ToolEnv -> AppTool
-grepTool env = jsonTool "grep" grepDescription
+grepTool env = withToolResourceClaims (grepClaims env) $
+    jsonTool "grep" grepDescription
     [ PropertySchema "pattern" PropertyString True $ Just
         "The regular expression pattern to search for in file contents (rg --regexp)"
     , PropertySchema "path" PropertyString False $ Just
@@ -85,6 +95,23 @@ grepTool env = jsonTool "grep" grepDescription
     True
     ParallelSafe
     (typedTool "grep" (runGrep env))
+
+grepClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+grepClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text GrepArgs
+    of
+        Left err -> pure (Left err)
+        Right args -> do
+            let searchRoot = maybe env.toolCwd fromText args.path
+            resolveForRead env searchRoot
+                >>= pure . fmap
+                    (\path ->
+                        [ToolResourceClaim ToolRead (ToolPathTree path)])
 
 grepDescription :: Text
 grepDescription =

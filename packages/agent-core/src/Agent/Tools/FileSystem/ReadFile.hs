@@ -3,13 +3,22 @@ module Agent.Tools.FileSystem.ReadFile (readFileTool) where
 import Agent.OsPath (fromText)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    )
 import Agent.Tools.IO (readTextFile, resolveForRead)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv
+    , ToolAccess(..)
     , ToolExecutionPolicy(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
     , jsonTool
+    , withToolResourceClaims
     )
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
@@ -34,7 +43,8 @@ instance FromJSON ReadFileArgs where
         <*> optText object "format"
 
 readFileTool :: ToolEnv -> AppTool
-readFileTool env = jsonTool "read_file" readFileDescription
+readFileTool env = withToolResourceClaims (readFileClaims env) $
+    jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
         "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
     , PropertySchema "offset" PropertyInteger False $ Just
@@ -45,6 +55,22 @@ readFileTool env = jsonTool "read_file" readFileDescription
     True
     ParallelSafe
     (typedTool "read_file" (runReadFile env))
+
+readFileClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+readFileClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text ReadFileArgs
+    of
+        Left err -> pure (Left err)
+        Right args ->
+            resolveForRead env (fromText args.targetFile)
+                >>= pure . fmap
+                    (\path ->
+                        [ToolResourceClaim ToolRead (ToolPath path)])
 
 readFileDescription :: Text
 readFileDescription =
