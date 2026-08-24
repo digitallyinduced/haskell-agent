@@ -96,6 +96,39 @@ passes.
 
 ## Results: August 24, 2026
 
+### Controlled prebuilt-flake smoke run: `gpt-5.6-terra`
+
+The evaluator prebuilt the exact shared flake before timing and copied the same
+immutable `flake.nix` and `flake.lock` into every workspace. All three runners
+preserved both files, self-verified, and passed the independent grader.
+
+| runner | pass | seconds | input | uncached | cached | output |
+|---|---:|---:|---:|---:|---:|---:|
+| agent-cli | yes | 250.51 | 268,201 | 27,305 | 240,896 | 6,385 |
+| agent-cli RLM | yes | 420.11 | 695,037 | 122,237 | 572,800 | 17,084 |
+| Codex | yes | 190.98 | 659,186 | 40,690 | 618,496 | 6,759 |
+
+Removing Nix closure variance changed the result materially. Direct agent-cli
+used 59.3% fewer total input tokens than Codex, but took 31.2% longer. RLM was
+67.7% slower than direct agent-cli and used 159.1% more total input, 347.7%
+more uncached input, 137.8% more cached input, and 167.6% more output. RLM also
+took 120.0% longer than Codex and used 5.4% more total input.
+
+The RLM transcript explains the regression. It used a read-only worker to
+inspect the supplied flake, a coding worker to create `app/Main.hs`, and
+another read-only worker to review the result. The coding worker returned
+source with missing or incorrectly qualified imports. The root then loaded the
+complete file, rewrote it itself, encountered a compile error at runtime, and
+performed multiple textual repair and verification turns. The delegation did
+not reduce root work; it duplicated implementation and review context before
+the root took over. In this small, tightly specified one-file task, worker
+startup and handoff overhead outweighed any context-isolation benefit.
+
+This remains a one-trial smoke result rather than a stable median. It does,
+however, show why controlling the Nix fixture is essential: the earlier warm
+RLM result looked much stronger while runner-specific flake choices and
+first-use package builds still differed.
+
 ### In-process RLM prototype: `gpt-5.6-terra`
 
 A one-trial smoke comparison was run on `office-builder` with medium effort
