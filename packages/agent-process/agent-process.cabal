@@ -1,0 +1,35 @@
+cabal-version:      2.2
+name:               agent-process
+version:            0.1.0.0
+synopsis:           Shared process lifecycle utilities for the agent harness
+description:        Shared process-group termination helpers used by the
+                    agent harness and standalone provider SDKs.
+license:            MIT
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           System
+build-type:         Simple
+
+common common-opts
+    default-language: Haskell2010
+    default-extensions: LambdaCase
+                      , BlockArguments
+                      , NumericUnderscores
+                      , ScopedTypeVariables
+                      , TypeApplications
+    ghc-options:      -Wall
+                      -Werror=incomplete-patterns
+                      -Werror=incomplete-uni-patterns
+                      -Wno-name-shadowing
+                      -Wno-missing-signatures
+
+library
+    import:           common-opts
+    hs-source-dirs:   src
+    exposed-modules:  Agent.Process
+    build-depends:    base >= 4.14 && < 5
+                    , process >= 1.6.26
+                    , safe-exceptions
+                    , unix

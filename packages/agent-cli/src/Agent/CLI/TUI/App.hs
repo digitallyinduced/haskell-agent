@@ -276,6 +276,7 @@ newFullscreenRuntimeWithSyntaxLoader
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
+            , sessionBtw = const (pure ())
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -287,6 +288,9 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeInput = inputBuffer
             , runtimeCancel =
                 readIORef sessionActions >>= (.sessionCancel)
+            , runtimeBtw = \question ->
+                readIORef sessionActions >>= \actions ->
+                    actions.sessionBtw question
             , runtimeRestartEffort = \level ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionRestartEffort level
@@ -322,6 +326,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
     -> (Text -> IO ())
+    -> (Text -> IO ())
     -> IO CtrlCDecision
     -> IO (AgentTarget, [AgentEntry])
     -> (AgentTarget -> IO ())
@@ -329,12 +334,14 @@ setFullscreenSessionActions
 setFullscreenSessionActions
     runtime
     cancelAction
+    btwAction
     restartEffortAction
     ctrlCAction
     agentSnapshot
     agentSelect =
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
             { sessionCancel = cancelAction
+            , sessionBtw = btwAction
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -2533,17 +2540,18 @@ drawBlock state block =
                             (txtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
-                    timestampedMessage block.blockTimestamp $
-                        withAttr Theme.assistantAttr
-                            (markdownWidgetWithSyntaxHighlighting
-                                state.appSyntaxHighlighter
-                                (\codeIndex ->
-                                    cached
-                                        (CodeBlockCache
-                                            block.blockId
-                                            codeIndex))
-                                (codeBlockHeader state block.blockId)
-                                block.blockBody)
+                    padRight (Pad 1) $
+                        timestampedMessage block.blockTimestamp $
+                            withAttr Theme.assistantAttr
+                                (markdownWidgetWithSyntaxHighlighting
+                                    state.appSyntaxHighlighter
+                                    (\codeIndex ->
+                                        cached
+                                            (CodeBlockCache
+                                                block.blockId
+                                                codeIndex))
+                                    (codeBlockHeader state block.blockId)
+                                    block.blockBody)
             BlockThinking ->
                 accentBlock (thinkingBlockAttr state block)
                     (blockStateGlyph state block <> block.blockTitle)

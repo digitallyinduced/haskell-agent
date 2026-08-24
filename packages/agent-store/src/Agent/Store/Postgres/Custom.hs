@@ -55,6 +55,7 @@ import Agent.Store.Postgres.Scope
     , scopeIdText
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.Sql (quoteIdentifier)
 
 data QueryLimits = QueryLimits
     { queryMaxRows :: !Int64
@@ -604,15 +605,15 @@ catalogObjectsStatement = mkStatement
     \ join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
     \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
     \ order by 2, c.relname"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         CatalogObjectRow
-            <$> textColumn
-            <*> textColumn
-            <*> textColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn
-            <*> nullableTextColumn)
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text))
     True
 
 catalogColumnsStatement :: Statement Text [CatalogColumnRow]
@@ -634,18 +635,18 @@ catalogColumnsStatement = mkStatement
     \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
     \   and a.attnum > 0 and not a.attisdropped\
     \ order by a.attrelid, a.attnum"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         CatalogColumnRow
-            <$> textColumn
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> (CatalogColumn
-                <$> textColumn
-                <*> textColumn
-                <*> boolColumn
-                <*> nullableTextColumn
-                <*> nullableTextColumn
-                <*> nullableTextColumn
-                <*> nullableTextColumn))
+                <$> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.bool)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)
+                <*> Decoders.column (Decoders.nullable Decoders.text)))
     True
 
 catalogConstraintsStatement :: Statement Text [CatalogConstraintRow]
@@ -665,14 +666,14 @@ catalogConstraintsStatement = mkStatement
     \ join pg_catalog.pg_namespace n on n.oid = c.relnamespace\
     \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
     \ order by con.conrelid, con.conname"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         CatalogConstraintRow
-            <$> textColumn
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> (CatalogConstraint
-                <$> textColumn
-                <*> textColumn
-                <*> textColumn))
+                <$> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)
+                <*> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 catalogIndexesStatement :: Statement Text [CatalogIndexRow]
@@ -685,11 +686,11 @@ catalogIndexesStatement = mkStatement
     \ join pg_catalog.pg_class i on i.oid = ix.indexrelid\
     \ where n.nspname = $1 and c.relkind in ('r','p','v','m','S')\
     \ order by ix.indrelid, i.relname"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     (Decoders.rowList $
         CatalogIndexRow
-            <$> textColumn
-            <*> (CatalogIndex <$> textColumn <*> textColumn))
+            <$> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> (CatalogIndex <$> Decoders.column (Decoders.nonNullable Decoders.text) <*> Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 scopeIdentityStatement :: Statement Text Bool
@@ -786,7 +787,7 @@ deleteCurrentCatalogStatement = mkStatement
     \ where snapshot.scope_id = scope.scope_id\
     \ and scope.scope_key = $1\
     \ and snapshot.snapshot_purpose = 'current'"
-    textParam
+    (Encoders.param (Encoders.nonNullable Encoders.text))
     Decoders.noResult
     True
 
@@ -796,10 +797,10 @@ insertCatalogSnapshotStatement = mkStatement
     \ (scope_id, snapshot_purpose)\
     \ select scope_id, $2 from harness.custom_scopes where scope_key = $1\
     \ returning snapshot_id::text"
-    ( (fst >$< textParam)
-        <> (snd >$< textParam)
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.text))
     )
-    textSingleRow
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 data CatalogObjectParams = CatalogObjectParams
@@ -818,14 +819,14 @@ insertCatalogObjectStatement = mkStatement
     \  object_comment, view_definition)\
     \ values ($1::uuid, $2, $3, $4, $5, $6)\
     \ returning catalog_object_id::text"
-    ( ((.objectSnapshotId) >$< textParam)
-        <> ((.objectKind) >$< textParam)
-        <> ((.objectName) >$< textParam)
-        <> ((.objectOwner) >$< nullableTextParam)
-        <> ((.objectComment) >$< nullableTextParam)
-        <> ((.objectViewDefinition) >$< nullableTextParam)
+    ( ((.objectSnapshotId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.objectKind) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.objectName) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.objectOwner) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.objectComment) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.objectViewDefinition) >$< Encoders.param (Encoders.nullable Encoders.text))
     )
-    textSingleRow
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 data CatalogColumnParams = CatalogColumnParams
@@ -847,15 +848,15 @@ insertCatalogColumnStatement = mkStatement
     \  is_nullable, default_expression, identity_kind, generated_kind,\
     \  column_comment)\
     \ values ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9)"
-    ( ((.catalogColumnObjectId) >$< textParam)
-        <> ((.catalogColumnOrdinal) >$< intParam)
-        <> ((.catalogColumnName) >$< textParam)
-        <> ((.catalogColumnType) >$< textParam)
-        <> ((.catalogColumnNullable) >$< boolParam)
-        <> ((.catalogColumnDefault) >$< nullableTextParam)
-        <> ((.catalogColumnIdentity) >$< nullableTextParam)
-        <> ((.catalogColumnGenerated) >$< nullableTextParam)
-        <> ((.catalogColumnComment) >$< nullableTextParam)
+    ( ((.catalogColumnObjectId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogColumnOrdinal) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> ((.catalogColumnName) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogColumnType) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogColumnNullable) >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> ((.catalogColumnDefault) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.catalogColumnIdentity) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.catalogColumnGenerated) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.catalogColumnComment) >$< Encoders.param (Encoders.nullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -874,11 +875,11 @@ insertCatalogConstraintStatement = mkStatement
     \ (catalog_object_id, constraint_ordinal, constraint_name,\
     \  constraint_kind, constraint_definition)\
     \ values ($1::uuid, $2, $3, $4, $5)"
-    ( ((.catalogConstraintObjectId) >$< textParam)
-        <> ((.catalogConstraintOrdinal) >$< intParam)
-        <> ((.catalogConstraintName) >$< textParam)
-        <> ((.catalogConstraintType) >$< textParam)
-        <> ((.catalogConstraintDefinition) >$< textParam)
+    ( ((.catalogConstraintObjectId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogConstraintOrdinal) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> ((.catalogConstraintName) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogConstraintType) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogConstraintDefinition) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -895,10 +896,10 @@ insertCatalogIndexStatement = mkStatement
     "insert into harness.custom_catalog_indexes\
     \ (catalog_object_id, index_ordinal, index_name, index_definition)\
     \ values ($1::uuid, $2, $3, $4)"
-    ( ((.catalogIndexObjectId) >$< textParam)
-        <> ((.catalogIndexOrdinal) >$< intParam)
-        <> ((.catalogIndexName) >$< textParam)
-        <> ((.catalogIndexDefinition) >$< textParam)
+    ( ((.catalogIndexObjectId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogIndexOrdinal) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
+        <> ((.catalogIndexName) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.catalogIndexDefinition) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     )
     Decoders.noResult
     True
@@ -1071,15 +1072,15 @@ auditStartedStatement = mkStatement
     \  $6, 'started', $7::uuid\
     \ from harness.custom_scopes where scope_key = $3\
     \ returning audit_id::text"
-    ( ((.startSessionId) >$< nullableTextParam)
-        <> ((.startAgentId) >$< nullableTextParam)
-        <> ((.startScopeKey) >$< textParam)
-        <> ((.startPurpose) >$< textParam)
-        <> ((.startSql) >$< textParam)
-        <> ((.startAt) >$< timeParam)
-        <> ((.startSnapshotId) >$< textParam)
+    ( ((.startSessionId) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.startAgentId) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.startScopeKey) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.startPurpose) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.startSql) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.startAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+        <> ((.startSnapshotId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     )
-    textSingleRow
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 auditScopeStatement :: Statement Text Text
@@ -1088,8 +1089,8 @@ auditScopeStatement = mkStatement
     \ from harness.custom_sql_audit audit\
     \ join harness.custom_scopes scope on scope.scope_id = audit.scope_id\
     \ where audit.audit_id = $1::uuid"
-    textParam
-    textSingleRow
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
     True
 
 data AuditFinishedParams = AuditFinishedParams
@@ -1109,46 +1110,14 @@ auditFinishedStatement = mkStatement
     \     error_text = $4,\
     \     catalog_after_snapshot_id = $5::uuid\
     \ where audit_id = $1::uuid and status = 'started'"
-    ( ((.finishAuditId) >$< textParam)
-        <> ((.finishAt) >$< timeParam)
-        <> ((.finishSucceeded) >$< boolParam)
-        <> ((.finishError) >$< nullableTextParam)
-        <> ((.finishSnapshotId) >$< textParam)
+    ( ((.finishAuditId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((.finishAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
+        <> ((.finishSucceeded) >$< Encoders.param (Encoders.nonNullable Encoders.bool))
+        <> ((.finishError) >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> ((.finishSnapshotId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
     )
     (fmap (> 0) Decoders.rowsAffected)
     True
-
-textParam :: Encoders.Params Text
-textParam = Encoders.param (Encoders.nonNullable Encoders.text)
-
-nullableTextParam :: Encoders.Params (Maybe Text)
-nullableTextParam = Encoders.param (Encoders.nullable Encoders.text)
-
-intParam :: Encoders.Params Int32
-intParam = Encoders.param (Encoders.nonNullable Encoders.int4)
-
-boolParam :: Encoders.Params Bool
-boolParam = Encoders.param (Encoders.nonNullable Encoders.bool)
-
-timeParam :: Encoders.Params UTCTime
-timeParam = Encoders.param (Encoders.nonNullable Encoders.timestamptz)
-
-textSingleRow :: Decoders.Result Text
-textSingleRow =
-    Decoders.singleRow $
-        textColumn
-
-textColumn :: Decoders.Row Text
-textColumn =
-    Decoders.column (Decoders.nonNullable Decoders.text)
-
-nullableTextColumn :: Decoders.Row (Maybe Text)
-nullableTextColumn =
-    Decoders.column (Decoders.nullable Decoders.text)
-
-boolColumn :: Decoders.Row Bool
-boolColumn =
-    Decoders.column (Decoders.nonNullable Decoders.bool)
 
 confinementSql :: ScopeDatabase -> QueryLimits -> ByteString.ByteString
 confinementSql database limits =
@@ -1162,10 +1131,6 @@ confinementSql database limits =
             <> "; set local lock_timeout = "
             <> Text.pack (show (max 1 limits.queryLockTimeoutMs))
             <> ";"
-
-quoteIdentifier :: Text -> Text
-quoteIdentifier value =
-    "\"" <> Text.replace "\"" "\"\"" value <> "\""
 
 encodedSize :: Text -> Int
 encodedSize = ByteString.length . Text.encodeUtf8

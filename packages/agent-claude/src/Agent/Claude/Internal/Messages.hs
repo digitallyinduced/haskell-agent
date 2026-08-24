@@ -15,7 +15,6 @@ import Claude.Agent.SDK.Types
     ( AssistantMessage(..)
     , ContentBlock(..)
     , Message(..)
-    , ModelUsage(..)
     , ResultMessage(..)
     , SystemMessage(..)
     , Usage(..)
@@ -23,6 +22,7 @@ import Claude.Agent.SDK.Types
     , addUsage
     , emptyUsage
     , messageHasParentToolUseId
+    , modelUsageToUsage
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -190,17 +190,6 @@ canonicalToolEvents toolEvents =
                 , Set.insert result.callId finished
                 , ToolFinished result : events
                 )
-
-modelUsageToUsage :: ModelUsage -> Usage
-modelUsageToUsage modelUsage =
-    Usage
-        { inputTokens =
-            modelUsage.inputTokens
-                + modelUsage.cacheCreationInputTokens
-                + modelUsage.cacheReadInputTokens
-        , outputTokens = modelUsage.outputTokens
-        , cachedTokens = modelUsage.cacheReadInputTokens
-        }
 
 renderResultContent :: Aeson.Value -> Text
 renderResultContent = \case

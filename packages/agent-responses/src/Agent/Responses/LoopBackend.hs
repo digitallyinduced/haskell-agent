@@ -22,6 +22,7 @@ import Agent.InterAgentMessage
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
@@ -144,12 +145,28 @@ turnInputToItem = \case
     UserMessage text -> userMessageItem text
     AgentMessage message -> agentMessageItem message
     UserMultimodal{userText, userImages} -> multimodalUserItem userText userImages
+    UserMultimodalFiles{userText, userImages, userFiles} ->
+        multimodalFilesItem userText userImages userFiles
     CompletedTool result -> toolResultToItem result
 
 userMessageItem :: Text -> ResponseItem
 userMessageItem text = MessageItem ResponseMessage
     { messageId = Nothing
     , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , role = RoleUser
+    , status = Nothing
+    , phase = Nothing
+    , extraFields = KeyMap.empty
+    }
+
+multimodalFilesItem :: Text -> [ImageAttachment] -> [FileAttachment] -> ResponseItem
+multimodalFilesItem text images files = MessageItem ResponseMessage
+    { messageId = Nothing
+    , content = MessageContentParts
+        ( InputTextPart text Nothing KeyMap.empty
+        : map imageAttachmentPart images
+        <> map fileAttachmentPart files
+        )
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
@@ -202,6 +219,18 @@ imageAttachmentPart ImageAttachment{imageMime, imageBytes} =
         { detail = Just "auto"
         , fileId = Nothing
         , imageUrl = Just (imageDataUrl imageMime imageBytes)
+        , promptCacheBreakpoint = Nothing
+        , extraFields = KeyMap.empty
+        }
+
+fileAttachmentPart :: FileAttachment -> ResponseContentPart
+fileAttachmentPart FileAttachment{fileName, fileMime, fileBytes} =
+    InputFilePart
+        { detail = Just "auto"
+        , fileData = Just (imageDataUrl fileMime fileBytes)
+        , fileId = Nothing
+        , fileUrl = Nothing
+        , filename = fileName
         , promptCacheBreakpoint = Nothing
         , extraFields = KeyMap.empty
         }

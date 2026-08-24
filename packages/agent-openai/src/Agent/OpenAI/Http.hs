@@ -1,5 +1,6 @@
 module Agent.OpenAI.Http
-    ( decodeCodexHttpBody
+    ( postCodexJson
+    , decodeCodexHttpBody
     , rejectFailedCodexResponse
     ) where
 
@@ -16,9 +17,64 @@ import qualified Agent.Responses.Types as OpenAI
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import Network.Http.Client
+    ( Method(POST)
+    , RequestBuilder
+    , Response
+    , buildRequest1
+    , establishConnection
+    , http
+    , jsonBody
+    , receiveResponse
+    , sendRequest
+    , setContentType
+    , setHeader
+    , withConnection
+    )
+import OpenSSL (withOpenSSL)
+import qualified Network.URI as URI
+import qualified System.IO.Streams as Streams
+
+-- | Execute a JSON POST against a Codex-compatible endpoint.
+--
+-- Authentication and the optional broker account header are shared by the
+-- normal Responses and compaction endpoints. Callers can add endpoint-specific
+-- headers with the request modifier and retain control over response decoding
+-- through the supplied handler.
+postCodexJson
+    :: Text
+    -> Text
+    -> Text
+    -> Text
+    -> (RequestBuilder () -> RequestBuilder ())
+    -> Aeson.Value
+    -> (Response -> Streams.InputStream BS.ByteString -> IO (Either ApiError value))
+    -> IO (Either ApiError value)
+postCodexJson baseUrl endpoint accessToken accountId configureRequest body handler = do
+    let url = Text.dropWhileEnd (== '/') baseUrl <> endpoint
+    case URI.parseURI (Text.unpack url) of
+        Nothing -> pure $ Left (JsonDecodeError ("Invalid URL: " <> url) "")
+        Just uri ->
+            let path = Text.encodeUtf8 (Text.pack uri.uriPath)
+                request = buildRequest1 $ configureRequest do
+                    http POST path
+                    setContentType "application/json"
+                    setHeader
+                        "Authorization"
+                        ("Bearer " <> Text.encodeUtf8 accessToken)
+                    if Text.null (Text.strip accountId)
+                        then pure ()
+                        else setHeader
+                            "chatgpt-account-id"
+                            (Text.encodeUtf8 accountId)
+            in withOpenSSL $
+                withConnection (establishConnection (Text.encodeUtf8 url)) \connection -> do
+                    sendRequest connection request (jsonBody body)
+                    receiveResponse connection handler
 
 -- | Decode a successful Responses HTTP body. Streaming bodies use the same
 -- partial-response assembler as the WebSocket and provider SSE transports;

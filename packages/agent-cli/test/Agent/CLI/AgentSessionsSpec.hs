@@ -2,6 +2,7 @@ module Agent.CLI.AgentSessionsSpec (spec) where
 
 import Agent.CLI.AgentSessions
 import Agent.CLI.Models (ModelTarget(..))
+import Agent.CLI.ManagedTurn (managedTurnRequestFromText)
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.Session
 import Agent.CLI.SessionLock
@@ -211,6 +212,23 @@ spec = describe "Agent.CLI.AgentSessions" do
                 args `shouldContain` ["--no-ghci", "--bash"]
                 closeSessionProcessManager manager
 
+    it "distinguishes managed deny from remote prompt approval" $
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
+            let argsPath = toFilePath root FilePath.</> "agent-args"
+            script <- writeFakeAgentBody root
+                ("printf '%s\\n' \"$@\" > " <> shellQuote argsPath <> "\nexit 0\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt pool root root)
+                manager <- newSessionProcessManager root
+                launchManagedTurnBounded
+                    manager False DenyMutating True False Nothing handle
+                    (managedTurnRequestFromText "one")
+                    `shouldReturn`
+                        Right ("completed session " <> handle.sessionMeta.metaId)
+                args <- lines <$> readFile argsPath
+                args `shouldContain` ["--managed-deny-mutations"]
+                closeSessionProcessManager manager
+
     it "keeps an advisory lock until its owner releases it" $
         withTempStoreDir "agent-session-lock-" \pool root -> do
             handle <- createSession (testCreateAt pool root root)
@@ -324,6 +342,42 @@ spec = describe "Agent.CLI.AgentSessions" do
                 _ <- launchSessionTurn manager True ApproveAll True False handle "one"
                 closeSessionProcessManager manager
                 waitForFile marker
+
+    it "terminates scoped gateway children when the manager closes" $
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
+            let marker = toFilePath root FilePath.</> "finished"
+            script <- writeFakeAgentBody root
+                ("sleep 1\nprintf done > " <> shellQuote marker <> "\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt pool root root)
+                manager <- newSessionProcessManagerWithLifetime
+                    ScopedSessionProcesses
+                    root
+                _ <- launchSessionTurn
+                    manager True ApproveAll True False handle "one"
+                closeSessionProcessManager manager
+                threadDelay 1_200_000
+                Directory.doesFileExist marker `shouldReturn` False
+
+    it "bounds a foreground managed gateway turn" $
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
+            script <- writeFakeAgentBody root "sleep 1\n"
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt pool root root)
+                manager <- newSessionProcessManagerWithLifetime
+                    ScopedSessionProcesses
+                    root
+                result <- launchManagedTurnBounded
+                    manager
+                    False
+                    PromptMutating
+                    True
+                    False
+                    (Just 50_000)
+                    handle
+                    (managedTurnRequestFromText "one")
+                result `shouldBe` Left "agent session timed out"
+                closeSessionProcessManager manager
 
 runTool :: AgentSessionToolsEnv -> Text.Text -> Text.Text -> IO Text.Text
 runTool env name arguments = do

@@ -1,6 +1,17 @@
 module Agent.TelegramSpec (spec) where
 
 import Agent.Telegram
+import Agent.Telegram.Types
+    ( TelegramApprovalMode(..)
+    , TelegramFileMedia(..)
+    , TelegramMedia(..)
+    , TelegramMediaKind(..)
+    , TelegramCallbackBinding(..)
+    , TelegramDeadLetter(..)
+    , TelegramPendingCallback(..)
+    , TelegramPendingMediaTurn(..)
+    , TelegramRetryMetadata(..)
+    )
 import Control.Concurrent
     ( newEmptyMVar
     , putMVar
@@ -40,8 +51,8 @@ spec = describe "Agent.Telegram" do
                         { setupProvider = Just XAIProvider
                         , setupModel = Just "grok-4.6"
                         , setupCwd = Just "/tmp/project"
-                        , setupYolo = True
-                        , setupAllowedUser = Just 123
+                        , setupApprovalMode = TelegramApprovalYolo
+                        , setupAllowedUsers = [123]
                         , setupRespondToAllGroupMessages = True
                         , setupStart = True
                         })
@@ -61,6 +72,21 @@ spec = describe "Agent.Telegram" do
             parseAllowedUsers "" `shouldSatisfy` isLeft
             parseAllowedUsers "123,nope" `shouldSatisfy` isLeft
             parseAllowedUsers "-1" `shouldSatisfy` isLeft
+
+    describe "Telegram config migration" do
+        it "maps legacy yolo booleans onto explicit approval modes" do
+            let decode yolo = eitherDecode
+                    (encode (object
+                        [ "provider" .= ("xai" :: String)
+                        , "cwd" .= ("/tmp" :: String)
+                        , "allowedUsers" .= ([123] :: [Integer])
+                        , "yolo" .= yolo
+                        ]))
+                    :: Either String TelegramConfig
+            fmap (.telegramApprovalMode) (decode False)
+                `shouldBe` Right TelegramApprovalPrompt
+            fmap (.telegramApprovalMode) (decode True)
+                `shouldBe` Right TelegramApprovalYolo
 
     describe "splitTelegramText" do
         it "keeps messages within the requested limit" do
@@ -160,6 +186,36 @@ spec = describe "Agent.Telegram" do
                     Nothing -> False
                 Left _ -> False
 
+        it "routes allowed callback queries onto the durable callback queue" do
+            let bot = TelegramUser
+                    { userId = 999
+                    , userIsBot = True
+                    , userFirstName = Just "Harness"
+                    , userLastName = Nothing
+                    , userUsername = Just "HarnessBot"
+                    }
+                decoded = eitherDecode
+                    (LBS.pack
+                        "{\"update_id\":24,\"callback_query\":{\
+                        \\"id\":\"callback-1\",\"from\":{\"id\":456},\
+                        \\"data\":\"ha:request:0\",\
+                        \\"message\":{\"message_id\":88,\
+                        \\"chat\":{\"id\":123,\"type\":\"private\"}}}}")
+                    :: Either String TelegramUpdate
+            update <- decoded `shouldReturnRight`
+                "Telegram callback update should decode"
+            classifyTelegramUpdate bot (Set.singleton 456) update
+                `shouldBe`
+                    QueueCallback TelegramPendingCallback
+                        { pendingCallbackUpdateId = 24
+                        , pendingCallbackQueryId = "callback-1"
+                        , pendingCallbackUserId = 456
+                        , pendingCallbackChat =
+                            Just (TelegramChatKey 123 Nothing)
+                        , pendingCallbackMessageId = Just 88
+                        , pendingCallbackData = "ha:request:0"
+                        }
+
         it "recognizes emoji-only assistant replies as reactions" do
             telegramReactionEmoji " 👍 " `shouldBe` Just "👍"
             telegramReactionEmoji "❤️" `shouldBe` Just "❤"
@@ -183,6 +239,113 @@ spec = describe "Agent.Telegram" do
                             && voice.voiceFileSize == Just 1024
                     Nothing -> False
                 Left _ -> False
+
+    describe "Telegram media messages" do
+        let bot = TelegramUser
+                { userId = 999
+                , userIsBot = True
+                , userFirstName = Just "Harness"
+                , userLastName = Nothing
+                , userUsername = Just "HarnessBot"
+                }
+            allowedUsers = Set.singleton 456
+            classify bytes = do
+                update <- (eitherDecode (LBS.pack bytes)
+                    :: Either String TelegramUpdate)
+                    `shouldReturnRight` "Telegram update should decode"
+                pure (classifyTelegramUpdate bot allowedUsers update)
+
+        it "queues private photo captions as managed media turns" do
+            action <- classify
+                "{\"update_id\":31,\"message\":{\
+                \\"message_id\":90,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":123,\"type\":\"private\"},\
+                \\"caption\":\"summarize this\",\
+                \\"photo\":[{\
+                \\"file_id\":\"small\",\"width\":10,\"height\":10},{\
+                \\"file_id\":\"large\",\"width\":20,\"height\":20,\
+                \\"file_size\":1024}]}}"
+            action `shouldBe`
+                QueueMediaTurn
+                    TelegramPendingMediaTurn
+                        { pendingMediaUpdateId = 31
+                        , pendingMediaMessageId = 90
+                        , pendingMediaChat = TelegramChatKey 123 Nothing
+                        , pendingMediaUserId = 456
+                        , pendingMediaText = "summarize this"
+                        , pendingMediaAttachments =
+                            [ TelegramMedia
+                                { telegramMediaKind = TelegramMediaPhoto
+                                , telegramMediaFile =
+                                    Just TelegramFileMedia
+                                        { fileMediaFileId = "large"
+                                        , fileMediaName = Nothing
+                                        , fileMediaMimeType = Just "image/jpeg"
+                                        , fileMediaFileSize = Just 1024
+                                        , fileMediaDuration = Nothing
+                                        }
+                                , telegramMediaDescription = "[Photo]"
+                                }
+                            ]
+                        , pendingMediaEdited = False
+                        , pendingMediaGroupId = Nothing
+                        }
+
+        it "routes edited text through replaceable managed-turn work" do
+            action <- classify
+                "{\"update_id\":33,\"edited_message\":{\
+                \\"message_id\":90,\"from\":{\"id\":456},\
+                \\"chat\":{\"id\":123,\"type\":\"private\"},\
+                \\"text\":\"corrected text\"}}"
+            action `shouldBe`
+                QueueMediaTurn TelegramPendingMediaTurn
+                    { pendingMediaUpdateId = 33
+                    , pendingMediaMessageId = 90
+                    , pendingMediaChat = TelegramChatKey 123 Nothing
+                    , pendingMediaUserId = 456
+                    , pendingMediaText = "corrected text"
+                    , pendingMediaAttachments = []
+                    , pendingMediaEdited = True
+                    , pendingMediaGroupId = Nothing
+                    }
+
+        it "queues group media replies as attributed managed media turns" do
+            action <- classify
+                "{\"update_id\":32,\"message\":{\
+                \\"message_id\":91,\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"document\":{\"file_id\":\"doc-file\",\"file_name\":\"report.pdf\",\
+                \\"mime_type\":\"application/pdf\",\"file_size\":2048},\
+                \\"reply_to_message\":{\"message_id\":77,\
+                \\"from\":{\"id\":999,\"is_bot\":true},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
+            action `shouldBe`
+                QueueMediaTurn
+                    TelegramPendingMediaTurn
+                        { pendingMediaUpdateId = 32
+                        , pendingMediaMessageId = 91
+                        , pendingMediaChat = TelegramChatKey (-1001) Nothing
+                        , pendingMediaUserId = 456
+                        , pendingMediaText =
+                            "[Telegram group message from Marc, user 456]\n\
+                            \[Document: report.pdf]"
+                        , pendingMediaAttachments =
+                            [ TelegramMedia
+                                { telegramMediaKind = TelegramMediaDocument
+                                , telegramMediaFile =
+                                    Just TelegramFileMedia
+                                        { fileMediaFileId = "doc-file"
+                                        , fileMediaName = Just "report.pdf"
+                                        , fileMediaMimeType = Just "application/pdf"
+                                        , fileMediaFileSize = Just 2048
+                                        , fileMediaDuration = Nothing
+                                        }
+                                , telegramMediaDescription = "[Document: report.pdf]"
+                                }
+                            ]
+                        , pendingMediaEdited = False
+                        , pendingMediaGroupId = Nothing
+                        }
 
     describe "Telegram group chats" do
         let bot = TelegramUser
@@ -447,7 +610,8 @@ spec = describe "Agent.Telegram" do
                             ]
                     }
                 expected = object
-                    [ "nextUpdateId" .= (Just 12 :: Maybe Integer)
+                    [ "version" .= (2 :: Int)
+                    , "nextUpdateId" .= (Just 12 :: Maybe Integer)
                     , "bindings" .=
                         [ object
                             [ "chat" .= key
@@ -456,6 +620,15 @@ spec = describe "Agent.Telegram" do
                         ]
                     , "pendingTurns" .= [turn]
                     , "pendingReplies" .= [reply]
+                    , "pendingMediaTurns" .= ([] :: [TelegramPendingMediaTurn])
+                    , "pendingCallbacks" .= ([] :: [TelegramPendingCallback])
+                    , "callbackBindings" .= ([] :: [TelegramCallbackBinding])
+                    , "retryMetadata" .=
+                        ([] :: [(Text.Text, TelegramRetryMetadata)])
+                    , "deliveryCheckpoints" .=
+                        ([] :: [(Text.Text, Int)])
+                    , "deadLetters" .= ([] :: [TelegramDeadLetter])
+                    , "outboundMessages" .= ([] :: [Value])
                     ]
             (eitherDecode (encode state) :: Either String Value)
                 `shouldBe` Right expected
@@ -483,6 +656,42 @@ spec = describe "Agent.Telegram" do
                     (QueueTurn 77 key "hello" Nothing)
                     once
             twice.pendingQueues `shouldBe` once.pendingQueues
+
+        it "coalesces adjacent text bursts into one managed turn" do
+            let key = TelegramChatKey 123 Nothing
+                first = storeUpdateAction
+                    10
+                    (QueueTurn 77 key "first" Nothing)
+                    emptyTelegramState
+                second = storeUpdateAction
+                    11
+                    (QueueTurn 78 key "second" Nothing)
+                    first
+            nextPendingAction key second `shouldBe`
+                Just
+                    (RunPendingMediaTurn TelegramPendingMediaTurn
+                        { pendingMediaUpdateId = 11
+                        , pendingMediaMessageId = 78
+                        , pendingMediaChat = key
+                        , pendingMediaUserId = 0
+                        , pendingMediaText = "first\n\n---\n\nsecond"
+                        , pendingMediaAttachments = []
+                        , pendingMediaEdited = False
+                        , pendingMediaGroupId = Nothing
+                        })
+
+        it "persists callback, retry, and chunk-delivery state" do
+            let key = TelegramChatKey 123 Nothing
+                callback = TelegramPendingCallback
+                    20 "callback-1" 456 (Just key) (Just 80) "ha:request:0"
+                retry = TelegramRetryMetadata 2 Nothing (Just "temporary")
+                state = emptyTelegramState
+                    { pendingCallbacks = Map.singleton 20 callback
+                    , retryMetadata = Map.singleton "turn" retry
+                    , deliveryCheckpoints = Map.singleton "reply" 2
+                    }
+            (eitherDecode (encode state) :: Either String TelegramState)
+                `shouldBe` Right state
 
         it "checkpoints a voice transcript before running the agent" do
             let key = TelegramChatKey 123 Nothing

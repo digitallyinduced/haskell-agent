@@ -88,6 +88,13 @@ spec = do
 
         it "rejects using both -p and --prompt-file" do
             parseArgs ["-p", "a", "--prompt-file", "b"] `shouldSatisfy` isLeft
+            parseArgs ["-p", "a", "--managed-turn-file", "b"]
+                `shouldSatisfy` isLeft
+
+        it "parses the internal managed-turn request file" do
+            parseArgs ["--managed-turn-file", "turn.json"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json") })
 
         it "requires a positive compaction threshold" do
             parseArgs ["--compact-threshold", "0"] `shouldSatisfy` isLeft
@@ -203,6 +210,26 @@ spec = do
             resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False False
                 `shouldBe` DenyMutating
 
+        it "keeps managed non-TTY turns in remote prompt mode" do
+            resolveApprovalPolicy
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json")
+                    , optNoYolo = True
+                    }
+                False
+                False
+                `shouldBe` PromptMutating
+
+        it "keeps explicitly denied managed turns non-mutating" do
+            resolveApprovalPolicy
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json")
+                    , optManagedDenyMutations = True
+                    }
+                False
+                False
+                `shouldBe` DenyMutating
+
         it "does not auto-approve a piped interactive REPL" do
             resolveApprovalPolicy defaultCliOptions False False
                 `shouldBe` DenyMutating
@@ -240,10 +267,13 @@ spec = do
             defaultEffortFor ClaudeCodeProvider `shouldBe` "xhigh"
 
     describe "isOneShot" do
-        it "is true for -p and --prompt-file" do
+        it "is true for text, prompt-file, and managed-turn-file input" do
             isOneShot defaultCliOptions `shouldBe` False
             isOneShot defaultCliOptions { optPrompt = Just "x" } `shouldBe` True
             isOneShot defaultCliOptions { optPromptFile = Just (fromFilePath "x.md") } `shouldBe` True
+            isOneShot defaultCliOptions
+                { optManagedTurnFile = Just (fromFilePath "turn.json") }
+                `shouldBe` True
 
 isLeft :: Either a b -> Bool
 isLeft = \case
