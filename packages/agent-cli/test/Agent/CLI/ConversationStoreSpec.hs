@@ -3,7 +3,7 @@ module Agent.CLI.ConversationStoreSpec (spec) where
 import Agent.CLI.Session.ConversationStore
 import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
-import Control.Concurrent.Async (concurrently)
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -98,7 +98,9 @@ spec = do
         it "coalesces concurrent hydration and safely re-evicts" do
             loads <- newIORef (0 :: Int)
             firstEntered <- newEmptyMVar
+            secondEntered <- newEmptyMVar
             releaseFirst <- newEmptyMVar
+            releaseSecond <- newEmptyMVar
             let items = [messageItem "shared"]
                 checkpoint = TranscriptCheckpoint "turn:1" do
                     modifyIORef' loads (+ 1)
@@ -108,17 +110,25 @@ spec = do
                     takeMVar releaseFirst
                     pure transcript
                 secondReader transcript = do
-                    putMVar releaseFirst ()
+                    putMVar secondEntered ()
+                    takeMVar releaseSecond
                     pure transcript
             store <- newColdConversationStore Nothing checkpoint []
 
-            (first, second) <- concurrently
-                (withConversationTranscript store firstReader)
-                (takeMVar firstEntered
-                    >> withConversationTranscript store secondReader)
-
-            first `shouldBe` items
-            second `shouldBe` items
+            withAsync
+                    (withConversationTranscript store firstReader)
+                    \firstReaderAsync -> do
+                takeMVar firstEntered
+                withAsync
+                        (withConversationTranscript store secondReader)
+                        \secondReaderAsync -> do
+                    takeMVar secondEntered
+                    putMVar releaseFirst ()
+                    wait firstReaderAsync `shouldReturn` items
+                    conversationResidency store
+                        `shouldReturn` ConversationResident
+                    putMVar releaseSecond ()
+                    wait secondReaderAsync `shouldReturn` items
             readIORef loads `shouldReturn` 1
             conversationResidency store `shouldReturn` ConversationCold
 
