@@ -50,6 +50,7 @@ module Agent.CLI.TUI.App
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
+    , wrapFullscreenKeyboardVty
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
@@ -118,7 +119,11 @@ import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
-    ( kittyCtrlVCsiBodies
+    ( TerminalCapabilities(..)
+    , detectTerminalCapabilities
+    , kittyCtrlVCsiBodies
+    , kittyKeyboardDisambiguatePush
+    , kittyKeyboardPop
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     )
@@ -206,7 +211,7 @@ import Control.Concurrent.STM
 import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, throwIO, tryAny)
+import Control.Exception.Safe (finally, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -574,6 +579,27 @@ fullscreenVtyConfig =
                ]
         }
 
+-- | Enable the smallest Kitty keyboard protocol mode needed for modified
+-- printable keys such as Cmd+V. The mode is tied to the Vty lifecycle so
+-- Brick suspension pops it before handing the terminal to another process and
+-- a rebuilt Vty pushes it again on resume.
+wrapFullscreenKeyboardVty :: Bool -> V.Vty -> IO V.Vty
+wrapFullscreenKeyboardVty enabled vty
+    | not enabled = pure vty
+    | otherwise = do
+        emit kittyKeyboardDisambiguatePush
+            `onException` V.shutdown vty
+        pure vty
+            { V.shutdown = do
+                alreadyShutdown <- V.isShutdown vty
+                unless alreadyShutdown $
+                    emit kittyKeyboardPop `finally` V.shutdown vty
+            }
+  where
+    emit =
+        V.outputByteBuffer (V.outputIface vty)
+            . TextEncoding.encodeUtf8
+
 requestFullscreenPermission
     :: FullscreenRuntime
     -> ToolCall
@@ -674,6 +700,7 @@ runFullscreen runtime workerAction = do
     history <- readReplHistory
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
     initialClock <- getMonotonicTimeNSec
+    terminal <- detectTerminalCapabilities stdout
     let buildVty = do
             vty <- Vty.mkVty fullscreenVtyConfig
             let output = V.outputIface vty
@@ -690,6 +717,7 @@ runFullscreen runtime workerAction = do
             when (V.supportsMode output V.Hyperlink) $
                 V.setMode output V.Hyperlink True
             wrapNativePreviewVty runtime vty
+                >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
     initialVty <- buildVty
     let
         initialState =
