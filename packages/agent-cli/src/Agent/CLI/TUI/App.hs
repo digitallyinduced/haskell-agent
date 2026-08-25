@@ -18,6 +18,8 @@ module Agent.CLI.TUI.App
     , initialFullscreenAppState
     , motionDemandFor
     , lambdaArtWidget
+    , quickStartRows
+    , quickStartVisible
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , newFullscreenInputBuffer
@@ -1350,6 +1352,18 @@ activateControl = \case
         Composer.handlePromptControlClick
             applyLocalUiEventWith
             ReplChooseAccount
+    QuickStartWorktree ->
+        activateQuickStartCommand "/worktree"
+    QuickStartResume ->
+        activateQuickStartCommand "/resume"
+    QuickStartCommands ->
+        applyLocalUiEventWith
+            (UiSetDraft "/" 1)
+            (applyUiEvent (UiFocusChanged FocusComposer))
+    QuickStartModel ->
+        Composer.handlePromptControlClick
+            applyLocalUiEventWith
+            ReplChooseModel
     ChoiceRow index ->
         confirmChoiceAt index
     ResumeRow sessionId ->
@@ -1361,15 +1375,33 @@ activateControl = \case
     _ ->
         pure ()
 
+activateQuickStartCommand :: Text -> EventM Name AppState ()
+activateQuickStartCommand command =
+    Composer.handlePromptControlClick
+        applyLocalUiEventWith
+        (const (ReplText command))
+
 isInteractiveControl :: Name -> Bool
 isInteractiveControl = \case
     ComposerModel -> True
     ComposerEffort -> True
     ComposerMode -> True
     ComposerAccount -> True
+    QuickStartWorktree -> True
+    QuickStartResume -> True
+    QuickStartCommands -> True
+    QuickStartModel -> True
     ChoiceRow _ -> True
     ResumeRow _ -> True
     CodeCopy _ _ -> True
+    _ -> False
+
+isQuickStartControl :: Name -> Bool
+isQuickStartControl = \case
+    QuickStartWorktree -> True
+    QuickStartResume -> True
+    QuickStartCommands -> True
+    QuickStartModel -> True
     _ -> False
 
 openMarkdownLink :: Text -> EventM Name AppState ()
@@ -2267,7 +2299,21 @@ conversationReserveWidgets = \case
 
 drawEmptyConversation :: AppState -> Widget Name
 drawEmptyConversation state =
-    center (lambdaArtWidget frame)
+    B.Widget B.Greedy B.Greedy do
+        context <- B.getContext
+        let width = context.availWidth
+            height = context.availHeight
+        B.render $
+            if quickStartVisible width height
+                then
+                    center $
+                        vBox
+                            [ vLimit
+                                (max 8 (height - quickStartReservedRows))
+                                (hCenter (lambdaArtWidget frame))
+                            , hCenter (drawQuickStartPanel state)
+                            ]
+                else center (lambdaArtWidget frame)
   where
     frame
         | userActionPending state = 0
@@ -2275,6 +2321,48 @@ drawEmptyConversation state =
             MotionFull -> state.appMotionElapsedMillis `div` 160
             MotionReduced -> 0
             MotionOff -> 0
+
+quickStartReservedRows :: Int
+quickStartReservedRows = 9
+
+quickStartVisible :: Int -> Int -> Bool
+quickStartVisible width height =
+    width >= 48 && height >= 20
+
+quickStartRows :: [(Name, Text, Text)]
+quickStartRows =
+    [ (QuickStartWorktree, "New worktree", "/worktree")
+    , (QuickStartResume, "Resume session", "/resume")
+    , (QuickStartCommands, "Browse commands", "/")
+    , (QuickStartModel, "Manage models", "/model")
+    ]
+
+drawQuickStartPanel :: AppState -> Widget Name
+drawQuickStartPanel state =
+    hLimit 44 $
+        vBox
+            [ withAttr Theme.headingAttr $
+                hCenter (txt "What would you like to do?")
+            , padTop (Pad 1) $
+                vBox (map drawQuickStartRow quickStartRows)
+            , padTop (Pad 1) $
+                withAttr Theme.mutedAttr $
+                    hCenter (txt "Tip: Type / to browse commands and skills.")
+            ]
+  where
+    drawQuickStartRow (name, label, command) =
+        clickable name $
+            case Composer.controlInteractionAttr state name of
+                Just attr -> forceAttr attr row
+                Nothing -> row
+      where
+        row =
+            hBox
+                [ withAttr Theme.controlLinkAttr (txt ("  " <> label))
+                , vLimit 1 (fill ' ')
+                , withAttr Theme.mutedAttr (txt command)
+                , txt "  "
+                ]
 
 drawBlock :: AppState -> UiBlock -> Widget Name
 drawBlock state block =
@@ -3554,6 +3642,9 @@ handleEventInner event = case event of
                                 Composer.handleControlMouseDown ComposerMode
                             (ComposerAccount, V.BLeft) ->
                                 Composer.handleControlMouseDown ComposerAccount
+                            (name, V.BLeft)
+                                | isQuickStartControl name ->
+                                    Composer.handleControlMouseDown name
                             (CodeCopy blockId codeIndex, V.BLeft) ->
                                 Composer.handleControlMouseDown
                                     (CodeCopy blockId codeIndex)

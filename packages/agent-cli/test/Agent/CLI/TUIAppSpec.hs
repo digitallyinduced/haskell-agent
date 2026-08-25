@@ -18,6 +18,8 @@ import Agent.CLI.TUI.App
     , fullscreenSurface
     , motionDemandFor
     , lambdaArtWidget
+    , quickStartRows
+    , quickStartVisible
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , onboardingVisibleRowIndices
@@ -32,6 +34,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , Name(..)
     , TextInputMode(..)
     , TextOverlay(..)
     )
@@ -219,6 +222,20 @@ spec = do
                         renderWidget Nothing [lambdaArtWidget 0] (5, 3)
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
+
+        it "shows quick-start actions only when the empty pane has room" do
+            quickStartVisible 100 30 `shouldBe` True
+            quickStartVisible 47 30 `shouldBe` False
+            quickStartVisible 100 19 `shouldBe` False
+
+        it "surfaces the existing high-value startup commands" do
+            quickStartRows
+                `shouldBe`
+                    [ (QuickStartWorktree, "New worktree", "/worktree")
+                    , (QuickStartResume, "Resume session", "/resume")
+                    , (QuickStartCommands, "Browse commands", "/")
+                    , (QuickStartModel, "Manage models", "/model")
+                    ]
 
         it "paints an exact terminal-sized backing surface" do
             let image =
