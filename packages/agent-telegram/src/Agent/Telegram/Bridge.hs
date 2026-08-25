@@ -22,7 +22,7 @@ import Agent.Telegram.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
-import Control.Monad (forM_, void, when)
+import Control.Monad (foldM, forM_, void, when)
 import Data.Aeson
     ( FromJSON(..)
     , Result(..)
@@ -34,12 +34,6 @@ import Data.Aeson
     , (.:?)
     )
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
-    ( IORef
-    , modifyIORef'
-    , newIORef
-    , readIORef
-    )
 import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -114,38 +108,39 @@ withTelegramBridge env action =
     withAsync (bridgeLoop env) (const action)
 
 bridgeLoop :: TelegramBridgeEnv -> IO ()
-bridgeLoop env = do
-    seen <- newIORef Set.empty
-    go seen (0 :: Int)
+bridgeLoop env = go Set.empty (0 :: Int)
   where
     go seen tick = do
-        processBridgeRequests env seen
+        seen' <- processBridgeRequests env seen
         when (tick `mod` 40 == 0) (publishActivity env)
         threadDelay 100_000
-        go seen (tick + 1)
+        go seen' (tick + 1)
 
-processBridgeRequests :: TelegramBridgeEnv -> IORef (Set.Set FilePath) -> IO ()
-processBridgeRequests env seenRef = do
+processBridgeRequests
+    :: TelegramBridgeEnv
+    -> Set.Set FilePath
+    -> IO (Set.Set FilePath)
+processBridgeRequests env seen = do
     let directory =
             unsafeToFilePath
                 (managedBridgeRequestsDirectory env.telegramBridgeRequest)
     files <- try @_ @SomeException (listDirectory directory) >>= \case
         Left _ -> pure []
         Right values -> pure values
-    seen <- readIORef seenRef
     let published =
             filter
                 (\name ->
                     takeExtension name == ".json"
                         && name `Set.notMember` seen)
                 files
-    forM_ published \name -> do
-        let path = directory </> name
-        decodeBridgeRequest path >>= \case
-            Nothing -> pure ()
-            Just request -> do
-                modifyIORef' seenRef (Set.insert name)
-                processBridgeRequest env request
+        processOne seen name = do
+            let path = directory </> name
+            decodeBridgeRequest path >>= \case
+                Nothing -> pure seen
+                Just request -> do
+                    processBridgeRequest env request
+                    pure (Set.insert name seen)
+    foldM processOne seen published
 
 decodeBridgeRequest :: FilePath -> IO (Maybe ManagedBridgeRequest)
 decodeBridgeRequest path =
