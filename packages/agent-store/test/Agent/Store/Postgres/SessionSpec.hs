@@ -105,6 +105,54 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected stored session: " <> show other)
+                            let metadata2 = metadata
+                                    { sessionMetadataKey = "session-2"
+                                    , sessionMetadataTitle = "second"
+                                    }
+                                turn2 = turn
+                                    { sessionTurnUserText = "batch load"
+                                    }
+                            createSession pool metadata2
+                                `shouldReturn` Right True
+                            appendSessionTurn pool turn2 metadata2
+                                `shouldReturn` Right True
+                            loadSessions pool [] `shouldReturn` []
+                            loadSessions pool
+                                [ "session-2"
+                                , "missing"
+                                , "session-1"
+                                , "session-2"
+                                ] >>= \results ->
+                                    fmap
+                                        (fmap
+                                            (fmap
+                                                (\stored ->
+                                                    ( stored.storedMetadata.sessionMetadataKey
+                                                    , map
+                                                        ( (.sessionTurnUserText)
+                                                            . (.storedTurn)
+                                                        )
+                                                        stored.storedTurns
+                                                    ))))
+                                        results
+                                        `shouldBe`
+                                            [ Right
+                                                (Just
+                                                    ( "session-2"
+                                                    , ["batch load"]
+                                                    ))
+                                            , Right Nothing
+                                            , Right
+                                                (Just
+                                                    ( "session-1"
+                                                    , ["/compact"]
+                                                    ))
+                                            , Right
+                                                (Just
+                                                    ( "session-2"
+                                                    , ["batch load"]
+                                                    ))
+                                            ]
                             searchConversationTurns pool "compact" 10 >>= \case
                                 Right [match] -> do
                                     match.searchSessionId `shouldBe` "session-1"
