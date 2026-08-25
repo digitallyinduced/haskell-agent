@@ -1,9 +1,11 @@
 -- | Fullscreen prompt composer rendering, editing, and input buffering.
 module Agent.CLI.TUI.Composer
     ( ComposerEscapeAction(..)
+    , KillDirection(..)
     , activateSlashAt
     , appendFullscreenInput
     , applyComposerUiEvent
+    , combineKill
     , composerEscapeAction
     , composerScrollbackAvailable
     , controlAttr
@@ -19,13 +21,16 @@ module Agent.CLI.TUI.Composer
     , handleEffortControlClick
     , handlePromptControlClick
     , immediateBtwQuestion
+    , isKillKey
     , newFullscreenInputBuffer
     , prepareBracketedPaste
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
+    , slashMenuWindowStart
     , takeFullscreenInput
     , takeFullscreenInputOr
+    , verticalCursorMove
     , wrapDraft
     , wrapDraftWindow
     ) where
@@ -100,8 +105,8 @@ drawSlashMenu state = case currentSlashMenu state of
             selected
                 | count == 0 = 0
                 | otherwise = state.appSlashIndex `mod` count
-            start = max 0 (min selected (max 0 (count - 6)))
-            suggestions = take 6 (drop start allSuggestions)
+            start = slashMenuWindowStart visibleSlashRows count selected
+            suggestions = take visibleSlashRows (drop start allSuggestions)
         in padLeftRight 2 $
             withAttr Theme.borderAttr $
                 withBorderStyle unicodeRounded $
@@ -114,11 +119,25 @@ drawSlashMenu state = case currentSlashMenu state of
   where
     menuLabel menu =
         case menu.slashMenuSuggestions of
-            suggestion : _
-                | "$" `Text.isPrefixOf`
-                    suggestion.slashSuggestionDisplay ->
+            suggestions@(_ : _)
+                | all
+                    (("$" `Text.isPrefixOf`)
+                        . (.slashSuggestionDisplay))
+                    suggestions ->
                         " Skills "
             _ -> " Commands "
+
+visibleSlashRows :: Int
+visibleSlashRows = 6
+
+-- | First visible row of the slash menu window. The selection stays roughly
+-- centered once the menu scrolls, so moving through a long menu shifts the
+-- window at the edges instead of pinning the highlight to the first row.
+slashMenuWindowStart :: Int -> Int -> Int -> Int
+slashMenuWindowStart visible count selected
+    | count <= visible = 0
+    | otherwise =
+        max 0 (min (selected - (visible - 1) `div` 2) (count - visible))
 
 drawSlashRow :: Int -> Int -> SlashSuggestion -> Widget Name
 drawSlashRow selected index suggestion =
@@ -166,6 +185,14 @@ drawComposer appState =
         context <- getContext
         let focused = state.uiFocus == FocusComposer
             attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
+            draftWidth = max 1 (context.availWidth - composerDraftChromeWidth)
+            draftLayout@(draftRows, _) =
+                wrapDraftWindow
+                    maxComposerRows
+                    draftWidth
+                    state.uiDraft
+                    state.uiCursor
+            bodyHeight = min maxComposerRows (length draftRows)
             leading =
                 filter (not . Text.null)
                     [ if state.uiPrompt.promptAttachments > 0
@@ -187,14 +214,6 @@ drawComposer appState =
                     then Nothing
                     else Just $
                         hBox (intersperse (txt " · ") (map txt leading))
-            draftWidth = max 1 (context.availWidth - composerDraftChromeWidth)
-            draftLayout@(draftRows, _) =
-                wrapDraftWindow
-                    maxComposerRows
-                    draftWidth
-                    state.uiDraft
-                    state.uiCursor
-            bodyHeight = min maxComposerRows (length draftRows)
             editor =
                 clickable ComposerArea $
                     padLeftRight 1 $
@@ -222,6 +241,12 @@ drawComposer appState =
   where
     state = appState.appUi
 
+-- | Columns consumed around the draft text: the two border columns, the
+-- one-column padding on each side, and the two-cell @❯ @ prompt. The draft is
+-- wrapped once in 'drawComposer' at the remaining width and the rows are
+-- passed to 'renderDraft', so body height and cursor placement always agree;
+-- drift between this constant and the actual chrome only changes the wrap
+-- width.
 composerDraftChromeWidth :: Int
 composerDraftChromeWidth = 6
 
@@ -284,6 +309,9 @@ controlInteractionAttr state name
     | otherwise =
         Nothing
 
+-- | Render the precomputed bounded draft layout. Wrapping happens once in
+-- 'drawComposer', so the visible height and cursor row agree without scanning
+-- the complete draft.
 renderDraft
     :: Bool
     -> Int
@@ -555,16 +583,23 @@ handleComposerKey
     case event of
         _ | Bridge.isSendNowKey event ->
             sendNow
-        V.EvKey (V.KChar 'q') [V.MCtrl] ->
-            submitRaw ReplEof
-        V.EvKey (V.KChar 'd') [V.MCtrl]
-            | Text.null ui.uiDraft ->
+        V.EvKey (V.KChar 'q') modifiers
+            | V.MCtrl `elem` modifiers ->
+                submitRaw ReplEof
+        V.EvKey (V.KChar 'd') modifiers
+            | V.MCtrl `elem` modifiers
+            , Text.null ui.uiDraft ->
                 submitRaw ReplEof
         V.EvKey (V.KChar 'd') modifiers
             | V.MCtrl `elem` modifiers ->
                 deleteAfter
-        V.EvKey (V.KChar 'c') [V.MCtrl] ->
-            void handleCtrlC
+        V.EvKey (V.KChar 'd') modifiers
+            | V.MMeta `elem` modifiers
+                || V.MAlt `elem` modifiers ->
+                killWordAfter
+        V.EvKey (V.KChar 'c') modifiers
+            | V.MCtrl `elem` modifiers ->
+                void handleCtrlC
         V.EvKey V.KEsc [] ->
             case composerEscapeAction
                 ui.uiAwaitingInput
@@ -584,13 +619,17 @@ handleComposerKey
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash (-1) (length menu.slashMenuSuggestions)
         V.EvKey V.KUp [] ->
-            moveHistory 1
+            case verticalCursorMove (-1) ui.uiDraft ui.uiCursor of
+                Just cursor -> setCursor cursor
+                Nothing -> moveHistory 1
         V.EvKey V.KDown []
             | Just menu <- slashMenu
             , not (null menu.slashMenuSuggestions) ->
                 moveSlash 1 (length menu.slashMenuSuggestions)
         V.EvKey V.KDown [] ->
-            moveHistory (-1)
+            case verticalCursorMove 1 ui.uiDraft ui.uiCursor of
+                Just cursor -> setCursor cursor
+                Nothing -> moveHistory (-1)
         V.EvKey (V.KChar '\t') [] ->
             case slashMenu of
                 Just menu -> acceptSlash menu
@@ -600,8 +639,9 @@ handleComposerKey
                             ui
                             state.appHistoryWindow) $
                         modifyUi (UiFocusChanged FocusScrollback)
-        V.EvKey V.KEnter [V.MShift] ->
-            insertText "\n"
+        V.EvKey V.KEnter modifiers
+            | V.MShift `elem` modifiers ->
+                insertText "\n"
         V.EvKey V.KEnter [] ->
             case slashMenu of
                 Just menu -> handleSlashEnter menu
@@ -609,18 +649,17 @@ handleComposerKey
         V.EvKey V.KBS [] ->
             deleteBefore
         V.EvKey V.KBS modifiers
-            | V.MMeta `elem` modifiers
-                || V.MAlt `elem` modifiers ->
-                deletePreviousWord
+            | any (`elem` modifiers) [V.MMeta, V.MAlt, V.MCtrl] ->
+                killPreviousWord
         V.EvKey (V.KChar 'w') modifiers
             | V.MCtrl `elem` modifiers ->
-                deletePreviousWord
+                killPreviousWord
         V.EvKey (V.KChar 'u') modifiers
             | V.MCtrl `elem` modifiers ->
-                deleteCurrentLine
+                killLineStart
         V.EvKey (V.KChar 'k') modifiers
             | V.MCtrl `elem` modifiers ->
-                deleteLineEnd
+                killLineEnd
         V.EvKey (V.KChar 'y') modifiers
             | V.MCtrl `elem` modifiers ->
                 insertKillBuffer
@@ -641,9 +680,22 @@ handleComposerKey
         V.EvKey (V.KChar 'b') modifiers
             | V.MCtrl `elem` modifiers ->
                 moveCursor (-1)
+        V.EvKey (V.KChar 'b') modifiers
+            | V.MMeta `elem` modifiers
+                || V.MAlt `elem` modifiers ->
+                setCursor (moveWordLeft ui.uiDraft ui.uiCursor)
         V.EvKey (V.KChar 'f') modifiers
             | V.MCtrl `elem` modifiers ->
                 moveCursor 1
+        V.EvKey (V.KChar 'f') modifiers
+            | V.MMeta `elem` modifiers
+                || V.MAlt `elem` modifiers ->
+                setCursor (moveWordRight ui.uiDraft ui.uiCursor)
+        V.EvKey (V.KChar '_') modifiers
+            | V.MCtrl `elem` modifiers ->
+                undoEdit
+        V.EvKey (V.KChar '\US') _ ->
+            undoEdit
         V.EvKey (V.KChar 'v') modifiers
             | V.MCtrl `elem` modifiers
                 || V.MMeta `elem` modifiers -> do
@@ -696,6 +748,9 @@ handleComposerKey
                                 (Just (progressNotice "Reading clipboard…")))
                     submitRaw replLine
         _ -> pure ()
+    -- Only a kill directly followed by another kill accumulates into the
+    -- kill buffer; any other key breaks the chain.
+    modify' \current -> current { appKillChain = isKillKey event }
   where
     startDictation = do
         current <- get
@@ -731,6 +786,7 @@ handleComposerKey
                     current
                         { appSlashIndex = 0
                         , appSlashDismissed = False
+                        , appUndo = []
                         }
                 liftIO (state.appRuntime.runtimeBtw question)
             Nothing ->
@@ -788,6 +844,7 @@ handleComposerKey
                                 , appHistoryDraft = ""
                                 , appSlashIndex = 0
                                 , appSlashDismissed = False
+                                , appUndo = []
                                 }
                     liftIO state.appRuntime.runtimeCancel
                     vScrollToEnd (viewportScroll ConversationViewport)
@@ -805,6 +862,12 @@ handleComposerKey
                 current
                     { appSlashIndex = 0
                     , appSlashDismissed = False
+                    , appUndo =
+                        -- A submitted prompt leaves an empty composer; its
+                        -- edit steps are no longer undoable.
+                        if clearDraft || maybe False (const True) display
+                            then []
+                            else current.appUndo
                     }
         case event of
             Nothing -> modify' update
@@ -823,8 +886,16 @@ handleComposerKey
                 liftIO state.appRuntime.runtimeCancel
                 modifyUi
                     (UiSetNotice (Just (progressNotice "Cancelling…")))
-            else
-                modifyUi (UiSetDraft "" 0)
+            else do
+                -- Esc must not destroy a typed draft irrecoverably: stash it
+                -- in the kill buffer so Ctrl-Y (or Ctrl-_) restores it.
+                let draft = state.appUi.uiDraft
+                if Text.null draft
+                    then modifyUi (UiSetDraft "" 0)
+                    else modifyUiWithKill
+                        KillBackward
+                        draft
+                        (UiSetDraft "" 0)
 
     insertText inserted = do
         state <- get
@@ -865,7 +936,7 @@ handleComposerKey
             modifyUiResetSlash
                 (UiSetDraft (before <> after) ui.uiCursor)
 
-    deletePreviousWord = do
+    killPreviousWord = do
         state <- get
         let old = state.appUi.uiDraft
             oldCursor = state.appUi.uiCursor
@@ -873,9 +944,19 @@ handleComposerKey
                 deleteWordBefore state.appUi.uiDraft state.appUi.uiCursor
             killed =
                 Text.take (oldCursor - cursor) (Text.drop cursor old)
-        modifyUiWithKill killed (UiSetDraft next cursor)
+        modifyUiWithKill KillBackward killed (UiSetDraft next cursor)
 
-    deleteLineEnd = do
+    killWordAfter = do
+        state <- get
+        let old = state.appUi.uiDraft
+            oldCursor = state.appUi.uiCursor
+            (next, cursor) =
+                deleteWordAfter state.appUi.uiDraft state.appUi.uiCursor
+            killedLength = Text.length old - Text.length next
+            killed = Text.take killedLength (Text.drop oldCursor old)
+        modifyUiWithKill KillForward killed (UiSetDraft next cursor)
+
+    killLineEnd = do
         state <- get
         let old = state.appUi.uiDraft
             oldCursor = state.appUi.uiCursor
@@ -883,9 +964,9 @@ handleComposerKey
                 deleteToLineEnd state.appUi.uiDraft state.appUi.uiCursor
             killedLength = Text.length old - Text.length next
             killed = Text.take killedLength (Text.drop oldCursor old)
-        modifyUiWithKill killed (UiSetDraft next cursor)
+        modifyUiWithKill KillForward killed (UiSetDraft next cursor)
 
-    deleteCurrentLine = do
+    killLineStart = do
         state <- get
         let old = state.appUi.uiDraft
             oldCursor = state.appUi.uiCursor
@@ -893,7 +974,21 @@ handleComposerKey
                 deleteToLineStart state.appUi.uiDraft state.appUi.uiCursor
             killed =
                 Text.take (oldCursor - cursor) (Text.drop cursor old)
-        modifyUiWithKill killed (UiSetDraft next cursor)
+        modifyUiWithKill KillBackward killed (UiSetDraft next cursor)
+
+    undoEdit = do
+        state <- get
+        case state.appUndo of
+            [] -> pure ()
+            (text, cursor) : rest ->
+                applyUiEvent (UiSetDraft text cursor) \current ->
+                    current
+                        { appUndo = rest
+                        , appSlashIndex = 0
+                        , appSlashDismissed = False
+                        , appHistoryIndex = Nothing
+                        , appHistoryDraft = text
+                        }
 
     insertKillBuffer = do
         state <- get
@@ -921,9 +1016,10 @@ handleComposerKey
     modifyUi uiEvent =
         applyUiEvent uiEvent id
 
-    modifyUiResetSlash uiEvent =
+    modifyUiResetSlash uiEvent = do
+        old <- get
         applyUiEvent uiEvent \state ->
-            state
+            (pushUndo old uiEvent state)
                 { appSlashIndex = 0
                 , appSlashDismissed = False
                 , appHistoryIndex = Nothing
@@ -933,18 +1029,40 @@ handleComposerKey
                         _ -> state.appHistoryDraft
                 }
 
-    modifyUiWithKill killed uiEvent =
+    modifyUiWithKill direction killed uiEvent = do
+        old <- get
         applyUiEvent uiEvent \state ->
-            state
+            (pushUndo old uiEvent state)
                 { appSlashIndex = 0
                 , appSlashDismissed = False
-                , appKillBuffer = killed
+                , appKillBuffer =
+                    if Text.null killed
+                        then state.appKillBuffer
+                        else if old.appKillChain
+                            then combineKill
+                                direction
+                                killed
+                                state.appKillBuffer
+                            else killed
                 , appHistoryIndex = Nothing
                 , appHistoryDraft =
                     case uiEvent of
                         UiSetDraft text _ -> text
                         _ -> state.appHistoryDraft
                 }
+
+    -- Record the pre-edit draft for Ctrl-_ when the edit changes the text.
+    pushUndo old uiEvent state =
+        case uiEvent of
+            UiSetDraft text _
+                | text /= old.appUi.uiDraft ->
+                    state
+                        { appUndo =
+                            take undoLimit
+                                ((old.appUi.uiDraft, old.appUi.uiCursor)
+                                    : state.appUndo)
+                        }
+            _ -> state
 
     moveHistory delta = do
         state <- get
@@ -1005,6 +1123,34 @@ handleComposerKey
                 menu.slashMenuReplaceStart
                     + Text.length suggestion.slashSuggestionReplacement
         modifyUiResetSlash (UiSetDraft next cursor)
+
+-- | Whether a kill removed text before or after the cursor.
+data KillDirection = KillBackward | KillForward
+    deriving (Eq, Show)
+
+-- | Merge a new kill into the existing kill buffer readline-style: backward
+-- kills prepend, forward kills append, so a chain of kills restores as one
+-- contiguous block on Ctrl-Y.
+combineKill :: KillDirection -> Text -> Text -> Text
+combineKill KillBackward killed buffer = killed <> buffer
+combineKill KillForward killed buffer = buffer <> killed
+
+-- | Keys that store deleted text in the kill buffer. Plain Backspace and
+-- Ctrl-D delete without killing, matching readline.
+isKillKey :: V.Event -> Bool
+isKillKey = \case
+    V.EvKey V.KBS modifiers ->
+        any (`elem` modifiers) [V.MMeta, V.MAlt, V.MCtrl]
+    V.EvKey (V.KChar 'w') modifiers -> V.MCtrl `elem` modifiers
+    V.EvKey (V.KChar 'u') modifiers -> V.MCtrl `elem` modifiers
+    V.EvKey (V.KChar 'k') modifiers -> V.MCtrl `elem` modifiers
+    V.EvKey (V.KChar 'd') modifiers ->
+        (V.MMeta `elem` modifiers || V.MAlt `elem` modifiers)
+            && V.MCtrl `notElem` modifiers
+    _ -> False
+
+undoLimit :: Int
+undoLimit = 200
 
 -- | Side questions are independent requests and should not wait behind the
 -- active turn's ordinary follow-up queue.

@@ -48,6 +48,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
+    , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
@@ -59,6 +60,8 @@ module Agent.CLI.TUI.App
     , wrapFullscreenKeyboardVty
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , applyStoredFullscreenWindowTitle
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
     , maskedSecretText
@@ -129,7 +132,9 @@ import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
+    , kittyAltCsiBodies
     , kittyCtrlCsiBodies
+    , kittyCtrlUnderscoreCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -169,6 +174,7 @@ import Agent.CLI.TUI.Motion
     , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , userActionPending
     )
@@ -368,6 +374,7 @@ newFullscreenRuntimeWithSyntaxLoader
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = const (pure ())
@@ -395,6 +402,7 @@ newFullscreenRuntimeWithSyntaxLoader
                 readIORef sessionActions >>= (.sessionCtrlC)
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
+            , runtimeWindowTitle = windowTitle
             , runtimeNativeProgress = nativeProgress
             , runtimeAgentSnapshot =
                 readIORef sessionActions >>= (.sessionAgentSnapshot)
@@ -554,8 +562,20 @@ emitUiEvent runtime event =
     enqueueAppEvent runtime (AppUi event)
 
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
-setFullscreenWindowTitle runtime =
-    enqueueAppEvent runtime . AppSetWindowTitle
+setFullscreenWindowTitle runtime title = do
+    writeIORef runtime.runtimeWindowTitle (Just title)
+    enqueueAppEvent runtime (AppSetWindowTitle title)
+
+-- | Brick/Vty owns the terminal, so titles must go through Vty output
+-- rather than stdout OSC writes.
+applyStoredFullscreenWindowTitle :: FullscreenRuntime -> V.Output -> IO ()
+applyStoredFullscreenWindowTitle runtime output =
+    readIORef runtime.runtimeWindowTitle
+        >>= mapM_ (writeOutputWindowTitle output)
+
+writeOutputWindowTitle :: V.Output -> Text -> IO ()
+writeOutputWindowTitle output title =
+    V.setOutputWindowTitle output (Text.unpack title)
 
 setFullscreenImagePreviews
     :: FullscreenRuntime
@@ -566,26 +586,48 @@ setFullscreenImagePreviews runtime images = do
     prepared <-
         if map fst previous == images
             then pure previous
-            else do
-                let next =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
-                -- ANSI previews force the sampled image during Brick drawing.
-                -- Build that sample here on the model worker instead of
-                -- stalling the Brick event/render thread.
-                unless runtime.runtimeNativeImagePreviews $
-                    mapM_
-                        (\(_, preview) ->
-                            void $
-                                pure $!
-                                    pixelAt preview.previewSample 0 0)
-                        next
-                pure next
+            else prepareFullscreenImagePreviews runtime images
     enqueueAppEvent runtime (AppSetImagePreviews prepared)
+
+-- | Move pending composer previews into the next submitted user message.
+commitFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+commitFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else prepareFullscreenImagePreviews runtime images
+    -- Submitted images use the ANSI renderer even when the transient overlay
+    -- used Kitty placement, so finish sampling before the Brick render thread.
+    mapM_
+        (\(_, preview) ->
+            void $ pure $! pixelAt preview.previewSample 0 0)
+        prepared
+    enqueueAppEvent runtime (AppCommitImagePreviews prepared)
+
+prepareFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO [(ImageAttachment, TuiImagePreview)]
+prepareFullscreenImagePreviews runtime images = do
+    let prepared =
+            mapMaybe
+                (\image ->
+                    case prepareTuiImagePreview image of
+                        Left _ -> Nothing
+                        Right preview -> Just (image, preview))
+                images
+    -- ANSI previews force the sampled image during Brick drawing. Build that
+    -- sample here on the model worker instead of stalling the render thread.
+    unless runtime.runtimeNativeImagePreviews $
+        mapM_
+            (\(_, preview) ->
+                void $ pure $! pixelAt preview.previewSample 0 0)
+            prepared
+    pure prepared
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -728,6 +770,19 @@ fullscreenVtyConfig =
                  , V.EvKey (V.KChar 'v') [V.MMeta]
                  )
                | body <- kittySuperVCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar '_') [V.MCtrl]
+                 )
+               | body <- kittyCtrlUnderscoreCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar character) [V.MMeta]
+                 )
+               | character <- ['b', 'd', 'f']
+               , body <- kittyAltCsiBodies character
                ]
         }
 
@@ -872,8 +927,13 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.Hyperlink True
             when (V.supportsMode output V.Focus) $
                 V.setMode output V.Focus True
-            wrapNativePreviewVty runtime vty
-                >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
+            wrapped <-
+                wrapNativePreviewVty runtime vty
+                    >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
+            applyStoredFullscreenWindowTitle
+                runtime
+                (V.outputIface wrapped)
+            pure wrapped
     initialVty <- buildVty
     let
         initialState =
@@ -1044,8 +1104,11 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
+        , appKillChain = False
+        , appUndo = []
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
+        , appSubmittedImagePreviews = Map.empty
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
         , appAgentHover = Nothing
@@ -3131,7 +3194,7 @@ drawBlock state target ui block =
                             , timestampedMessage
                                 Theme.userMutedAttr
                                 block.blockTimestamp
-                                (terminalTxtWrap block.blockBody)
+                                (submittedUserMessage state target block)
                             ]
             BlockAssistant ->
                 padLeft (Pad 3) $
@@ -3183,7 +3246,7 @@ drawBlock state target ui block =
                 withAttr Theme.mutedAttr
                     (terminalTxtWrap block.blockBody)
             BlockRecap ->
-                accentBlock
+                accentMarkdownBlock
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> "Recap")
                     (visibleBody block)
@@ -3218,6 +3281,39 @@ drawBlock state target ui block =
                 (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
+
+submittedUserMessage
+    :: AppState
+    -> AgentTarget
+    -> UiBlock
+    -> Widget Name
+submittedUserMessage state target block =
+    vBox $
+        [terminalTxtWrap block.blockBody]
+            <> case target of
+                AgentChild _ -> []
+                AgentRoot ->
+                    map submittedImage $
+                        Map.findWithDefault
+                            []
+                            block.blockId
+                            state.appSubmittedImagePreviews
+  where
+    submittedImage preview =
+        padTop (Pad 1) $
+            vBox
+                [ hLimit 36 (renderTuiImagePreview 36 12 preview)
+                , withAttr Theme.userMutedAttr $
+                    terminalTxt $
+                        "🖼 "
+                            <> preview.previewMime
+                            <> " · "
+                            <> Text.pack (show preview.previewSourceWidth)
+                            <> "×"
+                            <> Text.pack (show preview.previewSourceHeight)
+                            <> " · "
+                            <> formatImageSize preview.previewBytes
+                ]
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body
@@ -3996,7 +4092,30 @@ choiceRowColumns width label detail
 
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
-    initial <- get
+    stored <- get
+    viewportBounds <-
+        if stored.appAgentSelected == AgentRoot
+            then
+                lookupViewport ConversationViewport >>= \case
+                    Just (VP _ top (_, height) (_, contentHeight)) ->
+                        pure (Just (top, height, contentHeight))
+                    Nothing ->
+                        pure Nothing
+            else pure Nothing
+    let reconciledFollow =
+            if stored.appAgentSelected == AgentRoot
+                then
+                    Scroll.reconcileConversationFollow
+                        stored.appUi.uiFollow
+                        viewportBounds
+                else stored.appUi.uiFollow
+        initial =
+            stored
+                { appUi =
+                    stored.appUi
+                        { uiFollow = reconciledFollow
+                        }
+                }
     timestamp <- liftIO currentShortMessageTimestamp
     renderedContentHeight <-
         if any isSubmittedPrompt uiEvents
@@ -4089,6 +4208,7 @@ applyConversationUiEvent renderedContentHeight uiEvent state =
                 , appHistorySelectedBlock = Nothing
                 , appHistoryLiveStart = Nothing
                 , appNextHistoryBlockId = -1
+                , appSubmittedImagePreviews = Map.empty
                 }
         _ -> state
 
@@ -4295,6 +4415,7 @@ refreshNativeProgressKeepalive = do
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
+    stateBeforeEvent <- get
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     state <- get
@@ -4316,7 +4437,13 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
-    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+    when
+        ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && not
+                (turnCompletionRequiresRedraw
+                    stateBeforeEvent.appUi
+                    stateAfterMotionSync.appUi)
+        ) $
         continueWithoutRedraw
   where
     isMotionTick = \case
@@ -4418,6 +4545,29 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
+    AppEvent (AppCommitImagePreviews prepared) -> do
+        state <- get
+        let previews = map snd prepared
+            nextBlockId = BlockId state.appUi.uiNextBlockId
+            submitted =
+                if null previews
+                    then Map.delete
+                        nextBlockId
+                        state.appSubmittedImagePreviews
+                    else Map.insert
+                        nextBlockId
+                        previews
+                        state.appSubmittedImagePreviews
+        liftIO do
+            writeIORef state.appRuntime.runtimeImagePreviews []
+            modifyIORef'
+                state.appRuntime.runtimeImagePreviewRevision
+                (+ 1)
+        modify' \current ->
+            current
+                { appImagePreviews = []
+                , appSubmittedImagePreviews = submitted
+                }
     AppEvent (AppDictationFinished result) ->
         case result of
             Left message ->
@@ -4436,8 +4586,8 @@ handleEventInner event = case event of
                         Just $
                             successNotice "Dictation inserted."
     AppEvent (AppSetWindowTitle title) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeSetWindowTitle title)
+        vty <- getVtyHandle
+        liftIO (writeOutputWindowTitle (V.outputIface vty) title)
         modify' \current -> current { appWindowTitle = Just title }
     AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
         case highlighter of

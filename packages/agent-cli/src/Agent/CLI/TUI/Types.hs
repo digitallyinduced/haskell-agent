@@ -124,6 +124,7 @@ data AppEvent
     | AppSetModelIds ![Text]
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
@@ -185,6 +186,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeSetWindowTitle :: !(Text -> IO ())
+    , runtimeWindowTitle :: !(IORef (Maybe Text))
     , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
@@ -245,8 +247,14 @@ data AppState = AppState
     , appHistoryIndex :: !(Maybe Int)
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
+      -- | True while the previous composer key was a kill command, so a
+      -- consecutive kill accumulates into the kill buffer readline-style.
+    , appKillChain :: !Bool
+      -- | Editor undo log of (draft, cursor) states, most recent first.
+    , appUndo :: ![(Text, Int)]
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
+    , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
     , appAgentHover :: !(Maybe AgentHover)

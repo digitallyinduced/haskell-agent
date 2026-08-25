@@ -50,7 +50,6 @@ module Agent.CLI.Style
     , terminalOrange
     , terminalMuted
     , cliWindowTitle
-    , busyCliWindowTitle
     , setCliWindowTitle
     ) where
 
@@ -309,10 +308,6 @@ cliWindowTitle _cwd sessionTitle =
             | not (Text.null title)
             , title /= "untitled" -> title
         _ -> "New session"
-
--- | Prefix a session title with one frame of the busy animation.
-busyCliWindowTitle :: Text -> Text -> Text
-busyCliWindowTitle frame title = frame <> " " <> title
 
 -- | Set the terminal window title when @tty@ is 'True'; no-op otherwise.
 setCliWindowTitle :: Bool -> Handle -> Text -> IO ()
