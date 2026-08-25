@@ -2332,11 +2332,18 @@ drawLiveTodos ui =
                 vBox (map (vLimit 1 . drawLiveTodoLine) lines_)
 
 drawLiveTodoLine :: Text -> Widget Name
-drawLiveTodoLine line
-    | "… +" `Text.isPrefixOf` line =
-        withAttr Theme.mutedAttr (txt line)
-    | otherwise =
-        withAttr (todoStatusAttr (todoLineStatusFromText line)) (txt line)
+drawLiveTodoLine line =
+    Widget Fixed Fixed do
+        context <- getContext
+        let truncated = truncateDisplayText context.availWidth line
+            painted
+                | "… +" `Text.isPrefixOf` line =
+                    withAttr Theme.mutedAttr (terminalTxt truncated)
+                | otherwise =
+                    withAttr
+                        (todoStatusAttr (todoLineStatusFromText line))
+                        (terminalTxt truncated)
+        render painted
 
 todoLineStatusFromText :: Text -> TodoDisplayStatus
 todoLineStatusFromText line

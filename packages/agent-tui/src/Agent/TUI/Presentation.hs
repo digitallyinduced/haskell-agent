@@ -15,6 +15,7 @@ module Agent.TUI.Presentation
     , todoListFromToolOutput
     , summarizeToolCall
     , todoCallPreview
+    , todoListHasInProgress
     , todoListHasOpenWork
     , todoStatusGlyph
     , toolCallInput
@@ -208,6 +209,10 @@ todoListHasOpenWork :: [TodoDisplayLine] -> Bool
 todoListHasOpenWork =
     any \line ->
         line.todoLineStatus `elem` [TodoDisplayPending, TodoDisplayInProgress]
+
+todoListHasInProgress :: [TodoDisplayLine] -> Bool
+todoListHasInProgress =
+    any \line -> line.todoLineStatus == TodoDisplayInProgress
 
 -- | Replace the live list only when tool output is an actual checklist.
 -- Unrecognized output is ignored so ordinary tools cannot clobber it.
