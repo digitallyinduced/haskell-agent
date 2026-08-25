@@ -17,7 +17,11 @@ import Agent.CLI.Command
     , setReasoningEffort
     )
 import Agent.CLI.Interrupt (withTurnCancel)
-import Agent.CLI.Options (ApprovalPolicy)
+import Agent.CLI.Options
+    ( ApprovalPolicy
+    , normalizeReasoningEffortForDialect
+    , reasoningEffortsForDialect
+    )
 import Agent.CLI.Render
     ( RenderConfig(..)
     , putTextLn
@@ -46,6 +50,7 @@ import Agent.CLI.TUI.App
     ( emitUiEvent
     )
 import Agent.Loop (TokenUsage)
+import Agent.Dialect (DialectId, dialectId)
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -79,6 +84,7 @@ syncFullscreenPrompt env =
         attachments <- readLiveAttachments env.sessionConversation
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
+                (dialectId env.sessionDialect)
                 params
                 planState
                 policy
@@ -88,7 +94,8 @@ syncFullscreenPrompt env =
                 (length attachments)
 
 buildPromptState
-    :: ResponseCreateParams
+    :: DialectId
+    -> ResponseCreateParams
     -> PlanModeState
     -> ApprovalPolicy
     -> Text
@@ -96,10 +103,14 @@ buildPromptState
     -> TokenUsage
     -> Int
     -> PromptState
-buildPromptState params planState policy account accountSelectable usage attachments =
+buildPromptState activeDialect params planState policy account accountSelectable usage attachments =
     PromptState
         { promptModel = currentModel params
-        , promptEffort = currentEffort params
+        , promptEffort =
+            normalizeReasoningEffortForDialect
+                activeDialect
+                (currentEffort params)
+        , promptEffortOptions = reasoningEffortsForDialect activeDialect
         , promptMode =
             replModeLabel (replModeFromState planState policy)
         , promptAccount = account

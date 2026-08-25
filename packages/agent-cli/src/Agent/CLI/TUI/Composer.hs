@@ -59,7 +59,6 @@ import Agent.CLI.Input
     , truncateDisplayText
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
-import Agent.CLI.Options (reasoningEfforts)
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.CLI.TUI.Composer.Buffer
 import Agent.CLI.TUI.Composer.Edit
@@ -508,7 +507,7 @@ handleEffortControlClick applyUiEvent = do
         then handlePromptControlClick applyUiEvent ReplChooseEffort
         else if ui.uiRunning && not overlayOpen
             then do
-                let efforts = reasoningEfforts
+                let efforts = ui.uiPrompt.promptEffortOptions
                     current = ui.uiPrompt.promptEffort
                     initial = fromMaybe 0 (elemIndex current efforts)
                     choose = \case

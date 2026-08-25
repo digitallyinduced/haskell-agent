@@ -156,6 +156,7 @@ data PromptLimitStatus = PromptLimitStatus
 data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
+    , promptEffortOptions :: ![Text]
     , promptMode :: !Text
     , promptAccount :: !Text
     , promptAccountSelectable :: !Bool
@@ -250,6 +251,7 @@ initialUiState = UiState
     , uiPrompt = PromptState
         { promptModel = ""
         , promptEffort = ""
+        , promptEffortOptions = []
         , promptMode = "ask"
         , promptAccount = ""
         , promptAccountSelectable = False

@@ -86,6 +86,7 @@ import Agent.CLI.Models
 import Agent.CLI.Options
     ( defaultEffortFor,
       isOneShot,
+      normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
       CliOptions(optMotionMode, optNoYolo,
                  optYolo, optMaxConcurrentAgents, optCompactThreshold,
@@ -1615,9 +1616,14 @@ runAgentInitializedWithLock
             Nothing -> False
         legacySubagentTarget =
             sessionLegacySubagentTarget . fst <$> resumed
-        effort = fromMaybe
-            (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
-            options.optEffort
+        effort =
+            normalizeReasoningEffortForDialect dialectId $
+                fromMaybe
+                    (maybe
+                        (defaultEffortFor provider)
+                        (.metaEffort)
+                        (fst <$> resumed))
+                    options.optEffort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
         claudeBypassEnabled =

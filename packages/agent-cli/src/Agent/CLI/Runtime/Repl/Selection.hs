@@ -49,7 +49,10 @@ import Agent.CLI.Models
       ModelOption(modelTarget),
       ModelTarget(targetDialect, targetProvider, targetModelId,
                   targetConnectionId, targetWireModelId) )
-import Agent.CLI.Options ()
+import Agent.CLI.Options
+    ( normalizeReasoningEffortForDialect
+    , reasoningEffortsForDialect
+    )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
 import Agent.CLI.Progress ()
@@ -222,7 +225,11 @@ handleSelection
     Right ReplShowEffort -> do
         color <- resolveColor stdout
         params <- readIORef paramsRef
-        let message = "effort: " <> currentEffort params
+        let message =
+                "effort: "
+                    <> normalizeReasoningEffortForDialect
+                        (dialectId dialect)
+                        (currentEffort params)
         displayInfo message $
             Text.putStrLn
                 (roleMuted color (glyphSession <> message))
@@ -287,14 +294,27 @@ handleSelection
                 Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
     setEffort level = do
         color <- resolveColor stdout
-        setSessionEffort env level
-        displayInfo ("effort set to " <> level) $
-            Text.putStrLn
-                (roleMuted color
-                    (glyphOk <> "effort set to " <> level))
+        let supported = reasoningEffortsForDialect (dialectId dialect)
+        if level `elem` supported
+            then do
+                setSessionEffort env level
+                displayInfo ("effort set to " <> level) $
+                    Text.putStrLn
+                        (roleMuted color
+                            (glyphOk <> "effort set to " <> level))
+            else do
+                let message =
+                        "effort "
+                            <> level
+                            <> " is not supported by the active model"
+                displayError message $
+                    Text.hPutStrLn stderr (roleError color message)
     chooseEffort next = do
         params <- readIORef paramsRef
-        effortChoice fullscreen (currentEffort params) >>= \case
+        effortChoice
+            fullscreen
+            (reasoningEffortsForDialect (dialectId dialect))
+            (currentEffort params) >>= \case
             Nothing -> next
             Just level -> setEffort level >> next
     chooseModel next = do

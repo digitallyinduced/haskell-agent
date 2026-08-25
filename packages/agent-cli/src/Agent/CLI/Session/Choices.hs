@@ -17,7 +17,6 @@ import Agent.CLI.Models
     , initialPickerStateResolved
     )
 import Agent.Concurrent (mapConcurrentlyBounded)
-import Agent.CLI.Options (reasoningEfforts)
 import Agent.CLI.Style
     ( roleError
     , roleMuted
@@ -98,13 +97,13 @@ modelChoice
 
 effortChoice
     :: Maybe FullscreenRuntime
+    -> [Text]
     -> Text
     -> IO (Maybe Text)
-effortChoice fullscreen current = case fullscreen of
+effortChoice fullscreen efforts current = case fullscreen of
     Nothing -> pure Nothing
     Just runtime -> do
-        let efforts = reasoningEfforts
-            initial = fromMaybe 0 (elemIndex current efforts)
+        let initial = fromMaybe 0 (elemIndex current efforts)
         requestFullscreenChoice
             runtime
             "Reasoning effort"

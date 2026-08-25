@@ -351,6 +351,15 @@ spec = do
             slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
             slashCompletionCandidates "troffe/" "m" `shouldBe` ["medium", "max"]
             slashCompletionCandidates "troffe/" "n" `shouldBe` ["none"]
+            let grokCatalog = mkSlashCatalog GrokBuildDialect [] [] []
+            slashCompletionCandidatesWithCatalog
+                grokCatalog
+                "troffe/"
+                "m"
+                `shouldBe` ["medium"]
+            fmap (.slashUsage) (lookupSlashCommandIn grokCatalog "effort")
+                `shouldBe`
+                    Just "/effort [none|low|medium|high|xhigh]"
             slashCompletionCandidatesWithModels
                 ["grok-4.6", "grok-4.5", "grok-4.5-mini", "qwen-local"]
                 "m/"

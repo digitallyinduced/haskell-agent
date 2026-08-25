@@ -240,6 +240,7 @@ spec = do
                         setModel "gpt-5.6-sol" defaultResponseCreateParams
                 replacement =
                     buildPromptState
+                        CodexDialect
                         openAiParams
                         PlanInactive
                         PromptMutating
@@ -254,7 +255,24 @@ spec = do
                                 reduceUi (UiSetPrompt stalePrompt) initialUiState
             running.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
             running.uiPrompt.promptEffort `shouldBe` "medium"
+            running.uiPrompt.promptEffortOptions
+                `shouldBe` ["none", "low", "medium", "high", "xhigh", "max"]
             running.uiPrompt.promptAccount `shouldBe` "openai@example.com"
+
+        it "omits max for the Grok effort control" do
+            let prompt =
+                    buildPromptState
+                        GrokBuildDialect
+                        (setReasoningEffort "max" defaultResponseCreateParams)
+                        PlanInactive
+                        PromptMutating
+                        "grok@example.com"
+                        True
+                        emptyTokenUsage
+                        0
+            prompt.promptEffortOptions
+                `shouldBe` ["none", "low", "medium", "high", "xhigh"]
+            prompt.promptEffort `shouldBe` "high"
 
     describe "formatStartupTimings" do
         it "sorts cumulative startup markers and keeps subsecond precision" do

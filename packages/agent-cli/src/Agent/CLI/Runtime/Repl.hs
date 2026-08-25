@@ -265,6 +265,7 @@ replWithDraft env@SessionEnv
             setFullscreenImagePreviews runtime pendingAttachments
             let promptState =
                     buildPromptState
+                        (dialectId dialect)
                         params
                         planState
                         policy
