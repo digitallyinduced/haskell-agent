@@ -75,6 +75,7 @@ import Agent.CLI.ModelConfig
       loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelFor,
+      defaultModelOptionFor,
       rawModelOption,
       resolveConfiguredModel,
       resolvePersistedDialect,
@@ -122,11 +123,12 @@ import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback, isProviderUnavailable )
 import Agent.CLI.ProviderTransition
     ( applyProviderTransition,
-      ProviderTransition(transitionCause, transitionUnavailableProviders,
+      ProviderTransition(ProviderTransition, transitionCause,
+                         transitionUnavailableProviders,
                          transitionPendingTurn, transitionTarget,
                          transitionAccountSelectionId, transitionAccountId,
-                         transitionAutomaticBilling),
-      TransitionCause(AutomaticFallback) )
+                         transitionAutomaticBilling, transitionSessionId),
+      TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Recap ()
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
@@ -166,7 +168,7 @@ import Agent.CLI.Session
                   metaProvider),
       SessionTurn )
 import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
+import Agent.CLI.Session.Choices ( modelChoice )
 import Agent.CLI.Runtime.HistorySource
     ( emptyFullscreenHistoryPage
     , loadFullscreenHistoryPage
@@ -1165,6 +1167,9 @@ runFullscreenRestartLoop
             [ ( "Retry"
               , "Try loading credentials and account usage again"
               )
+            , ( "Choose model"
+              , "Pick a different model or provider"
+              )
             , ( "Manage"
               , "Connect, refresh, enable, or remove provider accounts"
               )
@@ -1172,11 +1177,95 @@ runFullscreenRestartLoop
             ] >>= \case
                 Just 0 ->
                     retryStartup options transition
-                Just 1 -> do
+                Just 1 ->
+                    chooseRecoveryModel options transition message
+                Just 2 -> do
                     color <- resolveColor stderr
                     withFullscreenSuspended runtime (runLoginManager color)
                     retryStartup options transition
                 _ -> pure RunQuit
+
+    chooseRecoveryModel options transition recoveryMessage = do
+        home <- getHomeDirectory
+        cwd <- case options.optCwd <|> runMode.runCwdHint of
+            Nothing -> getCurrentDirectory
+            Just path -> makeAbsolute path
+        loadModelCatalogAt home cwd >>= \case
+            Left err ->
+                recoverStartup options transition err
+            Right catalog -> do
+                color <- resolveColor stderr
+                let currentTarget =
+                        ((.transitionTarget) <$> transition)
+                            <|> ( (.modelTarget)
+                                    <$> (options.optModel
+                                        >>= resolveConfiguredModel catalog)
+                                )
+                            <|> ( (.modelTarget)
+                                    <$> (options.optProvider
+                                        >>= defaultModelOptionFor catalog)
+                                )
+                            <|> ( (.modelTarget)
+                                    <$> defaultModelOptionFor
+                                        catalog
+                                        OpenAIProvider
+                                )
+                case currentTarget of
+                    Nothing ->
+                        recoverStartup
+                            options
+                            transition
+                            "No configured models are available."
+                    Just current ->
+                        modelChoice
+                            catalog
+                            (Just runtime)
+                            color
+                            current.targetConnectionId
+                            current.targetProvider
+                            current.targetModelId
+                            current.targetDialect >>= \case
+                                Nothing ->
+                                    recoverStartup
+                                        options
+                                        transition
+                                        recoveryMessage
+                                Just choice -> do
+                                    let nextTransition =
+                                            recoveryModelTransition
+                                                options
+                                                transition
+                                                choice.modelTarget
+                                        nextOptions =
+                                            applyProviderTransition
+                                                options
+                                                nextTransition
+                                    retryStartup
+                                        nextOptions
+                                        (Just nextTransition)
+
+    recoveryModelTransition options transition target =
+        case transition of
+            Just active ->
+                active
+                    { transitionTarget = target
+                    , transitionAccountSelectionId = Nothing
+                    , transitionAccountId = Nothing
+                    , transitionUnavailableProviders = []
+                    , transitionCause = ManualTransition
+                    , transitionAutomaticBilling = Nothing
+                    }
+            Nothing ->
+                ProviderTransition
+                    { transitionTarget = target
+                    , transitionAccountSelectionId = Nothing
+                    , transitionAccountId = Nothing
+                    , transitionSessionId = options.optResume
+                    , transitionPendingTurn = Nothing
+                    , transitionUnavailableProviders = []
+                    , transitionCause = ManualTransition
+                    , transitionAutomaticBilling = Nothing
+                    }
 
 runAgentInitialized
     :: AgentProcessRuntime
