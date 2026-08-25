@@ -47,6 +47,9 @@ data Name
     | ConversationReserve
     | OverlayViewport
     | ConversationBlock !BlockId
+    | ConversationChunkCache
+        !BlockId
+        !BlockId
     | ConversationBlockCache
         !BlockId
         !Bool

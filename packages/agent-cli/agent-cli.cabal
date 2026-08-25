@@ -145,6 +145,7 @@ library
                     , Agent.CLI.TUI.Composer
                     , Agent.CLI.TUI.ImagePreview
                     , Agent.CLI.TUI.Scroll
+                    , Agent.CLI.TUI.Transcript
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
                     , Agent.CLI.TurnState
@@ -315,6 +316,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIPropertySpec
                     , Agent.CLI.TUIScrollSpec
+                    , Agent.CLI.TUITranscriptSpec
                     , Agent.CLI.UsageSpec
                     , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
@@ -378,3 +380,16 @@ benchmark clipboard-latency-bench
                     , filepath
                     , safe-exceptions
                     , text
+
+benchmark transcript-scrolling-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          TranscriptScrolling.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
+                    , deepseq
+                    , text
+                    , vty >= 6.4 && < 7

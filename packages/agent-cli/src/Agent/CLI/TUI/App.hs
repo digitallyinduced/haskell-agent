@@ -159,6 +159,7 @@ import Agent.Syntax
     , loadSyntaxHighlighter
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
+import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
 import Agent.TUI.Motion
@@ -217,7 +218,7 @@ import Data.IORef
 import Data.List (find, findIndex, intersperse, nub, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -2253,11 +2254,46 @@ waitingIndicatorAttr state =
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
     vBox $
-        [vBox (map (drawBlock state) blocks)]
+        [vBox (map (drawTranscriptChunk state) blockChunks)]
             <> conversationReserveWidgets anchor
   where
-    blocks = toList state.appUi.uiBlocks
+    blockChunks =
+        Transcript.transcriptChunks state.appUi.uiBlocks
     anchor = state.appConversationAnchor
+
+-- | Cache completed transcript blocks in moderately sized groups.
+--
+-- A Brick viewport must still lay out its complete child to determine the
+-- scroll range. Per-block caching avoids repeated Markdown parsing, but a
+-- redraw still has to combine one image per retained block. Grouping stable
+-- blocks means ordinary scrolling traverses roughly one cached image per 32
+-- blocks instead. Only full chunks are cached: Brick retains cache entries
+-- until explicit invalidation, so caching the growing final chunk under a new
+-- last-block key for every append would retain all of those obsolete images.
+-- The final partial/live/animated group remains uncached.
+drawTranscriptChunk :: AppState -> Seq UiBlock -> Widget Name
+drawTranscriptChunk state blocks =
+    case
+        Transcript.transcriptChunkCacheKey
+            (cacheableBlock state)
+            dynamicBlockIds
+            blocks of
+        Just (firstBlockId, lastBlockId) ->
+            cached
+                (ConversationChunkCache firstBlockId lastBlockId)
+                rendered
+        Nothing -> rendered
+  where
+    rendered = vBox (map (drawBlock state) (toList blocks))
+    dynamicBlockIds =
+        [ blockId
+        | state.appUi.uiFocus == FocusScrollback
+        , blockId <- maybeToList state.appUi.uiSelectedBlock
+        ]
+            <> [ blockId
+               | Just (CodeCopy blockId _) <-
+                    [state.appHoveredControl]
+               ]
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =

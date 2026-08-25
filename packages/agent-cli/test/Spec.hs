@@ -65,6 +65,7 @@ import qualified Agent.CLI.TUIComposerSpec as TUIComposerSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
 import qualified Agent.CLI.TUIPropertySpec as TUIPropertySpec
 import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
+import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
 import qualified Agent.CLI.UsageSpec as UsageSpec
 import qualified Agent.CLI.WebLspSpec as WebLspSpec
 import qualified Agent.CLI.WorktreeSpec as WorktreeSpec
@@ -134,6 +135,7 @@ main = hspec do
     TUIImagePreviewSpec.spec
     TUIPropertySpec.spec
     TUIScrollSpec.spec
+    TUITranscriptSpec.spec
     UsageSpec.spec
     WebLspSpec.spec
     WorktreeSpec.spec
