@@ -54,10 +54,37 @@ have to be.
   and execution policies are the current foundation for deeper work with
   LLMs, ADTs, type checkers, effect systems, and program verification.
 
-The harness also includes the capabilities expected of a modern coding agent:
-persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
-web search, and interactive terminal interfaces. Those are important product
-features, but not the core differentiation.
+## Features
+
+- **Choice of models and billing:** use OpenAI/Codex, xAI/Grok, OpenRouter, or
+  Claude Code through subscriptions or API keys, and add local or hosted
+  Responses-compatible models through the user model catalog.
+- **Interactive terminal workflow:** choose between fullscreen and inline
+  interfaces with streaming Markdown, live todo progress, one-shot operation,
+  and image attachments from files or the clipboard.
+- **PostgreSQL-backed memory and portable sessions:** persist conversations and
+  scoped learned guidance, resume or search past work, compact long histories,
+  and switch supported providers without losing the pending turn or durable
+  session state.
+- **Efficient long-running agents:** page persisted history on demand and
+  virtualize TUI scrolling to bound memory and rendering work as conversations
+  grow.
+- **Parallel agents and isolated work:** delegate to persisted subagents with a
+  configurable concurrency limit and create fresh sessions in managed Git
+  worktrees.
+- **Built-in coding tools:** run shell commands, opt into a persistent GHCi
+  workspace, search the web, and connect local MCP servers. Approval policies
+  keep mutating operations under user control.
+- **Guided agent workflows:** use plan mode, reusable skills, and scoped learned
+  guidance for repeatable tasks and project or user preferences.
+- **Multimodal input and live voice dictation:** attach images and files, or
+  press `Ctrl+R` on macOS to stream microphone audio to xAI and insert the live
+  transcript into the prompt.
+- **Telegram access:** run a durable, allowlisted Telegram gateway with
+  per-conversation sessions, multimodal messages, approvals, retries, and
+  bounded concurrent processing.
+
+These are important product features, but not the core differentiation.
 
 ## Install
 
