@@ -13,6 +13,7 @@ import Agent.CLI.Compaction
     , runProviderCompact
     , runProviderCompactWith
     , runResponsesCompactWith
+    , runResponsesCompactWithContextWindow
     )
 import Agent.CLI.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -232,7 +233,8 @@ spec = do
             transcript <- newIORef history
             requests <- newIORef []
             result <-
-                runResponsesCompactWith
+                runResponsesCompactWithContextWindow
+                    (Just 258_400)
                     (\request -> do
                         modifyIORef' requests (<> [request])
                         pure (Right (summaryResponse "summary")))
@@ -298,7 +300,8 @@ spec = do
             transcript <- newIORef [remoteCheckpoint]
             requests <- newIORef (0 :: Int)
             result <-
-                runResponsesCompactWith
+                runResponsesCompactWithContextWindow
+                    (Just 258_400)
                     (\_ -> do
                         modifyIORef' requests (+ 1)
                         pure (Right (summaryResponse "summary")))
@@ -311,6 +314,122 @@ spec = do
                     "nothing compatible to compact" `Text.isInfixOf` message
                 Right _ -> False
             readIORef requests `shouldReturn` 0
+
+        it "refuses to guess a portable model context window" do
+            let paramsValue =
+                    (defaultResponseCreateParams :: ResponseCreateParams)
+                        { model = Just "custom-small-model"
+                        }
+            params <- newIORef paramsValue
+            transcript <- newIORef [userTextItem "old context"]
+            requests <- newIORef (0 :: Int)
+            result <-
+                runResponsesCompactWith
+                    (\_ -> do
+                        modifyIORef' requests (+ 1)
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` \case
+                Left message ->
+                    "context_window" `Text.isInfixOf` message
+                        && "effective transport model" `Text.isInfixOf` message
+                Right _ -> False
+            readIORef requests `shouldReturn` 0
+
+        it "uses a portable model context larger than the Codex fallback" do
+            let contextWindow = 400_000
+                huge = Text.replicate 1_100_000 "x"
+                paramsValue =
+                    (defaultResponseCreateParams :: ResponseCreateParams)
+                        { model = Just "large-portable-model"
+                        }
+            params <- newIORef paramsValue
+            transcript <- newIORef [userTextItem huge]
+            requests <- newIORef []
+            result <-
+                runResponsesCompactWithContextWindow
+                    (Just contextWindow)
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    Nothing
+            case result of
+                Left err -> expectationFailure (Text.unpack err)
+                Right outcome ->
+                    estimateRequestTokensWithItems
+                        paramsValue
+                        outcome.compactHistory
+                        `shouldSatisfy` (<= contextWindow)
+            readIORef requests >>= \case
+                [request] -> do
+                    estimateResponseCreateParamsTokens request
+                        `shouldSatisfy`
+                            (> codexEffectiveContextWindowFor
+                                paramsValue.model)
+                    estimateResponseCreateParamsTokens request
+                        `shouldSatisfy` (<= contextWindow)
+                    requestItems request `shouldSatisfy` \case
+                        MessageItem message : _ ->
+                            case message.content of
+                                MessageContentText text ->
+                                    Text.length text == Text.length huge
+                                MessageContentParts parts ->
+                                    any
+                                        (\case
+                                            InputTextPart { text } ->
+                                                Text.length text
+                                                    == Text.length huge
+                                            _ -> False)
+                                        parts
+                        _ -> False
+                seen ->
+                    expectationFailure
+                        ("expected one portable compaction request, got "
+                            <> show (length seen))
+
+        it "bounds portable requests and snapshots to a smaller model window" do
+            let contextWindow = 8_000
+                paramsValue =
+                    (defaultResponseCreateParams :: ResponseCreateParams)
+                        { model = Just "small-portable-model"
+                        }
+            params <- newIORef paramsValue
+            transcript <- newIORef
+                [ userTextItem (Text.replicate 100_000 "old ")
+                , userTextItem "recent request"
+                ]
+            requests <- newIORef []
+            result <-
+                runResponsesCompactWithContextWindow
+                    (Just contextWindow)
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "bounded summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    Nothing
+            case result of
+                Left err -> expectationFailure (Text.unpack err)
+                Right outcome ->
+                    estimateRequestTokensWithItems
+                        paramsValue
+                        outcome.compactHistory
+                        `shouldSatisfy` (<= contextWindow)
+            readIORef requests >>= \case
+                [request] ->
+                    estimateResponseCreateParamsTokens request
+                        `shouldSatisfy` (<= contextWindow)
+                seen ->
+                    expectationFailure
+                        ("expected one portable compaction request, got "
+                            <> show (length seen))
 
         it "bounds oversized local-summary requests before sending them" do
             params <- newIORef defaultResponseCreateParams
@@ -1169,7 +1288,9 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-oversized"
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
                     , status = Nothing
                     , extraFields = mempty
                     }

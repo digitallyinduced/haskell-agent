@@ -38,12 +38,14 @@ import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Vector as Vector
 
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
@@ -292,6 +294,12 @@ taggedProtocolIds tagged =
     mapMaybe
         (\name -> taggedTextField name tagged)
         ["call_id", "approval_request_id", "id"]
+
+taggedTextField :: Text -> TaggedObject -> Maybe Text
+taggedTextField name tagged =
+    case KeyMap.lookup (Key.fromText name) tagged.fields of
+        Just (Aeson.String value) -> Just value
+        _ -> Nothing
 
 identifiersMatch :: [Text] -> [Text] -> Bool
 identifiersMatch expected actual =
@@ -562,6 +570,7 @@ sanitizeMessage message =
         , role = message.role
         , status = message.status
         , phase = message.phase
+        , passthrough = message.passthrough
         , extraFields = message.extraFields
         }
 
@@ -727,25 +736,7 @@ groupItems group =
     group.retainedSource : maybe [] pure group.retainedNotice
 
 itemTokenCount :: ResponseItem -> Int
-itemTokenCount = \case
-    MessageItem message -> max 1 (messageTokenCount message)
-    item -> estimateItemsTokens [item]
-
-messageTokenCount :: ResponseMessage -> Int
-messageTokenCount message = case message.content of
-    MessageContentText text -> estimateTokens text
-    MessageContentParts parts ->
-        sum (map contentPartTokenCount parts)
-
-contentPartTokenCount :: ResponseContentPart -> Int
-contentPartTokenCount = \case
-    InputTextPart { text } -> estimateTokens text
-    OutputTextPart { text } -> estimateTokens text
-    RefusalPart { refusal } -> estimateTokens refusal
-    ReasoningTextPart { text } -> estimateTokens text
-    SummaryTextPart { text } -> estimateTokens text
-    PlainTextPart { text } -> estimateTokens text
-    _ -> 0
+itemTokenCount item = estimateItemsTokens [sanitizeCompactionItem item]
 
 truncateItemText :: Int -> ResponseItem -> Maybe ResponseItem
 truncateItemText budget item =

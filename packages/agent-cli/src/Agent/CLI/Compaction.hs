@@ -14,7 +14,9 @@ module Agent.CLI.Compaction
     , installLiveCompactOutcome
     , runProviderCompact
     , runProviderCompactWith
+    , runProviderCompactWithContextWindow
     , runResponsesCompactWith
+    , runResponsesCompactWithContextWindow
     ) where
 
 import Agent.CLI.Error (formatApiError)
@@ -120,7 +122,24 @@ runProviderCompactWith
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runProviderCompactWith openAiSender recordUsage provider tokenProvider
+runProviderCompactWith =
+    runProviderCompactWithContextWindow Nothing
+
+-- | Variant of 'runProviderCompactWith' that receives the selected model's
+-- machine-readable context window. Portable providers must not inherit the
+-- unrelated Codex fallback when their model metadata is absent.
+runProviderCompactWithContextWindow
+    :: Maybe Int
+    -> Maybe OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> Provider
+    -> Maybe TokenProvider
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
+        provider tokenProvider
         paramsRef transcriptRef focus = do
     params <- readIORef paramsRef
     history <- readIORef transcriptRef
@@ -187,14 +206,17 @@ runProviderCompactWith openAiSender recordUsage provider tokenProvider
 
     summarizeTextAttempt sender params history focus
         | null history = pure (compactTextFailure "nothing to compact")
-        | otherwise =
-            mapCompactAttemptError formatApiError
-                <$> summarizePortableLocalAttempt
-                    sender
-                    params
-                    history
-                    (estimateItemsTokens history)
-                    focus
+        | otherwise = case configuredContextWindow params contextWindow of
+            Left message -> pure (compactTextFailure message)
+            Right limit ->
+                mapCompactAttemptError formatApiError
+                    <$> summarizePortableLocalAttempt
+                        limit
+                        sender
+                        params
+                        history
+                        (estimateItemsTokens history)
+                        focus
 
 -- | Run local-summary compaction through any stateless Responses-compatible
 -- sender, including user-configured local endpoints.
@@ -205,21 +227,52 @@ runResponsesCompactWith
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runResponsesCompactWith sender recordUsage paramsRef transcriptRef focus = do
+runResponsesCompactWith =
+    runResponsesCompactWithContextWindow Nothing
+
+runResponsesCompactWithContextWindow
+    :: Maybe Int
+    -> (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runResponsesCompactWithContextWindow contextWindow sender recordUsage
+        paramsRef transcriptRef focus = do
     params <- readIORef paramsRef
     history <- readIORef transcriptRef
     attempt <- runAttemptAndRecord recordUsage $
         if null history
             then pure (compactTextFailure "nothing to compact")
-            else
-                mapCompactAttemptError formatApiError
-                    <$> summarizePortableLocalAttempt
-                        sender
-                        params
-                        history
-                        (estimateItemsTokens history)
-                        focus
+            else case configuredContextWindow params contextWindow of
+                Left message -> pure (compactTextFailure message)
+                Right limit ->
+                    mapCompactAttemptError formatApiError
+                        <$> summarizePortableLocalAttempt
+                            limit
+                            sender
+                            params
+                            history
+                            (estimateItemsTokens history)
+                            focus
     pure attempt.compactAttemptResult
+
+configuredContextWindow
+    :: ResponseCreateParams
+    -> Maybe Int
+    -> Either Text Int
+configuredContextWindow _params = \case
+    Just contextWindow
+        | contextWindow > 0 -> Right contextWindow
+        | otherwise ->
+            Left "model context_window must be positive"
+    Nothing ->
+        Left
+            ( "the effective transport model has no context_window metadata; "
+                <> "add a positive context_window to its model catalog entry "
+                <> "before using /compact"
+            )
 
 compactTextFailure :: Text -> CompactAttempt Text
 compactTextFailure message =
@@ -443,29 +496,40 @@ summarizeLocalAttempt
     -> Int
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
-summarizeLocalAttempt =
-    summarizeLocalAttemptWith id
+summarizeLocalAttempt send params history before focus =
+    summarizeLocalAttemptWith
+        (codexEffectiveContextWindowFor params.model)
+        id
+        send
+        params
+        history
+        before
+        focus
 
 summarizePortableLocalAttempt
-    :: OpenAiCompactionSender
-    -> ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
-    -> Maybe Text
-    -> IO (CompactAttempt ApiError)
-summarizePortableLocalAttempt =
-    summarizeLocalAttemptWith
-        (filter isPortableLocalSummaryItem)
-
-summarizeLocalAttemptWith
-    :: ([ResponseItem] -> [ResponseItem])
+    :: Int
     -> OpenAiCompactionSender
     -> ResponseCreateParams
     -> [ResponseItem]
     -> Int
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
-summarizeLocalAttemptWith prepareHistory send params history before focus
+summarizePortableLocalAttempt contextWindow =
+    summarizeLocalAttemptWith
+        contextWindow
+        (filter isPortableLocalSummaryItem)
+
+summarizeLocalAttemptWith
+    :: Int
+    -> ([ResponseItem] -> [ResponseItem])
+    -> OpenAiCompactionSender
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+    -> Maybe Text
+    -> IO (CompactAttempt ApiError)
+summarizeLocalAttemptWith contextWindow prepareHistory send params history
+        before focus
     | null history =
         pure $ CompactAttempt emptyTokenUsage $
             Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
@@ -492,8 +556,6 @@ summarizeLocalAttemptWith prepareHistory send params history before focus
                     , ..
                     }
             promptItem = userTextItem summaryPrompt
-            contextWindow =
-                codexEffectiveContextWindowFor summaryParams.model
             requestHistory =
                 trimResponseHistoryToFit
                     contextWindow

@@ -112,6 +112,97 @@ spec = do
             estimateResponseCreateParamsTokens request
                 `shouldSatisfy` (<= 11_000)
 
+        it "omits function arguments above the provider string limit" do
+            let oversized = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-oversized"
+                    , name = "apply_patch"
+                    , namespace = Nothing
+                    , arguments =
+                        Text.replicate
+                            (remoteCompactionMaxStringLength + 1)
+                            "x"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionRequestToFit
+                        2_000_000
+                        defaultResponseCreateParams
+                        [user "keep", oversized]
+            case trimmed of
+                [_, FunctionCallItem call] -> do
+                    call.callId `shouldBe` "call-oversized"
+                    call.name `shouldBe` "apply_patch"
+                    Text.length call.arguments
+                        `shouldSatisfy` (<= remoteCompactionMaxStringLength)
+                    Aeson.eitherDecodeStrict'
+                        (TextEncoding.encodeUtf8 call.arguments)
+                        `shouldSatisfy`
+                            (either (const False) (const True)
+                                :: Either String Aeson.Value -> Bool)
+                other ->
+                    expectationFailure
+                        ("expected sanitized function call, got " <> show other)
+
+        it "omits custom-tool input above the provider string limit" do
+            let oversized = CustomToolCallItem CustomToolCall
+                    { itemId = Nothing
+                    , callId = "call-custom"
+                    , name = "apply_patch"
+                    , namespace = Nothing
+                    , input =
+                        Text.replicate
+                            (remoteCompactionMaxStringLength + 1)
+                            "x"
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionRequestToFit
+                        2_000_000
+                        defaultResponseCreateParams
+                        [oversized]
+            case trimmed of
+                [CustomToolCallItem call] -> do
+                    call.callId `shouldBe` "call-custom"
+                    call.name `shouldBe` "apply_patch"
+                    Text.length call.input
+                        `shouldSatisfy` (<= remoteCompactionMaxStringLength)
+                other ->
+                    expectationFailure
+                        ("expected sanitized custom tool call, got " <> show other)
+
+        it "keeps oversized tool arguments on portable compaction paths" do
+            let arguments =
+                    Text.replicate
+                        (remoteCompactionMaxStringLength + 1)
+                        "x"
+                oversized = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-portable"
+                    , name = "portable_tool"
+                    , namespace = Nothing
+                    , arguments
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimResponseHistoryToFit
+                        2_000_000
+                        defaultResponseCreateParams
+                        []
+                        [oversized]
+            case trimmed of
+                [FunctionCallItem call] ->
+                    call.arguments `shouldBe` arguments
+                other ->
+                    expectationFailure
+                        ("expected unchanged portable function call, got "
+                            <> show other)
+
         it "accepts exactly one compaction item alongside unrelated output" do
             let opaque = checkpoint "opaque"
                 response = completedResponse [assistant "ignored", opaque]
@@ -179,6 +270,7 @@ spec = do
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 compacted =
@@ -212,6 +304,7 @@ spec = do
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 compacted =
@@ -250,6 +343,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
             sanitizeCompactionHistory [rich] `shouldSatisfy` \case
@@ -278,6 +372,7 @@ spec = do
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 trimmed =
@@ -408,68 +503,6 @@ spec = do
                     expectationFailure
                         ("expected rewritten tool output, got " <> show other)
 
-        it "omits function arguments above the provider string limit" do
-            let oversized = FunctionCallItem FunctionCall
-                    { itemId = Nothing
-                    , callId = "call-oversized"
-                    , name = "apply_patch"
-                    , namespace = Nothing
-                    , arguments =
-                        Text.replicate
-                            (remoteCompactionMaxStringLength + 1)
-                            "x"
-                    , encryptedFunctionArgs = Nothing
-                    , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
-                    }
-                trimmed =
-                    trimRemoteCompactionHistoryToFit
-                        2_000_000
-                        Nothing
-                        [user "keep", oversized]
-            case trimmed of
-                [_, FunctionCallItem call] -> do
-                    call.callId `shouldBe` "call-oversized"
-                    call.name `shouldBe` "apply_patch"
-                    Text.length call.arguments
-                        `shouldSatisfy` (<= remoteCompactionMaxStringLength)
-                    Aeson.eitherDecodeStrict'
-                        (TextEncoding.encodeUtf8 call.arguments)
-                        `shouldSatisfy`
-                            (either (const False) (const True)
-                                :: Either String Aeson.Value -> Bool)
-                other ->
-                    expectationFailure
-                        ("expected sanitized function call, got " <> show other)
-
-        it "omits custom-tool input above the provider string limit" do
-            let oversized = CustomToolCallItem CustomToolCall
-                    { itemId = Nothing
-                    , callId = "call-custom"
-                    , name = "apply_patch"
-                    , namespace = Nothing
-                    , input =
-                        Text.replicate
-                            (remoteCompactionMaxStringLength + 1)
-                            "x"
-                    , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
-                    }
-                trimmed =
-                    trimRemoteCompactionHistoryToFit
-                        2_000_000
-                        Nothing
-                        [oversized]
-            case trimmed of
-                [CustomToolCallItem call] -> do
-                    call.callId `shouldBe` "call-custom"
-                    call.name `shouldBe` "apply_patch"
-                    Text.length call.input
-                        `shouldSatisfy` (<= remoteCompactionMaxStringLength)
-                other ->
-                    expectationFailure
-                        ("expected sanitized custom tool call, got " <> show other)
-
         it "truncates oversized messages without rewriting a tiny trailing output" do
             let huge = user (Text.replicate 20_000 "x")
                 tiny = FunctionCallOutputItem FunctionCallOutput
@@ -539,6 +572,8 @@ spec = do
                 recent = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
                     , callId = "call-1"
+                    , name = Nothing
+                    , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
                     , extraFields = KeyMap.empty
@@ -588,13 +623,17 @@ spec = do
                     { itemId = Nothing
                     , callId = ""
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = Text.replicate 20_000 "x"
+                    , encryptedFunctionArgs = Nothing
                     , status = Nothing
                     , extraFields = KeyMap.empty
                     }
                 output = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
                     , callId = ""
+                    , name = Nothing
+                    , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
                     , extraFields = KeyMap.empty
@@ -933,14 +972,11 @@ spec = do
                 `shouldBe` [latest, user "recent"]
 
     describe "hasCompactionCheckpoint" do
-        it "recognizes only typed remote compaction checkpoints" do
+        it "recognizes typed and locally generated compaction checkpoints" do
             hasCompactionCheckpoint [checkpoint "remote"] `shouldBe` True
             hasCompactionCheckpoint
                 (buildLocalCompactedHistory 1 [user "old"] "local summary")
-                `shouldBe` False
-            hasCompactionCheckpoint
-                [assistantSummaryItem "ordinary model-controlled text"]
-                `shouldBe` False
+                `shouldBe` True
             hasCompactionCheckpoint [assistant "ordinary response"]
                 `shouldBe` False
 
