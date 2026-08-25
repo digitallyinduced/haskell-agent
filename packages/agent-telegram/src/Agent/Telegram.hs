@@ -30,7 +30,8 @@ module Agent.Telegram
     , reactionMessageText
     , telegramReactionEmoji
     , telegramReplyText
-    , transcribeWithCodex
+    , transcribeWithXAI
+    , downloadTelegramMediaAttachmentsWith
     ) where
 
 import Agent.CLI.AgentSessions
@@ -96,8 +97,9 @@ import Agent.Telegram.Markdown
     ( markdownToTelegramHtml
     , telegramRenderedLength
     )
-import Agent.Telegram.Voice (transcribeWithCodex)
+import Agent.Telegram.Voice (transcribeWithXAI)
 import Agent.FileRetry (writeLazyFileAtomically)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider)
 import Agent.Store.Postgres
@@ -127,10 +129,11 @@ import Control.Exception.Safe
     , bracket
     , displayException
     , finally
+    , onException
     , try
     , tryAny
     )
-import Control.Monad (forM, forM_, unless, void, when)
+import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
     ( Value(..)
     , eitherDecode
@@ -302,6 +305,15 @@ parseSetupOptions = go defaultTelegramSetupOptions
             go options { setupApprovalMode = TelegramApprovalDeny } rest
         "--all-group-messages" : rest ->
             go options { setupRespondToAllGroupMessages = True } rest
+        "--workers" : value : rest ->
+            case readMaybe value of
+                Just workers
+                    | workers >= 1
+                    , workers <= maximumTelegramWorkerCount ->
+                        go options { setupWorkerCount = workers } rest
+                _ -> Left
+                    ("workers must be between 1 and "
+                        <> show maximumTelegramWorkerCount)
         "--start" : rest -> go options { setupStart = True } rest
         flag : _ -> Left ("unknown setup option: " <> flag <> "\n\n" <> telegramUsage)
 
@@ -337,6 +349,7 @@ telegramUsage = unlines
     , "                          default: ask with Telegram buttons"
     , "  --all-group-messages  consider every allowed-user group message"
     , "                          and reply only when useful"
+    , "  --workers N           concurrent chat workers (1-64, default: 8)"
     , "  --start               start the gateway after setup"
     ]
 
@@ -437,6 +450,7 @@ setupTelegram options = do
             , telegramAllowedUsers = allowedUsers
             , telegramRespondToAllGroupMessages =
                 options.setupRespondToAllGroupMessages
+            , telegramWorkerCount = options.setupWorkerCount
             }
     createDirectoryIfMissing True directory
     setFileMode (unsafeToFilePath directory) 0o700
@@ -572,6 +586,7 @@ runTelegramWithStore store home config token = do
             , runtimeAllowedUsers = config.telegramAllowedUsers
             , runtimeRespondToAllGroupMessages =
                 config.telegramRespondToAllGroupMessages
+            , runtimeWorkerCount = config.telegramWorkerCount
             , runtimeGatewayDirectory = gatewayDir
             , runtimePool = trustedPool store
             , runtimeSessionsRoot = root
@@ -670,6 +685,7 @@ data TelegramRuntime = TelegramRuntime
     , runtimeBot :: !TelegramUser
     , runtimeAllowedUsers :: !(Set Integer)
     , runtimeRespondToAllGroupMessages :: !Bool
+    , runtimeWorkerCount :: !Int
     , runtimeGatewayDirectory :: !OsPath
     , runtimePool :: !StorePool
     , runtimeSessionsRoot :: !OsPath
@@ -750,7 +766,9 @@ dispatchForever :: TelegramRuntime -> IO ()
 dispatchForever runtime =
     race_
         (scheduleTelegramWorkForever runtime)
-        (replicateConcurrently_ 8 (telegramWorkerLoop runtime))
+        (replicateConcurrently_
+            runtime.runtimeWorkerCount
+            (telegramWorkerLoop runtime))
 
 scheduleTelegramWorkForever :: TelegramRuntime -> IO ()
 scheduleTelegramWorkForever runtime = do
@@ -1122,12 +1140,12 @@ transcribeTelegramVoice runtime pending voice = do
         (\path -> void (tryAny (removeFile path)))
         \path -> do
             transcriptionCwd <- Directory.getTemporaryDirectory
-            transcript <- transcribeWithCodex
+            transcript <- transcribeWithXAI
                 transcriptionCwd
                 (unsafeToFilePath path)
             let clean = Text.strip transcript
             when (Text.null clean) $
-                fail "Codex returned an empty voice transcription"
+                fail "xAI returned an empty voice transcription"
             pure $
                 let rendered = "[Voice message transcript]: " <> clean
                 in if pending.pendingTurnText == "[Voice message]"
@@ -1140,47 +1158,72 @@ downloadTelegramMediaAttachments
     -> TelegramPendingMediaTurn
     -> IO [(TelegramMediaKind, ManagedTurnMedia)]
 downloadTelegramMediaAttachments runtime handle pending =
-    concat <$> forM
-        (zip [0 :: Int ..] pending.pendingMediaAttachments)
-        \(index, media) ->
-            case media.telegramMediaFile of
-                Nothing -> pure []
-                Just file -> do
-                    filePath <- TelegramClient.getTelegramFilePath
-                        runtime.runtimeClient
-                        file.fileMediaFileId
-                    let extension =
-                            fromMaybe
-                                (kindExtension media.telegramMediaKind)
-                                (fileMediaExtension file)
-                        localPath =
-                            handle.sessionTempDir
-                                </> unsafeEncodeUtf
-                                    ("media-"
-                                        <> show pending.pendingMediaUpdateId
-                                        <> "-"
-                                        <> show index
-                                        <> extension)
-                    path <-
-                        TelegramClient.downloadTelegramFile
-                            runtime.runtimeClient
-                            (20 * 1024 * 1024)
-                            filePath
-                            localPath
-                    pure
-                        [ ( media.telegramMediaKind
-                          , ManagedTurnMedia
-                                { managedTurnMediaPath =
-                                    unsafeToFilePath path
-                                , managedTurnMediaMime =
-                                    fromMaybe "application/octet-stream"
-                                        file.fileMediaMimeType
-                                , managedTurnMediaName =
-                                    file.fileMediaName
-                                }
-                          )
-                        ]
+    downloadTelegramMediaAttachmentsWith
+        (TelegramClient.getTelegramFilePath runtime.runtimeClient)
+        (TelegramClient.downloadTelegramFile
+            runtime.runtimeClient
+            (20 * 1024 * 1024))
+        handle.sessionTempDir
+        pending.pendingMediaUpdateId
+        pending.pendingMediaAttachments
+
+-- | Download one Telegram media batch with bounded concurrency. The injected
+-- operations make ordering, cleanup, and cancellation behavior testable
+-- without a live Telegram API.
+downloadTelegramMediaAttachmentsWith
+    :: (Text -> IO FilePath)
+    -> (FilePath -> OsPath -> IO OsPath)
+    -> OsPath
+    -> Integer
+    -> [TelegramMedia]
+    -> IO [(TelegramMediaKind, ManagedTurnMedia)]
+downloadTelegramMediaAttachmentsWith getFilePath downloadFile tempDir updateId media =
+    do
+        cleanupPaths <- newMVar []
+        let cleanup =
+                readMVar cleanupPaths >>= mapM_ \path ->
+                    void (tryAny (removeFile path))
+            downloadOne (index, attachment) =
+                case attachment.telegramMediaFile of
+                    Nothing -> pure []
+                    Just file -> do
+                        filePath <- getFilePath file.fileMediaFileId
+                        let extension =
+                                fromMaybe
+                                    (kindExtension attachment.telegramMediaKind)
+                                    (fileMediaExtension file)
+                            localPath =
+                                tempDir
+                                    </> unsafeEncodeUtf
+                                        ("media-"
+                                            <> show updateId
+                                            <> "-"
+                                            <> show index
+                                            <> extension)
+                        modifyMVar_ cleanupPaths (pure . (localPath :))
+                        path <- downloadFile filePath localPath
+                        pure
+                            [ ( attachment.telegramMediaKind
+                              , ManagedTurnMedia
+                                    { managedTurnMediaPath =
+                                        unsafeToFilePath path
+                                    , managedTurnMediaMime =
+                                        fromMaybe "application/octet-stream"
+                                            file.fileMediaMimeType
+                                    , managedTurnMediaName =
+                                        file.fileMediaName
+                                    }
+                              )
+                            ]
+        concat
+            <$> mapConcurrentlyBounded
+                telegramMediaDownloadConcurrency
+                downloadOne
+                (zip [0 :: Int ..] media)
+            `onException` cleanup
   where
+    telegramMediaDownloadConcurrency = 4
+
     fileMediaExtension file =
         case file.fileMediaName of
             Just name | not (Text.null name) ->

@@ -21,6 +21,7 @@ module Agent.GrokBuild.Dialect.Scheduler
     ) where
 
 import Agent.GrokBuild.Dialect.Common (jsonTool)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
     , InterAgentMessageType(QueuedMessage)
@@ -92,6 +93,9 @@ import System.OsPath (OsPath)
 
 maximumScheduledTasks :: Int
 maximumScheduledTasks = 50
+
+schedulerConcurrencyLimit :: Int
+schedulerConcurrencyLimit = 8
 
 recurringTaskTtlSeconds :: Integer
 recurringTaskTtlSeconds = 7 * 24 * 60 * 60
@@ -584,7 +588,15 @@ schedulerActor now fire isActive state signal = loop
         fires <- modifyMVar state \snapshot ->
             let (updated, due) = advanceScheduler current snapshot
             in pure (updated, due)
-        mapM_ runFire fires
+        fireResults <-
+            mapConcurrentlyBounded schedulerConcurrencyLimit runFire fires
+        modifyMVar_ state \snapshot ->
+            pure snapshot
+                { schedulerTasks =
+                    foldr publishFire
+                        snapshot.schedulerTasks
+                        fireResults
+                }
         currentAfterFire <- now
         snapshot <- readMVar state
         let delayMicros = nextDelayMicros currentAfterFire snapshot
@@ -595,37 +607,46 @@ schedulerActor now fire isActive state signal = loop
     runFire scheduled =
         tryAny (fire scheduled) >>= \case
             Right (Right agentId) ->
-                modifyMVar_ state \snapshot ->
-                    pure snapshot
-                        { schedulerTasks =
-                            Map.adjust
-                                (\task ->
-                                    task
-                                        { scheduledActiveAgent =
-                                            Just agentId
-                                        })
-                                scheduled.scheduledFireTaskId
-                                snapshot.schedulerTasks
-                        }
-            _ -> pure ()
+                pure (Just (scheduled.scheduledFireTaskId, agentId))
+            _ -> pure Nothing
+
+    publishFire Nothing tasks = tasks
+    publishFire (Just (taskId, agentId)) tasks =
+        Map.adjust
+            (\task ->
+                task
+                    { scheduledActiveAgent =
+                        Just agentId
+                    })
+            taskId
+            tasks
 
     refreshActiveAgents = do
         snapshot <- readMVar state
-        activity <-
-            Map.traverseWithKey
-                (\_ task ->
-                    case task.scheduledActiveAgent of
-                        Nothing -> pure False
-                        Just agentId -> isActive agentId)
-                snapshot.schedulerTasks
+        let active =
+                [ (taskId, agentId)
+                | (taskId, task) <- Map.toAscList snapshot.schedulerTasks
+                , Just agentId <- [task.scheduledActiveAgent]
+                ]
+        activity <- Map.fromAscList
+            <$> mapConcurrentlyBounded
+                schedulerConcurrencyLimit
+                (\(taskId, agentId) ->
+                    (\activeNow -> (taskId, activeNow))
+                        <$> isActive agentId)
+                active
         modifyMVar_ state \current ->
             pure current
                 { schedulerTasks =
                     Map.mapWithKey
                         (\taskId task ->
-                            if Map.findWithDefault False taskId activity
-                                then task
-                                else task { scheduledActiveAgent = Nothing })
+                            case task.scheduledActiveAgent of
+                                Nothing -> task
+                                Just _
+                                    | Map.findWithDefault False taskId activity ->
+                                        task
+                                    | otherwise ->
+                                        task { scheduledActiveAgent = Nothing })
                         current.schedulerTasks
                 }
 

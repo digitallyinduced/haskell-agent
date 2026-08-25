@@ -1,8 +1,11 @@
 module Agent.TelegramSpec (spec) where
 
 import Agent.Telegram
+import Agent.OsPath (unsafeToFilePath)
+import qualified Agent.Telegram.Bridge as Bridge
 import Agent.Telegram.Types
     ( TelegramApprovalMode(..)
+    , defaultTelegramWorkerCount
     , TelegramFileMedia(..)
     , TelegramMedia(..)
     , TelegramMediaKind(..)
@@ -12,19 +15,29 @@ import Agent.Telegram.Types
     , TelegramPendingMediaTurn(..)
     , TelegramRetryMetadata(..)
     )
+import Data.List (sort)
 import Control.Concurrent
     ( newEmptyMVar
     , putMVar
     , takeMVar
     , threadDelay
     )
+import Control.Exception.Safe (finally)
 import Data.Aeson (Value, eitherDecode, encode, object, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef
+    ( atomicModifyIORef'
+    , modifyIORef'
+    , newIORef
+    , readIORef
+    )
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Agent.Provider (Provider(..))
+import System.Directory (listDirectory)
+import System.IO.Temp (withSystemTempDirectory)
+import System.OsPath (unsafeEncodeUtf)
 import qualified System.Timeout as Timeout
 import Test.Hspec
 
@@ -43,6 +56,7 @@ spec = describe "Agent.Telegram" do
                 , "--cwd", "/tmp/project"
                 , "--allowed-user", "123"
                 , "--all-group-messages"
+                , "--workers", "12"
                 , "--yolo"
                 , "--start"
                 ]
@@ -54,6 +68,7 @@ spec = describe "Agent.Telegram" do
                         , setupApprovalMode = TelegramApprovalYolo
                         , setupAllowedUsers = [123]
                         , setupRespondToAllGroupMessages = True
+                        , setupWorkerCount = 12
                         , setupStart = True
                         })
 
@@ -61,6 +76,10 @@ spec = describe "Agent.Telegram" do
             parseTelegramArgs ["setup", "--token", "secret"]
                 `shouldSatisfy` isLeft
             parseTelegramArgs ["setup", "--allowed-user", "nope"]
+                `shouldSatisfy` isLeft
+            parseTelegramArgs ["setup", "--workers", "0"]
+                `shouldSatisfy` isLeft
+            parseTelegramArgs ["setup", "--workers", "65"]
                 `shouldSatisfy` isLeft
 
     describe "parseAllowedUsers" do
@@ -87,6 +106,119 @@ spec = describe "Agent.Telegram" do
                 `shouldBe` Right TelegramApprovalPrompt
             fmap (.telegramApprovalMode) (decode True)
                 `shouldBe` Right TelegramApprovalYolo
+
+        it "defaults old configs to eight workers and validates explicit values" do
+            let base workers = object $
+                    [ "provider" .= ("xai" :: String)
+                    , "cwd" .= ("/tmp" :: String)
+                    , "allowedUsers" .= ([123] :: [Integer])
+                    ] <> maybe [] (\value -> ["workers" .= value]) workers
+                decode :: Maybe Int -> Either String TelegramConfig
+                decode workers =
+                    eitherDecode (encode (base workers))
+            fmap (.telegramWorkerCount) (decode Nothing)
+                `shouldBe` Right defaultTelegramWorkerCount
+            fmap (.telegramWorkerCount) (decode (Just (16 :: Int)))
+                `shouldBe` Right 16
+            decode (Just (0 :: Int)) `shouldSatisfy` isLeft
+            decode (Just (65 :: Int)) `shouldSatisfy` isLeft
+
+    describe "Telegram media downloads" do
+        it "downloads concurrently with a bound and preserves attachment order" $
+            withSystemTempDirectory "telegram-media-" \directory -> do
+                active <- newIORef (0 :: Int)
+                maximumActive <- newIORef (0 :: Int)
+                let attachments =
+                        zipWith testMedia
+                            [ TelegramMediaPhoto
+                            , TelegramMediaDocument
+                            , TelegramMediaVideo
+                            , TelegramMediaAudio
+                            , TelegramMediaAnimation
+                            , TelegramMediaSticker
+                            ]
+                            [1 :: Int ..]
+                    download remote local = do
+                        current <- atomicModifyIORef' active \count ->
+                            let next = count + 1 in (next, next)
+                        atomicModifyIORef' maximumActive \seen ->
+                            (max seen current, ())
+                        let finish =
+                                atomicModifyIORef' active
+                                    (\count -> (count - 1, ()))
+                        (do
+                            threadDelay
+                                ((7 - read (dropWhile (not . (`elem` ['0'..'9'])) remote))
+                                    * 10_000)
+                            writeFile (unsafeToFilePath local) remote
+                            pure local)
+                            `finally` finish
+                results <- downloadTelegramMediaAttachmentsWith
+                    (pure . Text.unpack)
+                    download
+                    (unsafeEncodeUtf directory)
+                    42
+                    attachments
+                map fst results `shouldBe` map (.telegramMediaKind) attachments
+                observed <- readIORef maximumActive
+                observed `shouldSatisfy` (\value -> value > 1 && value <= 4)
+
+        it "removes completed and partial targets when one download fails" $
+            withSystemTempDirectory "telegram-media-failure-" \directory -> do
+                let attachments =
+                        zipWith testMedia
+                            [ TelegramMediaPhoto
+                            , TelegramMediaDocument
+                            , TelegramMediaVideo
+                            ]
+                            [1 :: Int ..]
+                    download remote local = do
+                        writeFile (unsafeToFilePath local) remote
+                        if remote == "file-2"
+                            then fail "download failed"
+                            else threadDelay 50_000 >> pure local
+                downloadTelegramMediaAttachmentsWith
+                    (pure . Text.unpack)
+                    download
+                    (unsafeEncodeUtf directory)
+                    43
+                    attachments
+                    `shouldThrow` anyException
+                listDirectory directory `shouldReturn` []
+
+    describe "Telegram bridge request batches" do
+        it "admits JSON requests once and dispatches them with a bound" do
+            dispatched <- newIORef []
+            active <- newIORef (0 :: Int)
+            maximumActive <- newIORef (0 :: Int)
+            let files =
+                    [ "request-6.json"
+                    , "ignored.tmp"
+                    , "request-2.json"
+                    , "request-5.json"
+                    , "request-1.json"
+                    , "request-4.json"
+                    , "request-3.json"
+                    ]
+                decode name = pure (Just name)
+                dispatch name = do
+                    current <- atomicModifyIORef' active \count ->
+                        let next = count + 1 in (next, next)
+                    atomicModifyIORef' maximumActive \value ->
+                        (max value current, ())
+                    (threadDelay 20_000
+                        >> modifyIORef' dispatched (name :))
+                        `finally`
+                            atomicModifyIORef' active
+                                (\count -> (count - 1, ()))
+            seen <-
+                Bridge.processBridgeRequestBatch Set.empty files decode dispatch
+            _ <- Bridge.processBridgeRequestBatch seen files decode dispatch
+            completed <- readIORef dispatched
+            sort completed `shouldBe`
+                sort (filter (Text.isSuffixOf ".json" . Text.pack) files)
+            observed <- readIORef maximumActive
+            observed `shouldSatisfy` (\value -> value > 1 && value <= 4)
 
     describe "splitTelegramText" do
         it "keeps messages within the requested limit" do
@@ -785,3 +917,17 @@ shouldReturnRight :: Either String a -> String -> IO a
 shouldReturnRight result message = case result of
     Left err -> expectationFailure (message <> ": " <> err) >> fail message
     Right value -> pure value
+
+testMedia :: TelegramMediaKind -> Int -> TelegramMedia
+testMedia kind index = TelegramMedia
+    { telegramMediaKind = kind
+    , telegramMediaFile =
+        Just TelegramFileMedia
+            { fileMediaFileId = "file-" <> Text.pack (show index)
+            , fileMediaName = Just ("attachment-" <> Text.pack (show index))
+            , fileMediaMimeType = Just "application/octet-stream"
+            , fileMediaFileSize = Just 10
+            , fileMediaDuration = Nothing
+            }
+    , telegramMediaDescription = ""
+    }

@@ -38,6 +38,8 @@ import Agent.CLI.Render
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
+    , renderPrintedText
+    , resetRenderPrintedText
     , stateStartedAt
     )
 import Agent.CLI.Session
@@ -147,7 +149,6 @@ runOneTurn env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
     , sessionPrevious = previous
-    , sessionPrinted = printed
     , sessionTranscript = transcriptRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
@@ -422,7 +423,7 @@ runOneTurn env@SessionEnv
                         putTextLn stderr
                             (formatTurnStatus color "ok" detail)
             followUp <- handleProposedPlan planMode loopResult.finalText
-            printedText <- readIORef printed
+            printedText <- renderPrintedText render
             case (fullscreen, printedText, assistantText) of
                 (Just _, _, _) -> pure ()
                 (Nothing, False, Just text) | not (Text.null (Text.strip text)) -> do
@@ -467,7 +468,7 @@ runOneTurn env@SessionEnv
             case followUp of
                 Nothing -> pure TurnSucceeded
                 Just notes -> do
-                    writeIORef printed False
+                    resetRenderPrintedText render
                     runOneTurn env notes [UserMessage notes]
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.

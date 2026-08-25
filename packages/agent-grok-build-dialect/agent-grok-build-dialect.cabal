@@ -62,8 +62,27 @@ library
                     , process
                     , safe-exceptions
                     , text
+                    , temporary
                     , time
                     , transformers
+                    , unix
+
+benchmark workflow-snapshots-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          WorkflowSnapshots.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-grok-build-dialect
+                    , agent-core
+                    , aeson
+                    , async
+                    , base >= 4.14 && < 5
+                    , containers
+                    , filepath
+                    , safe-exceptions
+                    , text
+                    , time
                     , unix
 
 test-suite agent-grok-build-dialect-test
@@ -77,6 +96,7 @@ test-suite agent-grok-build-dialect-test
                     , Agent.GrokBuild.WebLspSpec
     build-depends:    agent-grok-build-dialect
                     , agent-core
+                    , async
                     , base >= 4.14 && < 5
                     , containers
                     , directory
@@ -84,5 +104,6 @@ test-suite agent-grok-build-dialect-test
                     , hspec
                     , safe-exceptions
                     , text
+                    , temporary
                     , time
                     , unix

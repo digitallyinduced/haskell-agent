@@ -31,6 +31,7 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
+import Agent.CLI.Dictation (dictate)
 import Agent.CLI.Command
     ( ReplAction(..)
     , SlashMenu(..)
@@ -53,10 +54,12 @@ import Agent.CLI.TUI.Types
 import qualified Agent.TUI.Theme as Theme
 import Agent.TUI.Model
 import Brick
+import Brick.BChan (writeBChan)
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import qualified Brick.Widgets.Border.Style as BorderStyle
 import Control.Concurrent.STM (atomically)
+import Control.Exception.Safe (tryAny)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -561,6 +564,17 @@ handleComposerKey
         V.EvKey (V.KChar 'l') modifiers
             | V.MCtrl `elem` modifiers ->
                 invalidateCache
+        V.EvKey (V.KChar 'r') modifiers
+            | V.MCtrl `elem` modifiers ->
+                suspendAndResume do
+                    result <- tryAny dictate
+                    writeBChan
+                        state.appRuntime.runtimeEvents
+                        (AppDictationFinished
+                            (case result of
+                                Left err -> Left (Text.pack (show err))
+                                Right transcript -> Right transcript))
+                    pure state
         V.EvKey (V.KChar 'a') modifiers
             | V.MCtrl `elem` modifiers ->
                 setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
@@ -652,7 +666,7 @@ handleComposerKey
         modify' \current ->
             current
                 { appPasted = False
-                , appHistory = text : current.appHistory
+                , appHistory = Bridge.pushHistory text current.appHistory
                 , appHistoryIndex = Nothing
                 , appHistoryDraft = ""
                 }
@@ -696,7 +710,8 @@ handleComposerKey
                         \current ->
                             current
                                 { appPasted = False
-                                , appHistory = draft : current.appHistory
+                                , appHistory =
+                                    Bridge.pushHistory draft current.appHistory
                                 , appHistoryIndex = Nothing
                                 , appHistoryDraft = ""
                                 , appSlashIndex = 0

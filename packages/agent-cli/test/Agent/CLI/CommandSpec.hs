@@ -200,7 +200,15 @@ spec = do
             parseReplLine "/agents" `shouldBe` ReplAgents
             parseReplLine "/a" `shouldBe` ReplAgents
             parseReplLine "/agents now"
-                `shouldBe` ReplCommandError "usage: /agents"
+                `shouldBe` ReplCommandError "usage: /agents [limit [N]]"
+
+        it "shows or sets the concurrent agent limit" do
+            parseReplLine "/agents limit" `shouldBe` ReplShowAgentLimit
+            parseReplLine "/agents limit 64" `shouldBe` ReplSetAgentLimit 64
+            parseReplLine "/agents limit 0"
+                `shouldBe` ReplCommandError "usage: /agents [limit [N]]"
+            parseReplLine "/agents limit nope"
+                `shouldBe` ReplCommandError "usage: /agents [limit [N]]"
 
         it "opens the MCP server manager" do
             parseReplLine "/mcp" `shouldBe` ReplMcp
@@ -236,6 +244,12 @@ spec = do
             parseReplLine "/btw"
                 `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
 
+        it "requests a session recap" do
+            parseReplLine "/recap" `shouldBe` ReplRecap
+            parseReplLine "/summarize" `shouldBe` ReplRecap
+            parseReplLine "/recap now"
+                `shouldBe` ReplCommandError "usage: /recap"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
@@ -269,6 +283,7 @@ spec = do
                     , "effort"
                     , "plan"
                     , "btw"
+                    , "recap"
                     , "session"
                     , "session-info"
                     , "afk"

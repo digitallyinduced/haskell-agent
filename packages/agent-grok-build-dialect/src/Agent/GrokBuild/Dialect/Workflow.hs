@@ -10,9 +10,11 @@ module Agent.GrokBuild.Dialect.Workflow
     , newWorkflowRuntime
     , workflowTool
     , workflowRunSnapshots
+    , workflowRunSnapshotsWith
     , formatWorkflowRuns
     ) where
 
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpec(..)
@@ -77,6 +79,9 @@ data WorkflowRuntime = WorkflowRuntime
     , workflowSpecs :: !GrokSubagentSpecs
     , workflowStore :: !(MVar WorkflowStore)
     }
+
+workflowSnapshotConcurrencyLimit :: Int
+workflowSnapshotConcurrencyLimit = 8
 
 data WorkflowRunSnapshot = WorkflowRunSnapshot
     { workflowRunId :: !Text
@@ -330,9 +335,18 @@ launchWorkflow runtime workflowName objective = do
 workflowRunSnapshots
     :: WorkflowRuntime
     -> IO [WorkflowRunSnapshot]
-workflowRunSnapshots runtime = do
+workflowRunSnapshots runtime =
+    workflowRunSnapshotsWith
+        (getStatus runtime.workflowMulti.multiRegistry)
+        runtime
+
+workflowRunSnapshotsWith
+    :: (SubagentId -> IO SubagentStatus)
+    -> WorkflowRuntime
+    -> IO [WorkflowRunSnapshot]
+workflowRunSnapshotsWith readStatus runtime = do
     store <- readMVar runtime.workflowStore
-    mapM snapshotRun $
+    mapConcurrentlyBounded workflowSnapshotConcurrencyLimit snapshotRun $
         sortOn
             (\run ->
                 ( run.workflowStartedAt
@@ -343,9 +357,7 @@ workflowRunSnapshots runtime = do
     snapshotRun :: WorkflowRun -> IO WorkflowRunSnapshot
     snapshotRun run = do
         status <-
-            getStatus
-                runtime.workflowMulti.multiRegistry
-                run.workflowAgentId
+            readStatus run.workflowAgentId
         pure WorkflowRunSnapshot
             { workflowRunId = run.workflowInternalRunId
             , workflowRunName = run.workflowDisplayName

@@ -16,7 +16,10 @@ module Agent.CLI.TUI.App
     , externalUrlCommand
     , hasQueuedFullscreenInput
     , initialFullscreenAppState
+    , mergeConversationView
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , lambdaArtWidget
     , quickStartRows
     , quickStartVisible
@@ -49,6 +52,7 @@ module Agent.CLI.TUI.App
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
+    , wrapFullscreenKeyboardVty
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
@@ -61,6 +65,7 @@ module Agent.CLI.TUI.App
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
+import Agent.CLI.Dictation (insertDictation)
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
@@ -117,7 +122,11 @@ import Agent.CLI.Style (motionGlyphSet)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
-    ( kittyCtrlVCsiBodies
+    ( TerminalCapabilities(..)
+    , detectTerminalCapabilities
+    , kittyCtrlVCsiBodies
+    , kittyKeyboardDisambiguatePush
+    , kittyKeyboardPop
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
     )
@@ -135,6 +144,8 @@ import Agent.CLI.TUI.Motion
     , hasBackgroundActivity
     , isBackgroundAgentActive
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , uiEventRestartsMotionSchedule
@@ -159,6 +170,7 @@ import Agent.Syntax
     , loadSyntaxHighlighter
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
+import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
 import Agent.TUI.Motion
@@ -170,7 +182,14 @@ import Agent.TUI.Motion
     , quietIndicator
     , waitingIndicator
     )
-import Agent.TUI.Presentation (permissionToolCallPrompt)
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    , liveTodoPanelLines
+    , parseTodoList
+    , permissionToolCallPrompt
+    , todoStatusGlyph
+    )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -186,6 +205,7 @@ import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
+import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM
     ( STM
     , atomically
@@ -201,10 +221,14 @@ import Control.Concurrent.STM
     , takeTMVar
     , writeTVar
     )
-import Control.Monad (unless, void, when)
+import Agent.CLI.Recap
+    ( autoRecapAwayThreshold
+    , autoRecapIdleThreshold
+    , autoRecapRetryInterval
+    )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, throwIO, tryAny)
+import Control.Exception.Safe (finally, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -217,7 +241,7 @@ import Data.IORef
 import Data.List (find, findIndex, intersperse, nub, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -304,6 +328,7 @@ newFullscreenRuntimeWithSyntaxLoader
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = const (pure ())
+            , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -318,6 +343,8 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
+            , runtimeRecap =
+                readIORef sessionActions >>= (.sessionRecap)
             , runtimeRestartEffort = \level ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionRestartEffort level
@@ -353,6 +380,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
     -> (Text -> IO ())
+    -> IO ()
     -> (Text -> IO ())
     -> IO CtrlCDecision
     -> IO (AgentTarget, [AgentEntry])
@@ -362,6 +390,7 @@ setFullscreenSessionActions
     runtime
     cancelAction
     btwAction
+    recapAction
     restartEffortAction
     ctrlCAction
     agentSnapshot
@@ -369,6 +398,7 @@ setFullscreenSessionActions
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = btwAction
+            , sessionRecap = recapAction
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -572,6 +602,27 @@ fullscreenVtyConfig =
                ]
         }
 
+-- | Enable the smallest Kitty keyboard protocol mode needed for modified
+-- printable keys such as Cmd+V. The mode is tied to the Vty lifecycle so
+-- Brick suspension pops it before handing the terminal to another process and
+-- a rebuilt Vty pushes it again on resume.
+wrapFullscreenKeyboardVty :: Bool -> V.Vty -> IO V.Vty
+wrapFullscreenKeyboardVty enabled vty
+    | not enabled = pure vty
+    | otherwise = do
+        emit kittyKeyboardDisambiguatePush
+            `onException` V.shutdown vty
+        pure vty
+            { V.shutdown = do
+                alreadyShutdown <- V.isShutdown vty
+                unless alreadyShutdown $
+                    emit kittyKeyboardPop `finally` V.shutdown vty
+            }
+  where
+    emit =
+        V.outputByteBuffer (V.outputIface vty)
+            . TextEncoding.encodeUtf8
+
 requestFullscreenPermission
     :: FullscreenRuntime
     -> ToolCall
@@ -672,6 +723,7 @@ runFullscreen runtime workerAction = do
     history <- readReplHistory
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
     initialClock <- getMonotonicTimeNSec
+    terminal <- detectTerminalCapabilities stdout
     let buildVty = do
             vty <- Vty.mkVty fullscreenVtyConfig
             let output = V.outputIface vty
@@ -683,11 +735,16 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.BracketedPaste True
             when (V.supportsMode output V.Mouse) $
                 V.setMode output V.Mouse True
+            when (V.supportsMode output V.Focus) $
+                V.setMode output V.Focus True
             -- Vty deliberately leaves OSC 8 output disabled by default even
             -- when rendered attributes contain URLs.
             when (V.supportsMode output V.Hyperlink) $
                 V.setMode output V.Hyperlink True
+            when (V.supportsMode output V.Focus) $
+                V.setMode output V.Focus True
             wrapNativePreviewVty runtime vty
+                >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
     initialVty <- buildVty
     let
         initialState =
@@ -707,9 +764,10 @@ runFullscreen runtime workerAction = do
         withAsync uiTicker \_uiTicker ->
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
                 withAsync (eventPump runtime) \_eventPump ->
-                    withAsync
-                        (loadSyntaxHighlighterForRuntime runtime)
-                        \_syntaxLoader ->
+                    withAsync (recapTicker runtime) \_recapTicker ->
+                        withAsync
+                            (loadSyntaxHighlighterForRuntime runtime)
+                            \_syntaxLoader ->
                             withAsync
                                 (void (waitCatch worker)
                                     >> enqueueAppEvent runtime AppStop)
@@ -737,6 +795,10 @@ runFullscreen runtime workerAction = do
                                                     }
                                     wait worker
   where
+    recapTicker _runtime = forever do
+        threadDelay 20_000_000
+        enqueueAppEvent runtime AppRecapPoll
+
     uiTicker = waitForDemand
       where
         waitForDemand = do
@@ -811,7 +873,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appTextReply = Nothing
         , appSlashDismissed = False
         , appPasted = False
-        , appHistory = history
+        , appHistory = Bridge.trimHistory history
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
@@ -824,6 +886,10 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appPressedControl = Nothing
         , appWorkerStopped = False
         , appConversationAnchor = Nothing
+        , appFocusLostAt = Nothing
+        , appAutoRecapShownThisAway = False
+        , appLastAutoRecapAttemptAt = Nothing
+        , appLastTurnCompletedAt = Nothing
         , appConversationReflowQueued = False
         , appWindowTitle = Nothing
         , appMotionElapsedMillis = 0
@@ -832,6 +898,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appClockNanos = initialClock
         , appNativeProgressKeepaliveBucket = 0
         , appSyntaxHighlighter = Nothing
+        , appTerminalFocus = TerminalFocusUnknown
         }
 
 wrapNativePreviewVty :: FullscreenRuntime -> V.Vty -> IO V.Vty
@@ -1368,8 +1435,8 @@ activateControl = \case
         confirmChoiceAt index
     ResumeRow sessionId ->
         confirmResumeId sessionId
-    CodeCopy blockId codeIndex ->
-        copyCodeBlock blockId codeIndex
+    CodeCopy target blockId codeIndex ->
+        copyCodeBlock target blockId codeIndex
     MarkdownLink url ->
         openMarkdownLink url
     _ ->
@@ -1393,7 +1460,7 @@ isInteractiveControl = \case
     QuickStartModel -> True
     ChoiceRow _ -> True
     ResumeRow _ -> True
-    CodeCopy _ _ -> True
+    CodeCopy _ _ _ -> True
     _ -> False
 
 isQuickStartControl :: Name -> Bool
@@ -1440,11 +1507,16 @@ externalUrlCommand url
         in Text.isPrefixOf "https://" lower
             || Text.isPrefixOf "http://" lower
 
-copyCodeBlock :: BlockId -> Int -> EventM Name AppState ()
-copyCodeBlock blockId codeIndex = do
+copyCodeBlock
+    :: AgentTarget
+    -> BlockId
+    -> Int
+    -> EventM Name AppState ()
+copyCodeBlock target blockId codeIndex = do
     state <- get
     let code =
-            selectedBlock state.appUi blockId
+            conversationUiForTarget target state
+                >>= \ui -> selectedBlock ui blockId
                 >>= fencedCodeBlock codeIndex . (.blockBody)
     case code of
         Nothing ->
@@ -1633,6 +1705,8 @@ drawMain state =
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
                 , drawFollowStatus state.appUi
+                , drawLiveTodos state.appUi
+                , drawPromptActivity state
                 , Composer.drawComposer state
                 , drawFooter state
                 ]
@@ -1807,7 +1881,7 @@ drawConversationPane state =
             withVScrollBarRenderer conversationScrollbarRenderer $
                 withVScrollBars OnRight $
                     viewport ConversationViewport Vertical $
-                        padLeftRight 2 (drawAgentConversation entry)
+                        padLeftRight 2 (drawAgentConversation state entry)
         Nothing
             | conversationIsEmpty state.appUi ->
                 padLeftRight 2 $
@@ -1836,8 +1910,41 @@ selectedAgentConversation selected entries = case selected of
     target ->
         find ((== target) . (.agentTarget)) entries
 
-drawAgentConversation :: AgentEntry -> Widget Name
-drawAgentConversation entry =
+conversationUiForTarget :: AgentTarget -> AppState -> Maybe UiState
+conversationUiForTarget target state = case target of
+    AgentRoot -> Just state.appUi
+    AgentChild _ ->
+        (.agentConversation)
+            <$> find
+                ((== target) . (.agentTarget))
+                state.appAgentEntries
+
+activeConversationUi :: AppState -> UiState
+activeConversationUi state =
+    fromMaybe state.appUi $
+        conversationUiForTarget state.appAgentSelected state
+
+applyChildConversationUiEvent
+    :: AgentTarget
+    -> UiEvent
+    -> AppState
+    -> AppState
+applyChildConversationUiEvent target uiEvent state =
+    state
+        { appAgentEntries =
+            map updateEntry state.appAgentEntries
+        }
+  where
+    updateEntry entry
+        | entry.agentTarget == target =
+            entry
+                { agentConversation =
+                    reduceUi uiEvent entry.agentConversation
+                }
+        | otherwise = entry
+
+drawAgentConversation :: AppState -> AgentEntry -> Widget Name
+drawAgentConversation state entry =
     vBox
         [ withAttr Theme.headingAttr $
             txt ("Viewing " <> entry.agentPath)
@@ -1846,30 +1953,16 @@ drawAgentConversation entry =
                 (entry.agentStatus
                     <> " · input is sent to /root")
         , padTop (Pad 1) $
-            case entry.agentTranscript of
-                [] ->
+            if Seq.null entry.agentConversation.uiBlocks
+                then
                     withAttr Theme.mutedAttr $
                         txt "(no transcript yet)"
-                rows ->
-                    vBox (map drawAgentTranscriptLine rows)
+                else
+                    drawConversationBlocks
+                        state
+                        entry.agentTarget
+                        entry.agentConversation
         ]
-
-drawAgentTranscriptLine :: Text -> Widget Name
-drawAgentTranscriptLine line =
-    padBottom (Pad 1) $
-        case Text.breakOn ": " line of
-            ("user", body) ->
-                withAttr Theme.userAttr $
-                    padAll 1 (txtWrap (Text.drop 2 body))
-            ("assistant", body) ->
-                padLeft (Pad 3) $
-                    withAttr Theme.assistantAttr $
-                        txtWrap (Text.drop 2 body)
-            ("error", body) ->
-                withAttr Theme.errorAttr $
-                    txtWrap (Text.drop 2 body)
-            _ ->
-                withAttr Theme.mutedAttr (txtWrap line)
 
 -- Brick's default scrollbar uses a full block for the thumb and a blank
 -- space for the trough. During rapid viewport reflow, some terminals can
@@ -2191,11 +2284,38 @@ repositoryHeaderText branch cwd =
 
 drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
-    hBox
-        [ activityWidget
-        , withAttr Theme.mutedAttr (txt elapsed)
-        , withAttr Theme.mutedAttr (txt usage)
-        ]
+    withAttr Theme.mutedAttr $
+        txt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+
+drawLiveTodos :: UiState -> Widget Name
+drawLiveTodos ui =
+    case liveTodoPanelLines 8 (visibleTodoList ui) of
+        [] -> emptyWidget
+        lines_ ->
+            padLeftRight 2 $
+                vBox (map (vLimit 1 . drawLiveTodoLine) lines_)
+
+drawLiveTodoLine :: Text -> Widget Name
+drawLiveTodoLine line
+    | "… +" `Text.isPrefixOf` line =
+        withAttr Theme.mutedAttr (txt line)
+    | otherwise =
+        withAttr (todoStatusAttr (todoLineStatusFromText line)) (txt line)
+
+todoLineStatusFromText :: Text -> TodoDisplayStatus
+todoLineStatusFromText line
+    | "▶" `Text.isPrefixOf` line = TodoDisplayInProgress
+    | "✓" `Text.isPrefixOf` line = TodoDisplayCompleted
+    | "✗" `Text.isPrefixOf` line = TodoDisplayCancelled
+    | otherwise = TodoDisplayPending
+
+drawPromptActivity :: AppState -> Widget Name
+drawPromptActivity state =
+    padLeftRight 2 $
+        hBox
+            [ activityWidget
+            , withAttr Theme.mutedAttr (txt elapsed)
+            ]
   where
     ui = state.appUi
     waiting = userActionPending state
@@ -2234,9 +2354,6 @@ drawHeaderRight state =
                 <> formatElapsed
                     (fromIntegral ui.uiElapsedMillis / 1000)
             else ""
-    formattedUsage = formatTokenUsage ui.uiPrompt.promptUsage
-    usage =
-        if Text.null formattedUsage then "" else " │ " <> formattedUsage
 
 waitingIndicatorAttr :: AppState -> AttrName
 waitingIndicatorAttr state =
@@ -2253,11 +2370,66 @@ waitingIndicatorAttr state =
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
     vBox $
-        [vBox (map (drawBlock state) blocks)]
+        [drawConversationBlocks state AgentRoot state.appUi]
             <> conversationReserveWidgets anchor
   where
-    blocks = toList state.appUi.uiBlocks
     anchor = state.appConversationAnchor
+
+-- | Cache completed transcript blocks in moderately sized groups.
+--
+-- A Brick viewport must still lay out its complete child to determine the
+-- scroll range. Per-block caching avoids repeated Markdown parsing, but a
+-- redraw still has to combine one image per retained block. Grouping stable
+-- blocks means ordinary scrolling traverses roughly one cached image per 32
+-- blocks instead. Only full chunks are cached: Brick retains cache entries
+-- until explicit invalidation, so caching the growing final chunk under a new
+-- last-block key for every append would retain all of those obsolete images.
+-- The final partial/live/animated group remains uncached.
+drawTranscriptChunk
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> Seq UiBlock
+    -> Widget Name
+drawTranscriptChunk state target ui blocks =
+    case
+        Transcript.transcriptChunkCacheKey
+            (cacheableBlock state target ui)
+            dynamicBlockIds
+            blocks of
+        Just (firstBlockId, lastBlockId) ->
+            cached
+                (ConversationChunkCache
+                    target
+                    firstBlockId
+                    lastBlockId)
+                rendered
+        Nothing -> rendered
+  where
+    rendered =
+        vBox (map (drawBlock state target ui) (toList blocks))
+    dynamicBlockIds =
+        [ blockId
+        | state.appUi.uiFocus == FocusScrollback
+        , state.appAgentSelected == target
+        , blockId <- maybeToList ui.uiSelectedBlock
+        ]
+            <> [ blockId
+               | Just (CodeCopy hoveredTarget blockId _) <-
+                    [state.appHoveredControl]
+               , hoveredTarget == target
+               ]
+
+drawConversationBlocks
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> Widget Name
+drawConversationBlocks state target ui =
+    vBox $
+        map
+            (drawTranscriptChunk state target ui)
+            (Transcript.transcriptChunks ui.uiBlocks)
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =
@@ -2364,11 +2536,13 @@ drawQuickStartPanel state =
                 , txt "  "
                 ]
 
-drawBlock :: AppState -> UiBlock -> Widget Name
-drawBlock state block =
-    let ui = state.appUi
-        selected = ui.uiSelectedBlock == Just block.blockId
-        highlighted = selected && ui.uiFocus == FocusScrollback
+drawBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Widget Name
+drawBlock state target ui block =
+    let selected = ui.uiSelectedBlock == Just block.blockId
+        highlighted =
+            selected
+                && state.appUi.uiFocus == FocusScrollback
+                && state.appAgentSelected == target
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
@@ -2386,31 +2560,48 @@ drawBlock state block =
                                     (\codeIndex ->
                                         cached
                                             (CodeBlockCache
+                                                target
                                                 block.blockId
                                                 codeIndex))
-                                    (codeBlockHeader state block.blockId)
+                                    (codeBlockHeader
+                                        state
+                                        target
+                                        block.blockId)
                                     block.blockBody)
             BlockThinking ->
-                accentBlock (thinkingBlockAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle)
+                accentMarkdownBlock (thinkingBlockAttr state target block)
+                    (blockStateGlyph state target block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
-                accentBlock (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                accentBlock (statusAttr state target block)
+                    (blockStateGlyph state target block
+                        <> block.blockTitle
+                        <> detailSuffix block)
                     (visibleBody block)
+            BlockTodo ->
+                accentBlockWithSections (statusAttr state target block)
+                    (blockStateGlyph state target block <> block.blockTitle)
+                    (todoBodyWidgets block)
             BlockShell ->
                 accentCodeBlock
                     state.appSyntaxHighlighter
-                    (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle)
+                    (statusAttr state target block)
+                    (blockStateGlyph state target block <> block.blockTitle)
                     block.blockDetail
                     (visibleShellBody block)
             BlockEdit ->
-                accentBlock (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle <> detailSuffix block)
+                accentBlock (statusAttr state target block)
+                    (blockStateGlyph state target block
+                        <> block.blockTitle
+                        <> detailSuffix block)
                     (visibleBody block)
             BlockSystem ->
                 withAttr Theme.mutedAttr (txtWrap block.blockBody)
+            BlockRecap ->
+                accentBlock
+                    (statusAttr state target block)
+                    (blockStateGlyph state target block <> "Recap")
+                    (visibleBody block)
             BlockError ->
                 withAttr Theme.errorAttr (txtWrap block.blockBody)
         framed =
@@ -2418,7 +2609,7 @@ drawBlock state block =
                 then withAttr Theme.selectedAttr content
                 else content
         rendered =
-            clickable (ConversationBlock block.blockId) $
+            clickable (ConversationBlock target block.blockId) $
                 padBottom (Pad 1) $
                     hBox
                         [ withAttr
@@ -2428,13 +2619,14 @@ drawBlock state block =
                             (txt (if highlighted then "❯ " else "  "))
                         , framed
                         ]
-    in if cacheableBlock state block
+    in if cacheableBlock state target ui block
         then cached
             (ConversationBlockCache
+                target
                 block.blockId
                 highlighted
                 block.blockExpanded
-                (codeCopyCacheState state block.blockId))
+                (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
 
@@ -2447,8 +2639,14 @@ timestampedMessage timestamp body
             , withAttr Theme.mutedAttr (txt ("  " <> timestamp))
             ]
 
-codeBlockHeader :: AppState -> BlockId -> Int -> Text -> Widget Name
-codeBlockHeader state blockId codeIndex language =
+codeBlockHeader
+    :: AppState
+    -> AgentTarget
+    -> BlockId
+    -> Int
+    -> Text
+    -> Widget Name
+codeBlockHeader state target blockId codeIndex language =
     hBox
         [ if Text.null language
             then emptyWidget
@@ -2460,32 +2658,37 @@ codeBlockHeader state blockId codeIndex language =
                 (txt " Copy ")
         ]
   where
-    name = CodeCopy blockId codeIndex
+    name = CodeCopy target blockId codeIndex
 
-codeCopyCacheState :: AppState -> BlockId -> Maybe (Int, Bool)
-codeCopyCacheState state blockId =
+codeCopyCacheState
+    :: AppState
+    -> AgentTarget
+    -> BlockId
+    -> Maybe (Int, Bool)
+codeCopyCacheState state target blockId =
     case state.appHoveredControl of
-        Just (CodeCopy hoveredBlock codeIndex)
-            | hoveredBlock == blockId ->
+        Just (CodeCopy hoveredTarget hoveredBlock codeIndex)
+            | hoveredTarget == target
+            , hoveredBlock == blockId ->
                 Just
                     ( codeIndex
                     , state.appPressedControl
-                        == Just (CodeCopy blockId codeIndex)
+                        == Just (CodeCopy target blockId codeIndex)
                     )
         _ -> Nothing
 
-cacheableBlock :: AppState -> UiBlock -> Bool
-cacheableBlock state block =
+cacheableBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
+cacheableBlock state target ui block =
     block.blockState
         `notElem` [BlockStreaming, BlockRunning]
         && maybe
             True
             ((/= block.blockId) . (.retryCountdownBlockId))
-            state.appUi.uiRetryCountdown
-        && not (blockFlashing state block)
+            ui.uiRetryCountdown
+        && not (blockFlashing state target block)
 
-blockStateGlyph :: AppState -> UiBlock -> Text
-blockStateGlyph state block = case block.blockState of
+blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
+blockStateGlyph state target block = case block.blockState of
     BlockRunning -> liveGlyph
     BlockStreaming -> liveGlyph
     BlockComplete -> "✓ "
@@ -2494,7 +2697,8 @@ blockStateGlyph state block = case block.blockState of
     BlockCancelled -> "⊘ "
   where
     liveGlyph
-        | userActionPending state =
+        | target == AgentRoot
+        , userActionPending state =
             waitingIndicator
                 motionGlyphSet
                 MotionOff
@@ -2513,6 +2717,13 @@ accentBlock accent title body =
         if Text.null (Text.strip body)
             then []
             else [txtWrap body]
+
+accentMarkdownBlock :: AttrName -> Text -> Text -> Widget Name
+accentMarkdownBlock accent title body =
+    accentBlockWithSections accent title $
+        if Text.null (Text.strip body)
+            then []
+            else [markdownWidgetWithLinks MarkdownLink body]
 
 accentCodeBlock
     :: Maybe SyntaxHighlighter
@@ -2547,14 +2758,48 @@ accentBlockWithSections accent title sections =
 visibleBody :: UiBlock -> Text
 visibleBody block
     | block.blockExpanded = block.blockBody
-    | otherwise =
-        let rows = Text.lines block.blockBody
-            shown = take 3 rows
-            hidden = length rows - length shown
-        in Text.unlines shown
-            <> if hidden > 0
-                then "… +" <> Text.pack (show hidden) <> " lines"
-                else ""
+    | otherwise = truncatedLines 3 block.blockBody
+
+todoBodyWidgets :: UiBlock -> [Widget Name]
+todoBodyWidgets block =
+    let parsed = parseTodoList block.blockBody
+        (shown, hidden)
+            | block.blockExpanded = (parsed, 0)
+            | otherwise =
+                let visible = take 3 parsed
+                in (visible, length parsed - length visible)
+        rows = map todoLineWidget shown
+        overflow
+            | hidden > 0 =
+                [ withAttr Theme.mutedAttr
+                    (txt ("… +" <> Text.pack (show hidden) <> " lines"))
+                ]
+            | otherwise = []
+    in case rows <> overflow of
+        [] -> []
+        widgets -> [vBox widgets]
+
+todoLineWidget :: TodoDisplayLine -> Widget Name
+todoLineWidget line =
+    withAttr (todoStatusAttr line.todoLineStatus)
+        (txtWrap (todoStatusGlyph line.todoLineStatus <> " " <> line.todoLineText))
+
+todoStatusAttr :: TodoDisplayStatus -> AttrName
+todoStatusAttr = \case
+    TodoDisplayPending -> Theme.todoPendingAttr
+    TodoDisplayInProgress -> Theme.todoInProgressAttr
+    TodoDisplayCompleted -> Theme.todoCompletedAttr
+    TodoDisplayCancelled -> Theme.todoCancelledAttr
+
+truncatedLines :: Int -> Text -> Text
+truncatedLines shownCount body =
+    let rows = Text.lines body
+        shown = take shownCount rows
+        hidden = length rows - length shown
+    in Text.unlines shown
+        <> if hidden > 0
+            then "… +" <> Text.pack (show hidden) <> " lines"
+            else ""
 
 visibleShellBody :: UiBlock -> Text
 visibleShellBody block
@@ -2571,9 +2816,9 @@ detailSuffix block
     | Text.null (Text.strip block.blockDetail) = ""
     | otherwise = "  " <> block.blockDetail
 
-statusAttr :: AppState -> UiBlock -> AttrName
-statusAttr state block
-    | blockFlashing state block
+statusAttr :: AppState -> AgentTarget -> UiBlock -> AttrName
+statusAttr state target block
+    | blockFlashing state target block
     , block.blockState == BlockComplete =
         Theme.completionFlashAttr
     | otherwise = case block.blockState of
@@ -2584,17 +2829,18 @@ statusAttr state block
         BlockRunning -> Theme.toolAttr
         BlockStreaming -> Theme.thinkingAttr
 
-thinkingBlockAttr :: AppState -> UiBlock -> AttrName
-thinkingBlockAttr state block
-    | blockFlashing state block
+thinkingBlockAttr :: AppState -> AgentTarget -> UiBlock -> AttrName
+thinkingBlockAttr state target block
+    | blockFlashing state target block
     , block.blockState == BlockComplete =
         Theme.completionFlashAttr
     | otherwise =
         Theme.thinkingAttr
 
-blockFlashing :: AppState -> UiBlock -> Bool
-blockFlashing state block =
-    Map.member block.blockId state.appCompletionFlashes
+blockFlashing :: AppState -> AgentTarget -> UiBlock -> Bool
+blockFlashing state target block =
+    target == AgentRoot
+        && Map.member block.blockId state.appCompletionFlashes
 
 drawNotice :: AppState -> Widget Name
 drawNotice state = case state.appUi.uiNotice of
@@ -2652,9 +2898,9 @@ drawFooter state =
                         "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
-                            "Enter queue  │  Ctrl+Enter/Ctrl+O send now  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  Tab scrollback"
+                            "Enter queue  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback"
                         | otherwise ->
-                            "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+                            "Enter send  │  Ctrl+R dictate  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Tab scrollback"
 
 drawPermission :: AppState -> PermissionOverlay -> Widget Name
 drawPermission state permission =
@@ -2799,7 +3045,7 @@ resumeRow browser selectedId entry =
             vBox
                 [ summary
                 , padLeft (Pad 4) $
-                    vBox
+                    vBox $
                         [ resumeDetail "ID" entry.resumeId
                         , resumeDetail "CWD" entry.resumeCwd
                         , resumeDetail "Model" entry.resumeModel
@@ -2821,7 +3067,18 @@ resumeRow browser selectedId entry =
                                 <> "    Tools  "
                                 <> Text.pack (show entry.resumeToolCount)
                             )
-                        , resumeDetail
+                        ]
+                            <> maybe
+                                []
+                                (\recap -> [resumeDetail "Recap" recap])
+                                (nonEmptyResumeText entry.resumeRecap)
+                            <> maybe
+                                []
+                                (\summaryLine ->
+                                    [resumeDetail "Last turn" summaryLine])
+                                (nonEmptyResumeText entry.resumeLastTurnSummary)
+                            <>
+                        [ resumeDetail
                             "Prompt"
                             (if Text.null entry.resumePrompt
                                 then "(none)"
@@ -2844,6 +3101,11 @@ resumeDetail label value =
         [ withAttr Theme.mutedAttr (txt (Text.justifyLeft 12 ' ' label))
         , txtWrap value
         ]
+
+nonEmptyResumeText :: Maybe Text -> Maybe Text
+nonEmptyResumeText =
+    fmap Text.strip >=> \text ->
+        if Text.null text then Nothing else Just text
 
 resumeAbsoluteTime :: UTCTime -> Text
 resumeAbsoluteTime =
@@ -3256,6 +3518,15 @@ applyUiEvent uiEvent state =
         nextState0 =
             state
                 { appUi = nextUi
+                , appAutoRecapShownThisAway =
+                    case uiEvent of
+                        UiRecapReady _ -> True
+                        _ -> state.appAutoRecapShownThisAway
+                , appLastTurnCompletedAt =
+                    case uiEvent of
+                        UiLoop (TurnFinished _) -> Just state.appClockNanos
+                        UiTurnEnded BlockComplete -> Just state.appClockNanos
+                        _ -> state.appLastTurnCompletedAt
                 , appCompletionFlashes =
                     Map.union newFlashes retainedFlashes
                 , appMotionScheduleReset =
@@ -3332,6 +3603,60 @@ advanceAppClockNow = do
     now <- liftIO getMonotonicTimeNSec
     modify' (advanceAppTime now)
 
+noteTerminalFocusLost :: EventM Name AppState ()
+noteTerminalFocusLost = do
+    now <- liftIO getMonotonicTimeNSec
+    modify' \state ->
+        state
+            { appTerminalFocus = TerminalUnfocused
+            , appFocusLostAt = Just now
+            , appAutoRecapShownThisAway = False
+            , appLastAutoRecapAttemptAt = Nothing
+            }
+
+noteTerminalFocusGained :: EventM Name AppState ()
+noteTerminalFocusGained = do
+    maybeRequestAutoRecap
+    modify' \state ->
+        state
+            { appTerminalFocus = TerminalFocused
+            , appFocusLostAt = Nothing
+            , appMotionScheduleReset = True
+            }
+    invalidateCache
+    getVtyHandle >>= liftIO . V.refresh
+
+maybeRequestAutoRecap :: EventM Name AppState ()
+maybeRequestAutoRecap = do
+    now <- liftIO getMonotonicTimeNSec
+    state <- get
+    when (shouldRequestAutoRecap now state) do
+        modify' \current ->
+            current { appLastAutoRecapAttemptAt = Just now }
+        liftIO state.appRuntime.runtimeRecap
+
+shouldRequestAutoRecap :: Word64 -> AppState -> Bool
+shouldRequestAutoRecap now state =
+    state.appTerminalFocus == TerminalUnfocused
+        && not state.appAutoRecapShownThisAway
+        && not (userActionPending state)
+        && not state.appUi.uiRunning
+        && not (hasBackgroundActivity state.appAgentEntries)
+        && elapsedSeconds now state.appFocusLostAt >= autoRecapAwayThreshold
+        && elapsedSeconds now state.appLastTurnCompletedAt
+            >= autoRecapIdleThreshold
+        && ( case state.appLastAutoRecapAttemptAt of
+                Nothing -> True
+                Just attempted ->
+                    elapsedSeconds now (Just attempted)
+                        >= autoRecapRetryInterval
+           )
+
+elapsedSeconds :: Word64 -> Maybe Word64 -> NominalDiffTime
+elapsedSeconds _ Nothing = 0
+elapsedSeconds now (Just started) =
+    realToFrac (now - started) / 1_000_000_000
+
 applyLocalUiEvent :: UiEvent -> EventM Name AppState ()
 applyLocalUiEvent event =
     applyLocalUiEventWith event id
@@ -3380,6 +3705,9 @@ handleEvent event = do
                 state.appRuntime.runtimeImagePreviewRevision
                 (+ 1)
     syncMotionDemand
+    stateAfterMotionSync <- get
+    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+        continueWithoutRedraw
   where
     isMotionTick = \case
         AppEvent AppMotionTick -> True
@@ -3419,6 +3747,8 @@ handleEventInner event = case event of
                 writeTVar
                     state.appRuntime.runtimeMotionTickQueued
                     False
+    AppEvent AppRecapPoll ->
+        maybeRequestAutoRecap
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
@@ -3478,6 +3808,23 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
+    AppEvent (AppDictationFinished result) ->
+        case result of
+            Left message ->
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            warningNotice ("Dictation failed: " <> message)
+            Right transcript -> do
+                state <- get
+                let ui = state.appUi
+                    (draft, cursor) =
+                        insertDictation ui.uiDraft ui.uiCursor transcript
+                applyLocalUiEvent (UiSetDraft draft cursor)
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            successNotice "Dictation inserted."
     AppEvent (AppSetWindowTitle title) -> do
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
@@ -3493,18 +3840,37 @@ handleEventInner event = case event of
         state <- get
         let normalized =
                 Bridge.normalizeAgentSelection selected entries
+            mergedEntries =
+                preserveAgentConversationView
+                    normalized
+                    state.appAgentEntries
+                    entries
+            selectionChanged =
+                state.appAgentSelected /= normalized
+            selectedConversationChanged =
+                case normalized of
+                    AgentRoot -> False
+                    target ->
+                        fmap (.agentConversation)
+                            (find
+                                ((== target) . (.agentTarget))
+                                state.appAgentEntries)
+                            /= fmap (.agentConversation)
+                                (find
+                                    ((== target) . (.agentTarget))
+                                    mergedEntries)
         if state.appAgentSelected == normalized
-            && state.appAgentEntries == entries
+            && state.appAgentEntries == mergedEntries
             then pure ()
             else do
                 modify' \current ->
                     current
                         { appAgentSelected = normalized
-                        , appAgentEntries = entries
+                        , appAgentEntries = mergedEntries
                         , appAgentHover =
                             if normalized /= current.appAgentSelected
                                 || length entries <= 1
-                                || agentLayoutTargets entries
+                                || agentLayoutTargets mergedEntries
                                     /= agentLayoutTargets
                                         current.appAgentEntries
                                 then Nothing
@@ -3513,13 +3879,23 @@ handleEventInner event = case event of
                                         if any
                                             ((== hover.agentHoverTarget)
                                                 . (.agentTarget))
-                                            entries
+                                            mergedEntries
                                             then Just hover
                                             else Nothing
                         }
+                when selectedConversationChanged invalidateCache
+                if selectionChanged
+                    then resumeConversationFollow
+                    else when
+                        (selectedConversationChanged
+                            && state.appUi.uiFollow)
+                        do
+                            vScrollToEnd
+                                (viewportScroll ConversationViewport)
+                            queueConversationReflow
                 when
                     ((length state.appAgentEntries > 1)
-                        /= (length entries > 1))
+                        /= (length mergedEntries > 1))
                     do
                         invalidateCache
                         queueConversationReflow
@@ -3599,7 +3975,11 @@ handleEventInner event = case event of
                 (setFullscreenWindowTitle state.appRuntime)
                 state.appWindowTitle
             atomically (putTMVar reply result)
-            pure state { appAgentHover = Nothing }
+            pure state
+                { appAgentHover = Nothing
+                , appTerminalFocus = TerminalFocusUnknown
+                , appMotionScheduleReset = True
+                }
     MouseDown name button _ _ -> do
         unless (isAgentHoverSurface name) clearAgentHover
         state <- get
@@ -3645,9 +4025,9 @@ handleEventInner event = case event of
                             (name, V.BLeft)
                                 | isQuickStartControl name ->
                                     Composer.handleControlMouseDown name
-                            (CodeCopy blockId codeIndex, V.BLeft) ->
+                            (CodeCopy target blockId codeIndex, V.BLeft) ->
                                 Composer.handleControlMouseDown
-                                    (CodeCopy blockId codeIndex)
+                                    (CodeCopy target blockId codeIndex)
                             (SlashRow index, V.BLeft) ->
                                 Composer.activateSlashAt
                                     applyLocalUiEventWith
@@ -3668,16 +4048,10 @@ handleEventInner event = case event of
                                     (V.EvKey V.KDown [])
                             (AgentRow target, V.BLeft) -> do
                                 clearAgentHover
-                                liftIO
-                                    (state.appRuntime.runtimeAgentSelect target)
-                                modify' \current ->
-                                    current { appAgentSelected = target }
+                                selectAgentView target
                             (AgentPopover target, V.BLeft) -> do
                                 keepAgentHover target
-                                liftIO
-                                    (state.appRuntime.runtimeAgentSelect target)
-                                modify' \current ->
-                                    current { appAgentSelected = target }
+                                selectAgentView target
                             (link@MarkdownLink{}, V.BLeft) ->
                                 Composer.handleControlMouseDown link
                             _ -> handleMouseDown name button
@@ -3738,14 +4112,18 @@ handleEventInner event = case event of
                 , appPressedControl = Nothing
                 , appAgentHover = Nothing
                 }
+    VtyEvent V.EvLostFocus ->
+        noteTerminalFocusLost
+    VtyEvent V.EvGainedFocus ->
+        noteTerminalFocusGained
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
-        -- A resize can leave terminal cells from the previous geometry even
-        -- when Brick's next target picture is correctly bounded. Reset Vty's
-        -- assumed display so that redraw repaints the resized surface rather
-        -- than diffing against cells that may have wrapped or moved.
-        getVtyHandle >>= liftIO . V.refresh
+        -- A focused resize can leave cells from the previous geometry. Hidden
+        -- terminals defer the reset until their focus-gained refresh.
+        state <- get
+        when (state.appTerminalFocus /= TerminalUnfocused) $
+            getVtyHandle >>= liftIO . V.refresh
         queueConversationReflow
     VtyEvent vtyEvent -> do
         clearAgentHover
@@ -3913,6 +4291,15 @@ clearAgentHover =
     modify' \state ->
         state { appAgentHover = Nothing }
 
+selectAgentView :: AgentTarget -> EventM Name AppState ()
+selectAgentView target = do
+    state <- get
+    liftIO (state.appRuntime.runtimeAgentSelect target)
+    when (state.appAgentSelected /= target) do
+        modify' \current ->
+            current { appAgentSelected = target }
+        resumeConversationFollow
+
 isAgentHoverSurface :: Name -> Bool
 isAgentHoverSurface = \case
     AgentPane -> True
@@ -3924,16 +4311,98 @@ agentLayoutTargets :: [AgentEntry] -> [AgentTarget]
 agentLayoutTargets =
     map (.agentTarget) . sortOn (.agentPath)
 
+preserveAgentConversationView
+    :: AgentTarget
+    -> [AgentEntry]
+    -> [AgentEntry]
+    -> [AgentEntry]
+preserveAgentConversationView selected previous =
+    map preserve
+  where
+    preserve incoming
+        | incoming.agentTarget /= selected = incoming
+        | otherwise =
+            case find
+                ((== incoming.agentTarget) . (.agentTarget))
+                previous of
+                Nothing -> incoming
+                Just old ->
+                    incoming
+                        { agentConversation =
+                            mergeConversationView
+                                old.agentConversation
+                                incoming.agentConversation
+                        }
+
+mergeConversationView :: UiState -> UiState -> UiState
+mergeConversationView previous incoming
+    | Seq.null incoming.uiBlocks = incoming
+    | otherwise =
+        incoming
+            { uiBlocks = mergedBlocks
+            , uiSelectedBlock = selected
+            , uiSelectedBlockIndex =
+                selected >>= (`Map.lookup` incoming.uiBlockIndices)
+            }
+  where
+    previousBlocks =
+        Map.fromList
+            [ (block.blockId, block)
+            | block <- toList previous.uiBlocks
+            ]
+    mergedBlocks =
+        fmap
+            (\block ->
+                case Map.lookup block.blockId previousBlocks of
+                    Just old
+                        | sameConversationBlock old block ->
+                            block
+                                { blockExpanded = old.blockExpanded
+                                }
+                    _ -> block)
+            incoming.uiBlocks
+    selected =
+        case previous.uiSelectedBlock of
+            Just ident
+                | Just old <- Map.lookup ident previousBlocks
+                , Just new <-
+                    Map.lookup ident incoming.uiBlockIndices
+                        >>= \index -> Seq.lookup index incoming.uiBlocks
+                , sameConversationBlock old new ->
+                    Just ident
+            _ -> incoming.uiSelectedBlock
+
+sameConversationBlock :: UiBlock -> UiBlock -> Bool
+sameConversationBlock previous incoming =
+    previous.blockKind == incoming.blockKind
+        && previous.blockTitle == incoming.blockTitle
+        && case (previous.blockCallId, incoming.blockCallId) of
+            (Just oldCall, Just newCall) -> oldCall == newCall
+            (Nothing, Nothing) ->
+                previous.blockBody == incoming.blockBody
+            _ -> False
+
 handleMouseDown :: Name -> V.Button -> EventM Name AppState ()
 handleMouseDown name button =
     case button of
         V.BScrollUp -> scrollConversationBy (-mouseScrollLines)
         V.BScrollDown -> scrollConversationBy mouseScrollLines
         V.BLeft -> case name of
-            ConversationBlock ident ->
-                applyLocalUiEventWith
-                    (UiActivateBlock ident)
-                    (applyUiEvent (UiFocusChanged FocusScrollback))
+            ConversationBlock target ident ->
+                case target of
+                    AgentRoot ->
+                        applyLocalUiEventWith
+                            (UiActivateBlock ident)
+                            (applyUiEvent
+                                (UiFocusChanged FocusScrollback))
+                    AgentChild _ -> do
+                        modify' $
+                            applyChildConversationUiEvent
+                                target
+                                (UiActivateBlock ident)
+                        applyLocalUiEvent
+                            (UiFocusChanged FocusScrollback)
+                        queueConversationReflow
             ComposerArea ->
                 applyLocalUiEvent (UiFocusChanged FocusComposer)
             _ -> pure ()
@@ -3960,12 +4429,12 @@ handleScrollbackKey = \case
         leaveFollow
         vScrollToBeginning scroll
         queueConversationReflow
-    V.EvKey V.KEnd [] -> resumeFollow
+    V.EvKey V.KEnd [] -> resumeConversationFollow
     V.EvKey (V.KChar 'g') [] -> do
         leaveFollow
         vScrollToBeginning scroll
         queueConversationReflow
-    V.EvKey (V.KChar 'G') [] -> resumeFollow
+    V.EvKey (V.KChar 'G') [] -> resumeConversationFollow
     V.EvKey V.KLeft [] -> toggle
     V.EvKey V.KRight [] -> toggle
     V.EvKey V.KEnter [] -> toggle
@@ -3977,32 +4446,26 @@ handleScrollbackKey = \case
   where
     scroll = viewportScroll ConversationViewport
     moveBlock delta = do
-        applyLocalUiEvent (UiMoveSelection delta)
         state <- get
-        case state.appUi.uiSelectedBlock of
+        let target = state.appAgentSelected
+        applyActiveConversationUiEvent (UiMoveSelection delta)
+        state <- get
+        case (.uiSelectedBlock) =<< conversationUiForTarget target state of
             Just ident -> do
-                makeVisible (ConversationBlock ident)
+                makeVisible (ConversationBlock target ident)
                 queueConversationReflow
             Nothing -> pure ()
     toggle = do
-        applyLocalUiEvent UiToggleSelected
+        applyActiveConversationUiEvent UiToggleSelected
         queueConversationReflow
     focusComposer =
         applyLocalUiEvent (UiFocusChanged FocusComposer)
     leaveFollow =
         applyLocalUiEvent (UiSetFollow False)
-    resumeFollow = do
-        applyLocalUiEventWith (UiSetFollow True) \state ->
-            state
-                { appConversationAnchor =
-                    Scroll.followConversationTail
-                        <$> state.appConversationAnchor
-                }
-        vScrollToEnd scroll
-        queueConversationReflow
     copySelected = do
         state <- get
-        case state.appUi.uiSelectedBlock >>= selectedBlock state.appUi of
+        let ui = activeConversationUi state
+        case ui.uiSelectedBlock >>= selectedBlock ui of
             Nothing -> pure ()
             Just block -> do
                 copied <- liftIO $
@@ -4015,6 +4478,26 @@ handleScrollbackKey = \case
                                     "Copied selected block."
                                 else warningNotice
                                     "Terminal clipboard is unavailable."
+
+resumeConversationFollow :: EventM Name AppState ()
+resumeConversationFollow = do
+    applyLocalUiEventWith (UiSetFollow True) \state ->
+        state
+            { appConversationAnchor =
+                Scroll.followConversationTail
+                    <$> state.appConversationAnchor
+            }
+    vScrollToEnd (viewportScroll ConversationViewport)
+    queueConversationReflow
+
+applyActiveConversationUiEvent :: UiEvent -> EventM Name AppState ()
+applyActiveConversationUiEvent uiEvent = do
+    state <- get
+    case state.appAgentSelected of
+        AgentRoot ->
+            applyLocalUiEvent uiEvent
+        target@(AgentChild _) ->
+            modify' (applyChildConversationUiEvent target uiEvent)
 
 scrollConversationPage :: Direction -> EventM Name AppState ()
 scrollConversationPage direction = do

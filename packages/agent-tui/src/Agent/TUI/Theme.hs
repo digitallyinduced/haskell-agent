@@ -39,6 +39,10 @@ module Agent.TUI.Theme
     , syntaxWarningAttr
     , syntaxClassAttr
     , thinkingAttr
+    , todoCancelledAttr
+    , todoCompletedAttr
+    , todoInProgressAttr
+    , todoPendingAttr
     , toolAttr
     , userAttr
     , waitingDimAttr
@@ -55,6 +59,7 @@ import qualified Graphics.Vty as V
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
 userAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
+todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
 controlLinkAttr, controlLinkHoverAttr, controlLinkActiveAttr :: AttrName
@@ -72,6 +77,10 @@ userAttr = attrName "user"
 assistantAttr = attrName "assistant"
 thinkingAttr = attrName "thinking"
 toolAttr = attrName "tool"
+todoPendingAttr = attrName "todo-pending"
+todoInProgressAttr = attrName "todo-in-progress"
+todoCompletedAttr = attrName "todo-completed"
+todoCancelledAttr = attrName "todo-cancelled"
 errorAttr = attrName "error"
 successAttr = attrName "success"
 selectedAttr = attrName "selected"
@@ -140,6 +149,10 @@ terminalDefault =
         , (waitingDimAttr, palette V.brightBlack)
         , (waitingMidAttr, palette V.yellow)
         , (toolAttr, palette V.cyan)
+        , (todoPendingAttr, V.defAttr)
+        , (todoInProgressAttr, palette V.yellow `V.withStyle` V.bold)
+        , (todoCompletedAttr, palette V.brightBlack)
+        , (todoCancelledAttr, palette V.brightBlack `V.withStyle` V.strikethrough)
         , (errorAttr, palette V.red `V.withStyle` V.bold)
         , (successAttr, palette V.green)
         , (completionFlashAttr,
@@ -193,6 +206,10 @@ monochrome =
         , (waitingDimAttr, V.defAttr)
         , (waitingMidAttr, V.defAttr)
         , (toolAttr, V.defAttr)
+        , (todoPendingAttr, V.defAttr)
+        , (todoInProgressAttr, V.defAttr `V.withStyle` V.bold)
+        , (todoCompletedAttr, V.defAttr)
+        , (todoCancelledAttr, V.defAttr `V.withStyle` V.strikethrough)
         , (errorAttr, V.defAttr `V.withStyle` V.bold)
         , (successAttr, V.defAttr)
         , (completionFlashAttr, V.defAttr `V.withStyle` V.bold)

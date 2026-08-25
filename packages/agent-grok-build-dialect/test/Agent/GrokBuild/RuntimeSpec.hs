@@ -19,6 +19,7 @@ import Agent.Loop
     )
 import Agent.Subagents
     ( SubagentId(..)
+    , SubagentStatus(..)
     , closeSubagentRegistry
     , defaultSubagentConfig
     , newSubagentRegistry
@@ -40,14 +41,20 @@ import Agent.Tools.Types
     , defaultToolEnv
     , jsonToolParameters
     )
-import Control.Concurrent (threadDelay)
+import Control.Concurrent
+    ( newChan
+    , readChan
+    , threadDelay
+    , writeChan
+    )
+import Control.Concurrent.Async (wait, withAsync)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , takeMVar
     , tryPutMVar
     )
 import Control.Exception.Safe (bracket)
-import Control.Monad (forM_)
+import Control.Monad (forM_, replicateM, replicateM_)
 import Data.IORef
     ( IORef
     , newIORef
@@ -63,13 +70,8 @@ import Data.Time
     , addUTCTime
     , fromGregorian
     )
-import System.Directory
-    ( getTemporaryDirectory
-    , removeDirectoryRecursive
-    )
-import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
-import System.Posix.Temp (mkdtemp)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -196,6 +198,45 @@ spec = do
                     writeIORef active False
                     waitForCount fireCount 2
 
+        it "launches distinct due tasks concurrently with a bound of eight" do
+            clock <- newIORef fixedTime
+            started <- newChan
+            release <- newChan
+            bracket
+                (testScheduler
+                    (readIORef clock)
+                    (\fire -> do
+                        writeChan started fire.scheduledFireTaskId
+                        readChan release
+                        pure (Right testAgent)))
+                closeSchedulerRuntime
+                \runtime -> do
+                    forM_ [1 .. (9 :: Int)] \index -> do
+                        result <- call
+                            [schedulerCreateTool runtime]
+                            "scheduler_create"
+                            ("{\"interval\":\"60s\",\"prompt\":\"task "
+                                <> Text.pack (show index)
+                                <> "\"}")
+                        result.output `shouldSatisfy`
+                            Text.isInfixOf "\"updated\":false"
+                    writeIORef clock (addUTCTime 60 fixedTime)
+                    _ <- call
+                        [schedulerCreateTool runtime]
+                        "scheduler_create"
+                        "{\"interval\":\"1d\",\"prompt\":\"wake scheduler\"}"
+                    firstWave <-
+                        replicateM 8
+                            (timeout 1000000 (readChan started))
+                    firstWave `shouldSatisfy` all (/= Nothing)
+                    timeout 100000 (readChan started)
+                        `shouldReturn` Nothing
+                    writeChan release ()
+                    ninthStarted <-
+                        timeout 1000000 (readChan started)
+                    ninthStarted `shouldSatisfy` (/= Nothing)
+                    replicateM_ 8 (writeChan release ())
+
         it "enforces the 50-task limit and releases expired task slots" do
             nowRef <- newIORef fixedTime
             bracket
@@ -303,6 +344,46 @@ spec = do
                         ["deep-research", "deep-research-2"]
                 map (.workflowRunId) runs
                     `shouldMatchList` ["wf_1", "wf_2"]
+
+        it "probes workflow run statuses concurrently and preserves run order" do
+            withRegistry \registry -> do
+                specs <- newIORef Map.empty
+                runtime <-
+                    newWorkflowRuntime
+                        (unsafeEncodeUtf "/tmp")
+                        (rootContext registry)
+                        specs
+                forM_
+                    [ "first research"
+                    , "second research"
+                    ]
+                    \query -> do
+                        _ <- call
+                            [workflowTool runtime]
+                            "workflow"
+                            ("{\"name\":\"deep-research\",\"args\":{\"query\":\""
+                                <> query
+                                <> "\"}}")
+                        pure ()
+                started <- newChan
+                release <- newChan
+                let readStatus agentId = do
+                        writeChan started agentId
+                        readChan release
+                        pure Running
+                withAsync
+                    (workflowRunSnapshotsWith readStatus runtime)
+                    \snapshotsAsync -> do
+                        firstStarted <-
+                            timeout 1000000 (readChan started)
+                        secondStarted <-
+                            timeout 1000000 (readChan started)
+                        firstStarted `shouldSatisfy` (/= Nothing)
+                        secondStarted `shouldSatisfy` (/= Nothing)
+                        replicateM_ 2 (writeChan release ())
+                        snapshots <- wait snapshotsAsync
+                        map (.workflowRunId) snapshots
+                            `shouldBe` ["wf_1", "wf_2"]
 
         it "returns stable errors for unsupported workflow sources" do
             withRegistry \registry -> do
@@ -422,6 +503,7 @@ call tools name arguments =
 
 rootContext registry = MultiAgentContext
     registry
+    (unsafeEncodeUtf "/tmp")
     Nothing
     0
     taskPathRoot
@@ -434,6 +516,7 @@ rootContext registry = MultiAgentContext
 
 childContext registry = MultiAgentContext
     registry
+    (unsafeEncodeUtf "/tmp")
     (Just (SubagentId "agent-parent"))
     1
     taskPathRoot
@@ -475,9 +558,4 @@ fake name = AppTool
     }
 
 withTempDir :: (FilePath -> IO a) -> IO a
-withTempDir action = do
-    tmp <- getTemporaryDirectory
-    bracket
-        (mkdtemp (tmp </> "agent-grok-runtime-XXXXXX"))
-        removeDirectoryRecursive
-        action
+withTempDir = withSystemTempDirectory "agent-grok-runtime"

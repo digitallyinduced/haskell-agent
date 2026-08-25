@@ -15,10 +15,12 @@ module Agent.ProjectInstructions
     , nonEmptyInstructionContent
     ) where
 
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
+import Control.Applicative ((<|>))
+import Control.Concurrent.Async (concurrently)
 import Control.Exception.Safe (tryAny)
-import Control.Monad (filterM, foldM)
 import qualified Data.ByteString as BS
 import Data.List (sort)
 import Data.Maybe (mapMaybe)
@@ -102,10 +104,13 @@ discoverProjectInstructions options cwd
         loaded <-
             if usesCodexDiscovery options
                 then do
-                    global <-
-                        maybe (pure Nothing) readPreferredAgentsMd
-                            options.discoverGlobalDir
-                    project <- mapMaybe id <$> traverse readPreferredAgentsMd dirs
+                    (global, projectFiles) <- concurrently
+                        (maybe (pure Nothing) readPreferredAgentsMd
+                            options.discoverGlobalDir)
+                        (mapConcurrentlyBounded instructionDirectoryConcurrency
+                            readPreferredAgentsMd
+                            dirs)
+                    let project = mapMaybe id projectFiles
                     pure LoadedAgentsMd
                         { loadedGlobal = global
                         , loadedProject = project
@@ -124,8 +129,12 @@ discoverGrokInstructions
     -> [OsPath]
     -> IO LoadedAgentsMd
 discoverGrokInstructions options dirs = do
-    home <- maybe (pure []) readGrokHomeInstructions options.discoverGlobalDir
-    project <- concat <$> traverse readGrokDirectoryInstructions dirs
+    (home, projectParts) <- concurrently
+        (maybe (pure []) readGrokHomeInstructions options.discoverGlobalDir)
+        (mapConcurrentlyBounded instructionDirectoryConcurrency
+            readGrokDirectoryInstructions
+            dirs)
+    let project = concat projectParts
     combined <- dedupeInstructionFiles (home <> project)
     pure $ case (home, combined) of
         ([], _) -> LoadedAgentsMd
@@ -145,29 +154,35 @@ discoverGrokInstructions options dirs = do
 -- Cursor homes. For custom harness homes, only that explicit directory is
 -- inspected.
 readGrokHomeInstructions :: OsPath -> IO [InstructionFile]
-readGrokHomeInstructions globalDir = do
-    primary <- readGrokHomeRoot globalDir
-    compatible <-
-        if takeFileName globalDir == unsafeEncodeUtf ".grok"
-            then concat <$> traverse readGrokHomeRoot
-                [ takeDirectory globalDir </> unsafeEncodeUtf ".claude"
-                , takeDirectory globalDir </> unsafeEncodeUtf ".cursor"
-                ]
-            else pure []
-    pure (primary <> compatible)
+readGrokHomeInstructions globalDir =
+    concat
+        <$> mapConcurrentlyBounded instructionDirectoryConcurrency
+            readGrokHomeRoot
+            roots
+  where
+    roots
+        | takeFileName globalDir == unsafeEncodeUtf ".grok" =
+            [ globalDir
+            , takeDirectory globalDir </> unsafeEncodeUtf ".claude"
+            , takeDirectory globalDir </> unsafeEncodeUtf ".cursor"
+            ]
+        | otherwise = [globalDir]
 
 readGrokHomeRoot :: OsPath -> IO [InstructionFile]
 readGrokHomeRoot dir = do
-    named <- readNamedInstructionFiles dir
-    rules <- readRulesDirectory (dir </> unsafeEncodeUtf "rules")
+    (named, rules) <- concurrently
+        (readNamedInstructionFiles dir)
+        (readRulesDirectory (dir </> unsafeEncodeUtf "rules"))
     pure (named <> rules)
 
 readGrokDirectoryInstructions :: OsPath -> IO [InstructionFile]
 readGrokDirectoryInstructions dir = do
-    named <- readNamedInstructionFiles dir
-    rules <- concat <$> traverse
-        (readRulesDirectory . (dir </>))
-        grokProjectRulesDirectories
+    (named, ruleGroups) <- concurrently
+        (readNamedInstructionFiles dir)
+        (mapConcurrentlyBounded instructionDirectoryConcurrency
+            (readRulesDirectory . (dir </>))
+            grokProjectRulesDirectories)
+    let rules = concat ruleGroups
     pure (named <> rules)
 
 grokProjectRulesDirectories :: [OsPath]
@@ -179,16 +194,26 @@ grokProjectRulesDirectories =
 
 readNamedInstructionFiles :: OsPath -> IO [InstructionFile]
 readNamedInstructionFiles dir = do
-    preferredAgents <- readPreferredAgentsMd dir
+    (preferredAgents, loadedOthers) <- concurrently
+        (readPreferredAgentsMd dir)
+        (mapConcurrentlyBounded instructionFileConcurrency
+            (\name -> do
+                loaded <- readAgentsFile (dir </> name)
+                pure (name, loaded))
+            grokInstructionNames)
     let names = case preferredAgents of
             Just file
                 | takeFileName file.instructionPath
                     == unsafeEncodeUtf "AGENTS.override.md" ->
                     filter (not . isAgentsMdSpelling) grokInstructionNames
             _ -> grokInstructionNames
-    other <- mapMaybe id <$> traverse
-        (readAgentsFile . (dir </>))
-        names
+        allowedNames = Set.fromList names
+        other =
+            mapMaybe snd
+                [ loaded
+                | loaded@(name, _) <- loadedOthers
+                , name `Set.member` allowedNames
+                ]
     dedupeInstructionFiles (maybe [] pure preferredAgents <> other)
 
 isAgentsMdSpelling :: OsPath -> Bool
@@ -215,39 +240,53 @@ readRulesDirectory dir = do
         then pure []
         else do
             entries <- sort <$> listDirectory dir
-            markdown <- filterM
-                (doesFileExist . (dir </>))
-                [ name
-                | name <- entries
-                , Text.toLower (toText (takeExtension name)) == ".md"
-                ]
-            mapMaybe id <$> traverse (readAgentsFile . (dir </>)) markdown
+            let candidates =
+                    [ name
+                    | name <- entries
+                    , Text.toLower (toText (takeExtension name)) == ".md"
+                    ]
+            classified <-
+                mapConcurrentlyBounded instructionFileConcurrency
+                    (\name -> do
+                        exists <- doesFileExist (dir </> name)
+                        pure (name, exists))
+                    candidates
+            mapMaybe id
+                <$> mapConcurrentlyBounded instructionFileConcurrency
+                    (readAgentsFile . (dir </>))
+                    [name | (name, True) <- classified]
 
 -- | Case-insensitive filesystems can resolve several compatibility spellings
 -- to the same file. Symlinked rule files can do the same. Keep the first
 -- occurrence so order and precedence stay deterministic.
 dedupeInstructionFiles :: [InstructionFile] -> IO [InstructionFile]
-dedupeInstructionFiles files =
-    reverse . snd <$> foldM step (Set.empty, []) files
+dedupeInstructionFiles files = do
+    canonicals <-
+        mapConcurrentlyBounded instructionFileConcurrency canonical files
+    pure (reverse (snd (foldl step (Set.empty, []) (zip canonicals files))))
   where
+    canonical :: InstructionFile -> IO OsPath
+    canonical file =
+        tryAny (canonicalizePath file.instructionPath) >>= \case
+            Left _ -> pure file.instructionPath
+            Right path -> pure path
+
     step
         :: (Set.Set OsPath, [InstructionFile])
-        -> InstructionFile
-        -> IO (Set.Set OsPath, [InstructionFile])
-    step (seen, kept) file = do
-        canonical <-
-            tryAny (canonicalizePath file.instructionPath) >>= \case
-                Left _ -> pure file.instructionPath
-                Right path -> pure path
-        if Set.member canonical seen
-            then pure (seen, kept)
-            else pure (Set.insert canonical seen, file : kept)
+        -> (OsPath, InstructionFile)
+        -> (Set.Set OsPath, [InstructionFile])
+    step (seen, kept) (canonical, file)
+        | Set.member canonical seen = (seen, kept)
+        | otherwise = (Set.insert canonical seen, file : kept)
 
 findProjectRoot :: [OsPath] -> OsPath -> IO OsPath
 findProjectRoot markers start = go start
   where
     go dir = do
-        hit <- fmap or $ traverse (\marker -> doesPathExist (dir </> marker)) markers
+        hit <- fmap or $
+            mapConcurrentlyBounded instructionFileConcurrency
+                (\marker -> doesPathExist (dir </> marker))
+                markers
         if hit
             then pure dir
             else do
@@ -259,10 +298,10 @@ findProjectRoot markers start = go start
 -- | Prefer @AGENTS.override.md@ over @AGENTS.md@ in a directory.
 readPreferredAgentsMd :: OsPath -> IO (Maybe InstructionFile)
 readPreferredAgentsMd dir = do
-    override <- readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.override.md")
-    case override of
-        Just file -> pure (Just file)
-        Nothing -> readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.md")
+    (override, base) <- concurrently
+        (readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.override.md"))
+        (readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.md"))
+    pure (override <|> base)
 
 readAgentsFile :: OsPath -> IO (Maybe InstructionFile)
 readAgentsFile path = do
@@ -302,3 +341,9 @@ applyByteBudget maxBytes loaded =
                     let truncated = TextEncoding.decodeUtf8With TextEncodingError.ignore
                             (BS.take remaining encoded)
                     in [file { instructionContent = truncated }]
+
+instructionDirectoryConcurrency :: Int
+instructionDirectoryConcurrency = 8
+
+instructionFileConcurrency :: Int
+instructionFileConcurrency = 16

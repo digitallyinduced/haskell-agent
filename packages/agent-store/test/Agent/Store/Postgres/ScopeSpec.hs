@@ -51,6 +51,8 @@ spec = describe "custom PostgreSQL scopes" do
     it "rejects identifiers outside the UUID-shaped safe alphabet" do
         mkScopeId "not-a-scope" `shouldBe`
             Left "scope id must be a UUID (32 hex digits, with optional hyphens)"
+        mkScopeId "01234567-89abcdef0123-4567-89abcdef" `shouldBe`
+            Left "scope id must be a UUID (32 hex digits, with optional hyphens)"
 
     it "migrates a durable started-to-final audit lifecycle" do
         let migrationSql = ByteString.unlines customSchemaStatements

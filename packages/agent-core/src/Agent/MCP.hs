@@ -37,6 +37,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     )
 import Agent.ToolDispatch (typedTool)
+import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -654,14 +655,14 @@ closeMcpSupervisor supervisor = do
                 void (tryPutTMVar entry.supervisorPendingResult
                     (Left "MCP supervisor closed")))
             pending
-    mapM_
+    forConcurrentlyBounded_ 8
         (\entry -> do
             worker <- atomically
                 (readTMVar entry.supervisorPendingWorker)
             cancel worker
             void (waitCatch worker))
         pending
-    mapM_ closeMcpFleet fleets
+    forConcurrentlyBounded_ 4 closeMcpFleet fleets
 
 resolveEffectiveCwds :: [McpServerConfig] -> IO [McpServerConfig]
 resolveEffectiveCwds configs = do
@@ -1527,9 +1528,9 @@ closeMcpFleet fleet =
                 activeWorkers <-
                     modifyMVar fleet.mcpFleetWorkers \workers ->
                         pure ([], workers)
-                mapM_ stopWorker activeWorkers
+                forConcurrentlyBounded_ 8 stopWorker activeWorkers
                 clients <- Map.elems <$> readTVarIO fleet.mcpFleetClients
-                mapM_ closeMcpClient clients
+                forConcurrentlyBounded_ 8 closeMcpClient clients
                 pure True
 
 startMcpClient :: McpServerConfig -> IO McpClient

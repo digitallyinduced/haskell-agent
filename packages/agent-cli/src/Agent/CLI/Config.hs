@@ -231,6 +231,7 @@ data HarnessConfig = HarnessConfig
     , configMcpServers :: !(Map Text McpServerConfig)
     , configWebFetch :: !WebFetchConfig
     , configLsp :: !LspConfig
+    , configMaxConcurrentAgents :: !(Maybe Int)
     }
     deriving (Eq, Show)
 
@@ -242,6 +243,7 @@ instance Aeson.ToJSON HarnessConfig where
             , "mcpServers" Aeson..= config.configMcpServers
             , "webFetch" Aeson..= config.configWebFetch
             , "lsp" Aeson..= config.configLsp
+            , "maxConcurrentAgents" Aeson..= config.configMaxConcurrentAgents
             ]
 
 defaultHarnessConfig :: HarnessConfig
@@ -260,6 +262,7 @@ defaultHarnessConfig = HarnessConfig
         { lspEnabled = False
         , lspServers = Map.empty
         }
+    , configMaxConcurrentAgents = Nothing
     }
 
 instance FromJSON McpServerConfig where
@@ -330,6 +333,7 @@ instance FromJSON HarnessConfig where
             <*> object .:? "mcpServers" .!= Map.empty
             <*> object .:? "webFetch" .!= defaultHarnessConfig.configWebFetch
             <*> object .:? "lsp" .!= defaultHarnessConfig.configLsp
+            <*> object .:? "maxConcurrentAgents"
 
 -- | @~/.haskell-agent/config.json@ for a supplied home directory.
 harnessConfigPath :: OsPath -> OsPath
@@ -408,6 +412,7 @@ validateHarnessConfig config = do
     _ <- Map.traverseWithKey validateServer config.configMcpServers
     validateWebFetch config.configWebFetch
     _ <- Map.traverseWithKey validateLspServer config.configLsp.lspServers
+    validateMaxConcurrentAgents config.configMaxConcurrentAgents
     pure config
   where
     validateServer label server = do
@@ -428,6 +433,13 @@ validateHarnessConfig config = do
                     <> " requestTimeoutSeconds must be positive"
                 )
         pure server
+
+    validateMaxConcurrentAgents = \case
+        Nothing -> pure ()
+        Just limit
+            | limit < 1 ->
+                Left "maxConcurrentAgents must be at least 1"
+            | otherwise -> pure ()
 
     validateWebFetch web = do
         when (web.webFetchTimeoutSeconds < 1) $

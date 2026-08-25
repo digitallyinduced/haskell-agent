@@ -26,12 +26,15 @@ module Agent.CLI.Render
     , formatLoopErrorPersistedAt
     , formatSearchReplaceDiff
     , formatThinkingBlock
+    , formatToolBody
     , formatToolOutput
     , formatToolStarted
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
     , renderEvent
+    , renderPrintedText
+    , resetRenderPrintedText
     , setRenderActivity
     , streamMarkdown
     , summarizeToolCall
@@ -527,12 +530,24 @@ modifyRenderState config transition =
 readRenderState :: RenderConfig -> IO RenderState
 readRenderState config = readIORef config.renderState
 
+renderPrintedText :: RenderConfig -> IO Bool
+renderPrintedText config =
+    (.statePrintedText) <$> readRenderState config
+
+resetRenderPrintedText :: RenderConfig -> IO ()
+resetRenderPrintedText config =
+    modifyRenderState config \state ->
+        (state{statePrintedText = False}, ())
+
 setRenderActivity :: Text -> RenderState -> RenderState
 setRenderActivity activity state = state{stateActivity = activity}
 
-beginRenderTurn :: UTCTime -> RenderState
-beginRenderTurn now =
-    emptyRenderState{stateStartedAt = Just now}
+beginRenderTurn :: UTCTime -> RenderState -> RenderState
+beginRenderTurn now state =
+    emptyRenderState
+        { stateThinkingVisible = state.stateThinkingVisible
+        , stateStartedAt = Just now
+        }
 
 appendRenderReasoning :: Text -> RenderState -> RenderState
 appendRenderReasoning delta state =
@@ -599,7 +614,8 @@ renderEventUnlocked config = \case
         startThinkingSpinnerUnlocked config
     TurnStarted -> do
         now <- getCurrentTime
-        modifyRenderState config (const (beginRenderTurn now, ()))
+        modifyRenderState config \state ->
+            (beginRenderTurn now state, ())
         startThinkingSpinnerUnlocked config
     -- Finalize live color output (or paint once for non-streaming backends).
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
@@ -619,10 +635,11 @@ renderEventUnlocked config = \case
                 }
             , ()
             )
-        putTextLn config.renderStderr (formatToolStarted config.renderColor call)
-        let extra = formatToolBody config.renderColor call
-        unless (Text.null extra) do
-            putTextLn config.renderStderr extra
+        unless (isTodoTool call.name) do
+            putTextLn config.renderStderr (formatToolStarted config.renderColor call)
+            let extra = formatToolBody config.renderColor call
+            unless (Text.null extra) do
+                putTextLn config.renderStderr extra
         when config.renderShowThinking do
             visible <- (.stateThinkingVisible) <$> readRenderState config
             if visible
@@ -638,11 +655,21 @@ renderEventUnlocked config = \case
             ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
             , state.stateToolCalls
             )
-        let output = maybe result.output
+        let maybeCall = Map.lookup result.callId calls
+            formatted = maybe result.output
                 (`formatToolOutput` result.output)
-                (Map.lookup result.callId calls)
-        putTextLn config.renderStderr
-            (roleToolOutput config.renderColor (truncateToolOutput output))
+                maybeCall
+            painted = case maybeCall of
+                Just call
+                    | isTodoTool call.name -> Nothing
+                _ ->
+                    Just
+                        (roleToolOutput
+                            config.renderColor
+                            (truncateToolOutput formatted))
+        case painted of
+            Nothing -> pure ()
+            Just line -> putTextLn config.renderStderr line
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -1033,17 +1060,22 @@ toolChrome name = case canonicalToolName name of
     "followup_task" -> ToolChrome "Followed up with" ToolDetailMuted
     "list_agents" -> ToolChrome "Listed agents" ToolDetailMuted
     "interrupt_agent" -> ToolChrome "Interrupted" ToolDetailMuted
-    "update_plan" -> ToolChrome "Updated" ToolDetailMuted
+    "todo_write" -> ToolChrome "todo_write" ToolDetailNone
+    "update_plan" -> ToolChrome "update_plan" ToolDetailNone
     "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
     "skill_search" -> ToolChrome "Searched skills" ToolDetailMuted
-    "skill_read" -> ToolChrome "Read skill" ToolDetailMuted
+    "view_skill" -> ToolChrome "Viewed skill" ToolDetailMuted
     "skill_create" -> ToolChrome "Learned" ToolDetailMuted
     "skill_update" -> ToolChrome "Updated skill" ToolDetailMuted
     "skill_archive" -> ToolChrome "Archived skill" ToolDetailMuted
     "skill_rollback" -> ToolChrome "Restored skill" ToolDetailMuted
     _ -> ToolChrome name ToolDetailMuted
+
+isTodoTool :: Text -> Bool
+isTodoTool name =
+    canonicalToolName name `elem` ["todo_write", "update_plan"]
 
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case canonicalToolName call.name of

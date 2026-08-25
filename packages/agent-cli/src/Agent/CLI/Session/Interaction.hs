@@ -1,0 +1,175 @@
+-- | Session interaction helpers shared by turn handling and the REPL.
+module Agent.CLI.Session.Interaction
+    ( buildPromptState
+    , runBtwQuestion
+    , setSessionEffort
+    , syncFullscreenPrompt
+    ) where
+
+import Agent.CLI.Btw
+    ( formatBtwError
+    , runBtwWithCancel
+    )
+import Agent.CLI.CancelWatch (withEscCancel)
+import Agent.CLI.Command
+    ( currentEffort
+    , currentModel
+    , setReasoningEffort
+    )
+import Agent.CLI.Interrupt (withTurnCancel)
+import Agent.CLI.Options (ApprovalPolicy)
+import Agent.CLI.Render
+    ( putTextLn
+    , renderAssistantText
+    )
+import Agent.CLI.ReplMode
+    ( replModeFromState
+    , replModeLabel
+    )
+import Agent.CLI.Session
+    ( Persistence(..)
+    , PersistenceState(..)
+    , SessionHandle(..)
+    , SessionMeta(..)
+    , SessionCreate(..)
+    , writeSessionMeta
+    )
+import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Style (roleError)
+import Agent.CLI.Terminal (resolveColor)
+import Agent.CLI.TUI.App
+    ( emitUiEvent
+    )
+import Agent.Loop (TokenUsage)
+import Agent.Responses.Types (ResponseCreateParams)
+import Agent.Tools.PlanMode
+    ( PlanModeEnv(..)
+    , PlanModeState
+    )
+import Agent.TUI.Model
+    ( PromptState(..)
+    , UiEvent(..)
+    , progressNotice
+    )
+import Control.Monad (forM_)
+import Data.IORef
+    ( modifyIORef'
+    , readIORef
+    , writeIORef
+    )
+import Data.Maybe (isJust)
+import Data.Text (Text)
+import System.IO (stderr, stdout)
+
+-- | Publish the current session prompt metadata to a retained fullscreen
+-- runtime before replaying a pending turn after a provider rebuild.
+syncFullscreenPrompt :: SessionEnv -> IO ()
+syncFullscreenPrompt env =
+    forM_ env.sessionFullscreen \runtime -> do
+        planState <- readIORef env.sessionPlanMode.planStateRef
+        params <- readIORef env.sessionParams
+        policy <- readIORef env.sessionPolicy
+        account <- readIORef env.sessionAccount
+        usage <- readIORef env.sessionUsage
+        attachments <- readIORef env.sessionAttachments
+        emitUiEvent runtime $ UiSetPrompt $
+            buildPromptState
+                params
+                planState
+                policy
+                account
+                (isJust env.sessionSelectAccount)
+                usage
+                (length attachments)
+
+buildPromptState
+    :: ResponseCreateParams
+    -> PlanModeState
+    -> ApprovalPolicy
+    -> Text
+    -> Bool
+    -> TokenUsage
+    -> Int
+    -> PromptState
+buildPromptState params planState policy account accountSelectable usage attachments =
+    PromptState
+        { promptModel = currentModel params
+        , promptEffort = currentEffort params
+        , promptMode =
+            replModeLabel (replModeFromState planState policy)
+        , promptAccount = account
+        , promptAccountSelectable = accountSelectable
+        , promptUsage = usage
+        , promptLimitStatus = Nothing
+        , promptAttachments = attachments
+        }
+
+setSessionEffort :: SessionEnv -> Text -> IO ()
+setSessionEffort env level = do
+    modifyIORef' env.sessionParams (setReasoningEffort level)
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiSetPromptEffort level)
+        Nothing -> pure ()
+    case env.sessionPersist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef -> do
+            slot <- readIORef slotRef
+            case slot of
+                PersistencePending pending sessionId tempDir ->
+                    writeIORef slotRef
+                        (PersistencePending
+                            pending { createEffort = level }
+                            sessionId
+                            tempDir)
+                PersistenceActive handle -> do
+                    let meta = handle.sessionMeta { metaEffort = level }
+                    writeSessionMeta
+                        handle.sessionPool
+                        handle.sessionMetaPath
+                        meta
+                    writeIORef slotRef
+                        (PersistenceActive handle { sessionMeta = meta })
+
+runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
+runBtwQuestion registerCancel env question = do
+    let fullscreen = env.sessionFullscreen
+    color <- resolveColor stdout
+    forM_ fullscreen \runtime ->
+        emitUiEvent runtime
+            (UiSetNotice (Just (progressNotice "btw · asking…")))
+    result <-
+        runBtwWithCancel
+            (\cancel action ->
+                if registerCancel
+                    then
+                        withTurnCancel env.sessionInterrupt cancel $
+                            case fullscreen of
+                                Nothing ->
+                                    withEscCancel
+                                        cancel
+                                        env.sessionEscPaused
+                                        action
+                                Just _ -> action
+                    else action)
+            env.sessionBtwBackend
+            env.sessionParams
+            env.sessionTranscript
+            question
+    forM_ fullscreen \runtime ->
+        emitUiEvent runtime (UiSetNotice Nothing)
+    case result of
+        Left err -> do
+            errorColor <- resolveColor stderr
+            let message = formatBtwError err
+            case fullscreen of
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+                Nothing ->
+                    putTextLn stderr (roleError errorColor message)
+        Right answer ->
+            case fullscreen of
+                Just runtime ->
+                    emitUiEvent runtime (UiAssistantHistory answer)
+                Nothing ->
+                    putTextLn stdout (renderAssistantText color answer)

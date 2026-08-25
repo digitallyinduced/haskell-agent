@@ -46,11 +46,24 @@ The module:
 - restarts the foreground gateway after failures.
 
 The project directory must exist before the service starts. If `yolo` is
-enabled, it must also be writable by the service user.
+enabled, it must also be writable by the service user. The generated systemd
+unit orders itself after mounts needed by the project and instance home
+directories.
 
 Instance names must begin with a lowercase letter, contain only lowercase
 letters, digits, and hyphens, and be at most 16 characters long. Each enabled
-instance must use a distinct service user and home directory.
+instance must use a distinct service user and home directory. `homeDirectory`,
+`codexHome`, `workingDirectory`, and `tokenFile` must be absolute paths.
+
+Disabled instances do not require the enabled-only options:
+
+```nix
+services.haskell-agent.telegram.instances.assistant.enable = false;
+```
+
+Set `createUser = false` to use an account managed elsewhere. In that case the
+configured user and group must already exist, and the home directory must be
+writable by them.
 
 ## Provider credentials
 
@@ -64,6 +77,10 @@ authentication, the default `CODEX_HOME` is:
 ```
 
 It can be changed with `codexHome`.
+
+Every `environmentFiles` entry must be an absolute path. Prefix it with `-` to
+let systemd ignore a missing file, for example
+`-/run/secrets/haskell-agent-provider`.
 
 ## State and PostgreSQL
 

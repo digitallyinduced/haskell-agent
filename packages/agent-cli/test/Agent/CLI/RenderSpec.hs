@@ -32,10 +32,26 @@ spec :: Spec
 spec = do
     describe "RenderState transitions" do
         it "starts a fresh turn while retaining immutable defaults" do
-            let started = beginRenderTurn (UTCTime (fromGregorian 2026 1 2) 0)
+            let started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        emptyRenderState
             stateStartedAt started `shouldSatisfy` (/= Nothing)
             stateActivity started `shouldBe` "Thinking…"
             stateToolCalls started `shouldBe` mempty
+
+        it "preserves an already-running thinking spinner across tool rounds" do
+            let visible =
+                    emptyRenderState
+                        { stateThinkingVisible = True
+                        , statePrintedText = True
+                        }
+                started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        visible
+            stateThinkingVisible started `shouldBe` True
+            statePrintedText started `shouldBe` False
 
         it "streams markdown through a pure state transition" do
             let (state1, first) = streamMarkdown "hello " emptyRenderState
@@ -117,6 +133,15 @@ spec = do
             let call = functionToolCall "c1" "collaboration.spawn_agent" "{}"
             formatToolOutput call "not json" `shouldBe` "not json"
 
+        it "renders todo_write output as a glyph checklist" do
+            formatToolOutput
+                (functionToolCall "c1" "todo_write" "{}")
+                "- [completed] 1: Find and clone repos\n\
+                \- [pending] 2: Investigate Codex"
+                `shouldBe`
+                    "✓ Find and clone repos\n\
+                    \□ Investigate Codex"
+
     describe "formatElapsed" do
         it "formats seconds and minutes" do
             formatElapsed 0.4 `shouldBe` "0.4s"
@@ -146,6 +171,17 @@ spec = do
         it "keeps unknown tool names" do
             formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")
                 `shouldBe` "◆ custom_tool"
+
+        it "keeps todo_write and update_plan on their wire names" do
+            formatToolStarted False
+                (functionToolCall
+                    "c8"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Find repos\"}]}")
+                `shouldBe` "◆ todo_write"
+            formatToolStarted False
+                (functionToolCall "c9" "update_plan" "{\"plan\":[]}")
+                `shouldBe` "◆ update_plan"
 
         it "renders learned-skill mutations as visible learning activity" do
             formatToolStarted False
@@ -177,6 +213,16 @@ spec = do
             formatSearchReplaceDiff False
                 "{\"file_path\":\"src/Old.hs\",\"old_string\":\"bye\",\"new_string\":\"\"}"
                 `shouldSatisfy` Text.isInfixOf "delete src/Old.hs"
+
+    describe "formatToolBody" do
+        it "does not dump todo_write arguments into linear chrome" do
+            formatToolBody False
+                (functionToolCall
+                    "c1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\"},\
+                    \{\"id\":\"2\",\"content\":\"Investigate Codex\"}]}")
+                `shouldBe` ""
 
     describe "formatLoopError" do
         it "explains a max-turn stop" do
@@ -573,6 +619,27 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "Listed"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "ok"
+
+        it "suppresses todo_write from linear scrollback" do
+            withRenderConfig False False \config handle path -> do
+                let call =
+                        functionToolCall
+                            "c1"
+                            "todo_write"
+                            "{\"todos\":[{\"id\":\"1\",\"content\":\"Find repos\"}]}"
+                renderEvent config (ToolStarted call)
+                renderEvent config (ToolFinished ToolCallResult
+                    { callId = "c1"
+                    , output =
+                        "- [completed] 1: Find and clone Grok Build and Codex repos\n\
+                        \- [pending] 2: Investigate Codex"
+                    , callKind = FunctionCallKind
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldNotSatisfy` Text.isInfixOf "todo_write"
+                body `shouldNotSatisfy` Text.isInfixOf "Find and clone"
+                body `shouldNotSatisfy` Text.isInfixOf "[completed]"
 
         it "keeps thinking plain when color is off" do
             withRenderConfig True False \config handle path -> do
