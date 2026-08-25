@@ -11,6 +11,8 @@ module Agent.ToolDispatch
     , ToolInterpreter
     , StreamedTool(..)
     , StreamedToolFactory
+    , streamedToolForHandler
+    , streamedToolFactoryForHandler
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -37,7 +39,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseEither)
-import Data.Acquire (Acquire)
+import Data.Acquire (Acquire, mkAcquire)
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -141,13 +143,60 @@ type ToolInterpreter s args =
 data StreamedTool = forall s args. StreamedTool
     { streamedStart :: IO s
     , streamedInterpret :: ToolInterpreter s args
-    , streamedConsume :: args -> s -> IO ToolResult
+    , streamedConsume :: ToolCall -> (Text -> IO ()) -> args -> s -> IO ToolResult
     , streamedClose :: s -> IO ()
     }
 
 -- | Session-scoped acquisition of a streamed tool, e.g. @read_file@'s shared
 -- workspace index.
 type StreamedToolFactory = Acquire StreamedTool
+
+-- | Default interpreter for a typed handler: decode JSON once on 'ToolDone'
+-- and run the handler on those args. Speculation can replace this factory.
+streamedToolForHandler :: ToolHandler -> StreamedTool
+streamedToolForHandler = \case
+    TypedTool name run ->
+        jsonArgsTool name \_call _emit args () -> run args
+    TypedToolWithCall name run ->
+        jsonArgsTool name \call _emit args () -> run call args
+    TypedStreamingTool name run ->
+        jsonArgsTool name \_call emit args () -> run emit args
+    NoArgsTool _ run ->
+        StreamedTool
+            { streamedStart = pure ()
+            , streamedInterpret = \() -> \case
+                ToolPrefix _ -> pure (Right ())
+                ToolDone _ -> pure (Left ((), ()))
+            , streamedConsume = \_call _emit () () -> run
+            , streamedClose = \_ -> pure ()
+            }
+
+streamedToolFactoryForHandler :: ToolHandler -> StreamedToolFactory
+streamedToolFactoryForHandler handler =
+    mkAcquire (pure (streamedToolForHandler handler)) (\_ -> pure ())
+
+jsonArgsTool
+    :: FromJSON args
+    => Text
+    -> (ToolCall -> (Text -> IO ()) -> args -> () -> IO ToolResult)
+    -> StreamedTool
+jsonArgsTool name consume =
+    StreamedTool
+        { streamedStart = pure ()
+        , streamedInterpret = \() -> \case
+            ToolPrefix _ ->
+                pure (Right ())
+            ToolDone text ->
+                case decodeCallArguments name text of
+                    Left _ -> pure (Right ())
+                    Right args -> pure (Left (args, ()))
+        , streamedConsume = consume
+        , streamedClose = \_ -> pure ()
+        }
+
+decodeCallArguments :: FromJSON args => Text -> Text -> Either Text args
+decodeCallArguments name text =
+    decodeToolArguments (canonicalToolArguments name (toolArgumentsValue text))
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall

@@ -208,7 +208,7 @@ streamedReadFile speculation =
     StreamedTool
         { streamedStart = pure emptyPartialCall
         , streamedInterpret = interpretReadFile speculation
-        , streamedConsume = consumeReadFile speculation
+        , streamedConsume = \_call _emit -> consumeReadFile speculation
         , streamedClose = closePartialCall speculation
         }
 

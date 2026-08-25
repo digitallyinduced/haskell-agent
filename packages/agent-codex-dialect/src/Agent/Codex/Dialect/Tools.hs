@@ -24,7 +24,6 @@ import Agent.ToolDSL
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
-    , decodeToolArguments
     , toolArgumentsValue
     , typedStreamingTool
     , typedTool
@@ -71,7 +70,7 @@ import Agent.Tools.Types
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     , jsonTool
-    , withToolResourceClaims
+    , withTypedResourceClaims
     )
 import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..), Value(..), withObject)
@@ -126,7 +125,7 @@ instance FromJSON ShellCommandArgs where
 
 shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
 shellCommandTool env session =
-    withToolResourceClaims (shellCommandResourceClaims env) $
+    withTypedResourceClaims (shellCommandResourceClaims env) $
     jsonTool "shell_command" shellDescription
     [ PropertySchema "command" PropertyString True $ Just
         "Shell script to run in the user's default shell."
@@ -143,28 +142,22 @@ shellCommandTool env session =
 
 shellCommandResourceClaims
     :: ToolEnv
-    -> ToolCall
+    -> ShellCommandArgs
     -> IO (Either Text [ToolResourceClaim])
-shellCommandResourceClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text ShellCommandArgs
-    of
-        Left err -> pure (Left err)
-        Right args
-            | args.yieldTimeMs /= Nothing ->
-                pure (Left "yielding shell commands remain exclusive")
-            | not (shellCommandIsReadOnly args.command) ->
-                pure (Left "shell command is not in the read-only allowlist")
-            | otherwise -> do
-                let requested = maybe env.toolCwd fromText args.workdir
-                resolveUnderCwd env requested
-                    >>= pure . fmap
-                        (\_ ->
-                            [ ToolResourceClaim
-                                ToolRead
-                                ToolAllPaths
-                            ])
+shellCommandResourceClaims env args
+    | args.yieldTimeMs /= Nothing =
+        pure (Left "yielding shell commands remain exclusive")
+    | not (shellCommandIsReadOnly args.command) =
+        pure (Left "shell command is not in the read-only allowlist")
+    | otherwise = do
+        let requested = maybe env.toolCwd fromText args.workdir
+        resolveUnderCwd env requested
+            >>= pure . fmap
+                (\_ ->
+                    [ ToolResourceClaim
+                        ToolRead
+                        ToolAllPaths
+                    ])
 
 shellCommandIsReadOnly :: Text -> Bool
 shellCommandIsReadOnly command
@@ -313,7 +306,7 @@ instance FromJSON WriteStdinArgs where
 
 writeStdinTool :: CodexShellSession -> AppTool
 writeStdinTool session =
-    withToolResourceClaims writeStdinResourceClaims $
+    withTypedResourceClaims writeStdinResourceClaims $
     jsonAppToolWithExecution "write_stdin" writeStdinDescription
         [ PropertySchema "session_id" PropertyInteger True $ Just
             "Identifier returned by shell_command for a running command."
@@ -327,18 +320,14 @@ writeStdinTool session =
         (typedTool "write_stdin" (runWriteStdin session))
 
 writeStdinResourceClaims
-    :: ToolCall
+    :: WriteStdinArgs
     -> IO (Either Text [ToolResourceClaim])
-writeStdinResourceClaims call =
-    pure $ do
-        args <-
-            decodeToolArguments (toolArgumentsValue call.arguments)
-                :: Either Text WriteStdinArgs
-        Right
-            [ ToolResourceClaim ToolWrite $
-                ToolNamedResource
-                    ("shell-session:" <> Text.pack (show args.sessionId))
-            ]
+writeStdinResourceClaims args =
+    pure $ Right
+        [ ToolResourceClaim ToolWrite $
+            ToolNamedResource
+                ("shell-session:" <> Text.pack (show args.sessionId))
+        ]
 
 writeStdinDescription :: Text
 writeStdinDescription =
@@ -404,27 +393,21 @@ instance FromJSON ApplyPatchArgs where
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
-    withToolResourceClaims (applyPatchResourceClaims env) $
+    withTypedResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
         (typedTool "apply_patch" (runApplyPatch env))
 
 applyPatchResourceClaims
     :: ToolEnv
-    -> ToolCall
+    -> ApplyPatchArgs
     -> IO (Either Text [ToolResourceClaim])
-applyPatchResourceClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text ApplyPatchArgs
-    of
+applyPatchResourceClaims env args =
+    case parsePatch args.patch of
         Left err -> pure (Left err)
-        Right args ->
-            case parsePatch args.patch of
-                Left err -> pure (Left err)
-                Right hunks -> do
-                    claims <- traverse (claimsForHunk env) hunks
-                    pure (concat <$> sequence claims)
+        Right hunks -> do
+            claims <- traverse (claimsForHunk env) hunks
+            pure (concat <$> sequence claims)
 
 claimsForHunk
     :: ToolEnv

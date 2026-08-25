@@ -56,7 +56,7 @@ import Agent.Tools.Speculation
     ( ToolSpeculationRuntime
     , discardToolSpeculation
     , resetToolSpeculationRuntime
-    , takeToolSpeculation
+    , takeToolSpeculationEmitting
     )
 import Control.Concurrent.Async
     ( Async
@@ -892,7 +892,11 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                 ToolApprovalGranted ->
                     maybe
                         (pure Nothing)
-                        (`takeToolSpeculation` call)
+                        (\runtime ->
+                            takeToolSpeculationEmitting runtime call \output ->
+                                config.loopDispatch.toolDispatchOnOutput call output
+                                    >> config.loopOnEvent
+                                        (ToolOutputUpdated call.callId output))
                         config.loopToolSpeculation
                     >>= \case
                         Just toolResult ->

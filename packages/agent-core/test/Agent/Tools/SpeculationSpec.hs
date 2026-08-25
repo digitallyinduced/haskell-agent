@@ -313,7 +313,7 @@ probeStreamedTool nextId probe failTake =
                         (<> [(state.probeEntryId, text)])
                     pure $
                         Left (text, state { probeArguments = text })
-        , streamedConsume = \args _state ->
+        , streamedConsume = \_call _emit args _state ->
             if failTake
                 then throwIO (userError "probe take failed")
                 else pure (Right args)

@@ -6,6 +6,7 @@ module Agent.Tools.Speculation
     , observeToolArgumentEvent
     , retainToolSpeculation
     , takeToolSpeculation
+    , takeToolSpeculationEmitting
     , discardToolSpeculation
     , waitForToolSpeculation
     ) where
@@ -106,7 +107,7 @@ data ActiveEntry = ActiveEntry
 
 data ArgumentStreamCommand
     = DeliverPrefix !Text
-    | DeliverDone !Text
+    | DeliverDone !ToolCall !(Text -> IO ())
     | ReachArgumentBarrier !(TMVar ())
 
 newToolSpeculationRuntime
@@ -353,7 +354,17 @@ takeToolSpeculation
     :: ToolSpeculationRuntime
     -> ToolCall
     -> IO (Maybe ToolResult)
-takeToolSpeculation runtime call = do
+takeToolSpeculation runtime call =
+    takeToolSpeculationEmitting runtime call (const (pure ()))
+
+-- | Finish one interpreter after approval, forwarding snapshot output for
+-- streaming handlers such as shell_command.
+takeToolSpeculationEmitting
+    :: ToolSpeculationRuntime
+    -> ToolCall
+    -> (Text -> IO ())
+    -> IO (Maybe ToolResult)
+takeToolSpeculationEmitting runtime call emit = do
     selected <- removeByCallId runtime call.callId
     case selected of
         Nothing -> pure Nothing
@@ -363,7 +374,7 @@ takeToolSpeculation runtime call = do
     consume entry
         | not (entryMatchesCall entry call) = pure Nothing
         | otherwise = do
-            enqueueCommand entry (DeliverDone call.arguments)
+            enqueueCommand entry (DeliverDone call emit)
             waitCatch entry.interpreterWorker >>= \case
                 Left _ -> pure Nothing
                 Right result -> pure result
@@ -544,10 +555,10 @@ runStreamed (StreamedTool start interpret consume close) queue =
                                 -- consumes the typed args.
                                 commit next
                                 go next
-                    DeliverDone text ->
-                        interpret state (ToolDone text) >>= \case
+                    DeliverDone call emit ->
+                        interpret state (ToolDone call.arguments) >>= \case
                             Left (args, next) -> do
-                                result <- consume args next
+                                result <- consume call emit args next
                                 close next
                                 finished
                                 pure (Just result)

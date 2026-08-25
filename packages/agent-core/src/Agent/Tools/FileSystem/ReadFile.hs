@@ -6,10 +6,7 @@ module Agent.Tools.FileSystem.ReadFile
 import Agent.OsPath (fromText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
-    ( ToolCall(..)
-    , decodeToolArguments
-    , toolArgumentsValue
-    , typedTool
+    ( typedTool
     )
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
@@ -32,7 +29,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     , withToolArgumentInterpreter
-    , withToolResourceClaims
+    , withTypedResourceClaims
     )
 import Data.Text (Text)
 
@@ -57,7 +54,7 @@ readFileToolWithSpeculation env speculation =
 
 baseReadFileTool :: ToolEnv -> AppTool
 baseReadFileTool env =
-    withToolResourceClaims (readFileClaims env) $
+    withTypedResourceClaims (readFileClaims env) $
     jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
         "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
@@ -72,19 +69,13 @@ baseReadFileTool env =
 
 readFileClaims
     :: ToolEnv
-    -> ToolCall
+    -> ReadFileArgs
     -> IO (Either Text [ToolResourceClaim])
-readFileClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text ReadFileArgs
-    of
-        Left err -> pure (Left err)
-        Right args ->
-            resolveForRead env (fromText args.targetFile)
-                >>= pure . fmap
-                    (\path ->
-                        [ToolResourceClaim ToolRead (ToolPath path)])
+readFileClaims env args =
+    resolveForRead env (fromText args.targetFile)
+        >>= pure . fmap
+            (\path ->
+                [ToolResourceClaim ToolRead (ToolPath path)])
 
 readFileDescription :: Text
 readFileDescription =

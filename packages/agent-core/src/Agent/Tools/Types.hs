@@ -16,6 +16,7 @@ module Agent.Tools.Types
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , withToolResourceClaims
+    , withTypedResourceClaims
     , withToolArgumentInterpreter
     , mkToolRegistry
     , toolRegistryTools
@@ -36,9 +37,13 @@ import Agent.ToolDispatch
     , ToolDispatchConfig
     , ToolHandler
     , StreamedToolFactory
+    , canonicalToolArguments
     , canonicalToolName
+    , decodeToolArguments
     , dispatchToolHandler
     , handlerName
+    , streamedToolFactoryForHandler
+    , toolArgumentsValue
     )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
@@ -48,7 +53,7 @@ import Agent.Tools.Scheduling
     )
 import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
-import Data.Aeson (Value)
+import Data.Aeson (FromJSON, Value)
 import Data.IORef (IORef, newIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -185,7 +190,7 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolArgumentInterpreter = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -218,7 +223,7 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolArgumentInterpreter = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 withToolResourceClaims
@@ -227,6 +232,24 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+-- | Resource claims that consume already-shaped arguments. The wrapper
+-- decodes JSON once; claim functions must not re-parse 'ToolCall' text.
+withTypedResourceClaims
+    :: FromJSON args
+    => (args -> IO (Either Text [ToolResourceClaim]))
+    -> AppTool
+    -> AppTool
+withTypedResourceClaims resolve =
+    withToolResourceClaims \call ->
+        case
+            decodeToolArguments
+                (canonicalToolArguments
+                    call.name
+                    (toolArgumentsValue call.arguments))
+        of
+            Left err -> pure (Left err)
+            Right args -> resolve args
 
 -- | Attach an opt-in streamed-argument interpreter to a tool. Any prepared
 -- result is consumed only after normal approval and scheduling.
@@ -264,7 +287,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolArgumentInterpreter = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
