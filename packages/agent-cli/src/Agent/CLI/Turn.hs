@@ -58,13 +58,17 @@ import Agent.CLI.Session
     , ensureSession
     , loadRecentSessionTurns
     , sessionConversationText
+    , sessionsRoot
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
 import Agent.CLI.Session.History
-    ( readLivePreviousResponseId
-    , readLiveTranscript
+    ( currentLiveTranscriptGeneration
+    , durableTranscriptCheckpoint
+    , evictLiveTranscript
+    , readLivePreviousResponseId
+    , withLiveTranscript
     , writeLivePreviousResponseId
     , writeLiveTranscript
     )
@@ -132,7 +136,7 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (forM_, when)
+import Control.Monad (forM_, void, when)
 import Control.Exception.Safe (bracket_, onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
@@ -180,9 +184,17 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
-        (runOneTurnBusy includeTurnContext env promptText inputs)
+        (withLiveTranscript env.sessionConversation \beforeItems ->
+            runOneTurnBusy
+                includeTurnContext env beforeItems promptText inputs)
 
-runOneTurnBusy :: Bool -> SessionEnv -> Text -> [TurnInput] -> IO TurnResult
+runOneTurnBusy
+    :: Bool
+    -> SessionEnv
+    -> [ResponseItem]
+    -> Text
+    -> [TurnInput]
+    -> IO TurnResult
 runOneTurnBusy includeTurnContext env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
@@ -203,7 +215,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     , sessionFinishSubagentTurn = finishSubagentTurn
     , sessionAbortSubagentTurn = abortSubagentTurn
     , sessionOnPersisted = onPersisted
-    } promptText inputs = do
+    } beforeItems promptText inputs = do
   let stdoutHandle = render.renderStdout
       stderrHandle = render.renderStderr
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
@@ -247,7 +259,6 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                     <> handle.sessionMeta.metaId))
         PersistenceDisabled -> pure ()
     prev <- readLivePreviousResponseId conversationRef
-    beforeItems <- readLiveTranscript conversationRef
     pendingStartup <-
         if includeTurnContext
             then atomicModifyIORef' startupContext \pendingCtx ->
@@ -349,6 +360,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
                 writeIORef slotRef (PersistenceActive handle')
+                evictDurableConversation env handle'
                 forM_ fullscreen \runtime ->
                     commitFullscreenHistoryTurn
                         runtime
@@ -543,6 +555,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     writeIORef env.sessionTitleTurnCount titleTurns
                     let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
+                    evictDurableConversation env countedHandle
                     forM_ fullscreen \runtime ->
                         commitFullscreenHistoryTurn
                             runtime
@@ -567,6 +580,24 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 Just notes -> do
                     resetRenderPrintedText render
                     runOneTurn env notes [UserMessage notes]
+
+-- | Release the parsed root transcript after the exact turn is durable.
+--
+-- The checkpoint deliberately closes over only durable session identity and
+-- the store pool. A stale callback cannot evict a newer in-memory generation.
+evictDurableConversation :: SessionEnv -> SessionHandle -> IO ()
+evictDurableConversation env handle = do
+    generation <-
+        currentLiveTranscriptGeneration env.sessionConversation
+    let sessionId = handle.sessionMeta.metaId
+        checkpoint =
+            durableTranscriptCheckpoint
+                env.sessionDatabasePool
+                (sessionsRoot env.sessionHome)
+                sessionId
+    void $
+        evictLiveTranscript
+            env.sessionConversation generation checkpoint
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.
 -- Synthetic startup, skill, plan, and reminder messages precede it and remain

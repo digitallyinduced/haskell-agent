@@ -178,11 +178,14 @@ import Agent.CLI.Runtime.HistorySource
     , sessionUiPageSize
     )
 import Agent.CLI.Session.History
-    ( detectGitBranch,
+    ( currentLiveTranscriptGeneration,
+      detectGitBranch,
+      durableTranscriptCheckpoint,
+      evictLiveTranscript,
       foldSessionItems,
       readLiveTranscript,
-      writeLiveTranscript,
-      LiveConversation(liveTranscript, livePreviousResponseId) )
+      replaceLiveConversation,
+      writeLiveTranscript )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionBackend(..),
@@ -2094,13 +2097,9 @@ runAgentInitializedWithLock
                         (tokenProviderBillingMode tokenProvider)
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
-        atomicModifyIORef' conversationRef \state ->
-            ( state
-                { livePreviousResponseId = initialPrevious
-                , liveTranscript = initialItems
-                }
-            , ()
-            )
+        void $
+            replaceLiveConversation
+                conversationRef initialPrevious initialItems
         contextTokensRef <- newIORef Nothing
         writeIORef subagentForkSource (Just (readLiveTranscript conversationRef))
         let titleHint = case resumed of
@@ -2125,6 +2124,17 @@ runAgentInitializedWithLock
                 (if refreshDialectContext || resumeNeedsFreshContext
                     then Nothing
                     else initialPrevious)
+        forM_ resumed \(meta, _) -> do
+            generation <-
+                currentLiveTranscriptGeneration conversationRef
+            void $
+                evictLiveTranscript
+                    conversationRef
+                    generation
+                    (durableTranscriptCheckpoint
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        meta.metaId)
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -2197,7 +2207,10 @@ runAgentInitializedWithLock
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
-                                , initialTurns
+                                , needsInitialContext =
+                                    resumeNeedsFreshContext
+                                        || (null initialTurns
+                                            && isNothing initialPrevious)
                                 , persist
                                 , startupWindowTitle
                                 , projectRoot

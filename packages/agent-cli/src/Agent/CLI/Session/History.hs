@@ -3,7 +3,14 @@ module Agent.CLI.Session.History
     ( detectGitBranch
     , foldSessionItems
     , hydrateUiHistory
-    , LiveConversation(..)
+    , LiveConversation
+    , TranscriptCheckpoint(..)
+    , TranscriptGeneration
+    , currentLiveTranscriptGeneration
+    , durableTranscriptCheckpoint
+    , evictLiveTranscript
+    , replaceLiveConversation
+    , withLiveTranscript
     , readLiveAttachments
     , readLivePreviousResponseId
     , readLiveTranscript
@@ -18,7 +25,14 @@ module Agent.CLI.Session.History
 import Agent.CLI.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
+    , loadSession
     )
+import Agent.CLI.Session.ConversationStore
+    ( ConversationStore
+    , TranscriptCheckpoint(..)
+    , TranscriptGeneration
+    )
+import qualified Agent.CLI.Session.ConversationStore as ConversationStore
 import Agent.Loop (ImageAttachment)
 import Agent.OpenAI.Compaction
     ( isCompactSessionTurn
@@ -38,11 +52,12 @@ import Agent.TUI.Model
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe
     ( SomeException
+    , throwString
     , try
     )
+import Control.Monad (void)
 import Data.IORef
     ( IORef
-    , atomicModifyIORef'
     , readIORef
     )
 import Data.Text (Text)
@@ -50,6 +65,7 @@ import qualified Data.Text as Text
 import System.Exit (ExitCode(..))
 import System.OsPath (OsPath)
 import System.Process (readProcessWithExitCode)
+import Agent.Store.Postgres.Connection (StorePool)
 
 -- | The pieces of conversation state that must change together when a live
 -- session is reset.
@@ -57,54 +73,103 @@ import System.Process (readProcessWithExitCode)
 -- Keeping them in one value makes resets and multi-field updates atomic and
 -- prevents callers from observing mismatched response IDs, transcripts, and
 -- attachments.
-data LiveConversation = LiveConversation
-    { livePreviousResponseId :: !(Maybe Text)
-    , liveTranscript :: ![ResponseItem]
-    , liveAttachments :: ![ImageAttachment]
-    } deriving (Eq, Show)
+type LiveConversation = ConversationStore
 
--- | Pure reset transition for live conversation state.
-resetLiveConversationState :: LiveConversation -> LiveConversation
-resetLiveConversationState state =
-    state
-        { livePreviousResponseId = Nothing
-        , liveTranscript = []
-        , liveAttachments = []
-        }
+-- | Reset the live conversation atomically.
+resetLiveConversationState :: LiveConversation -> IO ()
+resetLiveConversationState = ConversationStore.resetConversationStore
 
 readLivePreviousResponseId :: IORef LiveConversation -> IO (Maybe Text)
-readLivePreviousResponseId = fmap (\state -> state.livePreviousResponseId) . readIORef
+readLivePreviousResponseId ref =
+    readIORef ref >>= ConversationStore.readConversationPreviousResponseId
 
 readLiveTranscript :: IORef LiveConversation -> IO [ResponseItem]
-readLiveTranscript = fmap (\state -> state.liveTranscript) . readIORef
+readLiveTranscript ref =
+    withLiveTranscript ref pure
+
+withLiveTranscript
+    :: IORef LiveConversation
+    -> ([ResponseItem] -> IO a)
+    -> IO a
+withLiveTranscript ref action =
+    readIORef ref >>= \store ->
+        ConversationStore.withConversationTranscript store action
 
 readLiveAttachments :: IORef LiveConversation -> IO [ImageAttachment]
-readLiveAttachments = fmap (\state -> state.liveAttachments) . readIORef
+readLiveAttachments ref =
+    readIORef ref >>= ConversationStore.readConversationAttachments
 
 modifyLiveAttachments
     :: IORef LiveConversation
     -> ([ImageAttachment] -> ([ImageAttachment], a))
     -> IO a
 modifyLiveAttachments ref update =
-    atomicModifyIORef' ref \state ->
-        let (attachments, result) = update state.liveAttachments
-        in (state { liveAttachments = attachments }, result)
+    readIORef ref >>= \store ->
+        ConversationStore.modifyConversationAttachments store update
 
 writeLivePreviousResponseId
     :: IORef LiveConversation
     -> Maybe Text
     -> IO ()
 writeLivePreviousResponseId ref value =
-    atomicModifyIORef' ref \state ->
-        (state { livePreviousResponseId = value }, ())
+    readIORef ref >>= \store ->
+        ConversationStore.writeConversationPreviousResponseId store value
 
 writeLiveTranscript
     :: IORef LiveConversation
     -> [ResponseItem]
     -> IO ()
 writeLiveTranscript ref value =
-    atomicModifyIORef' ref \state ->
-        (state { liveTranscript = value }, ())
+    readIORef ref >>= \store ->
+        void (ConversationStore.commitConversationTranscript store value)
+
+replaceLiveConversation
+    :: IORef LiveConversation
+    -> Maybe Text
+    -> [ResponseItem]
+    -> IO TranscriptGeneration
+replaceLiveConversation ref previousResponseId transcript =
+    readIORef ref >>= \store ->
+        ConversationStore.replaceConversationTranscript
+            store previousResponseId transcript
+
+currentLiveTranscriptGeneration
+    :: IORef LiveConversation
+    -> IO TranscriptGeneration
+currentLiveTranscriptGeneration ref =
+    readIORef ref >>= ConversationStore.currentTranscriptGeneration
+
+evictLiveTranscript
+    :: IORef LiveConversation
+    -> TranscriptGeneration
+    -> TranscriptCheckpoint
+    -> IO Bool
+evictLiveTranscript ref generation checkpoint =
+    readIORef ref >>= \store ->
+        ConversationStore.evictConversationTranscript
+            store generation checkpoint
+
+-- | Reconstruct the exact root transcript from durable session turns.
+--
+-- The returned closure captures only durable identity, never the transcript
+-- it is intended to release.
+durableTranscriptCheckpoint
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> TranscriptCheckpoint
+durableTranscriptCheckpoint pool root sessionId =
+    TranscriptCheckpoint
+        { checkpointDescription = "session:" <> sessionId
+        , checkpointLoad =
+            loadSession pool root sessionId >>= \case
+                Left err ->
+                    throwString
+                        ("could not hydrate durable conversation: "
+                            <> Text.unpack err)
+                Right (_, turns) ->
+                    pure (foldSessionItems turns)
+        }
 
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
@@ -121,8 +186,7 @@ resetLiveConversationWith
     -> IO ()
 resetLiveConversationWith resetBackend conversationRef planMode = do
     resetBackend
-    atomicModifyIORef' conversationRef \state ->
-        (resetLiveConversationState state, ())
+    readIORef conversationRef >>= resetLiveConversationState
     deactivatePlanMode planMode
 
 detectGitBranch :: OsPath -> IO Text

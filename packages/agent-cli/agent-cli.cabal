@@ -239,10 +239,9 @@ executable agent-cli
     import:           common-options
     hs-source-dirs:   app
     main-is:          Main.hs
-    -- Keep the heap ceiling without multiplying a large allocation area by
-    -- every host core. Four capabilities cover the agent's concurrent I/O;
-    -- leave -A at the GHC RTS default.
-    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
+    -- Agent concurrency is I/O-bound, so one capability avoids per-capability
+    -- heap overhead. Return unused pages promptly after major collections.
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N1 -Fd1 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
 
