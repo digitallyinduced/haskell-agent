@@ -28,7 +28,8 @@ import Agent.CLI.Auth
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction
-    ( installLiveCompactOutcome,
+    ( boundCompletedToolContinuations,
+      installLiveCompactOutcome,
       runProviderCompactWith,
       runResponsesCompactWithContextWindow )
 import Agent.CLI.Config
@@ -2055,13 +2056,20 @@ runAgentInitializedWithLock
         generatedContextReloadRef <- newIORef (pure ())
         let currentModelContextWindow mapTransportModel = do
                 currentParams <- readIORef paramsRef
-                pure $ do
-                    currentModel <- currentParams.model
-                    catalogContextWindowForTransport
-                        catalog
-                        inferredTarget.targetConnectionId
-                        currentModel
-                        (mapTransportModel currentModel)
+                pure $
+                    catalogContextWindowForParams
+                        mapTransportModel
+                        currentParams
+            catalogContextWindowForParams mapTransportModel params = do
+                currentModel <- params.model
+                catalogContextWindowForTransport
+                    catalog
+                    inferredTarget.targetConnectionId
+                    currentModel
+                    (mapTransportModel currentModel)
+            contextWindowForParams mapTransportModel fallback params =
+                fromMaybe fallback
+                    (catalogContextWindowForParams mapTransportModel params)
             subagentRuntime = SubagentRuntime
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
@@ -2544,6 +2552,17 @@ runAgentInitializedWithLock
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
+                        let xaiContextWindow =
+                                contextWindowForParams
+                                    (XAIRequest.mapModel xaiOptions)
+                                    500_000
+                            protectXaiOverflow occupancy getParams backend =
+                                boundCompletedToolContinuations
+                                    xaiContextWindow
+                                    getParams
+                                    occupancy
+                                    backend
+                        xaiOccupancy <- newIORef Nothing
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -2553,14 +2572,20 @@ runAgentInitializedWithLock
                                         XAIProvider
                                         ctx.multiSendToRoot
                                         (\childParams ->
-                                            xaiBackend xaiOptions tokenProvider
-                                                (pure childParams))
+                                            protectXaiOverflow
+                                                xaiOccupancy
+                                                (pure childParams)
+                                                (xaiBackend xaiOptions tokenProvider
+                                                    (pure childParams)))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        xaiBackend xaiOptions tokenProvider
+                                        protectXaiOverflow
+                                            xaiOccupancy
                                             (readIORef paramsRef)
+                                            (xaiBackend xaiOptions tokenProvider
+                                                (readIORef paramsRef))
                             btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
                                     (pure privateParams)
@@ -2678,7 +2703,10 @@ runAgentInitializedWithLock
                                     =<< readIORef claudeTranscriptRef
                                 pure result
                     OpenRouterProvider -> do
-                        let makeBackend params =
+                        openRouterOccupancy <- newIORef Nothing
+                        let openRouterContextWindow =
+                                contextWindowForParams transportModel 1_048_576
+                            makeBackend params =
                                 case customGenericOptions of
                                     Just genericOptions ->
                                         genericResponsesBackendWith
@@ -2697,6 +2725,12 @@ runAgentInitializedWithLock
                                     Nothing ->
                                         openRouterBackend openRouterOptions
                                             tokenProvider params
+                            protectOverflow occupancy getParams backend =
+                                boundCompletedToolContinuations
+                                    openRouterContextWindow
+                                    getParams
+                                    occupancy
+                                    backend
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -2706,14 +2740,20 @@ runAgentInitializedWithLock
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
                                         (\childParams ->
-                                            makeBackend
-                                                (pure childParams))
+                                            protectOverflow
+                                                openRouterOccupancy
+                                                (pure childParams)
+                                                (makeBackend
+                                                    (pure childParams)))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        makeBackend
+                                        protectOverflow
+                                            openRouterOccupancy
                                             (readIORef paramsRef)
+                                            (makeBackend
+                                                (readIORef paramsRef))
                             btwBackend privateParams =
                                 makeBackend
                                     (pure privateParams)

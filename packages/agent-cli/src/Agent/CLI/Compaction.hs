@@ -9,6 +9,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithSenderAndHook
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
+    , boundCompletedToolContinuations
     , compactOpenAIWith
     , installCompactOutcome
     , installLiveCompactOutcome
@@ -81,11 +82,12 @@ import Control.Monad.Trans.Except
     ( ExceptT
     , throwE
     )
-import Control.Exception.Safe (catchAny, mask, onException)
 import Control.Applicative ((<|>))
+import Control.Exception.Safe (catchAny, mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
+import Data.List (partition)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -737,7 +739,10 @@ autoCompactOpenAiBackendWithSenderAndHook
 autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
         getParams onCompacted contextTokensRef backend =
     rejectOversizedInitialRequest getParams $
-        boundCompletedToolContinuations getParams contextTokensRef $
+        boundCompletedToolContinuations
+            (codexEffectiveContextWindowFor . (.model))
+            getParams
+            contextTokensRef $
             autoCompactOpenAiBackendWithLimit
                 getLimit
                 compactAction
@@ -878,29 +883,48 @@ rejectOversizedInitialRequest getParams (Backend submit) =
 -- protocol identifiers and continuation id. Prefer the last provider-reported
 -- occupancy so skills, instructions, and tool schemas already counted in
 -- @input_tokens@ are not re-estimated with JSON length.
+--
+-- When a previous_response_id is present and occupancy is unknown, Codex only
+-- sends the new tool outputs, so size the continuation against that delta.
+-- Stateless providers and full-history replays trim older transcript items,
+-- keeping the unpaired function calls that match the in-flight results.
 boundCompletedToolContinuations
-    :: IO ResponseCreateParams
+    :: (ResponseCreateParams -> Int)
+    -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
-boundCompletedToolContinuations getParams contextTokensRef (Backend submit) =
+boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
     Backend \history previous inputs onEvent ->
-        if any isCompletedTool inputs
-            then do
+        if not (any isCompletedTool inputs)
+            then submit history previous inputs onEvent
+            else do
                 params <- getParams
                 occupancy <- readIORef contextTokensRef
-                let contextWindow =
-                        codexEffectiveContextWindowFor params.model
-                    requestTokens candidate =
-                        projectRequestTokens
-                            (Just params)
-                            occupancy
-                            history
-                            candidate
-                if requestTokens inputs <= contextWindow
-                    then submit history previous inputs onEvent
-                    else
-                        case
+                let contextWindow = contextWindowFor params
+                let liveChain = isJust previous
+                    requestTokens candidate
+                        | liveChain =
+                            case occupancy of
+                                Just snapshot
+                                    | snapshot.occupancyLength == length history
+                                    , snapshot.occupancyTokens > 0
+                                    , snapshot.occupancyKind == ReportedOccupancy ->
+                                        snapshot.occupancyTokens
+                                            + estimateItemsTokens
+                                                (turnInputsToItems candidate)
+                                _ ->
+                                    estimateRequestTokensWithItems
+                                        params
+                                        (turnInputsToItems candidate)
+                        | otherwise =
+                            projectRequestTokens
+                                (Just params)
+                                occupancy
+                                history
+                                candidate
+                    truncated =
+                        fromMaybe inputs $
                             fitCompletedToolOutputsToLimit
                                 ( max 0
                                     ( contextWindow
@@ -910,26 +934,56 @@ boundCompletedToolContinuations getParams contextTokensRef (Backend submit) =
                                 )
                                 requestTokens
                                 inputs
-                        of
-                            Just bounded ->
-                                submit history previous bounded onEvent
-                            Nothing ->
-                                case
-                                    fitCompletedToolOutputsToLimit
-                                        contextWindow
-                                        requestTokens
-                                        inputs
-                                of
-                                    Just bounded ->
-                                        submit history previous bounded onEvent
-                                    Nothing ->
-                                        pure $
-                                            Left toolContinuationTooLargeError
-            else submit history previous inputs onEvent
+                            <|> fitCompletedToolOutputsToLimit
+                                contextWindow
+                                requestTokens
+                                inputs
+                if requestTokens inputs <= contextWindow
+                    then submit history previous inputs onEvent
+                    else if requestTokens truncated <= contextWindow
+                        then submit history previous truncated onEvent
+                        else submitTrimmedHistory
+                            params
+                            contextWindow
+                            history
+                            truncated
+                            onEvent
   where
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
+
+    submitTrimmedHistory params contextWindow history inputs onEvent = do
+        let callIds = pendingToolCallIds inputs
+            (danglingCalls, prefix) =
+                partition (isPendingToolCall callIds) history
+            trailing = danglingCalls <> turnInputsToItems inputs
+            fittedPrefix =
+                trimResponseHistoryToFit
+                    contextWindow
+                    params
+                    trailing
+                    prefix
+            fittedHistory = fittedPrefix <> danglingCalls
+            fittedTokens =
+                estimateRequestTokensWithItems
+                    params
+                    (fittedHistory <> turnInputsToItems inputs)
+        if fittedTokens <= contextWindow
+            then submit fittedHistory Nothing inputs onEvent
+            else pure (Left toolContinuationTooLargeError)
+
+pendingToolCallIds :: [TurnInput] -> [Text]
+pendingToolCallIds inputs =
+    [ result.callId
+    | CompletedTool result <- inputs
+    ]
+
+isPendingToolCall :: [Text] -> ResponseItem -> Bool
+isPendingToolCall callIds = \case
+    FunctionCallItem call -> call.callId `elem` callIds
+    CustomToolCallItem call -> call.callId `elem` callIds
+    _ -> False
 
 fitCompletedToolOutputsToLimit
     :: Int
