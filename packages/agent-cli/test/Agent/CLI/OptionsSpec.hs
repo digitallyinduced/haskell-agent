@@ -1,6 +1,7 @@
 module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
+import Agent.Dialect (DialectId(..))
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.TUI.Motion (MotionMode(..))
@@ -320,6 +321,21 @@ spec = do
             defaultEffortFor OpenAIProvider `shouldBe` "medium"
             defaultEffortFor OpenRouterProvider `shouldBe` "medium"
             defaultEffortFor ClaudeCodeProvider `shouldBe` "xhigh"
+
+    describe "reasoningEffortsForDialect" do
+        it "does not offer OpenAI max effort to Grok models" do
+            reasoningEffortsForDialect GrokBuildDialect
+                `shouldBe` ["none", "low", "medium", "high", "xhigh"]
+            reasoningEffortsForDialect CodexDialect
+                `shouldBe` reasoningEfforts
+
+        it "maps inherited max effort to high for Grok models" do
+            normalizeReasoningEffortForDialect GrokBuildDialect "max"
+                `shouldBe` "high"
+            normalizeReasoningEffortForDialect GrokBuildDialect "xhigh"
+                `shouldBe` "xhigh"
+            normalizeReasoningEffortForDialect CodexDialect "max"
+                `shouldBe` "max"
 
     describe "isOneShot" do
         it "is true for text, prompt-file, and managed-turn-file input" do

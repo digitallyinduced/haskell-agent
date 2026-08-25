@@ -118,7 +118,10 @@ xaiReasoningEffort = \case
     Just "medium" -> "medium"
     Just "high" -> "high"
     Just "xhigh" -> "xhigh"
-    Just "max" -> "max"
+    -- The shared UI supports OpenAI's @max@ effort, but Grok's proxy rejects
+    -- it. Keep this projection defensive for resumed sessions and callers
+    -- that construct canonical requests directly.
+    Just "max" -> "high"
     _ -> "high"
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]

@@ -12,12 +12,15 @@ module Agent.CLI.Options
     , parseApprovalAnswer
     , parseArgs
     , parseEffort
+    , normalizeReasoningEffortForDialect
     , reasoningEfforts
+    , reasoningEffortsForDialect
     , resolveApprovalPolicy
     , usage
     ) where
 
 import System.OsPath (OsPath, unsafeEncodeUtf)
+import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..), parseProvider)
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Foldable (asum)
@@ -463,6 +466,22 @@ parseMotionMode raw = case Text.toLower (Text.pack raw) of
 
 reasoningEfforts :: [Text]
 reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
+
+-- | Efforts exposed by the active model-facing protocol. Grok accepts
+-- @xhigh@ but rejects the OpenAI-only @max@ value.
+reasoningEffortsForDialect :: DialectId -> [Text]
+reasoningEffortsForDialect = \case
+    GrokBuildDialect -> filter (/= "max") reasoningEfforts
+    _ -> reasoningEfforts
+
+-- | Replace an effort unsupported by the active model-facing protocol with
+-- its closest supported value. This also cleans up resumed sessions and
+-- provider switches that inherited an effort from another dialect.
+normalizeReasoningEffortForDialect :: DialectId -> Text -> Text
+normalizeReasoningEffortForDialect dialect effort
+    | effort `elem` reasoningEffortsForDialect dialect = effort
+    | dialect == GrokBuildDialect = "high"
+    | otherwise = effort
 
 parseEffort :: Text -> Either String Text
 parseEffort raw =

@@ -38,7 +38,10 @@ module Agent.CLI.Command
     , workflowInstruction
     ) where
 
-import Agent.CLI.Options (parseEffort, reasoningEfforts)
+import Agent.CLI.Options
+    ( parseEffort
+    , reasoningEffortsForDialect
+    )
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Dialect (DialectId(..))
 import Agent.Responses.Types
@@ -248,14 +251,29 @@ mkSlashCatalog dialect toolNames skills modelIds =
     let tools =
             Set.fromList
                 (map (Text.toLower . Text.strip) toolNames)
+        commands =
+            map (commandForDialect dialect) slashCommands
     in SlashCatalog
         { slashCatalogDialect = dialect
         , slashCatalogToolNames = tools
         , slashCatalogCommands =
-            filter (commandAvailable dialect tools) slashCommands
+            filter (commandAvailable dialect tools) commands
         , slashCatalogSkills = skills
         , slashCatalogModelIds = modelIds
         }
+
+commandForDialect :: DialectId -> SlashCommand -> SlashCommand
+commandForDialect dialect command
+    | command.slashName == "effort" =
+        command
+            { slashUsage =
+                "/effort ["
+                    <> Text.intercalate
+                        "|"
+                        (reasoningEffortsForDialect dialect)
+                    <> "]"
+            }
+    | otherwise = command
 
 commandAvailable :: DialectId -> Set Text -> SlashCommand -> Bool
 commandAvailable dialect tools command =
@@ -915,7 +933,7 @@ completeSlashArgs catalog cmd word =
 argCompletions :: SlashCatalog -> SlashCommand -> [Text]
 argCompletions catalog spec = case spec.slashName of
     "agents" -> ["limit"]
-    "effort" -> reasoningEfforts
+    "effort" -> reasoningEffortsForDialect catalog.slashCatalogDialect
     "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]
     "help" ->

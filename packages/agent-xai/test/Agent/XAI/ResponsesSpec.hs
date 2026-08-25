@@ -151,7 +151,7 @@ spec = do
             map (KeyMap.lookup "type") toolObjects `shouldBe`
                 [Just (Aeson.String "x_search")]
 
-        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh/max through" do
+        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh through" do
             let effortOf request = do
                     object <- expectObject (requestValue defaultClientOptions request)
                     reasoning <- expectObject =<< maybe
@@ -170,7 +170,7 @@ spec = do
             effortOf (withEffort "xhigh" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "xhigh"))
             effortOf (withEffort "max" sampleRequest)
-                >>= (`shouldBe` Just (Aeson.String "max"))
+                >>= (`shouldBe` Just (Aeson.String "high"))
             -- Unset effort defaults to high for Grok.
             effortOf (clearEffort sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "high"))
