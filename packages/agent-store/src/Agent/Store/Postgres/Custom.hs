@@ -20,6 +20,7 @@ module Agent.Store.Postgres.Custom
     , CustomAuditContext(..)
     , CustomExecutionResult(..)
     , inspectCustomSchema
+    , inspectCustomSchemaSequential
     , queryCustom
     , executeCustom
     , normalizeCustomQuery
@@ -136,7 +137,23 @@ inspectCustomSchema
     :: Pool
     -> ScopeDatabase
     -> IO (Either Text [CatalogObject])
-inspectCustomSchema scopePool database =
+inspectCustomSchema =
+    inspectCustomSchemaWith catalogSchemaRowsPipelined
+
+-- | Sequential baseline retained for the catalog-inspection benchmark.
+inspectCustomSchemaSequential
+    :: Pool
+    -> ScopeDatabase
+    -> IO (Either Text [CatalogObject])
+inspectCustomSchemaSequential =
+    inspectCustomSchemaWith catalogSchemaRowsSequential
+
+inspectCustomSchemaWith
+    :: (Text -> Session.Session CatalogSchemaRows)
+    -> Pool
+    -> ScopeDatabase
+    -> IO (Either Text [CatalogObject])
+inspectCustomSchemaWith loadCatalogRows scopePool database =
     runPool scopePool session >>= \case
         Left err -> pure (Left err)
         Right (Left err) -> pure (Left err)
@@ -150,22 +167,33 @@ inspectCustomSchema scopePool database =
             then pure (Left scopeIdentityError)
             else do
                 (objects, columns, constraints, indexes) <-
-                    Session.pipeline $
-                        (,,,)
-                            <$> Pipeline.statement
-                                database.scopeDatabaseSchema
-                                catalogObjectsStatement
-                            <*> Pipeline.statement
-                                database.scopeDatabaseSchema
-                                catalogColumnsStatement
-                            <*> Pipeline.statement
-                                database.scopeDatabaseSchema
-                                catalogConstraintsStatement
-                            <*> Pipeline.statement
-                                database.scopeDatabaseSchema
-                                catalogIndexesStatement
+                    loadCatalogRows database.scopeDatabaseSchema
                 pure $ Right $
                     assembleCatalog objects columns constraints indexes
+
+type CatalogSchemaRows =
+    ( [CatalogObjectRow]
+    , [CatalogColumnRow]
+    , [CatalogConstraintRow]
+    , [CatalogIndexRow]
+    )
+
+catalogSchemaRowsPipelined :: Text -> Session.Session CatalogSchemaRows
+catalogSchemaRowsPipelined schema =
+    Session.pipeline $
+        (,,,)
+            <$> Pipeline.statement schema catalogObjectsStatement
+            <*> Pipeline.statement schema catalogColumnsStatement
+            <*> Pipeline.statement schema catalogConstraintsStatement
+            <*> Pipeline.statement schema catalogIndexesStatement
+
+catalogSchemaRowsSequential :: Text -> Session.Session CatalogSchemaRows
+catalogSchemaRowsSequential schema = do
+    objects <- Session.statement schema catalogObjectsStatement
+    columns <- Session.statement schema catalogColumnsStatement
+    constraints <- Session.statement schema catalogConstraintsStatement
+    indexes <- Session.statement schema catalogIndexesStatement
+    pure (objects, columns, constraints, indexes)
 
 queryCustom
     :: Pool

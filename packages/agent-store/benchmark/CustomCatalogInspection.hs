@@ -36,15 +36,34 @@ import Agent.Store.Postgres.Scope
 main :: IO ()
 main = do
     getArgs >>= \case
-        [tableCount, iterations, sampleCount] ->
-            benchmark (read tableCount) (read iterations) (read sampleCount)
+        [workload, tableCount, iterations, sampleCount] ->
+            benchmark
+                (parseWorkload workload)
+                (read tableCount)
+                (read iterations)
+                (read sampleCount)
         _ ->
             fail
                 "usage: custom-catalog-inspection-bench \
-                \<table-count> <iterations> <samples>"
+                \<sequential|pipeline> <table-count> <iterations> <samples>"
 
-benchmark :: Int -> Int -> Int -> IO ()
-benchmark tableCount iterations sampleCount =
+data Workload
+    = Sequential
+    | Pipeline
+
+parseWorkload :: String -> Workload
+parseWorkload = \case
+    "sequential" -> Sequential
+    "pipeline" -> Pipeline
+    value -> error ("unknown workload: " <> value)
+
+workloadName :: Workload -> String
+workloadName = \case
+    Sequential -> "sequential"
+    Pipeline -> "pipeline"
+
+benchmark :: Workload -> Int -> Int -> Int -> IO ()
+benchmark workload tableCount iterations sampleCount =
     if tableCount < 0 || iterations <= 0 || sampleCount <= 0
         then fail "table count must be non-negative; iterations and samples must be positive"
         else
@@ -53,12 +72,12 @@ benchmark tableCount iterations sampleCount =
                 (openStore config
                     >>= either
                         (fail . show)
-                        (run tableCount iterations sampleCount))
+                        (run workload tableCount iterations sampleCount))
                     `finally` do
                         _ <- stopManagedPostgres config
                         pure ()
 
-run tableCount iterations sampleCount store =
+run workload tableCount iterations sampleCount store =
     finally
         (do
             scopeId <- either (fail . Text.unpack) pure $
@@ -90,13 +109,14 @@ run tableCount iterations sampleCount store =
                 else pure ()
             samples <- replicateM sampleCount $
                 measure $
-                    replicateM iterations (inspectCustomSchema pool database)
+                    replicateM iterations (inspect pool database)
                         >>= traverse (either (fail . Text.unpack) pure)
             let elapsed = sort [wall | (wall, _, _) <- samples]
                 cpu = sort [cpuTime | (_, cpuTime, _) <- samples]
                 checksum = sum [value | (_, _, value) <- samples]
             putStrLn $
-                "tables=" <> show tableCount
+                "workload=" <> workloadName workload
+                    <> " tables=" <> show tableCount
                     <> " iterations=" <> show iterations
                     <> " samples=" <> show sampleCount
                     <> " median-wall-ms=" <> show (median elapsed / 1e6)
@@ -105,6 +125,10 @@ run tableCount iterations sampleCount store =
         )
         (closeStore store)
   where
+    inspect = case workload of
+        Sequential -> inspectCustomSchemaSequential
+        Pipeline -> inspectCustomSchema
+
     measure action = do
         wallStart <- getMonotonicTimeNSec
         cpuStart <- getCPUTime
