@@ -170,3 +170,30 @@ spec = describe "tool presentation" do
         summarizeToolCall readSession `shouldBe` "Read agent session session-1"
         summarizeToolCall message `shouldBe`
             "Messaged agent session session-1"
+
+    it "keeps todo_write chrome on the wire name and renders checklist glyphs" do
+        let call = functionToolCall
+                "todo"
+                "todo_write"
+                "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\",\"status\":\"completed\"}]}"
+        toolCallTitle call `shouldBe` "todo_write"
+        todoCallPreview call `shouldBe` "Find and clone repos"
+        formatToolOutput call
+            "- [completed] 1: Find and clone repos\n\
+            \- [in_progress] 2: Investigate Grok Build\n\
+            \- [pending] 3: Investigate Codex\n\
+            \- [cancelled] 4: Skip leftover work"
+            `shouldBe`
+                "✓ Find and clone repos\n\
+                \▶ Investigate Grok Build\n\
+                \□ Investigate Codex\n\
+                \✗ Skip leftover work"
+
+    it "formats Codex update_plan output as the same checklist" do
+        let call = functionToolCall "plan" "update_plan" "{\"plan\":[]}"
+        toolCallTitle call `shouldBe` "update_plan"
+        formatToolOutput call
+            "Plan updated:\n- [completed] Clone the repo\n- [pending] Open a PR"
+            `shouldBe`
+                "✓ Clone the repo\n\
+                \□ Open a PR"
