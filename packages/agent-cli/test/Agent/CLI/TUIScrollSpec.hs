@@ -6,6 +6,25 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "fullscreen conversation scrolling" do
+    describe "conversationScrollGesture" do
+        it "ignores scrolling when an empty session has no viewport" do
+            conversationScrollGesture 3 Nothing
+                `shouldBe` IgnoreConversationScroll
+
+        it "does not pause following when scrolling up from the top" do
+            conversationScrollGesture (-3) (Just (0, 20, 10))
+                `shouldBe` IgnoreConversationScroll
+
+        it "pauses only when the viewport can move away from the tail" do
+            conversationScrollGesture (-3) (Just (12, 20, 60))
+                `shouldBe` PauseAndScrollConversation
+            conversationScrollGesture 3 (Just (12, 20, 60))
+                `shouldBe` PauseAndScrollConversation
+
+        it "resumes following when a downward scroll reaches the tail" do
+            conversationScrollGesture 10 (Just (31, 20, 60))
+                `shouldBe` ResumeConversationFollow
+
     it "reserves the rest of the viewport below a submitted prompt" do
         let anchor = startConversationAnchor (BlockId 7) "question" 40
             (next, action) =

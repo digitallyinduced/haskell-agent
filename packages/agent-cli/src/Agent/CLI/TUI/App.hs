@@ -4040,23 +4040,24 @@ conversationViewportHeight =
         Nothing -> pure 1
 
 scrollConversationBy :: Int -> EventM Name AppState ()
-scrollConversationBy amount
-    | amount == 0 = pure ()
-    | amount < 0 = do
-        setConversationFollow False
-        vScrollBy scroll amount
-        queueConversationReflow
-    | otherwise =
+scrollConversationBy amount = do
+    viewportBounds <-
         lookupViewport ConversationViewport >>= \case
-            Just (VP _ top (_, height) (_, contentHeight))
-                | top + height + amount >= contentHeight -> do
-                    setConversationFollow True
-                    vScrollToEnd scroll
-                    queueConversationReflow
-            _ -> do
-                setConversationFollow False
-                vScrollBy scroll amount
-                queueConversationReflow
+            Just (VP _ top (_, height) (_, contentHeight)) ->
+                pure (Just (top, height, contentHeight))
+            Nothing ->
+                pure Nothing
+    case Scroll.conversationScrollGesture amount viewportBounds of
+        Scroll.IgnoreConversationScroll ->
+            pure ()
+        Scroll.PauseAndScrollConversation -> do
+            setConversationFollow False
+            vScrollBy scroll amount
+            queueConversationReflow
+        Scroll.ResumeConversationFollow -> do
+            setConversationFollow True
+            vScrollToEnd scroll
+            queueConversationReflow
   where
     scroll = viewportScroll ConversationViewport
 
