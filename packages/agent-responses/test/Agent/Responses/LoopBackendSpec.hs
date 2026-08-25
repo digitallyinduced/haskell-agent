@@ -5,6 +5,7 @@ import Agent.Loop
     ( Backend(..)
     , FileAttachment(..)
     , ImageAttachment(..)
+    , LoopEvent(..)
     , TurnInput(..)
     )
 import Agent.Provider
@@ -14,16 +15,24 @@ import Agent.Provider
     , Provider(..)
     , tokenProvider
     )
-import Agent.Responses.LoopBackend (tokenProviderStatelessResponsesBackend)
-import Agent.Responses.LoopBackend (turnInputsToItems)
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackend
+    , statelessResponsesBackendWithRawReasoning
+    , tokenProviderStatelessResponsesBackend
+    , turnInputsToItems
+    )
 import Agent.Responses.Types
     ( MessageContent(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
+    , ResponseStreamEvent(..)
+    , StreamEventType(..)
     , defaultResponseCreateParams
     )
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Text as Text
 import Test.Hspec
@@ -67,6 +76,53 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
 
         result `shouldBe` Left (ConnectionError "stopped after failover")
         readIORef attempts `shouldReturn` [first, second]
+
+    it "forwards raw provider reasoning text to the UI loop" do
+        events <- newIORef []
+        let send _params onStreamEvent = do
+                onStreamEvent OtherResponseStreamEvent
+                    { otherEventType = EventReasoningTextDelta
+                    , sequenceNumber = Just 1
+                    , eventExtraFields =
+                        KeyMap.singleton "delta"
+                            (Aeson.String "checking the implementation")
+                    }
+                pure (Left (ConnectionError "stop after reasoning"))
+            backend =
+                statelessResponsesBackend send
+                    (pure defaultResponseCreateParams)
+
+        result <- backend.submitTurn [] Nothing [UserMessage "hello"]
+            (\event -> modifyIORef' events (<> [event]))
+
+        result `shouldBe` Left (ConnectionError "stop after reasoning")
+        readIORef events `shouldReturn`
+            [ReasoningDelta "checking the implementation"]
+
+    it "can hide raw reasoning while retaining reasoning summaries" do
+        events <- newIORef []
+        let send _params onStreamEvent = do
+                onStreamEvent OtherResponseStreamEvent
+                    { otherEventType = EventReasoningTextDelta
+                    , sequenceNumber = Just 1
+                    , eventExtraFields =
+                        KeyMap.singleton "delta" (Aeson.String "raw")
+                    }
+                onStreamEvent OtherResponseStreamEvent
+                    { otherEventType = EventReasoningSummaryTextDelta
+                    , sequenceNumber = Just 2
+                    , eventExtraFields =
+                        KeyMap.singleton "delta" (Aeson.String "summary")
+                    }
+                pure (Left (ConnectionError "stop after reasoning"))
+            backend =
+                statelessResponsesBackendWithRawReasoning False send
+                    (pure defaultResponseCreateParams)
+
+        _ <- backend.submitTurn [] Nothing [UserMessage "hello"]
+            (\event -> modifyIORef' events (<> [event]))
+
+        readIORef events `shouldReturn` [ReasoningDelta "summary"]
 
 credential :: String -> Credential
 credential label = Credential

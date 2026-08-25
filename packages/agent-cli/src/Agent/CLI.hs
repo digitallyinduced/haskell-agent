@@ -478,7 +478,7 @@ import Agent.OpenAI.Compaction
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.OpenAI.LoopBackend
     ( openAiAuxiliaryResponseSenderReconnecting
-    , openAiBackendWith
+    , openAiBackendWithReasoningVisibility
     , openAiResponseSenderReconnecting
     )
 import Agent.Responses.Types
@@ -2416,7 +2416,7 @@ runAgentInitializedWithLock
                     (Just sessionTmp)
                     today
                     (isOneShot options)
-            params = requestParams model instructions
+            params = requestParams provider model instructions
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
@@ -2736,6 +2736,7 @@ runAgentInitializedWithLock
                                 let (compactSender, lockedBackend) =
                                         lockedOpenAiSession
                                             options.optCompactThreshold
+                                            options.optShowRawReasoning
                                             wsLock
                                             tokenProvider
                                             activeConnectionRef
@@ -2747,6 +2748,7 @@ runAgentInitializedWithLock
                                             lockedBackend
                                     btwBackend privateParams =
                                         freshOpenAiBackend
+                                            options.optShowRawReasoning
                                             tokenProvider
                                             (readIORef privateParams)
                                     compactRunner focus =
@@ -7632,6 +7634,7 @@ reservedSessionId = \case
 -- transcript mutation must not interleave between those two requests.
 lockedOpenAiSession
     :: Maybe Int
+    -> Bool
     -> MVar ()
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
@@ -7639,7 +7642,7 @@ lockedOpenAiSession
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession compactThreshold wsLock provider activeConnection
+lockedOpenAiSession compactThreshold showRawReasoning wsLock provider activeConnection
         getParams contextTokens
         recordCompactionUsage =
     let sendResponse request previousResponseId onEvent = do
@@ -7672,7 +7675,10 @@ lockedOpenAiSession compactThreshold wsLock provider activeConnection
                 onEvent
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWith sendResponse getParams
+                openAiBackendWithReasoningVisibility
+                    showRawReasoning
+                    sendResponse
+                    getParams
         compactSender request =
             sendAuxiliary request Nothing (const (pure ()))
         compactingBackend =

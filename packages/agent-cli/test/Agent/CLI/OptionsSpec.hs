@@ -61,6 +61,12 @@ spec = do
             parseArgs ["--effort", "HIGH"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "high" })
 
+        it "keeps raw OpenAI reasoning hidden unless explicitly requested" do
+            defaultCliOptions.optShowRawReasoning `shouldBe` False
+            parseArgs ["--show-raw-reasoning"]
+                `shouldBe` Right
+                    (RunAgent defaultCliOptions { optShowRawReasoning = True })
+
         it "rejects unknown effort levels" do
             parseArgs ["--effort", "extreme"] `shouldSatisfy` isLeft
 

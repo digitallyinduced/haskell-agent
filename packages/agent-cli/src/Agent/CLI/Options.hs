@@ -93,6 +93,8 @@ data CliOptions = CliOptions
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
     , optEffort :: !(Maybe Text)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
+    , optShowRawReasoning :: !Bool
+      -- ^ Show raw OpenAI reasoning text instead of summaries only.
     , optPrompt :: !(Maybe Text)
     , optPromptFile :: !(Maybe OsPath)
     , optManagedTurnFile :: !(Maybe OsPath)
@@ -122,6 +124,7 @@ defaultCliOptions = CliOptions
     , optMaxTurns = 500
     , optCompactThreshold = Nothing
     , optEffort = Nothing
+    , optShowRawReasoning = False
     , optPrompt = Nothing
     , optPromptFile = Nothing
     , optManagedTurnFile = Nothing
@@ -246,6 +249,8 @@ parseOptions options = \case
     "--effort" : value : rest -> do
         effort <- parseEffort (Text.pack value)
         parseOptions options { optEffort = Just effort } rest
+    "--show-raw-reasoning" : rest ->
+        parseOptions options { optShowRawReasoning = True } rest
     "-p" : value : rest ->
         parseOptions options { optPrompt = Just (Text.pack value) } rest
     "--prompt" : value : rest ->
@@ -367,6 +372,8 @@ usage = unlines
     , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: xhigh for Claude Code, high for xai/grok,"
     , "                          medium otherwise)"
+    , "      --show-raw-reasoning"
+    , "                          Show raw OpenAI reasoning (default: summaries only)"
     , "      --version           Print the agent-cli version"
     , "      --help              Show this help"
     , ""

@@ -82,13 +82,15 @@ import Agent.Loop
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
-    ( openAiBackend
+    ( openAiBackendWithRawReasoning
     , openAiBackendWithTransportFallback
-    , statelessResponsesBackend
     )
 import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackendWithRawReasoning
+    )
 import Agent.Responses.Types
     ( ReasoningConfig(..)
     , ResponseCreateParams(..)
@@ -540,13 +542,19 @@ restoreAgentFromDisk
 -- | Use a disposable WebSocket for side questions so cancellation cannot
 -- leave abandoned response frames queued on the main conversation connection.
 freshOpenAiBackend
-    :: TokenProvider
+    :: Bool
+    -> TokenProvider
     -> IO ResponseCreateParams
     -> Backend
-freshOpenAiBackend provider getParams = Backend \state previous inputs onEvent ->
-    withCodexWsRetrying provider \conn _credential ->
-        let Backend submit = openAiBackend conn getParams
-        in submit state previous inputs onEvent
+freshOpenAiBackend showRawReasoning provider getParams =
+    Backend \state previous inputs onEvent ->
+        withCodexWsRetrying provider \conn _credential ->
+            let Backend submit =
+                    openAiBackendWithRawReasoning
+                        showRawReasoning
+                        conn
+                        getParams
+            in submit state previous inputs onEvent
 
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
@@ -623,16 +631,19 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 <> "report results clearly. Your agent id is "
                                 <> env.subId.unSubagentId
                                 <> "."
-                        childParams = requestParams model instructions
+                        childParams = requestParams OpenAIProvider model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     childParamsRef <- newIORef childParams
                     httpFallbackActive <- newIORef False
                     let websocketBackend =
-                            freshOpenAiBackend tokenProvider
+                            freshOpenAiBackend
+                                runtime.subagentOptions.optShowRawReasoning
+                                tokenProvider
                                 (readIORef childParamsRef)
                         httpBackend =
-                            statelessResponsesBackend
+                            statelessResponsesBackendWithRawReasoning
+                                runtime.subagentOptions.optShowRawReasoning
                                 (\request _onEvent ->
                                     OpenAI.createCodexMessageWithProvider
                                         tokenProvider request)
@@ -794,7 +805,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         genericSubagentSuffix agentType env.subId
                                     NoHostChildAgentProtocol ->
                                         ""
-                        childParams = requestParams model instructions
+                        childParams = requestParams provider model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     childParamsRef <- newIORef childParams
