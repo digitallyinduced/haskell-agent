@@ -43,6 +43,16 @@ library
                     , skylighting-core >= 0.14.7 && < 0.15
                     , text >= 2.0 && < 2.2
 
+benchmark syntax-loading-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SyntaxLoading.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-syntax
+                    , base >= 4.17 && < 5
+                    , text >= 2.0 && < 2.2
+
 test-suite agent-syntax-test
     import:           common-options
     type:             exitcode-stdio-1.0
