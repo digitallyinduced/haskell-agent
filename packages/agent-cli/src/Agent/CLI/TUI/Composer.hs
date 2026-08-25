@@ -337,9 +337,7 @@ drawComposerStatus state =
     account = prompt.promptAccount
     accountLimit =
         [ withAttr
-            (if limitStatus.promptLimitWarning
-                then Theme.syntaxWarningAttr
-                else Theme.successAttr)
+            Theme.controlLinkAttr
             (terminalTxt limitStatus.promptLimitText)
         | limitStatus <- maybeToList prompt.promptLimitStatus
         ]
