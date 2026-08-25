@@ -2,6 +2,7 @@ module Agent.CLI.RequestSpec (spec) where
 
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Tools (webSearchTool)
+import Agent.Provider (Provider(..))
 import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import Test.Hspec
@@ -11,6 +12,7 @@ spec = describe "requestParams" do
     it "constructs a non-storing request with model, instructions, tools, and effort" do
         let params =
                 requestParams
+                    OpenAIProvider
                     "test-model"
                     "test instructions"
                     [webSearchTool]
@@ -26,5 +28,15 @@ spec = describe "requestParams" do
                 reasoning.context `shouldBe` Nothing
                 reasoning.generateSummary `shouldBe` Nothing
                 reasoning.reasoningMode `shouldBe` Nothing
-                reasoning.summary `shouldBe` Nothing
+                reasoning.summary `shouldBe` Just "auto"
                 reasoning.extraFields `shouldBe` KeyMap.empty
+
+    it "leaves reasoning summaries provider-controlled outside OpenAI" do
+        let params =
+                requestParams
+                    OpenRouterProvider
+                    "test-model"
+                    "test instructions"
+                    []
+                    "medium"
+        (params.reasoning >>= (.summary)) `shouldBe` Nothing

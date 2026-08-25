@@ -208,11 +208,11 @@ spec = do
                 }
 
     describe "streamEventToLoopEvent" do
-        it "maps output_text.delta and reasoning deltas" do
+        it "maps output and summary deltas but hides raw reasoning" do
             streamEventToLoopEvent (deltaEvent EventOutputTextDelta "hello")
                 `shouldBe` Just (TextDelta "hello")
             streamEventToLoopEvent (deltaEvent EventReasoningTextDelta "think")
-                `shouldBe` Just (ReasoningDelta "think")
+                `shouldBe` Nothing
             streamEventToLoopEvent (deltaEvent EventReasoningSummaryTextDelta "sum")
                 `shouldBe` Just (ReasoningDelta "sum")
 
@@ -412,6 +412,28 @@ spec = do
                 ]
 
     describe "openAiBackendWith" do
+        it "shows raw reasoning only when explicitly enabled" do
+            let send _request _previous onEvent = do
+                    onEvent (deltaEvent EventReasoningTextDelta "raw")
+                    onEvent (deltaEvent EventReasoningSummaryTextDelta "summary")
+                    pure $ Right (testResponse "resp-1" [assistantItem "ok"])
+                collect showRawReasoning = do
+                    events <- newIORef []
+                    transcript <- newIORef []
+                    let backend =
+                            openAiBackendWithReasoningVisibility
+                                showRawReasoning
+                                send
+                                (pure baseParams)
+                    _ <- submitWithState transcript backend Nothing
+                        [UserMessage "hello"]
+                        (modifyIORef' events . (:))
+                    reverse <$> readIORef events
+
+            collect False `shouldReturn` [ReasoningDelta "summary"]
+            collect True `shouldReturn`
+                [ReasoningDelta "raw", ReasoningDelta "summary"]
+
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
             events <- newIORef []

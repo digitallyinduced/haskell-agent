@@ -5,18 +5,20 @@ module Agent.CLI.Request
     ) where
 
 import Agent.Responses.Types
+import Agent.Provider (Provider(..))
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 
 -- | Codex requires @store = false@. Continuation still uses
 -- @previous_response_id@, with the local transcript available for recovery.
 requestParams
-    :: Text
+    :: Provider
+    -> Text
     -> Text
     -> [ResponseTool]
     -> Text
     -> ResponseCreateParams
-requestParams modelName instructionText toolSchemas effort =
+requestParams provider modelName instructionText toolSchemas effort =
     case defaultResponseCreateParams of
         ResponseCreateParams{..} ->
             ResponseCreateParams
@@ -28,7 +30,10 @@ requestParams modelName instructionText toolSchemas effort =
                     , effort = Just effort
                     , generateSummary = Nothing
                     , reasoningMode = Nothing
-                    , summary = Nothing
+                    , summary =
+                        if provider == OpenAIProvider
+                            then Just "auto"
+                            else Nothing
                     , extraFields = KeyMap.empty
                     }
                 , store = Just False

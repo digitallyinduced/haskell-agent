@@ -4,6 +4,7 @@
 -- "Agent.Responses.LoopBackend" and are re-exported here for compatibility.
 module Agent.OpenAI.LoopBackend
     ( openAiBackend
+    , openAiBackendWithRawReasoning
     , openAiBackendReconnecting
     , openAiAuxiliaryResponseSenderReconnecting
     , openAiAuxiliaryResponseSenderWithConnectionRecovery
@@ -12,6 +13,7 @@ module Agent.OpenAI.LoopBackend
     , openAiResponseSenderWithConnectionRecovery
     , openAiResponseSenderWithRetryPolicy
     , openAiBackendWith
+    , openAiBackendWithReasoningVisibility
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
@@ -31,6 +33,7 @@ import Agent.Error
     , isInlineRetryableProviderError
     , isInlineRetryableProviderResponseError
     )
+import qualified Agent.Responses.LoopBackend as Responses
 import Agent.Loop (Backend(..), BackendResult(..), LoopEvent(..))
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
@@ -51,8 +54,6 @@ import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseToTurnOutput
     , responseTokenUsage
-    , statelessResponsesBackend
-    , streamEventToLoopEvent
     , streamOutputObserved
     , toolResultToItem
     , turnInputsToItems
@@ -89,6 +90,18 @@ openAiBackend
 openAiBackend conn =
     openAiBackendWith \request previousResponseId onEvent ->
         sendWsRequestWithEvents conn request previousResponseId onEvent
+
+-- | OpenAI backend with explicit raw-reasoning visibility. Normal Codex
+-- sessions should use 'openAiBackend', which displays summaries only.
+openAiBackendWithRawReasoning
+    :: Bool
+    -> CodexConn
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithRawReasoning showRawReasoning conn =
+    openAiBackendWithReasoningVisibility showRawReasoning
+        \request previousResponseId onEvent ->
+            sendWsRequestWithEvents conn request previousResponseId onEvent
 
 -- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
 openAiBackendReconnecting
@@ -483,7 +496,22 @@ openAiBackendWith
     -> IO ResponseCreateParams
     -> Backend
 openAiBackendWith =
-    openAiBackendWithRetryPolicy transientStreamingResultPolicy
+    openAiBackendWithReasoningVisibility False
+
+-- | Injectable OpenAI backend with Codex-style reasoning visibility:
+-- summaries are always shown and raw reasoning is opt-in.
+openAiBackendWithReasoningVisibility
+    :: Bool
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithReasoningVisibility showRawReasoning =
+    openAiBackendWithRetryPolicyAndReasoningVisibility
+        showRawReasoning
+        transientStreamingResultPolicy
 
 -- | Streaming retries are replay-safe only until the loop has observed output.
 -- Server error events themselves are not loop-visible, so transient Codex
@@ -496,7 +524,20 @@ openAiBackendWithRetryPolicy
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithRetryPolicy retryPolicy send getParams =
+openAiBackendWithRetryPolicy =
+    openAiBackendWithRetryPolicyAndReasoningVisibility False
+
+openAiBackendWithRetryPolicyAndReasoningVisibility
+    :: Bool
+    -> RetryPolicyM IO
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithRetryPolicyAndReasoningVisibility
+        showRawReasoning retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
         baseParams <- sanitizeCodexRequest <$> getParams
         let newItems = turnInputsToItems inputs
@@ -506,7 +547,11 @@ openAiBackendWithRetryPolicy retryPolicy send getParams =
             -- messages before its opaque checkpoint, so replay the complete
             -- replacement instead of trimming that retained prefix.
             fullRequest = withRequestInput baseParams (history <> newItems)
-            emit event = mapM_ onLoopEvent (streamEventToLoopEvent event)
+            emit event =
+                mapM_ onLoopEvent
+                    (Responses.streamEventToLoopEventWithRawReasoning
+                        showRawReasoning
+                        event)
             (initialRequest, initialPrevious) =
                 case previousResponseId of
                     Nothing | not (null history) -> (fullRequest, Nothing)
@@ -561,6 +606,23 @@ openAiBackendWithRetryPolicy retryPolicy send getParams =
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =
     exponentialBackoff 5_000_000 <> limitRetries 3
+
+-- | OpenAI's default event projection: reasoning summaries are visible, while
+-- raw chain-of-thought deltas are suppressed.
+streamEventToLoopEvent :: ResponseStreamEvent -> Maybe LoopEvent
+streamEventToLoopEvent =
+    Responses.streamEventToLoopEventWithRawReasoning False
+
+-- | Stateless OpenAI transport with the same summary-only default as the
+-- WebSocket backend.
+statelessResponsesBackend
+    :: (ResponseCreateParams
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+statelessResponsesBackend =
+    Responses.statelessResponsesBackendWithRawReasoning False
 
 formatRetryScheduled :: ApiError -> Int -> Int -> Text
 formatRetryScheduled apiError attempt delayMicros =
