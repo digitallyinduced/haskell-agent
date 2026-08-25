@@ -16,6 +16,8 @@ spec = do
             parseArgs ["-h"] `shouldBe` Right ShowHelp
             parseArgs ["--provider", "openai", "--help"] `shouldBe` Right ShowHelp
             parseArgs ["--version"] `shouldBe` Right ShowVersion
+            parseArgs ["sessions", "list", "--version"]
+                `shouldBe` Right ShowVersion
 
         it "parses one-shot flags" do
             parseArgs
@@ -92,7 +94,37 @@ spec = do
                     })
 
         it "rejects the removed openai-base-url command" do
-            parseArgs ["openai-base-url"] `shouldSatisfy` isLeft
+            parseArgs ["openai-base-url"]
+                `shouldBe`
+                    Left "openai-base-url was removed; run agent-cli --help"
+
+        it "keeps the last repeated option value" do
+            parseArgs
+                [ "--model", "first"
+                , "--effort", "low"
+                , "--model", "second"
+                , "--effort", "HIGH"
+                ]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optModel = Just "second"
+                    , optEffort = Just "high"
+                    })
+
+        it "applies approval flags in command-line order" do
+            parseArgs ["--yolo", "--no-yolo", "--yolo"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optYolo = True
+                    , optNoYolo = False
+                    })
+            parseArgs
+                [ "--managed-deny-mutations"
+                , "--yolo"
+                ]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optYolo = True
+                    , optNoYolo = False
+                    , optManagedDenyMutations = True
+                    })
 
         it "rejects using both -p and --prompt-file" do
             parseArgs ["-p", "a", "--prompt-file", "b"] `shouldSatisfy` isLeft
