@@ -19,6 +19,7 @@ module Agent.TUI.Model
     , conversationIsEmpty
     , deleteToLineStart
     , deleteToLineEnd
+    , deleteWordAfter
     , deleteWordBefore
     , lineEndCursor
     , lineStartCursor
@@ -1053,6 +1054,16 @@ deleteWordBefore text cursor =
                 Text.drop 1 after
             | otherwise = after
     in (kept <> after', Text.length kept)
+
+-- | Delete whitespace and the next non-whitespace word after the cursor.
+deleteWordAfter :: Text -> Int -> (Text, Int)
+deleteWordAfter text cursor =
+    let cursor' = max 0 (min (Text.length text) cursor)
+        before = Text.take cursor' text
+        after = Text.drop cursor' text
+        withoutSpace = Text.dropWhile isSpace after
+        remaining = Text.dropWhile (not . isSpace) withoutSpace
+    in (before <> remaining, cursor')
 
 -- | Delete from the cursor to the beginning of its logical line.
 deleteToLineStart :: Text -> Int -> (Text, Int)

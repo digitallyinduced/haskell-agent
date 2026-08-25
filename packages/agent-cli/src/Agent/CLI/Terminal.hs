@@ -17,7 +17,9 @@ module Agent.CLI.Terminal
     , synchronizedOutputBegin
     , synchronizedOutputEnd
     , stripAnsi
+    , kittyAltCsiBodies
     , kittyCtrlCsiBodies
+    , kittyCtrlUnderscoreCsiBodies
     , kittyCtrlVCsiBodies
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
@@ -219,6 +221,21 @@ shiftEnterCsiBodies =
 -- Event type 1 is an explicit key press; terminals may omit it.
 kittyCtrlCsiBodies :: Char -> [String]
 kittyCtrlCsiBodies character = kittyModifiedCsiBodies character 5
+
+-- | CSI bodies emitted by Kitty's keyboard protocol for Alt+letter chords.
+kittyAltCsiBodies :: Char -> [String]
+kittyAltCsiBodies character = kittyModifiedCsiBodies character 3
+
+-- | CSI bodies for Ctrl+underscore (undo). Terminals either report the
+-- shifted codepoint 95 directly with the Ctrl modifier (5), or key 45 (@-@)
+-- with its shifted codepoint and Ctrl+Shift (6).
+kittyCtrlUnderscoreCsiBodies :: [String]
+kittyCtrlUnderscoreCsiBodies =
+    [ keyCode <> ";" <> show modifier <> event <> "u"
+    | keyCode <- ["95", "45:95", "45:95:45"]
+    , modifier <- [5, 6 :: Int]
+    , event <- ["", ":1"]
+    ]
 
 -- | Paste chords retained as named lists for inline and fullscreen input.
 kittyCtrlVCsiBodies, kittySuperVCsiBodies :: [String]
