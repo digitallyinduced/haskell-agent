@@ -63,6 +63,7 @@ module Agent.CLI.TUI.App
     , setFullscreenWindowTitle
     , applyStoredFullscreenWindowTitle
     , turnCompletionRequiresRedraw
+    , syntaxLanguagesForBlocks
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
     , maskedSecretText
@@ -219,6 +220,10 @@ import Agent.TUI.Markdown
     , markdownWidgetWithLinks
     , markdownWidgetWithSyntaxHighlightingAndLinks
     )
+import Agent.TUI.FencedCode
+    ( FencedBlock(..)
+    , fencedBlocks
+    )
 import Agent.TUI.TextWidth
     ( clampGraphemeCursor
     , displayTerminalText
@@ -227,7 +232,9 @@ import Agent.TUI.TextWidth
     )
 import Agent.Syntax
     ( SyntaxHighlighter
-    , loadSyntaxHighlighter
+    , loadSyntaxLanguage
+    , newSyntaxHighlighter
+    , resolveFenceLanguage
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
@@ -271,6 +278,7 @@ import Control.Concurrent.STM
     ( STM
     , atomically
     , check
+    , flushTQueue
     , newEmptyTMVarIO
     , newTQueueIO
     , newTVarIO
@@ -353,7 +361,7 @@ newFullscreenRuntime
     -> UiState
     -> IO FullscreenRuntime
 newFullscreenRuntime =
-    newFullscreenRuntimeWithSyntaxLoader loadSyntaxHighlighter
+    newFullscreenRuntimeWithSyntaxLoader newSyntaxHighlighter
 
 newFullscreenRuntimeWithSyntaxLoader
     :: IO (Either Text SyntaxHighlighter)
@@ -393,6 +401,8 @@ newFullscreenRuntimeWithSyntaxLoader
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO
+        syntaxRequests <- newTQueueIO
+        syntaxHighlighter <- newIORef Nothing
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
         dictationJobs <- newTQueueIO
@@ -453,6 +463,8 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeWaveTrough = Theme.waveTroughFromColorFgBg colorFgBg
             , runtimeLoadSyntaxHighlighter = syntaxLoader
             , runtimeSyntaxLoadFinished = syntaxLoadFinished
+            , runtimeSyntaxRequests = syntaxRequests
+            , runtimeSyntaxHighlighter = syntaxHighlighter
             , runtimeInitial = initial
             , runtimeSessionActions = sessionActions
             , runtimeHistoryRequests = historyRequests
@@ -578,11 +590,41 @@ loadSyntaxHighlighterForRuntime runtime = do
     let highlighter = case result of
             Left _ -> Nothing
             Right loaded -> either (const Nothing) Just loaded
+    writeIORef runtime.runtimeSyntaxHighlighter highlighter
     enqueueAppEvent runtime (AppSyntaxHighlighterLoaded highlighter)
     void $
         tryAny $
             runtime.runtimeSyntaxLoadFinished
                 (nanosecondsToNominalDiffTime (finishedAt - startedAt))
+
+runSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
+runSyntaxHighlighterForRuntime runtime = do
+    loadSyntaxHighlighterForRuntime runtime
+    forever do
+        languages <-
+            atomically $
+                (:) <$> readTQueue runtime.runtimeSyntaxRequests
+                    <*> flushTQueue runtime.runtimeSyntaxRequests
+        readIORef runtime.runtimeSyntaxHighlighter >>= \case
+            Nothing -> pure ()
+            Just highlighter -> do
+                (changed, loaded) <-
+                    foldSyntaxRequests highlighter languages
+                when changed do
+                    writeIORef runtime.runtimeSyntaxHighlighter (Just loaded)
+                    enqueueAppEvent
+                        runtime
+                        (AppSyntaxHighlighterLoaded (Just loaded))
+  where
+    foldSyntaxRequests current = \case
+        [] -> pure (False, current)
+        language : remaining ->
+            tryAny (loadSyntaxLanguage current language) >>= \case
+                Left _ -> foldSyntaxRequests current remaining
+                Right (Left _) -> foldSyntaxRequests current remaining
+                Right (Right loaded) -> do
+                    (_, final) <- foldSyntaxRequests loaded remaining
+                    pure (True, final)
 
 nanosecondsToNominalDiffTime :: Word64 -> NominalDiffTime
 nanosecondsToNominalDiffTime nanoseconds =
@@ -1016,7 +1058,7 @@ runFullscreen runtime workerAction = do
                                     dictationWorker
                                     \_dictationWorker ->
                                     withAsync
-                                        (loadSyntaxHighlighterForRuntime runtime)
+                                        (runSyntaxHighlighterForRuntime runtime)
                                         \_syntaxLoader ->
                                             withAsync
                                                 (void (waitCatch worker)
@@ -1205,6 +1247,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appClockNanos = initialClock
         , appNativeProgressKeepaliveBucket = 0
         , appSyntaxHighlighter = Nothing
+        , appSyntaxRequested = Set.empty
         , appTerminalFocus = TerminalFocusUnknown
         }
 
@@ -2586,6 +2629,7 @@ handleEvent event = do
     stateBeforeEvent <- get
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
+    when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
     state <- get
     let visible =
             isNothing state.appTextPrompt
@@ -2617,6 +2661,86 @@ handleEvent event = do
     isMotionTick = \case
         AppEvent AppMotionTick -> True
         _ -> False
+
+eventMayExposeSyntax :: BrickEvent Name AppEvent -> Bool
+eventMayExposeSyntax = \case
+    AppEvent (AppUi uiEvent) ->
+        uiEventMayExposeSyntax uiEvent
+    AppEvent (AppUiBatch uiEvents) ->
+        any uiEventMayExposeSyntax uiEvents
+    AppEvent (AppSyntaxHighlighterLoaded _) -> True
+    AppEvent (AppHistoryReset _) -> True
+    AppEvent (AppHistoryLoaded _ _) -> True
+    AppEvent (AppHistoryCommitted _ _ _) -> True
+    AppEvent (AppAgentSnapshot _ _) -> True
+    _ -> False
+
+uiEventMayExposeSyntax :: UiEvent -> Bool
+uiEventMayExposeSyntax = \case
+    UiLoop (TextDelta delta) ->
+        Text.isInfixOf "```" delta
+            || Text.isInfixOf "~~~" delta
+    UiLoop (ReasoningDelta _) -> False
+    UiLoop (ActivityUpdated _) -> False
+    UiLoop (WarningRaised _) -> False
+    UiLoop (ToolOutputUpdated _ _) -> False
+    UiSetDraft _ _ -> False
+    UiSetPrompt _ -> False
+    UiSetPromptEffort _ -> False
+    UiSetPromptLimitStatus _ -> False
+    UiSetAwaitingInput _ -> False
+    UiSetRepository _ _ -> False
+    UiSetNotice _ -> False
+    UiMoveSelection _ -> False
+    UiSelectBlock _ -> False
+    UiActivateBlock _ -> False
+    UiToggleSelected -> False
+    UiFocusChanged _ -> False
+    UiPermissionShown _ -> False
+    UiPermissionMoved _ -> False
+    UiPermissionHidden -> False
+    UiSetFollow _ -> False
+    _ -> True
+
+requestVisibleSyntaxLanguages :: EventM Name AppState ()
+requestVisibleSyntaxLanguages = do
+    state <- get
+    let
+        languages =
+            syntaxLanguagesForBlocks (visibleConversationBlocks state)
+        missing =
+            Set.difference languages state.appSyntaxRequested
+    unless (Set.null missing) do
+        liftIO $
+            atomically $
+                mapM_
+                    (writeTQueue state.appRuntime.runtimeSyntaxRequests)
+                    (Set.toList missing)
+        modify' \current ->
+            current
+                { appSyntaxRequested =
+                    Set.union current.appSyntaxRequested missing
+                }
+
+visibleConversationBlocks :: AppState -> [UiBlock]
+visibleConversationBlocks state =
+    conversationBlocks state.appAgentSelected state
+
+syntaxLanguagesForBlocks :: [UiBlock] -> Set.Set Text
+syntaxLanguagesForBlocks =
+    Set.fromList . concatMap syntaxLanguagesForBlock
+
+syntaxLanguagesForBlock :: UiBlock -> [Text]
+syntaxLanguagesForBlock block =
+    case block.blockKind of
+        BlockAssistant ->
+            mapMaybe
+                (resolveFenceLanguage . (.fencedInfo))
+                (fencedBlocks block.blockBody)
+        BlockShell
+            | not (Text.null (Text.strip block.blockDetail)) ->
+                ["haskell"]
+        _ -> []
 
 syncMotionDemand :: EventM Name AppState ()
 syncMotionDemand = do
@@ -3302,6 +3426,7 @@ selectAgentView target = do
     when (state.appAgentSelected /= target) do
         modify' \current ->
             current { appAgentSelected = target }
+        requestVisibleSyntaxLanguages
         resumeConversationFollow
 
 isAgentHoverSurface :: Name -> Bool

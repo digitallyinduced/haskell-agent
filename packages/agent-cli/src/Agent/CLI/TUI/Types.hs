@@ -52,6 +52,7 @@ import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime)
 import Data.Word (Word64)
@@ -213,6 +214,9 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeLoadSyntaxHighlighter
         :: !(IO (Either Text SyntaxHighlighter))
     , runtimeSyntaxLoadFinished :: !(NominalDiffTime -> IO ())
+    , runtimeSyntaxRequests :: !(TQueue Text)
+    , runtimeSyntaxHighlighter
+        :: !(IORef (Maybe SyntaxHighlighter))
     , runtimeInitial :: !UiState
     , runtimeSessionActions :: !(IORef FullscreenSessionActions)
     , runtimeHistoryRequests :: !(TQueue HistoryRequest)
@@ -295,6 +299,7 @@ data AppState = AppState
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
+    , appSyntaxRequested :: !(Set.Set Text)
     , appTerminalFocus :: !TerminalFocus
     }
 
