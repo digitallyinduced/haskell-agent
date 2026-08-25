@@ -841,7 +841,8 @@ spec = do
         it "reports a throwing post-compaction hook instead of swallowing it" do
             let history = [userTextItem "old"]
                 threshold = 20
-            contextState <- newIORef (Just (threshold, length history))
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
             events <- newIORef []
             let sender _request =
                     pure (Right remoteCompactionResponse)
