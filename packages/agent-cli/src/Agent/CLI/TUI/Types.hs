@@ -119,6 +119,7 @@ data AppEvent
     | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)
     | AppConversationReflow
     | AppMotionTick
+    | AppRecapPoll
     | AppStop
 
 data PendingAppEvent
@@ -148,6 +149,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
     , runtimeBtw :: !(Text -> IO ())
+    , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
@@ -178,6 +180,7 @@ data FullscreenRuntime = FullscreenRuntime
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionCancel :: !(IO ())
     , sessionBtw :: !(Text -> IO ())
+    , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())
     , sessionCtrlC :: !(IO CtrlCDecision)
     , sessionAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
@@ -213,6 +216,10 @@ data AppState = AppState
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
+    , appFocusLostAt :: !(Maybe Word64)
+    , appAutoRecapShownThisAway :: !Bool
+    , appLastAutoRecapAttemptAt :: !(Maybe Word64)
+    , appLastTurnCompletedAt :: !(Maybe Word64)
     , appConversationReflowQueued :: !Bool
     , appWindowTitle :: !(Maybe Text)
     , appMotionElapsedMillis :: !Int

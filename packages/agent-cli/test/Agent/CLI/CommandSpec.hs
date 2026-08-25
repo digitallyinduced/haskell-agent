@@ -236,6 +236,12 @@ spec = do
             parseReplLine "/btw"
                 `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
 
+        it "requests a session recap" do
+            parseReplLine "/recap" `shouldBe` ReplRecap
+            parseReplLine "/summarize" `shouldBe` ReplRecap
+            parseReplLine "/recap now"
+                `shouldBe` ReplCommandError "usage: /recap"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
@@ -269,6 +275,7 @@ spec = do
                     , "effort"
                     , "plan"
                     , "btw"
+                    , "recap"
                     , "session"
                     , "session-info"
                     , "afk"

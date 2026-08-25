@@ -26,6 +26,20 @@ spec = describe "fullscreen UI reducer" do
         fmap (.permissionIndex) (moved 3).uiPermission `shouldBe` Just 3
         fmap (.permissionIndex) (moved 4).uiPermission `shouldBe` Just 0
 
+    it "reuses one recap block instead of stacking spinners" do
+        let started = reduceUi UiRecapStarted initialUiState
+            ready =
+                reduceUi
+                    (UiRecapReady "We fixed auth retries in billing/retry.rs.")
+                    started
+            blocks = Foldable.toList ready.uiBlocks
+        map (.blockKind) (Foldable.toList started.uiBlocks)
+            `shouldBe` [BlockRecap]
+        map (.blockKind) blocks `shouldBe` [BlockRecap]
+        map (.blockBody) blocks
+            `shouldBe` ["We fixed auth retries in billing/retry.rs."]
+        map (.blockState) blocks `shouldBe` [BlockComplete]
+
     it "retains user, reasoning, and assistant blocks across a turn" do
         let state =
                 apply

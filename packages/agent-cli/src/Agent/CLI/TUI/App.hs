@@ -203,6 +203,7 @@ import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
+import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM
     ( STM
     , atomically
@@ -218,7 +219,11 @@ import Control.Concurrent.STM
     , takeTMVar
     , writeTVar
     )
-import Control.Monad (unless, void, when)
+import Agent.CLI.Recap
+    ( autoRecapAwayThreshold
+    , autoRecapIdleThreshold
+    , autoRecapRetryInterval
+    )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, onException, throwIO, tryAny)
@@ -321,6 +326,7 @@ newFullscreenRuntimeWithSyntaxLoader
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = const (pure ())
+            , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -335,6 +341,8 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
+            , runtimeRecap =
+                readIORef sessionActions >>= (.sessionRecap)
             , runtimeRestartEffort = \level ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionRestartEffort level
@@ -370,6 +378,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
     -> (Text -> IO ())
+    -> IO ()
     -> (Text -> IO ())
     -> IO CtrlCDecision
     -> IO (AgentTarget, [AgentEntry])
@@ -379,6 +388,7 @@ setFullscreenSessionActions
     runtime
     cancelAction
     btwAction
+    recapAction
     restartEffortAction
     ctrlCAction
     agentSnapshot
@@ -386,6 +396,7 @@ setFullscreenSessionActions
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = btwAction
+            , sessionRecap = recapAction
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -728,6 +739,8 @@ runFullscreen runtime workerAction = do
             -- when rendered attributes contain URLs.
             when (V.supportsMode output V.Hyperlink) $
                 V.setMode output V.Hyperlink True
+            when (V.supportsMode output V.Focus) $
+                V.setMode output V.Focus True
             wrapNativePreviewVty runtime vty
                 >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
     initialVty <- buildVty
@@ -749,9 +762,10 @@ runFullscreen runtime workerAction = do
         withAsync uiTicker \_uiTicker ->
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
                 withAsync (eventPump runtime) \_eventPump ->
-                    withAsync
-                        (loadSyntaxHighlighterForRuntime runtime)
-                        \_syntaxLoader ->
+                    withAsync (recapTicker runtime) \_recapTicker ->
+                        withAsync
+                            (loadSyntaxHighlighterForRuntime runtime)
+                            \_syntaxLoader ->
                             withAsync
                                 (void (waitCatch worker)
                                     >> enqueueAppEvent runtime AppStop)
@@ -779,6 +793,10 @@ runFullscreen runtime workerAction = do
                                                     }
                                     wait worker
   where
+    recapTicker _runtime = forever do
+        threadDelay 20_000_000
+        enqueueAppEvent runtime AppRecapPoll
+
     uiTicker = waitForDemand
       where
         waitForDemand = do
@@ -866,6 +884,10 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appPressedControl = Nothing
         , appWorkerStopped = False
         , appConversationAnchor = Nothing
+        , appFocusLostAt = Nothing
+        , appAutoRecapShownThisAway = False
+        , appLastAutoRecapAttemptAt = Nothing
+        , appLastTurnCompletedAt = Nothing
         , appConversationReflowQueued = False
         , appWindowTitle = Nothing
         , appMotionElapsedMillis = 0
@@ -2532,8 +2554,8 @@ drawBlock state target ui block =
                         <> detailSuffix block)
                     (visibleBody block)
             BlockTodo ->
-                accentBlockWithSections (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle)
+                accentBlockWithSections (statusAttr state target block)
+                    (blockStateGlyph state target block <> block.blockTitle)
                     (todoBodyWidgets block)
             BlockShell ->
                 accentCodeBlock
@@ -2550,6 +2572,11 @@ drawBlock state target ui block =
                     (visibleBody block)
             BlockSystem ->
                 withAttr Theme.mutedAttr (txtWrap block.blockBody)
+            BlockRecap ->
+                accentBlock
+                    (statusAttr state target block)
+                    (blockStateGlyph state target block <> "Recap")
+                    (visibleBody block)
             BlockError ->
                 withAttr Theme.errorAttr (txtWrap block.blockBody)
         framed =
@@ -2993,7 +3020,7 @@ resumeRow browser selectedId entry =
             vBox
                 [ summary
                 , padLeft (Pad 4) $
-                    vBox
+                    vBox $
                         [ resumeDetail "ID" entry.resumeId
                         , resumeDetail "CWD" entry.resumeCwd
                         , resumeDetail "Model" entry.resumeModel
@@ -3015,7 +3042,18 @@ resumeRow browser selectedId entry =
                                 <> "    Tools  "
                                 <> Text.pack (show entry.resumeToolCount)
                             )
-                        , resumeDetail
+                        ]
+                            <> maybe
+                                []
+                                (\recap -> [resumeDetail "Recap" recap])
+                                (nonEmptyResumeText entry.resumeRecap)
+                            <> maybe
+                                []
+                                (\summaryLine ->
+                                    [resumeDetail "Last turn" summaryLine])
+                                (nonEmptyResumeText entry.resumeLastTurnSummary)
+                            <>
+                        [ resumeDetail
                             "Prompt"
                             (if Text.null entry.resumePrompt
                                 then "(none)"
@@ -3038,6 +3076,11 @@ resumeDetail label value =
         [ withAttr Theme.mutedAttr (txt (Text.justifyLeft 12 ' ' label))
         , txtWrap value
         ]
+
+nonEmptyResumeText :: Maybe Text -> Maybe Text
+nonEmptyResumeText =
+    fmap Text.strip >=> \text ->
+        if Text.null text then Nothing else Just text
 
 resumeAbsoluteTime :: UTCTime -> Text
 resumeAbsoluteTime =
@@ -3450,6 +3493,15 @@ applyUiEvent uiEvent state =
         nextState0 =
             state
                 { appUi = nextUi
+                , appAutoRecapShownThisAway =
+                    case uiEvent of
+                        UiRecapReady _ -> True
+                        _ -> state.appAutoRecapShownThisAway
+                , appLastTurnCompletedAt =
+                    case uiEvent of
+                        UiLoop (TurnFinished _) -> Just state.appClockNanos
+                        UiTurnEnded BlockComplete -> Just state.appClockNanos
+                        _ -> state.appLastTurnCompletedAt
                 , appCompletionFlashes =
                     Map.union newFlashes retainedFlashes
                 , appMotionScheduleReset =
@@ -3525,6 +3577,60 @@ advanceAppClockNow :: EventM Name AppState ()
 advanceAppClockNow = do
     now <- liftIO getMonotonicTimeNSec
     modify' (advanceAppTime now)
+
+noteTerminalFocusLost :: EventM Name AppState ()
+noteTerminalFocusLost = do
+    now <- liftIO getMonotonicTimeNSec
+    modify' \state ->
+        state
+            { appTerminalFocus = TerminalUnfocused
+            , appFocusLostAt = Just now
+            , appAutoRecapShownThisAway = False
+            , appLastAutoRecapAttemptAt = Nothing
+            }
+
+noteTerminalFocusGained :: EventM Name AppState ()
+noteTerminalFocusGained = do
+    maybeRequestAutoRecap
+    modify' \state ->
+        state
+            { appTerminalFocus = TerminalFocused
+            , appFocusLostAt = Nothing
+            , appMotionScheduleReset = True
+            }
+    invalidateCache
+    getVtyHandle >>= liftIO . V.refresh
+
+maybeRequestAutoRecap :: EventM Name AppState ()
+maybeRequestAutoRecap = do
+    now <- liftIO getMonotonicTimeNSec
+    state <- get
+    when (shouldRequestAutoRecap now state) do
+        modify' \current ->
+            current { appLastAutoRecapAttemptAt = Just now }
+        liftIO state.appRuntime.runtimeRecap
+
+shouldRequestAutoRecap :: Word64 -> AppState -> Bool
+shouldRequestAutoRecap now state =
+    state.appTerminalFocus == TerminalUnfocused
+        && not state.appAutoRecapShownThisAway
+        && not (userActionPending state)
+        && not state.appUi.uiRunning
+        && not (hasBackgroundActivity state.appAgentEntries)
+        && elapsedSeconds now state.appFocusLostAt >= autoRecapAwayThreshold
+        && elapsedSeconds now state.appLastTurnCompletedAt
+            >= autoRecapIdleThreshold
+        && ( case state.appLastAutoRecapAttemptAt of
+                Nothing -> True
+                Just attempted ->
+                    elapsedSeconds now (Just attempted)
+                        >= autoRecapRetryInterval
+           )
+
+elapsedSeconds :: Word64 -> Maybe Word64 -> NominalDiffTime
+elapsedSeconds _ Nothing = 0
+elapsedSeconds now (Just started) =
+    realToFrac (now - started) / 1_000_000_000
 
 applyLocalUiEvent :: UiEvent -> EventM Name AppState ()
 applyLocalUiEvent event =
@@ -3616,6 +3722,8 @@ handleEventInner event = case event of
                 writeTVar
                     state.appRuntime.runtimeMotionTickQueued
                     False
+    AppEvent AppRecapPoll ->
+        maybeRequestAutoRecap
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
@@ -3962,6 +4070,10 @@ handleEventInner event = case event of
                 , appPressedControl = Nothing
                 , appAgentHover = Nothing
                 }
+    VtyEvent V.EvLostFocus ->
+        noteTerminalFocusLost
+    VtyEvent V.EvGainedFocus ->
+        noteTerminalFocusGained
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
@@ -3971,17 +4083,6 @@ handleEventInner event = case event of
         when (state.appTerminalFocus /= TerminalUnfocused) $
             getVtyHandle >>= liftIO . V.refresh
         queueConversationReflow
-    VtyEvent V.EvLostFocus ->
-        modify' \state ->
-            state { appTerminalFocus = TerminalUnfocused }
-    VtyEvent V.EvGainedFocus -> do
-        modify' \state ->
-            state
-                { appTerminalFocus = TerminalFocused
-                , appMotionScheduleReset = True
-                }
-        invalidateCache
-        getVtyHandle >>= liftIO . V.refresh
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
