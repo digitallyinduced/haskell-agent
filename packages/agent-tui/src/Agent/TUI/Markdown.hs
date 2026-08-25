@@ -28,8 +28,10 @@ import Agent.Syntax
     , highlightCode
     )
 import Agent.TUI.TextWidth
-    ( displayCharCellWidth
-    , displayTerminalText
+    ( displayTerminalText
+    , graphemeCellWidth
+    , graphemeClusters
+    , terminalTextImage
     )
 import qualified Agent.TUI.Theme as Theme
 import Brick
@@ -44,15 +46,13 @@ import qualified Data.Text.Lazy as LazyText
 import qualified Data.Text.Lazy.Builder as Builder
 import qualified Graphics.Vty as V
 
-terminalCharWidth :: Char -> Int
-terminalCharWidth = displayCharCellWidth
-
 markdownWidget :: Ord n => Text -> Widget n
 markdownWidget =
     markdownWidgetWithCodeControls \_ language ->
         if Text.null language
             then emptyWidget
-            else withAttr Theme.mutedAttr (txt language)
+            else withAttr Theme.mutedAttr
+                (txt (displayTerminalText language))
 
 -- | Render Markdown with application-level click targets for links.
 markdownWidgetWithLinks
@@ -68,7 +68,8 @@ markdownWidgetWithLinks linkName =
         (\_ language ->
             if Text.null language
                 then emptyWidget
-                else withAttr Theme.mutedAttr (txt language))
+                else withAttr Theme.mutedAttr
+                    (txt (displayTerminalText language)))
 
 -- | Render Markdown, allowing callers to add an interactive control to each
 -- fenced code block header. Code block indices are one-based.
@@ -309,7 +310,7 @@ renderCodeRow paddingAttr horizontalPadding fragments =
     V.horizCat
         [ blank
         , V.horizCat
-            [ V.text attr (LazyText.fromStrict text)
+            [ terminalTextImage attr text
             | (attr, text) <- fragments
             ]
         , blank
@@ -412,7 +413,10 @@ tableWidget rows@(headerCells : _) =
 
 cellDisplayWidth :: Text -> Int
 cellDisplayWidth =
-    Text.foldl' (\width char -> width + terminalCharWidth char) 0
+    sum
+        . map graphemeCellWidth
+        . graphemeClusters
+        . displayTerminalText
         . inlinePlainText
         . parseInline
 
@@ -420,8 +424,9 @@ cellMinimumWidth :: Text -> Int
 cellMinimumWidth =
     maximum
         . (1 :)
-        . map terminalCharWidth
-        . Text.unpack
+        . map graphemeCellWidth
+        . graphemeClusters
+        . displayTerminalText
         . inlinePlainText
         . parseInline
 
@@ -476,7 +481,7 @@ compactTableImage width borderAttr rows =
 renderStyledLine :: [(V.Attr, Text)] -> V.Image
 renderStyledLine fragments =
     V.horizCat
-        [ V.text attr (LazyText.fromStrict text)
+        [ terminalTextImage attr text
         | (attr, text) <- fragments
         ]
 
@@ -549,7 +554,7 @@ renderTableCell paddingAttr horizontalPadding width fragments =
   where
     content =
         V.horizCat
-            [ V.text attr (LazyText.fromStrict text)
+            [ terminalTextImage attr text
             | (attr, text) <- fragments
             ]
     blank count
@@ -560,9 +565,9 @@ fragmentsDisplayWidth :: [(V.Attr, Text)] -> Int
 fragmentsDisplayWidth =
     sum
         . map
-            (Text.foldl'
-                (\width character -> width + terminalCharWidth character)
-                0
+            (sum
+                . map graphemeCellWidth
+                . graphemeClusters
                 . snd)
 
 inlineWidgetWithAttr
@@ -591,7 +596,7 @@ inlineWidgetWithAttr linkName plainAttr inlines =
                 B.Widget B.Fixed B.Fixed $
                     pure B.emptyResult
                         { B.image =
-                            V.text attr (LazyText.fromStrict text)
+                            terminalTextImage attr text
                         }
         B.render (vBox (map rowWidget rows))
 
@@ -649,8 +654,8 @@ wrapStyled width spans =
     finalize $
         List.foldl' addCell ([[]], 0) (styledCells spans)
   where
-    addCell (rows, used) cell@(_, character)
-        | character == '\n' = ([] : rows, 0)
+    addCell (rows, used) cell@(_, cluster, cellWidth)
+        | cluster == "\n" = ([] : rows, 0)
         | used > 0
         , used + cellWidth > width =
             ([cell] : rows, cellWidth)
@@ -659,8 +664,6 @@ wrapStyled width spans =
                 [] -> ([[cell]], cellWidth)
                 row : rest ->
                     ((cell : row) : rest, used + cellWidth)
-      where
-        cellWidth = terminalCharWidth character
     finalize (rows, _) =
         let ordered = map (groupStyledCells . reverse) (reverse rows)
         in if null ordered then [[]] else ordered
@@ -692,19 +695,17 @@ wrapStyledCode width spans =
     takeFitting = go 0 []
       where
         go _ taken [] = (reverse taken, [])
-        go used taken allCells@((attr, character) : rest)
+        go used taken allCells@(cell@(_, _, cellWidth) : rest)
             | used > 0
             , used + cellWidth > width' =
                 (reverse taken, allCells)
             | otherwise =
-                go (used + cellWidth) ((attr, character) : taken) rest
-          where
-            cellWidth = terminalCharWidth character
+                go (used + cellWidth) (cell : taken) rest
 
     lastSpaceIndex =
         List.foldl'
-            (\found (index, (_, character)) ->
-                if isSpace character then Just index else found)
+            (\found (index, cell) ->
+                if styledCellIsSpace cell then Just index else found)
             Nothing
             . zip [0 :: Int ..]
 
@@ -727,7 +728,7 @@ wrapStyledWords width spans =
                         | index > 0 ->
                             let (line, carried) = splitAt index fitting
                                 next =
-                                    dropWhile (isSpace . snd)
+                                    dropWhile styledCellIsSpace
                                         (carried <> overflow)
                             in dropTrailingSpace line : wrapCells next
                     _ -> fitting : wrapCells overflow
@@ -735,33 +736,35 @@ wrapStyledWords width spans =
     takeFitting = go 0 []
       where
         go _ taken [] = (reverse taken, [])
-        go used taken allCells@((attr, character) : rest)
+        go used taken allCells@(cell@(_, _, cellWidth) : rest)
             | used > 0
             , used + cellWidth > width' =
                 (reverse taken, allCells)
             | otherwise =
-                go (used + cellWidth) ((attr, character) : taken) rest
-          where
-            cellWidth = terminalCharWidth character
+                go (used + cellWidth) (cell : taken) rest
 
     lastSpaceIndex =
         List.foldl'
-            (\found (index, (_, character)) ->
-                if isSpace character then Just index else found)
+            (\found (index, cell) ->
+                if styledCellIsSpace cell then Just index else found)
             Nothing
             . zip [0 :: Int ..]
 
     dropTrailingSpace =
-        reverse . dropWhile (isSpace . snd) . reverse
+        reverse . dropWhile styledCellIsSpace . reverse
 
-type StyledCell = (V.Attr, Char)
+type StyledCell = (V.Attr, Text, Int)
 
 styledCells :: [(V.Attr, Text)] -> [StyledCell]
 styledCells spans =
-    [ (attr, character)
+    [ (attr, cluster, graphemeCellWidth cluster)
     | (attr, text) <- spans
-    , character <- Text.unpack text
+    , cluster <- graphemeClusters text
     ]
+
+styledCellIsSpace :: StyledCell -> Bool
+styledCellIsSpace (_, cluster, _) =
+    not (Text.null cluster) && Text.all isSpace cluster
 
 groupStyledCells :: [StyledCell] -> [(V.Attr, Text)]
 groupStyledCells =
@@ -771,10 +774,10 @@ groupStyledCells =
         . reverse
         . List.foldl' appendCell []
   where
-    appendCell grouped (attr, character) =
+    appendCell grouped (attr, cluster, _) =
         case grouped of
             (previousAttr, previousText) : rest
                 | previousAttr == attr ->
-                    (previousAttr, previousText <> Builder.singleton character)
+                    (previousAttr, previousText <> Builder.fromText cluster)
                         : rest
-            _ -> (attr, Builder.singleton character) : grouped
+            _ -> (attr, Builder.fromText cluster) : grouped

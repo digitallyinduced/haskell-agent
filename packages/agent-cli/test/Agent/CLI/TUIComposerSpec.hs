@@ -1,16 +1,48 @@
 module Agent.CLI.TUIComposerSpec (spec) where
 
-import Agent.CLI.Input (ReplLine(..))
 import Agent.CLI.Dictation (insertDictation)
+import Agent.CLI.Input
+    ( ReplLine(..)
+    , displayEditorText
+    , terminalTextWidth
+    )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model (UiState(..), initialUiState)
+import Agent.TUI.TextWidth
+    ( clampGraphemeCursor
+    , graphemeCellWidth
+    , graphemeClusters
+    , nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
 import Control.Concurrent.STM (atomically)
 import qualified Data.ByteString as ByteString
+import Data.Char (isControl)
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , Gen
+    , Property
+    , chooseInt
+    , conjoin
+    , counterexample
+    , elements
+    , vectorOf
+    , (===)
+    )
+
+data DraftCase = DraftCase !Int !Text !Int
+    deriving (Show)
+
+newtype PasteBytes = PasteBytes ByteString.ByteString
+    deriving (Show)
 
 spec :: Spec
 spec = describe "fullscreen composer" do
@@ -55,6 +87,12 @@ spec = describe "fullscreen composer" do
         wrapDraft 5 "abc\ndefghi" 10
             `shouldBe` (["abc", "defgh", "i"], (2, 1))
 
+    it "distinguishes the cursor positions before and after a full-row newline" do
+        wrapDraft 2 "ab\nc" 2
+            `shouldBe` (["ab", "c"], (0, 2))
+        wrapDraft 2 "ab\nc" 3
+            `shouldBe` (["ab", "c"], (1, 0))
+
     it "wraps using terminal columns for wide characters" do
         wrapDraft 3 "a界b" 2
             `shouldBe` (["a界", "b"], (1, 0))
@@ -62,6 +100,26 @@ spec = describe "fullscreen composer" do
     it "keeps combining marks attached at a visual boundary" do
         wrapDraft 1 "e\x0301x" 2
             `shouldBe` (["e\x0301", "x"], (1, 0))
+
+    it "fits wide glyphs into a one-cell composer" do
+        wrapDraft 1 "界" 1
+            `shouldBe` (["…", ""], (1, 0))
+
+    it "never splits emoji graphemes while wrapping or placing the cursor" do
+        let womanTechnologist =
+                Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+        wrapDraft 2 womanTechnologist 3
+            `shouldBe` ([womanTechnologist, ""], (1, 0))
+        wrapDraft 2 ("a" <> womanTechnologist) 4
+            `shouldBe` (["a", womanTechnologist, ""], (2, 0))
+        wrapDraft 1 womanTechnologist 3
+            `shouldBe` (["…", ""], (1, 0))
+        draftCursorLocation womanTechnologist 1 `shouldBe` (0, 0)
+        draftCursorLocation womanTechnologist 3 `shouldBe` (0, 2)
+
+    modifyMaxSuccess (const 500) $
+        prop "wraps generated Unicode drafts without overflowing rows" $
+            wrapDraftProperty
 
     it "filters control characters from bracketed paste text" do
         decodePaste (ByteString.pack [97, 0, 10, 9, 27, 98])
@@ -72,6 +130,10 @@ spec = describe "fullscreen composer" do
             `shouldBe` ("please fix this now", 15)
         insertDictation "hello" 5 ", world"
             `shouldBe` ("hello, world", 12)
+
+    modifyMaxSuccess (const 300) $
+        prop "decodes arbitrary paste bytes into stable safe text" $
+            decodePasteProperty
 
     it "keeps clipboard preludes immediately before promoted input" do
         buffer <- newFullscreenInputBuffer
@@ -132,3 +194,90 @@ spec = describe "fullscreen composer" do
         , fullscreenInputQueued = True
         , fullscreenInputDisplay = Nothing
         }
+
+wrapDraftProperty :: DraftCase -> Property
+wrapDraftProperty (DraftCase width draft requestedCursor) =
+    conjoin
+        [ counterexample "wrapped rows are nonempty"
+            (not (null rows) === True)
+        , counterexample "wrapped row width"
+            (all ((<= width) . terminalTextWidth) rows === True)
+        , counterexample "cursor row"
+            ((cursorRow >= 0 && cursorRow < length rows) === True)
+        , counterexample "cursor column"
+            ((cursorColumn >= 0 && cursorColumn <= width) === True)
+        , counterexample "wrapping preserves draft text when glyphs fit"
+            (if all ((<= width) . graphemeCellWidth)
+                    (filter (/= "\n") (graphemeClusters draft))
+                then Text.concat rows === displayedDraft
+                else True === True)
+        , counterexample "cursor movement is monotonic"
+            ((previousLocation <= location && location <= nextLocation)
+                === True)
+        , counterexample "explicit newline moves the cursor"
+            (all explicitNewlineMoves newlineOffsets === True)
+        ]
+  where
+    cursor = clampGraphemeCursor draft requestedCursor
+    (rows, location@(cursorRow, cursorColumn)) =
+        wrapDraft width draft cursor
+    (_, previousLocation) =
+        wrapDraft width draft
+            (previousGraphemeBoundary draft cursor)
+    (_, nextLocation) =
+        wrapDraft width draft
+            (nextGraphemeBoundary draft cursor)
+    displayedDraft =
+        Text.concat (map displayEditorText (Text.splitOn "\n" draft))
+    newlineOffsets =
+        [ index
+        | (index, character) <- zip [0 :: Int ..] (Text.unpack draft)
+        , character == '\n'
+        ]
+    explicitNewlineMoves index =
+        snd (wrapDraft width draft index)
+            /= snd (wrapDraft width draft (index + 1))
+
+decodePasteProperty :: PasteBytes -> Property
+decodePasteProperty (PasteBytes bytes) =
+    conjoin
+        [ counterexample "paste contains unsafe controls"
+            (Text.all allowed decoded === True)
+        , counterexample "paste decoding is idempotent"
+            (decodePaste (Text.encodeUtf8 decoded) === decoded)
+        ]
+  where
+    decoded = decodePaste bytes
+    allowed character =
+        character == '\n'
+            || character == '\t'
+            || not (isControl character)
+
+instance Arbitrary DraftCase where
+    arbitrary = do
+        width <- chooseInt (1, 120)
+        atomCount <- chooseInt (0, 110)
+        draft <- Text.concat <$> vectorOf atomCount genDraftAtom
+        cursor <- chooseInt (-20, Text.length draft + 20)
+        pure (DraftCase width draft cursor)
+
+instance Arbitrary PasteBytes where
+    arbitrary = do
+        size <- chooseInt (0, 400)
+        PasteBytes . ByteString.pack
+            <$> vectorOf size (fromIntegral <$> chooseInt (0, 255))
+
+genDraftAtom :: Gen Text
+genDraftAtom =
+    elements
+        [ "a", "z", "0", " ", " ", "\n"
+        , "界", "語", "🙂", "🚀", "é", "ø", "e\x0301"
+        , Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+        , Text.pack
+            [ '\x1f468', '\x200d', '\x1f469', '\x200d'
+            , '\x1f467', '\x200d', '\x1f466'
+            ]
+        , Text.pack ['\x1f1fa', '\x1f1f8']
+        , Text.pack ['\x1f44d', '\x1f3fd']
+        , Text.pack ['1', '\xfe0f', '\x20e3']
+        ]

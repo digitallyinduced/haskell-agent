@@ -17,8 +17,12 @@ module Agent.CLI.Input.Display
     ) where
 
 import Agent.CLI.Input.Types (DisplayCell(..))
-import Agent.TUI.TextWidth (charCellWidth)
-import Data.Char (GeneralCategory(..), chr, generalCategory, ord)
+import Agent.TUI.TextWidth
+    ( charCellWidth
+    , displayTerminalText
+    , graphemeCellWidth
+    , graphemeClusters
+    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -29,30 +33,34 @@ terminalCharWidth :: Char -> Int
 terminalCharWidth = (.displayCellWidth) . displayCell
 
 displayCells :: Text -> [DisplayCell]
-displayCells = map displayCell . Text.unpack
+displayCells = map displayCluster . graphemeClusters
 
 displayCell :: Char -> DisplayCell
-displayCell char =
-    let shown = safeDisplayChar char
+displayCell = displayCluster . Text.singleton
+
+displayCluster :: Text -> DisplayCell
+displayCluster cluster =
+    let lineSafe =
+            Text.concatMap
+                (\character ->
+                    if character == '\n'
+                        then "↵"
+                        else Text.singleton character)
+                cluster
+        shown = displayTerminalText lineSafe
     in DisplayCell
         { displayCellText = shown
         , displayCellWidth = textColumns shown
+        , displayCellSourceLength = Text.length cluster
         }
 
 safeDisplayChar :: Char -> Text
 safeDisplayChar char
-    | char == '\n' || char == '\r' = "↵"
-    | char == '\t' = "⇥"
-    | code >= 0 && code <= 0x1f = Text.singleton (chr (0x2400 + code))
-    | code == 0x7f = "␡"
-    | code >= 0x80 && code <= 0x9f = "�"
-    | generalCategory char == Format = "�"
-    | otherwise = Text.singleton char
-  where
-    code = ord char
+    | char == '\n' = "↵"
+    | otherwise = displayTerminalText (Text.singleton char)
 
 textColumns :: Text -> Int
-textColumns = sum . map charColumns . Text.unpack
+textColumns = sum . map graphemeCellWidth . graphemeClusters
 
 charColumns :: Char -> Int
 charColumns = charCellWidth
@@ -72,20 +80,61 @@ takeColumns width = go 0
         | otherwise = cell : go (used + cell.displayCellWidth) rest
 
 takeSuffixColumns :: Int -> [DisplayCell] -> [DisplayCell]
-takeSuffixColumns width = reverse . takeColumns width . reverse
+takeSuffixColumns width =
+    dropWhile ((== 0) . (.displayCellWidth))
+        . reverse
+        . takeColumns width
+        . reverse
 
 visibleEditorText :: Int -> Text -> Int -> (Text, Int)
-visibleEditorText available raw cursor =
-    let cells = displayCells raw
-        before = take cursor cells
-    in if cellsWidth cells <= available
-        then (renderCells cells, cellsWidth before)
-        else
-            let leftRoom = max 1 (available * 2 `div` 3)
-                visibleBefore = takeSuffixColumns leftRoom before
-                start = length before - length visibleBefore
-                shownCells = takeColumns available (drop start cells)
-            in (renderCells shownCells, cellsWidth visibleBefore)
+visibleEditorText available raw requestedCursor
+    | available <= 0 = ("", 0)
+    | otherwise =
+        let cells = fitCells False (displayCells raw)
+            cursor = max 0 (min (Text.length raw) requestedCursor)
+            before = cellsBeforeCursor cursor cells
+        in if cellsWidth cells <= available
+            then (renderCells cells, cellsWidth before)
+            else
+                let leftRoom = max 1 (available * 2 `div` 3)
+                    preferredBefore = takeSuffixColumns leftRoom before
+                    -- A wide glyph may not fit in the preferred left-hand
+                    -- budget. If it fits in the full viewport, keep it
+                    -- rather than dropping all text before the cursor.
+                    visibleBefore =
+                        if null preferredBefore
+                            then takeSuffixColumns available before
+                            else preferredBefore
+                    start = length before - length visibleBefore
+                    shownCells = takeColumns available (drop start cells)
+                in (renderCells shownCells, cellsWidth visibleBefore)
+  where
+    -- A single terminal glyph can occupy two cells, so it cannot be shown
+    -- verbatim in a one-cell viewport. Keep a visible placeholder and,
+    -- crucially, preserve the cursor's cell position.
+    fitCells _ [] = []
+    fitCells suppressCombining (cell : rest)
+        | cell.displayCellWidth > available =
+            cell
+                { displayCellText = "…"
+                , displayCellWidth = 1
+                }
+                : fitCells True rest
+        | suppressCombining
+        , cell.displayCellWidth == 0 =
+            cell { displayCellText = "" } : fitCells True rest
+        | otherwise =
+            cell : fitCells False rest
+
+    cellsBeforeCursor cursor = go 0
+      where
+        go _ [] = []
+        go offset (cell : rest)
+            | offset + cell.displayCellSourceLength <= cursor =
+                cell : go
+                    (offset + cell.displayCellSourceLength)
+                    rest
+            | otherwise = []
 
 displayEditorText :: Text -> Text
 displayEditorText = renderCells . displayCells

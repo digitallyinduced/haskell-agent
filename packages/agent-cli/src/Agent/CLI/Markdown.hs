@@ -29,8 +29,9 @@ import Agent.TUI.Markdown.Inline
     )
 import qualified Agent.TUI.Markdown.Block as Block
 import Agent.TUI.TextWidth
-    ( displayCharCellWidth
-    , displayTerminalText
+    ( displayTerminalText
+    , graphemeCellWidth
+    , graphemeClusters
     )
 import Data.Char (isAlphaNum, isAscii, isSpace)
 import Data.List (transpose)
@@ -168,9 +169,7 @@ columnWidths rows =
     in map (maximum . (0 :) . map renderedWidth) cols
   where
     renderedWidth =
-        Text.foldl'
-            (\width character -> width + displayCharCellWidth character)
-            0
+        terminalDisplayWidth
             . inlinePlainText
             . parseInline
 
@@ -179,12 +178,7 @@ styleTableRow isHeader widths cells =
     let cellText w c =
             let inlines = parseInline c
                 visible = inlinePlainText inlines
-                width' =
-                    Text.foldl'
-                        (\total character ->
-                            total + displayCharCellWidth character)
-                        0
-                        visible
+                width' = terminalDisplayWidth visible
                 padding = max 0 (w - width')
                 base
                     | isHeader = [SetConsoleIntensity BoldIntensity]
@@ -196,6 +190,13 @@ styleTableRow isHeader widths cells =
         parts = zipWith cellText widths (cells ++ repeat "")
         bar = md [terminalMuted] "│"
     in bar <> Text.intercalate bar (take (length widths) parts) <> bar
+
+terminalDisplayWidth :: Text -> Int
+terminalDisplayWidth =
+    sum
+        . map graphemeCellWidth
+        . graphemeClusters
+        . displayTerminalText
 
 styleInline :: Text -> Text
 styleInline = renderInlineWith [] . parseInline

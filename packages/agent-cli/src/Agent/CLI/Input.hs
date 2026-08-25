@@ -63,6 +63,10 @@ import Agent.CLI.Terminal
     , kittyKeyboardPop
     , stripAnsi
     )
+import Agent.TUI.TextWidth
+    ( nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
 import Control.Exception.Safe
     ( bracket
     , bracket_
@@ -306,12 +310,18 @@ readInlineEditor
             EditorBackspace -> continue history entries (backspace state)
             EditorDelete -> continue history entries (deleteAtCursor state)
             EditorLeft -> continue history entries state
-                { editorCursor = max 0 (state.editorCursor - 1)
+                { editorCursor =
+                    previousGraphemeBoundary
+                        state.editorText
+                        state.editorCursor
                 , editorSelected = 0
                 , editorSlashDismissed = False
                 }
             EditorRight -> continue history entries state
-                { editorCursor = min (Text.length state.editorText) (state.editorCursor + 1)
+                { editorCursor =
+                    nextGraphemeBoundary
+                        state.editorText
+                        state.editorCursor
                 , editorSelected = 0
                 , editorSlashDismissed = False
                 }
@@ -476,9 +486,13 @@ backspace :: EditorState -> EditorState
 backspace state
     | state.editorCursor <= 0 = state
     | otherwise =
-        let start = state.editorCursor - 1
+        let start =
+                previousGraphemeBoundary
+                    state.editorText
+                    state.editorCursor
             (before, rest) = Text.splitAt start state.editorText
-            (_, after) = Text.splitAt 1 rest
+            (_, after) =
+                Text.splitAt (state.editorCursor - start) rest
             text = before <> after
         in state
             { editorText = text
@@ -494,7 +508,11 @@ deleteAtCursor state
     | state.editorCursor >= Text.length state.editorText = state
     | otherwise =
         let (before, rest) = Text.splitAt state.editorCursor state.editorText
-            (_, after) = Text.splitAt 1 rest
+            end =
+                nextGraphemeBoundary
+                    state.editorText
+                    state.editorCursor
+            (_, after) = Text.splitAt (end - state.editorCursor) rest
             text = before <> after
         in state
             { editorText = text
