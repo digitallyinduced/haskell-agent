@@ -59,6 +59,7 @@ library
                     , Agent.CLI.Runtime.Persistence
                     , Agent.CLI.Runtime.Recap
                     , Agent.CLI.Runtime.Repl
+                    , Agent.CLI.Runtime.Repl.Commands
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
