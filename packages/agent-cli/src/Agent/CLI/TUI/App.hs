@@ -2292,14 +2292,14 @@ drawLiveTodos ui =
         [] -> emptyWidget
         lines_ ->
             padLeftRight 2 $
-                vBox (map drawLiveTodoLine lines_)
+                vBox (map (vLimit 1 . drawLiveTodoLine) lines_)
 
 drawLiveTodoLine :: Text -> Widget Name
 drawLiveTodoLine line
     | "… +" `Text.isPrefixOf` line =
         withAttr Theme.mutedAttr (txt line)
     | otherwise =
-        withAttr (todoStatusAttr (todoLineStatusFromText line)) (txtWrap line)
+        withAttr (todoStatusAttr (todoLineStatusFromText line)) (txt line)
 
 todoLineStatusFromText :: Text -> TodoDisplayStatus
 todoLineStatusFromText line

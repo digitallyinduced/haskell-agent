@@ -687,6 +687,11 @@ reduceLoop event state = case event of
                 { uiRunning = True
                 , uiAwaitingInput = False
                 , uiActivity = toolCallTitle call
+                , uiToolCalls =
+                    Map.insert
+                        call.callId
+                        (Seq.length state.uiBlocks, call)
+                        state.uiToolCalls
                 }
         | otherwise ->
             let
@@ -719,7 +724,13 @@ reduceLoop event state = case event of
                 Just (_, call) ->
                     result
                         { output = formatToolOutput call result.output }
-            todos = fromMaybe state.uiTodos (todoListFromToolOutput result.output)
+            todos =
+                case activeCall of
+                    Just (_, call)
+                        | isTodoTool call.name ->
+                            fromMaybe state.uiTodos
+                                (todoListFromToolOutput result.output)
+                    _ -> state.uiTodos
             next =
                 state
                     { uiRunning = True
@@ -731,8 +742,10 @@ reduceLoop event state = case event of
                     }
         in case activeCall of
             Nothing -> next
-            Just (blockIndex, _) ->
-                completeTool blockIndex displayed next
+            Just (blockIndex, _)
+                | blockIndex < Seq.length state.uiBlocks ->
+                    completeTool blockIndex displayed next
+            Just _ -> next
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)

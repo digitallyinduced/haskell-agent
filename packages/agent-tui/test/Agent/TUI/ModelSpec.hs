@@ -724,6 +724,37 @@ spec = describe "fullscreen UI reducer" do
         done.uiTodos
             `shouldBe` [TodoDisplayLine TodoDisplayCompleted "Find and clone repos"]
 
+    it "does not let ordinary tool output clobber the live todo list" do
+        let todoCall =
+                functionToolCall
+                    "todo-1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Keep this list\"}]}"
+            todoResult = ToolCallResult
+                { callId = "todo-1"
+                , output = "- [in_progress] 1: Keep this list"
+                , callKind = FunctionCallKind
+                }
+            shellCall =
+                functionToolCall "shell-1" "run_terminal_cmd" "{\"command\":\"ls\"}"
+            shellResult = ToolCallResult
+                { callId = "shell-1"
+                , output = "- [pending] 99: spoofed checklist from stdout"
+                , callKind = FunctionCallKind
+                }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted todoCall)
+                    , UiLoop (ToolFinished todoResult)
+                    , UiLoop (ToolStarted shellCall)
+                    , UiLoop (ToolFinished shellResult)
+                    ]
+        map (.todoLineText) (visibleTodoList state)
+            `shouldBe` ["Keep this list"]
+        map (.blockKind) (Foldable.toList state.uiBlocks)
+            `shouldBe` [BlockShell]
+
     it "formats collaboration result JSON for display" do
         let call =
                 functionToolCall
