@@ -97,11 +97,23 @@ jobs:
             echo "::error title=Missing setfacl::setfacl is required to grant the Nix build user read-only access to staged credentials"
             exit 1
           fi
-          "$setfacl_bin" -m g:nixbld:--x "$credential_home"
-          find "$credential_home" -type d \
-            -exec "$setfacl_bin" -m g:nixbld:r-x {} +
-          find "$credential_home" -type f \
-            -exec "$setfacl_bin" -m g:nixbld:r-- {} +
+
+          build_user_ids=()
+          while IFS=: read -r name _ uid _; do
+            if [[ "$name" == nixbld* ]]; then
+              build_user_ids+=("$uid")
+            fi
+          done < /etc/passwd
+          if [[ "${#build_user_ids[@]}" -eq 0 ]]; then
+            echo "::error title=Missing Nix build users::no nixbld users were found in /etc/passwd"
+            exit 1
+          fi
+          for uid in "${build_user_ids[@]}"; do
+            find "$credential_home" -type d \
+              -exec "$setfacl_bin" -m "u:$uid:r-x" {} +
+            find "$credential_home" -type f \
+              -exec "$setfacl_bin" -m "u:$uid:r--" {} +
+          done
 
           "$nix_bin" flake check \
             --impure \
