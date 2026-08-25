@@ -2199,11 +2199,55 @@ waitingIndicatorAttr state =
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
     vBox $
-        [vBox (map (drawBlock state) blocks)]
+        [vBox (map (drawTranscriptChunk state) blockChunks)]
             <> conversationReserveWidgets anchor
   where
-    blocks = toList state.appUi.uiBlocks
+    blockChunks =
+        toList (Seq.chunksOf transcriptChunkSize state.appUi.uiBlocks)
     anchor = state.appConversationAnchor
+
+-- | Cache completed transcript blocks in moderately sized groups.
+--
+-- A Brick viewport must still lay out its complete child to determine the
+-- scroll range. Per-block caching avoids repeated Markdown parsing, but a
+-- redraw still has to combine one image per retained block. Grouping stable
+-- blocks means ordinary scrolling traverses roughly one cached image per 32
+-- blocks instead. Only full chunks are cached: Brick retains cache entries
+-- until explicit invalidation, so caching the growing final chunk under a new
+-- last-block key for every append would retain all of those obsolete images.
+-- The final partial/live/animated group remains uncached.
+drawTranscriptChunk :: AppState -> Seq UiBlock -> Widget Name
+drawTranscriptChunk state blocks =
+    case (Seq.lookup 0 blocks, Seq.lookup (Seq.length blocks - 1) blocks) of
+        (Just firstBlock, Just lastBlock)
+            | Seq.length blocks == transcriptChunkSize
+            , all (cacheableBlock state) blocks ->
+                if chunkHasDynamicInteraction
+                    then rendered
+                    else
+                        cached
+                            (ConversationChunkCache
+                                firstBlock.blockId
+                                lastBlock.blockId)
+                            rendered
+        _ -> rendered
+  where
+    rendered = vBox (map (drawBlock state) (toList blocks))
+    blockIds = map (.blockId) (toList blocks)
+    chunkHasDynamicInteraction =
+        any (.blockExpanded) blocks
+            || highlightedBlockInChunk
+            || codeInteractionInChunk
+    highlightedBlockInChunk =
+        state.appUi.uiFocus == FocusScrollback
+            && maybe False (`elem` blockIds) state.appUi.uiSelectedBlock
+    codeInteractionInChunk =
+        case state.appHoveredControl of
+            Just (CodeCopy blockId _) -> blockId `elem` blockIds
+            _ -> False
+
+transcriptChunkSize :: Int
+transcriptChunkSize = 32
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =
