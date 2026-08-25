@@ -40,6 +40,7 @@ import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , loadSession
+    , loadSessions
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -52,7 +53,6 @@ import Agent.Provider (providerSlug)
 import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
-import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
@@ -640,22 +640,24 @@ loadRecentSessions
     -> OsPath
     -> [SessionMeta]
     -> IO [(SessionMeta, [SessionTurn])]
-loadRecentSessions pool root metas =
-    forM (take 20 metas) \meta ->
-        loadSession pool root meta.metaId >>= \case
-            Right loaded -> pure loaded
-            Left err ->
-                pure
-                    ( meta
-                    , [ SessionTurn
-                            { turnAt = meta.metaUpdatedAt
-                            , turnUserText = ""
-                            , turnAssistantText =
-                                Just ("Transcript unavailable: " <> err)
-                            , turnError = Nothing
-                            , turnResponseId = Nothing
-                            , turnItems = []
-                            , turnUsage = Nothing
-                            }
-                      ]
-                    )
+loadRecentSessions pool root metas = do
+    let recent = take 20 metas
+    loaded <- loadSessions pool root (map (.metaId) recent)
+    pure (zipWith loadedOrUnavailable recent loaded)
+  where
+    loadedOrUnavailable meta = \case
+        Right session -> session
+        Left err ->
+            ( meta
+            , [ SessionTurn
+                    { turnAt = meta.metaUpdatedAt
+                    , turnUserText = ""
+                    , turnAssistantText =
+                        Just ("Transcript unavailable: " <> err)
+                    , turnError = Nothing
+                    , turnResponseId = Nothing
+                    , turnItems = []
+                    , turnUsage = Nothing
+                    }
+              ]
+            )

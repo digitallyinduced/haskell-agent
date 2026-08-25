@@ -19,11 +19,18 @@ module Agent.Skills
     , resolveSkillMentions
     ) where
 
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Applicative ((<|>))
+import Control.Concurrent.STM
+    ( atomically
+    , modifyTVar'
+    , newTVarIO
+    , readTVar
+    )
 import Control.Exception.Safe (displayException, tryAny)
-import Control.Monad (filterM, forM)
+import Control.Monad (filterM)
 import Data.Aeson
     ( FromJSON(..)
     , Object
@@ -38,7 +45,7 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
-import Data.List (find, sortOn)
+import Data.List (find, sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -224,13 +231,18 @@ defaultSkillCatalogMaxChars = 8000
 discoverSkills :: SkillDiscoverOptions -> IO SkillCatalog
 discoverSkills options = do
     roots <- skillRoots options
-    results <- fmap concat $ forM roots \(scope, origin, root) -> do
-        exists <- doesDirectoryExist root
-        if exists
-            then do
-                files <- findSkillFiles options.skillsMaxDepth root
-                forM files (loadSkillFile scope origin)
-            else pure []
+    results <- fmap concat $
+        mapConcurrentlyBounded skillRootConcurrency
+            (\(scope, origin, root) -> do
+                exists <- doesDirectoryExist root
+                if exists
+                    then do
+                        files <- findSkillFiles options.skillsMaxDepth root
+                        mapConcurrentlyBounded skillFileConcurrency
+                            (loadSkillFile scope origin)
+                            files
+                    else pure [])
+            roots
     let skills = [skill | Right skill <- results]
         warnings = [warning | Left warning <- results]
     pure SkillCatalog
@@ -240,9 +252,14 @@ discoverSkills options = do
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
 skillRoots options = do
-    projectRoot <- canonicalizePath (unsafeToFilePath options.skillsProjectRoot)
-    cwd <- canonicalizePath (unsafeToFilePath options.skillsCwd)
-    home <- canonicalizePath (unsafeToFilePath options.skillsHome)
+    canonical <- mapConcurrentlyBounded 3 canonicalizePath
+        [ unsafeToFilePath options.skillsProjectRoot
+        , unsafeToFilePath options.skillsCwd
+        , unsafeToFilePath options.skillsHome
+        ]
+    let (projectRoot, cwd, home) = case canonical of
+            [project, current, userHome] -> (project, current, userHome)
+            _ -> error "skillRoots: canonical path count changed"
     let dirs =
             map unsafeToFilePath $
                 directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
@@ -275,29 +292,60 @@ skillRoots options = do
         CodexSkills -> ".codex" </> "skills"
 
 findSkillFiles :: Int -> FilePath -> IO [FilePath]
-findSkillFiles maxDepth root = go Set.empty 0 root
+findSkillFiles maxDepth root = do
+    seen <- newTVarIO Set.empty
+    sort <$> go seen 0 [root]
   where
-    go seen depth dir
-        | depth > maxDepth = pure []
-        | otherwise = do
-            canonicalResult <- tryAny (canonicalizePath dir)
-            case canonicalResult of
-                Left _ -> pure []
-                Right canonical
-                    | canonical `Set.member` seen -> pure []
-                    | otherwise -> do
-                        entriesResult <- tryAny (listDirectory dir)
-                        case entriesResult of
-                            Left _ -> pure []
-                            Right entries -> do
-                                let skillPath = dir </> "SKILL.md"
-                                hasSkill <- doesFileExist skillPath
-                                children <-
-                                    filterM doesDirectoryExist
-                                        [dir </> entry | entry <- entries]
-                                nested <- fmap concat $
-                                    traverse (go (Set.insert canonical seen) (depth + 1)) children
-                                pure ([skillPath | hasSkill] <> nested)
+    go _ depth _ | depth > maxDepth = pure []
+    go _ _ [] = pure []
+    go seen depth dirs = do
+        let orderedDirs = sort dirs
+        canonicalized <-
+            mapConcurrentlyBounded skillDirectoryConcurrency
+                (\dir -> fmap ((,) dir) <$> tryAny (canonicalizePath dir))
+                orderedDirs
+        claimed <- atomically do
+            visited <- readTVar seen
+            let claim (current, selected) = \case
+                    Left _ -> (current, selected)
+                    Right (dir, canonical)
+                        | canonical `Set.member` current ->
+                            (current, selected)
+                        | otherwise ->
+                            (Set.insert canonical current, dir : selected)
+                (updated, selected) =
+                    foldl claim (visited, []) canonicalized
+            modifyTVar' seen (const updated)
+            pure (reverse selected)
+        inspected <-
+            mapConcurrentlyBounded skillDirectoryConcurrency
+                inspectDirectory
+                claimed
+        let found = concatMap fst inspected
+            children = concatMap snd inspected
+        nested <- go seen (depth + 1) children
+        pure (found <> nested)
+
+    inspectDirectory dir = do
+        entriesResult <- tryAny (listDirectory dir)
+        case entriesResult of
+            Left _ -> pure ([], [])
+            Right entries -> do
+                let skillPath = dir </> "SKILL.md"
+                hasSkill <- doesFileExist skillPath
+                children <-
+                    filterM doesDirectoryExist
+                        [dir </> entry | entry <- sort entries]
+                pure ([skillPath | hasSkill], children)
+
+skillRootConcurrency :: Int
+skillRootConcurrency = 4
+
+skillDirectoryConcurrency :: Int
+skillDirectoryConcurrency = 8
+
+skillFileConcurrency :: Int
+skillFileConcurrency = 8
 
 loadSkillFile
     :: SkillScope

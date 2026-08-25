@@ -24,6 +24,7 @@ module Agent.CLI.Session
     , addSessionUsage
     , deleteSession
     , loadSession
+    , loadSessions
     , importSessionTransfer
     , loadSessionHandle
     , isValidSessionId
@@ -710,6 +711,36 @@ loadSession pool root sessionId = runExceptT do
     case stored' of
         Nothing -> throwE ("session not found: " <> sessionId)
         Just value -> decodeStoredSession sessionId value
+
+-- | Load several sessions with one batched PostgreSQL read while preserving
+-- request order. A missing database row still takes the legacy import path.
+loadSessions
+    :: StorePool
+    -> OsPath
+    -> [Text]
+    -> IO [Either Text (SessionMeta, [SessionTurn])]
+loadSessions pool root sessionIds = do
+    let validated =
+            [ sessionDirForId root sessionId
+                >> Right sessionId
+            | sessionId <- sessionIds
+            ]
+        validIds = [sessionId | Right sessionId <- validated]
+    stored <- Store.loadSessions pool validIds
+    restoreResults validated stored
+  where
+    restoreResults [] [] = pure []
+    restoreResults (Left err : rest) results =
+        (Left err :) <$> restoreResults rest results
+    restoreResults (Right sessionId : rest) (result : results) = do
+        loaded <- case result of
+            Left err -> pure (Left (renderStoreError err))
+            Right Nothing -> loadSession pool root sessionId
+            Right (Just value) ->
+                runExceptT (decodeStoredSession sessionId value)
+        (loaded :) <$> restoreResults rest results
+    restoreResults _ _ =
+        pure [Left "batched session load returned an unexpected result count"]
 
 loadSessionHandle
     :: StorePool

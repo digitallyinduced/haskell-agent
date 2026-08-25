@@ -41,6 +41,7 @@ import Agent.CLI.Models
     , ModelTarget(..)
     , resolveModelOptionDialect
     )
+import Agent.Concurrent (forConcurrentlyBounded_)
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Dialect
     ( DialectId
@@ -61,10 +62,13 @@ import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
     , modifyMVar_
+    , newEmptyMVar
     , newMVar
+    , putMVar
+    , readMVar
     )
-import Control.Exception.Safe (SomeException, try)
-import Control.Monad (forM_)
+import Control.Exception.Safe (SomeException, finally, try)
+import Control.Monad (void)
 import Data.Aeson (FromJSON(..), encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
@@ -118,12 +122,22 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     }
 
 data ManagedSessionProcess
-    = ManagedSessionStarting
+    = ManagedSessionStarting !(MVar ())
     | ManagedSessionRunning !ProcessHandle
+
+data SessionProcessState = SessionProcessState
+    { sessionManagerLifecycle :: !SessionManagerLifecycle
+    , sessionManagerProcesses :: !(Map Text ManagedSessionProcess)
+    }
+
+data SessionManagerLifecycle
+    = SessionManagerOpen
+    | SessionManagerClosing !(MVar ())
+    | SessionManagerClosed
 
 data SessionProcessManager = SessionProcessManager
     { managedRoot :: !OsPath
-    , managedProcesses :: !(MVar (Map Text ManagedSessionProcess))
+    , managedProcesses :: !(MVar SessionProcessState)
     , managedLifetime :: !SessionProcessLifetime
     }
 
@@ -141,7 +155,10 @@ newSessionProcessManagerWithLifetime
     -> OsPath
     -> IO SessionProcessManager
 newSessionProcessManagerWithLifetime lifetime root = do
-    processes <- newMVar Map.empty
+    processes <- newMVar SessionProcessState
+        { sessionManagerLifecycle = SessionManagerOpen
+        , sessionManagerProcesses = Map.empty
+        }
     pure SessionProcessManager
         { managedRoot = root
         , managedProcesses = processes
@@ -191,21 +208,29 @@ launchSessionTurnInput
         Left err -> pure (Left err)
         Right executable -> do
             let sessionId = handle.sessionMeta.metaId
-            reserved <- modifyMVar manager.managedProcesses \processes -> do
-                busy <- case Map.lookup sessionId processes of
+            completion <- newEmptyMVar
+            reserved <- modifyMVar manager.managedProcesses \state -> do
+                busy <- case Map.lookup sessionId state.sessionManagerProcesses of
                     Nothing -> pure False
-                    Just ManagedSessionStarting -> pure True
+                    Just ManagedSessionStarting{} -> pure True
                     Just (ManagedSessionRunning managedHandle) ->
                         (== Nothing) <$> getProcessExitCode managedHandle
-                if busy
-                    then pure (processes, False)
+                if not (sessionManagerIsOpen state) || busy
+                    then pure (state, False)
                     else pure
-                        ( Map.insert sessionId ManagedSessionStarting processes
+                        ( state
+                            { sessionManagerProcesses =
+                                Map.insert
+                                    sessionId
+                                    (ManagedSessionStarting completion)
+                                    state.sessionManagerProcesses
+                            }
                         , True
                         )
             if not reserved
-                then pure (Left ("session " <> sessionId <> " is already running"))
-                else do
+                then pure (Left ("session " <> sessionId
+                    <> " is already running or its process manager is closed"))
+                else (`finally` putMVar completion ()) do
                     started <- try @_ @SomeException
                         (startManagedSession executable)
                     case started of
@@ -218,33 +243,51 @@ launchSessionTurnInput
                             forgetSession manager sessionId
                             pure (Left err)
                         Right (Right process) -> do
-                            modifyMVar_ manager.managedProcesses \processes ->
-                                pure (Map.insert sessionId
-                                    (ManagedSessionRunning process)
-                                    processes)
-                            if background
-                                then pure (Right ("started session " <> sessionId))
-                                else do
-                                    exitResult <- case turnTimeout of
-                                        Nothing -> Right <$> waitForProcess process
-                                        Just micros ->
-                                            Timeout.timeout micros
-                                                (waitForManagedExit process) >>= \case
-                                                    Nothing -> do
-                                                        terminateManagedProcess process
-                                                        pure (Left
-                                                            "agent session timed out")
-                                                    Just exitCode ->
-                                                        pure (Right exitCode)
-                                    forgetSession manager sessionId
-                                    pure case exitResult of
-                                        Left err -> Left err
-                                        Right ExitSuccess ->
-                                            Right ("completed session " <> sessionId)
-                                        Right (ExitFailure code) ->
-                                            Left
-                                                ("session failed with exit code "
-                                                    <> Text.pack (show code))
+                            published <-
+                                modifyMVar manager.managedProcesses \state ->
+                                    if not (sessionManagerIsOpen state)
+                                        then pure (state, False)
+                                        else pure
+                                            ( state
+                                                { sessionManagerProcesses =
+                                                    Map.insert sessionId
+                                                        (ManagedSessionRunning process)
+                                                        state.sessionManagerProcesses
+                                                }
+                                            , True
+                                            )
+                            if not published
+                                then do
+                                    terminateManagedProcess process
+                                    pure (Left
+                                        "session process manager closed during startup")
+                                else if background
+                                    then pure (Right ("started session " <> sessionId))
+                                    else do
+                                        exitResult <- case turnTimeout of
+                                            Nothing ->
+                                                Right <$> waitForProcess process
+                                            Just micros ->
+                                                Timeout.timeout micros
+                                                    (waitForManagedExit process)
+                                                        >>= \case
+                                                            Nothing -> do
+                                                                terminateManagedProcess
+                                                                    process
+                                                                pure (Left
+                                                                    "agent session timed out")
+                                                            Just exitCode ->
+                                                                pure (Right exitCode)
+                                        forgetSession manager sessionId
+                                        pure case exitResult of
+                                            Left err -> Left err
+                                            Right ExitSuccess ->
+                                                Right
+                                                    ("completed session " <> sessionId)
+                                            Right (ExitFailure code) ->
+                                                Left
+                                                    ("session failed with exit code "
+                                                        <> Text.pack (show code))
   where
     sessionId = handle.sessionMeta.metaId
 
@@ -379,7 +422,10 @@ launchManagedTurnBounded
 forgetSession :: SessionProcessManager -> Text -> IO ()
 forgetSession manager sessionId =
     modifyMVar_ manager.managedProcesses
-        (pure . Map.delete sessionId)
+        (\state -> pure state
+            { sessionManagerProcesses =
+                Map.delete sessionId state.sessionManagerProcesses
+            })
 
 gatewayOnlyEnv :: [String]
 gatewayOnlyEnv =
@@ -389,44 +435,94 @@ gatewayOnlyEnv =
 
 sessionProcessStatus :: SessionProcessManager -> Text -> IO Text
 sessionProcessStatus manager sessionId =
-    modifyMVar manager.managedProcesses \processes ->
-        case Map.lookup sessionId processes of
+    modifyMVar manager.managedProcesses \state ->
+        case Map.lookup sessionId state.sessionManagerProcesses of
             Nothing -> do
                 locked <- sessionLockIsActive
                     (sessionLockPath
                         (manager.managedRoot
                             </> unsafeEncodeUtf (Text.unpack sessionId)))
-                pure (processes, if locked then "running" else "idle")
-            Just ManagedSessionStarting ->
-                pure (processes, "running")
+                pure (state, if locked then "running" else "idle")
+            Just ManagedSessionStarting{} ->
+                pure (state, "running")
             Just (ManagedSessionRunning managedHandle) ->
                 getProcessExitCode managedHandle >>= \case
-                    Nothing -> pure (processes, "running")
+                    Nothing -> pure (state, "running")
                     Just ExitSuccess ->
-                        pure (Map.delete sessionId processes, "completed")
+                        pure
+                            ( state
+                                { sessionManagerProcesses =
+                                    Map.delete sessionId
+                                        state.sessionManagerProcesses
+                                }
+                            , "completed"
+                            )
                     Just (ExitFailure code) ->
                         pure
-                            ( Map.delete sessionId processes
+                            ( state
+                                { sessionManagerProcesses =
+                                    Map.delete sessionId
+                                        state.sessionManagerProcesses
+                                }
                             , "failed (" <> Text.pack (show code) <> ")"
                             )
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
-closeSessionProcessManager manager =
-    modifyMVar_ manager.managedProcesses \processes -> do
-        forM_ (Map.elems processes) \case
-            ManagedSessionStarting -> pure ()
-            ManagedSessionRunning managedHandle ->
-                getProcessExitCode managedHandle >>= \case
-                    Just _ -> do
-                        _ <- try @_ @SomeException
-                            (waitForProcess managedHandle)
-                        pure ()
-                    Nothing ->
-                        case manager.managedLifetime of
-                            DetachedSessionProcesses -> pure ()
-                            ScopedSessionProcesses -> do
-                                terminateManagedProcess managedHandle
-        pure Map.empty
+closeSessionProcessManager manager = do
+    decision <- modifyMVar manager.managedProcesses \state ->
+        case state.sessionManagerLifecycle of
+            SessionManagerClosed -> pure (state, Left Nothing)
+            SessionManagerClosing completion ->
+                pure (state, Left (Just completion))
+            SessionManagerOpen -> do
+                completion <- newEmptyMVar
+                pure
+                    ( state
+                        { sessionManagerLifecycle =
+                            SessionManagerClosing completion
+                        , sessionManagerProcesses = Map.empty
+                        }
+                    , Right
+                        ( completion
+                        , Map.elems state.sessionManagerProcesses
+                        )
+                    )
+    case decision of
+        Left Nothing -> pure ()
+        Left (Just completion) -> readMVar completion
+        Right (completion, processes) ->
+            closeProcesses processes `finally` do
+                modifyMVar_ manager.managedProcesses \state ->
+                    pure state
+                        { sessionManagerLifecycle = SessionManagerClosed
+                        }
+                putMVar completion ()
+  where
+    closeProcesses processes = do
+        let waitStarting = \case
+                ManagedSessionStarting completion -> readMVar completion
+                ManagedSessionRunning _ -> pure ()
+            closeRunning = \case
+                ManagedSessionStarting{} -> pure ()
+                ManagedSessionRunning managedHandle ->
+                    getProcessExitCode managedHandle >>= \case
+                        Just _ ->
+                            void $ try @_ @SomeException
+                                (waitForProcess managedHandle)
+                        Nothing ->
+                            case manager.managedLifetime of
+                                DetachedSessionProcesses -> pure ()
+                                ScopedSessionProcesses ->
+                                    terminateManagedProcess managedHandle
+        forConcurrentlyBounded_ 8 waitStarting processes
+        forConcurrentlyBounded_ 8 closeRunning processes
+
+sessionManagerIsOpen :: SessionProcessState -> Bool
+sessionManagerIsOpen state =
+    case state.sessionManagerLifecycle of
+        SessionManagerOpen -> True
+        SessionManagerClosing{} -> False
+        SessionManagerClosed -> False
 
 waitForManagedExit :: ProcessHandle -> IO ExitCode
 waitForManagedExit process =

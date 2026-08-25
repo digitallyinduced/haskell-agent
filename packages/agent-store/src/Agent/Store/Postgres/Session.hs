@@ -24,6 +24,7 @@ module Agent.Store.Postgres.Session
     , replaceSessionMetadata
     , appendSessionTurn
     , loadSession
+    , loadSessions
     , loadSessionEvents
     , listSessionMetadata
     , searchConversationTurns
@@ -36,6 +37,7 @@ import Control.Monad (forM, forM_, unless)
 import Data.ByteString (ByteString)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32, Int64)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import qualified Hasql.Decoders as Decoders
@@ -371,21 +373,60 @@ loadSession
     -> Text
     -> IO (Either StoreError (Maybe StoredSession))
 loadSession pool sessionKey =
+    loadSessions pool [sessionKey] >>= \case
+        [result] -> pure result
+        _ -> pure (Left (StoreDataError "batched session load returned no result"))
+
+-- | Load sessions in the same order as the requested keys.
+--
+-- Metadata and turn projections are fetched in two set-based statements under
+-- one repeatable-read snapshot. Missing keys remain as 'Nothing', and duplicate
+-- keys produce duplicate results without repeating the database reads.
+loadSessions
+    :: StorePool
+    -> [Text]
+    -> IO [Either StoreError (Maybe StoredSession)]
+loadSessions _ [] = pure []
+loadSessions pool sessionKeys =
     withSession pool
         (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
-            metadata <- Transaction.statement sessionKey loadMetadataStatement
-            case metadata of
-                Nothing -> pure (Right Nothing)
-                Just value -> do
-                    rows <- Transaction.statement sessionKey loadTurnsStatement
-                    turns <- forM rows loadStoredTurn
-                    pure do
-                        decodedTurns <- sequence turns
-                        pure $ Just StoredSession
-                            { storedMetadata = value
-                            , storedTurns = decodedTurns
-                            })
-        >>= flattenDataResult
+            metadata <- Transaction.statement
+                sessionKeys
+                loadMetadataManyStatement
+            rows <- Transaction.statement sessionKeys loadTurnsManyStatement
+            turns <- forM rows \(sessionKey, row) ->
+                fmap ((,) sessionKey) (loadStoredTurn row)
+            pure (assembleSessions sessionKeys metadata turns))
+        >>= \case
+            Left err -> pure (replicate (length sessionKeys) (Left err))
+            Right results ->
+                pure (map (either (Left . StoreDataError) Right) results)
+
+assembleSessions
+    :: [Text]
+    -> [SessionMetadata]
+    -> [(Text, Either Text StoredTurn)]
+    -> [Either Text (Maybe StoredSession)]
+assembleSessions sessionKeys metadata turns =
+    map assemble sessionKeys
+  where
+    metadataByKey =
+        Map.fromList
+            [(value.sessionMetadataKey, value) | value <- metadata]
+    turnsByKey =
+        Map.fromListWith (flip (++))
+            [(sessionKey, [turn]) | (sessionKey, turn) <- turns]
+
+    assemble sessionKey =
+        case Map.lookup sessionKey metadataByKey of
+            Nothing -> Right Nothing
+            Just value -> do
+                decodedTurns <-
+                    sequence (Map.findWithDefault [] sessionKey turnsByKey)
+                pure $ Just StoredSession
+                    { storedMetadata = value
+                    , storedTurns = decodedTurns
+                    }
 
 loadSessionEvents
     :: StorePool
@@ -596,14 +637,6 @@ decodeUsage input output cached =
                 }
         _ -> Left "stored session turn has partial usage counters"
 
-flattenDataResult
-    :: Either StoreError (Either Text a)
-    -> IO (Either StoreError a)
-flattenDataResult = pure . \case
-    Left err -> Left err
-    Right (Left err) -> Left (StoreDataError err)
-    Right (Right value) -> Right value
-
 sessionExistsStatement :: Statement Text Bool
 sessionExistsStatement = mkStatement
     "SELECT EXISTS (SELECT 1 FROM harness.sessions WHERE session_key = $1)"
@@ -731,12 +764,13 @@ insertTurnStatement = mkStatement
     turnResponseId :: TurnInsert -> Maybe Text
     turnResponseId value = value.turnInsertTurn.sessionTurnResponseId
 
-loadMetadataStatement :: Statement Text (Maybe SessionMetadata)
-loadMetadataStatement = mkStatement
+loadMetadataManyStatement :: Statement [Text] [SessionMetadata]
+loadMetadataManyStatement = mkStatement
     (metadataSelectSql
-        <> " WHERE session_key = $1 AND deleted_at IS NULL")
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe metadataRow)
+        <> " WHERE session_key = ANY($1::text[]) AND deleted_at IS NULL\
+           \ ORDER BY array_position($1::text[], session_key)")
+    textArrayParams
+    (Decoders.rowList metadataRow)
     True
 
 listMetadataStatement :: Statement () [SessionMetadata]
@@ -758,30 +792,43 @@ metadataSelectSql =
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
     \ cached_tokens FROM harness.sessions"
 
-loadTurnsStatement :: Statement Text [TurnRow]
-loadTurnsStatement = mkStatement
-    "SELECT t.turn_id::text, t.turn_index, t.event_sequence, t.occurred_at,\
+loadTurnsManyStatement :: Statement [Text] [(Text, TurnRow)]
+loadTurnsManyStatement = mkStatement
+    "SELECT s.session_key, t.turn_id::text, t.turn_index, t.event_sequence,\
+    \ t.occurred_at,\
     \ t.user_text, t.assistant_text, t.error_text, t.response_id,\
     \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id\
-    \ WHERE s.session_key = $1\
-    \ ORDER BY t.turn_index ASC"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
+    \ WHERE s.session_key = ANY($1::text[]) AND s.deleted_at IS NULL\
+    \ ORDER BY array_position($1::text[], s.session_key), t.turn_index ASC"
+    textArrayParams
     (Decoders.rowList $
-        TurnRow
+        (,)
             <$> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-            <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.int8)
-            <*> Decoders.column (Decoders.nullable Decoders.int8)
-            <*> Decoders.column (Decoders.nullable Decoders.int8))
+            <*> turnRowDecoder)
     True
+
+turnRowDecoder :: Decoders.Row TurnRow
+turnRowDecoder =
+    TurnRow
+        <$> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.int8)
+
+textArrayParams :: Encoders.Params [Text]
+textArrayParams =
+    Encoders.param $
+        Encoders.nonNullable $
+            Encoders.foldableArray (Encoders.nonNullable Encoders.text)
 
 loadEventsStatement :: Statement Text [StoredEvent]
 loadEventsStatement = mkStatement

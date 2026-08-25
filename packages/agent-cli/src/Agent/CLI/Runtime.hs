@@ -495,6 +495,7 @@ import Agent.CLI.Worktree
     , worktreeRoot
     )
 import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Claude
     ( ClaudeCodeAuth(..)
     , ClaudeCodeOptions(..)
@@ -638,7 +639,16 @@ import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import qualified Agent.XAI.Usage as XAIUsage
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (link, waitSTM, withAsync)
+import Control.Concurrent.Async
+    ( cancel
+    , concurrently
+    , concurrently_
+    , link
+    , waitCatch
+    , waitEitherCatch
+    , waitSTM
+    , withAsync
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
@@ -658,6 +668,7 @@ import Control.Exception.Safe
     ( SomeException
     , catchAny
     , finally
+    , mask
     , mask_
     , onException
     , throwIO
@@ -1397,12 +1408,16 @@ runAgentInitializedWithLock
         deriveDatabaseScopes stateDirectory projectRootPath >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right scopes -> pure scopes
-    projectSettings <- loadProjectSettings projectRoot
-    catalog <-
-        loadModelCatalog home >>= either
-            (startupDie startup . Text.unpack)
-            pure
-    branch <- detectGitBranch cwd
+    (projectSettings, (catalogResult, branch)) <-
+        concurrently
+            (loadProjectSettings projectRoot)
+            (concurrently
+                (loadModelCatalog home)
+                (detectGitBranch cwd))
+    catalog <- either
+        (startupDie startup . Text.unpack)
+        pure
+        catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
     let transitionTarget = (.transitionTarget) <$> transition
@@ -2085,21 +2100,19 @@ runAgentInitializedWithLock
                         , lspStartupWarnings = []
                         }
                     )
-            | otherwise = do
-                webRuntime <-
-                    newWebFetchRuntime
+            | otherwise =
+                concurrentlyAcquire
+                    (newWebFetchRuntime
                         harnessConfig.configWebFetch
                         toolEnv >>= \case
                             Left err ->
                                 startupDie startup
                                     ("Failed to initialize web_fetch: "
                                         <> Text.unpack err)
-                            Right runtime -> pure runtime
-                lspStartup <-
-                    newLspRuntime harnessConfig.configLsp toolEnv
-                        `onException`
-                            mapM_ closeWebFetchRuntime webRuntime
-                pure (webRuntime, lspStartup)
+                            Right runtime -> pure runtime)
+                    (mapM_ closeWebFetchRuntime)
+                    (newLspRuntime harnessConfig.configLsp toolEnv)
+                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
     (webFetchRuntime, lspStartup) <-
         acquireGrokExtras `onException` closeBeforeSession
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
@@ -2108,9 +2121,9 @@ runAgentInitializedWithLock
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         closeExtraTools =
-            mapM_ closeLspRuntime lspRuntime
-                `finally`
-                    mapM_ closeWebFetchRuntime webFetchRuntime
+            concurrently_
+                (mapM_ closeLspRuntime lspRuntime)
+                (mapM_ closeWebFetchRuntime webFetchRuntime)
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -3223,7 +3236,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     , agentTranscript =
                         transcriptLines AgentRoot rootItems
                     }
-            children <- mapM
+            children <- mapConcurrentlyBounded 8
                 (materializeChild transcriptLines sessions)
                 agents
             pure (selected, rootEntry : children)
@@ -5754,6 +5767,59 @@ replWithDraft env@SessionEnv
                         Text.hPutStrLn stderr
                             (roleError color
                                 "terminal clipboard is unavailable")
+
+concurrentlyAcquire
+    :: IO a
+    -> (a -> IO ())
+    -> IO b
+    -> (b -> IO ())
+    -> IO (a, b)
+concurrentlyAcquire acquireLeft releaseLeft acquireRight releaseRight =
+    mask \restore ->
+        withAsync (restore acquireLeft) \leftWorker ->
+            withAsync (restore acquireRight) \rightWorker -> do
+                let cleanupResult release = \case
+                        Left _ -> pure ()
+                        Right value -> release value
+                    cancelAndCleanup = do
+                        cancel leftWorker
+                        cancel rightWorker
+                        leftResult <- waitCatch leftWorker
+                        rightResult <- waitCatch rightWorker
+                        cleanupResult releaseLeft leftResult
+                        cleanupResult releaseRight rightResult
+                first <-
+                    restore (waitEitherCatch leftWorker rightWorker)
+                        `onException` cancelAndCleanup
+                case first of
+                    Left (Left exception) -> do
+                        cancel rightWorker
+                        waitCatch rightWorker >>= cleanupResult releaseRight
+                        throwIO exception
+                    Right (Left exception) -> do
+                        cancel leftWorker
+                        waitCatch leftWorker >>= cleanupResult releaseLeft
+                        throwIO exception
+                    Left (Right leftValue) -> do
+                        rightResult <-
+                            restore (waitCatch rightWorker)
+                                `onException` releaseLeft leftValue
+                        case rightResult of
+                            Left exception -> do
+                                releaseLeft leftValue
+                                throwIO exception
+                            Right rightValue ->
+                                pure (leftValue, rightValue)
+                    Right (Right rightValue) -> do
+                        leftResult <-
+                            restore (waitCatch leftWorker)
+                                `onException` releaseRight rightValue
+                        case leftResult of
+                            Left exception -> do
+                                releaseRight rightValue
+                                throwIO exception
+                            Right leftValue ->
+                                pure (leftValue, rightValue)
 
 requestReload
     :: Maybe FullscreenRuntime
