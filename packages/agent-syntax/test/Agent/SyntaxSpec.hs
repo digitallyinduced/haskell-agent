@@ -99,6 +99,20 @@ spec = describe "syntax highlighting" do
         highlightCode highlighter "haskell" (Text.replicate 5000 "\n")
             `shouldSatisfy` isLeft
 
+    it "counts UTF-8 bytes at the highlighting boundary" do
+        highlighter <- requireHighlighter
+        let prefix = "--"
+            exactSource = prefix <> Text.replicate 131071 "é"
+            oversizedSource = exactSource <> "é"
+            byteLimitError = \case
+                Left message ->
+                    message == "Code block exceeds the syntax-highlighting byte limit"
+                Right _ -> False
+        highlightCode highlighter "haskell" exactSource
+            `shouldSatisfy` (not . byteLimitError)
+        highlightCode highlighter "haskell" oversizedSource
+            `shouldSatisfy` byteLimitError
+
 requireHighlighter :: IO SyntaxHighlighter
 requireHighlighter = do
     syntaxDirectory <- sourceSyntaxDirectory
