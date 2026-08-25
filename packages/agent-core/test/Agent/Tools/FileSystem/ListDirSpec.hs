@@ -71,6 +71,15 @@ spec = do
                     ]
             capNodes 10 tree `shouldBe` (tree, False)
 
+        it "keeps a prefix of a large flat listing without walking the tail each step" do
+            let tree =
+                    map
+                        (FileNode . fromText . Text.pack . show)
+                        [1 .. 10000 :: Int]
+                (shown, truncated) = capNodes 5 tree
+            truncated `shouldBe` True
+            map nodeName shown `shouldBe` ["1", "2", "3", "4", "5"]
+
     describe "renderTree" do
         it "does not insert blank lines after nested directories" do
             let tree =

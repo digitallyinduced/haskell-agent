@@ -137,16 +137,19 @@ toNode cwd parent (name, isDir) = do
 -- hide the rest of the listing.
 capNodes :: Int -> [DirNode] -> ([DirNode], Bool)
 capNodes budget nodes =
-    fill (max 0 budget) nodes
+    fill (max 0 budget) (length nodes) nodes
 
-fill :: Int -> [DirNode] -> ([DirNode], Bool)
-fill _ [] = ([], False)
-fill remaining _ | remaining <= 0 = ([], True)
-fill remaining (node : rest) =
-    let reserved = min (remaining - 1) (length rest)
+-- | @fill remaining restCount nodes@ spends at most @remaining@ slots. @restCount@
+-- is the length of @nodes@, carried so later-sibling reservation stays linear.
+fill :: Int -> Int -> [DirNode] -> ([DirNode], Bool)
+fill _ _ [] = ([], False)
+fill remaining _ _ | remaining <= 0 = ([], True)
+fill remaining restCount (node : rest) =
+    let reserved = min (remaining - 1) (restCount - 1)
         available = remaining - reserved
         (keptNode, used, nodeTruncated) = takeNode available node
-        (more, restTruncated) = fill (remaining - used) rest
+        (more, restTruncated) =
+            fill (remaining - used) (restCount - 1) rest
     in (keptNode : more, nodeTruncated || restTruncated)
 
 takeNode :: Int -> DirNode -> (DirNode, Int, Bool)
@@ -159,7 +162,8 @@ takeNode budget node = case node of
             , not (null children)
             )
         | otherwise ->
-            let (keptChildren, truncated) = fill (budget - 1) children
+            let (keptChildren, truncated) =
+                    fill (budget - 1) (length children) children
             in
                 ( DirectoryNode name keptChildren
                 , 1 + countNodes keptChildren
