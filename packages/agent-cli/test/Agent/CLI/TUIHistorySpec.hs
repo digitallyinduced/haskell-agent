@@ -293,13 +293,17 @@ spec = describe "bounded fullscreen history window" do
                             { itemId = Nothing
                             , callId = "call-1"
                             , name = "shell_command"
+                            , namespace = Nothing
                             , arguments = "{\"command\":\"pwd\"}"
+                            , encryptedFunctionArgs = Nothing
                             , status = Nothing
                             , extraFields = KeyMap.empty
                             }
                         , FunctionCallOutputItem FunctionCallOutput
                             { itemId = Nothing
                             , callId = "call-1"
+                            , name = Nothing
+                            , namespace = Nothing
                             , output = Aeson.String "/tmp/project"
                             , status = Nothing
                             , extraFields = KeyMap.empty
@@ -406,6 +410,7 @@ userMessage text =
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -417,6 +422,7 @@ assistantMessage text =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
