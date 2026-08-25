@@ -1959,7 +1959,6 @@ drawAgentConversation state entry =
             terminalTxt
                 (entry.agentStatus
                     <> " · input is sent to /root")
-        , drawLiveTodos entry.agentConversation
         , padTop (Pad 1) $
             if Seq.null entry.agentConversation.uiBlocks
                 then
@@ -4356,7 +4355,12 @@ preserveAgentConversationView selected previous =
 mergeConversationView :: UiState -> UiState -> UiState
 mergeConversationView previous incoming
     | Seq.null incoming.uiBlocks =
-        incoming { uiTodos = previous.uiTodos }
+        incoming
+            { uiTodos =
+                if null incoming.uiTodos
+                    then previous.uiTodos
+                    else incoming.uiTodos
+            }
     | otherwise =
         incoming
             { uiBlocks = mergedBlocks

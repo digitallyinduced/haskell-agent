@@ -64,7 +64,10 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.TUI.Model
-import Agent.TUI.Presentation (TodoDisplayLine(..))
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    )
 import Agent.TUI.Motion
 import Control.Concurrent.STM (newTChanIO)
 import qualified Data.ByteString as ByteString
@@ -472,8 +475,20 @@ spec = do
                                 })
                         ]
                 merged = mergeConversationView previous initialUiState
+                updated =
+                    mergeConversationView
+                        previous
+                        (initialUiState
+                            { uiTodos =
+                                [ TodoDisplayLine
+                                    TodoDisplayCompleted
+                                    "Keep this list"
+                                ]
+                            })
             map (.todoLineText) (visibleTodoList merged)
                 `shouldBe` ["Keep this list"]
+            map (.todoLineStatus) updated.uiTodos
+                `shouldBe` [TodoDisplayCompleted]
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do

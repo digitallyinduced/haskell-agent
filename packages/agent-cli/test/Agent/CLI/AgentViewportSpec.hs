@@ -154,12 +154,19 @@ spec = do
                     map
                         (\entry ->
                             if entry.agentTarget == selected
-                                then entry { agentConversation = conversation }
+                                then
+                                    entry
+                                        { agentConversation = conversation
+                                        , agentTranscript =
+                                            replicate 8 "assistant: filler"
+                                                <> ["assistant: working"]
+                                        }
                                 else entry)
                         entries
                 panel = renderAgentViewportPanelFor False 70 selected withTodos
             panel `shouldSatisfy` Text.isInfixOf "Review Model.hs"
             panel `shouldSatisfy` Text.isInfixOf "transcript · /root/alpha"
+            panel `shouldSatisfy` Text.isInfixOf "assistant: working"
 
     describe "formatAgentStatus" do
         it "uses compact status labels" do

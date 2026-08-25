@@ -311,8 +311,8 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
 
 agentViewportTranscript :: AgentTreeRow -> [Text]
 agentViewportTranscript row =
-    liveTodoPanelLines 3 (visibleTodoList row.treeRowEntry.agentConversation)
-        <> row.treeRowEntry.agentTranscript
+    row.treeRowEntry.agentTranscript
+        <> liveTodoPanelLines 3 (visibleTodoList row.treeRowEntry.agentConversation)
 
 pickAgentViewport
     :: Bool
