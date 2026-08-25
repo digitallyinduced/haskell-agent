@@ -253,4 +253,7 @@ sampleMeta sid title =
         , metaInputTokens = 0
         , metaOutputTokens = 0
         , metaCachedTokens = 0
+        , metaLastRecap = Nothing
+        , metaLastTurnSummary = Nothing
+        , metaLastRecapMainTurns = 0
         }

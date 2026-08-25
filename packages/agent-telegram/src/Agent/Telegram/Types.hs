@@ -6,6 +6,8 @@ module Agent.Telegram.Types
     , TelegramApprovalMode(..)
     , TelegramSetupOptions(..)
     , defaultTelegramSetupOptions
+    , defaultTelegramWorkerCount
+    , maximumTelegramWorkerCount
     , TelegramCommand(..)
     , TelegramUsersCommand(..)
     , TelegramChatKey(..)
@@ -126,7 +128,14 @@ data TelegramConfig = TelegramConfig
     , telegramApprovalMode :: !TelegramApprovalMode
     , telegramAllowedUsers :: !(Set Integer)
     , telegramRespondToAllGroupMessages :: !Bool
+    , telegramWorkerCount :: !Int
     } deriving (Eq, Show)
+
+defaultTelegramWorkerCount :: Int
+defaultTelegramWorkerCount = 8
+
+maximumTelegramWorkerCount :: Int
+maximumTelegramWorkerCount = 64
 
 instance ToJSON TelegramConfig where
     toJSON config = object
@@ -138,6 +147,7 @@ instance ToJSON TelegramConfig where
         , "allowedUsers" .= Set.toList config.telegramAllowedUsers
         , "respondToAllGroupMessages"
             .= config.telegramRespondToAllGroupMessages
+        , "workers" .= config.telegramWorkerCount
         ]
 
 instance FromJSON TelegramConfig where
@@ -152,6 +162,12 @@ instance FromJSON TelegramConfig where
             (if legacyYolo
                 then TelegramApprovalYolo
                 else TelegramApprovalPrompt)
+        workerCount <- o .:? "workers" .!= defaultTelegramWorkerCount
+        if workerCount < 1 || workerCount > maximumTelegramWorkerCount
+            then fail
+                ("workers must be between 1 and "
+                    <> show maximumTelegramWorkerCount)
+            else pure ()
         TelegramConfig
             <$> pure telegramProvider
             <*> o .:? "model"
@@ -160,6 +176,7 @@ instance FromJSON TelegramConfig where
             <*> pure approvalMode
             <*> (Set.fromList <$> o .: "allowedUsers")
             <*> (o .:? "respondToAllGroupMessages" .!= False)
+            <*> pure workerCount
 
 data TelegramSetupOptions = TelegramSetupOptions
     { setupProvider :: !(Maybe Provider)
@@ -169,6 +186,7 @@ data TelegramSetupOptions = TelegramSetupOptions
     , setupApprovalMode :: !TelegramApprovalMode
     , setupAllowedUsers :: ![Integer]
     , setupRespondToAllGroupMessages :: !Bool
+    , setupWorkerCount :: !Int
     , setupStart :: !Bool
     } deriving (Eq, Show)
 
@@ -181,6 +199,7 @@ defaultTelegramSetupOptions = TelegramSetupOptions
     , setupApprovalMode = TelegramApprovalPrompt
     , setupAllowedUsers = []
     , setupRespondToAllGroupMessages = False
+    , setupWorkerCount = defaultTelegramWorkerCount
     , setupStart = False
     }
 

@@ -28,7 +28,7 @@ import Agent.Responses.Types
     , ToolChoiceMode(..)
     )
 import Control.Concurrent.Async (race)
-import Data.IORef (IORef, newIORef, readIORef)
+import Data.IORef (IORef, readIORef)
 import Data.List (findIndex)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -37,7 +37,7 @@ import qualified Data.Text as Text
 
 -- | Construct a provider backend over private request parameters and transcript.
 type BtwBackendFactory =
-    IORef ResponseCreateParams -> Backend
+    ResponseCreateParams -> Backend
 
 data BtwError
     = BtwTransport !ApiError
@@ -124,9 +124,8 @@ runBtwWithCancel
 runBtwWithCancel withCancelScope makeBackend paramsRef transcriptRef question = do
     params <- clearTurnSpecificParams <$> readIORef paramsRef
     transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
-    privateParams <- newIORef params
     cancel <- newCancelFlag
-    let Backend submit = makeBackend privateParams
+    let Backend submit = makeBackend params
         request =
             submit transcript Nothing
                 [UserMessage (sideQuestionPrompt question)] (\_ -> pure ())

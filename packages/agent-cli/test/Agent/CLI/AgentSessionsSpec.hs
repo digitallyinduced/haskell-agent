@@ -67,7 +67,7 @@ spec = describe "Agent.CLI.AgentSessions" do
         withTempEnv \env launched -> do
             result <- runTool env "create_agent_session"
                 "{\"message\":\"investigate this\",\"title\":\"worker\",\"model\":\"model-2\",\"reasoning_effort\":\"high\"}"
-            result `shouldSatisfy` Text.isInfixOf "\"status\":\"running\""
+            result `shouldSatisfy` Text.isInfixOf "Status: running"
             [(handle, message)] <- readIORef launched
             message `shouldBe` "investigate this"
             handle.sessionMeta.metaTitle `shouldBe` "worker"
@@ -112,9 +112,9 @@ spec = describe "Agent.CLI.AgentSessions" do
                 }
             result <- runTool env "read_agent_session" $
                 "{\"session_id\":\"" <> handle.sessionMeta.metaId <> "\"}"
-            result `shouldSatisfy` Text.isInfixOf "\"user\":\"question\""
-            result `shouldSatisfy` Text.isInfixOf "\"assistant\":\"answer\""
-            result `shouldNotSatisfy` Text.isInfixOf "\"items\""
+            result `shouldSatisfy` Text.isInfixOf "User:\n  question"
+            result `shouldSatisfy` Text.isInfixOf "Assistant:\n  answer"
+            result `shouldNotSatisfy` Text.isInfixOf "items"
 
     it "includes ephemeral retry activity while a session is running" $
         withTempEnv \env _ -> do
@@ -128,9 +128,9 @@ spec = describe "Agent.CLI.AgentSessions" do
             result <- runTool env "read_agent_session" $
                 "{\"session_id\":\"" <> handle.sessionMeta.metaId <> "\"}"
             result `shouldSatisfy`
-                Text.isInfixOf "\"kind\":\"provider_cooldown\""
+                Text.isInfixOf "Kind: provider_cooldown"
             result `shouldSatisfy`
-                Text.isInfixOf "\"message\":\"Waiting before retrying.\""
+                Text.isInfixOf "Message: Waiting before retrying."
 
     it "starts a follow-up turn and rejects messaging the current session" $
         withTempEnv \env launched -> do
@@ -139,7 +139,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                 targetEnv = env { toolsCurrentSessionId = pure (Just "other") }
             result <- runTool targetEnv "send_agent_session_message" $
                 "{\"session_id\":\"" <> target <> "\",\"message\":\"continue\"}"
-            result `shouldSatisfy` Text.isInfixOf "\"status\":\"running\""
+            result `shouldSatisfy` Text.isInfixOf "Status: running"
             [(launchedHandle, message)] <- readIORef launched
             launchedHandle.sessionMeta.metaId `shouldBe` target
             message `shouldBe` "continue"
@@ -173,6 +173,31 @@ spec = describe "Agent.CLI.AgentSessions" do
                     handle.sessionMeta.metaId
                     "completed"
                 closeSessionProcessManager manager
+
+    it "closes scoped children concurrently and rejects later launches" $
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
+            let marker = toFilePath root FilePath.</> "stopped"
+            script <- writeFakeAgentBody root
+                ("trap 'printf stopped > " <> shellQuote marker
+                    <> "; exit 0' TERM INT\nsleep 30\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt pool root root)
+                manager <-
+                    newSessionProcessManagerWithLifetime
+                        ScopedSessionProcesses
+                        root
+                launchSessionTurn
+                    manager True ApproveAll True False handle "one"
+                    `shouldReturn`
+                        Right ("started session " <> handle.sessionMeta.metaId)
+                closeSessionProcessManager manager
+                waitForFile marker
+                launchSessionTurn
+                    manager True ApproveAll True False handle "two"
+                    `shouldReturn`
+                        Left
+                            ("session " <> handle.sessionMeta.metaId
+                                <> " is already running or its process manager is closed")
 
     it "forwards bash enablement to managed session turns" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do

@@ -1,7 +1,8 @@
 module Agent.Claude.LoopBackendSpec (spec) where
 
 import Agent.Claude.LoopBackend
-    ( claudeCodeOneShotBackend
+    ( appendHostTranscript
+    , claudeCodeOneShotBackend
     , withClaudeCodeBackend
     )
 import Agent.Claude.Options
@@ -74,6 +75,24 @@ submitBackend backend previous inputs onEvent =
 
 spec :: Spec
 spec = do
+    describe "appendHostTranscript" do
+        it "appends turn inputs followed by assistant text" $ do
+            let history =
+                    appendHostTranscript
+                        []
+                        [UserMessage "hello", UserMessage "world"]
+                        (Just "response")
+            map responseMessageText
+                [message | MessageItem message <- history]
+                `shouldBe` ["hello", "world", "response"]
+
+        it "preserves existing history and uses empty text when absent" $ do
+            let initial = turnInputsToItems [UserMessage "prior"]
+                history = appendHostTranscript initial [] Nothing
+            map responseMessageText
+                [message | MessageItem message <- history]
+                `shouldBe` ["prior", ""]
+
     describe "Claude Code loop backend" do
         it "renders validated structured JSONL and persists normalized host messages" $
             withFakeClaude \fake -> do

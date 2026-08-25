@@ -131,6 +131,19 @@ coreMigrations =
         , migrationStatements =
             [migrateOpaqueSessionFieldsToTextStatement]
         }
+    , Migration
+        { migrationVersion = 7
+        , migrationName = "session recap summaries"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS last_recap text"
+            , "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS last_turn_summary text"
+            , "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS last_recap_main_turns\
+              \ bigint NOT NULL DEFAULT 0"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty

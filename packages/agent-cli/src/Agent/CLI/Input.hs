@@ -35,6 +35,7 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
+import Agent.CLI.Dictation (dictate, insertDictation)
 import Agent.CLI.Command
     ( SkillCommand
     , SlashCatalog(..)
@@ -62,7 +63,14 @@ import Agent.CLI.Terminal
     , kittyKeyboardPop
     , stripAnsi
     )
-import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
+import Control.Exception.Safe
+    ( bracket
+    , bracket_
+    , catchIO
+    , throwIO
+    , tryAny
+    , tryIO
+    )
 import Control.Monad (unless, when)
 import Data.Char
     ( isSpace
@@ -322,6 +330,32 @@ readInlineEditor
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt state
                 editorLoop history entries state
+            EditorDictate -> do
+                finishEditorLine prompt state
+                result <- tryAny dictate
+                case result of
+                    Left err ->
+                        Text.putStrLn
+                            ("dictation failed: " <> Text.pack (show err))
+                    Right _ ->
+                        Text.putStrLn "Dictation inserted."
+                let state' = case result of
+                        Left _ -> state
+                        Right transcript ->
+                            let (text, cursor) =
+                                    insertDictation
+                                        state.editorText
+                                        state.editorCursor
+                                        transcript
+                            in state
+                                { editorText = text
+                                , editorCursor = cursor
+                                , editorHistoryIndex = Nothing
+                                , editorHistoryDraft = text
+                                , editorSlashDismissed = False
+                                }
+                redrawEditor prompt state'
+                editorLoop history entries state'
             EditorPaste pasted -> do
                 finishEditorLine prompt state
                 let pastedState =
@@ -575,6 +609,7 @@ readEditorKey = do
                 '\ETB' -> pure EditorKillWord
                 '\EM' -> pure EditorYank
                 '\FF' -> pure EditorClearScreen
+                '\DC2' -> pure EditorDictate
                 _
                     | char >= ' ' -> pure (EditorChar char)
                     | otherwise -> pure EditorIgnore

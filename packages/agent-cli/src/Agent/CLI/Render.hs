@@ -14,6 +14,7 @@ module Agent.CLI.Render
     , formatLoopErrorPersistedAt
     , formatSearchReplaceDiff
     , formatThinkingBlock
+    , formatToolBody
     , formatToolOutput
     , formatToolStarted
     , formatTurnStatus
@@ -529,10 +530,11 @@ renderEventUnlocked config = \case
         commitThinkingUnlocked config
         modifyIORef' config.renderToolCalls (Map.insert call.callId call)
         writeIORef config.renderActivityRef (summarizeToolCall call)
-        putTextLn config.renderStderr (formatToolStarted config.renderColor call)
-        let extra = formatToolBody config.renderColor call
-        unless (Text.null extra) do
-            putTextLn config.renderStderr extra
+        unless (isTodoTool call.name) do
+            putTextLn config.renderStderr (formatToolStarted config.renderColor call)
+            let extra = formatToolBody config.renderColor call
+            unless (Text.null extra) do
+                putTextLn config.renderStderr extra
         when config.renderShowThinking do
             visible <- readIORef config.renderThinkingVisible
             if visible
@@ -546,11 +548,21 @@ renderEventUnlocked config = \case
     ToolFinished result -> do
         calls <- readIORef config.renderToolCalls
         modifyIORef' config.renderToolCalls (Map.delete result.callId)
-        let output = maybe result.output
+        let maybeCall = Map.lookup result.callId calls
+            formatted = maybe result.output
                 (`formatToolOutput` result.output)
-                (Map.lookup result.callId calls)
-        putTextLn config.renderStderr
-            (roleToolOutput config.renderColor (truncateToolOutput output))
+                maybeCall
+            painted = case maybeCall of
+                Just call
+                    | isTodoTool call.name -> Nothing
+                _ ->
+                    Just
+                        (roleToolOutput
+                            config.renderColor
+                            (truncateToolOutput formatted))
+        case painted of
+            Nothing -> pure ()
+            Just line -> putTextLn config.renderStderr line
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -934,17 +946,22 @@ toolChrome name = case canonicalToolName name of
     "followup_task" -> ToolChrome "Followed up with" ToolDetailMuted
     "list_agents" -> ToolChrome "Listed agents" ToolDetailMuted
     "interrupt_agent" -> ToolChrome "Interrupted" ToolDetailMuted
-    "update_plan" -> ToolChrome "Updated" ToolDetailMuted
+    "todo_write" -> ToolChrome "todo_write" ToolDetailNone
+    "update_plan" -> ToolChrome "update_plan" ToolDetailNone
     "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
     "skill_search" -> ToolChrome "Searched skills" ToolDetailMuted
-    "skill_read" -> ToolChrome "Read skill" ToolDetailMuted
+    "view_skill" -> ToolChrome "Viewed skill" ToolDetailMuted
     "skill_create" -> ToolChrome "Learned" ToolDetailMuted
     "skill_update" -> ToolChrome "Updated skill" ToolDetailMuted
     "skill_archive" -> ToolChrome "Archived skill" ToolDetailMuted
     "skill_rollback" -> ToolChrome "Restored skill" ToolDetailMuted
     _ -> ToolChrome name ToolDetailMuted
+
+isTodoTool :: Text -> Bool
+isTodoTool name =
+    canonicalToolName name `elem` ["todo_write", "update_plan"]
 
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case canonicalToolName call.name of

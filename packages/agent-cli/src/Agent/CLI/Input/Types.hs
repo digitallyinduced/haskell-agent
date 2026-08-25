@@ -77,6 +77,7 @@ data EditorKey
     | EditorKillWord
     | EditorYank
     | EditorClearScreen
+    | EditorDictate
     | EditorCycleMode
     | EditorClipboardPaste !(Maybe [ImageAttachment])
     | EditorPaste !Text

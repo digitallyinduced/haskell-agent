@@ -124,6 +124,53 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
 
         readIORef events `shouldReturn` [ReasoningDelta "summary"]
 
+    it "separates multiple reasoning summary parts for Markdown rendering" do
+        events <- newIORef []
+        let send _params onStreamEvent = do
+                onStreamEvent ResponseReasoningSummaryPartAddedEvent
+                    { streamItemId = Just "reasoning-1"
+                    , streamOutputIndex = Just 0
+                    , summaryIndex = Just 0
+                    , partValue = Nothing
+                    , sequenceNumber = Just 1
+                    , eventExtraFields = KeyMap.empty
+                    }
+                onStreamEvent OtherResponseStreamEvent
+                    { otherEventType = EventReasoningSummaryTextDelta
+                    , sequenceNumber = Just 2
+                    , eventExtraFields =
+                        KeyMap.singleton "delta"
+                            (Aeson.String "**Inspecting dependencies**")
+                    }
+                onStreamEvent ResponseReasoningSummaryPartAddedEvent
+                    { streamItemId = Just "reasoning-1"
+                    , streamOutputIndex = Just 0
+                    , summaryIndex = Just 1
+                    , partValue = Nothing
+                    , sequenceNumber = Just 3
+                    , eventExtraFields = KeyMap.empty
+                    }
+                onStreamEvent OtherResponseStreamEvent
+                    { otherEventType = EventReasoningSummaryTextDelta
+                    , sequenceNumber = Just 4
+                    , eventExtraFields =
+                        KeyMap.singleton "delta"
+                            (Aeson.String "**Planning the fix**")
+                    }
+                pure (Left (ConnectionError "stop after reasoning"))
+            backend =
+                statelessResponsesBackendWithRawReasoning False send
+                    (pure defaultResponseCreateParams)
+
+        _ <- backend.submitTurn [] Nothing [UserMessage "hello"]
+            (\event -> modifyIORef' events (<> [event]))
+
+        readIORef events `shouldReturn`
+            [ ReasoningDelta "**Inspecting dependencies**"
+            , ReasoningDelta "\n\n"
+            , ReasoningDelta "**Planning the fix**"
+            ]
+
 credential :: String -> Credential
 credential label = Credential
     { accessToken = "token-" <> Text.pack label

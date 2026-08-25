@@ -72,6 +72,8 @@ data ReplAction
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
+    | ReplRecap
+    -- ^ Generate a display-only "where was I" recap of the current session.
     | ReplShowSession
     | ReplShowSessionInfo
     | ReplAfk (Maybe Text)
@@ -91,6 +93,8 @@ data ReplAction
     | ReplCopySession
     | ReplShowTerminal
     | ReplAgents
+    | ReplShowAgentLimit
+    | ReplSetAgentLimit Int
     | ReplMcp
     | ReplGoalStatus
     | ReplGoalPause
@@ -169,6 +173,7 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
@@ -191,7 +196,7 @@ slashCommands =
     , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
-    , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
+    , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
     , cmd "mcp" ["mcps"] "/mcp" "Manage local MCP servers" False
     , grokToolCmd "scheduler_create"
         "loop" [] "/loop [interval] <prompt>"
@@ -337,6 +342,10 @@ parseSlash catalog raw line = case Text.words line of
                 in if Text.null question
                     then ReplCommandError "usage: /btw <QUESTION>"
                     else ReplBtw question
+            "recap" ->
+                if null args
+                    then ReplRecap
+                    else ReplCommandError "usage: /recap"
             "session" ->
                 if null args
                     then ReplShowSession
@@ -426,10 +435,7 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplShowTerminal
                     else ReplCommandError "usage: /terminal"
-            "agents" ->
-                if null args
-                    then ReplAgents
-                    else ReplCommandError "usage: /agents"
+            "agents" -> parseAgentsCommand args
             "mcp" ->
                 if null args
                     then ReplMcp
@@ -691,6 +697,15 @@ parsePasteCommand rest =
             _ -> (False, rest)
     in ReplPaste immediate (Text.strip caption)
 
+parseAgentsCommand :: [Text] -> ReplAction
+parseAgentsCommand = \case
+    [] -> ReplAgents
+    ["limit"] -> ReplShowAgentLimit
+    ["limit", raw] -> case reads (Text.unpack raw) of
+        [(n, "")] | n >= 1 -> ReplSetAgentLimit n
+        _ -> ReplCommandError "usage: /agents [limit [N]]"
+    _ -> ReplCommandError "usage: /agents [limit [N]]"
+
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case
     [] -> ReplShowEffort
@@ -899,6 +914,7 @@ completeSlashArgs catalog cmd word =
 
 argCompletions :: SlashCatalog -> SlashCommand -> [Text]
 argCompletions catalog spec = case spec.slashName of
+    "agents" -> ["limit"]
     "effort" -> reasoningEfforts
     "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]

@@ -1,6 +1,7 @@
 module Agent.CLI.TUIComposerSpec (spec) where
 
 import Agent.CLI.Input (ReplLine(..))
+import Agent.CLI.Dictation (insertDictation)
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model (UiState(..), initialUiState)
@@ -65,6 +66,12 @@ spec = describe "fullscreen composer" do
     it "filters control characters from bracketed paste text" do
         decodePaste (ByteString.pack [97, 0, 10, 9, 27, 98])
             `shouldBe` "a\n\tb"
+
+    it "inserts dictation at the cursor with word-safe spacing" do
+        insertDictation "please now" 6 "fix this"
+            `shouldBe` ("please fix this now", 15)
+        insertDictation "hello" 5 ", world"
+            `shouldBe` ("hello, world", 12)
 
     it "keeps clipboard preludes immediately before promoted input" do
         buffer <- newFullscreenInputBuffer

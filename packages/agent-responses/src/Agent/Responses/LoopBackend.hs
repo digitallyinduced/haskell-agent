@@ -5,6 +5,7 @@ module Agent.Responses.LoopBackend
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
+    , responseItemToToolCall
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
@@ -444,6 +445,10 @@ streamEventToLoopEventWithRawReasoning
     -> ResponseStreamEvent
     -> Maybe LoopEvent
 streamEventToLoopEventWithRawReasoning showRawReasoning = \case
+    ResponseReasoningSummaryPartAddedEvent
+        { summaryIndex = Just index }
+        | index > 0 ->
+            Just (ReasoningDelta "\n\n")
     OtherResponseStreamEvent
         { otherEventType = StreamEventUnknown eventType } ->
             Just

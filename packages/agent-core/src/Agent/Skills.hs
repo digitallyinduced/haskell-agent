@@ -19,11 +19,18 @@ module Agent.Skills
     , resolveSkillMentions
     ) where
 
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
 import Control.Applicative ((<|>))
+import Control.Concurrent.STM
+    ( atomically
+    , modifyTVar'
+    , newTVarIO
+    , readTVar
+    )
 import Control.Exception.Safe (displayException, tryAny)
-import Control.Monad (filterM, forM)
+import Control.Monad (filterM)
 import Data.Aeson
     ( FromJSON(..)
     , Object
@@ -38,7 +45,7 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
-import Data.List (find, sortOn)
+import Data.List (find, sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -224,13 +231,18 @@ defaultSkillCatalogMaxChars = 8000
 discoverSkills :: SkillDiscoverOptions -> IO SkillCatalog
 discoverSkills options = do
     roots <- skillRoots options
-    results <- fmap concat $ forM roots \(scope, origin, root) -> do
-        exists <- doesDirectoryExist root
-        if exists
-            then do
-                files <- findSkillFiles options.skillsMaxDepth root
-                forM files (loadSkillFile scope origin)
-            else pure []
+    results <- fmap concat $
+        mapConcurrentlyBounded skillRootConcurrency
+            (\(scope, origin, root) -> do
+                exists <- doesDirectoryExist root
+                if exists
+                    then do
+                        files <- findSkillFiles options.skillsMaxDepth root
+                        mapConcurrentlyBounded skillFileConcurrency
+                            (loadSkillFile scope origin)
+                            files
+                    else pure [])
+            roots
     let skills = [skill | Right skill <- results]
         warnings = [warning | Left warning <- results]
     pure SkillCatalog
@@ -240,9 +252,14 @@ discoverSkills options = do
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
 skillRoots options = do
-    projectRoot <- canonicalizePath (unsafeToFilePath options.skillsProjectRoot)
-    cwd <- canonicalizePath (unsafeToFilePath options.skillsCwd)
-    home <- canonicalizePath (unsafeToFilePath options.skillsHome)
+    canonical <- mapConcurrentlyBounded 3 canonicalizePath
+        [ unsafeToFilePath options.skillsProjectRoot
+        , unsafeToFilePath options.skillsCwd
+        , unsafeToFilePath options.skillsHome
+        ]
+    let (projectRoot, cwd, home) = case canonical of
+            [project, current, userHome] -> (project, current, userHome)
+            _ -> error "skillRoots: canonical path count changed"
     let dirs =
             map unsafeToFilePath $
                 directoryChain (unsafeEncodeUtf projectRoot) (unsafeEncodeUtf cwd)
@@ -275,29 +292,60 @@ skillRoots options = do
         CodexSkills -> ".codex" </> "skills"
 
 findSkillFiles :: Int -> FilePath -> IO [FilePath]
-findSkillFiles maxDepth root = go Set.empty 0 root
+findSkillFiles maxDepth root = do
+    seen <- newTVarIO Set.empty
+    sort <$> go seen 0 [root]
   where
-    go seen depth dir
-        | depth > maxDepth = pure []
-        | otherwise = do
-            canonicalResult <- tryAny (canonicalizePath dir)
-            case canonicalResult of
-                Left _ -> pure []
-                Right canonical
-                    | canonical `Set.member` seen -> pure []
-                    | otherwise -> do
-                        entriesResult <- tryAny (listDirectory dir)
-                        case entriesResult of
-                            Left _ -> pure []
-                            Right entries -> do
-                                let skillPath = dir </> "SKILL.md"
-                                hasSkill <- doesFileExist skillPath
-                                children <-
-                                    filterM doesDirectoryExist
-                                        [dir </> entry | entry <- entries]
-                                nested <- fmap concat $
-                                    traverse (go (Set.insert canonical seen) (depth + 1)) children
-                                pure ([skillPath | hasSkill] <> nested)
+    go _ depth _ | depth > maxDepth = pure []
+    go _ _ [] = pure []
+    go seen depth dirs = do
+        let orderedDirs = sort dirs
+        canonicalized <-
+            mapConcurrentlyBounded skillDirectoryConcurrency
+                (\dir -> fmap ((,) dir) <$> tryAny (canonicalizePath dir))
+                orderedDirs
+        claimed <- atomically do
+            visited <- readTVar seen
+            let claim (current, selected) = \case
+                    Left _ -> (current, selected)
+                    Right (dir, canonical)
+                        | canonical `Set.member` current ->
+                            (current, selected)
+                        | otherwise ->
+                            (Set.insert canonical current, dir : selected)
+                (updated, selected) =
+                    foldl claim (visited, []) canonicalized
+            modifyTVar' seen (const updated)
+            pure (reverse selected)
+        inspected <-
+            mapConcurrentlyBounded skillDirectoryConcurrency
+                inspectDirectory
+                claimed
+        let found = concatMap fst inspected
+            children = concatMap snd inspected
+        nested <- go seen (depth + 1) children
+        pure (found <> nested)
+
+    inspectDirectory dir = do
+        entriesResult <- tryAny (listDirectory dir)
+        case entriesResult of
+            Left _ -> pure ([], [])
+            Right entries -> do
+                let skillPath = dir </> "SKILL.md"
+                hasSkill <- doesFileExist skillPath
+                children <-
+                    filterM doesDirectoryExist
+                        [dir </> entry | entry <- sort entries]
+                pure ([skillPath | hasSkill], children)
+
+skillRootConcurrency :: Int
+skillRootConcurrency = 4
+
+skillDirectoryConcurrency :: Int
+skillDirectoryConcurrency = 8
+
+skillFileConcurrency :: Int
+skillFileConcurrency = 8
 
 loadSkillFile
     :: SkillScope
@@ -577,7 +625,7 @@ formatSkillCatalogContext maxChars catalog
                 , "Always-active skills are included in full below and must be followed for every matching turn."
                 , "Use a skill when the user names it or the task clearly matches its description."
                 , "Users can explicitly invoke a skill with `$skill-name`."
-                , "After choosing a skill, read its SKILL.md from the listed path and follow it."
+                , "For on-demand skills, call `view_skill` with the listed name to load the full instructions."
                 , "Resolve relative scripts, references, and assets from the skill directory."
                 , "Load only the resources needed for the task; do not carry skills across turns unless relevant again."
                 , "Briefly state which skill(s) you are using. If a skill cannot be read, say so and continue with the best fallback."
@@ -607,9 +655,6 @@ renderSkillLine skill =
                 <> Text.replace "\n" " " skill.skillDescription
                 <> maybe "" (\trigger -> " Trigger: " <> Text.replace "\n" " " trigger)
                     skill.skillWhenToUse
-                <> " (file: "
-                <> toText skill.skillPath
-                <> ")"
 
 fitSkillLines :: Int -> [Skill] -> ([Text], Int)
 fitSkillLines budget = go budget []
@@ -633,8 +678,7 @@ renderShortenedSkillLine remaining skill =
         SkillContextAlways -> Nothing
         SkillContextOnDemand ->
             let prefix = "- $" <> skill.skillName <> ": "
-                suffix = " (file: " <> toText skill.skillPath <> ")"
-                available = remaining - Text.length prefix - Text.length suffix - 2
+                available = remaining - Text.length prefix - 2
             in if available < 12
                 then Nothing
                 else Just $
@@ -642,7 +686,6 @@ renderShortenedSkillLine remaining skill =
                         <> Text.take available
                             (Text.replace "\n" " " skill.skillDescription)
                         <> "…"
-                        <> suffix
 
 formatSkillActivation :: SkillInvocation -> Text -> Text
 formatSkillActivation invocation arguments =

@@ -7,6 +7,7 @@ module Agent.Store.Postgres.Custom.Sql
     ) where
 
 import Data.Char (isAlpha, isAlphaNum, isSpace)
+import Data.List (stripPrefix)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -196,7 +197,7 @@ splitTopLevelStatements input = do
                 go SqlDoubleQuoted (char : current) statements rest
 
             (SqlDollarQuoted delimiter, remaining)
-                | Just rest <- stripListPrefix delimiter remaining ->
+                | Just rest <- stripPrefix delimiter remaining ->
                     go
                         SqlNormal
                         (reverse delimiter <> current)
@@ -239,11 +240,3 @@ dollarDelimiter input =
         _ -> Nothing
   where
     isTagChar char = isAlphaNum char || char == '_'
-
-stripListPrefix :: Eq value => [value] -> [value] -> Maybe [value]
-stripListPrefix [] values = Just values
-stripListPrefix _ [] = Nothing
-stripListPrefix (expected : expectedRest) (actual : actualRest)
-    | expected == actual =
-        stripListPrefix expectedRest actualRest
-    | otherwise = Nothing

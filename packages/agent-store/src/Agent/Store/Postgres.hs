@@ -17,10 +17,13 @@ module Agent.Store.Postgres
     ) where
 
 import Control.Concurrent.MVar
+import Control.Concurrent.Async (mapConcurrently)
+import Control.Concurrent.STM
+import qualified Control.Exception as Exception
 import Control.Exception.Safe (bracket, mask, onException)
-import Data.Map.Strict (Map)
-import qualified Data.Map.Strict as Map
+import Control.Monad (void)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Clock
     ( UTCTime(..)
     , diffTimeToPicoseconds
@@ -31,14 +34,21 @@ import Agent.Store.Postgres.Config
 import Agent.Store.Postgres.Connection
 import Agent.Store.Postgres.Managed
 import Agent.Store.Postgres.Migrations
+import Agent.Store.PoolCache
 import Agent.Store.Types
 
 data Store = Store
     { storeConfigInternal :: !ManagedPostgresConfig
     , provisioningPoolInternal :: !StorePool
     , trustedPoolInternal :: !StorePool
-    , scopePoolsInternal :: !(MVar (Map Text StorePool))
+    , scopePoolsInternal :: !(PoolCache Text StoreError StorePool)
+    , storeCloseInternal :: !(MVar StoreCloseState)
     }
+
+data StoreCloseState
+    = StoreOpen
+    | StoreClosing !(TMVar (Either Exception.SomeException ()))
+    | StoreClosed !(Either Exception.SomeException ())
 
 openStore :: ManagedPostgresConfig -> IO (Either StoreError Store)
 openStore config = mask \restore ->
@@ -67,22 +77,54 @@ openStore config = mask \restore ->
                                         closeStorePool ownerPool
                                         pure (Left err)
                                     Right runtimePool -> do
-                                        pools <- newMVar Map.empty
+                                        pools <- newPoolCache
+                                            8
+                                            storeClosedError
+                                            storeExceptionError
+                                            (\role ->
+                                                openRoleStorePool
+                                                    config
+                                                    role
+                                                    (defaultPoolConfig
+                                                        { poolSize = 2
+                                                        }))
+                                            closeStorePool
+                                        closeState <- newMVar StoreOpen
                                         pure $ Right Store
                                             { storeConfigInternal = config
                                             , provisioningPoolInternal =
                                                 ownerPool
                                             , trustedPoolInternal = runtimePool
                                             , scopePoolsInternal = pools
+                                            , storeCloseInternal = closeState
                                             }
 
 closeStore :: Store -> IO ()
-closeStore store = do
-    pools <- takeMVar store.scopePoolsInternal
-    mapM_ closeStorePool (Map.elems pools)
-    putMVar store.scopePoolsInternal Map.empty
-    closeStorePool store.trustedPoolInternal
-    closeStorePool store.provisioningPoolInternal
+closeStore store =
+    Exception.mask \restore -> do
+        decision <- modifyMVar store.storeCloseInternal \case
+            state@(StoreClosed outcome) ->
+                pure (state, Left outcome)
+            state@(StoreClosing completion) ->
+                pure (state, Right (Left completion))
+            StoreOpen -> do
+                completion <- newEmptyTMVarIO
+                pure
+                    ( StoreClosing completion
+                    , Right (Right completion)
+                    )
+        case decision of
+            Left outcome -> replayStoreClose outcome
+            Right (Left completion) ->
+                restore (atomically (readTMVar completion))
+                    >>= replayStoreClose
+            Right (Right completion) -> do
+                outcome <-
+                    tryAnyException (restore (closeAllStorePools store))
+                modifyMVar_ store.storeCloseInternal \_ ->
+                    pure (StoreClosed outcome)
+                atomically $ void (tryPutTMVar completion outcome)
+                replayStoreClose outcome
 
 -- | Open a store for the duration of an action and always release every pool.
 withStore
@@ -111,15 +153,37 @@ trustedPool = (.trustedPoolInternal)
 
 scopePool :: Store -> Text -> IO (Either StoreError StorePool)
 scopePool store role =
-    modifyMVar store.scopePoolsInternal \pools ->
-        case Map.lookup role pools of
-            Just pool -> pure (pools, Right pool)
-            Nothing -> do
-                let options = defaultPoolConfig { poolSize = 2 }
-                openRoleStorePool store.storeConfigInternal role options >>= \case
-                    Left err -> pure (pools, Left err)
-                    Right pool ->
-                        pure (Map.insert role pool pools, Right pool)
+    acquirePoolCache store.scopePoolsInternal role
+
+closeAllStorePools :: Store -> IO ()
+closeAllStorePools store = do
+    outcomes <- mapConcurrently
+        tryAnyException
+        [ closePoolCache store.scopePoolsInternal
+        , closeStorePool store.trustedPoolInternal
+        , closeStorePool store.provisioningPoolInternal
+        ]
+    case [exception | Left exception <- outcomes] of
+        exception : _ -> Exception.throwIO exception
+        [] -> pure ()
+
+replayStoreClose :: Either Exception.SomeException () -> IO ()
+replayStoreClose = either Exception.throwIO pure
+
+tryAnyException
+    :: IO a
+    -> IO (Either Exception.SomeException a)
+tryAnyException = Exception.try
+
+storeClosedError :: StoreError
+storeClosedError =
+    StoreConnectionError "PostgreSQL store is closed"
+
+storeExceptionError :: Exception.SomeException -> StoreError
+storeExceptionError exception =
+    StoreConnectionError
+        ("PostgreSQL scope pool initialization failed: "
+            <> Text.pack (Exception.displayException exception))
 
 -- | Match PostgreSQL's @timestamptz@ microsecond precision before retaining
 -- timestamps in application state.

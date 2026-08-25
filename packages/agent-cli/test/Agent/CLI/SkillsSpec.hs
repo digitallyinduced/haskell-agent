@@ -120,7 +120,11 @@ spec = describe "Agent.CLI.Skills" do
             Nothing -> expectationFailure "expected startup context"
             Just text -> do
                 text `shouldSatisfy` Text.isPrefixOf "agents\n\n## Skills"
-                text `shouldSatisfy` Text.isInfixOf "/tmp/deploy/SKILL.md"
+                text `shouldSatisfy` Text.isInfixOf
+                    "call `view_skill` with the listed name"
+                text `shouldSatisfy` Text.isInfixOf "$deploy: Deploy the service"
+                text `shouldSatisfy`
+                    (not . Text.isInfixOf "/tmp/deploy/SKILL.md")
 
     it "maps invocation metadata into a slash command" do
         let invocation = SkillInvocation "deploy" fakeSkill True
