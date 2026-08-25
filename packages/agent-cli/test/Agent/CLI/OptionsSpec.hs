@@ -2,6 +2,7 @@ module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
 import Agent.Dialect (DialectId(..))
+import Agent.Loop (defaultLoopMaxTurns)
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
 import Agent.TUI.Motion (MotionMode(..))
@@ -136,6 +137,14 @@ spec = do
             parseArgs ["--managed-turn-file", "turn.json"]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optManagedTurnFile = Just (fromFilePath "turn.json") })
+
+        it "defaults max turns from agent-core and requires a positive override" do
+            defaultCliOptions.optMaxTurns `shouldBe` defaultLoopMaxTurns
+            defaultLoopMaxTurns `shouldBe` 2000
+            parseArgs ["--max-turns", "0"] `shouldSatisfy` isLeft
+            parseArgs ["--max-turns", "-1"] `shouldSatisfy` isLeft
+            parseArgs ["--max-turns", "nope"] `shouldSatisfy` isLeft
+            usage `shouldContain` ("default: " <> show defaultLoopMaxTurns)
 
         it "requires a positive concurrent agent limit" do
             parseArgs ["--max-concurrent-agents", "0"] `shouldSatisfy` isLeft
