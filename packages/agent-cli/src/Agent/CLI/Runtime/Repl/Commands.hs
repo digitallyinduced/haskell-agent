@@ -175,8 +175,8 @@ import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
     ( infoNotice,
       progressNotice,
-      UiEvent(UiUserSubmitted, UiRecapStarted, UiConversationCleared,
-              UiSetNotice, UiErrorMessage, UiSystemMessage) )
+      UiEvent(UiUserSubmitted, UiRecapStarted, UiSetNotice, UiErrorMessage,
+              UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
@@ -564,7 +564,6 @@ handleReplLine
                                     Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
-                                fullscreenEvent UiConversationCleared
                                 fullscreenEvent
                                     (UiSystemMessage outcome.compactSummary)
                                 let message =
