@@ -343,6 +343,55 @@ spec = do
                         (RenderHarness baseState (80, 24))
             assertFrame harness
 
+        it "shows a selected child's live todo list above its transcript" do
+            let target = AgentChild (SubagentId "reviewer")
+                todoCall =
+                    functionToolCall
+                        "todo-1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"Review Model.hs\"}]}"
+                todoResult = ToolCallResult
+                    { callId = "todo-1"
+                    , output = "- [in_progress] 1: Review Model.hs"
+                    , callKind = FunctionCallKind
+                    }
+                conversation =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted todoCall)
+                        , UiLoop (ToolFinished todoResult)
+                        ]
+                child =
+                    AgentEntry
+                        { agentTarget = target
+                        , agentPath = "/root/reviewer"
+                        , agentStatus = "running"
+                        , agentModel = Just "gpt-5.6-luna"
+                        , agentSteps = []
+                        , agentTranscript = []
+                        , agentConversation = conversation
+                        }
+                app =
+                    baseState
+                        { appAgentSelected = target
+                        , appAgentEntries = [rootEntry, child]
+                        }
+                size = (120, 32)
+                frame =
+                    Text.unlines $
+                        pictureRows
+                            (renderWidget
+                                (Just Theme.monochrome)
+                                (drawApp app)
+                                size)
+                            size
+            frame `shouldSatisfy` Text.isInfixOf "Viewing /root/reviewer"
+            length (filter (Text.isInfixOf "Review Model.hs") (Text.lines frame))
+                `shouldBe` 1
+            frame `shouldNotSatisfy` Text.isInfixOf "todo_write"
+
 renderTraceProperty :: AppState -> RenderTrace -> Property
 renderTraceProperty baseState (RenderTrace actions) =
     conjoin $
