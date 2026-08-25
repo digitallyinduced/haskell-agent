@@ -19,11 +19,11 @@ import Agent.CLI.Session
     , sessionTitleFromPrompt
     , writeSessionMeta
     )
+import Agent.CLI.Session.Runtime.Types (StartupRuntime(..))
 import Agent.CLI.Style (glyphSession, roleMuted)
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
-    ( FullscreenRuntime
-    , emitUiEvent
+    ( emitUiEvent
     )
 import Agent.OsPath (fromText)
 import Agent.Store.Postgres.Connection (StorePool)
@@ -33,7 +33,6 @@ import Data.Maybe (isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
-import System.IO (stderr)
 import System.OsPath
     ( OsPath
     , unsafeEncodeUtf
@@ -42,7 +41,7 @@ import System.OsPath
 
 preparePersistence
     :: StorePool
-    -> Maybe FullscreenRuntime
+    -> StartupRuntime
     -> CliOptions
     -> OsPath
     -> ModelTarget
@@ -53,7 +52,7 @@ preparePersistence
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
 preparePersistence
-        sessionPool fullscreen options root target
+        sessionPool startup options root target
         retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
@@ -118,10 +117,10 @@ preparePersistence
                     handle.sessionMetaPath
                     activeMeta
             let message = "session: " <> activeMeta.metaId <> " (resumed)"
-            case fullscreen of
+            case startup.startupFullscreen of
                 Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
+                    color <- resolveColor startup.startupStderr
+                    putTextLn startup.startupStderr
                         (roleMuted color (glyphSession <> message))
                 Just runtime ->
                     emitUiEvent runtime (UiSystemMessage message)

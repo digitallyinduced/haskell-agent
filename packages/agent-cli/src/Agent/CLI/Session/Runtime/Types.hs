@@ -77,6 +77,7 @@ import Data.Time.Clock
     ( NominalDiffTime
     , UTCTime
     )
+import System.IO (Handle)
 import System.OsPath (OsPath)
 
 data SessionBackend = SessionBackend
@@ -147,6 +148,9 @@ data StartupRuntime = StartupRuntime
     , startupUiRuntimeRef :: !(IORef (Maybe FullscreenRuntime))
     , startupFullscreen :: !(Maybe FullscreenRuntime)
     , startupTerminal :: !TerminalCapabilities
+    , startupStdout :: !Handle
+    , startupStderr :: !Handle
+    , startupBackground :: !Bool
     , startupUseColor :: !Bool
     , startupStderrTty :: !Bool
     , startupStdinTty :: !Bool

@@ -17,7 +17,7 @@ import Agent.CLI.Recap
     , runRecapWithCancel
     , runTurnSummaryWithCancel
     )
-import Agent.CLI.Render (putTextLn)
+import Agent.CLI.Render (RenderConfig(..), putTextLn)
 import Agent.CLI.Session
     ( Persistence(..)
     , PersistenceState(..)
@@ -38,14 +38,14 @@ import Control.Monad (forM_, when)
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
-import System.IO (stderr, stdout)
 import System.OsPath (takeDirectory)
 
 runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
 runSessionRecap registerCancel env kind = do
     let fullscreen = env.sessionFullscreen
+        stdoutHandle = env.sessionRender.renderStdout
     transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
-    color <- resolveColor stdout
+    color <- resolveColor stdoutHandle
     transcript <- readIORef transcriptRef
     let mainTurns = mainTurnCount transcript
         hasMessages = mainTurns > 0
@@ -73,7 +73,9 @@ runSessionRecap registerCancel env kind = do
                             then
                                 withTurnCancel env.sessionInterrupt cancel $
                                     case fullscreen of
-                                        Nothing ->
+                                        Nothing
+                                            | env.sessionBackground -> action
+                                            | otherwise ->
                                             withEscCancel
                                                 cancel
                                                 env.sessionEscPaused
@@ -145,7 +147,7 @@ displayRecap env color summary =
         Just runtime ->
             emitUiEvent runtime (UiRecapReady summary)
         Nothing ->
-            putTextLn stdout (roleMuted color message)
+            putTextLn env.sessionRender.renderStdout (roleMuted color message)
 
 recapUnavailable :: SessionEnv -> Bool -> IO ()
 recapUnavailable env hasMessages =
@@ -153,12 +155,13 @@ recapUnavailable env hasMessages =
 
 recapFailed :: SessionEnv -> Text -> IO ()
 recapFailed env message = do
-    color <- resolveColor stderr
+    let stderrHandle = env.sessionRender.renderStderr
+    color <- resolveColor stderrHandle
     case env.sessionFullscreen of
         Just runtime ->
             emitUiEvent runtime (UiRecapUnavailable message)
         Nothing ->
-            putTextLn stderr (roleMuted color message)
+            putTextLn stderrHandle (roleMuted color message)
 
 runSessionTurnSummary :: SessionEnv -> IO ()
 runSessionTurnSummary env = do
