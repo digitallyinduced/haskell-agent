@@ -1,6 +1,13 @@
 module Agent.CLI.StyleSpec (spec) where
 
 import Agent.CLI.Style
+import Agent.CLI.WindowTitle
+    ( WindowTitleController(..)
+    , busyWindowTitle
+    , newWindowTitleController
+    )
+import Agent.TUI.Motion (MotionMode(..))
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.OsPath (unsafeEncodeUtf)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -74,6 +81,28 @@ spec = do
             cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "untitled")
                 `shouldBe` "New session"
 
+    describe "WindowTitleController" do
         it "prefixes busy titles with a spinner frame" do
-            busyCliWindowTitle "⠋" "fix the title"
+            busyWindowTitle "⠋" "fix the title"
                 `shouldBe` "⠋ fix the title"
+
+        it "coordinates busy, renamed, and restored titles" do
+            written <- newIORef []
+            let firstFrame = case spinnerFrames of
+                    frame : _ -> frame
+                    [] -> "*"
+            controller <- newWindowTitleController
+                MotionOff
+                "initial"
+                id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleSet "renamed"
+            controller.windowTitleEndBusy
+            actual <- readIORef written
+            actual
+                `shouldBe`
+                [ firstFrame <> " initial"
+                , firstFrame <> " renamed"
+                , "renamed"
+                ]

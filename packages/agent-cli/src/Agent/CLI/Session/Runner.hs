@@ -108,14 +108,12 @@ import Agent.CLI.Subagents.Runtime
     , persistAndEvictSubagentSessionWithStatus
     )
 import Agent.CLI.Style
-    ( busyCliWindowTitle
-    , cliWindowTitle
+    ( cliWindowTitle
     , glyphSession
     , glyphWarn
     , roleMuted
     , roleWarn
     , setCliWindowTitle
-    , spinnerFrames
     )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
@@ -144,11 +142,10 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
-import Agent.TUI.Motion
-    ( MotionDemand(..)
-    , MotionMode(..)
-    , motionIntervalMicros
-    , nativeProgressAnimationEnabled
+import Agent.TUI.Motion (nativeProgressAnimationEnabled)
+import Agent.CLI.WindowTitle
+    ( WindowTitleController(..)
+    , newWindowTitleController
     )
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.Cancel (requestCancel)
@@ -194,17 +191,8 @@ import Agent.OsPath (toText)
 import Control.Concurrent.Async
     ( withAsync )
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( newMVar, withMVar )
-import Control.Concurrent.STM
-    ( atomically
-    , check
-    , modifyTVar'
-    , newTVarIO
-    , readTVar
-    , writeTVar
-    )
 import Control.Exception.Safe
     ( catchAny )
 import Control.Monad (forM_, unless, void, when)
@@ -224,11 +212,6 @@ data AgentStepCache = AgentStepCache
     { cachedTranscript :: !(StableName [ResponseItem])
     , cachedVariant :: !(Maybe SubagentStatus)
     , cachedSteps :: ![AgentStep]
-    }
-
-data WindowTitleAnimationState = WindowTitleAnimationState
-    { windowTitleBase :: !Text
-    , windowTitleBusyDepth :: !Int
     }
 
 data SessionRunnerContinuation = SessionRunnerContinuation
@@ -260,11 +243,6 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                           (Just handle.sessionMeta.metaTitle))
               _ -> pure (cliWindowTitle cwd Nothing)
       PersistenceDisabled -> pure (cliWindowTitle cwd Nothing)
-  windowTitleState <- newTVarIO
-      WindowTitleAnimationState
-          { windowTitleBase = initialWindowTitle
-          , windowTitleBusyDepth = 0
-          }
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout
@@ -276,58 +254,16 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
           case fullscreen of
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
-      firstSpinnerFrame = case spinnerFrames of
-          frame : _ -> frame
-          [] -> "*"
-      setWindowTitle title =
-          withMVar ioLock \_ -> do
-              state <- atomically do
-                  current <- readTVar windowTitleState
-                  let updated = current { windowTitleBase = title }
-                  writeTVar windowTitleState updated
-                  pure updated
-              writeWindowTitle
-                  (if state.windowTitleBusyDepth > 0
-                      then busyCliWindowTitle firstSpinnerFrame title
-                      else title)
-      beginWindowTitleBusy =
-          withMVar ioLock \_ -> do
-              state <- atomically do
-                  modifyTVar' windowTitleState \current ->
-                      current
-                          { windowTitleBusyDepth =
-                              current.windowTitleBusyDepth + 1
-                          }
-                  readTVar windowTitleState
-              when (state.windowTitleBusyDepth == 1) $
-                  writeWindowTitle
-                      (busyCliWindowTitle
-                          firstSpinnerFrame
-                          state.windowTitleBase)
-      endWindowTitleBusy =
-          withMVar ioLock \_ -> do
-              state <- atomically do
-                  modifyTVar' windowTitleState \current ->
-                      current
-                          { windowTitleBusyDepth =
-                              max 0 (current.windowTitleBusyDepth - 1)
-                          }
-                  readTVar windowTitleState
-              when (state.windowTitleBusyDepth == 0) $
-                  writeWindowTitle state.windowTitleBase
-      windowTitleWorker =
-          unless (options.optMotionMode == MotionOff) $
-              forM_ (cycle spinnerFrames) \frame -> do
-                  atomically do
-                      state <- readTVar windowTitleState
-                      check (state.windowTitleBusyDepth > 0)
-                  withMVar ioLock \_ -> do
-                      state <- atomically (readTVar windowTitleState)
-                      when (state.windowTitleBusyDepth > 0) $
-                          writeWindowTitle
-                              (busyCliWindowTitle frame state.windowTitleBase)
-                  threadDelay
-                      (motionIntervalMicros options.optMotionMode MotionSlow)
+      withIoLock action = withMVar ioLock (const action)
+  windowTitle <- newWindowTitleController
+      options.optMotionMode
+      initialWindowTitle
+      withIoLock
+      writeWindowTitle
+  let setWindowTitle = windowTitle.windowTitleSet
+      beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
+      endWindowTitleBusy = windowTitle.windowTitleEndBusy
+      windowTitleWorker = windowTitle.windowTitleWorker
       showTitleEvent = \case
         SessionTitleGenerated SessionTitleResult{..} ->
           case persist of

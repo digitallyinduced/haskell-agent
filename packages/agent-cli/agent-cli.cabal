@@ -175,6 +175,7 @@ library
                     , Agent.CLI.TurnState
                     , Agent.CLI.Usage
                     , Agent.CLI.WebFetch
+                    , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
