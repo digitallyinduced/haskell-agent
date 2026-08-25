@@ -10,12 +10,18 @@ import Agent.CLI.Session
     , TranscriptEffect(..)
     )
 import Agent.Dialect (DialectId(..))
-import System.OsPath (unsafeEncodeUtf)
+import Agent.OpenAI.Compaction (userTextItem)
 import Agent.Provider (Provider(..))
+import Agent.Responses.Types
+    ( CompactionItem(..)
+    , ResponseItem(..)
+    )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
+import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -69,6 +75,61 @@ spec = do
             entry.resumePrompt `shouldBe` "hello"
             entry.resumeTranscript
                 `shouldSatisfy` any (Text.isInfixOf "later question")
+
+    describe "resumeNeedsGeneratedContext" do
+        it "requeues context after compact, clear, and new boundaries" do
+            map
+                (\marker ->
+                    resumeNeedsGeneratedContext
+                        [sampleTurn { turnUserText = marker }])
+                ["/compact", "/clear", "/new"]
+                `shouldBe` [True, True, True]
+
+        it "requeues context after a typed automatic-compaction checkpoint" do
+            let checkpoint =
+                    CompactionItemValue CompactionItem
+                        { itemId = Nothing
+                        , encryptedContent = Nothing
+                        , extraFields = KeyMap.empty
+                        }
+            resumeNeedsGeneratedContext
+                [sampleTurn { turnItems = [checkpoint] }]
+                `shouldBe` True
+
+        it "repairs old compacted sessions until regenerated context persists" do
+            let boundary = sampleTurn { turnUserText = "/compact" }
+                ordinary = sampleTurn
+                    { turnUserText = "continue"
+                    , turnItems = [userTextItem "ordinary input"]
+                    }
+                regenerated = ordinary
+                    { turnItems =
+                        [ userTextItem
+                            "## Skills\nThe following reusable skills are available in this session.\n"
+                        ]
+                    }
+            resumeNeedsGeneratedContext [boundary, ordinary]
+                `shouldBe` True
+            resumeNeedsGeneratedContext [boundary, regenerated]
+                `shouldBe` False
+
+        it "does not mistake ephemeral harness context for a reload" do
+            let boundary = sampleTurn { turnUserText = "/compact" }
+                ephemeral text = sampleTurn
+                    { turnUserText = "continue"
+                    , turnItems = [userTextItem text]
+                    }
+            map
+                (\text ->
+                    resumeNeedsGeneratedContext [boundary, ephemeral text])
+                [ "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
+                , "# Skill instructions: one-off"
+                , "<subagent_notification>done</subagent_notification>"
+                ]
+                `shouldBe` [True, True, True]
+
+        it "does not requeue context without a transcript boundary" do
+            resumeNeedsGeneratedContext [sampleTurn] `shouldBe` False
 
     describe "applyResumeKey" do
         let entries =

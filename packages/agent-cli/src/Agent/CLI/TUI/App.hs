@@ -29,7 +29,6 @@ module Agent.CLI.TUI.App
     , newFullscreenRuntime
     , newFullscreenRuntimeWithSyntaxLoader
     , selectedAgentConversation
-    , textOverlayDisplayText
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
@@ -41,7 +40,6 @@ module Agent.CLI.TUI.App
     , repositoryHeaderText
     , resumeSearchCursorColumn
     , onboardingVisibleRowIndices
-    , normalizeTextOverlayInsertion
     , requestFullscreenPermission
     , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
@@ -50,6 +48,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
+    , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
@@ -61,349 +60,277 @@ module Agent.CLI.TUI.App
     , wrapFullscreenKeyboardVty
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , applyStoredFullscreenWindowTitle
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
     , maskedSecretText
+    , normalizeTextOverlayInsertion
+    , textOverlayDisplayText
     , withFullscreenSuspended
     ) where
 
-import Agent.CLI.AgentViewport
-    ( AgentEntry(agentConversation, agentTarget, agentPath),
-      AgentTarget(..) )
-import Agent.CLI.Artifact ( fencedCodeBlock )
-import Agent.CLI.Clipboard ()
-import Agent.CLI.Command
-    ( SkillCommand, SlashCatalog(..), defaultSlashCatalog )
-import Agent.CLI.Dictation ( insertDictation )
-import Agent.CLI.ImagePreview
-    ( ImagePreviewProtocol(..),
-      detectImagePreviewProtocol,
-      kittyDeleteImageSequence,
-      kittyPlacedImageSequence,
-      positionImagePayload )
+import Agent.CLI.Clipboard
+    ( formatImageSize
+    )
+import Agent.CLI.Dictation
+    ( DictationControl(..)
+    , DictationResult(..)
+    , dictateWith
+    , insertDictation
+    )
+import Agent.CLI.Secret (sanitizeSecretPromptText)
+import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
-    ( readReplHistory,
-      ReplLine(ReplText, ReplEof, ReplCycleMode, ReplChooseAccount,
-               ReplChooseModel) )
-import Agent.CLI.Interrupt ( CtrlCDecision(..) )
-import Agent.CLI.Permission ( PermissionChoice(..) )
-import Agent.CLI.Recap
-    ( autoRecapAwayThreshold,
-      autoRecapIdleThreshold,
-      autoRecapRetryInterval )
-import Agent.CLI.Render ()
+    ( ReplLine(..)
+    , readReplHistory
+    , terminalTextWidth
+    , truncateDisplayText
+    )
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentStep(..)
+    , AgentStepState(..)
+    , AgentTarget(..)
+    , agentDisplayName
+    , agentEntryTreeLabelWithGlyphModel
+    , agentStatusGlyph
+    )
+import Agent.CLI.Interrupt (CtrlCDecision(..))
+import Agent.CLI.ImagePreview
+    ( ImagePreviewProtocol(..)
+    , detectImagePreviewProtocol
+    , kittyDeleteImageSequence
+    , kittyPlacedImageSequence
+    , positionImagePayload
+    )
+import Agent.CLI.Command
+    ( SkillCommand
+    , SlashCatalog(..)
+    , defaultSlashCatalog
+    )
+import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Resume
-    ( ResumeBrowser(resumeBrowserSearching, resumeBrowserIndex,
-                    resumeBrowserExpanded, resumeBrowserQuery,
-                    resumeBrowserDeletePending),
-      ResumeEntry(resumeLoaded, resumeId),
-      visibleResumeBrowser,
-      applyResumeSearchResults,
-      selectedResumeBrowser,
-      moveResumeBrowser,
-      beginResumeSearch,
-      endResumeSearch,
-      insertResumeSearch,
-      cycleResumeSource,
-      toggleResumeExpanded,
-      setResumeDeletePending,
-      setResumeNotice,
-      replaceResumeEntry,
-      removeResumeEntry )
-import Agent.CLI.Secret ( sanitizeSecretPromptText )
-import Agent.CLI.Status ()
-import Agent.CLI.Style ()
-import Agent.CLI.TUI.History
-    ( HistoryCursor(..),
-      HistoryDirection(..),
-      HistoryGeneration(..),
-      HistoryPage(..),
-      HistoryRequest(..),
-      HistoryTurn(..),
-      HistoryWindow(..),
-      appendHistoryTurn,
-      applyHistoryPage,
-      clearHistoryRequest,
-      emptyHistoryWindow,
-      historyWindowRequest,
-      historyWindowSetAnchors,
-      markHistoryRequest )
-import Agent.CLI.TUI.ImagePreview
-    ( TuiImagePreview(previewSample),
-      NativePreviewPlacement(nativePreviewImageId, nativePreviewRow,
-                             nativePreviewColumn, nativePreviewColumns, nativePreviewRows,
-                             nativePreviewAttachment),
-      prepareTuiImagePreview,
-      nativePreviewPlacements )
-import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
-import Agent.CLI.TUI.Motion
-    ( motionDemandFor,
-      motionDemandForTerminalFocus,
-      motionModeForTerminalFocus,
-      appMotionTiming,
-      userActionPending,
-      hasBackgroundActivity,
-      completionFlashTransitions,
-      advanceCompletionFlashes,
-      uiEventRestartsMotionSchedule,
-      nextMotionSchedule,
-      elapsedMillisSince,
-      nativeProgressKeepaliveDue )
-import Agent.CLI.TUI.Render
-    ( agentEntryWindow,
-      agentPaneEntryLimit,
-      agentPaneVisible,
-      applyChildConversationUiEvent,
-      choiceRowColumns,
-      conversationUiForTarget,
-      conversationScrollbarRenderer,
-      drawApp,
-      fullscreenBounds,
-      fullscreenSurface,
-      onboardingVisibleRowIndices,
-      normalizeTextOverlayInsertion,
-      maskedSecretText,
-      quickStartRows,
-      quickStartVisible,
-      repositoryHeaderText,
-      resumeSearchCursorColumn,
-      selectedAgentConversation,
-      textOverlayDisplayText )
-import Agent.CLI.TUI.Types
-    ( TextInputMode(TextInputPlain, TextInputSecret),
-      TextOverlay(..),
-      ResumeOverlay(resumeOverlayBrowser, ResumeOverlay),
-      ChoiceOverlay(..),
-      ChoicePresentation(ChoiceOnboarding, ChoiceDialog),
-      AgentHover(agentHoverTarget, AgentHover, agentHoverUpperLeft,
-                 agentHoverPaneUpperLeft, agentHoverPaneWidth),
-      TerminalFocus(TerminalUnfocused, TerminalFocused,
-                    TerminalFocusUnknown),
-      AppState(..),
-      FullscreenSessionActions(sessionAgentSelect,
-                               FullscreenSessionActions, sessionCancel, sessionBtw, sessionRecap,
-                               sessionRestartEffort, sessionCtrlC, sessionAgentSnapshot),
-      FullscreenRuntime(..),
-      HistoryCommit(..),
-      FullscreenHistorySource(historySourceKey, FullscreenHistorySource,
-                              historySourceLoad),
-      FullscreenInputBuffer,
-      FullscreenInput(fullscreenInputLine, FullscreenInput,
-                      fullscreenInputQueued, fullscreenInputDisplay),
-      AppEventMailbox(..),
-      PendingUiEvent(..),
-      PendingAppEvent(..),
-      AppEvent(..),
-      Name(ConversationReserve, QuickStartWorktree, QuickStartResume,
-           QuickStartCommands, QuickStartModel, ResumeViewport, ResumeRow,
-           ComposerModel, ComposerEffort, ComposerMode, ComposerAccount,
-           CodeCopy, SlashRow, ChoiceRow, OverlayViewport, PermissionRow,
-           MarkdownLink, AgentPane, AgentRow, AgentPopover, ComposerArea,
-           ConversationBlock, ConversationViewport) )
+    ( ResumeBrowser(..)
+    , ResumeEntry(..)
+    , applyResumeSearchResults
+    , beginResumeSearch
+    , cycleResumeSource
+    , endResumeSearch
+    , groupResumeEntries
+    , insertResumeSearch
+    , moveResumeBrowser
+    , removeResumeEntry
+    , replaceResumeEntry
+    , resumeRelativeAge
+    , resumeSourceLabel
+    , selectedResumeBrowser
+    , setResumeDeletePending
+    , setResumeNotice
+    , toggleResumeExpanded
+    , visibleResumeBrowser
+    )
+import Agent.CLI.Render (formatElapsed)
+import Agent.CLI.Style (motionGlyphSet)
+import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
-    ( TerminalCapabilities(..),
-      detectTerminalCapabilities,
-      kittyCtrlCsiBodies,
-      kittyKeyboardDisambiguatePush,
-      kittyKeyboardPop,
-      kittySuperVCsiBodies,
-      shiftEnterCsiBodies )
-import Agent.CLI.Timestamp ( currentShortMessageTimestamp )
-import Agent.Loop ( ImageAttachment(..), LoopEvent(..) )
-import Agent.Syntax ( SyntaxHighlighter, loadSyntaxHighlighter )
-import Agent.TUI.Markdown ()
-import Agent.TUI.Model
-    ( advanceUiTime,
-      deleteToLineEnd,
-      deleteToLineStart,
-      deleteWordBefore,
-      lineEndCursor,
-      lineStartCursor,
-      reduceUi,
-      successNotice,
-      timestampNewMessageBlocks,
-      warningNotice,
-      BlockId(..),
-      BlockState(BlockComplete),
-      Focus(FocusScrollback, FocusPermission, FocusComposer),
-      PermissionOverlay(permissionIndex),
-      PromptState,
-      UiBlock(blockExpanded, blockId, blockKind, blockTitle, blockCallId,
-              blockBody),
-      UiEvent(UiFocusChanged, UiSetPrompt, UiQueuedInputStarted,
-              UiConversationCleared, UiTurnRestarted, UiRecapReady, UiLoop,
-              UiSetAwaitingInput, UiTurnEnded, UiSetDraft, UiPermissionShown,
-              UiPermissionMoved, UiPermissionHidden, UiToggleSelected,
-              UiSetNotice, UiSetFollow, UiUserSubmitted, UiSelectBlock,
-              UiActivateBlock),
-      UiState(uiPermission, uiSelectedBlockIndex, uiRetryCountdown,
-              uiSelectedBlock, uiBlockIndices, uiTodos, uiRunning,
-              uiElapsedMillis, uiFocus, uiTurnStartBlock, uiAttemptStartBlock,
-              uiToolCalls, uiNextBlockId, uiBlocks, uiFollow, uiCursor,
-              uiDraft) )
-import Agent.TUI.Motion
-    ( completionFlashDurationMillis,
-      MotionDemand(MotionNone),
-      MotionMode(MotionOff) )
-import Agent.TUI.Presentation ( permissionToolCallPrompt )
-import Agent.TUI.TextWidth
-    ( clampGraphemeCursor,
-      nextGraphemeBoundary,
-      previousGraphemeBoundary )
-import Agent.ToolDispatch ( ToolCall(..) )
-import Brick
-    ( get,
-      put,
-      continueWithoutRedraw,
-      customMain,
-      getVtyHandle,
-      halt,
-      invalidateCache,
-      lookupExtent,
-      lookupViewport,
-      makeVisible,
-      showFirstCursor,
-      suspendAndResume,
-      viewportScroll,
-      App(..),
-      ViewportScroll(vScrollToEnd, vScrollPage, vScrollToBeginning,
-                     vScrollBy),
-      Location(Location),
-      EventM,
-      BrickEvent(..),
-      Direction(..),
-      Extent(extentSize, Extent, extentUpperLeft),
-      Viewport(VP) )
-import Brick.BChan ( newBChan, writeBChan )
-import Brick.Widgets.Border ()
-import Brick.Widgets.Border.Style ()
-import Brick.Widgets.Center ()
-import Codec.Picture ( pixelAt )
-import Control.Applicative ( (<|>) )
-import Control.Concurrent ( threadDelay )
-import Control.Concurrent.Async ( wait, waitCatch, withAsync )
-import Control.Concurrent.STM
-    ( STM,
-      atomically,
-      check,
-      newEmptyTMVarIO,
-      newTQueueIO,
-      newTVarIO,
-      orElse,
-      putTMVar,
-      readTVar,
-      readTMVar,
-      readTQueue,
-      registerDelay,
-      retry,
-      takeTMVar,
-      writeTQueue,
-      writeTVar )
-import Control.Exception ( AsyncException(UserInterrupt) )
-import Control.Exception.Safe
-    ( finally, onException, throwIO, tryAny )
-import Control.Monad ( when, void, forever, unless )
-import Control.Monad.IO.Class ( liftIO )
-import Control.Monad.State.Strict ( modify' )
-import Data.Char ( isControl, isSpace )
-import Data.Foldable ( toList )
-import Data.IORef
-    ( atomicModifyIORef',
-      modifyIORef',
-      newIORef,
-      readIORef,
-      writeIORef )
-import Data.List ( find, findIndex, sortOn )
-import Data.List.NonEmpty ( NonEmpty(..) )
-import Data.Maybe ( fromMaybe, isJust, isNothing, mapMaybe )
-import Data.Sequence ( Seq, ViewL(..), ViewR(..), (|>) )
-import Data.Text ( Text )
-import Data.Time.Clock ( NominalDiffTime )
-import Data.Time.Clock.POSIX ( getPOSIXTime )
-import Data.Time.Format ()
-import Data.Word ( Word64 )
-import GHC.Clock ( getMonotonicTimeNSec )
-import System.Environment ( lookupEnv )
-import System.IO ( stdout )
-import System.Info ( os )
-import System.Posix.Process ( getProcessID )
-import System.Process ( callProcess )
-import qualified Brick.Types as B ()
-import qualified Brick.Widgets.Border as Border ()
-import qualified Agent.CLI.TUI.Bridge as Bridge
-    ( trimHistory,
-      eventFollows,
-      mergeUiEvents,
-      nativeProgressSignal,
-      isSendNowKey,
-      normalizeAgentSelection )
-import qualified Agent.CLI.TUI.Composer as Composer
-    ( decodePaste,
-      newFullscreenInputBuffer,
-      queuedFullscreenInputDisplays,
-      readFullscreenInputs,
-      appendFullscreenInput,
-      takeFullscreenInputOr,
-      handlePromptControlClick,
-      handleEffortControlClick,
-      handleControlMouseDown,
-      handleControlMouseUp,
-      activateSlashAt,
-      handleComposerKey,
-      applyComposerUiEvent )
-import qualified Data.Map.Strict as Map
-    ( Map, filter, filterWithKey, fromList, union, empty, lookup )
-import qualified Agent.CLI.TUI.Scroll as Scroll
-    ( ConversationScrollGesture(ResumeConversationFollow,
-                                IgnoreConversationScroll, PauseAndScrollConversation),
-      ConversationScroll(ScrollConversationToEnd,
-                         KeepConversationPosition),
-      conversationScrollGesture,
-      startConversationAnchor,
-      reflowConversationAnchor,
-      followConversationTail )
-import qualified Data.Sequence as Seq
-    ( Seq,
-      (!?),
-      empty,
-      length,
-      lookup,
-      null,
-      singleton,
-      take,
-      viewl,
-      viewr )
-import qualified Data.Set as Set ( empty )
-import qualified Data.Text as Text
-    ( any,
-      concat,
-      drop,
-      dropEnd,
-      isPrefixOf,
-      length,
-      null,
-      take,
-      toLower,
-      pack,
-      singleton,
-      unpack )
-import qualified Data.Text.Encoding as TextEncoding ( encodeUtf8 )
+    ( TerminalCapabilities(..)
+    , detectTerminalCapabilities
+    , kittyAltCsiBodies
+    , kittyCtrlCsiBodies
+    , kittyCtrlUnderscoreCsiBodies
+    , kittyKeyboardDisambiguatePush
+    , kittyKeyboardPop
+    , kittySuperVCsiBodies
+    , shiftEnterCsiBodies
+    )
 import qualified Agent.TUI.Theme as Theme
-    ( monochrome, terminalDefault )
-import qualified Agent.CLI.TUI.Transcript as Transcript ()
+import qualified Agent.CLI.TUI.Bridge as Bridge
+import qualified Agent.CLI.TUI.Composer as Composer
+import Agent.CLI.TUI.History
+    ( HistoryCursor(..)
+    , HistoryDirection(..)
+    , HistoryGeneration(..)
+    , HistoryPage(..)
+    , HistoryRequest(..)
+    , HistoryTurn(..)
+    , HistoryWindow(..)
+    , appendHistoryTurn
+    , applyHistoryPage
+    , clearHistoryRequest
+    , emptyHistoryWindow
+    , historyWindowRequest
+    , historyWindowSetAnchors
+    , markHistoryRequest
+    )
+import Agent.CLI.TUI.LambdaArt
+    ( lambdaArtWidget
+    )
+import Agent.CLI.TUI.Motion
+    ( advanceCompletionFlashes
+    , appMotionTiming
+    , completionFlashTransitions
+    , elapsedMillisSince
+    , hasBackgroundActivity
+    , isBackgroundAgentActive
+    , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
+    , nativeProgressKeepaliveDue
+    , nextMotionSchedule
+    , turnCompletionRequiresRedraw
+    , uiEventRestartsMotionSchedule
+    , userActionPending
+    )
+import Agent.CLI.TUI.Render
+    ( agentEntryWindow
+    , agentPaneEntryLimit
+    , agentPaneVisible
+    , applyChildConversationUiEvent
+    , choiceRowColumns
+    , conversationUiForTarget
+    , conversationScrollbarRenderer
+    , drawApp
+    , fullscreenBounds
+    , fullscreenSurface
+    , onboardingVisibleRowIndices
+    , normalizeTextOverlayInsertion
+    , maskedSecretText
+    , quickStartRows
+    , quickStartVisible
+    , repositoryHeaderText
+    , resumeSearchCursorColumn
+    , selectedAgentConversation
+    , textOverlayDisplayText
+    )
+import Agent.CLI.TUI.ImagePreview
+    ( NativePreviewPlacement(..)
+    , TuiImagePreview(..)
+    , nativePreviewPlacements
+    , prepareTuiImagePreview
+    , previewCountForWidth
+    , previewCellSize
+    , renderTuiImagePreview
+    )
+import Agent.TUI.Markdown
+    ( codeWidgetWithSyntaxHighlighting
+    , markdownWidgetWithLinks
+    , markdownWidgetWithSyntaxHighlightingAndLinks
+    )
+import Agent.TUI.TextWidth
+    ( clampGraphemeCursor
+    , displayTerminalText
+    , nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
+import Agent.Syntax
+    ( SyntaxHighlighter
+    , loadSyntaxHighlighter
+    )
+import qualified Agent.CLI.TUI.Scroll as Scroll
+import qualified Agent.CLI.TUI.Transcript as Transcript
+import Agent.CLI.TUI.Types
+import Agent.TUI.Model
+import Agent.TUI.Motion
+    ( MotionDemand(..)
+    , MotionMode(..)
+    , backgroundIndicator
+    , completionFlashDurationMillis
+    , foregroundIndicator
+    , quietIndicator
+    , waitingIndicator
+    )
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    , liveTodoPanelLines
+    , parseTodoList
+    , permissionToolCallPrompt
+    , todoStatusGlyph
+    )
+import Agent.Loop (ImageAttachment(..), LoopEvent(..))
+import Agent.ToolDispatch (ToolCall(..))
+import Brick
+import qualified Brick.Types as B
+import Brick.BChan
+    ( newBChan
+    , writeBChan
+    )
+import Brick.Widgets.Border (borderWithLabel)
+import qualified Brick.Widgets.Border as Border
+import Brick.Widgets.Border.Style (unicodeRounded)
+import Brick.Widgets.Center (center, centerLayer, hCenter)
+import Codec.Picture (pixelAt)
+import Control.Applicative ((<|>))
+import Control.Concurrent.Async (wait, waitCatch, withAsync)
+import Control.Concurrent (threadDelay)
+import Control.Monad (forever, unless, void, when, (>=>))
+import Control.Concurrent.STM
+    ( STM
+    , atomically
+    , check
+    , newEmptyTMVarIO
+    , newTQueueIO
+    , newTVarIO
+    , orElse
+    , putTMVar
+    , readTVar
+    , readTMVar
+    , readTQueue
+    , registerDelay
+    , retry
+    , takeTMVar
+    , writeTQueue
+    , writeTVar
+    )
+import Agent.CLI.Recap
+    ( autoRecapAwayThreshold
+    , autoRecapIdleThreshold
+    , autoRecapRetryInterval
+    )
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.State.Strict (modify')
+import Control.Exception.Safe (finally, onException, throwIO, tryAny)
+import Control.Exception (AsyncException(UserInterrupt))
+import Data.Char (isControl, isSpace)
+import Data.Foldable (toList)
+import Data.IORef
+    ( atomicModifyIORef'
+    , modifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
+import Data.List
+    ( find
+    , findIndex
+    , intersperse
+    , nub
+    , sort
+    , sortOn
+    )
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
+import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
+import qualified Data.Sequence as Seq
+import qualified Data.Set as Set
+import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
+import Data.Time.Clock (NominalDiffTime, UTCTime)
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
-    ( ColorMode(FullColor),
-      Button(BLeft, BScrollUp, BScrollDown),
-      Event(..),
-      Key(KEsc, KBS, KDel, KBackTab, KUp, KDown, KPageUp, KPageDown,
-          KHome, KEnd, KLeft, KRight, KEnter, KChar),
-      Modifier(MCtrl, MMeta, MShift),
-      defaultConfig,
-      Vty(shutdown, isShutdown, outputIface, update, refresh),
-      VtyUserConfig(configInputMap, configPreferredColorMode),
-      Mode(Focus, BracketedPaste, Mouse, Hyperlink),
-      Output(outputByteBuffer, supportsMode, setMode, displayBounds) )
-import qualified Graphics.Vty.CrossPlatform as Vty ( mkVty )
+import qualified Graphics.Vty.CrossPlatform as Vty
+import System.Environment (lookupEnv)
+import System.Info (os)
+import System.IO (stdout)
+import System.Posix.Process (getProcessID)
+import System.Process (callProcess)
 
 newFullscreenInputBuffer :: IO FullscreenInputBuffer
 newFullscreenInputBuffer = Composer.newFullscreenInputBuffer
@@ -467,12 +394,14 @@ newFullscreenRuntimeWithSyntaxLoader
         historyRequests <- newTQueueIO
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
+        dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = const (pure ())
@@ -500,6 +429,7 @@ newFullscreenRuntimeWithSyntaxLoader
                 readIORef sessionActions >>= (.sessionCtrlC)
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
+            , runtimeWindowTitle = windowTitle
             , runtimeNativeProgress = nativeProgress
             , runtimeAgentSnapshot =
                 readIORef sessionActions >>= (.sessionAgentSnapshot)
@@ -525,6 +455,7 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeHistoryRequests = historyRequests
             , runtimeHistorySource = historySource
             , runtimeHistoryGeneration = historyGeneration
+            , runtimeDictationJobs = dictationJobs
             }
 
 setFullscreenSessionActions
@@ -659,8 +590,20 @@ emitUiEvent runtime event =
     enqueueAppEvent runtime (AppUi event)
 
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
-setFullscreenWindowTitle runtime =
-    enqueueAppEvent runtime . AppSetWindowTitle
+setFullscreenWindowTitle runtime title = do
+    writeIORef runtime.runtimeWindowTitle (Just title)
+    enqueueAppEvent runtime (AppSetWindowTitle title)
+
+-- | Brick/Vty owns the terminal, so titles must go through Vty output
+-- rather than stdout OSC writes.
+applyStoredFullscreenWindowTitle :: FullscreenRuntime -> V.Output -> IO ()
+applyStoredFullscreenWindowTitle runtime output =
+    readIORef runtime.runtimeWindowTitle
+        >>= mapM_ (writeOutputWindowTitle output)
+
+writeOutputWindowTitle :: V.Output -> Text -> IO ()
+writeOutputWindowTitle output title =
+    V.setOutputWindowTitle output (Text.unpack title)
 
 setFullscreenImagePreviews
     :: FullscreenRuntime
@@ -671,26 +614,48 @@ setFullscreenImagePreviews runtime images = do
     prepared <-
         if map fst previous == images
             then pure previous
-            else do
-                let next =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
-                -- ANSI previews force the sampled image during Brick drawing.
-                -- Build that sample here on the model worker instead of
-                -- stalling the Brick event/render thread.
-                unless runtime.runtimeNativeImagePreviews $
-                    mapM_
-                        (\(_, preview) ->
-                            void $
-                                pure $!
-                                    pixelAt preview.previewSample 0 0)
-                        next
-                pure next
+            else prepareFullscreenImagePreviews runtime images
     enqueueAppEvent runtime (AppSetImagePreviews prepared)
+
+-- | Move pending composer previews into the next submitted user message.
+commitFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+commitFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else prepareFullscreenImagePreviews runtime images
+    -- Submitted images use the ANSI renderer even when the transient overlay
+    -- used Kitty placement, so finish sampling before the Brick render thread.
+    mapM_
+        (\(_, preview) ->
+            void $ pure $! pixelAt preview.previewSample 0 0)
+        prepared
+    enqueueAppEvent runtime (AppCommitImagePreviews prepared)
+
+prepareFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO [(ImageAttachment, TuiImagePreview)]
+prepareFullscreenImagePreviews runtime images = do
+    let prepared =
+            mapMaybe
+                (\image ->
+                    case prepareTuiImagePreview image of
+                        Left _ -> Nothing
+                        Right preview -> Just (image, preview))
+                images
+    -- ANSI previews force the sampled image during Brick drawing. Build that
+    -- sample here on the model worker instead of stalling the render thread.
+    unless runtime.runtimeNativeImagePreviews $
+        mapM_
+            (\(_, preview) ->
+                void $ pure $! pixelAt preview.previewSample 0 0)
+            prepared
+    pure prepared
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -833,6 +798,19 @@ fullscreenVtyConfig =
                  , V.EvKey (V.KChar 'v') [V.MMeta]
                  )
                | body <- kittySuperVCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar '_') [V.MCtrl]
+                 )
+               | body <- kittyCtrlUnderscoreCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar character) [V.MMeta]
+                 )
+               | character <- ['b', 'd', 'f']
+               , body <- kittyAltCsiBodies character
                ]
         }
 
@@ -977,8 +955,13 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.Hyperlink True
             when (V.supportsMode output V.Focus) $
                 V.setMode output V.Focus True
-            wrapNativePreviewVty runtime vty
-                >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
+            wrapped <-
+                wrapNativePreviewVty runtime vty
+                    >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
+            applyStoredFullscreenWindowTitle
+                runtime
+                (V.outputIface wrapped)
+            pure wrapped
     initialVty <- buildVty
     let
         initialState =
@@ -1003,34 +986,40 @@ runFullscreen runtime workerAction = do
                             historyLoader
                             \_historyLoader ->
                             withAsync
-                                (loadSyntaxHighlighterForRuntime runtime)
-                                \_syntaxLoader ->
-                                    withAsync
-                                        (void (waitCatch worker)
-                                            >> enqueueAppEvent runtime AppStop)
-                                        \_notifier -> do
-                                            finalState <-
-                                                customMain
-                                                    initialVty
-                                                    buildVty
-                                                    (Just runtime.runtimeEvents)
-                                                    fullscreenApp
-                                                    initialState
-                                                `finally`
-                                                    runtime.runtimeNativeProgress False
-                                            when (not finalState.appWorkerStopped) $
-                                                atomically $
-                                                    Composer.appendFullscreenInput
-                                                        runtime.runtimeInput
-                                                        FullscreenInput
-                                                            { fullscreenInputLine =
-                                                                ReplEof
-                                                            , fullscreenInputQueued =
-                                                                False
-                                                            , fullscreenInputDisplay =
-                                                                Nothing
-                                                            }
-                                            wait worker
+                                dictationWorker
+                                \_dictationWorker ->
+                                withAsync
+                                    (loadSyntaxHighlighterForRuntime runtime)
+                                    \_syntaxLoader ->
+                                        withAsync
+                                            (void (waitCatch worker)
+                                                >> enqueueAppEvent runtime AppStop)
+                                            \_notifier -> do
+                                                finalState <-
+                                                    customMain
+                                                        initialVty
+                                                        buildVty
+                                                        (Just runtime.runtimeEvents)
+                                                        fullscreenApp
+                                                        initialState
+                                                    `finally`
+                                                        runtime.runtimeNativeProgress False
+                                                mapM_
+                                                    (`Composer.requestDictationStop` True)
+                                                    finalState.appDictation
+                                                when (not finalState.appWorkerStopped) $
+                                                    atomically $
+                                                        Composer.appendFullscreenInput
+                                                            runtime.runtimeInput
+                                                            FullscreenInput
+                                                                { fullscreenInputLine =
+                                                                    ReplEof
+                                                                , fullscreenInputQueued =
+                                                                    False
+                                                                , fullscreenInputDisplay =
+                                                                    Nothing
+                                                                }
+                                                wait worker
   where
     recapTicker _runtime = forever do
         threadDelay 20_000_000
@@ -1109,6 +1098,21 @@ runFullscreen runtime workerAction = do
             (AppHistoryLoaded request normalized)
         historyLoader
 
+    dictationWorker = forever do
+        job <- atomically (readTQueue runtime.runtimeDictationJobs)
+        result <-
+            dictateWith
+                DictationControl
+                    { dictationWaitForStop = job.dictationJobWaitForStop
+                    , dictationOnTranscript =
+                        enqueueAppEvent runtime . AppDictationPartial
+                    }
+        enqueueAppEvent runtime $
+            AppDictationFinished $
+                case result of
+                    DictationTranscript transcript -> Right transcript
+                    DictationFailed message -> Left message
+
 -- | Construct the retained application state shared by the live entry point
 -- and renderer tests. Generated tests should start from the same defaults as
 -- a real fullscreen session instead of assembling an approximate state.
@@ -1149,8 +1153,12 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
+        , appKillChain = False
+        , appUndo = []
+        , appDictation = Nothing
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
+        , appSubmittedImagePreviews = Map.empty
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
         , appAgentHover = Nothing
@@ -1615,6 +1623,8 @@ appendExactAppEvent event pending =
                 rest |> PendingEvent (AppAgentSnapshot selected entries)
         (rest :> PendingEvent (AppSetWindowTitle _), AppSetWindowTitle title) ->
             rest |> PendingEvent (AppSetWindowTitle title)
+        (rest :> PendingEvent (AppDictationPartial _), AppDictationPartial text) ->
+            rest |> PendingEvent (AppDictationPartial text)
         _ ->
             pending |> PendingEvent event
 
@@ -2223,7 +2233,30 @@ fullscreenApp = App
 
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
-    initial <- get
+    stored <- get
+    viewportBounds <-
+        if stored.appAgentSelected == AgentRoot
+            then
+                lookupViewport ConversationViewport >>= \case
+                    Just (VP _ top (_, height) (_, contentHeight)) ->
+                        pure (Just (top, height, contentHeight))
+                    Nothing ->
+                        pure Nothing
+            else pure Nothing
+    let reconciledFollow =
+            if stored.appAgentSelected == AgentRoot
+                then
+                    Scroll.reconcileConversationFollow
+                        stored.appUi.uiFollow
+                        viewportBounds
+                else stored.appUi.uiFollow
+        initial =
+            stored
+                { appUi =
+                    stored.appUi
+                        { uiFollow = reconciledFollow
+                        }
+                }
     timestamp <- liftIO currentShortMessageTimestamp
     renderedContentHeight <-
         if any isSubmittedPrompt uiEvents
@@ -2316,6 +2349,7 @@ applyConversationUiEvent renderedContentHeight uiEvent state =
                 , appHistorySelectedBlock = Nothing
                 , appHistoryLiveStart = Nothing
                 , appNextHistoryBlockId = -1
+                , appSubmittedImagePreviews = Map.empty
                 }
         _ -> state
 
@@ -2522,6 +2556,7 @@ refreshNativeProgressKeepalive = do
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
+    stateBeforeEvent <- get
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     state <- get
@@ -2543,7 +2578,13 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
-    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+    when
+        ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && not
+                (turnCompletionRequiresRedraw
+                    stateBeforeEvent.appUi
+                    stateAfterMotionSync.appUi)
+        ) $
         continueWithoutRedraw
   where
     isMotionTick = \case
@@ -2587,7 +2628,16 @@ handleEventInner event = case event of
     AppEvent AppRecapPoll ->
         maybeRequestAutoRecap
     AppEvent AppStop -> do
-        modify' \state -> state { appWorkerStopped = True }
+        state <- get
+        liftIO $
+            mapM_
+                (`Composer.requestDictationStop` True)
+                state.appDictation
+        modify' \current ->
+            current
+                { appWorkerStopped = True
+                , appDictation = Nothing
+                }
         halt
     AppEvent (AppSetSlashCatalog catalog) -> do
         state <- get
@@ -2645,26 +2695,65 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
-    AppEvent (AppDictationFinished result) ->
-        case result of
-            Left message ->
-                applyLocalUiEvent $
-                    UiSetNotice $
-                        Just $
-                            warningNotice ("Dictation failed: " <> message)
-            Right transcript -> do
-                state <- get
-                let ui = state.appUi
-                    (draft, cursor) =
-                        insertDictation ui.uiDraft ui.uiCursor transcript
-                applyLocalUiEvent (UiSetDraft draft cursor)
-                applyLocalUiEvent $
-                    UiSetNotice $
-                        Just $
-                            successNotice "Dictation inserted."
-    AppEvent (AppSetWindowTitle title) -> do
+    AppEvent (AppCommitImagePreviews prepared) -> do
         state <- get
-        liftIO (state.appRuntime.runtimeSetWindowTitle title)
+        let previews = map snd prepared
+            nextBlockId = BlockId state.appUi.uiNextBlockId
+            submitted =
+                if null previews
+                    then Map.delete
+                        nextBlockId
+                        state.appSubmittedImagePreviews
+                    else Map.insert
+                        nextBlockId
+                        previews
+                        state.appSubmittedImagePreviews
+        liftIO do
+            writeIORef state.appRuntime.runtimeImagePreviews []
+            modifyIORef'
+                state.appRuntime.runtimeImagePreviewRevision
+                (+ 1)
+        modify' \current ->
+            current
+                { appImagePreviews = []
+                , appSubmittedImagePreviews = submitted
+                }
+    AppEvent (AppDictationPartial text) -> do
+        state <- get
+        when (isJust state.appDictation) $
+            applyLocalUiEvent
+                (UiSetNotice (Just (Composer.dictationProgressNotice text)))
+    AppEvent (AppDictationFinished result) -> do
+        state <- get
+        aborted <-
+            case state.appDictation of
+                Just session ->
+                    liftIO (readIORef session.dictationAbort)
+                Nothing ->
+                    pure False
+        modify' \current -> current { appDictation = Nothing }
+        if aborted
+            then applyLocalUiEvent $
+                UiSetNotice $
+                    Just (infoNotice "Dictation cancelled.")
+            else case result of
+                Left message ->
+                    applyLocalUiEvent $
+                        UiSetNotice $
+                            Just $
+                                warningNotice ("Dictation failed: " <> message)
+                Right transcript -> do
+                    let ui = state.appUi
+                        (draft, cursor) =
+                            insertDictation ui.uiDraft ui.uiCursor transcript
+                    applyLocalUiEvent (UiSetDraft draft cursor)
+                    applyLocalUiEvent $
+                        UiSetNotice $
+                            Just $
+                                successNotice "Dictation inserted."
+    AppEvent (AppSetWindowTitle title) -> do
+        vty <- getVtyHandle
+        liftIO (writeOutputWindowTitle (V.outputIface vty) title)
         modify' \current -> current { appWindowTitle = Just title }
     AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
         case highlighter of
@@ -3104,30 +3193,34 @@ handleCtrlC = do
     pure decision
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
-handleNormalKey event
-    | Bridge.isSendNowKey event =
-        Composer.handleComposerKey
-            applyLocalUiEventWith
-            handleCtrlC
-            scrollConversationPage
-            event
-    | otherwise = do
-        case event of
-            V.EvMouseDown _ _ V.BScrollUp _ ->
-                scrollConversationBy (-mouseScrollLines)
-            V.EvMouseDown _ _ V.BScrollDown _ ->
-                scrollConversationBy mouseScrollLines
-            _ -> do
-                state <- get
-                case state.appUi.uiFocus of
-                    FocusScrollback -> handleScrollbackKey event
-                    FocusComposer ->
-                        Composer.handleComposerKey
-                            applyLocalUiEventWith
-                            handleCtrlC
-                            scrollConversationPage
-                            event
-                    FocusPermission -> pure ()
+handleNormalKey event = do
+    state <- get
+    case state.appDictation of
+        Just session ->
+            Composer.handleDictationKey handleCtrlC session event
+        Nothing
+            | Bridge.isSendNowKey event ->
+                Composer.handleComposerKey
+                    applyLocalUiEventWith
+                    handleCtrlC
+                    scrollConversationPage
+                    event
+            | otherwise ->
+                case event of
+                    V.EvMouseDown _ _ V.BScrollUp _ ->
+                        scrollConversationBy (-mouseScrollLines)
+                    V.EvMouseDown _ _ V.BScrollDown _ ->
+                        scrollConversationBy mouseScrollLines
+                    _ ->
+                        case state.appUi.uiFocus of
+                            FocusScrollback -> handleScrollbackKey event
+                            FocusComposer ->
+                                Composer.handleComposerKey
+                                    applyLocalUiEventWith
+                                    handleCtrlC
+                                    scrollConversationPage
+                                    event
+                            FocusPermission -> pure ()
 
 rememberAgentHover :: AgentTarget -> EventM Name AppState ()
 rememberAgentHover target = do

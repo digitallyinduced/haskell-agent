@@ -6,6 +6,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackend
     , autoCompactOpenAiBackendWithThreshold
     , autoCompactOpenAiBackendWithSender
+    , autoCompactOpenAiBackendWithSenderAndHook
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , compactOpenAIWith
@@ -13,7 +14,9 @@ module Agent.CLI.Compaction
     , installLiveCompactOutcome
     , runProviderCompact
     , runProviderCompactWith
+    , runProviderCompactWithContextWindow
     , runResponsesCompactWith
+    , runResponsesCompactWithContextWindow
     ) where
 
 import Agent.CLI.Error (formatApiError)
@@ -32,14 +35,17 @@ import Agent.Loop
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.Compaction
-    ( buildLocalCompactedHistory
+    ( buildLocalCompactedHistoryToFit
     , buildRemoteCompactedHistory
     , buildRemoteCompactionRequest
     , extractRemoteCompactionItem
     , estimateItemsTokens
+    , estimateRequestTokensWithItems
+    , estimateResponseCreateParamsTokens
     , remoteCompactionRetainedTokenBudget
     , summarizationPrompt
-    , trimRemoteCompactionHistoryToFit
+    , trimRemoteCompactionRequestToFit
+    , trimResponseHistoryToFit
     , userTextItem
     )
 import Agent.OpenAI.ModelMetadata
@@ -50,11 +56,11 @@ import Agent.OpenAI.ModelMetadata
 import Agent.Responses.LoopBackend
     ( assistantTextFromResponse
     , responseTokenUsage
-    , toolResultToItem
     , turnInputsToItems
     , withRequestInput
     )
 import Agent.Responses.Types
+import Agent.ToolDispatch (ToolCallResult(..))
 import Agent.Provider
     ( Provider(..)
     , TokenProvider
@@ -69,7 +75,7 @@ import Control.Monad.Trans.Except
     ( ExceptT
     , throwE
     )
-import Control.Exception.Safe (mask, onException)
+import Control.Exception.Safe (catchAny, mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
@@ -116,7 +122,24 @@ runProviderCompactWith
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runProviderCompactWith openAiSender recordUsage provider tokenProvider
+runProviderCompactWith =
+    runProviderCompactWithContextWindow Nothing
+
+-- | Variant of 'runProviderCompactWith' that receives the selected model's
+-- machine-readable context window. Portable providers must not inherit the
+-- unrelated Codex fallback when their model metadata is absent.
+runProviderCompactWithContextWindow
+    :: Maybe Int
+    -> Maybe OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> Provider
+    -> Maybe TokenProvider
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runProviderCompactWithContextWindow contextWindow openAiSender recordUsage
+        provider tokenProvider
         paramsRef transcriptRef focus = do
     params <- readIORef paramsRef
     history <- readIORef transcriptRef
@@ -183,14 +206,17 @@ runProviderCompactWith openAiSender recordUsage provider tokenProvider
 
     summarizeTextAttempt sender params history focus
         | null history = pure (compactTextFailure "nothing to compact")
-        | otherwise =
-            mapCompactAttemptError formatApiError
-                <$> summarizeLocalAttempt
-                    sender
-                    params
-                    history
-                    (estimateItemsTokens history)
-                    focus
+        | otherwise = case configuredContextWindow params contextWindow of
+            Left message -> pure (compactTextFailure message)
+            Right limit ->
+                mapCompactAttemptError formatApiError
+                    <$> summarizePortableLocalAttempt
+                        limit
+                        sender
+                        params
+                        history
+                        (estimateItemsTokens history)
+                        focus
 
 -- | Run local-summary compaction through any stateless Responses-compatible
 -- sender, including user-configured local endpoints.
@@ -201,21 +227,52 @@ runResponsesCompactWith
     -> IORef [ResponseItem]
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
-runResponsesCompactWith sender recordUsage paramsRef transcriptRef focus = do
+runResponsesCompactWith =
+    runResponsesCompactWithContextWindow Nothing
+
+runResponsesCompactWithContextWindow
+    :: Maybe Int
+    -> (ResponseCreateParams -> IO (Either ApiError Response))
+    -> (TokenUsage -> IO ())
+    -> IORef ResponseCreateParams
+    -> IORef [ResponseItem]
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+runResponsesCompactWithContextWindow contextWindow sender recordUsage
+        paramsRef transcriptRef focus = do
     params <- readIORef paramsRef
     history <- readIORef transcriptRef
     attempt <- runAttemptAndRecord recordUsage $
         if null history
             then pure (compactTextFailure "nothing to compact")
-            else
-                mapCompactAttemptError formatApiError
-                    <$> summarizeLocalAttempt
-                        sender
-                        params
-                        history
-                        (estimateItemsTokens history)
-                        focus
+            else case configuredContextWindow params contextWindow of
+                Left message -> pure (compactTextFailure message)
+                Right limit ->
+                    mapCompactAttemptError formatApiError
+                        <$> summarizePortableLocalAttempt
+                            limit
+                            sender
+                            params
+                            history
+                            (estimateItemsTokens history)
+                            focus
     pure attempt.compactAttemptResult
+
+configuredContextWindow
+    :: ResponseCreateParams
+    -> Maybe Int
+    -> Either Text Int
+configuredContextWindow _params = \case
+    Just contextWindow
+        | contextWindow > 0 -> Right contextWindow
+        | otherwise ->
+            Left "model context_window must be positive"
+    Nothing ->
+        Left
+            ( "the effective transport model has no context_window metadata; "
+                <> "add a positive context_window to its model catalog entry "
+                <> "before using /compact"
+            )
 
 compactTextFailure :: Text -> CompactAttempt Text
 compactTextFailure message =
@@ -351,41 +408,83 @@ compactRemoteV2Attempt
     -> [ResponseItem]
     -> Int
     -> IO (CompactAttempt ApiError)
-compactRemoteV2Attempt send params history before
+compactRemoteV2Attempt send params history before =
+    compactRemoteV2AttemptWithRetainedBudget
+        send
+        params
+        history
+        before
+        (const remoteCompactionRetainedTokenBudget)
+
+compactRemoteV2AttemptWithRetainedBudget
+    :: OpenAiCompactionSender
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+    -> (ResponseItem -> Int)
+    -> IO (CompactAttempt ApiError)
+compactRemoteV2AttemptWithRetainedBudget
+        send params history before retainedBudgetFor
     | null history =
         pure $ CompactAttempt emptyTokenUsage $
             Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
     | otherwise = do
-        let requestHistory =
-                trimRemoteCompactionHistoryToFit
-                    (codexEffectiveContextWindowFor params.model)
-                    params.instructions
+        let contextWindow =
+                codexEffectiveContextWindowFor params.model
+            requestHistory =
+                trimRemoteCompactionRequestToFit
+                    contextWindow
+                    params
                     history
             request = buildRemoteCompactionRequest params requestHistory
-        send request >>= \case
-            Left err ->
-                pure (CompactAttempt emptyTokenUsage (Left err))
-            Right response ->
-                pure CompactAttempt
-                    { compactAttemptUsage = responseTokenUsage response
-                    , compactAttemptResult = do
-                        checkpoint <-
-                            either
-                                (Left . protocolError)
-                                Right
-                                (extractRemoteCompactionItem response)
-                        let items =
-                                buildRemoteCompactedHistory
-                                    remoteCompactionRetainedTokenBudget
-                                    history
-                                    checkpoint
-                        Right CompactOutcome
-                            { compactBeforeTokens = before
-                            , compactAfterTokens = estimateItemsTokens items
-                            , compactHistory = items
-                            , compactSummary = "Context compacted remotely."
+        if estimateResponseCreateParamsTokens request > contextWindow
+            then pure $ CompactAttempt emptyTokenUsage $
+                Left (requestTooLargeError "remote compaction")
+            else
+                send request >>= \case
+                    Left err ->
+                        pure (CompactAttempt emptyTokenUsage (Left err))
+                    Right response ->
+                        pure CompactAttempt
+                            { compactAttemptUsage = responseTokenUsage response
+                            , compactAttemptResult = do
+                                checkpoint <-
+                                    either
+                                        (Left . protocolError)
+                                        Right
+                                        (extractRemoteCompactionItem response)
+                                let items =
+                                        buildRemoteCompactedHistory
+                                            ( min
+                                                (max 0
+                                                    (retainedBudgetFor checkpoint))
+                                                ( max 0
+                                                    ( contextWindow
+                                                        - estimateRequestTokensWithItems
+                                                            params
+                                                            [checkpoint]
+                                                    )
+                                                )
+                                            )
+                                            history
+                                            checkpoint
+                                if
+                                    estimateRequestTokensWithItems params items
+                                        > contextWindow
+                                    then
+                                        Left
+                                            (requestTooLargeError
+                                                "remote compacted snapshot")
+                                    else
+                                        Right CompactOutcome
+                                            { compactBeforeTokens = before
+                                            , compactAfterTokens =
+                                                estimateItemsTokens items
+                                            , compactHistory = items
+                                            , compactSummary =
+                                                "Context compacted remotely."
+                                            }
                             }
-                    }
   where
     protocolError message =
         ProviderError ApiErrorType message Nothing
@@ -397,50 +496,144 @@ summarizeLocalAttempt
     -> Int
     -> Maybe Text
     -> IO (CompactAttempt ApiError)
-summarizeLocalAttempt send params history before focus
+summarizeLocalAttempt send params history before focus =
+    summarizeLocalAttemptWith
+        (codexEffectiveContextWindowFor params.model)
+        id
+        send
+        params
+        history
+        before
+        focus
+
+summarizePortableLocalAttempt
+    :: Int
+    -> OpenAiCompactionSender
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+    -> Maybe Text
+    -> IO (CompactAttempt ApiError)
+summarizePortableLocalAttempt contextWindow =
+    summarizeLocalAttemptWith
+        contextWindow
+        (filter isPortableLocalSummaryItem)
+
+summarizeLocalAttemptWith
+    :: Int
+    -> ([ResponseItem] -> [ResponseItem])
+    -> OpenAiCompactionSender
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+    -> Maybe Text
+    -> IO (CompactAttempt ApiError)
+summarizeLocalAttemptWith contextWindow prepareHistory send params history
+        before focus
     | null history =
         pure $ CompactAttempt emptyTokenUsage $
             Left (ProviderError InvalidRequestError "nothing to compact" Nothing)
+    | null summaryHistory =
+        pure $ CompactAttempt emptyTokenUsage $
+            Left
+                (ProviderError InvalidRequestError
+                    "nothing compatible to compact"
+                    Nothing)
     | otherwise = do
         let summaryPrompt = summarizationPrompt focus
             ResponseCreateParams{..} = params
             summaryParams =
                 ResponseCreateParams
                     { tools = Nothing
+                    , toolChoice = Nothing
+                    , maxToolCalls = Nothing
                     , parallelToolCalls = Just False
+                    , previousResponseId = Nothing
+                    , conversation = Nothing
                     -- The ChatGPT Codex REST endpoint only accepts streaming
                     -- Responses requests, and this client decodes its SSE result.
                     , stream = Just True
                     , ..
                     }
+            promptItem = userTextItem summaryPrompt
+            requestHistory =
+                trimResponseHistoryToFit
+                    contextWindow
+                    summaryParams
+                    [promptItem]
+                    summaryHistory
             request =
                 withRequestInput
                     summaryParams
-                    (history <> [userTextItem summaryPrompt])
-        send request >>= \case
-            Left err ->
-                pure (CompactAttempt emptyTokenUsage (Left err))
-            Right response ->
-                pure CompactAttempt
-                    { compactAttemptUsage = responseTokenUsage response
-                    , compactAttemptResult =
-                        case assistantTextFromResponse response of
-                            Nothing ->
-                                Left (ProviderError ApiErrorType
-                                    "compaction produced no summary text"
-                                    Nothing)
-                            Just summary ->
-                                let items =
-                                        buildLocalCompactedHistory
-                                            6 history summary
-                                in Right CompactOutcome
-                                    { compactBeforeTokens = before
-                                    , compactAfterTokens =
-                                        estimateItemsTokens items
-                                    , compactHistory = items
-                                    , compactSummary = summary
-                                    }
-                    }
+                    (requestHistory <> [promptItem])
+        if estimateResponseCreateParamsTokens request > contextWindow
+            then pure $ CompactAttempt emptyTokenUsage $
+                Left (requestTooLargeError "local compaction")
+            else
+                send request >>= \case
+                    Left err ->
+                        pure (CompactAttempt emptyTokenUsage (Left err))
+                    Right response ->
+                        pure CompactAttempt
+                            { compactAttemptUsage = responseTokenUsage response
+                            , compactAttemptResult =
+                                if response.status /= ResponseCompleted
+                                    then Left (ProviderError ApiErrorType
+                                        ( "compaction response was not complete: "
+                                            <> Text.pack (show response.status)
+                                        )
+                                        Nothing)
+                                    else
+                                        case assistantTextFromResponse response of
+                                            Nothing ->
+                                                Left (ProviderError ApiErrorType
+                                                    "compaction produced no summary text"
+                                                    Nothing)
+                                            Just summary
+                                                | Text.null
+                                                    (Text.strip summary) ->
+                                                    Left
+                                                        (ProviderError ApiErrorType
+                                                            "compaction produced no summary text"
+                                                            Nothing)
+                                            Just summary ->
+                                                let items =
+                                                        buildLocalCompactedHistoryToFit
+                                                            contextWindow
+                                                            params
+                                                            6
+                                                            history
+                                                            summary
+                                                in if
+                                                    estimateRequestTokensWithItems
+                                                        params
+                                                        items
+                                                        > contextWindow
+                                                    then Left
+                                                        (requestTooLargeError
+                                                            "local compacted snapshot")
+                                                    else Right CompactOutcome
+                                                        { compactBeforeTokens = before
+                                                        , compactAfterTokens =
+                                                            estimateItemsTokens items
+                                                        , compactHistory = items
+                                                        , compactSummary = summary
+                                                        }
+                            }
+  where
+    summaryHistory = prepareHistory history
+
+isPortableLocalSummaryItem :: ResponseItem -> Bool
+isPortableLocalSummaryItem = \case
+    -- OpenAI checkpoints are opaque provider protocol items. Preserve them
+    -- for focused OpenAI summaries, but never replay them through
+    -- xAI/OpenRouter or user-configured Responses endpoints.
+    KnownResponseItem ItemCompaction _ -> False
+    KnownResponseItem ItemCompactionTrigger _ -> False
+    UnknownResponseItem tagged ->
+        Text.toLower (Text.strip tagged.tag)
+            `notElem` ["compaction", "compaction_summary", "compaction_trigger"]
+    _ -> True
 
 autoCompactOpenAiBackend
     :: TokenProvider
@@ -483,25 +676,278 @@ autoCompactOpenAiBackendWithSender
     -> Backend
 autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
         getParams contextTokensRef backend =
-    autoCompactOpenAiBackendWithLimit
-        getLimit
-        compactAction
+    autoCompactOpenAiBackendWithSenderAndHook
+        configuredThreshold
+        send
         recordUsage
+        getParams
+        (pure ())
         contextTokensRef
         backend
+
+-- | Variant that runs a best-effort hook after a compacted continuation is
+-- accepted. The root CLI uses it to queue fresh generated project/skill
+-- context for the next turn.
+autoCompactOpenAiBackendWithSenderAndHook
+    :: Maybe Int
+    -> OpenAiCompactionSender
+    -> (TokenUsage -> IO ())
+    -> IO ResponseCreateParams
+    -> IO ()
+    -> IORef (Maybe (Int, Int))
+    -> Backend
+    -> Backend
+autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
+        getParams onCompacted contextTokensRef backend =
+    rejectOversizedInitialRequest getParams $
+        boundCompletedToolContinuations getParams $
+            autoCompactOpenAiBackendWithLimit
+                getLimit
+                compactAction
+                recordUsage
+                estimateProjectedRequest
+                onCompacted
+                contextTokensRef
+                backend
   where
     getLimit = do
         params <- getParams
-        pure $ fromMaybe
-            (codexAutoCompactTokenLimitFor params.model)
-            configuredThreshold
-    compactAction history = do
+        let configuredLimit =
+                fromMaybe
+                    (codexAutoCompactTokenLimitFor params.model)
+                    configuredThreshold
+        pure $
+            min
+                configuredLimit
+                (codexEffectiveContextWindowFor params.model)
+    compactAction history inputs = do
         params <- getParams
-        compactRemoteV2Attempt
-            send
-            params
-            history
-            (estimateItemsTokens history)
+        tokenLimit <- getLimit
+        let fixedRequestTokens =
+                estimateRequestTokensWithItems params []
+            pendingItems = turnInputsToItems inputs
+            contextWindow =
+                codexEffectiveContextWindowFor params.model
+            checkpointBaseTokens checkpoint =
+                estimateRequestTokensWithItems params [checkpoint]
+            continuationBaseTokens checkpoint =
+                estimateRequestTokensWithItems
+                    params
+                    (checkpoint : pendingItems)
+            retainedBudget checkpoint =
+                min remoteCompactionRetainedTokenBudget $
+                    max 0
+                        ( tokenLimit
+                            - continuationBaseTokens checkpoint
+                            - automaticCompactionHeadroom tokenLimit
+                        )
+            thresholdError minimumTokens =
+                ProviderError InvalidRequestError
+                    ( "automatic compaction threshold "
+                        <> Text.pack (show tokenLimit)
+                        <> " is below the minimum compacted request size of "
+                        <> Text.pack (show minimumTokens)
+                        <> " tokens; increase --compact-threshold"
+                    )
+                    Nothing
+        if tokenLimit <= 0 || fixedRequestTokens >= tokenLimit
+            then
+                pure $ CompactAttempt emptyTokenUsage $
+                    Left (thresholdError fixedRequestTokens)
+            else do
+                attempt <-
+                    compactRemoteV2AttemptWithRetainedBudget
+                        send
+                        params
+                        history
+                        (estimateItemsTokens history)
+                        retainedBudget
+                pure $
+                    case attempt.compactAttemptResult of
+                        Right outcome ->
+                            let continuationTokens =
+                                    estimateRequestTokensWithItems
+                                        params
+                                        (outcome.compactHistory <> pendingItems)
+                                (baseTokens, baseWithPendingTokens) =
+                                    case reverse outcome.compactHistory of
+                                        checkpoint : _ ->
+                                            ( checkpointBaseTokens checkpoint
+                                            , continuationBaseTokens checkpoint
+                                            )
+                                        [] ->
+                                            ( fixedRequestTokens
+                                            , estimateRequestTokensWithItems
+                                                params
+                                                pendingItems
+                                            )
+                            in if continuationTokens > contextWindow
+                                then
+                                    attempt
+                                        { compactAttemptResult =
+                                            Left
+                                                (requestTooLargeError
+                                                    "automatic compacted continuation")
+                                        }
+                                else if baseTokens >= tokenLimit
+                                    then
+                                        attempt
+                                            { compactAttemptResult =
+                                                Left
+                                                    (thresholdError baseTokens)
+                                            }
+                                    else if
+                                        baseWithPendingTokens < tokenLimit
+                                            && continuationTokens >= tokenLimit
+                                        then
+                                            attempt
+                                                { compactAttemptResult =
+                                                    Left
+                                                        (thresholdError
+                                                            continuationTokens)
+                                                }
+                                        else attempt
+                        _ -> attempt
+    estimateProjectedRequest _ history inputs = do
+        params <- getParams
+        pure $
+            estimateRequestTokensWithItems
+                params
+                (history <> turnInputsToItems inputs)
+
+rejectOversizedInitialRequest
+    :: IO ResponseCreateParams
+    -> Backend
+    -> Backend
+rejectOversizedInitialRequest getParams (Backend submit) =
+    Backend \history previous inputs onEvent ->
+        if null history
+            then do
+                params <- getParams
+                let requestTokens =
+                        estimateRequestTokensWithItems
+                            params
+                            (turnInputsToItems inputs)
+                    contextWindow =
+                        codexEffectiveContextWindowFor params.model
+                if requestTokens > contextWindow
+                    then
+                        pure $
+                            Left $
+                                requestTooLargeError "initial"
+                    else submit history previous inputs onEvent
+            else submit history previous inputs onEvent
+
+-- A completed tool result must be submitted against its live response chain
+-- before that call/output pair can be compacted. If the result itself would
+-- overflow the model context, cap only its output text while preserving the
+-- protocol identifiers and continuation id.
+boundCompletedToolContinuations
+    :: IO ResponseCreateParams
+    -> Backend
+    -> Backend
+boundCompletedToolContinuations getParams (Backend submit) =
+    Backend \history previous inputs onEvent ->
+        if any isCompletedTool inputs
+            then do
+                params <- getParams
+                let contextWindow =
+                        codexEffectiveContextWindowFor params.model
+                    requestTokens candidate =
+                        estimateRequestTokensWithItems
+                            params
+                            (history <> turnInputsToItems candidate)
+                if requestTokens inputs <= contextWindow
+                    then submit history previous inputs onEvent
+                    else
+                        case
+                            fitCompletedToolOutputsToLimit
+                                ( max 0
+                                    ( contextWindow
+                                        - automaticCompactionHeadroom
+                                            contextWindow
+                                    )
+                                )
+                                requestTokens
+                                inputs
+                        of
+                            Just bounded ->
+                                submit history previous bounded onEvent
+                            Nothing ->
+                                case
+                                    fitCompletedToolOutputsToLimit
+                                        contextWindow
+                                        requestTokens
+                                        inputs
+                                of
+                                    Just bounded ->
+                                        submit history previous bounded onEvent
+                                    Nothing ->
+                                        pure $
+                                            Left toolContinuationTooLargeError
+            else submit history previous inputs onEvent
+  where
+    isCompletedTool = \case
+        CompletedTool{} -> True
+        _ -> False
+
+fitCompletedToolOutputsToLimit
+    :: Int
+    -> ([TurnInput] -> Int)
+    -> [TurnInput]
+    -> Maybe [TurnInput]
+fitCompletedToolOutputsToLimit limit requestTokens inputs
+    | requestTokens inputs <= limit = Just inputs
+    | requestTokens minimal > limit = Nothing
+    | otherwise = Just (search 0 maximumOutputLength minimal)
+  where
+    maximumOutputLength =
+        maximum
+            ( 0 :
+                [ Text.length result.output
+                | CompletedTool result <- inputs
+                ]
+            )
+    minimal = capCompletedToolOutputs 0 inputs
+
+    search low high best
+        | low > high = best
+        | otherwise =
+            let middle = (low + high) `div` 2
+                candidate = capCompletedToolOutputs middle inputs
+            in if requestTokens candidate <= limit
+                then search (middle + 1) high candidate
+                else search low (middle - 1) best
+
+capCompletedToolOutputs :: Int -> [TurnInput] -> [TurnInput]
+capCompletedToolOutputs maximumCharacters =
+    map \case
+        CompletedTool result ->
+            CompletedTool ToolCallResult
+                { callId = result.callId
+                , output =
+                    capToolOutput maximumCharacters result.output
+                , callKind = result.callKind
+                }
+        input -> input
+
+capToolOutput :: Int -> Text -> Text
+capToolOutput maximumCharacters text
+    | Text.length text <= maximumCharacters = text
+    | maximumCharacters <= 0 = ""
+    | maximumCharacters <= noticeLength =
+        Text.take maximumCharacters toolOutputTruncationNotice
+    | otherwise =
+        Text.take
+            (maximumCharacters - noticeLength)
+            text
+            <> toolOutputTruncationNotice
+  where
+    noticeLength = Text.length toolOutputTruncationNotice
+
+toolOutputTruncationNotice :: Text
+toolOutputTruncationNotice =
+    "\n[tool output truncated to fit the model context]"
 
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
@@ -511,11 +957,13 @@ autoCompactOpenAiBackendWith
 autoCompactOpenAiBackendWith compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
-        (const
+        (\_history _inputs ->
             (CompactAttempt emptyTokenUsage
                 <$> fmap (either (Left . textCompactionError) Right)
                     compactAction))
         (const (pure ()))
+        estimateProjectedFromCache
+        (pure ())
   where
     textCompactionError message =
         ProviderError ApiErrorType message Nothing
@@ -528,79 +976,61 @@ autoCompactOpenAiBackendWithApi
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
-        (const (CompactAttempt emptyTokenUsage <$> compactAction))
+        (\_history _inputs ->
+            CompactAttempt emptyTokenUsage <$> compactAction)
         (const (pure ()))
+        estimateProjectedFromCache
+        (pure ())
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
-    -> ([ResponseItem] -> IO (CompactAttempt ApiError))
+    -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
+    -> (Maybe (Int, Int) -> [ResponseItem] -> [TurnInput] -> IO Int)
+    -> IO ()
     -> IORef (Maybe (Int, Int))
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
+        estimateProjected
+        onCompacted
         contextTokensRef
         (Backend submit) =
     Backend \history previous inputs onEvent -> do
         contextState <- readIORef contextTokensRef
         tokenLimit <- getLimit
-        let historyLength = length history
-            pendingItems = turnInputsToItems inputs
-            projectedTokens =
-                case contextState of
-                    Just (tokens, observedLength)
-                        | observedLength == historyLength ->
-                            tokens + estimateItemsTokens pendingItems
-                    _ ->
-                        estimateItemsTokens (history <> pendingItems)
-            shouldCompact =
+        projectedTokens <- estimateProjected contextState history inputs
+        let shouldCompact =
                 not (null history)
                     && projectedTokens >= tokenLimit
-        if shouldCompact
-            then if any isCompletedTool inputs
-                then compactToolContinuation
-                    contextState history inputs onEvent
-                else compactThenSubmit
-                    contextState history inputs onEvent
+        if shouldCompact && not (any isCompletedTool inputs)
+            then compactThenSubmit
+                tokenLimit
+                contextState history inputs onEvent
             else submitAndTrack
                 contextState history previous inputs onEvent
   where
-    runCompaction history =
+    runCompaction history inputs =
         (.compactAttemptResult)
-            <$> runAttemptAndRecord recordUsage (compactAction history)
+            <$> runAttemptAndRecord recordUsage (compactAction history inputs)
 
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
 
-    -- Tool outputs must be part of the checkpoint, but the wrapped backend has
-    -- not committed them yet. Absorb them into history before compaction, then
-    -- resume from the new checkpoint without sending them a second time.
-    compactToolContinuation oldTokens oldHistory inputs onEvent = do
-        mask \restore -> do
-            let (toolItems, remainingInputs) = absorbCompletedTools inputs
-                compactHistory = oldHistory <> toolItems
-                rollback = writeIORef contextTokensRef oldTokens
-            (do
-                onEvent (ActivityUpdated "Compacting context…")
-                restore (runCompaction compactHistory) >>= \case
-                    Left err -> do
-                        rollback
-                        pure (Left (automaticCompactionError err))
-                    Right outcome ->
-                        installSubmitAndTrack
-                            restore
-                            rollback
-                            outcome
-                            remainingInputs
-                            onEvent
-                ) `onException` rollback
-
-    compactThenSubmit oldTokens oldHistory inputs onEvent = do
+    compactThenSubmit tokenLimit oldTokens oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
-        runCompaction oldHistory >>= \case
+        runCompaction oldHistory inputs >>= \case
                 Left err ->
                     pure (Left (automaticCompactionError err))
+                Right outcome
+                    | outcome.compactAfterTokens >= tokenLimit ->
+                        pure $
+                            Left $
+                                automaticCompactionError $
+                                    compactedSnapshotThresholdError
+                                        tokenLimit
+                                        outcome.compactAfterTokens
                 Right outcome ->
                     mask \restore -> do
                         let rollback = writeIORef contextTokensRef oldTokens
@@ -619,7 +1049,9 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         result <- restore (submit compactedHistory Nothing inputs onEvent)
         case result of
             Left _ -> rollback
-            Right _ -> invalidateContextTokens
+            Right _ -> do
+                invalidateContextTokens
+                onCompacted `catchAny` const (pure ())
         pure result
 
     submitAndTrack oldTokens history previous inputs onEvent = do
@@ -638,16 +1070,6 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
     invalidateContextTokens =
         writeIORef contextTokensRef Nothing
 
-    absorbCompletedTools =
-        foldr
-            (\input (toolItems, otherInputs) ->
-                case input of
-                    CompletedTool result ->
-                        (toolResultToItem result : toolItems, otherInputs)
-                    _ ->
-                        (toolItems, input : otherInputs))
-            ([], [])
-
     automaticCompactionError = \case
         ProviderError errorType message retryAfter ->
             ProviderError errorType
@@ -658,6 +1080,27 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         CredentialError message ->
             CredentialError ("automatic compaction failed: " <> message)
         err -> err
+
+estimateProjectedFromCache
+    :: Maybe (Int, Int)
+    -> [ResponseItem]
+    -> [TurnInput]
+    -> IO Int
+estimateProjectedFromCache contextState history inputs =
+    pure $
+        case contextState of
+            Just (tokens, observedLength)
+                | observedLength >= 0
+                , observedLength == length history ->
+                    tokens + estimateItemsTokens pendingItems
+            _ ->
+                estimateItemsTokens (history <> pendingItems)
+  where
+    pendingItems = turnInputsToItems inputs
+
+automaticCompactionHeadroom :: Int -> Int
+automaticCompactionHeadroom tokenLimit =
+    max 1_024 (max 0 tokenLimit `div` 10)
 
 requireTokenProvider
     :: Provider
@@ -677,6 +1120,30 @@ providerLabel = \case
     XAIProvider -> "xai"
     OpenRouterProvider -> "openrouter"
     ClaudeCodeProvider -> "claude-code"
+
+requestTooLargeError :: Text -> ApiError
+requestTooLargeError label =
+    ProviderError InvalidRequestError
+        (label <> " request cannot fit within the model context window")
+        Nothing
+
+compactedSnapshotThresholdError :: Int -> Int -> ApiError
+compactedSnapshotThresholdError tokenLimit compactedTokens =
+    ProviderError InvalidRequestError
+        ( "compaction produced a "
+            <> Text.pack (show compactedTokens)
+            <> "-token snapshot at or above the automatic compaction threshold "
+            <> Text.pack (show tokenLimit)
+            <> "; increase --compact-threshold"
+        )
+        Nothing
+
+toolContinuationTooLargeError :: ApiError
+toolContinuationTooLargeError =
+    ProviderError InvalidRequestError
+        "tool continuation request cannot fit within the model context window \
+        \even after truncating completed tool output"
+        Nothing
 
 hasFocus :: Maybe Text -> Bool
 hasFocus =

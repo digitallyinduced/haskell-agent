@@ -43,6 +43,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Telegram" do
+    describe "telegramAgentPrompt" do
+        it "injects Telegram streaming and brevity guidance" do
+            let prompt = telegramAgentPrompt "Inspect the failing tests"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "shown to the user as a live Telegram draft"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Keep messages concise and conversational"
+            prompt `shouldSatisfy`
+                Text.isPrefixOf "Inspect the failing tests"
+
+    describe "telegramActivityDraftHtml" do
+        it "shows escaped reasoning summaries and streamed answer text" do
+            Bridge.telegramActivityDraftHtml
+                "Writing reply…"
+                "Checking <files>"
+                "Found & fixed\nDone"
+                `shouldBe`
+                "<tg-thinking>Checking &lt;files&gt;</tg-thinking>\
+                \<p>Found &amp; fixed<br>Done</p>"
+
     describe "parseTelegramArgs" do
         it "runs the configured gateway by default" do
             parseTelegramArgs [] `shouldBe` Right TelegramRun
@@ -269,6 +289,30 @@ spec = describe "Agent.Telegram" do
             markdownToTelegramHtml "before\n```haskell\nx < y && **raw**\n```\nafter"
                 `shouldBe`
                     "before<br><pre>x &lt; y &amp;&amp; **raw**\n</pre><br>after"
+
+        it "renders ATX headings with native bold entities" do
+            markdownToTelegramHtml
+                "# Summary\n#### Details with *emphasis*\nnot# a heading"
+                `shouldBe`
+                    "<b>Summary</b><br>\
+                    \<b>Details with <i>emphasis</i></b><br>\
+                    \not# a heading"
+
+        it "renders Markdown tables as aligned preformatted text" do
+            markdownToTelegramHtml
+                "| Metric | Before | Current | Change |\n\
+                \|:---|---:|---:|:---:|\n\
+                \| Clicks | 2,026 | 3,487 | **+72%** |\n\
+                \| Views & visits | 77 | 169 | +119% |"
+                `shouldBe`
+                    "<pre>Metric         | Before | Current | Change\n\
+                    \---------------+--------+---------+-------\n\
+                    \Clicks         |  2,026 |   3,487 |  +72% \n\
+                    \Views &amp; visits |     77 |     169 | +119% </pre>"
+
+        it "does not mistake ordinary pipe-separated text for a table" do
+            markdownToTelegramHtml "one | two\nstill | text"
+                `shouldBe` "one | two<br>still | text"
 
         it "leaves unmatched delimiters literal" do
             markdownToTelegramHtml "unfinished **bold and `code"

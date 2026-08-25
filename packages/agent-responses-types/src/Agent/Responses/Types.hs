@@ -52,6 +52,7 @@ module Agent.Responses.Types
     , ResponseTool(..)
     , ResponseToolType(..)
     , responseToolTypeText
+    , knownResponseTool
     , FunctionTool(..)
 
       -- * Response

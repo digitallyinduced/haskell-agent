@@ -25,6 +25,8 @@ API keys in the file.
    user. The resulting request URL is `<base_url>/responses`.
 4. Determine whether authentication is required. Store only the environment
    variable name in the config, never its secret value.
+5. Determine the model's documented context window. Store it as a positive
+   integer `context_window`; do not infer it from a display label.
 
 Ask a concise follow-up question only for information that cannot be inferred
 or verified.
@@ -68,6 +70,7 @@ or `-`, then add:
       "connection": "local-name",
       "model": "exact-wire-model-name",
       "dialect": "generic-responses",
+      "context_window": 32768,
       "label": "local"
     }
   ]
@@ -77,7 +80,8 @@ or `-`, then add:
 For authenticated endpoints, replace `api_key_optional` with
 `"api_key_env": "PROVIDER_API_KEY"` and tell the user which variable to export.
 Use `codex` or `grok-build` only when the endpoint is known to require that
-model-facing protocol; otherwise use `generic-responses`.
+model-facing protocol; otherwise use `generic-responses`. Replace the
+illustrative `32768` context window with the endpoint's documented value.
 
 ### OpenRouter
 
@@ -93,7 +97,8 @@ and wire model name by omitting `model`:
 ```
 
 Use `codex` for OpenAI Codex-style models, `grok-build` for xAI Grok models,
-and `generic-responses` for other model families.
+and `generic-responses` for other model families. Add the model's verified
+numeric `context_window` to the same object.
 
 ### Built-in OpenAI or xAI
 
@@ -108,7 +113,9 @@ OpenAI use:
 }
 ```
 
-For xAI use connection `xai` and dialect `grok-build`.
+For xAI use connection `xai` and dialect `grok-build`, and add its verified
+numeric `context_window`. Built-in OpenAI compaction instead uses the
+repository's Codex model metadata.
 
 ## Validate and finish
 

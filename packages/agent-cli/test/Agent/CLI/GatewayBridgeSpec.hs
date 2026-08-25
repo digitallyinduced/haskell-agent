@@ -71,9 +71,13 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     }
                 wait running `shouldReturn` Just PermissionAllowOnce
 
-    it "publishes redacted activity rather than streamed content" $
+    it "publishes accumulated reasoning summaries and response text" $
         withBridgeRequest \request -> do
-            publishManagedLoopEvent request (TextDelta "secret response text")
+            publish <- newManagedLoopEventPublisher request
+            publish (ReasoningDelta "Checking ")
+            publish (ReasoningDelta "the files")
+            publish (TextDelta "Found ")
+            publish (TextDelta "the issue.")
             bytes <- LBS.readFile
                 (unsafeToFilePath (managedBridgeActivityPath request))
             activity <- case
@@ -84,6 +88,8 @@ spec = describe "Agent.CLI.GatewayBridge" do
                 Right value -> pure value
             activity.managedActivityKind `shouldBe` "writing"
             activity.managedActivityMessage `shouldBe` "Writing reply…"
+            activity.managedActivityReasoning `shouldBe` "Checking the files"
+            activity.managedActivityResponse `shouldBe` "Found the issue."
 
 withBridgeRequest :: (ManagedTurnRequest -> IO a) -> IO a
 withBridgeRequest action =

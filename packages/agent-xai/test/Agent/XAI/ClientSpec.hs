@@ -45,7 +45,15 @@ spec = do
             [request] <- readIORef recorded
             request.path `shouldBe` "/v1/responses"
             lookup "Authorization" request.headers `shouldBe` Just "Bearer token-a"
-            lookup "X-XAI-Token-Auth" request.headers `shouldBe` Just "xai-grok-cli"
+            lookup "X-XAI-Token-Auth" request.headers `shouldBe` Just grokTokenAuthValue
+            lookup "x-authenticateresponse" request.headers
+                `shouldBe` Just grokAuthenticateResponseValue
+            lookup "x-grok-client-identifier" request.headers
+                `shouldBe` Just grokClientIdentifier
+            lookup "x-grok-client-version" request.headers
+                `shouldBe` Just defaultGrokClientVersion
+            lookup "User-Agent" request.headers
+                `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
             (inputRoles <$> requestBodyObject request) `shouldBe` Just ["system", "user"]

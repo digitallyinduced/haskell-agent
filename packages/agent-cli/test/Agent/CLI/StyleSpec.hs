@@ -106,3 +106,18 @@ spec = do
                 , firstFrame <> " renamed"
                 , "renamed"
                 ]
+
+        it "keeps reduced-motion busy titles static" do
+            written <- newIORef []
+            let firstFrame = case spinnerFrames of
+                    frame : _ -> frame
+                    [] -> "*"
+            controller <- newWindowTitleController
+                MotionReduced
+                "initial"
+                id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleWorker
+            actual <- readIORef written
+            actual `shouldBe` [firstFrame <> " initial"]

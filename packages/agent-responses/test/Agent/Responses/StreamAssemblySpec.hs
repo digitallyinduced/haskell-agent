@@ -4,9 +4,27 @@ import Agent.Error (ApiError(..))
 import Agent.Responses.SSE (parseSseEvents)
 import Agent.Responses.StreamAssembly
 import Agent.Responses.Types
+import Control.Applicative ((<|>))
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , chooseInt
+    , conjoin
+    , counterexample
+    , elements
+    , listOf
+    , listOf1
+    , oneof
+    , (===)
+    )
 
 spec :: Spec
 spec = describe "buildStreamResponse" do
@@ -215,6 +233,99 @@ spec = describe "buildStreamResponse" do
                 message `shouldBe` "custom missing completion"
             other -> expectationFailure
                 ("expected missing-completion JsonDecodeError, got " <> show other)
+
+    modifyMaxSuccess (const 500) $
+        prop "matches an independent model for adversarial indexed events" $
+            \(AdversarialOperations operations) ->
+                let events =
+                        [ ResponseCreatedEvent
+                            (responseFragment "adversarial")
+                            Nothing
+                            mempty
+                        ]
+                        <> map operationEvent operations
+                        <> [ ResponseCompletedEvent
+                                (responseFragment "adversarial")
+                                Nothing
+                                mempty
+                           ]
+                    expectedModel =
+                        foldl applyExpected Map.empty operations
+                    expected =
+                        expectedOutput expectedModel
+                in case buildStreamResponse config events of
+                    Left err ->
+                        counterexample
+                            ( "unexpected assembly failure: "
+                                <> show err
+                                <> "\noperations: "
+                                <> show operations
+                            )
+                            False
+                    Right response ->
+                        let actual = map Aeson.toJSON response.output
+                        in counterexample
+                            ( "operations: " <> show operations
+                                <> "\nexpected: " <> show expected
+                                <> "\nactual: " <> show actual
+                            )
+                            (actual === expected)
+
+    modifyMaxSuccess (const 300) $
+        prop "keeps done precedence when a late added event is merged" $
+            \doneFragment lateFragment terminalFragment ->
+                let doneOperation = IndexedOperation (Just 0) True doneFragment
+                    lateOperation = IndexedOperation (Just 0) False lateFragment
+                    terminalValue =
+                        Aeson.toJSON (toResponseItem terminalFragment)
+                    streamedValue =
+                        mergeModelValues
+                            (Aeson.toJSON (toResponseItem doneFragment))
+                            (Aeson.toJSON (toResponseItem lateFragment))
+                    expected =
+                        [mergeModelValues terminalValue streamedValue]
+                    events =
+                        [ ResponseCreatedEvent
+                            (responseFragment "sticky-done")
+                            Nothing
+                            mempty
+                        , operationEvent doneOperation
+                        , operationEvent lateOperation
+                        , ResponseCompletedEvent
+                            (responseFragmentWithOutput
+                                "sticky-done"
+                                [toResponseItem terminalFragment])
+                            Nothing
+                            mempty
+                        ]
+                in case buildStreamResponse config events of
+                    Left err ->
+                        counterexample
+                            ("unexpected assembly failure: " <> show err)
+                            False
+                    Right response ->
+                        map Aeson.toJSON response.output === expected
+
+    modifyMaxSuccess (const 300) $
+        prop "ignores all events after the first terminal lifecycle event" $
+            \(LifecycleTrace before terminal after) ->
+                let events =
+                        map lifecycleEvent before
+                        <> [lifecycleEvent terminal]
+                        <> map lifecycleEvent after
+                    expectedId = terminal.lifecycleId
+                in case buildStreamResponse config events of
+                    Left err ->
+                        counterexample
+                            ("unexpected assembly failure: " <> show err)
+                            False
+                    Right response ->
+                        conjoin
+                            [ counterexample
+                                ("terminal: " <> show terminal
+                                    <> "\nafter: " <> show after)
+                                (response.responseId === expectedId)
+                            ]
   where
     config = StreamAssemblyConfig
         { missingCompletionMessage = "custom missing completion"
@@ -226,6 +337,299 @@ spec = describe "buildStreamResponse" do
                     ("failed: " <> failedStreamResponseMessage failure)
         , incompleteAsFailure = True
         }
+
+responseFragment :: Text -> Aeson.Value
+responseFragment responseId =
+    Aeson.object
+        [ "id" Aeson..= responseId
+        , "created_at" Aeson..= (0 :: Int)
+        , "model" Aeson..= ("generated-model" :: Text)
+        , "status" Aeson..= ("completed" :: Text)
+        , "output" Aeson..= ([] :: [Aeson.Value])
+        ]
+
+responseFragmentWithOutput :: Text -> [ResponseItem] -> Aeson.Value
+responseFragmentWithOutput responseId output =
+    Aeson.object
+        [ "id" Aeson..= responseId
+        , "created_at" Aeson..= (0 :: Int)
+        , "model" Aeson..= ("generated-model" :: Text)
+        , "status" Aeson..= ("completed" :: Text)
+        , "output" Aeson..= output
+        ]
+
+-- This model deliberately stores raw item values rather than reusing the
+-- implementation's progress type. An explicit output index identifies one
+-- item, and later object fields overlay earlier fields.
+type StreamModel = Map.Map Int (Aeson.Value, Bool)
+
+data CallFragment = CallFragment
+    { fragmentItemId    :: !(Maybe Text)
+    , fragmentCallId    :: !Text
+    , fragmentName      :: !Text
+    , fragmentNamespace :: !(Maybe Text)
+    , fragmentArguments  :: !Text
+    , fragmentStatus     :: !(Maybe ItemStatus)
+    , fragmentMarker     :: !Text
+    }
+    deriving (Eq, Show)
+
+data LifecycleStep = LifecycleStep
+    { lifecycleId       :: !Text
+    , lifecycleTerminal :: !Bool
+    }
+    deriving (Eq, Show)
+
+instance Arbitrary LifecycleStep where
+    arbitrary = LifecycleStep
+        <$> elements ["response-before-a", "response-before-b", "response-final"]
+        <*> arbitrary
+
+data LifecycleTrace = LifecycleTrace
+    { lifecycleBefore   :: ![LifecycleStep]
+    , lifecycleTerminalStep :: !LifecycleStep
+    , lifecycleAfter    :: ![LifecycleStep]
+    }
+    deriving (Eq, Show)
+
+instance Arbitrary LifecycleTrace where
+    arbitrary = do
+        beforeIds <- listOf
+            (elements ["response-before-a", "response-before-b"])
+        terminal <- LifecycleStep
+            <$> elements ["response-final", "response-final-b"]
+            <*> pure True
+        after <- listOf arbitrary
+        pure (LifecycleTrace
+            (map (`LifecycleStep` False) beforeIds)
+            terminal
+            after)
+    shrink (LifecycleTrace before terminal after) =
+        [ LifecycleTrace before' terminal after
+        | before' <- shrink before
+        ]
+        <> [ LifecycleTrace before terminal after'
+           | after' <- shrink after
+           ]
+
+lifecycleEvent :: LifecycleStep -> ResponseStreamEvent
+lifecycleEvent step
+    | step.lifecycleTerminal =
+        ResponseCompletedEvent
+            (responseFragment step.lifecycleId)
+            Nothing
+            mempty
+    | otherwise =
+        ResponseCreatedEvent
+            (responseFragment step.lifecycleId)
+            Nothing
+            mempty
+
+instance Arbitrary CallFragment where
+    arbitrary = CallFragment
+        <$> arbitraryOptional
+        <*> elements ["call-a", "call-b", "call-c", "call-latest"]
+        <*> elements ["first", "second", "third", "latest"]
+        <*> arbitraryOptional
+        <*> elements ["{}", "{\"value\":1}", "{\"value\":2}", ""]
+        <*> arbitraryOptionalStatus
+        <*> elements ["marker-a", "marker-b", "marker-c", "marker-latest"]
+      where
+        arbitraryOptional =
+            elements
+                [ Nothing
+                , Just "item-a"
+                , Just "item-b"
+                , Just "item-c"
+                ]
+        arbitraryOptionalStatus =
+            elements
+                [ Nothing
+                , Just ItemInProgress
+                , Just ItemCompleted
+                , Just ItemIncomplete
+                ]
+
+data IndexedOperation = IndexedOperation
+    { operationIndex :: !(Maybe Int)
+    , operationDone  :: !Bool
+    , operationCall  :: !CallFragment
+    }
+    deriving (Eq, Show)
+
+instance Arbitrary IndexedOperation where
+    arbitrary = IndexedOperation
+        <$> oneof
+            [ pure Nothing
+            , Just <$> chooseInt (-3, 100)
+            ]
+        <*> arbitrary
+        <*> arbitrary
+
+newtype AdversarialOperations = AdversarialOperations [IndexedOperation]
+    deriving (Eq, Show)
+
+instance Arbitrary AdversarialOperations where
+    arbitrary = do
+        -- Keep these operations in every generated stream so that each
+        -- property run exercises duplicates, both orderings, and sparse,
+        -- out-of-order indexes. Additional operations remain arbitrary.
+        doneBeforeAddedIndex <- chooseInt (30, 40)
+        addedBeforeDoneIndex <- chooseInt (60, 70)
+        lateAddedIndex <- chooseInt (0, 10)
+        forced <- traverse
+            (\(index, done) ->
+                IndexedOperation index done <$> arbitrary)
+            [ (Just doneBeforeAddedIndex, True)
+            , (Just doneBeforeAddedIndex, False)
+            , (Just addedBeforeDoneIndex, False)
+            , (Just addedBeforeDoneIndex, True)
+            , (Just lateAddedIndex, True)
+            , (Just lateAddedIndex, False)
+            ]
+        noise <- listOf1
+            (IndexedOperation
+                <$> (oneof
+                    [ pure Nothing
+                    , Just <$> chooseInt (0, 100)
+                    ])
+                <*> arbitrary
+                <*> arbitrary)
+        let shared = CallFragment
+                { fragmentItemId = Just "shared-item"
+                , fragmentCallId = "shared-call"
+                , fragmentName = "shared"
+                , fragmentNamespace = Nothing
+                , fragmentArguments = "{}"
+                , fragmentStatus = Just ItemInProgress
+                , fragmentMarker = "shared"
+                }
+            conflicting = shared
+                { fragmentCallId = "other-call"
+                , fragmentName = "conflicting"
+                , fragmentMarker = "conflicting"
+                }
+            identityOperations =
+                [ IndexedOperation Nothing True shared
+                , IndexedOperation Nothing False conflicting
+                ]
+        pure (AdversarialOperations
+            (forced <> identityOperations <> noise))
+    shrink (AdversarialOperations operations) =
+        AdversarialOperations <$> shrink operations
+
+operationEvent :: IndexedOperation -> ResponseStreamEvent
+operationEvent operation
+    | operation.operationDone =
+        ResponseOutputItemDoneEvent
+            (toResponseItem operation.operationCall)
+            operation.operationIndex
+            Nothing
+            mempty
+    | otherwise =
+        ResponseOutputItemAddedEvent
+            (toResponseItem operation.operationCall)
+            operation.operationIndex
+            Nothing
+            mempty
+
+toResponseItem :: CallFragment -> ResponseItem
+toResponseItem fragment =
+    FunctionCallItem FunctionCall
+        { itemId = fragment.fragmentItemId
+        , callId = fragment.fragmentCallId
+        , name = fragment.fragmentName
+        , namespace = fragment.fragmentNamespace
+        , arguments = fragment.fragmentArguments
+        , encryptedFunctionArgs = Nothing
+        , status = fragment.fragmentStatus
+        , extraFields =
+            KeyMap.singleton
+                "model_test_marker"
+                (Aeson.String fragment.fragmentMarker)
+        }
+
+applyExpected :: StreamModel -> IndexedOperation -> StreamModel
+applyExpected expected operation =
+    Map.alter update outputIndex expected
+  where
+    newValue = Aeson.toJSON (toResponseItem operation.operationCall)
+    outputIndex =
+        fromMaybe (nextModelIndex expected) $
+            operation.operationIndex
+                <|> findModelItemIndex newValue expected
+                <|> if operation.operationDone
+                    then findPendingModelIndex newValue expected
+                    else Nothing
+    update Nothing = Just (newValue, operation.operationDone)
+    update (Just (oldValue, wasDone)) =
+        Just
+            ( mergeModelValues oldValue newValue
+            , wasDone || operation.operationDone
+            )
+
+mergeModelValues :: Aeson.Value -> Aeson.Value -> Aeson.Value
+mergeModelValues (Aeson.Object oldObject) (Aeson.Object newObject) =
+    Aeson.Object (KeyMap.union newObject oldObject)
+mergeModelValues _ newValue = newValue
+
+expectedOutput :: StreamModel -> [Aeson.Value]
+expectedOutput = map fst . Map.elems
+
+nextModelIndex :: StreamModel -> Int
+nextModelIndex model =
+    maybe 0 ((+ 1) . fst) (Map.lookupMax model)
+
+findModelItemIndex :: Aeson.Value -> StreamModel -> Maybe Int
+findModelItemIndex value model =
+    firstJustModel
+        [ findIdentityModel identity model
+        | identity <- itemIdentitiesModel value
+        ]
+
+findIdentityModel :: Text -> StreamModel -> Maybe Int
+findIdentityModel wanted model =
+    fst <$> Map.lookupMin
+        (Map.filter
+            (matchesIdentityValue wanted . fst)
+            model)
+
+matchesIdentityValue :: Text -> Aeson.Value -> Bool
+matchesIdentityValue wanted candidate =
+    objectTextFieldModel "id" candidate == Just wanted
+        || objectTextFieldModel "call_id" candidate == Just wanted
+
+itemIdentitiesModel :: Aeson.Value -> [Text]
+itemIdentitiesModel value =
+    [ identity
+    | fieldName <- ["id", "call_id"]
+    , Just identity <- [objectTextFieldModel fieldName value]
+    ]
+
+findPendingModelIndex :: Aeson.Value -> StreamModel -> Maybe Int
+findPendingModelIndex value model =
+    case objectTextFieldModel "type" value of
+        Nothing -> Nothing
+        Just wantedType ->
+            fst <$> Map.lookupMin
+                (Map.filter
+                    (\(item, done) ->
+                        not done
+                            && objectTextFieldModel "type" item
+                                == Just wantedType)
+                    model)
+
+firstJustModel :: [Maybe value] -> Maybe value
+firstJustModel = foldr (<|>) Nothing
+
+objectTextFieldModel :: Text -> Aeson.Value -> Maybe Text
+objectTextFieldModel fieldName value =
+    case value of
+        Aeson.Object object ->
+            case KeyMap.lookup (Key.fromText fieldName) object of
+                Just (Aeson.String text) -> Just text
+                _ -> Nothing
+        _ -> Nothing
 
 sseBlock :: Text -> Text -> Text
 sseBlock eventType dataText =

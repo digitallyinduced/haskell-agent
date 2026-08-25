@@ -26,6 +26,48 @@ let
   isAbsoluteEnvironmentFile =
     path: hasPrefix "/" path || (hasPrefix "-/" path && builtins.stringLength path > 2);
 
+  mcpServerType = types.submodule {
+    options = {
+      enabled = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Whether this MCP server is enabled.";
+      };
+      command = mkOption {
+        type = types.str;
+        description = "Executable used to start the stdio MCP server.";
+      };
+      args = mkOption {
+        type = types.listOf types.str;
+        default = [ ];
+        description = "Arguments passed to the MCP server executable.";
+      };
+      cwd = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "Optional working directory for the MCP server.";
+      };
+      environment = mkOption {
+        type = types.attrsOf types.str;
+        default = { };
+        description = ''
+          Environment passed to the MCP server. Values are written to the Nix
+          store; use paths to runtime credential files rather than secrets.
+        '';
+      };
+      startupTimeoutSeconds = mkOption {
+        type = types.ints.positive;
+        default = 30;
+        description = "Maximum time allowed for MCP server initialization.";
+      };
+      requestTimeoutSeconds = mkOption {
+        type = types.ints.positive;
+        default = 60;
+        description = "Maximum time allowed for one MCP request.";
+      };
+    };
+  };
+
   instanceType = types.submodule (
     { name, config, ... }:
     {
@@ -183,6 +225,27 @@ let
             missing file.
           '';
         };
+
+        mcpInitStrategy = mkOption {
+          type = types.enum [
+            "auto"
+            "progressive"
+          ];
+          default = "auto";
+          description = "MCP initialization strategy used by agent-cli.";
+        };
+
+        mcpServers = mkOption {
+          type = types.nullOr (types.attrsOf mcpServerType);
+          default = null;
+          description = ''
+            Declarative agent-cli MCP servers for this instance. Null leaves
+            the existing machine-wide MCP configuration untouched. Any
+            attribute set, including an empty one, makes this module own the
+            complete mcpServers value in
+            <filename>~/.haskell-agent/config.json</filename>.
+          '';
+        };
       };
     }
   );
@@ -200,6 +263,25 @@ let
         yolo = instance.yolo;
         allowedUsers = instance.allowedUsers;
         inherit (instance) respondToAllGroupMessages;
+      }
+    );
+
+  managedMcpConfig =
+    name: instance:
+    pkgs.writeText "haskell-agent-telegram-${name}-mcp.json" (
+      builtins.toJSON {
+        mcpInitStrategy = instance.mcpInitStrategy;
+        mcpServers = lib.mapAttrs (_: server: {
+          inherit (server)
+            args
+            command
+            cwd
+            enabled
+            requestTimeoutSeconds
+            startupTimeoutSeconds
+            ;
+          env = server.environment;
+        }) instance.mcpServers;
       }
     );
 
@@ -307,6 +389,7 @@ in
       let
         directory = gatewayDirectory instance;
         generatedConfig = gatewayConfig name instance;
+        generatedMcpConfig = managedMcpConfig name instance;
       in
       nameValuePair (serviceName name) {
         description = "Haskell Agent Telegram gateway (${name})";
@@ -332,6 +415,7 @@ in
           pkgs.coreutils
           pkgs.git
         ]
+        ++ lib.optional (instance.mcpServers != null) pkgs.jq
         ++ instance.extraPackages;
 
         preStart = ''
@@ -344,6 +428,25 @@ in
           ln -sfn \
               "$CREDENTIALS_DIRECTORY/telegram-token" \
               ${lib.escapeShellArg "${directory}/token"}
+        ''
+        + lib.optionalString (instance.mcpServers != null) ''
+
+          harness_config=${lib.escapeShellArg "${instance.homeDirectory}/.haskell-agent/config.json"}
+          managed_config="$(mktemp "$harness_config.XXXXXX")"
+          if [ -f "$harness_config" ]; then
+            jq --slurpfile managed ${lib.escapeShellArg generatedMcpConfig} \
+              '.mcpInitStrategy = $managed[0].mcpInitStrategy
+               | .mcpServers = $managed[0].mcpServers' \
+              "$harness_config" > "$managed_config"
+          else
+            jq --slurpfile managed ${lib.escapeShellArg generatedMcpConfig} \
+              '{ version: 1,
+                 mcpInitStrategy: $managed[0].mcpInitStrategy,
+                 mcpServers: $managed[0].mcpServers }' \
+              /dev/null > "$managed_config"
+          fi
+          chmod 0600 "$managed_config"
+          mv -f "$managed_config" "$harness_config"
         '';
 
         serviceConfig = {

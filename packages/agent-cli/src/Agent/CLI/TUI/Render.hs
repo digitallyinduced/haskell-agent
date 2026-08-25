@@ -85,7 +85,8 @@ import Agent.CLI.TUI.Types
       AgentHover(agentHoverTarget, agentHoverPaneUpperLeft,
                  agentHoverPaneWidth, agentHoverUpperLeft),
       AppState(appRuntime, appHistorySelectedBlock, appSyntaxHighlighter,
-               appImagePreviews, appResume, appTextPrompt, appChoice,
+               appImagePreviews, appSubmittedImagePreviews, appResume,
+               appDictation, appTextPrompt, appChoice,
                appMotionElapsedMillis, appCompletionFlashes, appHoveredControl,
                appPressedControl, appAgentSelected, appConversationAnchor,
                appAgentEntries, appUi, appHistoryWindow, appAgentHover),
@@ -233,7 +234,7 @@ import qualified Agent.CLI.TUI.Composer as Composer
       drawComposer,
       controlAttr,
       controlInteractionAttr )
-import qualified Data.Map.Strict as Map ( member )
+import qualified Data.Map.Strict as Map ( findWithDefault, member )
 import qualified Agent.CLI.TUI.Scroll as Scroll
     ( ConversationAnchor(anchorText, anchorReserveRows),
       conversationAnchorSticky )
@@ -1307,7 +1308,7 @@ drawBlock state target ui block =
                             , timestampedMessage
                                 Theme.userMutedAttr
                                 block.blockTimestamp
-                                (terminalTxtWrap block.blockBody)
+                                (submittedUserMessage state target block)
                             ]
             BlockAssistant ->
                 padLeft (Pad 3) $
@@ -1359,7 +1360,7 @@ drawBlock state target ui block =
                 withAttr Theme.mutedAttr
                     (terminalTxtWrap block.blockBody)
             BlockRecap ->
-                accentBlock
+                accentMarkdownBlock
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> "Recap")
                     (visibleBody block)
@@ -1394,6 +1395,39 @@ drawBlock state target ui block =
                 (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
+
+submittedUserMessage
+    :: AppState
+    -> AgentTarget
+    -> UiBlock
+    -> Widget Name
+submittedUserMessage state target block =
+    vBox $
+        [terminalTxtWrap block.blockBody]
+            <> case target of
+                AgentChild _ -> []
+                AgentRoot ->
+                    map submittedImage $
+                        Map.findWithDefault
+                            []
+                            block.blockId
+                            state.appSubmittedImagePreviews
+  where
+    submittedImage preview =
+        padTop (Pad 1) $
+            vBox
+                [ hLimit 36 (renderTuiImagePreview 36 12 preview)
+                , withAttr Theme.userMutedAttr $
+                    terminalTxt $
+                        "🖼 "
+                            <> preview.previewMime
+                            <> " · "
+                            <> Text.pack (show preview.previewSourceWidth)
+                            <> "×"
+                            <> Text.pack (show preview.previewSourceHeight)
+                            <> " · "
+                            <> formatImageSize preview.previewBytes
+                ]
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body
@@ -1648,16 +1682,18 @@ drawFooter state =
         padLeftRight 2 $
             txt footer
   where
-    footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
-        (Just _, _, _) ->
+    footer = case (state.appDictation, state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
+        (Just _, _, _, _) ->
+            "Enter stop  │  Esc cancel  │  Ctrl+R stop"
+        (_, Just _, _, _) ->
             if state.appUi.uiRunning
                 then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
                 else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
-        (Nothing, Just _, _) ->
+        (_, Nothing, Just _, _) ->
             if state.appUi.uiRunning
                 then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
                 else "↑↓ select  │  Enter choose  │  Esc cancel"
-        (Nothing, Nothing, focus) ->
+        (_, Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
                         "↑↓ select  │  Enter choose  │  Esc deny"
