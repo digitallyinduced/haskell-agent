@@ -22,7 +22,7 @@ module Agent.OpenAI.Compaction
     , buildLocalCompactedHistoryToFit
     , compactTranscriptAtLastCheckpoint
     , hasCompactionCheckpoint
-    , hasGeneratedContextItems
+    , hasReloadedGeneratedContextItems
     , assistantSummaryItem
     , userTextItem
     , isCompactSessionTurn
@@ -641,24 +641,32 @@ isImageResizeNotice = \case
 -- reinjected from current session state.
 isGeneratedContextUserText :: Text -> Bool
 isGeneratedContextUserText text =
+    isReloadedGeneratedContextUserText text
+        || any (`Text.isPrefixOf` Text.stripStart text)
+            [ "# Skill instructions: "
+            , "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
+            , "The user approved the plan. Plan mode is now off."
+            , "<subagent_notification>"
+            ]
+
+isReloadedGeneratedContextUserText :: Text -> Bool
+isReloadedGeneratedContextUserText text =
     any (`Text.isPrefixOf` Text.stripStart text)
         [ "# AGENTS.md instructions for "
-        , "# Skill instructions: "
         , "## Skills\nThe following reusable skills are available in this session."
         , "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions."
         , "<system-reminder>\nAs you answer the user's questions, you can use the following context"
-        , "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
-        , "The user approved the plan. Plan mode is now off."
-        , "<subagent_notification>"
         ]
 
--- | Whether persisted items contain generated project, skill, or harness
--- context that can satisfy a post-reset resume without injecting it again.
-hasGeneratedContextItems :: [ResponseItem] -> Bool
-hasGeneratedContextItems = any \case
+-- | Whether persisted items prove that reloadable project and skill context
+-- was consumed after a transcript reset. Ephemeral plan, subagent, and
+-- individually invoked skill wrappers do not satisfy this check.
+hasReloadedGeneratedContextItems :: [ResponseItem] -> Bool
+hasReloadedGeneratedContextItems = any \case
     MessageItem message
         | message.role == RoleUser ->
-            maybe False isGeneratedContextUserText (messageText message)
+            maybe False isReloadedGeneratedContextUserText
+                (messageText message)
     _ -> False
 
 isRemoteRetainedItem :: ResponseItem -> Bool

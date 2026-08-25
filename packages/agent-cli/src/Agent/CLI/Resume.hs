@@ -51,7 +51,7 @@ import Agent.CLI.Session
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.OpenAI.Compaction
     ( hasCompactionCheckpoint
-    , hasGeneratedContextItems
+    , hasReloadedGeneratedContextItems
     , isTranscriptResetTurn
     )
 import Agent.CLI.TextLayout
@@ -139,7 +139,7 @@ resumeNeedsGeneratedContext turns =
             null newerTurns
                 || not
                     (any
-                        (hasGeneratedContextItems . (.turnItems))
+                        (hasReloadedGeneratedContextItems . (.turnItems))
                         newerTurns)
   where
     isContextBoundary turn =

@@ -436,7 +436,11 @@ summarizeLocalAttempt send params history before focus
             summaryParams =
                 ResponseCreateParams
                     { tools = Nothing
+                    , toolChoice = Nothing
+                    , maxToolCalls = Nothing
                     , parallelToolCalls = Just False
+                    , previousResponseId = Nothing
+                    , conversation = Nothing
                     -- The ChatGPT Codex REST endpoint only accepts streaming
                     -- Responses requests, and this client decodes its SSE result.
                     , stream = Just True
@@ -588,17 +592,25 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
         pure $ fromMaybe
             (codexAutoCompactTokenLimitFor params.model)
             configuredThreshold
-    compactAction history = do
+    compactAction history inputs = do
         params <- getParams
         tokenLimit <- getLimit
         let fixedRequestTokens =
                 estimateRequestTokensWithItems params []
+            pendingItems = turnInputsToItems inputs
+            contextWindow =
+                codexEffectiveContextWindowFor params.model
+            checkpointBaseTokens checkpoint =
+                estimateRequestTokensWithItems params [checkpoint]
+            continuationBaseTokens checkpoint =
+                estimateRequestTokensWithItems
+                    params
+                    (checkpoint : pendingItems)
             retainedBudget checkpoint =
                 min remoteCompactionRetainedTokenBudget $
                     max 0
                         ( tokenLimit
-                            - fixedRequestTokens
-                            - estimateItemsTokens [checkpoint]
+                            - continuationBaseTokens checkpoint
                             - automaticCompactionHeadroom tokenLimit
                         )
             thresholdError minimumTokens =
@@ -624,18 +636,49 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
                         retainedBudget
                 pure $
                     case attempt.compactAttemptResult of
-                        Right outcome
-                            | let compactedRequestTokens =
+                        Right outcome ->
+                            let continuationTokens =
                                     estimateRequestTokensWithItems
                                         params
-                                        outcome.compactHistory
-                            , compactedRequestTokens >= tokenLimit ->
-                                attempt
-                                    { compactAttemptResult =
-                                        Left
-                                            (thresholdError
-                                                compactedRequestTokens)
-                                    }
+                                        (outcome.compactHistory <> pendingItems)
+                                (baseTokens, baseWithPendingTokens) =
+                                    case reverse outcome.compactHistory of
+                                        checkpoint : _ ->
+                                            ( checkpointBaseTokens checkpoint
+                                            , continuationBaseTokens checkpoint
+                                            )
+                                        [] ->
+                                            ( fixedRequestTokens
+                                            , estimateRequestTokensWithItems
+                                                params
+                                                pendingItems
+                                            )
+                            in if continuationTokens > contextWindow
+                                then
+                                    attempt
+                                        { compactAttemptResult =
+                                            Left
+                                                (requestTooLargeError
+                                                    "automatic compacted continuation")
+                                        }
+                                else if baseTokens >= tokenLimit
+                                    then
+                                        attempt
+                                            { compactAttemptResult =
+                                                Left
+                                                    (thresholdError baseTokens)
+                                            }
+                                    else if
+                                        baseWithPendingTokens < tokenLimit
+                                            && continuationTokens >= tokenLimit
+                                        then
+                                            attempt
+                                                { compactAttemptResult =
+                                                    Left
+                                                        (thresholdError
+                                                            continuationTokens)
+                                                }
+                                        else attempt
                         _ -> attempt
     estimateProjectedRequest _ history inputs = do
         params <- getParams
@@ -652,7 +695,7 @@ autoCompactOpenAiBackendWith
 autoCompactOpenAiBackendWith compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
-        (const
+        (\_history _inputs ->
             (CompactAttempt emptyTokenUsage
                 <$> fmap (either (Left . textCompactionError) Right)
                     compactAction))
@@ -671,14 +714,15 @@ autoCompactOpenAiBackendWithApi
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
-        (const (CompactAttempt emptyTokenUsage <$> compactAction))
+        (\_history _inputs ->
+            CompactAttempt emptyTokenUsage <$> compactAction)
         (const (pure ()))
         estimateProjectedFromCache
         (pure ())
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
-    -> ([ResponseItem] -> IO (CompactAttempt ApiError))
+    -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
     -> (Maybe (Int, Int) -> [ResponseItem] -> [TurnInput] -> IO Int)
     -> IO ()
@@ -705,9 +749,9 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
             else submitAndTrack
                 contextState history previous inputs onEvent
   where
-    runCompaction history =
+    runCompaction history inputs =
         (.compactAttemptResult)
-            <$> runAttemptAndRecord recordUsage (compactAction history)
+            <$> runAttemptAndRecord recordUsage (compactAction history inputs)
 
     isCompletedTool = \case
         CompletedTool{} -> True
@@ -715,7 +759,7 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
 
     compactThenSubmit tokenLimit oldTokens oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
-        runCompaction oldHistory >>= \case
+        runCompaction oldHistory inputs >>= \case
                 Left err ->
                     pure (Left (automaticCompactionError err))
                 Right outcome ->

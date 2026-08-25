@@ -22,6 +22,7 @@ import Agent.OpenAI.Compaction
     , estimateRequestTokensWithItems
     , estimateResponseCreateParamsTokens
     , hasCompactionCheckpoint
+    , summarizationPrompt
     , userTextItem
     )
 import Agent.OpenAI.ModelMetadata (codexEffectiveContextWindowFor)
@@ -156,6 +157,57 @@ spec = do
                     "compaction response was not complete"
                         `Text.isInfixOf` message
                 Right _ -> False
+
+        it "clears tool and continuation controls for local summaries" do
+            let paramsValue =
+                    (defaultResponseCreateParams :: ResponseCreateParams)
+                        { tools =
+                            Just
+                                [ FunctionToolValue FunctionTool
+                                    { name = "must_call"
+                                    , description = Nothing
+                                    , parameters = Nothing
+                                    , strict = Just True
+                                    , extraFields = mempty
+                                    }
+                                ]
+                        , toolChoice =
+                            Just (ToolChoiceMode ToolChoiceRequired)
+                        , maxToolCalls = Just 1
+                        , previousResponseId = Just "resp-old"
+                        , conversation = Just (ConversationId "conv-old")
+                        }
+            params <- newIORef paramsValue
+            transcript <- newIORef [userTextItem "old context"]
+            requests <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    (Just "focus")
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef requests `shouldReturn`
+                [ paramsValue
+                    { tools = Nothing
+                    , toolChoice = Nothing
+                    , maxToolCalls = Nothing
+                    , parallelToolCalls = Just False
+                    , previousResponseId = Nothing
+                    , conversation = Nothing
+                    , input = Just
+                        (ResponseInputItems
+                            [ userTextItem "old context"
+                            , userTextItem (summarizationPrompt (Just "focus"))
+                            ])
+                    , stream = Just True
+                    }
+                ]
 
         it "bounds oversized local-summary requests before sending them" do
             params <- newIORef defaultResponseCreateParams
@@ -336,21 +388,38 @@ spec = do
             readIORef contextState `shouldReturn` oldContextState
 
         it "includes tool schemas when deciding whether to compact" do
-            let history = [userTextItem "old"]
-                threshold = 200
+            let history =
+                    [userTextItem (Text.replicate 12_000 "old context ")]
                 params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { tools = Just
                         [ FunctionToolValue FunctionTool
                             { name = "large_tool"
                             , description =
-                                Just (Text.replicate 2_000 "schema")
+                                Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
                             , extraFields = mempty
                             }
                         ]
                     }
-            contextState <- newIORef (Just (1, length history))
+                paramsWithoutTools =
+                    defaultResponseCreateParams :: ResponseCreateParams
+                projectedItems = history <> [userTextItem "new"]
+                projectedWithoutTools =
+                    estimateRequestTokensWithItems
+                        paramsWithoutTools
+                        projectedItems
+                projectedWithTools =
+                    estimateRequestTokensWithItems params projectedItems
+                threshold =
+                    projectedWithoutTools
+                        + ((projectedWithTools - projectedWithoutTools) `div` 2)
+            estimateRequestTokensWithItems params []
+                `shouldSatisfy` (< threshold)
+            projectedWithoutTools `shouldSatisfy` (< threshold)
+            projectedWithTools `shouldSatisfy` (>= threshold)
+            contextState <-
+                newIORef (Just (projectedWithoutTools, length history))
             compactCalls <- newIORef (0 :: Int)
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
@@ -409,6 +478,44 @@ spec = do
             compacted <- readIORef seenHistory
             estimateRequestTokensWithItems params compacted
                 `shouldSatisfy` (< threshold)
+
+        it "reserves pending input when sizing the compacted continuation" do
+            let pendingText = Text.replicate 6_000 "pending "
+                pendingItem = userTextItem pendingText
+                params = defaultResponseCreateParams
+                threshold =
+                    estimateRequestTokensWithItems params [pendingItem]
+                        + 8_000
+                history =
+                    [userTextItem (Text.replicate 30_000 "old ")]
+            contextState <- newIORef Nothing
+            continuationTokens <- newIORef 0
+            let sender _request =
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ -> do
+                    writeIORef continuationTokens $
+                        estimateRequestTokensWithItems
+                            params
+                            (state <> [pendingItem])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn history Nothing
+                [UserMessage pendingText] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            tokens <- readIORef continuationTokens
+            tokens `shouldSatisfy` (< threshold)
 
         it "rejects a tiny threshold before starting compaction" do
             let history = [userTextItem "old"]

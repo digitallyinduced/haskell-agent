@@ -113,6 +113,21 @@ spec = do
             resumeNeedsGeneratedContext [boundary, regenerated]
                 `shouldBe` False
 
+        it "does not mistake ephemeral harness context for a reload" do
+            let boundary = sampleTurn { turnUserText = "/compact" }
+                ephemeral text = sampleTurn
+                    { turnUserText = "continue"
+                    , turnItems = [userTextItem text]
+                    }
+            map
+                (\text ->
+                    resumeNeedsGeneratedContext [boundary, ephemeral text])
+                [ "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
+                , "# Skill instructions: one-off"
+                , "<subagent_notification>done</subagent_notification>"
+                ]
+                `shouldBe` [True, True, True]
+
         it "does not requeue context without a transcript boundary" do
             resumeNeedsGeneratedContext [sampleTurn] `shouldBe` False
 
