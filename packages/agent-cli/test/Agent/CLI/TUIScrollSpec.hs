@@ -25,6 +25,23 @@ spec = describe "fullscreen conversation scrolling" do
             conversationScrollGesture 10 (Just (31, 20, 60))
                 `shouldBe` ResumeConversationFollow
 
+    describe "reconcileConversationFollow" do
+        it "repairs a stale paused flag when the tail is visible" do
+            reconcileConversationFollow False (Just (40, 20, 60))
+                `shouldBe` True
+
+        it "does not override active following during page-fill reflow" do
+            reconcileConversationFollow True (Just (12, 20, 60))
+                `shouldBe` True
+
+        it "keeps a paused viewport paused while it is above the tail" do
+            reconcileConversationFollow False (Just (12, 20, 60))
+                `shouldBe` False
+
+        it "retains the stored state before the first viewport render" do
+            reconcileConversationFollow True Nothing `shouldBe` True
+            reconcileConversationFollow False Nothing `shouldBe` False
+
     it "reserves the rest of the viewport below a submitted prompt" do
         let anchor = startConversationAnchor (BlockId 7) "question" 40
             (next, action) =

@@ -7,6 +7,7 @@ module Agent.CLI.TUI.Scroll
     , conversationScrollGesture
     , conversationAnchorSticky
     , followConversationTail
+    , reconcileConversationFollow
     , reflowConversationAnchor
     , startConversationAnchor
     ) where
@@ -64,6 +65,21 @@ conversationScrollGesture amount viewport
                     ResumeConversationFollow
                 | otherwise ->
                     PauseAndScrollConversation
+
+-- | Reconcile the stored follow flag with the viewport that was visible
+-- immediately before new conversation output arrived.
+--
+-- A visible tail repairs a stale paused flag. A viewport above the tail does
+-- not itself pause following, because the submitted-prompt page-fill reflow
+-- can transiently expose that geometry before its reserve rows are installed.
+-- Explicit user scroll gestures remain responsible for pausing follow mode.
+-- Before the first render there is no viewport, so retain the stored flag.
+reconcileConversationFollow :: Bool -> Maybe (Int, Int, Int) -> Bool
+reconcileConversationFollow storedFollow = \case
+    Nothing -> storedFollow
+    Just (top, height, contentHeight) ->
+        storedFollow
+            || top + max 0 height >= max 0 contentHeight
 
 startConversationAnchor :: BlockId -> Text -> Int -> ConversationAnchor
 startConversationAnchor blockId text top = ConversationAnchor
