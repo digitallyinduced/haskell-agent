@@ -18,6 +18,7 @@ import Agent.CLI.TUI.Types
     , TextInputMode(..)
     , TextOverlay(..)
     )
+import Agent.Loop (LoopEvent(..))
 import Agent.Subagents (SubagentId(..))
 import Agent.TUI.Model
     ( BlockId(..)
@@ -175,6 +176,27 @@ spec = do
                 Just row -> do
                     Text.take 1 row `shouldBe` "╰"
                     Text.stripEnd row `shouldSatisfy` Text.isSuffixOf "╯"
+
+        it "renders reasoning summaries as Markdown instead of literal markers" do
+            let reasoningUi =
+                    reduceUi
+                        (UiLoop
+                            (ReasoningDelta
+                                "**Inspecting dependencies**\n\n**Planning the fix**"))
+                        (reduceUi (UiLoop TurnStarted) baseState.appUi)
+                app = baseState { appUi = reasoningUi }
+                size = (80, 20)
+                rows =
+                    pictureRows
+                        (renderWidget
+                            (Just Theme.monochrome)
+                            (drawApp app)
+                            size)
+                        size
+                rendered = Text.unlines rows
+            rendered `shouldSatisfy` Text.isInfixOf "Inspecting dependencies"
+            rendered `shouldSatisfy` Text.isInfixOf "Planning the fix"
+            rendered `shouldSatisfy` (not . Text.isInfixOf "**")
 
 renderTraceProperty :: AppState -> RenderTrace -> Property
 renderTraceProperty baseState (RenderTrace actions) =
