@@ -157,6 +157,7 @@ spec = describe "fullscreen TUI bridge" do
         setFullscreenSessionActions
             runtime
             (modifyIORef' calls (<> ["new cancel"]))
+            (const (modifyIORef' calls (<> ["new steer"])))
             (const (modifyIORef' calls (<> ["new btw"])))
             (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))
@@ -164,13 +165,14 @@ spec = describe "fullscreen TUI bridge" do
             (pure (AgentRoot, []))
             (const (modifyIORef' calls (<> ["new agent"])))
         runtime.runtimeCancel
+        runtime.runtimeSteer "guidance"
         runtime.runtimeBtw "question"
         runtime.runtimeRecap
         runtime.runtimeRestartEffort "high"
         runtime.runtimeAgentSelect AgentRoot
         decision <- runtime.runtimeCtrlC
         readIORef calls `shouldReturn`
-            ["old cancel", "new cancel", "new btw", "new recap", "new effort", "new agent"]
+            ["old cancel", "new cancel", "new steer", "new btw", "new recap", "new effort", "new agent"]
         decision `shouldBe` SoftCancel
 
     it "defers syntax loading until the runtime starts it" do

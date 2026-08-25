@@ -416,6 +416,7 @@ newFullscreenRuntimeWithSyntaxLoader
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
+            , sessionSteer = const (pure ())
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
@@ -429,6 +430,9 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeInput = inputBuffer
             , runtimeCancel =
                 readIORef sessionActions >>= (.sessionCancel)
+            , runtimeSteer = \text ->
+                readIORef sessionActions >>= \actions ->
+                    actions.sessionSteer text
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
@@ -477,6 +481,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
     -> (Text -> IO ())
+    -> (Text -> IO ())
     -> IO ()
     -> (Text -> IO ())
     -> IO CtrlCDecision
@@ -486,6 +491,7 @@ setFullscreenSessionActions
 setFullscreenSessionActions
     runtime
     cancelAction
+    steerAction
     btwAction
     recapAction
     restartEffortAction
@@ -494,6 +500,7 @@ setFullscreenSessionActions
     agentSelect =
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
             { sessionCancel = cancelAction
+            , sessionSteer = steerAction
             , sessionBtw = btwAction
             , sessionRecap = recapAction
             , sessionRestartEffort = restartEffortAction

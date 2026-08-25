@@ -158,6 +158,8 @@ runWorkload workload callCount delayMicros = do
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = \_ -> pure ()
             , loopApprove = \_ -> pure (Right True)
+            , loopReadSteering = pure []
+            , loopCommitSteering = \_ -> pure ()
             , loopCancel = cancel
             }
     result <- runLoop config Nothing "benchmark"

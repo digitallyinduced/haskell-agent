@@ -1263,6 +1263,42 @@ spec = describe "runLoop" do
             , tokenUsage = TokenUsage 22 10 2
             }
 
+    it "injects pending steering at the next committed model boundary" do
+        submissions <- newIORef []
+        pending <- newIORef []
+        baseBackend <- scriptedBackend submissions
+            [ Right (emptyTurnOutput "resp-1" [] (Just "initial answer"))
+            , Right (emptyTurnOutput "resp-2" [] (Just "revised answer"))
+            ]
+        calls <- newIORef (0 :: Int)
+        let backend = Backend \state previous inputs onEvent -> do
+                call <- atomicModifyIORef' calls \count ->
+                    (count + 1, count)
+                if call == 0
+                    then writeIORef pending ["use the existing schema"]
+                    else pure ()
+                baseBackend.submitTurn state previous inputs onEvent
+        config0 <- testConfig backend
+        let config = config0
+                { loopReadSteering =
+                    map UserMessage <$> readIORef pending
+                , loopCommitSteering = \count ->
+                    atomicModifyIORef' pending \messages ->
+                        (drop count messages, ())
+                }
+        result <- runLoop config Nothing "start"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "revised answer"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "start"])
+            , (Just "resp-1", [UserMessage "use the existing schema"])
+            ]
+        readIORef pending `shouldReturn` []
+
 --------------------------------------------------------------------------------
 -- Helpers
 --------------------------------------------------------------------------------
@@ -1285,6 +1321,8 @@ testConfig backend = do
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()
         , loopApprove = \_ -> pure (Right True)
+        , loopReadSteering = pure []
+        , loopCommitSteering = \_ -> pure ()
         , loopCancel = cancel
         }
 

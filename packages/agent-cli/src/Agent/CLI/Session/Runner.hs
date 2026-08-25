@@ -43,6 +43,7 @@ import Agent.CLI.Recap
     , RecapRequest(..)
     )
 import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Clipboard (loadImagesFromPastedText)
 import Agent.CLI.Command
 import Agent.CLI.LearnedSkills
     ( defaultLearnedSkillContextMaxChars
@@ -296,6 +297,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
+    steeringRef <- newIORef []
     let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
@@ -764,6 +766,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             ("Tool " <> call.name
                                 <> " is disabled by the current /shell setting."))
                     True -> approveRegisteredTool call
+            , loopReadSteering =
+                readIORef steeringRef
+            , loopCommitSteering = \count ->
+                atomicModifyIORef' steeringRef \pending ->
+                    (drop count pending, ())
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -958,6 +965,23 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
+            (\text -> do
+                images <- loadImagesFromPastedText text
+                let input = case images of
+                        Just attached@(_:_) ->
+                            UserMultimodal
+                                { userText = "Image attached."
+                                , userImages = attached
+                                }
+                        _ -> UserMessage text
+                callbacks.runnerPreparePromptSkillInputs
+                    env text [input] >>= \case
+                        Left err ->
+                            emitUiEvent runtime (UiErrorMessage err)
+                        Right inputs -> do
+                            atomicModifyIORef' steeringRef \pending ->
+                                (pending <> inputs, ())
+                            emitUiEvent runtime (UiInputSteered text))
             (writeChan btwRequests)
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->

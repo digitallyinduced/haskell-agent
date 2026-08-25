@@ -263,6 +263,11 @@ data LoopConfig = LoopConfig
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
+    -- | Read pending user guidance submitted while this loop is active.
+    -- Guidance is acknowledged only after the model response commits, so a
+    -- failed submission can be retried without losing it.
+    , loopReadSteering :: !(IO [TurnInput])
+    , loopCommitSteering :: !(Int -> IO ())
       -- | Soft-cancel latch. The caller owns resetting it before publishing
       -- the turn to input/interrupt handlers. When set, the loop stops after
       -- the current tool batch instead of asking the model for another step.
@@ -356,6 +361,7 @@ runLoopInputsUnsafe
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
+    initialSteering <- config0.loopReadSteering
     withAsync (runLoopEventPump eventPump) \eventWorker -> do
         let config = config0
                 { loopOnEvent = emitLoopEvent eventPump
@@ -372,7 +378,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     (Left (LoopUnexpected (exceptionSummary exception)))
             protect state progress action =
                 tryAny action >>= either (unexpected state progress) pure
-            go state progress prev turnsUsed inputs lastOutput usageAcc = do
+            go state progress prev turnsUsed inputs steeringCount lastOutput usageAcc = do
                 writeIORef progressRef (state, progress)
                 if turnsUsed >= config.loopMaxTurns
                     then finish state progress $ case lastOutput of
@@ -423,8 +429,9 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                             finish state progress (Left LoopNoResponseId)
                                     Right (Right BackendResult{..}) -> do
                                         continueCommitted
-                                            backendState backendOutput turnsUsed usageAcc
-            continueCommitted state turn turnsUsed usageAcc = do
+                                            backendState backendOutput turnsUsed
+                                            steeringCount usageAcc
+            continueCommitted state turn turnsUsed steeringCount usageAcc = do
                 writeIORef progressRef (state, ResponseCommitted)
                 protect state ResponseCommitted do
                     -- A cancel that landed during submitTurn after the race chose
@@ -435,34 +442,44 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         then finish state ResponseCommitted
                             (Left (LoopCancelled []))
                         else do
+                            config.loopCommitSteering steeringCount
                             config.loopOnEvent (TurnFinished turn)
                             let nextTurnsUsed = turnsUsed + 1
-                            if null turn.toolCalls
-                                then finish state ResponseCommitted $
-                                    Right LoopResult
-                                        { finalResponseId = turn.responseId
-                                        , finalText = turn.assistantText
-                                        , turnsUsed = nextTurnsUsed
-                                        , tokenUsage = usageAcc'
-                                        }
+                            results <-
+                                if null turn.toolCalls
+                                    then pure []
+                                    else runToolCalls config turn.toolCalls
+                            cancelledAfter <- isCancelled config.loopCancel
+                            if cancelledAfter
+                                then finish state ResponseCommitted
+                                    (Left (LoopCancelled results))
                                 else do
-                                    results <- runToolCalls config turn.toolCalls
-                                    cancelledAfter <-
-                                        isCancelled config.loopCancel
-                                    if cancelledAfter
-                                        then finish state ResponseCommitted
-                                            (Left (LoopCancelled results))
+                                    steering <- config.loopReadSteering
+                                    let continuation =
+                                            map CompletedTool results <> steering
+                                    if null continuation
+                                        then finish state ResponseCommitted $
+                                            Right LoopResult
+                                                { finalResponseId = turn.responseId
+                                                , finalText = turn.assistantText
+                                                , turnsUsed = nextTurnsUsed
+                                                , tokenUsage = usageAcc'
+                                                }
                                         else go
                                             state
                                             ResponseCommitted
                                             (Just turn.responseId)
                                             nextTurnsUsed
-                                            (map CompletedTool results)
+                                            continuation
+                                            (length steering)
                                             (Just turn)
                                             usageAcc'
             run =
-                go initialState NoResponseCommitted previousResponseId 0 firstInputs
-                    Nothing emptyTokenUsage
+                go initialState NoResponseCommitted previousResponseId 0
+                    (firstInputs <> initialSteering)
+                    (length initialSteering)
+                    Nothing
+                    emptyTokenUsage
         raced <- race (waitLoopEventFailure eventWorker eventPump) run
         execution <- case raced of
             Left failure -> do

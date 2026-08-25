@@ -119,7 +119,12 @@ addRegularTurn items state turn =
                 else reduceUi
                     (UiUserSubmitted turn.turnUserText)
                     state
-        withItems = foldl' projectItem withUser items
+        -- Initial generated context, skill activations, and the prompt are all
+        -- encoded as leading user messages. The prompt already has its own
+        -- block above; later user messages are mid-turn steering and must stay
+        -- visible after the live turn is replaced by durable history.
+        withItems =
+            foldl' projectItem withUser (dropWhile isUserMessage items)
         withAssistant =
             if hasAssistantBlock withItems
                 then withItems
@@ -164,6 +169,9 @@ projectItem state = \case
     MessageItem message
         | message.role == RoleAssistant ->
             appendText (UiLoop . TextDelta) (messageText message.content) state
+        | message.role == RoleUser
+        , not (isGeneratedUserText (messageText message.content)) ->
+            appendText UiInputSteered (messageText message.content) state
         | otherwise -> state
     ReasoningItemValue reasoning ->
         appendText
@@ -207,6 +215,15 @@ projectItem state = \case
                         CustomCallKind)))
             state
     _ -> state
+
+isUserMessage :: ResponseItem -> Bool
+isUserMessage = \case
+    MessageItem message -> message.role == RoleUser
+    _ -> False
+
+isGeneratedUserText :: Text.Text -> Bool
+isGeneratedUserText =
+    Text.isPrefixOf "# Skill instructions: " . Text.stripStart
 
 appendText :: (Text.Text -> UiEvent) -> Text.Text -> UiState -> UiState
 appendText event text state
