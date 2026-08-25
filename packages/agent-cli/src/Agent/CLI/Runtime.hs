@@ -104,6 +104,19 @@ import Agent.CLI.Btw
     ( formatBtwError
     , runBtwWithCancel
     )
+import Agent.CLI.Recap
+    ( RecapKind(..)
+    , RecapOutcome(..)
+    , RecapRequest(..)
+    , autoRecapIdleThreshold
+    , formatRecapError
+    , mainTurnCount
+    , recapGate
+    , recapPreview
+    , recapUnavailableToast
+    , runRecapWithCancel
+    , runTurnSummaryWithCancel
+    )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
     ( appendUniqueImageAttachments
@@ -656,6 +669,7 @@ import Control.Exception.Safe
     ( SomeException
     , catchAny
     , finally
+    , tryAny
     , mask_
     , onException
     , throwIO
@@ -1222,6 +1236,7 @@ prepareAgentIteration
                         runtime
                         (requestCancel toolEnv.toolCancel)
                         (const (pure ()))
+                        (pure ())
                         (\level ->
                             readIORef restartEffortActionRef >>= ($ level))
                         (noteFullscreenCtrlC interrupt)
@@ -1275,6 +1290,7 @@ resetFullscreenSessionActions runtime =
         runtime
         (pure ())
         (const (pure ()))
+        (pure ())
         (const (pure ()))
         -- No session-local interrupt state is alive between providers. A
         -- transition must remain escapable even if auth probing blocks.
@@ -3671,9 +3687,13 @@ runSession SessionRequest{..} SessionBackend{..} = do
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef
             refreshShellParams ghciEnabled bashEnabled
+    btwRequests <- newChan
+    recapRequests <- newChan
+    let
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
+            , sessionQueueRecap = writeChan recapRequests
             , sessionCompact = compactRunner
             , sessionRender = render
             , sessionProvider = provider
@@ -3737,12 +3757,12 @@ runSession SessionRequest{..} SessionBackend{..} = do
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
-    btwRequests <- newChan
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
             (writeChan btwRequests)
+            (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
                 readIORef startup.startupRestartEffort >>= ($ level))
             (noteFullscreenCtrlC interrupt)
@@ -3816,9 +3836,18 @@ runSession SessionRequest{..} SessionBackend{..} = do
             question <- readChan btwRequests
             runBtwQuestion False env question
             btwWorker
+        recapWorker = do
+            request <- readChan recapRequests
+            case request of
+                RecapSession kind -> runSessionRecap False env kind
+                RecapTurnSummary -> runSessionTurnSummary env
+            recapWorker
     result <- case fullscreen of
-        Just _ -> withAsync btwWorker (const sessionAction)
-        Nothing -> sessionAction
+        Just _ ->
+            withAsync btwWorker \_ ->
+                withAsync recapWorker (const sessionAction)
+        Nothing ->
+            withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
@@ -4013,6 +4042,7 @@ finishTurnWithCooldownRetry
     -> IO RunResult
 finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
+        env.sessionQueueRecap RecapTurnSummary
         writeIORef env.sessionUnavailableProviders []
         selectionId <- readIORef env.sessionAccountSelectionId
         accountId <- readIORef env.sessionAccountId
@@ -4254,6 +4284,145 @@ runBtwQuestion registerCancel env question = do
                     emitUiEvent runtime (UiAssistantHistory answer)
                 Nothing ->
                     putTextLn stdout (renderAssistantText color answer)
+
+runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
+runSessionRecap registerCancel env kind = do
+    let fullscreen = env.sessionFullscreen
+        transcriptRef = env.sessionTranscript
+    color <- resolveColor stdout
+    transcript <- readIORef transcriptRef
+    let mainTurns = mainTurnCount transcript
+        hasMessages = mainTurns > 0
+    lastCommittedTurns <- recapWatermark env
+    lastCompletedAt <- recapLastCompletedAt env
+    now <- getCurrentTime
+    let idleOk =
+            case lastCompletedAt of
+                Nothing -> False
+                Just finished ->
+                    diffUTCTime now finished >= autoRecapIdleThreshold
+    case recapGate mainTurns lastCommittedTurns kind idleOk of
+        Left _ ->
+            case kind of
+                RecapManual -> recapUnavailable env hasMessages
+                RecapAuto -> pure ()
+        Right () -> do
+            when (kind == RecapManual) $
+                forM_ fullscreen \runtime ->
+                    emitUiEvent runtime UiRecapStarted
+            result <-
+                runRecapWithCancel
+                    (\cancel action ->
+                        if registerCancel
+                            then
+                                withTurnCancel env.sessionInterrupt cancel $
+                                    case fullscreen of
+                                        Nothing ->
+                                            withEscCancel
+                                                cancel
+                                                env.sessionEscPaused
+                                                action
+                                        Just _ -> action
+                            else action)
+                    env.sessionBtwBackend
+                    env.sessionParams
+                    transcriptRef
+                    kind
+            case result of
+                Left err ->
+                    case kind of
+                        RecapManual -> recapFailed env (formatRecapError err)
+                        RecapAuto -> pure ()
+                Right (RecapShown summary) -> do
+                    persistSessionRecap env summary mainTurns
+                    displayRecap env color summary
+                Right (RecapSuppressed summary) ->
+                    persistSessionRecap env summary mainTurns
+
+recapWatermark :: SessionEnv -> IO Int
+recapWatermark env =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure 0
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending _ _ _ -> pure 0
+                PersistenceActive handle ->
+                    pure handle.sessionMeta.metaLastRecapMainTurns
+
+recapLastCompletedAt :: SessionEnv -> IO (Maybe UTCTime)
+recapLastCompletedAt env =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure Nothing
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending _ _ _ -> pure Nothing
+                PersistenceActive handle ->
+                    loadSession
+                        handle.sessionPool
+                        (takeDirectory handle.sessionDir)
+                        handle.sessionMeta.metaId
+                        >>= \case
+                            Left _ ->
+                                pure (Just handle.sessionMeta.metaUpdatedAt)
+                            Right (_, turns) ->
+                                pure $
+                                    case reverse turns of
+                                        turn : _ -> Just turn.turnAt
+                                        [] -> Just handle.sessionMeta.metaUpdatedAt
+
+persistSessionRecap :: SessionEnv -> Text -> Int -> IO ()
+persistSessionRecap env summary mainTurns =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure ()
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending _ _ _ -> pure ()
+                PersistenceActive handle -> do
+                    updated <-
+                        setSessionRecap (recapPreview summary) mainTurns handle
+                    writeIORef slotRef (PersistenceActive updated)
+
+displayRecap :: SessionEnv -> Bool -> Text -> IO ()
+displayRecap env color summary =
+    let message = "Recap: " <> summary
+    in case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiRecapReady summary)
+        Nothing ->
+            putTextLn stdout (roleMuted color message)
+
+recapUnavailable :: SessionEnv -> Bool -> IO ()
+recapUnavailable env hasMessages =
+    recapFailed env (recapUnavailableToast hasMessages)
+
+recapFailed :: SessionEnv -> Text -> IO ()
+recapFailed env message = do
+    color <- resolveColor stderr
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiRecapUnavailable message)
+        Nothing ->
+            putTextLn stderr (roleMuted color message)
+
+runSessionTurnSummary :: SessionEnv -> IO ()
+runSessionTurnSummary env = do
+    result <-
+        runTurnSummaryWithCancel
+            (\_ action -> action)
+            env.sessionBtwBackend
+            env.sessionParams
+            env.sessionTranscript
+    case result of
+        Left _ -> pure ()
+        Right summary ->
+            case env.sessionPersist of
+                PersistenceDisabled -> pure ()
+                PersistenceEnabled slotRef ->
+                    readIORef slotRef >>= \case
+                        PersistencePending _ _ _ -> pure ()
+                        PersistenceActive handle -> do
+                            updated <- setSessionTurnSummary summary handle
+                            writeIORef slotRef (PersistenceActive updated)
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -5140,6 +5309,15 @@ replWithDraft env@SessionEnv
                     ReplBtw question -> do
                         runBtwQuestion True env question
                         continue
+                    ReplRecap ->
+                        case fullscreen of
+                            Just runtime -> do
+                                emitUiEvent runtime UiRecapStarted
+                                env.sessionQueueRecap (RecapSession RecapManual)
+                                continue
+                            Nothing -> do
+                                runSessionRecap True env RecapManual
+                                continue
                     ReplResume maybeId -> do
                         handleResume databasePool fullscreen maybeId persist >>= \case
                             Nothing -> continue
@@ -5180,6 +5358,9 @@ replWithDraft env@SessionEnv
                                                 , metaInputTokens = 0
                                                 , metaOutputTokens = 0
                                                 , metaCachedTokens = 0
+                                                , metaLastRecap = Nothing
+                                                , metaLastTurnSummary = Nothing
+                                                , metaLastRecapMainTurns = 0
                                                 }
                                         writeSessionMeta
                                             handle'.sessionPool

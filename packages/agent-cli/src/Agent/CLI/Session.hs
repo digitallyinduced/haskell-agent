@@ -39,6 +39,8 @@ module Agent.CLI.Session
     , setGeneratedSessionTitle
     , setManualSessionTitle
     , resetSessionTitleToAuto
+    , setSessionRecap
+    , setSessionTurnSummary
     , sessionConversationText
     , sessionLegacySubagentTarget
     , sessionTitleTurnCountFromSlot
@@ -146,6 +148,9 @@ data SessionMeta = SessionMeta
     , metaInputTokens :: !Int
     , metaOutputTokens :: !Int
     , metaCachedTokens :: !Int
+    , metaLastRecap :: !(Maybe Text)
+    , metaLastTurnSummary :: !(Maybe Text)
+    , metaLastRecapMainTurns :: !Int
     } deriving (Eq, Show)
 
 data SessionTransfer = SessionTransfer
@@ -234,6 +239,9 @@ instance ToJSON SessionMeta where
         , "inputTokens" .= meta.metaInputTokens
         , "outputTokens" .= meta.metaOutputTokens
         , "cachedTokens" .= meta.metaCachedTokens
+        , "lastRecap" .= meta.metaLastRecap
+        , "lastTurnSummary" .= meta.metaLastTurnSummary
+        , "lastRecapMainTurns" .= meta.metaLastRecapMainTurns
         ]
 
 instance FromJSON SessionMeta where
@@ -280,6 +288,9 @@ instance FromJSON SessionMeta where
             <*> (o .:? "inputTokens" .!= 0)
             <*> (o .:? "outputTokens" .!= 0)
             <*> (o .:? "cachedTokens" .!= 0)
+            <*> o .:? "lastRecap"
+            <*> o .:? "lastTurnSummary"
+            <*> (o .:? "lastRecapMainTurns" .!= 0)
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
@@ -525,6 +536,9 @@ createReservedSession spec sessionId tempDir = do
             , metaInputTokens = 0
             , metaOutputTokens = 0
             , metaCachedTokens = 0
+            , metaLastRecap = Nothing
+            , metaLastTurnSummary = Nothing
+            , metaLastRecapMainTurns = 0
             }
         handle = SessionHandle
             { sessionPool = pool
@@ -886,6 +900,21 @@ resetSessionTitleToAuto handle = do
     writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
 
+setSessionRecap :: Text -> Int -> SessionHandle -> IO SessionHandle
+setSessionRecap summary mainTurns handle = do
+    let meta = handle.sessionMeta
+            { metaLastRecap = Just summary
+            , metaLastRecapMainTurns = max 0 mainTurns
+            }
+    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
+
+setSessionTurnSummary :: Text -> SessionHandle -> IO SessionHandle
+setSessionTurnSummary summary handle = do
+    let meta = handle.sessionMeta { metaLastTurnSummary = Just summary }
+    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
+
 sessionUsageFromMeta :: SessionMeta -> TokenUsage
 sessionUsageFromMeta meta = TokenUsage
     { inputTokens = meta.metaInputTokens
@@ -1053,6 +1082,10 @@ toStoredMetadata meta = Store.SessionMetadata
     , sessionMetadataInputTokens = fromIntegral meta.metaInputTokens
     , sessionMetadataOutputTokens = fromIntegral meta.metaOutputTokens
     , sessionMetadataCachedTokens = fromIntegral meta.metaCachedTokens
+    , sessionMetadataLastRecap = meta.metaLastRecap
+    , sessionMetadataLastTurnSummary = meta.metaLastTurnSummary
+    , sessionMetadataLastRecapMainTurns =
+        fromIntegral meta.metaLastRecapMainTurns
     }
 
 fromStoredMetadata :: Store.SessionMetadata -> Either Text SessionMeta
@@ -1100,6 +1133,10 @@ fromStoredMetadata stored = do
         , metaInputTokens = fromIntegral stored.sessionMetadataInputTokens
         , metaOutputTokens = fromIntegral stored.sessionMetadataOutputTokens
         , metaCachedTokens = fromIntegral stored.sessionMetadataCachedTokens
+        , metaLastRecap = stored.sessionMetadataLastRecap
+        , metaLastTurnSummary = stored.sessionMetadataLastTurnSummary
+        , metaLastRecapMainTurns =
+            fromIntegral stored.sessionMetadataLastRecapMainTurns
         }
 
 toStoredLegacyTarget

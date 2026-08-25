@@ -40,6 +40,7 @@ import qualified Agent.CLI.PlanSpec as PlanSpec
 import qualified Agent.CLI.ProgressSpec as ProgressSpec
 import qualified Agent.CLI.ProjectSpec as ProjectSpec
 import qualified Agent.CLI.PromptSpec as PromptSpec
+import qualified Agent.CLI.RecapSpec as RecapSpec
 import qualified Agent.CLI.ProviderFallbackSpec as ProviderFallbackSpec
 import qualified Agent.CLI.ProviderAvailabilitySpec as ProviderAvailabilitySpec
 import qualified Agent.CLI.ProviderTransitionSpec as ProviderTransitionSpec
@@ -109,6 +110,7 @@ main = hspec do
     ProgressSpec.spec
     ProjectSpec.spec
     PromptSpec.spec
+    RecapSpec.spec
     ProviderFallbackSpec.spec
     ProviderAvailabilitySpec.spec
     ProviderTransitionSpec.spec

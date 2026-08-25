@@ -86,6 +86,8 @@ data ResumeEntry = ResumeEntry
     , resumeTurnCount :: !Int
     , resumeToolCount :: !Int
     , resumePrompt :: !Text
+    , resumeRecap :: !(Maybe Text)
+    , resumeLastTurnSummary :: !(Maybe Text)
     , resumeMatch :: !(Maybe Text)
     , resumeLoaded :: !Bool
     , resumeTranscript :: ![Text]
@@ -153,6 +155,8 @@ entryFromWith loaded meta turns =
         , resumePrompt =
             fromMaybe ""
                 (firstNonEmpty (map (.turnUserText) turns))
+        , resumeRecap = meta.metaLastRecap
+        , resumeLastTurnSummary = meta.metaLastTurnSummary
         , resumeMatch = Nothing
         , resumeLoaded = loaded
         , resumeTranscript = transcriptLines turns

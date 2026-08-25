@@ -56,7 +56,9 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , canonicalToolName
     )
+import qualified Data.Foldable as Foldable
 import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -74,6 +76,7 @@ data BlockKind
     | BlockShell
     | BlockEdit
     | BlockSystem
+    | BlockRecap
     | BlockError
     deriving (Eq, Show)
 
@@ -207,6 +210,9 @@ data UiEvent
     | UiHistory !Text
     | UiAssistantHistory !Text
     | UiSystemMessage !Text
+    | UiRecapStarted
+    | UiRecapReady !Text
+    | UiRecapUnavailable !Text
     | UiErrorMessage !Text
     -- | Append an error whose retry guidance counts down in place.
     | UiRetryCountdown !Text !Int !Text
@@ -380,6 +386,22 @@ reduceUi event state = case event of
                 BlockComplete Nothing state
     UiSystemMessage message ->
         appendBlock BlockSystem "System" message "" BlockComplete Nothing state
+    UiRecapStarted ->
+        replaceOrAppendRecap "Generating recap…" BlockRunning state
+    UiRecapReady summary ->
+        replaceOrAppendRecap summary BlockComplete state
+    UiRecapUnavailable message ->
+        case latestRecapIndex state of
+            Just index ->
+                (removeBlockAt index state)
+                    { uiNotice = Just (warningNotice message)
+                    , uiNoticeElapsedMillis = 0
+                    }
+            Nothing ->
+                state
+                    { uiNotice = Just (warningNotice message)
+                    , uiNoticeElapsedMillis = 0
+                    }
     UiErrorMessage message ->
         (appendBlock BlockError "Error" message "" BlockFailed Nothing state)
             { uiRetryCountdown = Nothing }
@@ -729,6 +751,56 @@ appendOrExtend kind title delta streamState state =
         _ ->
             appendBlock kind title delta "" streamState Nothing state
 
+replaceOrAppendRecap :: Text -> BlockState -> UiState -> UiState
+replaceOrAppendRecap body blockState state =
+    case latestRecapIndex state of
+        Just index ->
+            state
+                { uiBlocks =
+                    Seq.adjust
+                        (\block ->
+                            block
+                                { blockBody = body
+                                , blockState
+                                })
+                        index
+                        state.uiBlocks
+                }
+        Nothing ->
+            appendBlock BlockRecap "Recap" body "" blockState Nothing state
+
+latestRecapIndex :: UiState -> Maybe Int
+latestRecapIndex state =
+    case Seq.findIndexR ((== BlockRecap) . (.blockKind)) state.uiBlocks of
+        Just index -> Just index
+        Nothing -> Nothing
+
+selectedIndexFor :: Maybe BlockId -> Seq UiBlock -> Maybe Int
+selectedIndexFor selected remaining =
+    selected >>= \ident -> Seq.findIndexL ((== ident) . (.blockId)) remaining
+
+removeBlockAt :: Int -> UiState -> UiState
+removeBlockAt index state =
+    let remaining = Seq.deleteAt index state.uiBlocks
+        selected =
+            listToMaybe
+                [ block.blockId
+                | idx <- [min index (max 0 (Seq.length remaining - 1))]
+                , idx >= 0
+                , idx < Seq.length remaining
+                , let block = Seq.index remaining idx
+                ]
+    in state
+        { uiBlocks = remaining
+        , uiSelectedBlock = selected
+        , uiSelectedBlockIndex = selectedIndexFor selected remaining
+        , uiBlockIndices =
+            Map.fromList
+                [ (block.blockId, idx)
+                | (idx, block) <- zip [0 ..] (Foldable.toList remaining)
+                ]
+        }
+
 appendBlock
     :: BlockKind
     -> Text
@@ -750,7 +822,7 @@ appendBlock kind title body detail blockState callId state =
             , blockDetail = detail
             , blockState
             , blockExpanded =
-                kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockError]
+                kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockRecap, BlockError]
             , blockCallId = callId
             }
     in state
