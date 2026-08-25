@@ -3,6 +3,7 @@ module Agent.CLI.TUI.Composer.Edit
     ( decodePaste
     , draftCursorLocation
     , wrapDraft
+    , wrapDraftWindow
     ) where
 
 import Agent.CLI.Input (terminalTextWidth)
@@ -121,6 +122,53 @@ wrapDraft requestedWidth text requestedCursor =
         Nothing
             | cursor == index -> Just location
         previous -> previous
+
+-- | Lay out only the logical lines that can contribute to a bounded composer
+-- viewport around the cursor. Starting at newline boundaries preserves visual
+-- wrapping, while avoiding a full-draft grapheme pass for large pastes.
+wrapDraftWindow :: Int -> Int -> Text -> Int -> ([Text], (Int, Int))
+wrapDraftWindow requestedRows requestedWidth text requestedCursor =
+    let rows = max 1 requestedRows
+        cursor = max 0 (min (Text.length text) requestedCursor)
+        before = Text.take cursor text
+        start = precedingLineStart rows before
+        after = Text.drop cursor text
+        end = cursor + followingLinesLength rows after
+        window = Text.take (end - start) (Text.drop start text)
+    in wrapDraft requestedWidth window (cursor - start)
+
+precedingLineStart :: Int -> Text -> Int
+precedingLineStart lineCount text =
+    go lineCount text
+  where
+    go remaining current
+        | remaining <= 0 = Text.length current
+        | otherwise =
+            case Text.unsnoc current of
+                Nothing -> 0
+                Just (rest, character)
+                    | character == '\n' ->
+                        if remaining == 1
+                            then Text.length rest + 1
+                            else go (remaining - 1) rest
+                    | otherwise -> go remaining rest
+
+followingLinesLength :: Int -> Text -> Int
+followingLinesLength lineCount =
+    go lineCount 0
+  where
+    go remaining consumed current
+        | remaining <= 0 = consumed
+        | otherwise =
+            let (line, rest) = Text.break (== '\n') current
+                next = consumed + Text.length line
+            in if Text.null rest
+                then next
+                else
+                    go
+                        (remaining - 1)
+                        (next + 1)
+                        (Text.drop 1 rest)
 
 draftCursorLocation :: Text -> Int -> (Int, Int)
 draftCursorLocation text requestedCursor =

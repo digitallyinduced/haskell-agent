@@ -20,12 +20,14 @@ module Agent.CLI.TUI.Composer
     , handlePromptControlClick
     , immediateBtwQuestion
     , newFullscreenInputBuffer
+    , prepareBracketedPaste
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
     , takeFullscreenInput
     , takeFullscreenInputOr
     , wrapDraft
+    , wrapDraftWindow
     ) where
 
 import Agent.CLI.Clipboard
@@ -186,8 +188,12 @@ drawComposer appState =
                     else Just $
                         hBox (intersperse (txt " · ") (map txt leading))
             draftWidth = max 1 (context.availWidth - composerDraftChromeWidth)
-            (draftRows, _) =
-                wrapDraft draftWidth state.uiDraft state.uiCursor
+            draftLayout@(draftRows, _) =
+                wrapDraftWindow
+                    maxComposerRows
+                    draftWidth
+                    state.uiDraft
+                    state.uiCursor
             bodyHeight = min maxComposerRows (length draftRows)
             editor =
                 clickable ComposerArea $
@@ -199,7 +205,11 @@ drawComposer appState =
                                     else Theme.mutedAttr)
                                 (txt "❯ ")
                             , withAttr Theme.assistantAttr
-                                (renderDraft focused bodyHeight state)
+                                (renderDraft
+                                    focused
+                                    bodyHeight
+                                    state
+                                    draftLayout)
                             ]
             composer =
                 withBorderStyle unicodeRounded $
@@ -274,34 +284,35 @@ controlInteractionAttr state name
     | otherwise =
         Nothing
 
-renderDraft :: Bool -> Int -> UiState -> Widget Name
-renderDraft focused height state =
-    Widget Greedy Fixed do
-        context <- getContext
-        let width = max 1 context.availWidth
-            (rows, (row, column)) =
-                wrapDraft width state.uiDraft state.uiCursor
-            firstVisibleRow = max 0 (row - height + 1)
-            visibleRows = take height (drop firstVisibleRow rows)
-            visibleCursorRow = row - firstVisibleRow
-            content
-                | Text.null state.uiDraft =
-                    withAttr Theme.mutedAttr $
-                        txt
-                            (if not state.uiAwaitingInput
-                                then "Type a follow-up…"
-                                else " ")
-                | otherwise =
-                    vBox (map renderRow visibleRows)
-            cursorContent
-                | focused =
-                    showCursor
-                        ComposerCursor
-                        (Location (column, visibleCursorRow))
-                        content
-                | otherwise = content
-        render (padRight Max cursorContent)
+renderDraft
+    :: Bool
+    -> Int
+    -> UiState
+    -> ([Text], (Int, Int))
+    -> Widget Name
+renderDraft focused height state (rows, (row, column)) =
+    padRight Max cursorContent
   where
+    firstVisibleRow = max 0 (row - height + 1)
+    visibleRows = take height (drop firstVisibleRow rows)
+    visibleCursorRow = row - firstVisibleRow
+    content
+        | Text.null state.uiDraft =
+            withAttr Theme.mutedAttr $
+                txt
+                    (if not state.uiAwaitingInput
+                        then "Type a follow-up…"
+                        else " ")
+        | otherwise =
+            vBox (map renderRow visibleRows)
+    cursorContent
+        | focused =
+            showCursor
+                ComposerCursor
+                (Location (column, visibleCursorRow))
+                content
+        | otherwise = content
+
     -- Empty visual rows still need one cell so Brick preserves their height
     -- and can place the insertion cursor on them.
     renderRow row
@@ -495,6 +506,36 @@ activateSlashAt
                     (V.EvKey V.KEnter [])
         _ -> pure ()
 
+-- | An idle composer can hand bracketed paste classification to the main REPL,
+-- which is already waiting for input. During a running turn that consumer is
+-- blocked, so insert terminal text locally rather than leaving the draft behind
+-- a persistent "Reading clipboard…" notice.
+prepareBracketedPaste
+    :: Bool
+    -> Text
+    -> Int
+    -> Text
+    -> (Text, Int, Maybe ReplLine)
+prepareBracketedPaste awaitingInput draft cursor pasted =
+    let boundedCursor = max 0 (min (Text.length draft) cursor)
+        before = Text.take boundedCursor draft
+        after = Text.drop boundedCursor draft
+        pastedDraft = before <> pasted <> after
+        pastedCursor = boundedCursor + Text.length pasted
+    in if Text.null pasted
+        then
+            ( draft
+            , boundedCursor
+            , Just (ReplClipboardPaste draft Nothing)
+            )
+        else if awaitingInput
+        then
+            ( draft
+            , boundedCursor
+            , Just (ReplClipboardPasteOrText draft pasted pastedDraft)
+            )
+        else (pastedDraft, pastedCursor, Nothing)
+
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
 handleComposerKey
@@ -637,20 +678,23 @@ handleComposerKey
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
             let pasted = decodePaste bytes
-                before = Text.take ui.uiCursor ui.uiDraft
-                after = Text.drop ui.uiCursor ui.uiDraft
-                pastedDraft = before <> pasted <> after
-            if Text.null pasted
-                then submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
-                else do
-                    modifyUi
-                        (UiSetNotice
-                            (Just (progressNotice "Reading clipboard…")))
-                    submitRaw
-                        (ReplClipboardPasteOrText
-                            ui.uiDraft
-                            pasted
-                            pastedDraft)
+                (pastedDraft, pastedCursor, clipboardInput) =
+                    prepareBracketedPaste
+                        ui.uiAwaitingInput
+                        ui.uiDraft
+                        ui.uiCursor
+                        pasted
+            case clipboardInput of
+                Nothing -> do
+                    modifyUiResetSlash
+                        (UiSetDraft pastedDraft pastedCursor)
+                    modify' \current -> current { appPasted = True }
+                Just replLine -> do
+                    when (not (Text.null pasted)) $
+                        modifyUi
+                            (UiSetNotice
+                                (Just (progressNotice "Reading clipboard…")))
+                    submitRaw replLine
         _ -> pure ()
   where
     startDictation = do
