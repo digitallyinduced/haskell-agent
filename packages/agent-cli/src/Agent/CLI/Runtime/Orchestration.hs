@@ -2056,13 +2056,20 @@ runAgentInitializedWithLock
         generatedContextReloadRef <- newIORef (pure ())
         let currentModelContextWindow mapTransportModel = do
                 currentParams <- readIORef paramsRef
-                pure $ do
-                    currentModel <- currentParams.model
-                    catalogContextWindowForTransport
-                        catalog
-                        inferredTarget.targetConnectionId
-                        currentModel
-                        (mapTransportModel currentModel)
+                pure $
+                    catalogContextWindowForParams
+                        mapTransportModel
+                        currentParams
+            catalogContextWindowForParams mapTransportModel params = do
+                currentModel <- params.model
+                catalogContextWindowForTransport
+                    catalog
+                    inferredTarget.targetConnectionId
+                    currentModel
+                    (mapTransportModel currentModel)
+            contextWindowForParams mapTransportModel fallback params =
+                fromMaybe fallback
+                    (catalogContextWindowForParams mapTransportModel params)
             subagentRuntime = SubagentRuntime
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
@@ -2545,10 +2552,16 @@ runAgentInitializedWithLock
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
-                        let xaiWindow =
-                                fmap (fromMaybe 500_000)
-                                    (currentModelContextWindow
-                                        (XAIRequest.mapModel xaiOptions))
+                        let xaiContextWindow =
+                                contextWindowForParams
+                                    (XAIRequest.mapModel xaiOptions)
+                                    500_000
+                            protectXaiOverflow occupancy getParams backend =
+                                boundCompletedToolContinuations
+                                    xaiContextWindow
+                                    getParams
+                                    occupancy
+                                    backend
                         xaiOccupancy <- newIORef Nothing
                         case multiCtx of
                             Just ctx ->
@@ -2559,20 +2572,18 @@ runAgentInitializedWithLock
                                         XAIProvider
                                         ctx.multiSendToRoot
                                         (\childParams ->
-                                            boundCompletedToolContinuations
-                                                xaiWindow
-                                                (pure childParams)
+                                            protectXaiOverflow
                                                 xaiOccupancy
+                                                (pure childParams)
                                                 (xaiBackend xaiOptions tokenProvider
                                                     (pure childParams)))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        boundCompletedToolContinuations
-                                            xaiWindow
-                                            (readIORef paramsRef)
+                                        protectXaiOverflow
                                             xaiOccupancy
+                                            (readIORef paramsRef)
                                             (xaiBackend xaiOptions tokenProvider
                                                 (readIORef paramsRef))
                             btwBackend privateParams =
@@ -2693,9 +2704,8 @@ runAgentInitializedWithLock
                                 pure result
                     OpenRouterProvider -> do
                         openRouterOccupancy <- newIORef Nothing
-                        let openRouterWindow =
-                                fmap (fromMaybe 1_048_576)
-                                    (currentModelContextWindow transportModel)
+                        let openRouterContextWindow =
+                                contextWindowForParams transportModel 1_048_576
                             makeBackend params =
                                 case customGenericOptions of
                                     Just genericOptions ->
@@ -2715,11 +2725,11 @@ runAgentInitializedWithLock
                                     Nothing ->
                                         openRouterBackend openRouterOptions
                                             tokenProvider params
-                            protectOverflow params backend =
+                            protectOverflow occupancy getParams backend =
                                 boundCompletedToolContinuations
-                                    openRouterWindow
-                                    params
-                                    openRouterOccupancy
+                                    openRouterContextWindow
+                                    getParams
+                                    occupancy
                                     backend
                         case multiCtx of
                             Just ctx ->
@@ -2731,6 +2741,7 @@ runAgentInitializedWithLock
                                         ctx.multiSendToRoot
                                         (\childParams ->
                                             protectOverflow
+                                                openRouterOccupancy
                                                 (pure childParams)
                                                 (makeBackend
                                                     (pure childParams)))
@@ -2739,6 +2750,7 @@ runAgentInitializedWithLock
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
                                         protectOverflow
+                                            openRouterOccupancy
                                             (readIORef paramsRef)
                                             (makeBackend
                                                 (readIORef paramsRef))

@@ -118,6 +118,31 @@ spec = do
             readIORef attempts `shouldReturn` 1
 
     describe "decodeCodexHttpBody" do
+        it "rejects an empty incomplete SSE response" do
+            let body = Text.concat
+                    [ "event: response.created\n"
+                    , "data: {\"type\":\"response.created\","
+                    , "\"response\":{\"id\":\"resp-empty-incomplete\"}}\n\n"
+                    , "event: response.incomplete\n"
+                    , "data: "
+                    , Text.decodeUtf8 (LBS.toStrict (Aeson.encode (Aeson.object
+                        [ "response" .= Aeson.object
+                            [ "id" .= ("resp-empty-incomplete" :: Text)
+                            , "created_at" .= (0 :: Int)
+                            , "model" .= ("gpt-test" :: Text)
+                            , "status" .= ("incomplete" :: Text)
+                            , "incomplete_details" .= Aeson.object
+                                [ "reason" .= ("max_output_tokens" :: Text) ]
+                            , "output" .= ([] :: [Aeson.Value])
+                            ]
+                        ])))
+                    , "\n\n"
+                    ]
+            decodeCodexHttpBody body `shouldBe` Left
+                (ProviderError ApiErrorType
+                    "response.incomplete: max_output_tokens"
+                    Nothing)
+
         it "reads an incomplete SSE response that already contains a function call" do
             let body = Text.concat
                     [ "event: response.output_item.done\n"

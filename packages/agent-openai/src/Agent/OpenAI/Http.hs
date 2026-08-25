@@ -109,7 +109,8 @@ decodeCodexHttpBodyWithModel
 decodeCodexHttpBodyWithModel modelHint bodyText
     | looksLikeSse bodyText = do
         events <- parseSseEvents bodyText
-        buildStreamResponseWithModel streamConfig modelHint events
+        response <- buildStreamResponseWithModel streamConfig modelHint events
+        rejectFailedCodexResponse response
     | otherwise =
         case decodeJsonResponseBody bodyText of
             Just jsonValue -> decodeResponseValue jsonValue bodyText

@@ -740,7 +740,7 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
         getParams onCompacted contextTokensRef backend =
     rejectOversizedInitialRequest getParams $
         boundCompletedToolContinuations
-            (codexEffectiveContextWindowFor . (.model) <$> getParams)
+            (codexEffectiveContextWindowFor . (.model))
             getParams
             contextTokensRef $
             autoCompactOpenAiBackendWithLimit
@@ -889,19 +889,19 @@ rejectOversizedInitialRequest getParams (Backend submit) =
 -- Stateless providers and full-history replays trim older transcript items,
 -- keeping the unpaired function calls that match the in-flight results.
 boundCompletedToolContinuations
-    :: IO Int
+    :: (ResponseCreateParams -> Int)
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
-boundCompletedToolContinuations getWindow getParams contextTokensRef (Backend submit) =
+boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
     Backend \history previous inputs onEvent ->
         if not (any isCompletedTool inputs)
             then submit history previous inputs onEvent
             else do
                 params <- getParams
-                contextWindow <- getWindow
                 occupancy <- readIORef contextTokensRef
+                let contextWindow = contextWindowFor params
                 let liveChain = isJust previous
                     requestTokens candidate
                         | liveChain =
