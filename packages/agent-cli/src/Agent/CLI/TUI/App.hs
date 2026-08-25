@@ -812,7 +812,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appTextReply = Nothing
         , appSlashDismissed = False
         , appPasted = False
-        , appHistory = history
+        , appHistory = Bridge.trimHistory history
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
