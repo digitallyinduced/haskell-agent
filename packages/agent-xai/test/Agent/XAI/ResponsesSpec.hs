@@ -123,6 +123,7 @@ spec = do
             map (KeyMap.lookup "type") toolObjects `shouldBe`
                 [ Just (Aeson.String "function")
                 , Just (Aeson.String "web_search")
+                , Just (Aeson.String "x_search")
                 ]
             -- external_web_access is a ChatGPT knob the proxy does not know.
             Maybe.mapMaybe (KeyMap.lookup "external_web_access") toolObjects `shouldBe` []
@@ -133,7 +134,24 @@ spec = do
             object <- expectObject value
             KeyMap.lookup "include" object `shouldBe` Nothing
 
-        it "clamps reasoning efforts grok does not offer" do
+        it "serializes hosted tools from ResponseToolType, not a tag string" do
+            let mismatched = KnownResponseTool ToolXSearch TaggedObject
+                    { tag = "web_search"
+                    , fields = KeyMap.empty
+                    }
+            Aeson.toJSON mismatched `shouldBe` Aeson.object
+                ["type" .= ("x_search" :: Text)]
+
+        it "injects hosted x_search when the caller omitted it" do
+            let value = requestValue defaultClientOptions
+                    (setTools (Just []) sampleRequest)
+            object <- expectObject value
+            tools <- expectArray (KeyMap.lookup "tools" object)
+            toolObjects <- traverse expectObject tools
+            map (KeyMap.lookup "type") toolObjects `shouldBe`
+                [Just (Aeson.String "x_search")]
+
+        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh/max through" do
             let effortOf request = do
                     object <- expectObject (requestValue defaultClientOptions request)
                     reasoning <- expectObject =<< maybe
@@ -150,9 +168,9 @@ spec = do
             effortOf (withEffort "low" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "low"))
             effortOf (withEffort "xhigh" sampleRequest)
-                >>= (`shouldBe` Just (Aeson.String "high"))
+                >>= (`shouldBe` Just (Aeson.String "xhigh"))
             effortOf (withEffort "max" sampleRequest)
-                >>= (`shouldBe` Just (Aeson.String "high"))
+                >>= (`shouldBe` Just (Aeson.String "max"))
             -- Unset effort defaults to high for Grok.
             effortOf (clearEffort sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "high"))
@@ -314,14 +332,9 @@ sampleRequest = defaultResponseCreateParams
             , strict = Nothing
             , extraFields = mempty
             }
-        , KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            , fields = KeyMap.singleton "external_web_access" (Aeson.Bool True)
-            }
-        , KnownResponseTool ToolComputer TaggedObject
-            { tag = "computer"
-            , fields = mempty
-            }
+        , knownResponseTool ToolWebSearch
+            (KeyMap.singleton "external_web_access" (Aeson.Bool True))
+        , knownResponseTool ToolComputer mempty
         ]
     , reasoning = Just (reasoningConfig "high")
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
@@ -361,6 +374,10 @@ setModel newModel ResponseCreateParams { model = _, .. } =
 setInput :: Maybe ResponseInput -> ResponseCreateParams -> ResponseCreateParams
 setInput newInput ResponseCreateParams { input = _, .. } =
     ResponseCreateParams { input = newInput, .. }
+
+setTools :: Maybe [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
+setTools newTools ResponseCreateParams { tools = _, .. } =
+    ResponseCreateParams { tools = newTools, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

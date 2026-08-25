@@ -3,6 +3,11 @@ module Agent.XAI.Options
     ( ClientOptions(..)
     , defaultClientOptions
     , clientOptionsFromEnv
+    , defaultGrokClientVersion
+    , grokAuthenticateResponseValue
+    , grokClientIdentifier
+    , grokTokenAuthValue
+    , grokUserAgent
     ) where
 
 import Agent.Provider.Options
@@ -13,6 +18,47 @@ import Agent.Provider.Options
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified System.Info as SysInfo
+
+-- | Process identity Grok Build sends as @x-grok-client-identifier@.
+grokClientIdentifier :: Text
+grokClientIdentifier = "grok-shell"
+
+-- | Current Grok Build crate version (@xai-grok-version@). The proxy
+-- version-gates on @x-grok-client-version@.
+defaultGrokClientVersion :: Text
+defaultGrokClientVersion = "1.0.8"
+
+-- | Value Grok Build injects as @X-XAI-Token-Auth@ on cli-chat-proxy.
+grokTokenAuthValue :: Text
+grokTokenAuthValue = "xai-grok-cli"
+
+-- | Value Grok Build injects as @x-authenticateresponse@ on cli-chat-proxy.
+grokAuthenticateResponseValue :: Text
+grokAuthenticateResponseValue = "authenticate-response"
+
+-- | User-Agent Grok Build sends when the origin product is @grok-shell@.
+grokUserAgent :: Text -> Text
+grokUserAgent version =
+    grokClientIdentifier
+        <> "/"
+        <> version
+        <> " ("
+        <> grokPlatformOs
+        <> "; "
+        <> grokPlatformArch
+        <> ")"
+
+grokPlatformOs :: Text
+grokPlatformOs = case SysInfo.os of
+    "darwin" -> "macos"
+    "mingw32" -> "windows"
+    other -> Text.pack other
+
+grokPlatformArch :: Text
+grokPlatformArch = case SysInfo.arch of
+    "arm64" -> "aarch64"
+    other -> Text.pack other
 
 data ClientOptions = ClientOptions
     { baseUrl :: !String
@@ -33,7 +79,7 @@ defaultClientOptions = ClientOptions
     , modelOverrides = []
     , defaultModel = "grok-4.6"
     , requestTimeoutSeconds = 600
-    , clientVersion = "0.2.118"
+    , clientVersion = defaultGrokClientVersion
     }
 
 -- | Load optional transport overrides from the environment.

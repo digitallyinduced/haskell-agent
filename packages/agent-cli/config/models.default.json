@@ -43,6 +43,7 @@
       "id": "grok-4.6",
       "connection": "xai",
       "dialect": "grok-build",
+      "context_window": 500000,
       "label": "default",
       "default": true,
       "fallback_priority": 10
@@ -51,6 +52,7 @@
       "id": "stealth/ox-alpha",
       "connection": "openrouter",
       "dialect": "generic-responses",
+      "context_window": 1048576,
       "label": "default · frontier · free · coding · 1M context",
       "default": true,
       "fallback_priority": 20

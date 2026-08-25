@@ -1,6 +1,11 @@
 module Agent.XAI.UsageSpec (spec) where
 
 import Agent.Provider (Credential(..), Provider(..))
+import Agent.XAI.Options
+    ( defaultGrokClientVersion
+    , grokTokenAuthValue
+    , grokUserAgent
+    )
 import Agent.XAI.Usage
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar)
 import qualified Data.ByteString.Lazy.Char8 as LBS
@@ -75,9 +80,13 @@ spec = do
             lookup "Authorization" headers
                 `shouldBe` Just "Bearer token-a"
             lookup "X-XAI-Token-Auth" headers
-                `shouldBe` Just "xai-grok-cli"
+                `shouldBe` Just grokTokenAuthValue
             lookup "x-userid" headers
                 `shouldBe` Just "user-a"
+            lookup "x-grok-client-version" headers
+                `shouldBe` Just defaultGrokClientVersion
+            lookup "User-Agent" headers
+                `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
             lookup "X-Auth-Token" headers `shouldBe` Nothing
 
 billingApp

@@ -30,7 +30,7 @@ import Agent.CLI.Command ()
 import Agent.CLI.Compaction
     ( installLiveCompactOutcome,
       runProviderCompactWith,
-      runResponsesCompactWith )
+      runResponsesCompactWithContextWindow )
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
@@ -72,6 +72,7 @@ import Agent.CLI.ModelConfig
       ResponsesConnection(..),
       builtinConnectionId,
       catalogConnection,
+      catalogContextWindowForTransport,
       loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelFor,
@@ -86,17 +87,14 @@ import Agent.CLI.Options
     ( defaultEffortFor,
       isOneShot,
       resolveApprovalPolicy,
-      ApprovalPolicy(..),
-      CliOptions(optMotionMode, optManagedDenyMutations, optNoYolo,
+      CliOptions(optMotionMode, optNoYolo,
                  optYolo, optMaxConcurrentAgents, optCompactThreshold,
                  optShowRawReasoning, optProvider, optModel, optWorktree, optEffort,
-                 optPrompt, optPromptFile, optManagedTurnFile, optSaveSession,
+                 optPrompt, optPromptFile, optManagedTurnFile,
                  optScreenMode, optGhci, optBash, optResume, optCwd),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
 import Agent.CLI.Plan ( cliPlanHooks )
-import Agent.CLI.Progress
-    ( osc9ProgressIndeterminate, osc9ProgressRemove, wrapOscForTmux )
 import Agent.CLI.Project
     ( ProjectAccount(..),
       ProjectModel(..),
@@ -130,6 +128,7 @@ import Agent.CLI.ProviderTransition
                          transitionAutomaticBilling, transitionSessionId),
       TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Recap ()
+import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request ( requestParams )
@@ -207,10 +206,6 @@ import Agent.CLI.Startup.Auth
       recordStartupTiming,
       setStartupNotice,
       startupDie )
-import Agent.CLI.Startup.Format
-    ( formatRepositoryPath,
-      formatStartupDuration,
-      formatStartupTimings )
 import Agent.CLI.StartupContext ( loadAgentsContext )
 import Agent.CLI.Style
     ( cliWindowTitle,
@@ -236,7 +231,6 @@ import Agent.CLI.TUI.App
       newFullscreenInputBuffer,
       newFullscreenRuntime,
       queuedFullscreenInputDisplays,
-      requestFullscreenChoiceWithBody,
       runFullscreen,
       setFullscreenHistorySource,
       setFullscreenSessionActions,
@@ -301,6 +295,7 @@ import Agent.Provider
       TokenProvider,
       getNextToken,
       providerSlug,
+      runWithTokenProvider,
       tokenProvider,
       tokenProviderBillingMode )
 import Agent.Responses.GenericBackend
@@ -333,7 +328,6 @@ import Agent.TUI.Model
       UiEvent(UiSystemMessage, UiSetRepository, UiSetNotice),
       UiState(uiQueuedInputs) )
 import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
-import Agent.ToolDispatch ( canonicalToolName )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
@@ -348,12 +342,9 @@ import Agent.Tools.Types
 import Agent.XAI.LoopBackend ( xaiBackend )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async
-    ( cancel,
-      concurrently,
+    ( concurrently,
       concurrently_,
       link,
-      waitCatch,
-      waitEitherCatch,
       waitSTM,
       withAsync )
 import Control.Concurrent.Chan
@@ -373,7 +364,6 @@ import Control.Exception.Safe
     ( SomeException,
       catchAny,
       finally,
-      mask,
       mask_,
       onException,
       throwIO,
@@ -401,13 +391,9 @@ import System.Directory.OsPath
 import System.Environment ( getProgName, lookupEnv )
 import System.Exit ( die )
 import System.IO
-    ( Handle,
-      IOMode(AppendMode),
-      hFlush,
-      hIsTerminalDevice,
+    ( hIsTerminalDevice,
       stderr,
-      stdin,
-      withFile )
+      stdin )
 import System.OsPath
     ( OsPath,
       decodeFS,
@@ -415,7 +401,6 @@ import System.OsPath
       (</>),
       takeDirectory,
       takeFileName )
-import System.Posix.Files ( setFileMode )
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ( GenericClientOptions(model),
@@ -432,14 +417,13 @@ import qualified Agent.MCP as MCP
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
                       mcpServerName, mcpServerCommand, mcpServerArgs, mcpServerCwd,
-                      mcpServerEnv, mcpServerStartupTimeoutSeconds),
-      McpToolRegistration(mcpRegistrationTool, mcpRegistrationServer) )
+                      mcpServerEnv, mcpServerStartupTimeoutSeconds) )
 import qualified Data.Map.Strict as Map
-    ( toAscList, fromList, empty, lookup )
+    ( toAscList, empty, lookup )
 import qualified Agent.OpenAI.Auth as OpenAI
     ( discoverAccounts, getAccessTokenForAccount )
 import qualified Agent.OpenRouter as OpenRouter
-    ( clientOptionsFromEnv, mapModel )
+    ( clientOptionsFromEnv, createResponseWith, mapModel )
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
 import qualified Agent.Provider as Provider ( tokenProvider )
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
@@ -449,13 +433,27 @@ import qualified Data.Set as Set ()
 import qualified Data.Text as Text
     ( intercalate, null, pack, unpack )
 import qualified Data.Text.IO as Text ( hPutStr )
+import qualified Agent.XAI.Client as XAIClient ( createResponseWith )
 import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
+import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(..), AccountSwitchRequest(..), AgentProcessRuntime(..),
-      AgentRunMode(..), backgroundRunMode )
-
+      AgentRunMode(..) )
+import Agent.CLI.Runtime.Orchestration.Restart
+    ( RestartCallbacks(..), runFullscreenRestartLoop )
+import Agent.CLI.Runtime.Orchestration.Background
+    ( runInProcessSessionTurn )
+import Agent.CLI.Runtime.Orchestration.Concurrent ( concurrentlyAcquire )
+import Agent.CLI.Runtime.Orchestration.Startup
+    ( clearNativeProgress
+    , finishStartup
+    , mcpToolCollision
+    , reportStartupWarning
+    , setNativeProgress
+    , setStartupRepository
+    )
 runAgentWithRuntime
     :: AgentProcessRuntime
     -> AgentRunMode
@@ -547,73 +545,6 @@ runAgentWithRuntime processRuntime runMode options = do
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
 
-runInProcessSessionTurn
-    :: AgentProcessRuntime
-    -> CliOptions
-    -> ApprovalPolicy
-    -> Bool
-    -> Bool
-    -> SessionHandle
-    -> Text
-    -> IO (Either Text ())
-runInProcessSessionTurn
-        processRuntime parentOptions policy ghciEnabled bashEnabled handle message =
-    withFile logPath AppendMode \logHandle -> do
-        setFileMode logPath 0o600
-        runAgentWithRuntime
-            processRuntime
-            (backgroundRunMode logHandle handle.sessionMeta.metaCwd)
-            childOptions >>= \case
-                DevQuit -> pure (Right ())
-                DevReload _ ->
-                    pure (Left "background agent session requested a reload")
-  where
-    logPath =
-        unsafeToFilePath
-            (handle.sessionDir </> unsafeEncodeUtf "agent.log")
-    childOptions =
-        applyBackgroundApproval policy $
-            parentOptions
-                { optProvider = Nothing
-                , optModel = Nothing
-                , optCwd = Nothing
-                , optWorktree = False
-                , optEffort = Nothing
-                , optPrompt = Just message
-                , optPromptFile = Nothing
-                , optManagedTurnFile = Nothing
-                , optResume = Just handle.sessionMeta.metaId
-                , optSaveSession = True
-                , optGhci = ghciEnabled
-                , optBash = bashEnabled
-                , optScreenMode = ScreenMinimal
-                }
-
-applyBackgroundApproval :: ApprovalPolicy -> CliOptions -> CliOptions
-applyBackgroundApproval policy options =
-    case policy of
-        ApproveAll ->
-            options
-                { optYolo = True
-                , optNoYolo = False
-                , optManagedDenyMutations = False
-                }
-        DenyMutating ->
-            options
-                { optYolo = False
-                , optNoYolo = True
-                , optManagedDenyMutations = True
-                }
-        PromptMutating ->
-            -- Background sessions cannot safely borrow the caller's stdin.
-            -- Keep the prompt policy marker; non-TTY one-shot resolution
-            -- conservatively denies mutating calls.
-            options
-                { optYolo = False
-                , optNoYolo = True
-                , optManagedDenyMutations = False
-                }
-
 -- | Restore the process cwd after an action succeeds or throws. Cabal gives
 -- GHCi relative source paths, so returning from an agent session in its cwd
 -- would make the following @:reload@ lose local modules.
@@ -621,79 +552,6 @@ withRestoredCurrentDirectory :: IO a -> IO a
 withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
-
-finishStartup :: StartupRuntime -> IO ()
-finishStartup startup = do
-    writeIORef startup.startupFinished True
-    recordStartupTiming startup.startupStartedAt startup.startupTimings "ready"
-    case startup.startupFullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime (UiSetNotice Nothing)
-    lookupEnv "HASKELL_AGENT_STARTUP_TIMING" >>= \case
-        Just "1" -> do
-            timings <- readIORef startup.startupTimings
-            syntaxLoadDuration <-
-                readIORef startup.startupSyntaxLoadDuration
-            let message =
-                    formatStartupTimings timings
-                        <> maybe
-                            ""
-                            (\duration ->
-                                " · syntax highlighting "
-                                    <> formatStartupDuration duration)
-                            syntaxLoadDuration
-            case startup.startupFullscreen of
-                Nothing -> putTextLn startup.startupStderr message
-                Just runtime -> emitUiEvent runtime (UiSystemMessage message)
-        _ -> pure ()
-
-reportStartupWarning :: StartupRuntime -> Text -> IO ()
-reportStartupWarning startup message =
-    case startup.startupFullscreen of
-        Nothing -> putTextLn startup.startupStderr ("warning: " <> message)
-        Just runtime ->
-            emitUiEvent runtime (UiSystemMessage ("warning: " <> message))
-
-mcpToolCollision :: [AppTool] -> [MCP.McpToolRegistration] -> Maybe Text
-mcpToolCollision existingTools = go
-  where
-    existing =
-        Map.fromList $
-            ("web_search", "built-in web search")
-                : [ (canonicalToolName tool.appToolName, "built-in tool")
-                  | tool <- existingTools
-                  ]
-
-    go [] = Nothing
-    go (registration : rest) =
-        let tool = registration.mcpRegistrationTool
-            name = canonicalToolName tool.appToolName
-        in case Map.lookup name existing of
-            Nothing -> go rest
-            Just source ->
-                Just $
-                    "MCP tool "
-                        <> tool.appToolName
-                        <> " from server "
-                        <> registration.mcpRegistrationServer
-                        <> " conflicts with "
-                        <> source
-
-setStartupRepository
-    :: Maybe FullscreenRuntime
-    -> OsPath
-    -> Text
-    -> OsPath
-    -> IO ()
-setStartupRepository fullscreen home branch cwd =
-    case fullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime $
-                UiSetRepository
-                    branch
-                    (formatRepositoryPath home cwd)
 
 runAgent
     :: AgentProcessRuntime
@@ -717,12 +575,109 @@ runAgent
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
+                let chooseRecoveryModel nextOptions nextTransition = do
+                        home <- getHomeDirectory
+                        cwd <- case nextOptions.optCwd <|> runMode.runCwdHint of
+                            Nothing -> getCurrentDirectory
+                            Just path -> makeAbsolute path
+                        loadModelCatalogAt home cwd >>= \case
+                            Left err -> pure (Left err)
+                            Right catalog -> do
+                                color <- resolveColor runMode.runStderr
+                                let currentTarget =
+                                        ((.transitionTarget) <$> nextTransition)
+                                            <|> ( (.modelTarget)
+                                                    <$> (nextOptions.optModel
+                                                        >>= resolveConfiguredModel
+                                                            catalog)
+                                                )
+                                            <|> ( (.modelTarget)
+                                                    <$> (nextOptions.optProvider
+                                                        >>= defaultModelOptionFor
+                                                            catalog)
+                                                )
+                                            <|> ( (.modelTarget)
+                                                    <$> defaultModelOptionFor
+                                                        catalog
+                                                        OpenAIProvider
+                                                )
+                                case currentTarget of
+                                    Nothing ->
+                                        pure
+                                            (Left
+                                                "No configured models are available.")
+                                    Just current ->
+                                        modelChoice
+                                            catalog
+                                            (Just runtime)
+                                            color
+                                            current.targetConnectionId
+                                            current.targetProvider
+                                            current.targetModelId
+                                            current.targetDialect >>= \case
+                                                Nothing ->
+                                                    pure (Right Nothing)
+                                                Just choice ->
+                                                    pure $ Right $ Just $
+                                                        recoveryModelTransition
+                                                            nextOptions
+                                                            nextTransition
+                                                            choice.modelTarget
+                    recoveryModelTransition nextOptions nextTransition target =
+                        case nextTransition of
+                            Just active ->
+                                active
+                                    { transitionTarget = target
+                                    , transitionAccountSelectionId = Nothing
+                                    , transitionAccountId = Nothing
+                                    , transitionUnavailableProviders = []
+                                    , transitionCause = ManualTransition
+                                    , transitionAutomaticBilling = Nothing
+                                    }
+                            Nothing ->
+                                ProviderTransition
+                                    { transitionTarget = target
+                                    , transitionAccountSelectionId = Nothing
+                                    , transitionAccountId = Nothing
+                                    , transitionSessionId = nextOptions.optResume
+                                    , transitionPendingTurn = Nothing
+                                    , transitionUnavailableProviders = []
+                                    , transitionCause = ManualTransition
+                                    , transitionAutomaticBilling = Nothing
+                                    }
+                    callbacks = RestartCallbacks
+                        { restartPrepare =
+                            \nextOptions nextTransition ->
+                                prepareAgentIteration
+                                    processRuntime
+                                    runMode
+                                    fullscreenInputs
+                                    sessionState
+                                    (Just runtime)
+                                    nextOptions
+                                    nextTransition
+                        , restartFallback =
+                            \failed apiError ->
+                                continueAutomaticFallback
+                                    runMode.runCwdHint
+                                    runMode.runStderr
+                                    (Just runtime)
+                                    failed
+                                    apiError
+                        , restartFormatFailure = \apiError -> do
+                            now <- getCurrentTime
+                            pure (formatApiErrorAt now apiError)
+                        , restartOptions = restartSessionOptions
+                        , restartApplyTransition = applyProviderTransition
+                        , restartManageAccounts = do
+                            color <- resolveColor stderr
+                            runLoginManager color
+                        , restartChooseModel = chooseRecoveryModel
+                        }
+                in
                 runFullscreen runtime $
                     runFullscreenRestartLoop
-                        processRuntime
-                        runMode
-                        fullscreenInputs
-                        sessionState
+                        callbacks
                         runtime
                         options
                         transition
@@ -1078,194 +1033,6 @@ resetFullscreenSessionActions runtime =
         (pure ForceExit)
         (pure (AgentRoot, []))
         (const (pure ()))
-
-runFullscreenRestartLoop
-    :: AgentProcessRuntime
-    -> AgentRunMode
-    -> FullscreenInputBuffer
-    -> SessionState
-    -> FullscreenRuntime
-    -> CliOptions
-    -> Maybe ProviderTransition
-    -> IO RunResult
-    -> IO RunResult
-runFullscreenRestartLoop
-    processRuntime
-    runMode
-    fullscreenInputs
-    sessionState
-    runtime =
-        loop
-  where
-    loop options transition action =
-        -- The notifier in 'runFullscreen' watches this whole tail-recursive
-        -- chain, rather than stopping Brick after the first provider exits.
-        try @_ @StartupFailure action >>= \case
-            Left (StartupFailure message) ->
-                recoverStartup options transition (Text.pack message)
-            Right result -> case result of
-                RunRestart sessionId -> do
-                    let nextOptions = restartSessionOptions options sessionId
-                    retryStartup nextOptions Nothing
-                RunSwitchProvider next -> do
-                    let nextOptions = applyProviderTransition options next
-                    retryStartup nextOptions (Just next)
-                RunProviderStartFailed apiError ->
-                    case transition of
-                        Just failed
-                            | failed.transitionCause == AutomaticFallback ->
-                                continueAutomaticFallback
-                                    runMode.runCwdHint
-                                    runMode.runStderr
-                                    (Just runtime)
-                                    failed
-                                    apiError >>= \case
-                                    Just next -> do
-                                        let nextOptions =
-                                                applyProviderTransition
-                                                    options next
-                                        retryStartup nextOptions (Just next)
-                                    Nothing ->
-                                        recoverProviderStart
-                                            options transition apiError
-                        _ ->
-                            recoverProviderStart options transition apiError
-                other -> pure other
-
-    recoverProviderStart options transition apiError = do
-        now <- getCurrentTime
-        recoverStartup
-            options
-            transition
-            (formatApiErrorAt now apiError)
-
-    retryStartup options transition = do
-        emitUiEvent runtime $
-            UiSetNotice (Just (progressNotice "Retrying startup…"))
-        try @_ @StartupFailure
-            (prepareAgentIteration
-                processRuntime
-                runMode
-                fullscreenInputs
-                sessionState
-                (Just runtime)
-                options
-                transition) >>= \case
-                    Left (StartupFailure message) ->
-                        recoverStartup
-                            options transition (Text.pack message)
-                    Right prepared ->
-                        loop options transition prepared.preparedRun
-
-    recoverStartup options transition message = do
-        emitUiEvent runtime (UiSetNotice Nothing)
-        requestFullscreenChoiceWithBody
-            runtime
-            "Couldn’t start the agent"
-            message
-            0
-            [ ( "Retry"
-              , "Try loading credentials and account usage again"
-              )
-            , ( "Choose model"
-              , "Pick a different model or provider"
-              )
-            , ( "Manage"
-              , "Connect, refresh, enable, or remove provider accounts"
-              )
-            , ("Exit", "Close the agent")
-            ] >>= \case
-                Just 0 ->
-                    retryStartup options transition
-                Just 1 ->
-                    chooseRecoveryModel options transition message
-                Just 2 -> do
-                    color <- resolveColor stderr
-                    withFullscreenSuspended runtime (runLoginManager color)
-                    retryStartup options transition
-                _ -> pure RunQuit
-
-    chooseRecoveryModel options transition recoveryMessage = do
-        home <- getHomeDirectory
-        cwd <- case options.optCwd <|> runMode.runCwdHint of
-            Nothing -> getCurrentDirectory
-            Just path -> makeAbsolute path
-        loadModelCatalogAt home cwd >>= \case
-            Left err ->
-                recoverStartup options transition err
-            Right catalog -> do
-                color <- resolveColor stderr
-                let currentTarget =
-                        ((.transitionTarget) <$> transition)
-                            <|> ( (.modelTarget)
-                                    <$> (options.optModel
-                                        >>= resolveConfiguredModel catalog)
-                                )
-                            <|> ( (.modelTarget)
-                                    <$> (options.optProvider
-                                        >>= defaultModelOptionFor catalog)
-                                )
-                            <|> ( (.modelTarget)
-                                    <$> defaultModelOptionFor
-                                        catalog
-                                        OpenAIProvider
-                                )
-                case currentTarget of
-                    Nothing ->
-                        recoverStartup
-                            options
-                            transition
-                            "No configured models are available."
-                    Just current ->
-                        modelChoice
-                            catalog
-                            (Just runtime)
-                            color
-                            current.targetConnectionId
-                            current.targetProvider
-                            current.targetModelId
-                            current.targetDialect >>= \case
-                                Nothing ->
-                                    recoverStartup
-                                        options
-                                        transition
-                                        recoveryMessage
-                                Just choice -> do
-                                    let nextTransition =
-                                            recoveryModelTransition
-                                                options
-                                                transition
-                                                choice.modelTarget
-                                        nextOptions =
-                                            applyProviderTransition
-                                                options
-                                                nextTransition
-                                    retryStartup
-                                        nextOptions
-                                        (Just nextTransition)
-
-    recoveryModelTransition options transition target =
-        case transition of
-            Just active ->
-                active
-                    { transitionTarget = target
-                    , transitionAccountSelectionId = Nothing
-                    , transitionAccountId = Nothing
-                    , transitionUnavailableProviders = []
-                    , transitionCause = ManualTransition
-                    , transitionAutomaticBilling = Nothing
-                    }
-            Nothing ->
-                ProviderTransition
-                    { transitionTarget = target
-                    , transitionAccountSelectionId = Nothing
-                    , transitionAccountId = Nothing
-                    , transitionSessionId = options.optResume
-                    , transitionPendingTurn = Nothing
-                    , transitionUnavailableProviders = []
-                    , transitionCause = ManualTransition
-                    , transitionAutomaticBilling = Nothing
-                    }
 
 runAgentInitialized
     :: AgentProcessRuntime
@@ -2142,7 +1909,7 @@ runAgentInitializedWithLock
                 bashEnabled <- readIORef bashEnabledRef
                 let action =
                         runInProcessSessionTurn
-                            processRuntime
+                            (runAgentWithRuntime processRuntime)
                             options
                             policy
                             ghciEnabled
@@ -2262,6 +2029,8 @@ runAgentInitializedWithLock
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
+            resumeNeedsFreshContext =
+                resumeNeedsGeneratedContext initialTurns
             initialPrevious = case transition of
                 Just _ -> Nothing
                 Nothing
@@ -2269,7 +2038,17 @@ runAgentInitializedWithLock
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
-        let subagentRuntime = SubagentRuntime
+        generatedContextReloadRef <- newIORef (pure ())
+        let currentModelContextWindow mapTransportModel = do
+                currentParams <- readIORef paramsRef
+                pure $ do
+                    currentModel <- currentParams.model
+                    catalogContextWindowForTransport
+                        catalog
+                        inferredTarget.targetConnectionId
+                        currentModel
+                        (mapTransportModel currentModel)
+            subagentRuntime = SubagentRuntime
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
                 , subagentBashEnabled = bashEnabledRef
@@ -2318,8 +2097,12 @@ runAgentInitializedWithLock
                 dialect
                 home
                 cwd
-                (if refreshDialectContext then [] else initialItems)
-                (if refreshDialectContext then Nothing else initialPrevious)
+                (if refreshDialectContext || resumeNeedsFreshContext
+                    then []
+                    else initialItems)
+                (if refreshDialectContext || resumeNeedsFreshContext
+                    then Nothing
+                    else initialPrevious)
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -2401,6 +2184,7 @@ runAgentInitializedWithLock
                                 , tokenProvider = sessionTokenProvider
                                 , openAiPool = sessionOpenAiPool
                                 , startupContext
+                                , generatedContextReloadRef
                                 , skillsRef
                                 , skillInvocationsRef
                                 , escPaused
@@ -2656,6 +2440,7 @@ runAgentInitializedWithLock
                                             (readIORef paramsRef)
                                             contextTokensRef
                                             recordCompactionUsage
+                                            (readIORef generatedContextReloadRef >>= id)
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
@@ -2766,14 +2551,22 @@ runAgentInitializedWithLock
                                 xaiBackend xaiOptions tokenProvider
                                     (pure privateParams)
                             compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow
+                                        (XAIRequest.mapModel xaiOptions)
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
-                                    (runProviderCompactWith
-                                        Nothing
+                                    (runResponsesCompactWithContextWindow
+                                        contextWindow
+                                        (\request ->
+                                            runWithTokenProvider tokenProvider
+                                                \credential ->
+                                                    XAIClient.createResponseWith
+                                                        xaiOptions
+                                                        credential
+                                                        request)
                                         recordCompactionUsage
-                                        provider
-                                        (Just tokenProvider)
                                         paramsRef
                                         historyRef)
                                     focus
@@ -2911,12 +2704,15 @@ runAgentInitializedWithLock
                                 makeBackend
                                     (pure privateParams)
                             compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow transportModel
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
                                     (case customGenericOptions of
                                         Just genericOptions ->
-                                            runResponsesCompactWith
+                                            runResponsesCompactWithContextWindow
+                                                contextWindow
                                                 (\request ->
                                                     GenericResponses.createResponseWith
                                                         genericOptions
@@ -2931,11 +2727,17 @@ runAgentInitializedWithLock
                                                 paramsRef
                                                 historyRef
                                         Nothing ->
-                                            runProviderCompactWith
-                                                Nothing
+                                            runResponsesCompactWithContextWindow
+                                                contextWindow
+                                                (\request ->
+                                                    runWithTokenProvider
+                                                        tokenProvider
+                                                        \credential ->
+                                                            OpenRouter.createResponseWith
+                                                                openRouterOptions
+                                                                credential
+                                                                request)
                                                 recordCompactionUsage
-                                                provider
-                                                (Just tokenProvider)
                                                 paramsRef
                                                 historyRef)
                                     focus
@@ -3051,73 +2853,3 @@ restartSessionOptions options sessionId =
         , optManagedTurnFile = Nothing
         , optResume = Just sessionId
         }
-
-concurrentlyAcquire
-    :: IO a
-    -> (a -> IO ())
-    -> IO b
-    -> (b -> IO ())
-    -> IO (a, b)
-concurrentlyAcquire acquireLeft releaseLeft acquireRight releaseRight =
-    mask \restore ->
-        withAsync (restore acquireLeft) \leftWorker ->
-            withAsync (restore acquireRight) \rightWorker -> do
-                let cleanupResult release = \case
-                        Left _ -> pure ()
-                        Right value -> release value
-                    cancelAndCleanup = do
-                        cancel leftWorker
-                        cancel rightWorker
-                        leftResult <- waitCatch leftWorker
-                        rightResult <- waitCatch rightWorker
-                        cleanupResult releaseLeft leftResult
-                        cleanupResult releaseRight rightResult
-                first <-
-                    restore (waitEitherCatch leftWorker rightWorker)
-                        `onException` cancelAndCleanup
-                case first of
-                    Left (Left exception) -> do
-                        cancel rightWorker
-                        waitCatch rightWorker >>= cleanupResult releaseRight
-                        throwIO exception
-                    Right (Left exception) -> do
-                        cancel leftWorker
-                        waitCatch leftWorker >>= cleanupResult releaseLeft
-                        throwIO exception
-                    Left (Right leftValue) -> do
-                        rightResult <-
-                            restore (waitCatch rightWorker)
-                                `onException` releaseLeft leftValue
-                        case rightResult of
-                            Left exception -> do
-                                releaseLeft leftValue
-                                throwIO exception
-                            Right rightValue ->
-                                pure (leftValue, rightValue)
-                    Right (Right rightValue) -> do
-                        leftResult <-
-                            restore (waitCatch leftWorker)
-                                `onException` releaseRight rightValue
-                        case leftResult of
-                            Left exception -> do
-                                releaseRight rightValue
-                                throwIO exception
-                            Right leftValue ->
-                                pure (leftValue, rightValue)
-
--- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
--- Safe when the bar was never shown; unknown terminals ignore the sequence.
-clearNativeProgress :: Handle -> IO ()
-clearNativeProgress handle =
-    setNativeProgress handle False
-
-setNativeProgress :: Handle -> Bool -> IO ()
-setNativeProgress handle active = do
-    tty <- hIsTerminalDevice handle
-    when tty do
-        inTmux <- isJust <$> lookupEnv "TMUX"
-        let sequence_
-                | active = osc9ProgressIndeterminate
-                | otherwise = osc9ProgressRemove
-        Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
-        hFlush handle

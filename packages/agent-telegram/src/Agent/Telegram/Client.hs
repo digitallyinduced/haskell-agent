@@ -10,6 +10,7 @@ module Agent.Telegram.Client
     , downloadTelegramFile
     , sendTypingAction
     , sendThinkingDraft
+    , sendStreamingDraft
     , setMessageReaction
     , sendRichMessage
     , sendMessageWithKeyboard
@@ -278,6 +279,20 @@ sendTypingAction client key =
         object $
             [ "chat_id" .= key.chatId
             , "action" .= ("typing" :: Text)
+            ]
+                <> threadParameters key
+
+sendStreamingDraft
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Text
+    -> IO ()
+sendStreamingDraft client key html =
+    expectBool client "sendRichMessageDraft" $
+        object $
+            [ "chat_id" .= key.chatId
+            , "draft_id" .= (1 :: Int)
+            , "rich_message" .= object ["html" .= html]
             ]
                 <> threadParameters key
 

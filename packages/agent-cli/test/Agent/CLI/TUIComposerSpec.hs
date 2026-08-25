@@ -8,7 +8,12 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
-import Agent.TUI.Model (UiState(..), initialUiState)
+import Agent.TUI.Model
+    ( NoticeKind(..)
+    , UiNotice(..)
+    , UiState(..)
+    , initialUiState
+    )
 import Agent.TUI.TextWidth
     ( clampGraphemeCursor
     , graphemeCellWidth
@@ -24,8 +29,10 @@ import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Graphics.Vty as V
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import qualified Graphics.Vty as V
 import Test.QuickCheck
     ( Arbitrary(..)
     , Gen
@@ -87,6 +94,25 @@ spec = describe "fullscreen composer" do
         wrapDraft 5 "abc\ndefghi" 10
             `shouldBe` (["abc", "defgh", "i"], (2, 1))
 
+    it "bounds composer layout to logical lines around the cursor" do
+        let draft =
+                Text.intercalate
+                    "\n"
+                    (map (Text.pack . show) [1 :: Int .. 100])
+            cursor = Text.length draft
+            (rows, location) = wrapDraftWindow 8 10 draft cursor
+        rows `shouldBe` map (Text.pack . show) [93 :: Int .. 100]
+        location `shouldBe` (7, 3)
+
+    it "keeps enough following rows when the cursor is near the start" do
+        let draft =
+                Text.intercalate
+                    "\n"
+                    (map (Text.pack . show) [1 :: Int .. 100])
+            (rows, location) = wrapDraftWindow 8 10 draft 0
+        take 8 rows `shouldBe` map (Text.pack . show) [1 :: Int .. 8]
+        location `shouldBe` (0, 0)
+
     it "distinguishes the cursor positions before and after a full-row newline" do
         wrapDraft 2 "ab\nc" 2
             `shouldBe` (["ab", "c"], (0, 2))
@@ -117,6 +143,45 @@ spec = describe "fullscreen composer" do
         draftCursorLocation womanTechnologist 1 `shouldBe` (0, 0)
         draftCursorLocation womanTechnologist 3 `shouldBe` (0, 2)
 
+    it "moves the cursor between logical lines preserving the column" do
+        verticalCursorMove 1 "one\ntwo three" 2 `shouldBe` Just 6
+        verticalCursorMove (-1) "one\ntwo" 6 `shouldBe` Just 2
+
+    it "keeps vertical movement inside the draft edges" do
+        verticalCursorMove (-1) "one\ntwo" 2 `shouldBe` Nothing
+        verticalCursorMove 1 "one\ntwo" 6 `shouldBe` Nothing
+        verticalCursorMove (-1) "one" 1 `shouldBe` Nothing
+        verticalCursorMove 1 "one" 1 `shouldBe` Nothing
+
+    it "clamps vertical movement to shorter target lines" do
+        verticalCursorMove 1 "abcdef\nxy" 5 `shouldBe` Just 9
+
+    it "does not split wide characters when moving vertically" do
+        verticalCursorMove 1 "abc\n\20320\22909" 3 `shouldBe` Just 5
+        verticalCursorMove (-1) "\20320\22909\nabcd" 6 `shouldBe` Just 1
+        verticalCursorMove (-1) "\20320\22909\nabcd" 7 `shouldBe` Just 2
+
+    it "combines consecutive kills in the kill direction" do
+        combineKill KillBackward "foo " "bar" `shouldBe` "foo bar"
+        combineKill KillForward " bar" "foo" `shouldBe` "foo bar"
+
+    it "classifies kill keys for kill-buffer accumulation" do
+        isKillKey (V.EvKey (V.KChar 'w') [V.MCtrl]) `shouldBe` True
+        isKillKey (V.EvKey (V.KChar 'k') [V.MCtrl, V.MShift])
+            `shouldBe` True
+        isKillKey (V.EvKey (V.KChar 'd') [V.MMeta]) `shouldBe` True
+        isKillKey (V.EvKey V.KBS [V.MMeta]) `shouldBe` True
+        isKillKey (V.EvKey V.KBS []) `shouldBe` False
+        isKillKey (V.EvKey (V.KChar 'd') [V.MCtrl]) `shouldBe` False
+        isKillKey (V.EvKey (V.KChar 'x') [V.MCtrl]) `shouldBe` False
+
+    it "keeps the slash selection visible while scrolling" do
+        slashMenuWindowStart 6 4 3 `shouldBe` 0
+        slashMenuWindowStart 6 10 0 `shouldBe` 0
+        slashMenuWindowStart 6 10 2 `shouldBe` 0
+        slashMenuWindowStart 6 10 5 `shouldBe` 3
+        slashMenuWindowStart 6 10 9 `shouldBe` 4
+
     modifyMaxSuccess (const 500) $
         prop "wraps generated Unicode drafts without overflowing rows" $
             wrapDraftProperty
@@ -125,11 +190,58 @@ spec = describe "fullscreen composer" do
         decodePaste (ByteString.pack [97, 0, 10, 9, 27, 98])
             `shouldBe` "a\n\tb"
 
+    it "inserts bracketed paste immediately while a turn is running" do
+        prepareBracketedPaste False "next message" 4 " pasted"
+            `shouldBe` ("next pasted message", 11, Nothing)
+
+    it "defers clipboard classification only while the REPL is awaiting input" do
+        prepareBracketedPaste True "next message" 4 " pasted"
+            `shouldBe`
+                ( "next message"
+                , 4
+                , Just
+                    (ReplClipboardPasteOrText
+                        "next message"
+                        " pasted"
+                        "next pasted message")
+                )
+
+    it "keeps empty paste events available for native clipboard images" do
+        prepareBracketedPaste False "next message" 4 ""
+            `shouldBe`
+                ( "next message"
+                , 4
+                , Just (ReplClipboardPaste "next message" Nothing)
+                )
+
     it "inserts dictation at the cursor with word-safe spacing" do
         insertDictation "please now" 6 "fix this"
             `shouldBe` ("please fix this now", 15)
         insertDictation "hello" 5 ", world"
             `shouldBe` ("hello, world", 12)
+
+    it "keeps dictation stop keys inside the composer" do
+        dictationKeyAction (V.EvKey V.KEnter [])
+            `shouldBe` Just DictationCommit
+        dictationKeyAction (V.EvKey (V.KChar 'r') [V.MCtrl])
+            `shouldBe` Just DictationCommit
+        dictationKeyAction (V.EvKey (V.KChar '\DC2') [])
+            `shouldBe` Just DictationCommit
+        dictationKeyAction (V.EvKey V.KEsc [])
+            `shouldBe` Just DictationAbort
+        dictationKeyAction (V.EvKey (V.KChar 'c') [V.MCtrl])
+            `shouldBe` Just DictationAbort
+        dictationKeyAction (V.EvKey (V.KChar 'x') [])
+            `shouldBe` Nothing
+
+    it "renders a non-transient listening notice for live transcripts" do
+        let idle = dictationProgressNotice ""
+            live = dictationProgressNotice "hello from the mic"
+        idle.noticeKind `shouldBe` NoticeProgress
+        idle.noticeTransient `shouldBe` False
+        idle.noticeText
+            `shouldBe` "Listening… Enter to stop · Esc to cancel"
+        live.noticeText `shouldBe` "Listening… hello from the mic"
 
     modifyMaxSuccess (const 300) $
         prop "decodes arbitrary paste bytes into stable safe text" $
