@@ -39,7 +39,6 @@ import Agent.Responses.Types
     , ItemStatus(..)
     , MessageContent(..)
     , ReasoningConfig(..)
-    , ResponseAgentMessage(..)
     , ResponseContentPart(..)
     , ResponseCreateParams(..)
     , ResponseItem(..)
@@ -448,7 +447,7 @@ renderResponseItem = \case
     ItemReferenceValue{} ->
         Nothing
     AgentMessageItem message ->
-        labelled "Agent message" (agentMessagePlainText message)
+        labelled "Context item" (renderJsonValue (Aeson.toJSON message))
     KnownResponseItem _ tagged ->
         labelled "Context item" (renderTaggedObject tagged)
     UnknownResponseItem tagged ->
@@ -487,10 +486,6 @@ contentPartText = \case
     ReasoningTextPart{} -> []
     EncryptedContentPart{} -> []
     UnknownContentPart{} -> []
-
-agentMessagePlainText :: ResponseAgentMessage -> Text
-agentMessagePlainText message =
-    Text.intercalate "\n" (concatMap contentPartText message.content)
 
 renderTaggedObject :: TaggedObject -> Text
 renderTaggedObject =
