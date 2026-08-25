@@ -7,6 +7,7 @@ module Agent.CLI.CancelWatch
     ) where
 
 import Agent.Cancel (CancelFlag, requestCancel)
+import Agent.CLI.Terminal (rawAttrs)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (bracket, finally)
@@ -30,10 +31,7 @@ import System.Posix.Terminal
     , TerminalState(..)
     , getTerminalAttributes
     , setTerminalAttributes
-    , withMinInput
     , withMode
-    , withTime
-    , withoutMode
     )
 
 -- | Run @action@ while Esc on a TTY stdin requests soft cancel.
@@ -94,17 +92,6 @@ withStdinPaused paused action = do
                     hSetBuffering stdin activeBuf
                     writeIORef paused False
             bracket enter (const restore) (\_ -> action)
-
-rawAttrs :: TerminalAttributes -> TerminalAttributes
-rawAttrs oldTerm =
-    flip withMinInput 1
-        . flip withTime 0
-        . flip withoutMode EnableEcho
-        -- Non-canonical so VMIN/VTIME expose a lone Esc.
-        . flip withoutMode ProcessInput
-        -- Keep Ctrl-C as SIGINT / UserInterrupt.
-        . flip withMode KeyboardInterrupts
-        $ oldTerm
 
 cookedAttrs :: TerminalAttributes -> TerminalAttributes
 cookedAttrs term =

@@ -17,6 +17,7 @@ import Agent.CLI.CredentialStore
     , upsertManagedCredentialAfterRefresh
     , withCredentialRefreshFileLock
     )
+import Agent.CLI.Environment (lookupNonEmpty)
 import Agent.Error (ApiError(..))
 import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -27,6 +28,7 @@ import Agent.Provider
     , FailedCredential(..)
     , Provider(XAIProvider)
     , TokenProvider
+    , credentialsExhaustedForRateLimit
     , tokenProvider
     )
 import qualified Agent.XAI.Auth as XAIAuth
@@ -42,13 +44,10 @@ import Data.IORef
     )
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
-import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.OsPath (unsafeEncodeUtf, (</>))
-import qualified System.OsPath as OsPath
-import qualified System.Process.Environment.OsString as Environment
 
 loadExternalGrokCredentials :: IO [(Text, Credential)]
 loadExternalGrokCredentials = do
@@ -99,24 +98,19 @@ managedGrokCredential
 managedGrokCredential metadata secret stateRef refresh failed = do
     current <- readIORef stateRef
     case failed of
-        Just FailedCredential
-            { failure = AccountRateLimited { retryAfterSeconds }
-            , failureReason
-            } -> do
-                now <- getCurrentTime
-                let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
-                pure $ Left $ CredentialsExhausted
-                    { retryAt = addUTCTime (fromIntegral seconds) now
-                    , exhaustionReasons = [failureReason]
+        Just reported -> credentialsExhaustedForRateLimit reported >>= \case
+            Just err -> pure (Left err)
+            Nothing -> case reported of
+                FailedCredential
+                    { credential = rejected
+                    , failure = AccountAuthenticationRejected
                     }
-        Just FailedCredential
-            { credential = rejected
-            , failure = AccountAuthenticationRejected
-            }
-            | rejected.accessToken /= current.grokAccessToken ->
-                pure (Right (grokCredentialFromState metadata current))
-            | otherwise ->
-                refreshManagedGrok metadata secret stateRef refresh current
+                    | rejected.accessToken /= current.grokAccessToken ->
+                        pure (Right (grokCredentialFromState metadata current))
+                    | otherwise ->
+                        refreshManagedGrok metadata secret stateRef refresh current
+                _ -> pure $ Left $ CredentialError
+                    "unsupported credential failure"
         Nothing -> do
             now <- getCurrentTime
             if grokNeedsRefresh now current
@@ -249,13 +243,3 @@ loadManagedCredentialById credentialId =
                     (filter
                         ((== credentialId) . (.managedId) . fst)
                         credentials))
-
-lookupNonEmpty :: String -> IO (Maybe Text)
-lookupNonEmpty name = do
-    value <- Environment.getEnv (OsPath.unsafeEncodeUtf name)
-    pure $ case value of
-        Just raw
-            | Right text <- OsPath.decodeUtf raw
-            , not (null text) ->
-                Just (Text.pack text)
-        _ -> Nothing

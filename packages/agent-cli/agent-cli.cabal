@@ -71,6 +71,7 @@ library
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Duration
                     , Agent.CLI.Dialects
+                    , Agent.CLI.Environment
                     , Agent.CLI.Error
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
@@ -240,6 +241,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
+                    , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec

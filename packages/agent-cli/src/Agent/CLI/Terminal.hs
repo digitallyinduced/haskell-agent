@@ -2,6 +2,7 @@
 module Agent.CLI.Terminal
     ( TerminalKind(..)
     , TerminalCapabilities(..)
+    , rawAttrs
     , detectTerminalCapabilities
     , formatTerminalCapabilities
     , resolveColor
@@ -42,6 +43,27 @@ import qualified Data.Text.IO as Text
 import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush, hIsTerminalDevice)
+import System.Posix.Terminal
+    ( TerminalAttributes
+    , TerminalMode(..)
+    , withMinInput
+    , withMode
+    , withTime
+    , withoutMode
+    )
+
+-- | Put terminal input in the raw mode used by interactive overlays and the
+-- Esc cancellation watcher.
+rawAttrs :: TerminalAttributes -> TerminalAttributes
+rawAttrs oldTerm =
+    flip withMinInput 1
+        . flip withTime 0
+        . flip withoutMode EnableEcho
+        -- Non-canonical so VMIN/VTIME expose a lone Esc.
+        . flip withoutMode ProcessInput
+        -- Keep Ctrl-C as SIGINT / UserInterrupt.
+        . flip withMode KeyboardInterrupts
+        $ oldTerm
 
 data TerminalKind
     = TerminalGhostty
