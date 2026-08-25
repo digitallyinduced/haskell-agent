@@ -19,6 +19,8 @@ module Agent.Telegram.Client
     , sendTelegramDocument
     , sendTelegramPhoto
     , sendTelegramVoice
+    , getChatAdministrators
+    , leaveChat
     , redactToken
     ) where
 
@@ -223,10 +225,29 @@ getUpdates client offset =
               , "edited_message"
               , "message_reaction"
               , "callback_query"
+              , "my_chat_member"
               ] :: [Text]
             )
         ]
             <> maybe [] (\value -> ["offset" .= value]) offset
+
+getChatAdministrators
+    :: TelegramClient
+    -> Integer
+    -> IO (Either Text [TelegramChatMember])
+getChatAdministrators client chatId =
+    telegramRequest client "getChatAdministrators"
+        (object ["chat_id" .= chatId])
+        15 >>= \case
+        Left err -> pure (Left err)
+        Right response -> pure (decodeTelegramResponse response)
+
+leaveChat
+    :: TelegramClient
+    -> Integer
+    -> IO (Either Text ())
+leaveChat client chatId =
+    requestUnit client "leaveChat" (object ["chat_id" .= chatId])
 
 getTelegramBot :: TelegramClient -> IO TelegramUser
 getTelegramBot client =

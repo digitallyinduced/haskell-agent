@@ -59,13 +59,14 @@ disables terminal echo and stores the token in a private gateway file.
 9. Tell the user to open their new bot and send `/start`. The bot supports
    `/new` for a fresh agent session, `/session` for the current session ID,
    `/status` for queue/retry state, and `/retry` for the latest failed turn.
-   To use it in a group, add the bot and mention its `@username`, reply to one
-   of its messages, or address commands to it (for example
-   `/new@your_bot_username`). Each group or forum topic has a shared agent
-   session. Only messages from allowlisted users are accepted; ambient group
-   traffic is ignored unless setup used `--all-group-messages`. In that mode
-   each allowed-user message is considered, but the agent stays silent unless
-   a response would be useful. Text, edited messages, reactions, photos,
+   To use it in a group, an allowlisted Telegram administrator of that group
+   must add the bot. If anyone else adds it, the bot leaves. Then mention its
+   `@username`, reply to one of its messages, or address commands to it (for
+   example `/new@your_bot_username`). Each group or forum topic has a shared
+   agent session. Only messages from allowlisted users are accepted; ambient
+   group traffic is ignored unless setup used `--all-group-messages`. In that
+   mode each allowed-user message is considered, but the agent stays silent
+   unless a response would be useful. Text, edited messages, reactions, photos,
    documents, audio, video, video notes, animations, stickers, locations,
    contacts, venues, polls, dice, and voice messages are persisted before
    processing.

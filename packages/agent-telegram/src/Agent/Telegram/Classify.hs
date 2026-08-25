@@ -7,6 +7,9 @@ module Agent.Telegram.Classify
     , ambientGroupPrompt
     , classifyTelegramUpdate
     , classifyTelegramUpdateWithMode
+    , groupJoinAuthorized
+    , isAnonymousAdmin
+    , telegramAnonymousAdminUserId
     , isAmbientGroupPrompt
     , reactionMessageText
     , telegramCommand
@@ -17,7 +20,7 @@ module Agent.Telegram.Classify
 import Agent.Telegram.Types
 import Control.Applicative ((<|>))
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, maybeToList)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -28,6 +31,10 @@ data TelegramUpdateAction
     | QueueTurn !Integer !TelegramChatKey !Text !(Maybe TelegramVoice)
     | QueueMediaTurn !TelegramPendingMediaTurn
     | QueueCallback !TelegramPendingCallback
+    | AuthorizeGroupChat !Integer
+    | RevokeGroupChat !Integer
+    | ReviewGroupJoin !Integer !TelegramUser
+    | LeaveUnauthorizedGroup !Integer
     deriving (Eq, Show)
 
 storeUpdateAction
@@ -41,12 +48,36 @@ storeUpdateAction updateId action current
     | otherwise =
         advanceOffset case action of
             IgnoreUpdate -> current
+            ReviewGroupJoin _ _ -> current
+            AuthorizeGroupChat chatId ->
+                current
+                    { authorizedGroupChatIds =
+                        Set.insert chatId current.authorizedGroupChatIds
+                    }
+            RevokeGroupChat chatId ->
+                current
+                    { authorizedGroupChatIds =
+                        Set.delete chatId current.authorizedGroupChatIds
+                    }
+            LeaveUnauthorizedGroup chatId ->
+                enqueuePendingAction
+                    (LeaveUnauthorizedChat
+                        (TelegramPendingLeave
+                            updateId
+                            (TelegramChatKey chatId Nothing)))
+                    (dropPendingChat chatId current)
+                        { authorizedGroupChatIds =
+                            Set.delete
+                                chatId
+                                current.authorizedGroupChatIds
+                        }
             QueueTurn messageId key text voice ->
-                enqueueIncomingAction
-                    (RunPendingTurn
-                        (TelegramPendingTurn
-                            updateId messageId key text voice))
-                    current
+                authorizeGroupKey key $
+                    enqueueIncomingAction
+                        (RunPendingTurn
+                            (TelegramPendingTurn
+                                updateId messageId key text voice))
+                        current
             QueueMediaTurn pending ->
                 let prepared = pending
                         { pendingMediaUpdateId = updateId
@@ -58,17 +89,19 @@ storeUpdateAction updateId action current
                                 pending.pendingMediaMessageId
                                 current
                             else current
-                in enqueueIncomingAction
-                    (RunPendingMediaTurn prepared)
-                    replaced
+                in authorizeGroupKey pending.pendingMediaChat $
+                    enqueueIncomingAction
+                        (RunPendingMediaTurn prepared)
+                        replaced
             QueueCallback pending ->
-                current
-                    { pendingCallbacks =
-                        Map.insert
-                            pending.pendingCallbackUpdateId
-                            pending
-                            current.pendingCallbacks
-                    }
+                maybe id authorizeGroupKey pending.pendingCallbackChat $
+                    current
+                        { pendingCallbacks =
+                            Map.insert
+                                pending.pendingCallbackUpdateId
+                                pending
+                                current.pendingCallbacks
+                        }
   where
     advanceOffset state =
         state
@@ -162,18 +195,22 @@ pendingActionParts = \case
     DeliverReply pending ->
         (pending.pendingText, [], 0, fromMaybe 0 pending.pendingReplyToMessageId,
             False, Nothing)
+    LeaveUnauthorizedChat _ ->
+        ("", [], 0, 0, False, Nothing)
 
 pendingActionUpdateIdLocal :: PendingChatAction -> Integer
 pendingActionUpdateIdLocal = \case
     DeliverReply pending -> pending.pendingUpdateId
     RunPendingTurn pending -> pending.pendingTurnUpdateId
     RunPendingMediaTurn pending -> pending.pendingMediaUpdateId
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveUpdateId
 
 pendingActionChatLocal :: PendingChatAction -> TelegramChatKey
 pendingActionChatLocal = \case
     DeliverReply pending -> pending.pendingChat
     RunPendingTurn pending -> pending.pendingTurnChat
     RunPendingMediaTurn pending -> pending.pendingMediaChat
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveChat
 
 removePendingMessage
     :: TelegramChatKey
@@ -200,6 +237,168 @@ removePendingMessage key messageId state =
         RunPendingMediaTurn pending ->
             pending.pendingMediaMessageId == messageId
         DeliverReply _ -> False
+        LeaveUnauthorizedChat _ -> False
+
+telegramAnonymousAdminUserId :: Integer
+telegramAnonymousAdminUserId = 1087968824
+
+isAnonymousAdmin :: TelegramUser -> Bool
+isAnonymousAdmin user =
+    user.userId == telegramAnonymousAdminUserId
+        || user.userUsername == Just "GroupAnonymousBot"
+
+isGroupChatType :: Text -> Bool
+isGroupChatType chatType =
+    chatType == "group"
+        || chatType == "supergroup"
+        || chatType == "channel"
+
+chatMemberIsPresent :: TelegramChatMember -> Bool
+chatMemberIsPresent member =
+    case member.chatMemberStatus of
+        "creator" -> True
+        "administrator" -> True
+        "member" -> True
+        "restricted" -> member.chatMemberIsMember == Just True
+        _ -> False
+
+chatMemberIsAdministrator :: TelegramChatMember -> Bool
+chatMemberIsAdministrator member =
+    member.chatMemberStatus == "creator"
+        || member.chatMemberStatus == "administrator"
+
+groupJoinAuthorized
+    :: Set Integer
+    -> TelegramUser
+    -> [TelegramChatMember]
+    -> Bool
+groupJoinAuthorized allowedUsers actor admins =
+    let adminIds =
+            Set.fromList
+                [ member.chatMemberUser.userId
+                | member <- admins
+                , chatMemberIsAdministrator member
+                ]
+    in if isAnonymousAdmin actor
+        then any (`Set.member` allowedUsers) (Set.toList adminIds)
+        else actor.userId `Set.member` allowedUsers
+            && actor.userId `Set.member` adminIds
+
+dropPendingChat :: Integer -> TelegramState -> TelegramState
+dropPendingChat chatId state =
+    state
+        { pendingQueues =
+            Map.filterWithKey
+                (\key _ -> key.chatId /= chatId)
+                state.pendingQueues
+        }
+
+authorizeGroupKey :: TelegramChatKey -> TelegramState -> TelegramState
+authorizeGroupKey key state
+    | key.chatId < 0 =
+        state
+            { authorizedGroupChatIds =
+                Set.insert key.chatId state.authorizedGroupChatIds
+            }
+    | otherwise = state
+
+classifyGroupJoin
+    :: Set Integer
+    -> Set Integer
+    -> Integer
+    -> TelegramUser
+    -> TelegramUpdateAction
+classifyGroupJoin allowedUsers authorizedGroups chatId actor
+    | chatId `Set.member` authorizedGroups = IgnoreUpdate
+    | actor.userId `Set.member` allowedUsers || isAnonymousAdmin actor =
+        ReviewGroupJoin chatId actor
+    | otherwise = LeaveUnauthorizedGroup chatId
+
+classifyMyChatMember
+    :: Set Integer
+    -> Set Integer
+    -> TelegramChatMemberUpdated
+    -> TelegramUpdateAction
+classifyMyChatMember allowedUsers authorizedGroups membership
+    | not (isGroupChatType membership.chatMemberUpdatedChat.telegramChatType) =
+        IgnoreUpdate
+    | chatMemberIsPresent membership.chatMemberUpdatedNew =
+        classifyGroupJoin
+            allowedUsers
+            authorizedGroups
+            membership.chatMemberUpdatedChat.telegramChatId
+            membership.chatMemberUpdatedFrom
+    | chatMemberIsPresent membership.chatMemberUpdatedOld =
+        RevokeGroupChat membership.chatMemberUpdatedChat.telegramChatId
+    | otherwise = IgnoreUpdate
+
+botAddedInMessage :: TelegramUser -> TelegramMessage -> Bool
+botAddedInMessage bot message =
+    any (\user -> user.userId == bot.userId) message.messageNewChatMembers
+
+classifyBotAddedMessage
+    :: Set Integer
+    -> Set Integer
+    -> TelegramMessage
+    -> TelegramUpdateAction
+classifyBotAddedMessage allowedUsers authorizedGroups message
+    | not (isGroupChatType message.messageChat.telegramChatType) =
+        IgnoreUpdate
+    | otherwise =
+        case message.messageFrom of
+            Just sender ->
+                classifyGroupJoin
+                    allowedUsers
+                    authorizedGroups
+                    message.messageChat.telegramChatId
+                    sender
+            Nothing ->
+                LeaveUnauthorizedGroup message.messageChat.telegramChatId
+
+inboundGroupChatId :: TelegramUpdate -> Maybe Integer
+inboundGroupChatId update =
+    (update.updateMyChatMember >>= chatIdFromChat . (.chatMemberUpdatedChat))
+        <|> (update.updateMessage >>= chatIdFromChat . (.messageChat))
+        <|> (update.updateEditedMessage >>= chatIdFromChat . (.messageChat))
+        <|> (update.updateMessageReaction >>= chatIdFromChat . (.messageReactionChat))
+        <|> (update.updateCallbackQuery
+            >>= (.callbackQueryMessage)
+            >>= chatIdFromChat . (.messageChat))
+  where
+    chatIdFromChat chat =
+        if isGroupChatType chat.telegramChatType
+            then Just chat.telegramChatId
+            else Nothing
+
+isMembershipAction :: TelegramUpdateAction -> Bool
+isMembershipAction = \case
+    AuthorizeGroupChat _ -> True
+    RevokeGroupChat _ -> True
+    ReviewGroupJoin _ _ -> True
+    LeaveUnauthorizedGroup _ -> True
+    _ -> False
+
+isAuthorizingGroupAction :: TelegramUpdateAction -> Bool
+isAuthorizingGroupAction = \case
+    QueueTurn _ _ text _ -> not (isAmbientGroupPrompt text)
+    QueueMediaTurn pending ->
+        not (isAmbientGroupPrompt pending.pendingMediaText)
+    QueueCallback _ -> True
+    _ -> False
+
+enforceGroupAuthorization
+    :: Set Integer
+    -> TelegramUpdate
+    -> TelegramUpdateAction
+    -> TelegramUpdateAction
+enforceGroupAuthorization authorizedGroups update action
+    | isMembershipAction action = action
+    | Just chatId <- inboundGroupChatId update
+    , chatId `Set.notMember` authorizedGroups
+    , not (isAuthorizingGroupAction action)
+        || isJust update.updateMessageReaction =
+        LeaveUnauthorizedGroup chatId
+    | otherwise = action
 
 classifyTelegramUpdate
     :: TelegramUser
@@ -207,7 +406,7 @@ classifyTelegramUpdate
     -> TelegramUpdate
     -> TelegramUpdateAction
 classifyTelegramUpdate bot allowedUsers =
-    classifyTelegramUpdateWithMode bot allowedUsers False
+    classifyTelegramUpdateWithMode bot allowedUsers Set.empty False
 
 setActionUpdateId :: Integer -> TelegramUpdateAction -> TelegramUpdateAction
 setActionUpdateId updateId = \case
@@ -237,68 +436,59 @@ classifyTelegramReaction allowedUsers update =
 classifyTelegramUpdateWithMode
     :: TelegramUser
     -> Set Integer
+    -> Set Integer
     -> Bool
     -> TelegramUpdate
     -> TelegramUpdateAction
-classifyTelegramUpdateWithMode bot allowedUsers respondToAllGroupMessages update =
-    case update of
-        TelegramUpdate
-            { updateMessage = Just message
-            , updateEditedMessage = _
-            , updateMessageReaction = _
-            , updateCallbackQuery = _
-            }
-            | Just sender <- message.messageFrom
-            , sender.userId `Set.member` allowedUsers ->
-                setActionUpdateId update.updateId
-                    (classifyMessageLike
-                        False
-                        bot
-                        sender
-                        respondToAllGroupMessages
-                        message)
-        TelegramUpdate
-            { updateMessage = Nothing
-            , updateEditedMessage = Just message
-            , updateMessageReaction = _
-            , updateCallbackQuery = _
-            }
-            | Just sender <- message.messageFrom
-            , sender.userId `Set.member` allowedUsers ->
-                setActionUpdateId update.updateId
-                    (classifyMessageLike
-                        True
-                        bot
-                        sender
-                        respondToAllGroupMessages
-                        message)
-        TelegramUpdate
-            { updateMessageReaction = Just reaction
-            , updateCallbackQuery = _
-            }
-            | reaction.messageReactionChat.telegramChatType == "private" ->
+classifyTelegramUpdateWithMode bot allowedUsers authorizedGroups respondToAllGroupMessages update =
+    enforceGroupAuthorization authorizedGroups update $
+        case update of
+            TelegramUpdate { updateMyChatMember = Just membership } ->
+                classifyMyChatMember allowedUsers authorizedGroups membership
+            TelegramUpdate { updateMessage = Just message }
+                | botAddedInMessage bot message ->
+                    classifyBotAddedMessage allowedUsers authorizedGroups message
+            TelegramUpdate { updateMessage = Just message }
+                | Just sender <- message.messageFrom
+                , sender.userId `Set.member` allowedUsers ->
+                    setActionUpdateId update.updateId
+                        (classifyMessageLike
+                            False
+                            bot
+                            sender
+                            respondToAllGroupMessages
+                            message)
+            TelegramUpdate { updateEditedMessage = Just message }
+                | Just sender <- message.messageFrom
+                , sender.userId `Set.member` allowedUsers ->
+                    setActionUpdateId update.updateId
+                        (classifyMessageLike
+                            True
+                            bot
+                            sender
+                            respondToAllGroupMessages
+                            message)
+            TelegramUpdate { updateMessageReaction = Just _ } ->
                 classifyTelegramReaction allowedUsers update
-        TelegramUpdate
-            { updateCallbackQuery = Just callback
-            }
-            | sender <- callback.callbackQueryFrom
-            , sender.userId `Set.member` allowedUsers
-            , Just callbackData <- callback.callbackQueryData ->
-                QueueCallback TelegramPendingCallback
-                    { pendingCallbackUpdateId = update.updateId
-                    , pendingCallbackQueryId = callback.callbackQueryId
-                    , pendingCallbackUserId = sender.userId
-                    , pendingCallbackChat =
-                        (\message -> TelegramChatKey
-                            { chatId = message.messageChat.telegramChatId
-                            , messageThreadId = message.messageThread
-                            })
-                            <$> callback.callbackQueryMessage
-                    , pendingCallbackMessageId =
-                        (.messageId) <$> callback.callbackQueryMessage
-                    , pendingCallbackData = callbackData
-                    }
-        _ -> IgnoreUpdate
+            TelegramUpdate { updateCallbackQuery = Just callback }
+                | sender <- callback.callbackQueryFrom
+                , sender.userId `Set.member` allowedUsers
+                , Just callbackData <- callback.callbackQueryData ->
+                    QueueCallback TelegramPendingCallback
+                        { pendingCallbackUpdateId = update.updateId
+                        , pendingCallbackQueryId = callback.callbackQueryId
+                        , pendingCallbackUserId = sender.userId
+                        , pendingCallbackChat =
+                            (\message -> TelegramChatKey
+                                { chatId = message.messageChat.telegramChatId
+                                , messageThreadId = message.messageThread
+                                })
+                                <$> callback.callbackQueryMessage
+                        , pendingCallbackMessageId =
+                            (.messageId) <$> callback.callbackQueryMessage
+                        , pendingCallbackData = callbackData
+                        }
+            _ -> IgnoreUpdate
 
 classifyMessageLike
     :: Bool

@@ -10,8 +10,10 @@ import Agent.Telegram.Types
     , TelegramMedia(..)
     , TelegramMediaKind(..)
     , TelegramCallbackBinding(..)
+    , TelegramChatMember(..)
     , TelegramDeadLetter(..)
     , TelegramPendingCallback(..)
+    , TelegramPendingLeave(..)
     , TelegramPendingMediaTurn(..)
     , TelegramRetryMetadata(..)
     )
@@ -532,18 +534,24 @@ spec = describe "Agent.Telegram" do
                 , userUsername = Just "HarnessBot"
                 }
             allowedUsers = Set.singleton 456
-            classify bytes = do
-                update <- (eitherDecode (LBS.pack bytes)
-                    :: Either String TelegramUpdate)
-                    `shouldReturnRight` "Telegram update should decode"
-                pure (classifyTelegramUpdate bot allowedUsers update)
-            classifyAll bytes = do
+            authorizedGroups = Set.singleton (-1001)
+            allowedUser = TelegramUser
+                { userId = 456
+                , userIsBot = False
+                , userFirstName = Just "Marc"
+                , userLastName = Nothing
+                , userUsername = Nothing
+                }
+            classifyWith respondToAll authorized bytes = do
                 update <- (eitherDecode (LBS.pack bytes)
                     :: Either String TelegramUpdate)
                     `shouldReturnRight` "Telegram update should decode"
                 pure
                     (classifyTelegramUpdateWithMode
-                        bot allowedUsers True update)
+                        bot allowedUsers authorized respondToAll update)
+            classify = classifyWith False Set.empty
+            classifyAuthorized = classifyWith False authorizedGroups
+            classifyAll = classifyWith True authorizedGroups
 
         it "routes an allowed mention into the shared group session" do
             action <- classify
@@ -639,20 +647,20 @@ spec = describe "Agent.Telegram" do
                     \[Voice message]"
                     (Just (TelegramVoice "voice-file" 4 Nothing Nothing))
 
-        it "ignores ambient group traffic, other bots' commands, and blocked users" do
+        it "leaves unauthorized groups on ambient traffic, other bots' commands, and blocked users" do
             ambient <- classify
                 "{\"update_id\":27,\"message\":{\
                 \\"message_id\":85,\"from\":{\"id\":456},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"hello everyone\"}}"
-            ambient `shouldBe` IgnoreUpdate
+            ambient `shouldBe` LeaveUnauthorizedGroup (-1001)
 
             otherBot <- classify
                 "{\"update_id\":28,\"message\":{\
                 \\"message_id\":86,\"from\":{\"id\":456},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"/new@OtherBot\"}}"
-            otherBot `shouldBe` IgnoreUpdate
+            otherBot `shouldBe` LeaveUnauthorizedGroup (-1001)
 
             repliedOtherBot <- classify
                 "{\"update_id\":29,\"message\":{\
@@ -662,13 +670,27 @@ spec = describe "Agent.Telegram" do
                 \\"reply_to_message\":{\"message_id\":70,\
                 \\"from\":{\"id\":999,\"is_bot\":true},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
-            repliedOtherBot `shouldBe` IgnoreUpdate
+            repliedOtherBot `shouldBe` LeaveUnauthorizedGroup (-1001)
 
             blocked <- classify
                 "{\"update_id\":30,\"message\":{\
                 \\"message_id\":88,\"from\":{\"id\":123},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"@HarnessBot hello\"}}"
+            blocked `shouldBe` LeaveUnauthorizedGroup (-1001)
+
+        it "ignores ambient group traffic, other bots' commands, and blocked users in authorized groups" do
+            ambient <- classifyAuthorized
+                "{\"update_id\":27,\"message\":{\"message_id\":85,\"from\":{\"id\":456},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"hello everyone\"}}"
+            ambient `shouldBe` IgnoreUpdate
+            otherBot <- classifyAuthorized
+                "{\"update_id\":28,\"message\":{\"message_id\":86,\"from\":{\"id\":456},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"/new@OtherBot\"}}"
+            otherBot `shouldBe` IgnoreUpdate
+            repliedOtherBot <- classifyAuthorized
+                "{\"update_id\":29,\"message\":{\"message_id\":87,\"from\":{\"id\":456},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"/new@OtherBot\",\"reply_to_message\":{\"message_id\":70,\"from\":{\"id\":999,\"is_bot\":true},\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
+            repliedOtherBot `shouldBe` IgnoreUpdate
+            blocked <- classifyAuthorized
+                "{\"update_id\":30,\"message\":{\"message_id\":88,\"from\":{\"id\":123},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"@HarnessBot hello\"}}"
             blocked `shouldBe` IgnoreUpdate
 
         it "suppresses the ambient no-reply marker but not normal replies" do
@@ -721,6 +743,121 @@ spec = describe "Agent.Telegram" do
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"/new@OtherBot\"}}"
             otherBot `shouldBe` IgnoreUpdate
+
+        it "rejects group joins from people who are not allowed admins" do
+            foreigner <- classify
+                "{\"update_id\":40,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"from\":{\"id\":123,\"first_name\":\"Eve\"},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"}}}"
+            foreigner `shouldBe` LeaveUnauthorizedGroup (-1001)
+
+            addedByAdmin <- classify
+                "{\"update_id\":41,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"supergroup\"},\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"}}}"
+            addedByAdmin `shouldBe` ReviewGroupJoin (-1001) allowedUser
+                { userFirstName = Just "Marc" }
+
+            alreadyAuthorized <- classifyAuthorized
+                "{\"update_id\":42,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"from\":{\"id\":123},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"}}}"
+            alreadyAuthorized `shouldBe` IgnoreUpdate
+
+            removed <- classifyAuthorized
+                "{\"update_id\":43,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"from\":{\"id\":123},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"}}}"
+            removed `shouldBe` RevokeGroupChat (-1001)
+
+            serviceAdd <- classify
+                "{\"update_id\":44,\"message\":{\
+                \\"message_id\":91,\"from\":{\"id\":123},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"new_chat_members\":[{\"id\":999,\"is_bot\":true,\
+                \\"username\":\"HarnessBot\"}]}}"
+            serviceAdd `shouldBe` LeaveUnauthorizedGroup (-1001)
+
+        it "authorizes a group only when an allowed user is a chat administrator" do
+            let admin =
+                    TelegramChatMember allowedUser "administrator" Nothing
+                member =
+                    TelegramChatMember allowedUser "member" Nothing
+                foreignAdmin = TelegramChatMember
+                    TelegramUser
+                        { userId = 123
+                        , userIsBot = False
+                        , userFirstName = Just "Eve"
+                        , userLastName = Nothing
+                        , userUsername = Nothing
+                        }
+                    "administrator"
+                    Nothing
+                anonymous = TelegramUser
+                    { userId = telegramAnonymousAdminUserId
+                    , userIsBot = True
+                    , userFirstName = Just "Group"
+                    , userLastName = Nothing
+                    , userUsername = Just "GroupAnonymousBot"
+                    }
+            groupJoinAuthorized allowedUsers allowedUser [admin]
+                `shouldBe` True
+            groupJoinAuthorized allowedUsers allowedUser [member]
+                `shouldBe` False
+            groupJoinAuthorized allowedUsers allowedUser [foreignAdmin]
+                `shouldBe` False
+            groupJoinAuthorized allowedUsers anonymous [admin]
+                `shouldBe` True
+            groupJoinAuthorized allowedUsers anonymous [foreignAdmin]
+                `shouldBe` False
+            isAnonymousAdmin anonymous `shouldBe` True
+            isAnonymousAdmin allowedUser `shouldBe` False
+
+        it "authorizes a group after an allowed user targets the bot there" do
+            let key = TelegramChatKey (-1001) Nothing
+                state = storeUpdateAction
+                    22
+                    (QueueTurn 80 key "@HarnessBot hello" Nothing)
+                    emptyTelegramState
+            state.authorizedGroupChatIds `shouldBe` Set.singleton (-1001)
+            nextPendingAction key state `shouldBe`
+                Just
+                    (RunPendingTurn
+                        (TelegramPendingTurn 22 80 key "@HarnessBot hello" Nothing))
+
+        it "queues a leave and drops other work for unauthorized groups" do
+            let key = TelegramChatKey (-1001) Nothing
+                turn = TelegramPendingTurn 10 77 key "hello" Nothing
+                seeded = emptyTelegramState
+                    { authorizedGroupChatIds = Set.singleton (-1001)
+                    , pendingQueues =
+                        Map.singleton key (Map.singleton 10 (RunPendingTurn turn))
+                    }
+                state = storeUpdateAction
+                    40
+                    (LeaveUnauthorizedGroup (-1001))
+                    seeded
+            state.authorizedGroupChatIds `shouldBe` Set.empty
+            nextPendingAction key state `shouldBe`
+                Just
+                    (LeaveUnauthorizedChat
+                        (TelegramPendingLeave 40 key))
 
     describe "durable queue state" do
         it "loads state written before pending turns were introduced" do
@@ -789,6 +926,31 @@ spec = describe "Agent.Telegram" do
                         , (9, RunPendingTurn secondTurn)
                         ])
 
+        it "seeds authorized group chats from legacy group bindings" do
+            let groupKey = TelegramChatKey (-1001) Nothing
+                privateKey = TelegramChatKey 123 Nothing
+                decoded = eitherDecode
+                    (LBS.pack
+                        "{\"bindings\":[{\
+                        \\"chat\":{\"chatId\":-1001},\"sessionId\":\"group\"},{\
+                        \\"chat\":{\"chatId\":123},\"sessionId\":\"private\"}]}")
+                    :: Either String TelegramState
+            state <- decoded `shouldReturnRight`
+                "legacy Telegram bindings should decode"
+            state.authorizedGroupChatIds `shouldBe` Set.singleton (-1001)
+            Map.lookup groupKey state.bindings `shouldBe` Just "group"
+            Map.lookup privateKey state.bindings `shouldBe` Just "private"
+
+        it "keeps an explicit empty authorized group set" do
+            let decoded = eitherDecode
+                    (LBS.pack
+                        "{\"authorizedGroupChats\":[],\"bindings\":[{\
+                        \\"chat\":{\"chatId\":-1001},\"sessionId\":\"group\"}]}")
+                    :: Either String TelegramState
+            state <- decoded `shouldReturnRight`
+                "explicit authorized group chats should decode"
+            state.authorizedGroupChatIds `shouldBe` Set.empty
+
         it "preserves first-match semantics for duplicate legacy bindings" do
             let key = TelegramChatKey 123 Nothing
                 decoded = eitherDecode
@@ -826,6 +988,7 @@ spec = describe "Agent.Telegram" do
                     , "pendingTurns" .= [turn]
                     , "pendingReplies" .= [reply]
                     , "pendingMediaTurns" .= ([] :: [TelegramPendingMediaTurn])
+                    , "pendingLeaves" .= ([] :: [TelegramPendingLeave])
                     , "pendingCallbacks" .= ([] :: [TelegramPendingCallback])
                     , "callbackBindings" .= ([] :: [TelegramCallbackBinding])
                     , "retryMetadata" .=
@@ -834,6 +997,7 @@ spec = describe "Agent.Telegram" do
                         ([] :: [(Text.Text, Int)])
                     , "deadLetters" .= ([] :: [TelegramDeadLetter])
                     , "outboundMessages" .= ([] :: [Value])
+                    , "authorizedGroupChats" .= ([] :: [Integer])
                     ]
             (eitherDecode (encode state) :: Either String Value)
                 `shouldBe` Right expected
