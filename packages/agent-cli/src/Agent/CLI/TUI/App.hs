@@ -2586,16 +2586,27 @@ drawBlock state target ui block =
             selected
                 && state.appUi.uiFocus == FocusScrollback
                 && state.appAgentSelected == target
+        marker =
+            txt (if highlighted then "❯ " else "  ")
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
                     padAll 1 $
-                        timestampedMessage block.blockTimestamp
-                            (terminalTxtWrap block.blockBody)
+                        hBox
+                            [ withAttr
+                                (if highlighted
+                                    then Theme.borderActiveAttr
+                                    else Theme.userMutedAttr)
+                                marker
+                            , timestampedMessage
+                                Theme.userMutedAttr
+                                block.blockTimestamp
+                                (terminalTxtWrap block.blockBody)
+                            ]
             BlockAssistant ->
                 padLeft (Pad 3) $
                     padRight (Pad 1) $
-                        timestampedMessage block.blockTimestamp $
+                        timestampedMessage Theme.mutedAttr block.blockTimestamp $
                             withAttr Theme.assistantAttr
                                 (markdownWidgetWithSyntaxHighlightingAndLinks
                                     state.appSyntaxHighlighter
@@ -2656,14 +2667,17 @@ drawBlock state target ui block =
         rendered =
             clickable (ConversationBlock target block.blockId) $
                 padBottom (Pad 1) $
-                    hBox
-                        [ withAttr
-                            (if highlighted
-                                then Theme.borderActiveAttr
-                                else Theme.mutedAttr)
-                            (txt (if highlighted then "❯ " else "  "))
-                        , framed
-                        ]
+                    case block.blockKind of
+                        BlockUser -> framed
+                        _ ->
+                            hBox
+                                [ withAttr
+                                    (if highlighted
+                                        then Theme.borderActiveAttr
+                                        else Theme.mutedAttr)
+                                    marker
+                                , framed
+                                ]
     in if cacheableBlock state target ui block
         then cached
             (ConversationBlockCache
@@ -2675,13 +2689,13 @@ drawBlock state target ui block =
             rendered
         else rendered
 
-timestampedMessage :: Text -> Widget Name -> Widget Name
-timestampedMessage timestamp body
+timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
+timestampedMessage timestampAttr timestamp body
     | Text.null timestamp = body
     | otherwise =
         hBox
             [ padRight Max body
-            , withAttr Theme.mutedAttr
+            , withAttr timestampAttr
                 (terminalTxt ("  " <> timestamp))
             ]
 
