@@ -75,7 +75,7 @@ spec = do
                     Backend \privateTranscript previous inputs _onEvent -> do
                         writeIORef seenPrevious previous
                         writeIORef seenInputs inputs
-                        writeIORef seenPrivateParams . Just =<< readIORef privateParams
+                        writeIORef seenPrivateParams (Just privateParams)
                         writeIORef seenPrivateTranscript privateTranscript
                         pure $ Right BackendResult
                             { backendOutput =
