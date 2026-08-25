@@ -53,8 +53,12 @@ data ConversationResidency
     deriving (Eq, Show)
 
 data TranscriptState
-    = ResidentTranscript ![ResponseItem]
+    = ResidentTranscript ![ResponseItem] !ResidentSource
     | ColdTranscript !TranscriptCheckpoint
+
+data ResidentSource
+    = CommittedResident
+    | HydratedResident !TranscriptCheckpoint !Int
 
 data ConversationState = ConversationState
     { stateGeneration :: !TranscriptGeneration
@@ -73,7 +77,7 @@ newConversationStore
 newConversationStore previousResponseId transcript attachments =
     ConversationStore <$> newMVar ConversationState
         { stateGeneration = TranscriptGeneration 0
-        , stateTranscript = ResidentTranscript transcript
+        , stateTranscript = ResidentTranscript transcript CommittedResident
         , statePreviousResponseId = previousResponseId
         , stateAttachments = attachments
         }
@@ -95,7 +99,7 @@ conversationResidency :: ConversationStore -> IO ConversationResidency
 conversationResidency (ConversationStore stateVar) = do
     state <- readMVar stateVar
     pure case state.stateTranscript of
-        ResidentTranscript _ -> ConversationResident
+        ResidentTranscript _ _ -> ConversationResident
         ColdTranscript _ -> ConversationCold
 
 currentTranscriptGeneration
@@ -116,28 +120,42 @@ withConversationTranscript
         store@(ConversationStore stateVar)
         action =
     mask \restore -> do
-        (generation, checkpoint, transcript) <-
+        (generation, releaseHydration, transcript) <-
             modifyMVar stateVar \state ->
                 case state.stateTranscript of
-                    ResidentTranscript items ->
-                        pure (state, (state.stateGeneration, Nothing, items))
+                    ResidentTranscript items CommittedResident ->
+                        pure (state, (state.stateGeneration, False, items))
+                    ResidentTranscript items
+                            (HydratedResident checkpoint readers) ->
+                        pure
+                            ( state
+                                { stateTranscript =
+                                    ResidentTranscript
+                                        items
+                                        (HydratedResident
+                                            checkpoint
+                                            (readers + 1))
+                                }
+                            , (state.stateGeneration, True, items)
+                            )
                     ColdTranscript cold -> do
                         items <- cold.checkpointLoad
                         let resident =
                                 state
                                     { stateTranscript =
-                                        ResidentTranscript items
+                                        ResidentTranscript
+                                            items
+                                            (HydratedResident cold 1)
                                     }
                         pure
                             ( resident
-                            , (state.stateGeneration, Just cold, items)
+                            , (state.stateGeneration, True, items)
                             )
         restore (action transcript)
-            `finally` case checkpoint of
-                Nothing -> pure ()
-                Just cold -> do
-                    _ <- evictConversationTranscript store generation cold
-                    pure ()
+            `finally`
+                if releaseHydration
+                    then releaseHydratedTranscript store generation
+                    else pure ()
 
 -- | Publish a newer exact transcript and return its generation token.
 commitConversationTranscript
@@ -150,7 +168,8 @@ commitConversationTranscript (ConversationStore stateVar) transcript =
         pure
             ( state
                 { stateGeneration = generation
-                , stateTranscript = ResidentTranscript transcript
+                , stateTranscript =
+                    ResidentTranscript transcript CommittedResident
                 }
             , generation
             )
@@ -170,7 +189,8 @@ replaceConversationTranscript
         pure
             ( state
                 { stateGeneration = generation
-                , stateTranscript = ResidentTranscript transcript
+                , stateTranscript =
+                    ResidentTranscript transcript CommittedResident
                 , statePreviousResponseId = previousResponseId
                 }
             , generation
@@ -191,7 +211,7 @@ evictConversationTranscript
         checkpoint =
     modifyMVar stateVar \state ->
         case state.stateTranscript of
-            ResidentTranscript _
+            ResidentTranscript _ CommittedResident
                 | state.stateGeneration == expectedGeneration ->
                     pure
                         ( state
@@ -236,7 +256,8 @@ resetConversationStore (ConversationStore stateVar) =
     modifyMVar_ stateVar \state ->
         pure state
             { stateGeneration = nextGeneration state.stateGeneration
-            , stateTranscript = ResidentTranscript []
+            , stateTranscript =
+                ResidentTranscript [] CommittedResident
             , statePreviousResponseId = Nothing
             , stateAttachments = []
             }
@@ -244,3 +265,30 @@ resetConversationStore (ConversationStore stateVar) =
 nextGeneration :: TranscriptGeneration -> TranscriptGeneration
 nextGeneration (TranscriptGeneration generation) =
     TranscriptGeneration (generation + 1)
+
+releaseHydratedTranscript
+    :: ConversationStore
+    -> TranscriptGeneration
+    -> IO ()
+releaseHydratedTranscript
+        (ConversationStore stateVar)
+        expectedGeneration =
+    modifyMVar_ stateVar \state ->
+        if state.stateGeneration /= expectedGeneration
+            then pure state
+            else case state.stateTranscript of
+                ResidentTranscript _
+                        (HydratedResident checkpoint 1) ->
+                    pure state
+                        { stateTranscript = ColdTranscript checkpoint }
+                ResidentTranscript items
+                        (HydratedResident checkpoint readers) ->
+                    pure state
+                        { stateTranscript =
+                            ResidentTranscript
+                                items
+                                (HydratedResident
+                                    checkpoint
+                                    (readers - 1))
+                        }
+                _ -> pure state
