@@ -962,13 +962,18 @@ resolveChildModelAndEffort
 resolveChildModelAndEffort
         provider parentParams inheritedModel childModel childEffort =
     ( model
-    , fromMaybe inheritedEffort childEffort
+    , fromMaybe defaultChildEffort childEffort
     )
   where
     model = fromMaybe inheritedModel childModel
     inheritedEffort = case parentParams.reasoning of
         Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
         Nothing -> defaultEffortFor provider
+    defaultChildEffort
+        | provider == OpenAIProvider
+        , model == "gpt-5.6-luna"
+        , inheritedEffort `notElem` ["xhigh", "max"] = "high"
+        | otherwise = inheritedEffort
 
 runPreparedChild
     :: SubagentRuntime
