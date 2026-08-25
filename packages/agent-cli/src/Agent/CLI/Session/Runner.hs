@@ -70,6 +70,7 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Prompt
     ( systemPromptForTools )
+import Agent.CLI.Resume (resumeNeedsGeneratedContext)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
@@ -552,20 +553,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     <> Text.pack (show omitted)
                                     <> " omitted from model context due to the context budget")
                         pure learnedSkills
-        sessionReset = do
-            resetLiveConversationWith
-                resetBackendState
-                conversationRef
-                planMode
-            writeIORef usageRef emptyTokenUsage
-            writeIORef lastAssistantRef Nothing
-            writeIORef pendingNotices []
-            writeIORef subagentSessions Map.empty
-            writeIORef selectedAgent AgentRoot
-            writeIORef agentStepCache Map.empty
-            case multiCtx of
-                Just ctx -> resetSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
+        reloadGeneratedContext = do
             freshAgents <-
                 loadAgentsContext
                     stderrHandle
@@ -585,6 +573,21 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 defaultLearnedSkillContextMaxChars
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
+        sessionReset = do
+            resetLiveConversationWith
+                resetBackendState
+                conversationRef
+                planMode
+            writeIORef usageRef emptyTokenUsage
+            writeIORef lastAssistantRef Nothing
+            writeIORef pendingNotices []
+            writeIORef subagentSessions Map.empty
+            writeIORef selectedAgent AgentRoot
+            writeIORef agentStepCache Map.empty
+            case multiCtx of
+                Just ctx -> resetSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
+            reloadGeneratedContext
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
@@ -874,11 +877,18 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     btwRequests <- newChan
     recapRequests <- newChan
     let
+        compactRunnerWithContext focus = do
+            result <- compactRunner focus
+            case result of
+                Left _ -> pure ()
+                Right _ ->
+                    reloadGeneratedContext `catchAny` \_ -> pure ()
+            pure result
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
             , sessionQueueRecap = writeChan recapRequests
-            , sessionCompact = compactRunner
+            , sessionCompact = compactRunnerWithContext
             , sessionRender = render
             , sessionProvider = provider
             , sessionConnection = connectionId
@@ -939,6 +949,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
+    writeIORef generatedContextReloadRef reloadGeneratedContext
     writeIORef startup.startupRestartEffort \level -> do
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
@@ -960,7 +971,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
             let queueInitialContext =
-                    null initialTurns && not (isJust initialPrevious)
+                    resumeNeedsGeneratedContext initialTurns
+                        || (null initialTurns && isNothing initialPrevious)
             (omitted, _) <- installSkills startupContext
                 queueInitialContext
                 skills
