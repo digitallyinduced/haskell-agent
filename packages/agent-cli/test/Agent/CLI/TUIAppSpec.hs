@@ -2,8 +2,10 @@ module Agent.CLI.TUIAppSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
-    ( applyTextPromptEdit
+    ( applyStoredFullscreenWindowTitle
+    , applyTextPromptEdit
     , advanceCompletionFlashes
     , agentEntryWindow
     , agentPaneEntryLimit
@@ -18,6 +20,8 @@ import Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , mergeConversationView
+    , newFullscreenInputBuffer
+    , newFullscreenRuntime
     , wrapFullscreenKeyboardVty
     , motionDemandFor
     , motionDemandForTerminalFocus
@@ -33,6 +37,7 @@ import Agent.CLI.TUI.App
     , repositoryHeaderText
     , resumeSearchCursorColumn
     , selectedAgentConversation
+    , setFullscreenWindowTitle
     , textOverlayDisplayText
     , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
@@ -40,6 +45,7 @@ import Agent.CLI.TUI.App
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , FullscreenRuntime(..)
     , Name(..)
     , TerminalFocus(..)
     , TextInputMode(..)
@@ -354,6 +360,37 @@ spec = do
 
             V.shutdown wrapped
             readIORef events `shouldReturn` [Right ()]
+
+    describe "fullscreen window title" do
+        it "replays the stored session title through Vty output" do
+            titles <- newIORef ([] :: [String])
+            input <- newFullscreenInputBuffer
+            runtime <- newFullscreenRuntime
+                input
+                (pure ())
+                (const (pure ()))
+                (pure WarnExit)
+                (const (pure True))
+                (const (pure ()))
+                (const (pure ()))
+                (pure (AgentRoot, []))
+                (const (pure ()))
+                (pure ())
+                (const (pure ()))
+                MotionFull
+                False
+                initialUiState
+            (_, output) <- VMock.mockTerminal (80, 24)
+            setFullscreenWindowTitle runtime "New session"
+            readIORef runtime.runtimeWindowTitle
+                `shouldReturn` Just "New session"
+            applyStoredFullscreenWindowTitle
+                runtime
+                output
+                    { V.setOutputWindowTitle =
+                        \title -> modifyIORef' titles (<> [title])
+                    }
+            readIORef titles `shouldReturn` ["New session"]
 
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do

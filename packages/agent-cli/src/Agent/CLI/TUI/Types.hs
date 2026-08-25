@@ -186,6 +186,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
     , runtimeSetWindowTitle :: !(Text -> IO ())
+    , runtimeWindowTitle :: !(IORef (Maybe Text))
     , runtimeNativeProgress :: !(Bool -> IO ())
     , runtimeAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
     , runtimeAgentSelect :: !(AgentTarget -> IO ())
