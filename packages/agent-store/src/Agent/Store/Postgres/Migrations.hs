@@ -135,11 +135,11 @@ coreMigrations =
         { migrationVersion = 7
         , migrationName = "session recap summaries"
         , migrationStatements =
-            [ "ALTER TABLE harness.sessions\
+            [ "ALTER TABLE IF EXISTS harness.sessions\
               \ ADD COLUMN IF NOT EXISTS last_recap text"
-            , "ALTER TABLE harness.sessions\
+            , "ALTER TABLE IF EXISTS harness.sessions\
               \ ADD COLUMN IF NOT EXISTS last_turn_summary text"
-            , "ALTER TABLE harness.sessions\
+            , "ALTER TABLE IF EXISTS harness.sessions\
               \ ADD COLUMN IF NOT EXISTS last_recap_main_turns\
               \ bigint NOT NULL DEFAULT 0"
             ]
