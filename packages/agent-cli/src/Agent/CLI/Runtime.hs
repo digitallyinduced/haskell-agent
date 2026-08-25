@@ -1945,8 +1945,19 @@ runAgentInitializedWithLock
             atomicModifyIORef' pendingNotices \xs ->
                 (xs <> [AgentMessage message], ())
             pure (Right "queued")
+        createSubagentWorktree source =
+            createWorktree source (worktreeRoot home) >>= \case
+                Left err -> pure (Left err)
+                Right path -> pure $ Right SubagentWorktree
+                    { subagentWorktreePath = path
+                    , subagentWorktreeCleanup =
+                        removeWorktree source path >>= \case
+                            Left err -> pure (Left err)
+                            Right () -> pure (Right ())
+                    }
         multiCtx = Just MultiAgentContext
             { multiRegistry = registry
+            , multiCwd = cwd
             , multiSelfId = Nothing
             , multiDepth = 0
             , multiTaskPath = taskPathRoot
@@ -1963,16 +1974,7 @@ runAgentInitializedWithLock
                     registry
                     subagentSessions
                     agentTypesRef)
-            , multiCreateWorktree = Just \source ->
-                createWorktree source (worktreeRoot home) >>= \case
-                    Left err -> pure (Left err)
-                    Right path -> pure $ Right SubagentWorktree
-                        { subagentWorktreePath = path
-                        , subagentWorktreeCleanup =
-                            removeWorktree source path >>= \case
-                                Left err -> pure (Left err)
-                                Right () -> pure (Right ())
-                        }
+            , multiCreateWorktree = Just createSubagentWorktree
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
                     provider
@@ -2310,6 +2312,7 @@ runAgentInitializedWithLock
                 , subagentLegacyTarget = legacySubagentTarget
                 , subagentConnection = inferredTarget.targetConnectionId
                 , subagentMapModel = transportModel
+                , subagentCreateWorktree = Just createSubagentWorktree
                 , subagentSessionTmp = toolEnv.toolSessionTmp
                 , subagentSpawnModelGuidance =
                     subscriptionSubagentModelGuidance

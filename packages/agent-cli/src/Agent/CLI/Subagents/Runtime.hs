@@ -133,6 +133,7 @@ import Agent.GrokBuild.Dialect.Task
 import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
+    , SubagentWorktree
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
 import Agent.Tools.Types
@@ -193,6 +194,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
     , subagentConnection :: !Text
     , subagentMapModel :: !(Text -> Text)
+    , subagentCreateWorktree
+        :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
     , subagentSpawnModelGuidance :: !(Maybe Text)
     }
 
@@ -860,12 +863,13 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
         childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
             { multiRegistry = runtime.subagentRegistry
+            , multiCwd = env.subCwd
             , multiSelfId = Just env.subId
             , multiDepth = env.subDepth
             , multiTaskPath = childPath
             , multiRootTurnId = pure env.subRootTurnId
             , multiResumeFromDisk = Nothing
-            , multiCreateWorktree = Nothing
+            , multiCreateWorktree = runtime.subagentCreateWorktree
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
                     provider

@@ -26,6 +26,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent.STM
 import Control.Monad (unless)
+import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -113,6 +114,19 @@ spec = describe "Agent.Tools.MultiAgents" do
             any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
         closeSubagentRegistry registry
 
+    it "advertises optional worktree isolation on spawn_agent" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let propertyNames =
+                [ property.propertyName
+                | tool <- multiAgentTools (rootContext registry Nothing)
+                , tool.appToolName == "spawn_agent"
+                , property <- fromMaybe [] (jsonToolParameters tool)
+                ]
+        propertyNames `shouldContain` ["isolation"]
+        closeSubagentRegistry registry
+
     it "preserves encrypted spawn payloads" do
         spawned <- newEmptyTMVarIO
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
@@ -164,6 +178,61 @@ spec = describe "Agent.Tools.MultiAgents" do
             , collaborationReasoningEffort = Just "high"
             , collaborationForkTurns = Just "3"
             }
+        closeSubagentRegistry registry
+
+    it "spawns an isolated child in a host-provided worktree" do
+        childCwd <- newEmptyTMVarIO
+        cleaned <- newIORef False
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp/root")
+            (\env _ _ _ -> do
+                atomically (putTMVar childCwd env.subCwd)
+                pure (resultWithText "done"))
+            (\_ _ -> pure ())
+        let worktreePath = fromFilePath "/tmp/worktree"
+            createWorktree source = do
+                source `shouldBe` fromFilePath "/tmp/root"
+                pure $ Right SubagentWorktree
+                    { subagentWorktreePath = worktreePath
+                    , subagentWorktreeCleanup =
+                        writeIORef cleaned True >> pure (Right ())
+                    }
+            context = (rootContext registry Nothing)
+                { multiCwd = fromFilePath "/tmp/root"
+                , multiCreateWorktree = Just createWorktree
+                }
+            call = ToolCall
+                { callId = "spawn-worktree"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"isolation\":\"worktree\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools context)) call
+        result.output `shouldSatisfy` Text.isInfixOf "/tmp/worktree"
+        atomically (takeTMVar childCwd) `shouldReturn` worktreePath
+        readIORef cleaned `shouldReturn` False
+        closeSubagentRegistry registry
+        readIORef cleaned `shouldReturn` True
+
+    it "rejects worktree isolation when the host does not provide it" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        let call = ToolCall
+                { callId = "spawn-worktree-unavailable"
+                , name = "collaboration.spawn_agent"
+                , arguments =
+                    "{\"task_name\":\"worker\",\"message\":\"task\",\
+                    \\"isolation\":\"worktree\"}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- dispatchToolCall defaultLoopDispatch
+            (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
+        result.output `shouldSatisfy` Text.isInfixOf "unavailable"
         closeSubagentRegistry registry
 
     it "rejects zero fork turns" do
@@ -298,6 +367,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 pure (Right "queued")
             context = MultiAgentContext
                 { multiRegistry = registry
+                , multiCwd = fromFilePath "/tmp"
                 , multiSelfId = Nothing
                 , multiDepth = 1
                 , multiTaskPath = workerPath
@@ -330,6 +400,7 @@ rootContext
     -> MultiAgentContext
 rootContext registry sendToRoot = MultiAgentContext
     { multiRegistry = registry
+    , multiCwd = fromFilePath "/tmp"
     , multiSelfId = Nothing
     , multiDepth = 0
     , multiTaskPath = taskPathRoot
