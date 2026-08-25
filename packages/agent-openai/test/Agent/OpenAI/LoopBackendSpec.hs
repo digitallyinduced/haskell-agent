@@ -201,8 +201,14 @@ spec = do
                             [ (Key.fromText "namespace", Aeson.String "collaboration")
                             , (Key.fromText "encrypted_function_args", Aeson.Array mempty)
                             ])]
+                worktree = responseToTurnOutput $ testResponse "resp-worktree"
+                    [functionCallItemWithExtras "fc3" "spawn_agent_in_worktree"
+                        "{\"task_name\":\"worker\",\"message\":\"gAAAAA\"}"
+                        (KeyMap.fromList
+                            [(Key.fromText "namespace", Aeson.String "collaboration")])]
             map (.argumentsEncrypted) encrypted.toolCalls `shouldBe` [True]
             map (.argumentsEncrypted) plaintext.toolCalls `shouldBe` [False]
+            map (.argumentsEncrypted) worktree.toolCalls `shouldBe` [False]
 
         it "joins multiple assistant messages" do
             let turn = responseToTurnOutput $ testResponse "resp-text"

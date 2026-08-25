@@ -21,7 +21,7 @@ import Agent.Error
     , errorTypeText
     )
 import Control.Exception.Safe (Exception, displayException)
-import Data.Char (isControl)
+import Data.Char (isControl, isSpace)
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -479,7 +479,14 @@ safeErrorType raw =
 
 looksStructured :: Text -> Bool
 looksStructured value =
-    any (`Text.isPrefixOf` Text.stripStart value) ["{", "[", "<"]
+    case Text.uncons (Text.stripStart value) of
+        Just ('{', _) -> True
+        Just ('<', _) -> True
+        Just ('[', rest) ->
+            case Text.uncons (Text.dropWhile isSpace rest) of
+                Just (next, _) -> next == '{' || next == '"' || next == '['
+                Nothing -> True
+        _ -> False
 
 looksLikeExceptionDump :: Text -> Bool
 looksLikeExceptionDump value =

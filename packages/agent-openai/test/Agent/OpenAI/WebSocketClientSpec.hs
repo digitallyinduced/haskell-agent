@@ -10,6 +10,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.Foldable (toList)
 import Data.IORef
 import Data.Text (Text)
 
@@ -87,6 +88,28 @@ spec = do
         field "prompt_cache_retention" payload `shouldBe` Nothing
         field "previous_response_id" payload
             `shouldBe` Just (Aeson.String "previous-1")
+
+    it "strips Responses Lite content_item_kinds from the wire payload" do
+        let payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions sampleLitePrefixRequest Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                case toList items of
+                    [Aeson.Object message] -> do
+                        KeyMap.lookup
+                            (Key.fromText
+                                "internal_chat_message_metadata_passthrough")
+                            message
+                            `shouldBe` Nothing
+                        field "role" (Aeson.Object message)
+                            `shouldBe` Just (Aeson.String "developer")
+                    other ->
+                        expectationFailure
+                            ("expected one developer message, got "
+                                <> show other)
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
 
     it "does not request server-managed compaction by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
@@ -292,6 +315,28 @@ field :: Key.Key -> Aeson.Value -> Maybe Aeson.Value
 field name = \case
     Aeson.Object object -> KeyMap.lookup name object
     _ -> Nothing
+
+sampleLitePrefixRequest :: ResponseCreateParams
+sampleLitePrefixRequest = sampleRequest
+    { input = Just (ResponseInputItems
+        [ MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [InputTextPart "base instructions" Nothing KeyMap.empty]
+            , role = RoleDeveloper
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just ["model.base_instructions"]
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            , extraFields = KeyMap.empty
+            }
+        ])
+    }
 
 sampleRequest :: ResponseCreateParams
 sampleRequest = defaultResponseCreateParams

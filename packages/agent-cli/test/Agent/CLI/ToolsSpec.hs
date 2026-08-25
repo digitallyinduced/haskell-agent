@@ -219,7 +219,7 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure
                 ("expected collaboration namespace, got " <> show other)
 
-    it "matches the reserved collaboration schemas with the production tools" do
+    it "keeps reserved collaboration schemas exact and exposes worktree spawn separately" do
         bracket
             (newSubagentRegistry
                 defaultSubagentConfig
@@ -236,18 +236,54 @@ spec = describe "schemasFromAppTools" do
                         , multiTaskPath = taskPathRoot
                         , multiRootTurnId = pure Nothing
                         , multiResumeFromDisk = Nothing
-                        , multiCreateWorktree = Nothing
+                        , multiCreateWorktree = Just
+                            (\_ -> pure (Left "not used"))
                         , multiPrepareSpawn = Nothing
                         , multiSendToRoot = Nothing
                         , multiSpawnModelGuidance = Nothing
                         }
+                    schemas =
+                        schemasFromAppTools
+                            codexDialect
+                            (multiAgentTools context)
                     namespaces =
                         [ tagged
                         | KnownResponseTool ToolNamespace tagged <-
-                            schemasFromAppTools
-                                codexDialect
-                                (multiAgentTools context)
+                            schemas
                         ]
+                    worktreeFunctions =
+                        [ function
+                        | FunctionToolValue function <- schemas
+                        , function.name == "spawn_agent_in_worktree"
+                        ]
+                case worktreeFunctions of
+                    [function] -> do
+                        function.strict `shouldBe` Just True
+                        Just (Aeson.Object parameters) <-
+                            pure function.parameters
+                        KeyMap.lookup "required" parameters
+                            `shouldBe` Just
+                                (Aeson.toJSON
+                                    ( [ "task_name"
+                                      , "message"
+                                      , "model"
+                                      , "reasoning_effort"
+                                      , "fork_turns"
+                                      ] :: [Text]
+                                    ))
+                        Just (Aeson.Object properties) <-
+                            pure (KeyMap.lookup "properties" parameters)
+                        map Key.toText (KeyMap.keys properties)
+                            `shouldMatchList`
+                                [ "task_name"
+                                , "message"
+                                , "model"
+                                , "reasoning_effort"
+                                , "fork_turns"
+                                ]
+                    other -> expectationFailure
+                        ("expected top-level spawn_agent_in_worktree, got "
+                            <> show other)
                 case namespaces of
                     [tagged] ->
                         case KeyMap.lookup "tools" tagged.fields of
