@@ -1,5 +1,6 @@
 module Main (main) where
 
+import Agent.CLI.Compaction (OccupancySnapshot(..), estimatedOccupancy)
 import Agent.CLI.Subagents.Runtime (SubagentSession(..))
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
@@ -145,7 +146,7 @@ buildSessions agentCount itemCount payloadBytes sampleIndex =
                 | itemIndex <- [1 .. itemCount]
                 ]
         transcript <- newIORef items
-        contextTokens <- newIORef (Just (itemCount, payloadBytes))
+        contextTokens <- newIORef (Just (estimatedOccupancy itemCount payloadBytes))
         pinned <- newIORef False
         hydrated <- newMVar True
         pure
@@ -178,7 +179,12 @@ checksumSessions sessions =
         pure $
             foldl'
                 checksumItem
-                (checksum * 33 + agentIndex + maybe 0 (uncurry (+)) context)
+                ( checksum * 33 + agentIndex
+                    + maybe 0
+                        (\snapshot ->
+                            snapshot.occupancyTokens + snapshot.occupancyLength)
+                        context
+                )
                 items
 
 checksumItem :: Int -> ResponseItem -> Int

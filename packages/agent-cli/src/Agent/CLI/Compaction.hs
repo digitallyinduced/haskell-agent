@@ -17,6 +17,10 @@ module Agent.CLI.Compaction
     , runProviderCompactWithContextWindow
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
+    , OccupancyKind(..)
+    , OccupancySnapshot(..)
+    , estimatedOccupancy
+    , reportedOccupancy
     ) where
 
 import Agent.CLI.Error (formatApiError)
@@ -94,6 +98,36 @@ data CompactOutcome = CompactOutcome
     , compactHistory :: ![ResponseItem]
     , compactSummary :: !Text
     } deriving (Eq, Show)
+
+-- | Whether cached occupancy is provider-reported full-request usage or an
+-- items-only estimate. Estimated snapshots must not be treated as complete
+-- occupancy because they omit instructions, skills, and tool schemas.
+data OccupancyKind
+    = ReportedOccupancy
+    | EstimatedOccupancy
+    deriving (Eq, Show)
+
+data OccupancySnapshot = OccupancySnapshot
+    { occupancyTokens :: !Int
+    , occupancyLength :: !Int
+    , occupancyKind :: !OccupancyKind
+    } deriving (Eq, Show)
+
+reportedOccupancy :: Int -> Int -> OccupancySnapshot
+reportedOccupancy tokens historyLength =
+    OccupancySnapshot
+        { occupancyTokens = tokens
+        , occupancyLength = historyLength
+        , occupancyKind = ReportedOccupancy
+        }
+
+estimatedOccupancy :: Int -> Int -> OccupancySnapshot
+estimatedOccupancy tokens historyLength =
+    OccupancySnapshot
+        { occupancyTokens = tokens
+        , occupancyLength = historyLength
+        , occupancyKind = EstimatedOccupancy
+        }
 
 type OpenAiCompactionSender =
     ResponseCreateParams -> IO (Either ApiError Response)
@@ -320,7 +354,7 @@ runAttemptAndRecord recordUsage action =
 installCompactOutcome
     :: IORef (Maybe Text)
     -> IORef [ResponseItem]
-    -> Maybe (IORef (Maybe (Int, Int)))
+    -> Maybe (IORef (Maybe OccupancySnapshot))
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -335,15 +369,15 @@ installCompactOutcome previous transcript contextTokens runCompact focus =
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->
-                        writeIORef ref $ Just
-                            ( outcome.compactAfterTokens
-                            , length outcome.compactHistory
-                            )
+                        writeIORef ref $ Just $
+                            estimatedOccupancy
+                                outcome.compactAfterTokens
+                                (length outcome.compactHistory)
         pure result
 
 installLiveCompactOutcome
     :: IORef LiveConversation
-    -> Maybe (IORef (Maybe (Int, Int)))
+    -> Maybe (IORef (Maybe OccupancySnapshot))
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -358,10 +392,10 @@ installLiveCompactOutcome conversationRef contextTokens runCompact focus =
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->
-                        writeIORef ref $ Just
-                            ( outcome.compactAfterTokens
-                            , length outcome.compactHistory
-                            )
+                        writeIORef ref $ Just $
+                            estimatedOccupancy
+                                outcome.compactAfterTokens
+                                (length outcome.compactHistory)
         pure result
 
 sendOpenAIRemoteCompaction
@@ -641,7 +675,7 @@ isPortableLocalSummaryItem = \case
 autoCompactOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackend =
@@ -653,7 +687,7 @@ autoCompactOpenAiBackendWithThreshold
     :: Maybe Int
     -> TokenProvider
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
@@ -674,7 +708,7 @@ autoCompactOpenAiBackendWithSender
     -> OpenAiCompactionSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
@@ -697,7 +731,7 @@ autoCompactOpenAiBackendWithSenderAndHook
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
     -> IO ()
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
@@ -846,7 +880,7 @@ rejectOversizedInitialRequest getParams (Backend submit) =
 -- @input_tokens@ are not re-estimated with JSON length.
 boundCompletedToolContinuations
     :: IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 boundCompletedToolContinuations getParams contextTokensRef (Backend submit) =
@@ -957,7 +991,7 @@ toolOutputTruncationNotice =
 
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWith compactAction =
@@ -976,7 +1010,7 @@ autoCompactOpenAiBackendWith compactAction =
 
 autoCompactOpenAiBackendWithApi
     :: IO (Either ApiError CompactOutcome)
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithApi compactAction =
@@ -992,9 +1026,9 @@ autoCompactOpenAiBackendWithLimit
     :: IO Int
     -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
-    -> (Maybe (Int, Int) -> [ResponseItem] -> [TurnInput] -> IO Int)
+    -> (Maybe OccupancySnapshot -> [ResponseItem] -> [TurnInput] -> IO Int)
     -> IO ()
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
@@ -1051,7 +1085,10 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
             compactSnapshot =
-                Just (outcome.compactAfterTokens, length compactedHistory)
+                Just $
+                    estimatedOccupancy
+                        outcome.compactAfterTokens
+                        (length compactedHistory)
         writeIORef contextTokensRef compactSnapshot
         result <- restore (submit compactedHistory Nothing inputs onEvent)
         case result of
@@ -1084,7 +1121,7 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         err -> err
 
 estimateProjectedFromCache
-    :: Maybe (Int, Int)
+    :: Maybe OccupancySnapshot
     -> [ResponseItem]
     -> [TurnInput]
     -> IO Int
@@ -1100,29 +1137,37 @@ reportedContextTokens usage
     | otherwise =
         Just (max 0 usage.inputTokens + max 0 usage.outputTokens)
 
-occupancySnapshot :: BackendResult -> Maybe (Int, Int)
+occupancySnapshot :: BackendResult -> Maybe OccupancySnapshot
 occupancySnapshot result
     | Text.null result.backendOutput.responseId = Nothing
     | otherwise =
         reportedContextTokens result.backendOutput.tokenUsage >>= \tokens ->
-            Just (tokens, length result.backendState)
+            Just (reportedOccupancy tokens (length result.backendState))
 
--- | Project the next request from last reported occupancy when that snapshot
--- still describes @history@. Only unsent items are estimated; without a
--- snapshot, fall back to encoding the complete request (or items only when
--- request params are unavailable).
+-- | Project the next request from last occupancy when that snapshot still
+-- describes @history@. Provider-reported occupancy already includes
+-- instructions, tools, and skills, so only unsent items are estimated.
+-- Estimated compaction snapshots are items-only; recompute against the
+-- complete request when params are available so those fields are counted.
 projectRequestTokens
     :: Maybe ResponseCreateParams
-    -> Maybe (Int, Int)
+    -> Maybe OccupancySnapshot
     -> [ResponseItem]
     -> [TurnInput]
     -> Int
 projectRequestTokens params occupancy history inputs =
     case occupancy of
-        Just (tokens, observedLength)
-            | observedLength == length history
-            , tokens > 0 ->
-                tokens + estimateItemsTokens pendingItems
+        Just snapshot
+            | snapshot.occupancyLength == length history
+            , snapshot.occupancyTokens > 0
+            , snapshot.occupancyKind == ReportedOccupancy ->
+                snapshot.occupancyTokens + estimateItemsTokens pendingItems
+        Just snapshot
+            | snapshot.occupancyLength == length history
+            , snapshot.occupancyTokens > 0
+            , snapshot.occupancyKind == EstimatedOccupancy
+            , Nothing <- params ->
+                snapshot.occupancyTokens + estimateItemsTokens pendingItems
         _ ->
             case params of
                 Just requestParams ->

@@ -1,5 +1,6 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
+import Agent.CLI.Compaction (estimatedOccupancy)
 import Agent.CLI.SubagentStore
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.Dialect (DialectId(..))
@@ -478,7 +479,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                 lookupTestSession
                     sessionsRef storeRootRef typesRef agentId
             writeIORef session.subSessionTranscript items
-            writeIORef session.subSessionContextTokens (Just (100, 200))
+            writeIORef session.subSessionContextTokens
+                (Just (estimatedOccupancy 100 200))
             bracket
                 (newSubagentRegistry defaultSubagentConfig dir
                     (\_ _ _ _ -> fail "unexpected subagent runner invocation")

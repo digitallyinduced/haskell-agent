@@ -18,7 +18,10 @@ module Agent.CLI.Subagents.Runtime
 
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction (autoCompactOpenAiBackendWithSender)
+import Agent.CLI.Compaction
+    ( OccupancySnapshot
+    , autoCompactOpenAiBackendWithSender
+    )
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -176,7 +179,7 @@ import qualified System.Info as SystemInfo
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
-    , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
+    , subSessionContextTokens :: !(IORef (Maybe OccupancySnapshot))
     , subSessionProvider :: !Provider
     , subSessionConnection :: !Text
     , subSessionEffectiveModel :: !Text
