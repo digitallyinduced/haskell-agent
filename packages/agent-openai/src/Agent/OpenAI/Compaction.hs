@@ -8,14 +8,21 @@ module Agent.OpenAI.Compaction
     , compactionTriggerItem
     , buildRemoteCompactionRequest
     , trimRemoteCompactionHistoryToFit
+    , trimRemoteCompactionRequestToFit
     , extractRemoteCompactionItem
     , buildRemoteCompactedHistory
     , estimateTokens
     , estimateItemsTokens
+    , estimateResponseCreateParamsTokens
+    , estimateRequestTokensWithItems
+    , trimResponseHistoryToFit
+    , sanitizeCompactionHistory
     , collectRecentUserTexts
     , buildLocalCompactedHistory
+    , buildLocalCompactedHistoryToFit
     , compactTranscriptAtLastCheckpoint
     , hasCompactionCheckpoint
+    , hasReloadedGeneratedContextItems
     , assistantSummaryItem
     , userTextItem
     , isCompactSessionTurn
@@ -31,12 +38,14 @@ import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Vector as Vector
 
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
@@ -82,51 +91,232 @@ buildRemoteCompactionRequest params history =
                 , ..
                 }
 
+-- | Estimate the complete serialized request, including instructions, tools,
+-- and all other request-level fields.
+estimateRequestTokensWithItems
+    :: ResponseCreateParams
+    -> [ResponseItem]
+    -> Int
+estimateRequestTokensWithItems params items =
+    estimateEncodedValue (withRequestInput params items)
+
+estimateResponseCreateParamsTokens :: ResponseCreateParams -> Int
+estimateResponseCreateParamsTokens = estimateEncodedValue
+
+estimateEncodedValue :: Aeson.ToJSON value => value -> Int
+estimateEncodedValue value =
+    estimateTokens
+        (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode value)))
+
 contextWindowTruncatedOutputMessage :: Text
 contextWindowTruncatedOutputMessage =
     "Output exceeded the available model context and was truncated"
 
--- | Codex rewrites only a contiguous suffix of tool outputs when the
--- compaction request itself would exceed the model's usable context window.
--- This keeps call/output pairing valid while making room for the trigger.
+-- | Rewrite the oldest oversized, safely-rewritable items when the compaction
+-- request itself would exceed the model's usable context window. Items that
+-- cannot be rewritten are preserved while newer outputs are considered.
 trimRemoteCompactionHistoryToFit
     :: Int
     -> Maybe Text
     -> [ResponseItem]
     -> [ResponseItem]
 trimRemoteCompactionHistoryToFit contextWindow instructionText history =
-    go initialTokens (reverse sanitizedHistory) []
+    trimCompactionHistoryToFitWith
+        sanitizeRemoteCompactionHistory
+        contextWindow
+        requestTokens
+        history
   where
-    sanitizedHistory = map sanitizeOversizedToolCall history
-
-    initialTokens =
+    requestTokens items =
         maybe 0 estimateTokens instructionText
-            + estimateItemsTokens sanitizedHistory
+            + estimateItemsTokens (items <> [compactionTriggerItem])
 
-    go _ [] rewritten = rewritten
-    go tokens remaining rewritten
-        | tokens <= contextWindow =
-            reverse remaining <> rewritten
-    go tokens (item : remaining) rewritten =
-        case rewriteOversizedToolOutput item of
-            Nothing ->
-                reverse (item : remaining) <> rewritten
-            Just replacement ->
-                let nextTokens =
-                        tokens
-                            - estimateItemsTokens [item]
-                            + estimateItemsTokens [replacement]
-                in go nextTokens remaining (replacement : rewritten)
+-- | Trim a compaction request using the complete serialized request size.
+-- Unlike the legacy helper above, this accounts for tools, instructions,
+-- trigger overhead, and all other request fields preserved by the remote
+-- compaction request.
+trimRemoteCompactionRequestToFit
+    :: Int
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> [ResponseItem]
+trimRemoteCompactionRequestToFit contextWindow params =
+    trimCompactionHistoryToFitWith
+        sanitizeRemoteCompactionHistory
+        contextWindow
+        requestTokens
+  where
+    requestTokens history =
+        estimateEncodedValue (buildRemoteCompactionRequest params history)
 
-oversizedToolArgumentsMessage :: Text
-oversizedToolArgumentsMessage =
-    "Tool arguments exceeded the provider string limit and were omitted during compaction."
+-- | Trim history for a normal Responses request with fixed trailing items.
+-- Local summarization uses this to bound the transcript before appending its
+-- summary prompt.
+trimResponseHistoryToFit
+    :: Int
+    -> ResponseCreateParams
+    -> [ResponseItem]
+    -> [ResponseItem]
+    -> [ResponseItem]
+trimResponseHistoryToFit contextWindow params trailing =
+    trimCompactionHistoryToFitWith
+        sanitizeCompactionHistory
+        contextWindow
+        requestTokens
+  where
+    requestTokens history =
+        estimateRequestTokensWithItems params (history <> trailing)
 
-oversizedFunctionArguments :: Text
-oversizedFunctionArguments =
-    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $ Aeson.object
-        [ "compaction_notice" Aeson..= oversizedToolArgumentsMessage
-        ]
+trimCompactionHistoryToFitWith
+    :: ([ResponseItem] -> [ResponseItem])
+    -> Int
+    -> ([ResponseItem] -> Int)
+    -> [ResponseItem]
+    -> [ResponseItem]
+trimCompactionHistoryToFitWith sanitize contextWindow requestTokens history =
+    let sanitized = sanitize history
+        rewritten = rewriteUntilFit sanitized
+    in dropOldestUntilFit rewritten
+  where
+    rewriteUntilFit items
+        | requestTokens items <= contextWindow = items
+        | otherwise =
+            case rewriteFirstReducible [] items of
+                Just smaller -> rewriteUntilFit smaller
+                Nothing -> items
+
+    rewriteFirstReducible _ [] = Nothing
+    rewriteFirstReducible prefix (item : remaining) =
+        let withoutItem = prefix <> remaining
+            availableTokens =
+                max 0 (contextWindow - requestTokens withoutItem)
+            original = prefix <> (item : remaining)
+        in case rewriteItemForBudget availableTokens item of
+            Just compacted
+                | let candidate = prefix <> (compacted : remaining)
+                , requestTokens candidate < requestTokens original ->
+                    Just candidate
+            _ ->
+                rewriteFirstReducible (prefix <> [item]) remaining
+
+    dropOldestUntilFit items
+        | requestTokens items <= contextWindow = items
+        | otherwise =
+            case dropOldestProtocolUnit items of
+                Nothing -> items
+                Just smaller -> dropOldestUntilFit smaller
+
+dropOldestProtocolUnit :: [ResponseItem] -> Maybe [ResponseItem]
+dropOldestProtocolUnit = go []
+  where
+    go _ [] = Nothing
+    go prefix (item@(KnownResponseItem ItemCompaction _) : rest) =
+        go (prefix <> [item]) rest
+    go prefix (FunctionCallItem call : rest) =
+        Just (prefix <> dropMatchingFunctionOutput call.callId rest)
+    go prefix (CustomToolCallItem call : rest) =
+        Just (prefix <> dropMatchingCustomToolOutput call.callId rest)
+    go prefix (KnownResponseItem itemType tagged : rest)
+        | Just outputType <- pairedOutputType itemType =
+            Just $
+                prefix
+                    <> dropMatchingTaggedOutput
+                        (== outputType)
+                        (taggedProtocolIds tagged)
+                        rest
+    go prefix (UnknownResponseItem tagged : rest)
+        | Just outputTag <- pairedUnknownOutputTag tagged.tag =
+            Just $
+                prefix
+                    <> dropMatchingTaggedOutput
+                        (\case
+                            ItemUnknownType itemType -> itemType == outputTag
+                            _ -> False)
+                        (taggedProtocolIds tagged)
+                        rest
+    go prefix (_ : rest) = Just (prefix <> rest)
+
+dropMatchingFunctionOutput :: Text -> [ResponseItem] -> [ResponseItem]
+dropMatchingFunctionOutput callId = go
+  where
+    go [] = []
+    go (FunctionCallOutputItem output : rest)
+        | identifiersMatch [callId] [output.callId] = rest
+    go (item : rest) = item : go rest
+
+dropMatchingCustomToolOutput :: Text -> [ResponseItem] -> [ResponseItem]
+dropMatchingCustomToolOutput callId = go
+  where
+    go [] = []
+    go (CustomToolCallOutputItem output : rest)
+        | identifiersMatch [callId] [output.callId] = rest
+    go (item : rest) = item : go rest
+
+pairedOutputType :: ResponseItemType -> Maybe ResponseItemType
+pairedOutputType = \case
+    ItemComputerCall -> Just ItemComputerCallOutput
+    ItemToolSearchCall -> Just ItemToolSearchOutput
+    ItemLocalShellCall -> Just ItemLocalShellCallOutput
+    ItemShellCall -> Just ItemShellCallOutput
+    ItemApplyPatchCall -> Just ItemApplyPatchCallOutput
+    ItemMcpApprovalRequest -> Just ItemMcpApprovalResponse
+    ItemProgram -> Just ItemProgramOutput
+    _ -> Nothing
+
+pairedUnknownOutputTag :: Text -> Maybe Text
+pairedUnknownOutputTag itemType
+    | "_call" `Text.isSuffixOf` normalized =
+        Just (normalized <> "_output")
+    | otherwise = Nothing
+  where
+    normalized = Text.toLower (Text.strip itemType)
+
+dropMatchingTaggedOutput
+    :: (ResponseItemType -> Bool)
+    -> [Text]
+    -> [ResponseItem]
+    -> [ResponseItem]
+dropMatchingTaggedOutput isOutput callIds = go
+  where
+    go [] = []
+    go (KnownResponseItem itemType tagged : rest)
+        | isOutput itemType
+        , identifiersMatch callIds (taggedProtocolIds tagged) =
+            rest
+    go (UnknownResponseItem tagged : rest)
+        | isOutput (ItemUnknownType tagged.tag)
+        , identifiersMatch callIds (taggedProtocolIds tagged) =
+            rest
+    go (item : rest) = item : go rest
+
+taggedProtocolIds :: TaggedObject -> [Text]
+taggedProtocolIds tagged =
+    mapMaybe
+        (\name -> taggedTextField name tagged)
+        ["call_id", "approval_request_id", "id"]
+
+taggedTextField :: Text -> TaggedObject -> Maybe Text
+taggedTextField name tagged =
+    case KeyMap.lookup (Key.fromText name) tagged.fields of
+        Just (Aeson.String value) -> Just value
+        _ -> Nothing
+
+identifiersMatch :: [Text] -> [Text] -> Bool
+identifiersMatch expected actual =
+    not (null expectedIds)
+        && not (null actualIds)
+        && any (`elem` actualIds) expectedIds
+  where
+    expectedIds = nonEmptyIdentifiers expected
+    actualIds = nonEmptyIdentifiers actual
+
+nonEmptyIdentifiers :: [Text] -> [Text]
+nonEmptyIdentifiers =
+    filter (not . Text.null) . map Text.strip
+
+sanitizeRemoteCompactionHistory :: [ResponseItem] -> [ResponseItem]
+sanitizeRemoteCompactionHistory =
+    map sanitizeOversizedToolCall . sanitizeCompactionHistory
 
 sanitizeOversizedToolCall :: ResponseItem -> ResponseItem
 sanitizeOversizedToolCall = \case
@@ -154,6 +344,16 @@ sanitizeOversizedToolCall = \case
                 , extraFields = call.extraFields
                 }
     item -> item
+
+oversizedToolArgumentsMessage :: Text
+oversizedToolArgumentsMessage =
+    "Tool arguments exceeded the provider string limit and were omitted during compaction."
+
+oversizedFunctionArguments :: Text
+oversizedFunctionArguments =
+    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $ Aeson.object
+        [ "compaction_notice" Aeson..= oversizedToolArgumentsMessage
+        ]
 
 rewriteOversizedToolOutput :: ResponseItem -> Maybe ResponseItem
 rewriteOversizedToolOutput = \case
@@ -185,7 +385,128 @@ rewriteOversizedToolOutput = \case
             , tools = []
             , extraFields = output.extraFields
             }
+    KnownResponseItem itemType tagged
+        | isTaggedOutputItem itemType ->
+            KnownResponseItem itemType
+                <$> rewriteTaggedOutput tagged
+        | isTaggedInlineResultItem itemType ->
+            KnownResponseItem itemType
+                <$> rewriteTaggedInlineResult tagged
+    -- Provider extensions are decoded as 'ItemUnknownType'. Preserve their
+    -- identity and required metadata, but only redact broad payload fields
+    -- when the wire type is explicitly output-like. Call-shaped extensions
+    -- may safely redact recognized result fields, never generic input fields
+    -- such as content, data, text, or payload.
+    KnownResponseItem (ItemUnknownType itemType) tagged
+        | isOutputLikeType itemType ->
+            KnownResponseItem (ItemUnknownType itemType)
+                <$> rewriteTaggedOutput tagged
+        | isCallLikeType itemType ->
+            KnownResponseItem (ItemUnknownType itemType)
+                <$> rewriteTaggedInlineResult tagged
+    UnknownResponseItem tagged
+        | isOutputLikeType tagged.tag ->
+            UnknownResponseItem <$> rewriteTaggedOutput tagged
+        | isCallLikeType tagged.tag ->
+            UnknownResponseItem <$> rewriteTaggedInlineResult tagged
     _ -> Nothing
+
+isTaggedOutputItem :: ResponseItemType -> Bool
+isTaggedOutputItem = \case
+    ItemComputerCallOutput -> True
+    ItemLocalShellCallOutput -> True
+    ItemShellCallOutput -> True
+    ItemApplyPatchCallOutput -> True
+    ItemMcpApprovalResponse -> True
+    ItemProgramOutput -> True
+    _ -> False
+
+-- Some provider-managed call items carry completed results inline. Limit
+-- rewriting on these shapes to unambiguously result-like fields.
+isTaggedInlineResultItem :: ResponseItemType -> Bool
+isTaggedInlineResultItem = \case
+    ItemFileSearchCall -> True
+    ItemWebSearchCall -> True
+    ItemImageGenerationCall -> True
+    ItemCodeInterpreterCall -> True
+    ItemMcpListTools -> True
+    ItemMcpCall -> True
+    _ -> False
+
+isOutputLikeType :: Text -> Bool
+isOutputLikeType itemType =
+    let normalized = Text.toLower (Text.strip itemType)
+    in Text.isSuffixOf "_output" normalized
+        || Text.isInfixOf "output" normalized
+
+isCallLikeType :: Text -> Bool
+isCallLikeType itemType =
+    Text.isSuffixOf "_call" (Text.toLower (Text.strip itemType))
+
+rewriteTaggedOutput :: TaggedObject -> Maybe TaggedObject
+rewriteTaggedOutput =
+    rewriteTaggedFields
+        [ "output"
+        , "outputs"
+        , "result"
+        , "results"
+        , "stdout"
+        , "stderr"
+        , "response"
+        , "data"
+        , "content"
+        , "text"
+        , "payload"
+        , "tools"
+        ]
+
+rewriteTaggedInlineResult :: TaggedObject -> Maybe TaggedObject
+rewriteTaggedInlineResult =
+    rewriteTaggedFields
+        [ "output"
+        , "outputs"
+        , "result"
+        , "results"
+        , "stdout"
+        , "stderr"
+        , "response"
+        , "tools"
+        ]
+
+rewriteTaggedFields :: [Text] -> TaggedObject -> Maybe TaggedObject
+rewriteTaggedFields payloadKeys tagged =
+    let
+        rewritten =
+            foldr
+                (\name fields ->
+                    let key = Key.fromText name
+                    in case KeyMap.lookup key fields of
+                        Just value ->
+                            KeyMap.insert key (truncatePayload value) fields
+                        Nothing -> fields)
+                tagged.fields
+                payloadKeys
+    in if rewritten == tagged.fields
+        then Nothing
+        else Just tagged { fields = rewritten }
+
+truncatePayload :: Aeson.Value -> Aeson.Value
+truncatePayload = \case
+    Aeson.String _ ->
+        Aeson.String contextWindowTruncatedOutputMessage
+    Aeson.Array _ ->
+        Aeson.Array Vector.empty
+    Aeson.Object _ ->
+        Aeson.Object KeyMap.empty
+    value -> value
+
+rewriteItemForBudget :: Int -> ResponseItem -> Maybe ResponseItem
+rewriteItemForBudget budget item =
+    case item of
+        MessageItem{} ->
+            truncateItemText budget item
+        _ ->
+            rewriteOversizedToolOutput item
 
 -- | A successful v2 stream must complete and contain exactly one compaction
 -- output item. Other output item types are ignored, matching Codex.
@@ -223,8 +544,82 @@ buildRemoteCompactedHistory
 buildRemoteCompactedHistory budget history checkpoint =
     truncateRetainedGroups budget
         (filter (\group -> isRemoteRetainedItem group.retainedSource)
-            (retainedGroups history))
+            (retainedGroups (sanitizeCompactionHistory history)))
         <> [checkpoint]
+
+-- | Remove unbounded inline payloads before a compacted snapshot is retained
+-- or replayed. Textual content remains intact; rich content becomes a short
+-- explanatory input message rather than a base64 URL or opaque JSON blob.
+sanitizeCompactionHistory :: [ResponseItem] -> [ResponseItem]
+sanitizeCompactionHistory = map sanitizeCompactionItem
+
+sanitizeCompactionItem :: ResponseItem -> ResponseItem
+sanitizeCompactionItem (MessageItem message) =
+    MessageItem (sanitizeMessage message)
+sanitizeCompactionItem item = item
+
+sanitizeMessage :: ResponseMessage -> ResponseMessage
+sanitizeMessage message =
+    ResponseMessage
+        { messageId = message.messageId
+        , content = case message.content of
+            MessageContentText _ -> message.content
+            MessageContentParts parts ->
+                MessageContentParts
+                    (concatMap (sanitizeContentPart message.role) parts)
+        , role = message.role
+        , status = message.status
+        , phase = message.phase
+        , passthrough = message.passthrough
+        , extraFields = message.extraFields
+        }
+
+sanitizeContentPart
+    :: ResponseRole
+    -> ResponseContentPart
+    -> [ResponseContentPart]
+sanitizeContentPart role part =
+    case part of
+        InputTextPart{} -> [part]
+        OutputTextPart{} -> [part]
+        RefusalPart{} -> [part]
+        ReasoningTextPart{} -> [part]
+        SummaryTextPart{} -> [part]
+        _ -> [richContentNoticePart role (richContentNotice part)]
+
+richContentNoticePart :: ResponseRole -> Text -> ResponseContentPart
+richContentNoticePart role notice =
+    case role of
+        RoleAssistant ->
+            OutputTextPart
+                { text = notice
+                , annotations = Nothing
+                , logprobs = Nothing
+                , extraFields = KeyMap.empty
+                }
+        _ ->
+            InputTextPart
+                { text = notice
+                , promptCacheBreakpoint = Nothing
+                , extraFields = KeyMap.empty
+                }
+
+richContentNotice :: ResponseContentPart -> Text
+richContentNotice = \case
+    InputImagePart{} ->
+        "<image attachment omitted from compacted context>"
+    InputFilePart{filename} ->
+        "<file attachment omitted from compacted context"
+            <> maybe "" (\name -> ": " <> Text.take 120 name) filename
+            <> ">"
+    InputAudioPart{} ->
+        "<audio attachment omitted from compacted context>"
+    UnknownContentPart tagged ->
+        "<unsupported content omitted from compacted context: "
+            <> Text.take 80 tagged.tag
+            <> ">"
+    _ ->
+        "<rich content omitted from compacted context>"
 
 data RetainedGroup = RetainedGroup
     { retainedSource :: !ResponseItem
@@ -255,13 +650,33 @@ isImageResizeNotice = \case
 -- reinjected from current session state.
 isGeneratedContextUserText :: Text -> Bool
 isGeneratedContextUserText text =
+    isReloadedGeneratedContextUserText text
+        || any (`Text.isPrefixOf` Text.stripStart text)
+            [ "# Skill instructions: "
+            , "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
+            , "The user approved the plan. Plan mode is now off."
+            , "<subagent_notification>"
+            ]
+
+isReloadedGeneratedContextUserText :: Text -> Bool
+isReloadedGeneratedContextUserText text =
     any (`Text.isPrefixOf` Text.stripStart text)
         [ "# AGENTS.md instructions for "
-        , "# Skill instructions: "
-        , "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
-        , "The user approved the plan. Plan mode is now off."
-        , "<subagent_notification>"
+        , "## Skills\nThe following reusable skills are available in this session."
+        , "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions."
+        , "<system-reminder>\nAs you answer the user's questions, you can use the following context"
         ]
+
+-- | Whether persisted items prove that reloadable project and skill context
+-- was consumed after a transcript reset. Ephemeral plan, subagent, and
+-- individually invoked skill wrappers do not satisfy this check.
+hasReloadedGeneratedContextItems :: [ResponseItem] -> Bool
+hasReloadedGeneratedContextItems = any \case
+    MessageItem message
+        | message.role == RoleUser ->
+            maybe False isReloadedGeneratedContextUserText
+                (messageText message)
+    _ -> False
 
 isRemoteRetainedItem :: ResponseItem -> Bool
 isRemoteRetainedItem = \case
@@ -321,49 +736,46 @@ groupItems group =
     group.retainedSource : maybe [] pure group.retainedNotice
 
 itemTokenCount :: ResponseItem -> Int
-itemTokenCount = \case
-    MessageItem message -> max 1 (messageTokenCount message)
-    item -> estimateItemsTokens [item]
-
-messageTokenCount :: ResponseMessage -> Int
-messageTokenCount message = case message.content of
-    MessageContentText text -> estimateTokens text
-    MessageContentParts parts ->
-        sum (map contentPartTokenCount parts)
-
-contentPartTokenCount :: ResponseContentPart -> Int
-contentPartTokenCount = \case
-    InputTextPart { text } -> estimateTokens text
-    OutputTextPart { text } -> estimateTokens text
-    RefusalPart { refusal } -> estimateTokens refusal
-    ReasoningTextPart { text } -> estimateTokens text
-    SummaryTextPart { text } -> estimateTokens text
-    PlainTextPart { text } -> estimateTokens text
-    _ -> 0
+itemTokenCount item = estimateItemsTokens [sanitizeCompactionItem item]
 
 truncateItemText :: Int -> ResponseItem -> Maybe ResponseItem
-truncateItemText budget = \case
-    MessageItem message ->
-        MessageItem <$> truncateMessageText budget message
-    _ -> Nothing
+truncateItemText budget item =
+    case sanitizeCompactionItem item of
+        MessageItem message ->
+            MessageItem <$> truncateMessageText budget message
+        _ -> Nothing
 
 truncateMessageText :: Int -> ResponseMessage -> Maybe ResponseMessage
 truncateMessageText budget message =
-    case message.content of
-        MessageContentText text ->
-            let truncated = takeTokenBudget budget text
-            in if Text.null truncated
-                then Nothing
-                else Just (replaceMessageContent
-                    message
-                    (MessageContentText truncated))
-        MessageContentParts parts ->
-            let truncated = truncateContentParts budget parts
-            in if null truncated
-                then Nothing
-                else Just (replaceMessageContent
-                    message
-                    (MessageContentParts truncated))
+    search 0 (max 0 budget) Nothing
+  where
+    candidateFor textBudget =
+        case message.content of
+            MessageContentText text ->
+                let truncated = takeTokenBudget textBudget text
+                in if Text.null truncated
+                    then Nothing
+                    else Just (replaceMessageContent
+                        message
+                        (MessageContentText truncated))
+            MessageContentParts parts ->
+                let truncated = truncateContentParts textBudget parts
+                in if null truncated
+                    then Nothing
+                    else Just (replaceMessageContent
+                        message
+                        (MessageContentParts truncated))
+
+    search low high best
+        | low > high = best
+        | otherwise =
+            let middle = (low + high) `div` 2
+            in case candidateFor middle of
+                Just candidate
+                    | estimateItemsTokens [MessageItem candidate] <= budget ->
+                        search (middle + 1) high (Just candidate)
+                _ ->
+                    search low (middle - 1) best
 
 replaceMessageContent :: ResponseMessage -> MessageContent -> ResponseMessage
 replaceMessageContent message nextContent =
@@ -456,7 +868,10 @@ summarizationPrompt focus =
         [ "Summarize the conversation so far for a successor coding agent."
         , "The successor will only see this summary plus a few recent user messages;"
         , "it will not see prior tool calls or tool outputs."
-        , "Preserve: the user's goals, important file paths, decisions made,"
+        , "The input may have been sanitized or truncated to fit the context window."
+        , "Preserve: the user's goals, active project instructions, always-active"
+        , "skill constraints, safety and policy constraints, required workflows,"
+        , "important file paths, decisions made,"
         , "errors encountered and how they were fixed, and remaining work."
         , "Be concrete and concise. Do not call tools."
         ]
@@ -486,9 +901,10 @@ collectRecentUserTexts keep items =
     userTextOf = \case
         MessageItem message
             | message.role == RoleUser ->
-                case messageText message of
+                case messageText (sanitizeMessage message) of
                     Just text
-                        | Text.isPrefixOf "/compact" (Text.strip text) -> Nothing
+                        | isCompactSessionTurn text -> Nothing
+                        | isGeneratedContextUserText text -> Nothing
                         | otherwise -> Just text
                     Nothing -> Nothing
         _ -> Nothing
@@ -544,6 +960,64 @@ buildLocalCompactedHistory :: Int -> [ResponseItem] -> Text -> [ResponseItem]
 buildLocalCompactedHistory keepRecent history summary =
     map userTextItem (collectRecentUserTexts keepRecent history)
         <> [assistantSummaryItem summary]
+
+-- | Build a local summary snapshot whose complete next-request size is
+-- bounded. The generated summary is protected while recent user messages are
+-- truncated or discarded oldest-first. Local snapshots target the same 64k
+-- retained-item envelope as remote compaction while still accounting for
+-- request-level instructions and tool schemas.
+buildLocalCompactedHistoryToFit
+    :: Int
+    -> ResponseCreateParams
+    -> Int
+    -> [ResponseItem]
+    -> Text
+    -> [ResponseItem]
+buildLocalCompactedHistoryToFit
+        contextWindow params keepRecent history summary =
+    let targetWindow =
+            min
+                (max 0 contextWindow)
+                ( estimateRequestTokensWithItems params []
+                    + remoteCompactionRetainedTokenBudget
+                )
+        summaryItem = fitLocalSummaryItem targetWindow params summary
+        recentItems =
+            map userTextItem (collectRecentUserTexts keepRecent history)
+    in trimResponseHistoryToFit
+        targetWindow
+        params
+        [summaryItem]
+        recentItems
+            <> [summaryItem]
+
+fitLocalSummaryItem
+    :: Int
+    -> ResponseCreateParams
+    -> Text
+    -> ResponseItem
+fitLocalSummaryItem targetWindow params summary
+    | requestTokens fullItem <= targetWindow = fullItem
+    | Text.null stripped = fullItem
+    | otherwise = maybe fullItem id (search 1 (Text.length stripped - 1) Nothing)
+  where
+    stripped = Text.strip summary
+    fullItem = assistantSummaryItem stripped
+    truncationNotice = "\n\n[Summary truncated to fit compacted context.]"
+    requestTokens item = estimateRequestTokensWithItems params [item]
+
+    candidateFor characters =
+        assistantSummaryItem
+            (Text.take characters stripped <> truncationNotice)
+
+    search low high best
+        | low > high = best
+        | otherwise =
+            let middle = (low + high) `div` 2
+                candidate = candidateFor middle
+            in if requestTokens candidate <= targetWindow
+                then search (middle + 1) high (Just candidate)
+                else search low (middle - 1) best
 
 -- | Legacy helper retained for API compatibility. Installed v2 snapshots must
 -- be replayed in full because they intentionally place retained messages

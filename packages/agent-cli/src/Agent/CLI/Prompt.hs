@@ -17,6 +17,7 @@ import Agent.Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
+import Agent.CLI.Tools (hostedSearchToolNames)
 import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
@@ -68,7 +69,7 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
             claudeCodeSystemPrompt cwd today
 
 -- | Render a child prompt against the final filtered application-tool set.
--- @web_search@ is server-side and remains available independently.
+-- Hosted search tools are server-side and remain available independently.
 systemPromptForTools
     :: Dialect
     -> [Text]
@@ -89,7 +90,7 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    available = "web_search" : toolNames
+    available = hostedSearchToolNames dialect ++ toolNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
             grokSystemPromptForTools

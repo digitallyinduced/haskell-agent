@@ -4,6 +4,8 @@ module Agent.CLI.TUI.Types
     , AppEventMailbox(..)
     , AppState(..)
     , AgentHover(..)
+    , DictationJob(..)
+    , DictationSession(..)
     , ChoicePresentation(..)
     , ChoiceOverlay(..)
     , FullscreenInput(..)
@@ -42,6 +44,7 @@ import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
 import Brick (Location)
 import Brick.BChan (BChan)
+import Control.Concurrent (MVar)
 import Control.Concurrent.STM (TMVar, TQueue, TVar)
 import Control.Exception.Safe (SomeException)
 import Data.IORef (IORef)
@@ -125,6 +128,7 @@ data AppEvent
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppDictationPartial !Text
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
@@ -208,6 +212,16 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeHistoryRequests :: !(TQueue HistoryRequest)
     , runtimeHistorySource :: !(IORef (Maybe FullscreenHistorySource))
     , runtimeHistoryGeneration :: !(IORef Int64)
+    , runtimeDictationJobs :: !(TQueue DictationJob)
+    }
+
+data DictationJob = DictationJob
+    { dictationJobWaitForStop :: IO ()
+    }
+
+data DictationSession = DictationSession
+    { dictationStop :: !(MVar ())
+    , dictationAbort :: !(IORef Bool)
     }
 
 -- | Provider/session-scoped actions behind one long-lived terminal runtime.
@@ -252,6 +266,7 @@ data AppState = AppState
     , appKillChain :: !Bool
       -- | Editor undo log of (draft, cursor) states, most recent first.
     , appUndo :: ![(Text, Int)]
+    , appDictation :: !(Maybe DictationSession)
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
     , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])

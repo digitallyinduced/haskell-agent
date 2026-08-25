@@ -13,6 +13,7 @@ import Agent.Responses.Request
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -34,8 +35,9 @@ mapModel options model =
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
-    mapResponseTools xaiTool $
-        forceStatelessStreaming defaultResponseCreateParams
+    withHostedXSearch $
+        mapResponseTools xaiTool $
+            forceStatelessStreaming defaultResponseCreateParams
             { model = Just $
                 selectConfiguredModel
                     options.modelOverrides
@@ -74,12 +76,38 @@ buildRequest options request =
 
     xaiTool tool = case tool of
         FunctionToolValue {} -> Just tool
-        KnownResponseTool ToolWebSearch _ -> Just (KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            , fields = KeyMap.empty
-            })
+        KnownResponseTool ToolWebSearch _ -> Just hostedWebSearchTool
+        KnownResponseTool ToolXSearch _ -> Just hostedXSearchTool
         KnownResponseTool ToolComputer _ -> Nothing
         _ -> Just tool
+
+-- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
+-- requests. Keep a single empty-fields entry even when the caller omitted
+-- tools or already listed web search.
+withHostedXSearch :: ResponseCreateParams -> ResponseCreateParams
+withHostedXSearch ResponseCreateParams { tools = existing, .. } =
+    ResponseCreateParams
+        { tools = Just (current <> extra)
+        , ..
+        }
+  where
+    current = Maybe.fromMaybe [] existing
+    extra
+        | any isHostedXSearch current = []
+        | otherwise = [hostedXSearchTool]
+
+isHostedXSearch :: ResponseTool -> Bool
+isHostedXSearch = \case
+    KnownResponseTool ToolXSearch _ -> True
+    UnknownResponseTool tagged
+        | tagged.tag == responseToolTypeText ToolXSearch -> True
+    _ -> False
+
+hostedWebSearchTool :: ResponseTool
+hostedWebSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+
+hostedXSearchTool :: ResponseTool
+hostedXSearchTool = knownResponseTool ToolXSearch KeyMap.empty
 
 xaiReasoningEffort :: Maybe Text -> Text
 xaiReasoningEffort = \case
@@ -89,8 +117,8 @@ xaiReasoningEffort = \case
     Just "minimal" -> "low"
     Just "medium" -> "medium"
     Just "high" -> "high"
-    Just "xhigh" -> "high"
-    Just "max" -> "high"
+    Just "xhigh" -> "xhigh"
+    Just "max" -> "max"
     _ -> "high"
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]

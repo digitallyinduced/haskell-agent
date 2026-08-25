@@ -32,6 +32,8 @@ data GrokPromptTools = GrokPromptTools
     , grokEnterPlan :: !Text
     , grokExitPlan :: !Text
     , grokAskUser :: !Text
+    , grokWebSearch :: !Text
+    , grokXSearch :: !Text
     } deriving (Eq, Show)
 
 codingGrokPromptTools :: GrokPromptTools
@@ -48,6 +50,8 @@ codingGrokPromptTools = GrokPromptTools
     , grokEnterPlan = "enter_plan_mode"
     , grokExitPlan = "exit_plan_mode"
     , grokAskUser = "ask_user_question"
+    , grokWebSearch = "web_search"
+    , grokXSearch = "x_search"
     }
 
 grokSystemPrompt :: GrokPromptTools -> OsPath -> Day -> Bool -> Text
@@ -169,7 +173,12 @@ toolCalling tools =
         <> "` instead of ls). Reserve `"
         <> tools.grokExecute
         <> "` exclusively for actual system commands and terminal operations that require shell execution. NEVER use bash echo or other command-line tools to communicate thoughts, explanations, or instructions to the user. Output all communication directly in your response text instead.\n\
-    \- Use `web_search` to look up current public information on the internet.\n\
+    \- Use `"
+        <> tools.grokWebSearch
+        <> "` to look up current public information on the internet.\n\
+    \- Use `"
+        <> tools.grokXSearch
+        <> "` to look up current posts and discussions on X.\n\
     \- Do not mention tools this session does not register.\n\
     \</tool_calling>"
 
@@ -191,8 +200,12 @@ toolCallingForTools tools available =
                     <> tools.grokExecute
                     <> "` for system commands and terminal operations."
                 )
-            <> toolLine "web_search"
-                "- Use `web_search` to look up current public information on the internet."
+            <> toolLine tools.grokWebSearch
+                ("- Use `" <> tools.grokWebSearch
+                    <> "` to look up current public information on the internet.")
+            <> toolLine tools.grokXSearch
+                ("- Use `" <> tools.grokXSearch
+                    <> "` to look up current posts and discussions on X.")
             <> ["- Do not mention tools this session does not register."]
   where
     toolLine name line

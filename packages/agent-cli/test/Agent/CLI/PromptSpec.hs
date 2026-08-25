@@ -46,6 +46,7 @@ spec = describe "systemPrompt" do
         grok `shouldSatisfy` Text.isInfixOf "monitor"
         grok `shouldSatisfy` Text.isInfixOf "spawn_subagent"
         grok `shouldSatisfy` Text.isInfixOf "web_search"
+        grok `shouldSatisfy` Text.isInfixOf "x_search"
         grok `shouldSatisfy` Text.isInfixOf "<plan_mode>"
         grok `shouldSatisfy` Text.isInfixOf "enter_plan_mode"
         grok `shouldSatisfy` Text.isInfixOf "exit_plan_mode"
@@ -113,6 +114,7 @@ spec = describe "systemPrompt" do
                     True
         prompt `shouldSatisfy` Text.isInfixOf "read_file"
         prompt `shouldSatisfy` Text.isInfixOf "web_search"
+        prompt `shouldSatisfy` Text.isInfixOf "x_search"
         prompt `shouldNotSatisfy` Text.isInfixOf "search_replace"
         prompt `shouldNotSatisfy` Text.isInfixOf "run_terminal_cmd"
         prompt `shouldNotSatisfy` Text.isInfixOf "run_ghci"

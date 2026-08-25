@@ -30,7 +30,7 @@ import Agent.CLI.Command ()
 import Agent.CLI.Compaction
     ( installLiveCompactOutcome,
       runProviderCompactWith,
-      runResponsesCompactWith )
+      runResponsesCompactWithContextWindow )
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
@@ -72,6 +72,7 @@ import Agent.CLI.ModelConfig
       ResponsesConnection(..),
       builtinConnectionId,
       catalogConnection,
+      catalogContextWindowForTransport,
       loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelFor,
@@ -94,8 +95,6 @@ import Agent.CLI.Options
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
 import Agent.CLI.Plan ( cliPlanHooks )
-import Agent.CLI.Progress
-    ( osc9ProgressIndeterminate, osc9ProgressRemove, wrapOscForTmux )
 import Agent.CLI.Project
     ( ProjectAccount(..),
       ProjectModel(..),
@@ -128,6 +127,7 @@ import Agent.CLI.ProviderTransition
                          transitionAutomaticBilling),
       TransitionCause(AutomaticFallback) )
 import Agent.CLI.Recap ()
+import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request ( requestParams )
@@ -205,10 +205,6 @@ import Agent.CLI.Startup.Auth
       recordStartupTiming,
       setStartupNotice,
       startupDie )
-import Agent.CLI.Startup.Format
-    ( formatRepositoryPath,
-      formatStartupDuration,
-      formatStartupTimings )
 import Agent.CLI.StartupContext ( loadAgentsContext )
 import Agent.CLI.Style
     ( cliWindowTitle,
@@ -298,6 +294,7 @@ import Agent.Provider
       TokenProvider,
       getNextToken,
       providerSlug,
+      runWithTokenProvider,
       tokenProvider,
       tokenProviderBillingMode )
 import Agent.Responses.GenericBackend
@@ -330,7 +327,6 @@ import Agent.TUI.Model
       UiEvent(UiSystemMessage, UiSetRepository, UiSetNotice),
       UiState(uiQueuedInputs) )
 import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
-import Agent.ToolDispatch ( canonicalToolName )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
@@ -347,12 +343,9 @@ import Agent.Tools.Types
 import Agent.XAI.LoopBackend ( xaiBackend )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async
-    ( cancel,
-      concurrently,
+    ( concurrently,
       concurrently_,
       link,
-      waitCatch,
-      waitEitherCatch,
       waitSTM,
       withAsync )
 import Control.Concurrent.Chan
@@ -372,7 +365,6 @@ import Control.Exception.Safe
     ( SomeException,
       catchAny,
       finally,
-      mask,
       mask_,
       onException,
       throwIO,
@@ -400,9 +392,7 @@ import System.Directory.OsPath
 import System.Environment ( getProgName, lookupEnv )
 import System.Exit ( die )
 import System.IO
-    ( Handle,
-      hFlush,
-      hIsTerminalDevice,
+    ( hIsTerminalDevice,
       stderr,
       stdin )
 import System.OsPath
@@ -428,14 +418,13 @@ import qualified Agent.MCP as MCP
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
                       mcpServerName, mcpServerCommand, mcpServerArgs, mcpServerCwd,
-                      mcpServerEnv, mcpServerStartupTimeoutSeconds),
-      McpToolRegistration(mcpRegistrationTool, mcpRegistrationServer) )
+                      mcpServerEnv, mcpServerStartupTimeoutSeconds) )
 import qualified Data.Map.Strict as Map
-    ( toAscList, fromList, empty, lookup )
+    ( toAscList, empty, lookup )
 import qualified Agent.OpenAI.Auth as OpenAI
     ( discoverAccounts, getAccessTokenForAccount )
 import qualified Agent.OpenRouter as OpenRouter
-    ( clientOptionsFromEnv, mapModel )
+    ( clientOptionsFromEnv, createResponseWith, mapModel )
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
 import qualified Agent.Provider as Provider ( tokenProvider )
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
@@ -445,7 +434,9 @@ import qualified Data.Set as Set ()
 import qualified Data.Text as Text
     ( intercalate, null, pack, unpack )
 import qualified Data.Text.IO as Text ( hPutStr )
+import qualified Agent.XAI.Client as XAIClient ( createResponseWith )
 import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
+import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 import Agent.CLI.Runtime.Orchestration.Types
@@ -455,7 +446,15 @@ import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
 import Agent.CLI.Runtime.Orchestration.Background
     ( runInProcessSessionTurn )
-
+import Agent.CLI.Runtime.Orchestration.Concurrent ( concurrentlyAcquire )
+import Agent.CLI.Runtime.Orchestration.Startup
+    ( clearNativeProgress
+    , finishStartup
+    , mcpToolCollision
+    , reportStartupWarning
+    , setNativeProgress
+    , setStartupRepository
+    )
 runAgentWithRuntime
     :: AgentProcessRuntime
     -> AgentRunMode
@@ -554,79 +553,6 @@ withRestoredCurrentDirectory :: IO a -> IO a
 withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
-
-finishStartup :: StartupRuntime -> IO ()
-finishStartup startup = do
-    writeIORef startup.startupFinished True
-    recordStartupTiming startup.startupStartedAt startup.startupTimings "ready"
-    case startup.startupFullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime (UiSetNotice Nothing)
-    lookupEnv "HASKELL_AGENT_STARTUP_TIMING" >>= \case
-        Just "1" -> do
-            timings <- readIORef startup.startupTimings
-            syntaxLoadDuration <-
-                readIORef startup.startupSyntaxLoadDuration
-            let message =
-                    formatStartupTimings timings
-                        <> maybe
-                            ""
-                            (\duration ->
-                                " · syntax highlighting "
-                                    <> formatStartupDuration duration)
-                            syntaxLoadDuration
-            case startup.startupFullscreen of
-                Nothing -> putTextLn startup.startupStderr message
-                Just runtime -> emitUiEvent runtime (UiSystemMessage message)
-        _ -> pure ()
-
-reportStartupWarning :: StartupRuntime -> Text -> IO ()
-reportStartupWarning startup message =
-    case startup.startupFullscreen of
-        Nothing -> putTextLn startup.startupStderr ("warning: " <> message)
-        Just runtime ->
-            emitUiEvent runtime (UiSystemMessage ("warning: " <> message))
-
-mcpToolCollision :: [AppTool] -> [MCP.McpToolRegistration] -> Maybe Text
-mcpToolCollision existingTools = go
-  where
-    existing =
-        Map.fromList $
-            ("web_search", "built-in web search")
-                : [ (canonicalToolName tool.appToolName, "built-in tool")
-                  | tool <- existingTools
-                  ]
-
-    go [] = Nothing
-    go (registration : rest) =
-        let tool = registration.mcpRegistrationTool
-            name = canonicalToolName tool.appToolName
-        in case Map.lookup name existing of
-            Nothing -> go rest
-            Just source ->
-                Just $
-                    "MCP tool "
-                        <> tool.appToolName
-                        <> " from server "
-                        <> registration.mcpRegistrationServer
-                        <> " conflicts with "
-                        <> source
-
-setStartupRepository
-    :: Maybe FullscreenRuntime
-    -> OsPath
-    -> Text
-    -> OsPath
-    -> IO ()
-setStartupRepository fullscreen home branch cwd =
-    case fullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime $
-                UiSetRepository
-                    branch
-                    (formatRepositoryPath home cwd)
 
 runAgent
     :: AgentProcessRuntime
@@ -2039,6 +1965,8 @@ runAgentInitializedWithLock
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
+            resumeNeedsFreshContext =
+                resumeNeedsGeneratedContext initialTurns
             initialPrevious = case transition of
                 Just _ -> Nothing
                 Nothing
@@ -2046,7 +1974,17 @@ runAgentInitializedWithLock
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
-        let subagentRuntime = SubagentRuntime
+        generatedContextReloadRef <- newIORef (pure ())
+        let currentModelContextWindow mapTransportModel = do
+                currentParams <- readIORef paramsRef
+                pure $ do
+                    currentModel <- currentParams.model
+                    catalogContextWindowForTransport
+                        catalog
+                        inferredTarget.targetConnectionId
+                        currentModel
+                        (mapTransportModel currentModel)
+            subagentRuntime = SubagentRuntime
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
                 , subagentBashEnabled = bashEnabledRef
@@ -2095,8 +2033,12 @@ runAgentInitializedWithLock
                 dialect
                 home
                 cwd
-                (if refreshDialectContext then [] else initialItems)
-                (if refreshDialectContext then Nothing else initialPrevious)
+                (if refreshDialectContext || resumeNeedsFreshContext
+                    then []
+                    else initialItems)
+                (if refreshDialectContext || resumeNeedsFreshContext
+                    then Nothing
+                    else initialPrevious)
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -2179,6 +2121,7 @@ runAgentInitializedWithLock
                                 , tokenProvider = sessionTokenProvider
                                 , openAiPool = sessionOpenAiPool
                                 , startupContext
+                                , generatedContextReloadRef
                                 , skillsRef
                                 , skillInvocationsRef
                                 , escPaused
@@ -2435,6 +2378,7 @@ runAgentInitializedWithLock
                                             (readIORef paramsRef)
                                             contextTokensRef
                                             recordCompactionUsage
+                                            (readIORef generatedContextReloadRef >>= id)
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
@@ -2545,14 +2489,22 @@ runAgentInitializedWithLock
                                 xaiBackend xaiOptions tokenProvider
                                     (pure privateParams)
                             compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow
+                                        (XAIRequest.mapModel xaiOptions)
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
-                                    (runProviderCompactWith
-                                        Nothing
+                                    (runResponsesCompactWithContextWindow
+                                        contextWindow
+                                        (\request ->
+                                            runWithTokenProvider tokenProvider
+                                                \credential ->
+                                                    XAIClient.createResponseWith
+                                                        xaiOptions
+                                                        credential
+                                                        request)
                                         recordCompactionUsage
-                                        provider
-                                        (Just tokenProvider)
                                         paramsRef
                                         historyRef)
                                     focus
@@ -2690,12 +2642,15 @@ runAgentInitializedWithLock
                                 makeBackend
                                     (pure privateParams)
                             compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow transportModel
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
                                     (case customGenericOptions of
                                         Just genericOptions ->
-                                            runResponsesCompactWith
+                                            runResponsesCompactWithContextWindow
+                                                contextWindow
                                                 (\request ->
                                                     GenericResponses.createResponseWith
                                                         genericOptions
@@ -2710,11 +2665,17 @@ runAgentInitializedWithLock
                                                 paramsRef
                                                 historyRef
                                         Nothing ->
-                                            runProviderCompactWith
-                                                Nothing
+                                            runResponsesCompactWithContextWindow
+                                                contextWindow
+                                                (\request ->
+                                                    runWithTokenProvider
+                                                        tokenProvider
+                                                        \credential ->
+                                                            OpenRouter.createResponseWith
+                                                                openRouterOptions
+                                                                credential
+                                                                request)
                                                 recordCompactionUsage
-                                                provider
-                                                (Just tokenProvider)
                                                 paramsRef
                                                 historyRef)
                                     focus
@@ -2830,73 +2791,3 @@ restartSessionOptions options sessionId =
         , optManagedTurnFile = Nothing
         , optResume = Just sessionId
         }
-
-concurrentlyAcquire
-    :: IO a
-    -> (a -> IO ())
-    -> IO b
-    -> (b -> IO ())
-    -> IO (a, b)
-concurrentlyAcquire acquireLeft releaseLeft acquireRight releaseRight =
-    mask \restore ->
-        withAsync (restore acquireLeft) \leftWorker ->
-            withAsync (restore acquireRight) \rightWorker -> do
-                let cleanupResult release = \case
-                        Left _ -> pure ()
-                        Right value -> release value
-                    cancelAndCleanup = do
-                        cancel leftWorker
-                        cancel rightWorker
-                        leftResult <- waitCatch leftWorker
-                        rightResult <- waitCatch rightWorker
-                        cleanupResult releaseLeft leftResult
-                        cleanupResult releaseRight rightResult
-                first <-
-                    restore (waitEitherCatch leftWorker rightWorker)
-                        `onException` cancelAndCleanup
-                case first of
-                    Left (Left exception) -> do
-                        cancel rightWorker
-                        waitCatch rightWorker >>= cleanupResult releaseRight
-                        throwIO exception
-                    Right (Left exception) -> do
-                        cancel leftWorker
-                        waitCatch leftWorker >>= cleanupResult releaseLeft
-                        throwIO exception
-                    Left (Right leftValue) -> do
-                        rightResult <-
-                            restore (waitCatch rightWorker)
-                                `onException` releaseLeft leftValue
-                        case rightResult of
-                            Left exception -> do
-                                releaseLeft leftValue
-                                throwIO exception
-                            Right rightValue ->
-                                pure (leftValue, rightValue)
-                    Right (Right rightValue) -> do
-                        leftResult <-
-                            restore (waitCatch leftWorker)
-                                `onException` releaseRight rightValue
-                        case leftResult of
-                            Left exception -> do
-                                releaseRight rightValue
-                                throwIO exception
-                            Right leftValue ->
-                                pure (leftValue, rightValue)
-
--- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
--- Safe when the bar was never shown; unknown terminals ignore the sequence.
-clearNativeProgress :: Handle -> IO ()
-clearNativeProgress handle =
-    setNativeProgress handle False
-
-setNativeProgress :: Handle -> Bool -> IO ()
-setNativeProgress handle active = do
-    tty <- hIsTerminalDevice handle
-    when tty do
-        inTmux <- isJust <$> lookupEnv "TMUX"
-        let sequence_
-                | active = osc9ProgressIndeterminate
-                | otherwise = osc9ProgressRemove
-        Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
-        hFlush handle

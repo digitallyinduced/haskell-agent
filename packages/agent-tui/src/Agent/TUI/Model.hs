@@ -956,6 +956,7 @@ finalizeTurn terminalState state =
             Just notice
                 | notice.noticeKind == NoticeProgress -> 0
             _ -> state.uiNoticeElapsedMillis
+        , uiToolCalls = Map.empty
         }
 
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice

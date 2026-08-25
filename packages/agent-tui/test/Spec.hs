@@ -6,6 +6,7 @@ import qualified Agent.TUI.Markdown.InlineSpec as MarkdownInlineSpec
 import qualified Agent.TUI.MarkdownSpec as MarkdownSpec
 import qualified Agent.TUI.MotionSpec as MotionSpec
 import qualified Agent.TUI.ModelSpec as ModelSpec
+import qualified Agent.TUI.ModelPropertySpec as ModelPropertySpec
 import qualified Agent.TUI.PresentationSpec as PresentationSpec
 import qualified Agent.TUI.ThemeSpec as ThemeSpec
 import qualified Agent.TUI.TextWidthSpec as TextWidthSpec
@@ -19,6 +20,7 @@ main = hspec do
     MarkdownSpec.spec
     MotionSpec.spec
     ModelSpec.spec
+    ModelPropertySpec.spec
     PresentationSpec.spec
     ThemeSpec.spec
     TextWidthSpec.spec

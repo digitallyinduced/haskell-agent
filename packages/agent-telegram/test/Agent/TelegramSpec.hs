@@ -43,6 +43,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Telegram" do
+    describe "telegramAgentPrompt" do
+        it "injects Telegram streaming and brevity guidance" do
+            let prompt = telegramAgentPrompt "Inspect the failing tests"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "shown to the user as a live Telegram draft"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Keep messages concise and conversational"
+            prompt `shouldSatisfy`
+                Text.isPrefixOf "Inspect the failing tests"
+
+    describe "telegramActivityDraftHtml" do
+        it "shows escaped reasoning summaries and streamed answer text" do
+            Bridge.telegramActivityDraftHtml
+                "Writing reply…"
+                "Checking <files>"
+                "Found & fixed\nDone"
+                `shouldBe`
+                "<tg-thinking>Checking &lt;files&gt;</tg-thinking>\
+                \<p>Found &amp; fixed<br>Done</p>"
+
     describe "parseTelegramArgs" do
         it "runs the configured gateway by default" do
             parseTelegramArgs [] `shouldBe` Right TelegramRun

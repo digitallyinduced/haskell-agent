@@ -5,8 +5,98 @@ import Agent.Tools.Dangerous
     , forbiddenRmRfReason
     , shellCommandBlocked
     )
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , choose
+    , conjoin
+    , elements
+    , (===)
+    )
+
+newtype DangerousCommand = DangerousCommand Text.Text
+    deriving (Show)
+
+instance Arbitrary DangerousCommand where
+    arbitrary = DangerousCommand <$> do
+        prefix <- elements
+            [ ""
+            , "true; "
+            , "ls && "
+            , "echo hi | "
+            ]
+        environment <- elements
+            [ ""
+            , "FOO=1 "
+            , "FOO=1 BAR=2 "
+            ]
+        wrapper <- elements
+            [ ""
+            , "sudo "
+            , "env "
+            , "command "
+            , "nice "
+            , "nohup "
+            , "time "
+            , "stdbuf "
+            ]
+        command <- elements ["rm", "RM", "/bin/rm", "rm.exe"]
+        flags <- elements
+            [ "-rf"
+            , "-fr"
+            , "-Rf"
+            , "-fR"
+            , "-r -f"
+            , "-f -r"
+            , "--recursive --force"
+            , "--force --recursive"
+            , "--recursive=true --force=false"
+            ]
+        spacing <- elements [" ", "  ", "\t"]
+        target <- elements ["tmp", "./build", "/tmp/x", "C:\\Temp\\x"]
+        suffix <- elements ["", " || true", "; true"]
+        pure
+            ( prefix
+                <> environment
+                <> wrapper
+                <> command
+                <> spacing
+                <> flags
+                <> spacing
+                <> target
+                <> suffix
+            )
+
+newtype BenignCommand = BenignCommand Text.Text
+    deriving (Show)
+
+instance Arbitrary BenignCommand where
+    arbitrary = BenignCommand <$> do
+        choice <- choose (0 :: Int, 4)
+        case choice of
+            0 -> do
+                flag <- elements ["", "-r", "-f", "--recursive", "--force"]
+                pure ("rm " <> flag <> " build")
+            1 -> elements
+                [ "ls -la"
+                , "git status"
+                , "rmdir empty-dir"
+                , "rclone sync --force"
+                ]
+            2 -> elements
+                [ "echo 'rm -rf tmp'"
+                , "echo \"rm -rf tmp\""
+                , "bash -lc 'rm -rf tmp'"
+                ]
+            3 -> do
+                wrapper <- elements ["sudo ", "env ", "command "]
+                pure (wrapper <> "rm -r build")
+            _ -> pure "rm -r -x file"
 
 spec :: Spec
 spec = do
@@ -43,6 +133,8 @@ spec = do
         it "allows safe rm and unrelated commands" do
             commandLooksLikeRmRf "rm -r build" `shouldBe` False
             commandLooksLikeRmRf "rm -f file.txt" `shouldBe` False
+            commandLooksLikeRmRf "rm --recursive build" `shouldBe` False
+            commandLooksLikeRmRf "rm --force build" `shouldBe` False
             commandLooksLikeRmRf "rm file.txt" `shouldBe` False
             commandLooksLikeRmRf "ls -la" `shouldBe` False
             commandLooksLikeRmRf "git status" `shouldBe` False
@@ -52,6 +144,16 @@ spec = do
             commandLooksLikeRmRf "rclone sync --force" `shouldBe` False
             -- Nested shells are out of scope for this best-effort gate.
             commandLooksLikeRmRf "bash -lc 'rm -rf tmp'" `shouldBe` False
+
+        modifyMaxSuccess (const 500) $
+            prop "detects generated equivalent recursive-force forms" $
+                \(DangerousCommand command) ->
+                    commandLooksLikeRmRf command === True
+
+        modifyMaxSuccess (const 500) $
+            prop "does not classify generated benign near-misses as dangerous" $
+                \(BenignCommand command) ->
+                    commandLooksLikeRmRf command === False
 
     describe "shellCommandBlocked" do
         it "blocks shell tools with a clear reason" do
@@ -67,6 +169,20 @@ spec = do
 
         it "parses JSON with whitespace around the command value" do
             shouldBlock "run_terminal_cmd" "{\"command\" : \"rm -rf x\"}"
+
+        modifyMaxSuccess (const 500) $
+            prop "blocks dangerous generated commands for every shell tool name" $
+                \(DangerousCommand command) ->
+                    let arguments = encodeCommand command
+                    in conjoin
+                        [ isBlocked (shellCommandBlocked tool arguments)
+                            === True
+                        | tool <-
+                            [ "run_terminal_cmd"
+                            , "run_terminal_command"
+                            , "shell_command"
+                            ]
+                        ]
 
         it "allows non-matching shell commands" do
             shouldAllow "run_terminal_cmd" "{\"command\":\"rm -r build\"}"
@@ -90,3 +206,12 @@ spec = do
             Nothing -> expectationFailure ("expected block for " <> Text.unpack args)
     shouldAllow tool args =
         shellCommandBlocked tool args `shouldBe` Nothing
+
+    isBlocked (Just message) =
+        Text.isInfixOf "Blocked dangerous shell command" message
+    isBlocked Nothing = False
+
+    encodeCommand command =
+        TextEncoding.decodeUtf8
+            (LazyByteString.toStrict
+                (Aeson.encode (Aeson.object ["command" Aeson..= command])))
