@@ -32,7 +32,6 @@ import Data.IORef
     ( IORef
     , writeIORef
     )
-import Data.List (foldl')
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Exit (ExitCode(..))

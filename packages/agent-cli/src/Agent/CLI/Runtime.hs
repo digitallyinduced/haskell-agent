@@ -101,8 +101,7 @@ import Agent.CLI.AccountPicker
     , loadAllAccountPickerOptions
     )
 import Agent.CLI.Btw
-    ( BtwBackendFactory
-    , formatBtwError
+    ( formatBtwError
     , runBtwWithCancel
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
@@ -132,8 +131,7 @@ import Agent.CLI.Compaction
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Database (databaseTools)
 import Agent.CLI.Database.Store
-    ( DatabaseScopes
-    , databaseToolsEnvForStore
+    ( databaseToolsEnvForStore
     , deriveDatabaseScopes
     )
 import Agent.CLI.Database.Storage
@@ -179,13 +177,16 @@ import Agent.CLI.Runtime.Types
     , PendingTurnPresentation(..)
     , PreparedAgent(..)
     , RunResult(..)
+    )
+import Agent.CLI.Session.Runtime.Types
+    ( SessionBackend(..)
+    , SessionRequest(..)
     , StartupCancelled(..)
     , StartupFailure(..)
     , StartupRuntime(..)
     )
 import Agent.CLI.Interrupt
     ( CtrlCDecision(..)
-    , InterruptState
     , catchUserInterrupt
     , newInterruptState
     , noteFullscreenCtrlC
@@ -377,7 +378,6 @@ import Agent.CLI.Startup.Format
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(..)
     , SubagentSession(..)
-    , SubagentStoreRoot
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
     , lookupOrCreateSubagentSession
@@ -497,8 +497,7 @@ import Agent.Error
     , CredentialExhaustionReason(..)
     )
 import Agent.Dialect
-    ( Dialect
-    , DialectId(..)
+    ( DialectId(..)
     , ToolLayout(..)
     , dialectForId
     , dialectId
@@ -563,7 +562,6 @@ import Agent.Provider
 import qualified Agent.Provider as Provider
 import Agent.Subagents
     ( RootTurnId
-    , SubagentId(..)
     , SubagentStatus(..)
     , abortRootTurn
     , beginRootTurn
@@ -588,7 +586,6 @@ import Agent.GrokBuild.Dialect.Goal
     , resumeGoal
     )
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl(..))
-import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.GrokBuild.Dialect.Workflow
     ( formatWorkflowRuns
     , workflowRunSnapshots
@@ -642,11 +639,10 @@ import Control.Concurrent.MVar
     , tryPutMVar
     , withMVar
     )
-import Control.Concurrent.STM (STM, retry)
+import Control.Concurrent.STM (retry)
 import Control.Exception (AsyncException(UserInterrupt))
 import Control.Exception.Safe
-    ( Exception
-    , SomeException
+    ( SomeException
     , catchAny
     , finally
     , mask_
@@ -2370,6 +2366,68 @@ runAgentInitializedWithLock
                             && isNothing options.optProvider
                             && isNothing options.optModel
                             && isNothing promptRequest
+                    sessionRequest
+                        startupUnavailable
+                        sessionTokenProvider
+                        sessionOpenAiPool
+                        sessionSelectAccount
+                        sessionCompactRunner =
+                            SessionRequest
+                                { catalog
+                                , connectionId =
+                                    inferredTarget.targetConnectionId
+                                , options
+                                , provider
+                                , dialect
+                                , policy
+                                , allTools
+                                , suspendGhci = coding.codingSuspendGhci
+                                , grokRuntime = coding.codingGrokRuntime
+                                , mcpRegistrations =
+                                    mcpFleet.mcpFleetRegistrations
+                                , mcpWarnings = mcpFleet.mcpFleetWarnings
+                                , ghciEnabledRef
+                                , bashEnabledRef
+                                , toolEnv
+                                , planMode
+                                , startup
+                                , learnAboutUserRequested
+                                , databaseScopes
+                                , promptRequest
+                                , pendingTurn
+                                , unavailableProviders
+                                , startupUnavailable
+                                , paramsRef
+                                , transcriptRef
+                                , initialTurns
+                                , previous = previousRef
+                                , persist
+                                , projectRoot
+                                , home
+                                , cwd
+                                , tokenProvider = sessionTokenProvider
+                                , openAiPool = sessionOpenAiPool
+                                , startupContext
+                                , skillsRef
+                                , skillInvocationsRef
+                                , escPaused
+                                , interrupt
+                                , multiCtx
+                                , rootTurnRef
+                                , subagentSessions
+                                , pendingNotices
+                                , storeRoot = subagentStoreRoot
+                                , agentTypes = agentTypesRef
+                                , legacyTarget = legacySubagentTarget
+                                , usageRef
+                                , accountRef = activeAccountRef
+                                , accountIdRef = activeAccountIdRef
+                                , selectionRef = activeSelectionRef
+                                , accountLabel = resolveActiveAccountLabel
+                                , selectAccount = sessionSelectAccount
+                                , onPersisted = claimCurrentSession
+                                , compactRunner = sessionCompactRunner
+                                }
                     withStartupAvailability action
                         | shouldProbeAtStartup =
                             withAsync
@@ -2630,9 +2688,17 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                                        previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                        multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
+                                    runSession
+                                        (sessionRequest
+                                            startupUnavailable
+                                            (Just tokenProvider)
+                                            loaded.loadedOpenAiPool
+                                            selectAccount
+                                            compactRunner)
+                                        SessionBackend
+                                            { backend = activeBackend
+                                            , btwBackend
+                                            })
                             >>= \case
                                 Left (CodexAuthFailed err) ->
                                     case transition of
@@ -2694,9 +2760,19 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                        runSession
+                            (sessionRequest
+                                startupUnavailable
+                                (Just tokenProvider)
+                                loaded.loadedOpenAiPool
+                                (if isJust customGenericOptions
+                                    then Nothing
+                                    else Just selectHttpAccount)
+                                compactRunner)
+                            SessionBackend
+                                { backend = activeBackend
+                                , btwBackend
+                                }
                     ClaudeCodeProvider -> do
                         claudeAuth <-
                             loadClaudeCodeAuth
@@ -2755,9 +2831,17 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                                    previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
-                                    multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
+                                runSession
+                                    (sessionRequest
+                                        startupUnavailable
+                                        Nothing
+                                        Nothing
+                                        Nothing
+                                        compactRunner)
+                                    SessionBackend
+                                        { backend = activeBackend
+                                        , btwBackend
+                                        }
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of
@@ -2827,9 +2911,17 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
-                            previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
-                            multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
+                        runSession
+                            (sessionRequest
+                                startupUnavailable
+                                (Just tokenProvider)
+                                loaded.loadedOpenAiPool
+                                (Just selectHttpAccount)
+                                compactRunner)
+                            SessionBackend
+                                { backend = activeBackend
+                                , btwBackend
+                                }
           where
             startupFailure err = do
                 now <- getCurrentTime
@@ -3007,62 +3099,10 @@ isJustCwd options = case options.optCwd of
 
 
 runSession
-    :: ModelCatalog
-    -> Text
-    -> CliOptions
-    -> Provider
-    -> Dialect
-    -> ApprovalPolicy
-    -> [AppTool]
-    -> IO ()
-    -> Maybe GrokRuntimeControl
-    -> [MCP.McpToolRegistration]
-    -> [Text]
-    -> IORef Bool
-    -> IORef Bool
-    -> ToolEnv
-    -> PlanModeEnv
-    -> StartupRuntime
-    -> Bool
-    -> DatabaseScopes
-    -> Maybe ManagedTurnRequest
-    -> Maybe PendingTurn
-    -> [Provider]
-    -> Maybe (STM ApiError)
-    -> IORef ResponseCreateParams
-    -> IORef [ResponseItem]
-    -> [SessionTurn]
-    -> IORef (Maybe Text)
-    -> Persistence
-    -> OsPath
-    -> OsPath
-    -> OsPath
-    -> Maybe TokenProvider
-    -> Maybe OpenAI.Pool
-    -> IORef (Maybe Text)
-    -> IORef SkillCatalog
-    -> IORef [SkillInvocation]
-    -> IORef Bool
-    -> InterruptState
-    -> Maybe MultiAgentContext
-    -> IORef (Maybe RootTurnId)
-    -> IORef (Map SubagentId SubagentSession)
-    -> IORef [TurnInput]
-    -> SubagentStoreRoot
-    -> GrokSubagentSpecs
-    -> Maybe LegacySubagentTarget
-    -> IORef TokenUsage
-    -> IORef Text
-    -> IORef Text
-    -> IORef Text
-    -> (Credential -> IO Text)
-    -> Maybe (Text -> IO (Either ApiError Text))
-    -> (SessionHandle -> IO ())
-    -> (Maybe Text -> IO (Either Text CompactOutcome))
-    -> Backend
-    -> BtwBackendFactory
+    :: SessionRequest
+    -> SessionBackend
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools suspendGhci grokRuntime mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession SessionRequest{..} SessionBackend{..} = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
