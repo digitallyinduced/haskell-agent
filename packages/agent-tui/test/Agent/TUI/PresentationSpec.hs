@@ -145,6 +145,14 @@ spec = describe "tool presentation" do
         formatToolOutput call
             "{\"agents\":[{\"agent_status\":\"running\"},null]}"
             `shouldBe` "(no live agents)"
+        let worktreeSpawn = functionToolCall
+                "spawn" "collaboration.spawn_agent_in_worktree"
+                "{\"task_name\":\"worker\",\"message\":\"task\"}"
+        summarizeToolCall worktreeSpawn
+            `shouldBe` "Spawned worktree agent worker"
+        formatToolOutput worktreeSpawn
+            "{\"task_name\":\"/root/worker\",\"worktree\":\"/tmp/worker\"}"
+            `shouldBe` "Agent: /root/worker"
 
     it "summarizes conversation search calls while preserving text output" do
         let call = functionToolCall
