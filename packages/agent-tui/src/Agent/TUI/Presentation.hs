@@ -151,7 +151,7 @@ formatSearchReplaceDiff arguments =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
-    "spawn_agent" ->
+    name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
     "wait_agent" ->
         fromMaybe output (nonEmptyJsonText "message" output)
@@ -358,6 +358,7 @@ toolVerb name = case canonicalToolName name of
     "kill_task" -> "Killed"
     "task" -> "Ran"
     "spawn_agent" -> "Spawned agent"
+    "spawn_agent_in_worktree" -> "Spawned worktree agent"
     "wait_agent" -> "Waited for agent updates"
     "send_message" -> "Sent message to"
     "followup_task" -> "Followed up with"
@@ -403,6 +404,8 @@ toolDetail call = case canonicalToolName call.name of
                 then jsonTextFieldDefault "prompt" call.arguments
                 else purpose
     "spawn_agent" -> jsonTextFieldDefault "task_name" call.arguments
+    "spawn_agent_in_worktree" ->
+        jsonTextFieldDefault "task_name" call.arguments
     "send_message" -> jsonTextFieldDefault "target" call.arguments
     "followup_task" -> jsonTextFieldDefault "target" call.arguments
     "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments

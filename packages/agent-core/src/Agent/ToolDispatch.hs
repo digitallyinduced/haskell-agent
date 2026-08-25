@@ -222,6 +222,7 @@ renameObjectKey _ _ value = value
 multiAgentBareNames :: [Text]
 multiAgentBareNames =
     [ "spawn_agent"
+    , "spawn_agent_in_worktree"
     , "wait_agent"
     , "send_message"
     , "followup_task"
