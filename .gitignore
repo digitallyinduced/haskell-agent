@@ -1,5 +1,6 @@
 /dist-newstyle/
 /.direnv/
+/.haskell-agent/
 /result
 /result-*
 /eval-results/
