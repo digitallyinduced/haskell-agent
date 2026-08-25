@@ -1511,6 +1511,12 @@ runAgentInitializedWithLock
                 CustomResponsesConnection responses -> Just
                     (connection.connectionId, responses)
                 BuiltinConnection _ -> Nothing
+        checkStartupUsageInBackground =
+            isJust fullscreen
+                && isNothing transition
+                && isNothing resumed
+                && isNothing options.optProvider
+                && isNothing options.optModel
     ((initialLoaded, learnAboutUserRequested), customBearerToken) <-
         case customResponses of
             Nothing -> do
@@ -1573,6 +1579,28 @@ runAgentInitializedWithLock
                 (providerSupportsUsageAccountSelection
                     initialLoaded.loadedProvider) ->
                         pure (initialLoaded, Nothing)
+            | checkStartupUsageInBackground -> do
+                -- Make the remembered model/account usable immediately. The
+                -- scoped availability worker below checks the account pool
+                -- after the prompt is ready and triggers startup fallback if
+                -- every credential is exhausted.
+                let provider = initialLoaded.loadedProvider
+                case projectAccountFor provider projectSettings of
+                    Nothing -> pure (initialLoaded, Nothing)
+                    Just remembered ->
+                        loadSelectedAccountAuth
+                            provider
+                            remembered.projectAccountSelectionId
+                            remembered.projectAccountId >>= \case
+                                Left _ -> pure (initialLoaded, Nothing)
+                                Right selectedLoaded ->
+                                    pure
+                                        ( selectedLoaded
+                                        , Just
+                                            ( remembered.projectAccountSelectionId
+                                            , remembered.projectAccountId
+                                            )
+                                        )
             | otherwise -> do
                 let provider = initialLoaded.loadedProvider
                     rememberedIds = fmap
@@ -2430,11 +2458,7 @@ runAgentInitializedWithLock
                             fullscreen progName persist RunQuit action
         runWithInterruptHandling do
                 let shouldProbeAtStartup =
-                        isJust fullscreen
-                            && isNothing transition
-                            && isNothing resumed
-                            && isNothing options.optProvider
-                            && isNothing options.optModel
+                        checkStartupUsageInBackground
                             && isNothing promptRequest
                     sessionRequest
                         startupUnavailable
