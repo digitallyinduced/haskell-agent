@@ -6,7 +6,7 @@
 mkDerivation {
   pname = "agent-telegram";
   version = "0.1.0.0";
-  src = packages/agent-telegram;
+  src = ./.;
   isLibrary = true;
   isExecutable = true;
   libraryHaskellDepends = [
