@@ -54,6 +54,7 @@ library
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.History
+                    , Agent.CLI.Session.Runtime.Types
                     , Agent.CLI.SessionAdmin
                     , Agent.CLI.StartupContext
                     , Agent.CLI.Startup.Format
