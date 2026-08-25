@@ -21,11 +21,11 @@ import Control.Monad (filterM)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Char (toLower)
-import Data.List (foldl')
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( doesFileExist
+    , findExecutable
     , getTemporaryDirectory
     , removeFile
     )
@@ -349,30 +349,75 @@ readMacClipboardClass typeClass = do
 
 readLinuxClipboardImage :: IO (Either Text ImageAttachment)
 readLinuxClipboardImage = do
-    png <- firstRight
-        [ runBytesCmd "wl-paste" ["-t", "image/png"]
-        , runBytesCmd "xclip" ["-selection", "clipboard", "-t", "image/png", "-o"]
-        ]
-    case png of
-        Right bytes | not (BS.null bytes) ->
-            pure (Right (ImageAttachment "image/png" bytes))
+    tools <- findLinuxClipboardTools
+    case tools of
+        [] -> pure (Left linuxClipboardUnavailableError)
         _ -> do
-            jpg <- firstRight
-                [ runBytesCmd "wl-paste" ["-t", "image/jpeg"]
-                , runBytesCmd "xclip" ["-selection", "clipboard", "-t", "image/jpeg", "-o"]
+            png <- firstRight
+                [ runBytesCmd executable (linuxImageArgs tool "image/png")
+                | tool <- tools
+                , let executable = linuxClipboardExecutable tool
                 ]
-            case jpg of
+            case png of
                 Right bytes | not (BS.null bytes) ->
-                    pure (Right (ImageAttachment "image/jpeg" bytes))
-                Left err -> pure (Left err)
-                Right _ -> pure (Left "no image found on the clipboard")
+                    pure (Right (ImageAttachment "image/png" bytes))
+                _ -> do
+                    jpg <- firstRight
+                        [ runBytesCmd executable
+                            (linuxImageArgs tool "image/jpeg")
+                        | tool <- tools
+                        , let executable = linuxClipboardExecutable tool
+                        ]
+                    case jpg of
+                        Right bytes | not (BS.null bytes) ->
+                            pure (Right (ImageAttachment "image/jpeg" bytes))
+                        Left err -> pure (Left err)
+                        Right _ -> pure (Left "no image found on the clipboard")
 
 readLinuxClipboardText :: IO (Either Text Text)
-readLinuxClipboardText =
-    firstRight
-        [ runTextCmd "wl-paste" ["-n"]
-        , runTextCmd "xclip" ["-selection", "clipboard", "-o"]
-        ]
+readLinuxClipboardText = do
+    tools <- findLinuxClipboardTools
+    case tools of
+        [] -> pure (Left linuxClipboardUnavailableError)
+        _ ->
+            firstRight
+                [ runTextCmd executable (linuxTextArgs tool)
+                | tool <- tools
+                , let executable = linuxClipboardExecutable tool
+                ]
+
+data LinuxClipboardTool
+    = WlPaste FilePath
+    | Xclip FilePath
+
+findLinuxClipboardTools :: IO [LinuxClipboardTool]
+findLinuxClipboardTools = do
+    wlPaste <- findExecutable "wl-paste"
+    xclip <- findExecutable "xclip"
+    pure $
+        maybe [] (pure . WlPaste) wlPaste
+            <> maybe [] (pure . Xclip) xclip
+
+linuxClipboardExecutable :: LinuxClipboardTool -> FilePath
+linuxClipboardExecutable = \case
+    WlPaste executable -> executable
+    Xclip executable -> executable
+
+linuxImageArgs :: LinuxClipboardTool -> String -> [String]
+linuxImageArgs tool mime = case tool of
+    WlPaste _ -> ["-t", mime]
+    Xclip _ -> ["-selection", "clipboard", "-t", mime, "-o"]
+
+linuxTextArgs :: LinuxClipboardTool -> [String]
+linuxTextArgs = \case
+    WlPaste _ -> ["-n"]
+    Xclip _ -> ["-selection", "clipboard", "-o"]
+
+linuxClipboardUnavailableError :: Text
+linuxClipboardUnavailableError =
+    "no clipboard reader is available on this Linux host; install \
+    \wl-clipboard (Wayland) or xclip (X11). On a remote server, upload the \
+    \image and paste its server-side path instead."
 
 --------------------------------------------------------------------------------
 -- Shared helpers

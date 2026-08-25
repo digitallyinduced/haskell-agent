@@ -2,10 +2,16 @@ module Agent.CLI.ClipboardSpec (spec) where
 
 import Agent.CLI.Clipboard
 import Agent.Loop (ImageAttachment(..))
-import Control.Exception (bracket)
+import Control.Exception.Safe (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.Text as Text
-import System.Directory (getTemporaryDirectory, removeFile)
+import System.Directory
+    ( createDirectory
+    , getTemporaryDirectory
+    , removeDirectory
+    , removeFile
+    )
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Info (os)
 import System.IO (hClose, openBinaryTempFile)
 import Test.Hspec
@@ -37,6 +43,17 @@ spec = do
                             BS.length imageBytes `shouldSatisfy` (> 0)
                     else result `shouldBe`
                         Left "clipboard images are not supported on this platform yet"
+
+        it "explains clipboard limitations when Linux readers are unavailable" do
+            if os /= "linux"
+                then pendingWith "Linux-only clipboard behavior"
+                else withEmptyPath do
+                    readClipboardImage `shouldReturn`
+                        Left
+                            "no clipboard reader is available on this Linux host; \
+                            \install wl-clipboard (Wayland) or xclip (X11). On a \
+                            \remote server, upload the image and paste its \
+                            \server-side path instead."
 
     describe "nonEmptyClipboardImages" do
         it "keeps only successful non-empty image reads" do
@@ -99,3 +116,20 @@ spec = do
                     check "path" result
                     check "quoted" quoted
                     check "file-url" filed
+
+withEmptyPath :: IO a -> IO a
+withEmptyPath action = do
+    tmp <- getTemporaryDirectory
+    bracket
+        (do
+            (path, handle) <- openBinaryTempFile tmp "agent-empty-path-"
+            hClose handle
+            removeFile path
+            createDirectory path
+            originalPath <- lookupEnv "PATH"
+            setEnv "PATH" path
+            pure (path, originalPath))
+        (\(path, originalPath) -> do
+            maybe (unsetEnv "PATH") (setEnv "PATH") originalPath
+            removeDirectory path)
+        (const action)
