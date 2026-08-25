@@ -46,17 +46,19 @@ data Name
     = ConversationViewport
     | ConversationReserve
     | OverlayViewport
-    | ConversationBlock !BlockId
+    | ConversationBlock !AgentTarget !BlockId
     | ConversationChunkCache
+        !AgentTarget
         !BlockId
         !BlockId
     | ConversationBlockCache
+        !AgentTarget
         !BlockId
         !Bool
         !Bool
         !(Maybe (Int, Bool))
-    | CodeBlockCache !BlockId !Int
-    | CodeCopy !BlockId !Int
+    | CodeBlockCache !AgentTarget !BlockId !Int
+    | CodeCopy !AgentTarget !BlockId !Int
     | MarkdownLink !Text
     | ComposerArea
     | ComposerCursor

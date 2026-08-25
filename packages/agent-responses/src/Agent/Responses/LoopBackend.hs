@@ -5,6 +5,7 @@ module Agent.Responses.LoopBackend
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
+    , responseItemToToolCall
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
