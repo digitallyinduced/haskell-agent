@@ -410,18 +410,18 @@ spec = do
             estimateRequestTokensWithItems params compacted
                 `shouldSatisfy` (< threshold)
 
-        it "does not loop when the checkpoint exceeds a tiny threshold" do
+        it "rejects a tiny threshold before starting compaction" do
             let history = [userTextItem "old"]
                 threshold = 1
                 params = defaultResponseCreateParams
             contextState <- newIORef Nothing
             compactCalls <- newIORef (0 :: Int)
-            seenHistory <- newIORef []
+            continuationCalls <- newIORef (0 :: Int)
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
                     pure (Right remoteCompactionResponse)
                 base = Backend \state _ _ _ -> do
-                    writeIORef seenHistory state
+                    modifyIORef' continuationCalls (+ 1)
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -436,14 +436,15 @@ spec = do
                         (pure params)
                         contextState
                         base
-            first <- backend.submitTurn history Nothing
+            result <- backend.submitTurn history Nothing
                 [UserMessage "new"] (const (pure ()))
-            first `shouldSatisfy` either (const False) (const True)
-            compacted <- readIORef seenHistory
-            second <- backend.submitTurn compacted Nothing
-                [UserMessage "again"] (const (pure ()))
-            second `shouldSatisfy` either (const False) (const True)
-            readIORef compactCalls `shouldReturn` 1
+            result `shouldSatisfy` \case
+                Left (ProviderError InvalidRequestError message _) ->
+                    "increase --compact-threshold" `Text.isInfixOf` message
+                _ -> False
+            readIORef compactCalls `shouldReturn` 0
+            readIORef continuationCalls `shouldReturn` 0
+            readIORef contextState `shouldReturn` Nothing
 
         it "runs the post-compaction hook only after a successful continuation" do
             let history = [userTextItem "old"]

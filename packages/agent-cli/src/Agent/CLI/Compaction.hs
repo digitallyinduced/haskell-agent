@@ -601,12 +601,42 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
                             - estimateItemsTokens [checkpoint]
                             - automaticCompactionHeadroom tokenLimit
                         )
-        compactRemoteV2AttemptWithRetainedBudget
-            send
-            params
-            history
-            (estimateItemsTokens history)
-            retainedBudget
+            thresholdError minimumTokens =
+                ProviderError InvalidRequestError
+                    ( "automatic compaction threshold "
+                        <> Text.pack (show tokenLimit)
+                        <> " is below the minimum compacted request size of "
+                        <> Text.pack (show minimumTokens)
+                        <> " tokens; increase --compact-threshold"
+                    )
+                    Nothing
+        if tokenLimit <= 0 || fixedRequestTokens >= tokenLimit
+            then
+                pure $ CompactAttempt emptyTokenUsage $
+                    Left (thresholdError fixedRequestTokens)
+            else do
+                attempt <-
+                    compactRemoteV2AttemptWithRetainedBudget
+                        send
+                        params
+                        history
+                        (estimateItemsTokens history)
+                        retainedBudget
+                pure $
+                    case attempt.compactAttemptResult of
+                        Right outcome
+                            | let compactedRequestTokens =
+                                    estimateRequestTokensWithItems
+                                        params
+                                        outcome.compactHistory
+                            , compactedRequestTokens >= tokenLimit ->
+                                attempt
+                                    { compactAttemptResult =
+                                        Left
+                                            (thresholdError
+                                                compactedRequestTokens)
+                                    }
+                        _ -> attempt
     estimateProjectedRequest _ history inputs = do
         params <- getParams
         pure $

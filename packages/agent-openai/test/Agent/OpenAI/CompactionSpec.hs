@@ -342,6 +342,9 @@ spec = do
                 history =
                     [ user "# AGENTS.md instructions for /tmp/project\n\n<INSTRUCTIONS>generated</INSTRUCTIONS>"
                     , user "# Skill instructions: example\n\n<SKILL_INSTRUCTIONS>generated</SKILL_INSTRUCTIONS>"
+                    , user "## Skills\nThe following reusable skills are available in this session.\n"
+                    , user "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions.\n"
+                    , user "<system-reminder>\nAs you answer the user's questions, you can use the following context\n"
                     , user "<subagent_notification>\nstatus: completed\n</subagent_notification>"
                     , user "real user request"
                     ]
@@ -548,6 +551,61 @@ spec = do
             estimateItemsTokens (trimmed <> [compactionTriggerItem])
                 `shouldSatisfy` (<= 100)
             trimmed `shouldBe` [recent]
+
+        it "does not delete tagged outputs when pairing ids are missing" do
+            let callWith identifier = KnownResponseItem ItemShellCall TaggedObject
+                    { tag = "shell_call"
+                    , fields = KeyMap.fromList $
+                        [ ("command", Aeson.String (Text.replicate 20_000 "x"))
+                        ]
+                            <> maybe []
+                                (\value -> [("id", Aeson.String value)])
+                                identifier
+                    }
+                outputWith identifier =
+                    KnownResponseItem ItemShellCallOutput TaggedObject
+                        { tag = "shell_call_output"
+                        , fields = KeyMap.fromList $
+                            [ ("output", Aeson.String "ok")
+                            ]
+                                <> maybe []
+                                    (\value ->
+                                        [("call_id", Aeson.String value)])
+                                    identifier
+                        }
+                identifiedOutput = outputWith (Just "other-call")
+                unidentifiedOutput = outputWith Nothing
+                recent = user "recent"
+                trim =
+                    trimRemoteCompactionHistoryToFit 200 Nothing
+            trim [callWith Nothing, identifiedOutput, recent]
+                `shouldBe` [identifiedOutput, recent]
+            trim [callWith (Just "call-1"), unidentifiedOutput, recent]
+                `shouldBe` [unidentifiedOutput, recent]
+
+        it "does not pair typed calls with empty identifiers" do
+            let call = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = ""
+                    , name = "shell_command"
+                    , arguments = Text.replicate 20_000 "x"
+                    , status = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                output = FunctionCallOutputItem FunctionCallOutput
+                    { itemId = Nothing
+                    , callId = ""
+                    , output = Aeson.String "ok"
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                recent = user "recent"
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        200
+                        Nothing
+                        [call, output, recent]
+            trimmed `shouldBe` [output, recent]
 
         it "drops paired tagged outputs with their oversized calls" do
             let call = KnownResponseItem ItemShellCall TaggedObject
@@ -769,6 +827,9 @@ spec = do
             let history =
                     [ user "# AGENTS.md instructions for /tmp/project\nrules"
                     , user "# Skill instructions: test\nrules"
+                    , user "## Skills\nThe following reusable skills are available in this session.\nrules"
+                    , user "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions.\nrules"
+                    , user "<system-reminder>\nAs you answer the user's questions, you can use the following context\nrules"
                     , user "old request"
                     , user "new request"
                     ]

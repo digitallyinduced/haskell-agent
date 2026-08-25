@@ -22,6 +22,7 @@ module Agent.OpenAI.Compaction
     , buildLocalCompactedHistoryToFit
     , compactTranscriptAtLastCheckpoint
     , hasCompactionCheckpoint
+    , hasGeneratedContextItems
     , assistantSummaryItem
     , userTextItem
     , isCompactSessionTurn
@@ -238,7 +239,7 @@ dropMatchingFunctionOutput callId = go
   where
     go [] = []
     go (FunctionCallOutputItem output : rest)
-        | output.callId == callId = rest
+        | identifiersMatch [callId] [output.callId] = rest
     go (item : rest) = item : go rest
 
 dropMatchingCustomToolOutput :: Text -> [ResponseItem] -> [ResponseItem]
@@ -246,7 +247,7 @@ dropMatchingCustomToolOutput callId = go
   where
     go [] = []
     go (CustomToolCallOutputItem output : rest)
-        | output.callId == callId = rest
+        | identifiersMatch [callId] [output.callId] = rest
     go (item : rest) = item : go rest
 
 pairedOutputType :: ResponseItemType -> Maybe ResponseItemType
@@ -294,9 +295,16 @@ taggedProtocolIds tagged =
 
 identifiersMatch :: [Text] -> [Text] -> Bool
 identifiersMatch expected actual =
-    null expected
-        || null actual
-        || any (`elem` actual) expected
+    not (null expectedIds)
+        && not (null actualIds)
+        && any (`elem` actualIds) expectedIds
+  where
+    expectedIds = nonEmptyIdentifiers expected
+    actualIds = nonEmptyIdentifiers actual
+
+nonEmptyIdentifiers :: [Text] -> [Text]
+nonEmptyIdentifiers =
+    filter (not . Text.null) . map Text.strip
 
 sanitizeRemoteCompactionHistory :: [ResponseItem] -> [ResponseItem]
 sanitizeRemoteCompactionHistory =
@@ -636,10 +644,22 @@ isGeneratedContextUserText text =
     any (`Text.isPrefixOf` Text.stripStart text)
         [ "# AGENTS.md instructions for "
         , "# Skill instructions: "
+        , "## Skills\nThe following reusable skills are available in this session."
+        , "<learned-skills>\nThese are durable, reusable instructions learned from earlier sessions."
+        , "<system-reminder>\nAs you answer the user's questions, you can use the following context"
         , "Plan mode is active. Do not make any edits or writes to the system except for the plan file."
         , "The user approved the plan. Plan mode is now off."
         , "<subagent_notification>"
         ]
+
+-- | Whether persisted items contain generated project, skill, or harness
+-- context that can satisfy a post-reset resume without injecting it again.
+hasGeneratedContextItems :: [ResponseItem] -> Bool
+hasGeneratedContextItems = any \case
+    MessageItem message
+        | message.role == RoleUser ->
+            maybe False isGeneratedContextUserText (messageText message)
+    _ -> False
 
 isRemoteRetainedItem :: ResponseItem -> Bool
 isRemoteRetainedItem = \case
