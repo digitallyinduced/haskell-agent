@@ -2539,7 +2539,7 @@ drawBlock state block =
                                     (codeBlockHeader state block.blockId)
                                     block.blockBody)
             BlockThinking ->
-                accentBlock (thinkingBlockAttr state block)
+                accentMarkdownBlock (thinkingBlockAttr state block)
                     (blockStateGlyph state block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
@@ -2661,6 +2661,13 @@ accentBlock accent title body =
         if Text.null (Text.strip body)
             then []
             else [txtWrap body]
+
+accentMarkdownBlock :: AttrName -> Text -> Text -> Widget Name
+accentMarkdownBlock accent title body =
+    accentBlockWithSections accent title $
+        if Text.null (Text.strip body)
+            then []
+            else [markdownWidgetWithLinks MarkdownLink body]
 
 accentCodeBlock
     :: Maybe SyntaxHighlighter
