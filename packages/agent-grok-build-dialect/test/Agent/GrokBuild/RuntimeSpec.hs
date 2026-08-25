@@ -508,6 +508,7 @@ call tools name arguments =
 
 rootContext registry = MultiAgentContext
     registry
+    (unsafeEncodeUtf "/tmp")
     Nothing
     0
     taskPathRoot
@@ -520,6 +521,7 @@ rootContext registry = MultiAgentContext
 
 childContext registry = MultiAgentContext
     registry
+    (unsafeEncodeUtf "/tmp")
     (Just (SubagentId "agent-parent"))
     1
     taskPathRoot
