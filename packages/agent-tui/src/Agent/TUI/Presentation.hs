@@ -3,11 +3,17 @@ module Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
     , SearchReplaceLine(..)
+    , TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
     , formatSearchReplaceDiff
+    , formatTodoList
     , formatToolOutput
     , parseSearchReplaceDiff
+    , parseTodoList
     , permissionToolCallPrompt
     , summarizeToolCall
+    , todoCallPreview
+    , todoStatusGlyph
     , toolCallInput
     , toolCallTitle
     , toolDetail
@@ -22,6 +28,8 @@ import Agent.ToolDispatch
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Control.Applicative ((<|>))
+import Data.Char (isSpace)
 import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
@@ -152,7 +160,147 @@ formatToolOutput call output = case canonicalToolName call.name of
     "skill_update" -> fromMaybe output (formatSkillMutation output)
     "skill_archive" -> fromMaybe output (formatSkillMutation output)
     "skill_rollback" -> fromMaybe output (formatSkillMutation output)
+    "todo_write" -> formatTodoList output
+    "update_plan" -> formatTodoList output
     _ -> output
+
+data TodoDisplayStatus
+    = TodoDisplayPending
+    | TodoDisplayInProgress
+    | TodoDisplayCompleted
+    | TodoDisplayCancelled
+    deriving (Eq, Show)
+
+data TodoDisplayLine = TodoDisplayLine
+    { todoLineStatus :: !TodoDisplayStatus
+    , todoLineText :: !Text
+    }
+    deriving (Eq, Show)
+
+-- | Compact preview of the first todo content from a @todo_write@ /
+-- @update_plan@ argument payload, used while the tool is still running.
+todoCallPreview :: ToolCall -> Text
+todoCallPreview call = case canonicalToolName call.name of
+    "todo_write" -> firstTodoContentFromArguments call.arguments
+    "update_plan" -> firstPlanStepFromArguments call.arguments
+    _ -> ""
+
+formatTodoList :: Text -> Text
+formatTodoList output =
+    Text.intercalate "\n" (map formatTodoDisplayLine (parseTodoList output))
+
+parseTodoList :: Text -> [TodoDisplayLine]
+parseTodoList output =
+    let rows =
+            [ Text.strip line
+            | line <- Text.lines (Text.stripEnd output)
+            , not (Text.null (Text.strip line))
+            ]
+        parsed = mapMaybe parseTodoDisplayLine rows
+    in if null parsed
+        then map (TodoDisplayLine TodoDisplayPending) rows
+        else parsed
+
+parseTodoDisplayLine :: Text -> Maybe TodoDisplayLine
+parseTodoDisplayLine raw =
+    parseGlyphTodoLine line <|> parseMarkedTodoLine line
+  where
+    line = Text.strip raw
+
+parseGlyphTodoLine :: Text -> Maybe TodoDisplayLine
+parseGlyphTodoLine line =
+    foldr (\(status, glyph) acc -> acc <|> prefixed status glyph) Nothing
+        [ (TodoDisplayCompleted, "✓")
+        , (TodoDisplayInProgress, "▶")
+        , (TodoDisplayCancelled, "✗")
+        , (TodoDisplayPending, "□")
+        ]
+  where
+    prefixed status glyph = do
+        rest <-
+            Text.stripPrefix (glyph <> " ") line
+                <|> Text.stripPrefix glyph line
+        let content = Text.strip rest
+        if Text.null content
+            then Nothing
+            else Just (TodoDisplayLine status content)
+
+parseMarkedTodoLine :: Text -> Maybe TodoDisplayLine
+parseMarkedTodoLine line =
+    let body = Text.strip (Text.dropWhile (== '-') line)
+        (marker, rest) = Text.break (== ']') body
+    in do
+        status <- parseTodoStatusMarker (Text.strip (Text.dropWhile (== '[') marker))
+        rest' <- Text.stripPrefix "]" rest
+        let content = stripTodoIdentifier (Text.strip rest')
+        if Text.null content
+            then Nothing
+            else Just (TodoDisplayLine status content)
+
+parseTodoStatusMarker :: Text -> Maybe TodoDisplayStatus
+parseTodoStatusMarker = \case
+    "pending" -> Just TodoDisplayPending
+    "in_progress" -> Just TodoDisplayInProgress
+    "completed" -> Just TodoDisplayCompleted
+    "cancelled" -> Just TodoDisplayCancelled
+    _ -> Nothing
+
+stripTodoIdentifier :: Text -> Text
+stripTodoIdentifier text =
+    case Text.break (== ':') text of
+        (before, after)
+            | not (Text.null after)
+            , looksLikeTodoId (Text.strip before) ->
+                Text.strip (Text.drop 1 after)
+        _ -> text
+
+looksLikeTodoId :: Text -> Bool
+looksLikeTodoId text =
+    not (Text.null text)
+        && Text.length text <= 24
+        && not (Text.any isSpace text)
+        && Text.all isTodoIdChar text
+
+isTodoIdChar :: Char -> Bool
+isTodoIdChar c =
+    c == '-' || c == '_' || c == '.' || isAsciiAlphaNum c
+
+isAsciiAlphaNum :: Char -> Bool
+isAsciiAlphaNum c =
+    (c >= '0' && c <= '9')
+        || (c >= 'A' && c <= 'Z')
+        || (c >= 'a' && c <= 'z')
+
+formatTodoDisplayLine :: TodoDisplayLine -> Text
+formatTodoDisplayLine line =
+    todoStatusGlyph line.todoLineStatus <> " " <> line.todoLineText
+
+todoStatusGlyph :: TodoDisplayStatus -> Text
+todoStatusGlyph = \case
+    TodoDisplayPending -> "□"
+    TodoDisplayInProgress -> "▶"
+    TodoDisplayCompleted -> "✓"
+    TodoDisplayCancelled -> "✗"
+
+firstTodoContentFromArguments :: Text -> Text
+firstTodoContentFromArguments arguments = fromMaybe "" do
+    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
+    Aeson.Array todos <- KeyMap.lookup "todos" object
+    Aeson.Object todo <- case toList todos of
+        first : _ -> Just first
+        [] -> Nothing
+    content <- jsonObjectText "content" todo
+    pure (firstLine content)
+
+firstPlanStepFromArguments :: Text -> Text
+firstPlanStepFromArguments arguments = fromMaybe "" do
+    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
+    Aeson.Array plan <- KeyMap.lookup "plan" object
+    Aeson.Object item <- case toList plan of
+        first : _ -> Just first
+        [] -> Nothing
+    step <- jsonObjectText "step" item
+    pure (firstLine step)
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
@@ -178,7 +326,8 @@ toolVerb name = case canonicalToolName name of
     "create_agent_session" -> "Created agent session"
     "read_agent_session" -> "Read agent session"
     "send_agent_session_message" -> "Messaged agent session"
-    "update_plan" -> "Updated"
+    "todo_write" -> "todo_write"
+    "update_plan" -> "update_plan"
     "enter_plan_mode" -> "Entered"
     "exit_plan_mode" -> "Exited"
     "ask_user_question" -> "Asked"
@@ -204,7 +353,6 @@ toolDetail call = case canonicalToolName call.name of
     "write_stdin" ->
         maybe "" ("session " <>) (jsonIntField "session_id" call.arguments)
     "apply_patch" -> fromMaybe "patch" (firstPatchPath call.arguments)
-    "update_plan" -> "plan"
     "enter_plan_mode" -> "enter"
     "exit_plan_mode" -> "exit"
     "ask_user_question" -> askUserQuestionDetail call.arguments

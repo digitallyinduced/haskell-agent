@@ -172,7 +172,13 @@ import Agent.TUI.Motion
     , quietIndicator
     , waitingIndicator
     )
-import Agent.TUI.Presentation (permissionToolCallPrompt)
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    , parseTodoList
+    , permissionToolCallPrompt
+    , todoStatusGlyph
+    )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -2490,6 +2496,10 @@ drawBlock state target ui block =
                         <> block.blockTitle
                         <> detailSuffix block)
                     (visibleBody block)
+            BlockTodo ->
+                accentBlockWithSections (statusAttr state block)
+                    (blockStateGlyph state block <> block.blockTitle)
+                    (todoBodyWidgets block)
             BlockShell ->
                 accentCodeBlock
                     state.appSyntaxHighlighter
@@ -2661,14 +2671,48 @@ accentBlockWithSections accent title sections =
 visibleBody :: UiBlock -> Text
 visibleBody block
     | block.blockExpanded = block.blockBody
-    | otherwise =
-        let rows = Text.lines block.blockBody
-            shown = take 3 rows
-            hidden = length rows - length shown
-        in Text.unlines shown
-            <> if hidden > 0
-                then "… +" <> Text.pack (show hidden) <> " lines"
-                else ""
+    | otherwise = truncatedLines 3 block.blockBody
+
+todoBodyWidgets :: UiBlock -> [Widget Name]
+todoBodyWidgets block =
+    let parsed = parseTodoList block.blockBody
+        (shown, hidden)
+            | block.blockExpanded = (parsed, 0)
+            | otherwise =
+                let visible = take 3 parsed
+                in (visible, length parsed - length visible)
+        rows = map todoLineWidget shown
+        overflow
+            | hidden > 0 =
+                [ withAttr Theme.mutedAttr
+                    (txt ("… +" <> Text.pack (show hidden) <> " lines"))
+                ]
+            | otherwise = []
+    in case rows <> overflow of
+        [] -> []
+        widgets -> [vBox widgets]
+
+todoLineWidget :: TodoDisplayLine -> Widget Name
+todoLineWidget line =
+    withAttr (todoStatusAttr line.todoLineStatus)
+        (txtWrap (todoStatusGlyph line.todoLineStatus <> " " <> line.todoLineText))
+
+todoStatusAttr :: TodoDisplayStatus -> AttrName
+todoStatusAttr = \case
+    TodoDisplayPending -> Theme.todoPendingAttr
+    TodoDisplayInProgress -> Theme.todoInProgressAttr
+    TodoDisplayCompleted -> Theme.todoCompletedAttr
+    TodoDisplayCancelled -> Theme.todoCancelledAttr
+
+truncatedLines :: Int -> Text -> Text
+truncatedLines shownCount body =
+    let rows = Text.lines body
+        shown = take shownCount rows
+        hidden = length rows - length shown
+    in Text.unlines shown
+        <> if hidden > 0
+            then "… +" <> Text.pack (show hidden) <> " lines"
+            else ""
 
 visibleShellBody :: UiBlock -> Text
 visibleShellBody block

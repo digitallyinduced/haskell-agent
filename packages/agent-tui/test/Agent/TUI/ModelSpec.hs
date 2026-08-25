@@ -661,6 +661,48 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
             _ -> expectationFailure "expected one running edit block"
 
+    it "renders todo_write as a checklist block" do
+        let call =
+                functionToolCall
+                    "todo-1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\",\"status\":\"pending\"}]}"
+            result = ToolCallResult
+                { callId = "todo-1"
+                , output =
+                    "- [completed] 1: Find and clone repos\n\
+                    \- [in_progress] 2: Investigate Grok Build"
+                , callKind = FunctionCallKind
+                }
+            started =
+                Foldable.toList $
+                    (.uiBlocks) $
+                        apply
+                            [ UiLoop TurnStarted
+                            , UiLoop (ToolStarted call)
+                            ]
+            finished =
+                Foldable.toList $
+                    (.uiBlocks) $
+                        apply
+                            [ UiLoop TurnStarted
+                            , UiLoop (ToolStarted call)
+                            , UiLoop (ToolFinished result)
+                            ]
+        case started of
+            [block] -> do
+                block.blockKind `shouldBe` BlockTodo
+                block.blockTitle `shouldBe` "todo_write"
+                block.blockBody `shouldBe` "Find and clone repos"
+            _ -> expectationFailure "expected one running todo block"
+        case finished of
+            [block] -> do
+                block.blockKind `shouldBe` BlockTodo
+                block.blockTitle `shouldBe` "todo_write"
+                block.blockBody
+                    `shouldBe` "✓ Find and clone repos\n▶ Investigate Grok Build"
+            _ -> expectationFailure "expected one completed todo block"
+
     it "formats collaboration result JSON for display" do
         let call =
                 functionToolCall
