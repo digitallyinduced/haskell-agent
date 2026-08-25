@@ -6,6 +6,7 @@ module Agent.Responses.StreamAssembly
     , emptyStreamAssemblyState
     , applyStreamEvent
     , finishStreamResponse
+    , finishAssembledIncomplete
     , buildStreamResponse
     , buildStreamResponseWithModel
     , assembleDoneResponse
@@ -201,6 +202,20 @@ finishStreamResponse modelHint state terminalEvent = do
         _ -> Left $ JsonDecodeError
             "Streamed response did not contain a response id"
             (jsonPreview assembled)
+
+-- | Assemble the current stream state as an incomplete response. Used when the
+-- provider emits @response.incomplete@ or the socket dies after output items
+-- were already collected.
+finishAssembledIncomplete
+    :: Maybe Text
+    -> StreamAssemblyState
+    -> Either ApiError Response
+finishAssembledIncomplete modelHint state =
+    finishStreamResponse modelHint state
+        (ResponseIncompleteEvent
+            (Aeson.Object state.responseObject)
+            Nothing
+            KeyMap.empty)
 
 -- | Build a response without a request-model hint. This remains the shared
 -- entry point used by provider SSE transports.

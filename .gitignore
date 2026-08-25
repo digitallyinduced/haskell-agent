@@ -1,5 +1,7 @@
 /dist-newstyle/
 /.direnv/
+# Project-local last-model / approval state. Must not be committed or new
+# worktrees inherit a stale default such as Claude fable.
 /.haskell-agent/
 /result
 /result-*

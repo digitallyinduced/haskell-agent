@@ -1671,6 +1671,138 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn` Nothing
 
+        it "continues a live tool chain without counting retained history against the window" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-live"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory =
+                    [ userTextItem
+                        (Text.replicate ((contextWindow + 1_000) * 4) "x")
+                    , danglingCall
+                    ]
+                toolResult = ToolCallResult
+                    { callId = "call-live"
+                    , output = "ok"
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            seenPrevious <- newIORef []
+            seenInputs <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state previous submitted _ -> do
+                    modifyIORef' seenPrevious (<> [previous])
+                    modifyIORef' seenInputs (<> [submitted])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
+            readIORef seenInputs `shouldReturn` [inputs]
+
+        it "trims replay history when a tool continuation cannot fit the full transcript" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-replay"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory =
+                    [ userTextItem
+                        (Text.replicate ((contextWindow + 1_000) * 4) "x")
+                    , danglingCall
+                    ]
+                toolResult = ToolCallResult
+                    { callId = "call-replay"
+                    , output = "ok"
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            seenHistory <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _previous _submitted _ -> do
+                    modifyIORef' seenHistory (<> [state])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory Nothing inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef seenHistory >>= \case
+                [fitted] -> do
+                    estimateRequestTokensWithItems
+                        params
+                        (fitted <> turnInputsToItems inputs)
+                        `shouldSatisfy` (<= contextWindow)
+                    any
+                        (\case
+                            FunctionCallItem call -> call.callId == "call-replay"
+                            _ -> False)
+                        fitted
+                        `shouldBe` True
+                seen ->
+                    expectationFailure
+                        ("expected one trimmed continuation, got "
+                            <> show (length seen))
+
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]
                 compactError =

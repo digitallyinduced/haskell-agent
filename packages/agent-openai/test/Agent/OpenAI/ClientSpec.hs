@@ -61,6 +61,25 @@ spec = do
                     "response.incomplete: max_output_tokens"
                     Nothing)
 
+        it "keeps an incomplete response that already contains tool calls" do
+            let response = decodeResponse (Aeson.object
+                    [ "id" .= ("response-id" :: Text)
+                    , "created_at" .= (0 :: Int)
+                    , "model" .= ("gpt-5.6-sol" :: Text)
+                    , "status" .= ("incomplete" :: Text)
+                    , "incomplete_details" .= Aeson.object
+                        [ "reason" .= ("max_output_tokens" :: Text) ]
+                    , "output" .=
+                        [ Aeson.object
+                            [ "type" .= ("function_call" :: Text)
+                            , "call_id" .= ("call-1" :: Text)
+                            , "name" .= ("shell_command" :: Text)
+                            , "arguments" .= ("{}" :: Text)
+                            ]
+                        ]
+                    ])
+            rejectFailedCodexResponse response `shouldBe` Right response
+
     describe "retryTransientCodexResultWithPolicy" do
         it "retries ordinary Left overloads before returning success" do
             let overload = ProviderError OverloadedError "server_is_overloaded" Nothing
@@ -99,6 +118,35 @@ spec = do
             readIORef attempts `shouldReturn` 1
 
     describe "decodeCodexHttpBody" do
+        it "reads an incomplete SSE response that already contains a function call" do
+            let body = Text.concat
+                    [ "event: response.output_item.done\n"
+                    , "data: {\"item\":"
+                    , "{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"shell_command\",\"arguments\":\"{}\"}"
+                    , "}\n\n"
+                    , "event: response.incomplete\n"
+                    , "data: "
+                    , Text.decodeUtf8 (LBS.toStrict (Aeson.encode (Aeson.object
+                        [ "response" .= Aeson.object
+                            [ "id" .= ("resp-incomplete" :: Text)
+                            , "created_at" .= (0 :: Int)
+                            , "model" .= ("gpt-test" :: Text)
+                            , "status" .= ("incomplete" :: Text)
+                            , "incomplete_details" .= Aeson.object
+                                [ "reason" .= ("max_output_tokens" :: Text) ]
+                            , "output" .= ([] :: [Aeson.Value])
+                            ]
+                        ])))
+                    , "\n\n"
+                    ]
+            case decodeCodexHttpBody body of
+                Right response -> do
+                    response.responseId `shouldBe` "resp-incomplete"
+                    response.status `shouldBe` ResponseIncomplete
+                    [name | FunctionCallItem FunctionCall { name } <- response.output]
+                        `shouldBe` ["shell_command"]
+                Left err -> expectationFailure ("expected response, got " <> show err)
+
         it "reads the terminal SSE response.completed event" do
             let body = Text.concat
                     [ "event: response.output_item.done\n"

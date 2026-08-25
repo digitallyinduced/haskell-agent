@@ -78,6 +78,43 @@ spec = do
             input <- expectArray (KeyMap.lookup "input" object)
             length input `shouldBe` 1
 
+        it "omits OpenAI item status fields the Grok proxy rejects" do
+            let call = FunctionCallItem FunctionCall
+                    { itemId = Just "fc_1"
+                    , callId = "call-1"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields =
+                        KeyMap.singleton "status" (Aeson.String "completed")
+                    }
+                message = MessageItem ResponseMessage
+                    { messageId = Just "msg_1"
+                    , content = MessageContentParts
+                        [InputTextPart "hello" Nothing KeyMap.empty]
+                    , role = RoleUser
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields =
+                        KeyMap.singleton "status" (Aeson.String "completed")
+                    }
+                request = setInstructions Nothing $
+                    setInput
+                        (Just (ResponseInputItems [message, call]))
+                        sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            input <- expectArray (KeyMap.lookup "input" object)
+            itemObjects <- traverse expectObject input
+            map (KeyMap.lookup "status") itemObjects `shouldBe` [Nothing, Nothing]
+            map (KeyMap.lookup "type") itemObjects `shouldBe`
+                [ Just (Aeson.String "message")
+                , Just (Aeson.String "function_call")
+                ]
+
         it "flattens resumed OpenAI agent messages into Grok user messages" do
             let agentMessage = AgentMessageItem ResponseAgentMessage
                     { messageId = Nothing

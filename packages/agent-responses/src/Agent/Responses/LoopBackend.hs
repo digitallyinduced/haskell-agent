@@ -10,6 +10,7 @@ module Agent.Responses.LoopBackend
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
     , streamOutputObserved
+    , hasRecoverableIncompleteOutput
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
@@ -372,6 +373,15 @@ responseToTurnOutput response = TurnOutput
     , tokenUsage = responseTokenUsage response
     }
 
+-- | An incomplete response can still finish the turn when it already contains
+-- executable tool calls or assistant text. Empty @max_output_tokens@ stops
+-- remain transport failures so a replay-safe fallback can still run.
+hasRecoverableIncompleteOutput :: Response -> Bool
+hasRecoverableIncompleteOutput response =
+    not (null (mapMaybe responseItemToToolCall response.output))
+        || maybe False (not . Text.null . Text.strip)
+            (assistantTextFromResponse response)
+
 responseTokenUsage :: Response -> TokenUsage
 responseTokenUsage response =
     tokenUsageFromResponse response.usage
@@ -566,7 +576,8 @@ streamOutputObserved :: ResponseStreamEvent -> Bool
 streamOutputObserved event = case event of
     ResponseCompletedEvent{} -> True
     ResponseDoneEvent{} -> True
-    ResponseIncompleteEvent{} -> True
+    ResponseIncompleteEvent { responseValue } ->
+        responseFragmentHasOutput responseValue
     ResponseFailedEvent { responseValue } ->
         responseFragmentHasOutput responseValue
     ResponseOutputItemAddedEvent{} -> True

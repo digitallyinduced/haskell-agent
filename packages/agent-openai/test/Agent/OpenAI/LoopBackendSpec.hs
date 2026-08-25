@@ -335,6 +335,12 @@ spec = do
                 `shouldBe` True
             streamOutputObserved
                 (ResponseIncompleteEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` False
+            streamOutputObserved
+                (ResponseIncompleteEvent
+                    (Aeson.object ["output" Aeson..= [Aeson.object []]])
+                    Nothing
+                    KeyMap.empty)
                 `shouldBe` True
 
         it "treats failed lifecycle events as output only when output is present" do
