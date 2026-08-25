@@ -380,6 +380,42 @@
                                 '';
                         });
                 agentOpenaiExecutables = pkgs.haskell.lib.justStaticExecutables agentOpenaiPackage;
+                functionalTestCredentialHome =
+                    builtins.getEnv "AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME";
+                # A live provider call cannot run in Nix's normal
+                # network-isolated sandbox. CI opts into this Linux-only
+                # check with impure evaluation, staged credentials, and
+                # `sandbox = relaxed`.
+                functionalTestEnabled =
+                    functionalTestCredentialHome != ""
+                    && pkgs.stdenv.hostPlatform.isLinux;
+                agentCliHelloWorldFunctional =
+                    pkgs.runCommand "agent-cli-functional-hello-world"
+                        {
+                            __noChroot = true;
+                            AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME =
+                                functionalTestCredentialHome;
+                            AGENT_FUNCTIONAL_TEST_PROVIDER =
+                                builtins.getEnv "AGENT_FUNCTIONAL_TEST_PROVIDER";
+                            AGENT_FUNCTIONAL_TEST_MODEL =
+                                builtins.getEnv "AGENT_FUNCTIONAL_TEST_MODEL";
+                            LANG = "C.UTF-8";
+                            LC_ALL = "C.UTF-8";
+                            SSL_CERT_FILE =
+                                "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+                            nativeBuildInputs = [
+                                agentCliExecutable
+                                haskellPackages.ghc
+                                pkgs.coreutils
+                                pkgs.tmux
+                            ];
+                        }
+                        ''
+                            ${pkgs.bash}/bin/bash \
+                                ${./tests/functional/agent-cli-hello-world.sh} \
+                                ${agentCliExecutable}/bin/agent-cli
+                            touch "$out"
+                        '';
 
                 # Opens cabal repl on the agent-cli library and enters the
                 # GHCi :cmd loop that reloads + resumes after agent :reload.
@@ -538,6 +574,9 @@
                     agent-openrouter = agentOpenrouterPackage;
                     claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
                     agent-claude = agentClaudePackage;
+                } // pkgs.lib.optionalAttrs functionalTestEnabled {
+                    agent-cli-functional-hello-world =
+                        agentCliHelloWorldFunctional;
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;

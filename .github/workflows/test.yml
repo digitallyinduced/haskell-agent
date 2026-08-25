@@ -42,4 +42,55 @@ jobs:
             exit 1
           fi
 
-          "$nix_bin" flake check --no-write-lock-file --print-build-logs
+          credential_home="$(mktemp -d \
+            "/tmp/agent-functional-credentials.XXXXXX")"
+          chmod 700 "$credential_home"
+          export AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME="$credential_home"
+
+          cleanup() {
+            set +e
+            find "$credential_home" -type f -exec shred -u {} +
+            rm -r "$credential_home"
+          }
+          trap cleanup EXIT
+
+          credentials_found=0
+          if [[ -f "$HOME/.codex/auth.json" ]]; then
+            mkdir -p "$credential_home/.codex"
+            install -m 600 "$HOME/.codex/auth.json" \
+              "$credential_home/.codex/auth.json"
+            credentials_found=1
+          fi
+          if [[ -f "$HOME/.grok/auth.json" ]]; then
+            mkdir -p "$credential_home/.grok"
+            install -m 600 "$HOME/.grok/auth.json" \
+              "$credential_home/.grok/auth.json"
+            credentials_found=1
+          fi
+          if [[ -d "$HOME/.haskell-agent/credentials" ]]; then
+            mkdir -p "$credential_home/.haskell-agent"
+            cp -R "$HOME/.haskell-agent/credentials" \
+              "$credential_home/.haskell-agent/credentials"
+            chmod -R go-rwx "$credential_home/.haskell-agent/credentials"
+            credentials_found=1
+          fi
+          if [[ "$credentials_found" -eq 0 ]]; then
+            echo "::error title=Missing agent credentials::the CI runner must provide OpenAI, xAI, or managed agent credentials"
+            exit 1
+          fi
+
+          if ! command -v setfacl >/dev/null; then
+            echo "::error title=Missing setfacl::setfacl is required to grant the Nix build user read-only access to staged credentials"
+            exit 1
+          fi
+          setfacl -m g:nixbld:--x "$credential_home"
+          find "$credential_home" -type d \
+            -exec setfacl -m g:nixbld:r-x {} +
+          find "$credential_home" -type f \
+            -exec setfacl -m g:nixbld:r-- {} +
+
+          "$nix_bin" flake check \
+            --impure \
+            --option sandbox relaxed \
+            --no-write-lock-file \
+            --print-build-logs
