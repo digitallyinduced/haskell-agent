@@ -1712,7 +1712,7 @@ drawMain state =
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
                 , drawFollowStatus state.appUi
-                , drawLiveTodos state.appUi
+                , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
                 , Composer.drawComposer state
                 , drawFooter state
@@ -1959,6 +1959,7 @@ drawAgentConversation state entry =
             terminalTxt
                 (entry.agentStatus
                     <> " · input is sent to /root")
+        , drawLiveTodos entry.agentConversation
         , padTop (Pad 1) $
             if Seq.null entry.agentConversation.uiBlocks
                 then
@@ -4354,13 +4355,18 @@ preserveAgentConversationView selected previous =
 
 mergeConversationView :: UiState -> UiState -> UiState
 mergeConversationView previous incoming
-    | Seq.null incoming.uiBlocks = incoming
+    | Seq.null incoming.uiBlocks =
+        incoming { uiTodos = previous.uiTodos }
     | otherwise =
         incoming
             { uiBlocks = mergedBlocks
             , uiSelectedBlock = selected
             , uiSelectedBlockIndex =
                 selected >>= (`Map.lookup` incoming.uiBlockIndices)
+            , uiTodos =
+                if null incoming.uiTodos
+                    then previous.uiTodos
+                    else incoming.uiTodos
             }
   where
     previousBlocks =

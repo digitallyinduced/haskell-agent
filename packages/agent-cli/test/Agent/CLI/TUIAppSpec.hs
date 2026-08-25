@@ -64,6 +64,7 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.TUI.Model
+import Agent.TUI.Presentation (TodoDisplayLine(..))
 import Agent.TUI.Motion
 import Control.Concurrent.STM (newTChanIO)
 import qualified Data.ByteString as ByteString
@@ -448,7 +449,31 @@ spec = do
                             merged.uiBlocks)
                         `shouldBe` Just True
                     mergeConversationView previous initialUiState
-                        `shouldBe` initialUiState
+                        `shouldBe`
+                            initialUiState { uiTodos = previous.uiTodos }
+
+        it "keeps a child's live todo list across empty snapshot refreshes" do
+            let todoCall =
+                    functionToolCall
+                        "todo-1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"Keep this list\"}]}"
+                previous =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted todoCall)
+                        , UiLoop
+                            (ToolFinished ToolCallResult
+                                { callId = "todo-1"
+                                , output = "- [in_progress] 1: Keep this list"
+                                , callKind = FunctionCallKind
+                                })
+                        ]
+                merged = mergeConversationView previous initialUiState
+            map (.todoLineText) (visibleTodoList merged)
+                `shouldBe` ["Keep this list"]
 
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
