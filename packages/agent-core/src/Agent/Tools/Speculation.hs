@@ -518,7 +518,7 @@ runStreamed
     :: StreamedTool
     -> TQueue ArgumentStreamCommand
     -> IO (Maybe ToolResult)
-runStreamed (StreamedTool start interpret close) queue =
+runStreamed (StreamedTool start interpret consume close) queue =
     mask \restore -> do
         initial <- start
         live <- newIORef (Just initial)
@@ -539,12 +539,16 @@ runStreamed (StreamedTool start interpret close) queue =
                             Right next -> do
                                 commit next
                                 go next
-                            Left result -> do
-                                finished
-                                pure (Just result)
+                            Left (_, next) -> do
+                                -- Parsed early; keep state until ToolDone
+                                -- consumes the typed args.
+                                commit next
+                                go next
                     DeliverDone text ->
                         interpret state (ToolDone text) >>= \case
-                            Left result -> do
+                            Left (args, next) -> do
+                                result <- consume args next
+                                close next
                                 finished
                                 pure (Just result)
                             Right leftover -> do

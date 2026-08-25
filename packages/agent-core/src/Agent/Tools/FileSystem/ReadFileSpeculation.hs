@@ -21,6 +21,7 @@ import Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
     , formatReadFileContent
     , readFileResolvedContent
+    , runReadFile
     )
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Applicative ((<|>))
@@ -207,6 +208,7 @@ streamedReadFile speculation =
     StreamedTool
         { streamedStart = pure emptyPartialCall
         , streamedInterpret = interpretReadFile speculation
+        , streamedConsume = consumeReadFile speculation
         , streamedClose = closePartialCall speculation
         }
 
@@ -221,14 +223,16 @@ interpretReadFile
     :: ReadFileSpeculation
     -> PartialReadCall
     -> ToolInput
-    -> IO (Either ToolResult PartialReadCall)
+    -> IO (Either (ReadFileArgs, PartialReadCall) PartialReadCall)
 interpretReadFile speculation state = \case
     ToolPrefix text ->
         Right <$> refreshAfterArguments speculation state { partialArguments = text }
     ToolDone text -> do
         next <-
             refreshAfterArguments speculation state { partialArguments = text }
-        finishRead speculation next
+        case decodeReadFileArgs next.partialArguments of
+            Nothing -> pure (Right next)
+            Just args -> pure (Left (args, next))
 
 refreshAfterArguments
     :: ReadFileSpeculation
@@ -298,59 +302,44 @@ pendingWorkspaceIndex speculation partial
                         <$> readMVar speculation.state
             _ -> pure Nothing
 
-finishRead
+consumeReadFile
     :: ReadFileSpeculation
+    -> ReadFileArgs
     -> PartialReadCall
-    -> IO (Either ToolResult PartialReadCall)
-finishRead speculation partial =
-    case decodeReadFileArgs partial.partialArguments of
+    -> IO ToolResult
+consumeReadFile speculation args partial =
+    case partial.partialCandidate of
         Nothing -> do
             recordMiss speculation
-            pure (Right partial)
-        Just args ->
-            consumeCandidate args
+            runReadFile speculation.environment args
+        Just selected ->
+            resolveForRead
+                speculation.environment
+                (fromText args.targetFile) >>= \case
+                    Left _ -> missExecute selected
+                    Right finalPath ->
+                        waitCatch selected.candidateTask >>= \case
+                            Left _ -> do
+                                releaseCandidate selected
+                                recordMiss speculation
+                                runReadFile speculation.environment args
+                            Right Nothing -> do
+                                releaseCandidate selected
+                                recordMiss speculation
+                                runReadFile speculation.environment args
+                            Right (Just prefetched)
+                                | equalFilePath
+                                    finalPath
+                                    prefetched.prefetchedResolvedPath ->
+                                        consumePrefetch selected prefetched
+                                | otherwise ->
+                                    missExecute selected
   where
-    consumeCandidate
-        :: ReadFileArgs
-        -> IO (Either ToolResult PartialReadCall)
-    consumeCandidate args =
-        case partial.partialCandidate of
-            Nothing -> do
-                recordMiss speculation
-                pure (Right partial)
-            Just selected ->
-                resolveForRead
-                    speculation.environment
-                    (fromText args.targetFile) >>= \case
-                        Left _ -> miss selected
-                        Right finalPath ->
-                            waitCatch selected.candidateTask >>= \case
-                                Left _ -> do
-                                    releaseCandidate selected
-                                    recordMiss speculation
-                                    pure (Right withoutCandidate)
-                                Right Nothing -> do
-                                    releaseCandidate selected
-                                    recordMiss speculation
-                                    pure (Right withoutCandidate)
-                                Right (Just prefetched)
-                                    | equalFilePath
-                                        finalPath
-                                        prefetched.prefetchedResolvedPath ->
-                                            consumePrefetch
-                                                selected
-                                                args
-                                                prefetched
-                                    | otherwise ->
-                                        miss selected
-
-    miss
-        :: ReadCandidate
-        -> IO (Either ToolResult PartialReadCall)
-    miss selected = do
+    missExecute :: ReadCandidate -> IO ToolResult
+    missExecute selected = do
         cancelReadCandidate speculation selected
         recordMiss speculation
-        pure (Right withoutCandidate)
+        runReadFile speculation.environment args
 
     releaseCandidate :: ReadCandidate -> IO ()
     releaseCandidate selected =
@@ -359,26 +348,22 @@ finishRead speculation partial =
                 speculation
                 selected.candidateTaskKey
 
-    consumePrefetch
-        :: ReadCandidate
-        -> ReadFileArgs
-        -> PrefetchedRead
-        -> IO (Either ToolResult PartialReadCall)
-    consumePrefetch selected args prefetched = do
+    consumePrefetch :: ReadCandidate -> PrefetchedRead -> IO ToolResult
+    consumePrefetch selected prefetched = do
         releaseCandidate selected
         resolveForRead
             speculation.environment
             (fromText args.targetFile) >>= \case
                 Left _ -> do
                     recordMiss speculation
-                    pure (Right withoutCandidate)
+                    runReadFile speculation.environment args
                 Right finalPath
                     | not
                         (equalFilePath
                             finalPath
                             prefetched.prefetchedResolvedPath) -> do
                         recordMiss speculation
-                        pure (Right withoutCandidate)
+                        runReadFile speculation.environment args
                     | otherwise ->
                         fileFingerprint finalPath >>= \case
                             Just current
@@ -388,7 +373,7 @@ finishRead speculation partial =
                                             { speculativeReadHits =
                                                 metrics.speculativeReadHits + 1
                                             }
-                                    pure . Left $
+                                    pure $
                                         if prefetched.prefetchedArguments == args
                                             then prefetched.prefetchedOutput
                                             else
@@ -402,9 +387,7 @@ finishRead speculation partial =
                                             metrics.speculativeReadStale + 1
                                         }
                                 recordMiss speculation
-                                pure (Right withoutCandidate)
-
-    withoutCandidate = partial { partialCandidate = Nothing }
+                                runReadFile speculation.environment args
 
 recordMiss :: ReadFileSpeculation -> IO ()
 recordMiss speculation =

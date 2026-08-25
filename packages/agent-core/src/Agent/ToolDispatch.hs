@@ -120,7 +120,7 @@ type ToolResult = Either Text Text
 -- 'ToolPrefix' is the current accumulated argument JSON. Interpreters should
 -- return 'Right' quickly; speculation is an internal detail of that state.
 -- 'ToolDone' is issued once after approval with the authoritative complete
--- arguments and should return 'Left'.
+-- arguments and should return parsed args plus the interpreter state.
 data ToolInput
     = ToolPrefix !Text
     | ToolDone !Text
@@ -128,17 +128,20 @@ data ToolInput
 
 -- | Streamed tool evaluation:
 --
--- @interpret state chunk@ consumes argument text and either finishes with a
--- result or returns an updated state. Speculation, prefetch, and the actual
--- handler are all implementation details of this function.
-type ToolInterpreter s = s -> ToolInput -> IO (Either ToolResult s)
+-- @interpret state chunk@ consumes argument text. 'Right' keeps going.
+-- 'Left' @(args, state)@ means the arguments decoded successfully; the
+-- caller must not re-parse JSON. Speculation stays in @state@ until
+-- 'streamedConsume' runs after approval.
+type ToolInterpreter s args =
+    s -> ToolInput -> IO (Either (args, s) s)
 
 -- | Session-scoped streamed tool. 'streamedStart' / 'streamedClose' run once
 -- per correlated call. Session resources live in the 'StreamedToolFactory'
 -- 'Acquire'.
-data StreamedTool = forall s. StreamedTool
+data StreamedTool = forall s args. StreamedTool
     { streamedStart :: IO s
-    , streamedInterpret :: ToolInterpreter s
+    , streamedInterpret :: ToolInterpreter s args
+    , streamedConsume :: args -> s -> IO ToolResult
     , streamedClose :: s -> IO ()
     }
 

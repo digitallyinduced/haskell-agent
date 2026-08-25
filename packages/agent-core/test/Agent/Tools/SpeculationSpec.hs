@@ -72,7 +72,7 @@ spec = describe "ToolSpeculationRuntime" do
                 , (0, call.arguments)
                 ]
             readIORef probe.dones `shouldReturn` [(0, call.arguments)]
-            readIORef probe.cancellations `shouldReturn` []
+            readIORef probe.cancellations `shouldReturn` [0]
 
     it "can start from arguments.done and bind the final call later" do
         withProbeRuntime False \probe runtime -> do
@@ -311,9 +311,12 @@ probeStreamedTool nextId probe failTake =
                     modifyIORef'
                         probe.dones
                         (<> [(state.probeEntryId, text)])
-                    if failTake
-                        then throwIO (userError "probe take failed")
-                        else pure (Left (Right text))
+                    pure $
+                        Left (text, state { probeArguments = text })
+        , streamedConsume = \args _state ->
+            if failTake
+                then throwIO (userError "probe take failed")
+                else pure (Right args)
         , streamedClose = \state ->
             modifyIORef' probe.cancellations (<> [state.probeEntryId])
         }
