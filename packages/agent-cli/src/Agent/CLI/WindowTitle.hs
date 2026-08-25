@@ -20,7 +20,7 @@ import Control.Concurrent.STM
     , readTVar
     , writeTVar
     )
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM_, when)
 import Data.Text (Text)
 
 data WindowTitleController = WindowTitleController
@@ -88,7 +88,7 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
                 when (state.titleBusyDepth == 0) $
                     writeTitle state.titleBase
         worker =
-            unless (motionMode == MotionOff) $
+            when (motionMode == MotionFull) $
                 forM_ (cycle frames) \frame -> do
                     atomically do
                         state <- readTVar stateVar

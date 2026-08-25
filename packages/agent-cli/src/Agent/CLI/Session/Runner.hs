@@ -233,16 +233,6 @@ runSession
 runSession callbacks SessionRequest{..} SessionBackend{..} = do
   initialPrevious <- readLivePreviousResponseId conversationRef
   ioLock <- newMVar ()
-  initialWindowTitle <- case persist of
-      PersistenceEnabled slotRef ->
-          readIORef slotRef >>= \case
-              PersistenceActive handle ->
-                  pure
-                      (cliWindowTitle
-                          handle.sessionMeta.metaCwd
-                          (Just handle.sessionMeta.metaTitle))
-              _ -> pure (cliWindowTitle cwd Nothing)
-      PersistenceDisabled -> pure (cliWindowTitle cwd Nothing)
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
       stdoutHandle = startup.startupStdout
@@ -257,7 +247,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       withIoLock action = withMVar ioLock (const action)
   windowTitle <- newWindowTitleController
       options.optMotionMode
-      initialWindowTitle
+      startupWindowTitle
       withIoLock
       writeWindowTitle
   let setWindowTitle = windowTitle.windowTitleSet
