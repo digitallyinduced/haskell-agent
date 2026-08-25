@@ -406,6 +406,7 @@
                                             "${skylightingSyntaxDirectory}" \
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
+                                                pkgs.ffmpeg
                                                 pkgs.postgresql_18
                                                 haskellPackages.ghc
                                             ]}"
@@ -576,6 +577,7 @@
                         ])
                         ++ (with pkgs; [
                             cabal2nix
+                            ffmpeg
                             postgresql_18
                             ripgrep
                         ])

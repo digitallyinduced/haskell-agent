@@ -30,7 +30,7 @@ module Agent.Telegram
     , reactionMessageText
     , telegramReactionEmoji
     , telegramReplyText
-    , transcribeWithCodex
+    , transcribeWithXAI
     ) where
 
 import Agent.CLI.AgentSessions
@@ -82,7 +82,7 @@ import Agent.Telegram.Markdown
     ( markdownToTelegramHtml
     , telegramRenderedLength
     )
-import Agent.Telegram.Voice (transcribeWithCodex)
+import Agent.Telegram.Voice (transcribeWithXAI)
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider)
@@ -1894,12 +1894,12 @@ transcribeTelegramVoice runtime pending voice = do
         (\path -> void (tryAny (removeFile path)))
         \path -> do
             transcriptionCwd <- Directory.getTemporaryDirectory
-            transcript <- transcribeWithCodex
+            transcript <- transcribeWithXAI
                 transcriptionCwd
                 (unsafeToFilePath path)
             let clean = Text.strip transcript
             when (Text.null clean) $
-                fail "Codex returned an empty voice transcription"
+                fail "xAI returned an empty voice transcription"
             pure $
                 let rendered = "[Voice message transcript]: " <> clean
                 in if pending.pendingTurnText == "[Voice message]"
