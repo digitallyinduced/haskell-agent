@@ -204,6 +204,7 @@ handleSelection
             , sessionParams = paramsRef
             , sessionPersist = persist
             , sessionProjectRoot = projectRoot
+            , sessionHome = home
             , sessionDraft = draftRef
             , sessionAccountId = accountIdRef
             , sessionAccountSelectionId = selectionRef
@@ -259,7 +260,7 @@ handleSelection
                     Right result -> pure result
             else do
                 message <- applyModelChange
-                    projectRoot provider connectionId name
+                    home projectRoot provider connectionId name
                     choice.modelTarget.targetWireModelId
                     choice.modelTarget.targetDialect
                     paramsRef render conversationRef persist
@@ -327,7 +328,7 @@ handleSelection
                             connectionId provider (dialectId dialect) choice)
                   then do
                     message <- applyModelChange
-                        projectRoot provider connectionId
+                        home projectRoot provider connectionId
                         choice.modelTarget.targetModelId
                         choice.modelTarget.targetWireModelId
                         choice.modelTarget.targetDialect

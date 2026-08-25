@@ -100,10 +100,12 @@ import Agent.CLI.Project
       ProjectModel(..),
       ProjectSettings(..),
       loadProjectSettings,
+      loadUserSettings,
       projectAccountFor,
       projectModelProvider,
       resolveProjectRoot,
-      saveProjectModel )
+      saveRememberedModel,
+      withInheritedLastModel )
 import Agent.CLI.Prompt
     ( subscriptionSubagentModelGuidance, systemPromptForTools )
 import Agent.CLI.PromptHooks
@@ -1086,12 +1088,16 @@ runAgentInitializedWithLock
         deriveDatabaseScopes stateDirectory projectRootPath >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right scopes -> pure scopes
-    (projectSettings, (catalogResult, branch)) <-
+    ((projectSettings0, userSettings), (catalogResult, branch)) <-
         concurrently
-            (loadProjectSettings projectRoot)
+            (concurrently
+                (loadProjectSettings projectRoot)
+                (loadUserSettings home))
             (concurrently
                 (loadModelCatalogAt home cwd)
                 (detectGitBranch cwd))
+    let projectSettings =
+            withInheritedLastModel projectSettings0 userSettings
     catalog <- either
         (startupDie startup . Text.unpack)
         pure
@@ -1626,7 +1632,7 @@ runAgentInitializedWithLock
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
-        saveProjectModel projectRoot
+        saveRememberedModel home projectRoot
             inferredTarget { targetDialect = dialectId }
     activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
@@ -2478,7 +2484,7 @@ runAgentInitializedWithLock
                                                 resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        projectRoot transition persist noticingBackend
+                                        home projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession
@@ -2572,7 +2578,7 @@ runAgentInitializedWithLock
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                projectRoot transition persist backend
+                                home projectRoot transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable
@@ -2646,7 +2652,7 @@ runAgentInitializedWithLock
                             \backend -> do
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        projectRoot transition persist backend
+                                        home projectRoot transition persist backend
                                 result <- runSession
                                     (sessionRequest
                                         startupUnavailable
@@ -2743,7 +2749,7 @@ runAgentInitializedWithLock
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                projectRoot transition persist backend
+                                home projectRoot transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable

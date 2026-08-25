@@ -286,7 +286,7 @@ optionUpdateParser = asum
     [ optionUpdate "provider" "NAME"
         "Provider: openai, xai, openrouter, or claude-code"
         providerReader (\value options -> options { optProvider = Just value })
-    , optionUpdate "model" "NAME" "Override the saved/default model"
+    , optionUpdate "model" "NAME" "Override the saved last model"
         textReader (\value options -> options { optModel = Just value })
     , optionUpdate "cwd" "DIR" "Working directory for tools"
         pathReader (\value options -> options { optCwd = Just value })
@@ -487,7 +487,7 @@ usage = unlines
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
     , "      --provider NAME     openai, xai, openrouter, or claude-code"
     , "                          (default: detect from API/OAuth auth)"
-    , "      --model NAME        Override the project's saved/default model"
+    , "      --model NAME        Override the saved last model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
