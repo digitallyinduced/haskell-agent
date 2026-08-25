@@ -124,6 +124,7 @@ data AppEvent
     | AppSetModelIds ![Text]
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppCommitImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
@@ -247,6 +248,7 @@ data AppState = AppState
     , appKillBuffer :: !Text
     , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
+    , appSubmittedImagePreviews :: !(Map.Map BlockId [TuiImagePreview])
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
     , appAgentHover :: !(Maybe AgentHover)

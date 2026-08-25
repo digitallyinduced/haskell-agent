@@ -56,6 +56,10 @@ library
                     , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
+                    , Agent.CLI.Runtime.Orchestration
+                    , Agent.CLI.Runtime.Orchestration.Background
+                    , Agent.CLI.Runtime.Orchestration.Restart
+                    , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
                     , Agent.CLI.Runtime.Recap
@@ -175,6 +179,7 @@ library
                     , Agent.CLI.TurnState
                     , Agent.CLI.Usage
                     , Agent.CLI.WebFetch
+                    , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2

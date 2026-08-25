@@ -44,6 +44,14 @@ let
           "/run/keys/provider"
           "-/run/keys/optional-provider"
         ];
+        mcpInitStrategy = "progressive";
+        mcpServers.example = {
+          command = "/nix/store/example/bin/example-mcp";
+          args = [ "--stdio" ];
+          environment.CREDENTIAL_FILE = "/run/keys/example";
+          startupTimeoutSeconds = 12;
+          requestTimeoutSeconds = 34;
+        };
       };
 
       secondary = {
@@ -181,9 +189,16 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
         grep -o "/nix/store/[^ ']*-haskell-agent-telegram-secondary.json" |
         head -n1
     )"
+    primary_mcp_config="$(
+      printf '%s\n' "$primaryService" |
+        jq -r .preStart |
+        grep -o "/nix/store/[^ ']*-haskell-agent-telegram-primary-mcp.json" |
+        head -n1
+    )"
 
     test -f "$primary_config"
     test -f "$secondary_config"
+    test -f "$primary_mcp_config"
 
     jq -e '
       . == {
@@ -196,6 +211,23 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
         yolo: false
       }
     ' "$primary_config" >/dev/null
+
+    jq -e '
+      . == {
+        mcpInitStrategy: "progressive",
+        mcpServers: {
+          example: {
+            args: ["--stdio"],
+            command: "/nix/store/example/bin/example-mcp",
+            cwd: null,
+            enabled: true,
+            env: { CREDENTIAL_FILE: "/run/keys/example" },
+            requestTimeoutSeconds: 34,
+            startupTimeoutSeconds: 12
+          }
+        }
+      }
+    ' "$primary_mcp_config" >/dev/null
 
     jq -e '
       . == {
@@ -225,6 +257,8 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
       and .environment.MODULE_TEST == "present"
       and (.ExecStart | endswith("/bin/agent-telegram run"))
       and (.preStart | contains("$CREDENTIALS_DIRECTORY/telegram-token"))
+      and (.preStart | contains(".mcpInitStrategy = $managed[0].mcpInitStrategy"))
+      and (.preStart | contains(".mcpServers = $managed[0].mcpServers"))
     ' >/dev/null
 
     printf '%s\n' "$secondaryService" | jq -e '

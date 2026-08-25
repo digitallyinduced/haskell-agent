@@ -232,14 +232,14 @@ renderInlineWith base = Text.concat . map (go base)
         InlineLink url children ->
             let label =
                     renderInlineWith (context <> linkStyle) children
-                linked
-                    | safeUrl url = osc8Link True url label
-                    | otherwise = label
                 suffix
                     | Text.null url || inlinePlainText children == url = ""
                     | otherwise =
                         styled (context <> urlStyle) (" (" <> url <> ")")
-            in linked <> suffix
+                displayedLink = label <> suffix
+            in if safeUrl url
+                then osc8Link True url displayedLink
+                else displayedLink
 
     styled [] value = value
     styled styles value = md styles value

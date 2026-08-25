@@ -107,7 +107,14 @@ import Agent.CLI.Subagents.Runtime
     , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     )
-import Agent.CLI.Style (glyphSession, glyphWarn, roleMuted, roleWarn, cliWindowTitle, setCliWindowTitle)
+import Agent.CLI.Style
+    ( cliWindowTitle
+    , glyphSession
+    , glyphWarn
+    , roleMuted
+    , roleWarn
+    , setCliWindowTitle
+    )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , resolveColor
@@ -136,6 +143,10 @@ import Agent.TUI.Model
     , reduceUi
     )
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
+import Agent.CLI.WindowTitle
+    ( WindowTitleController(..)
+    , newWindowTitleController
+    )
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.Cancel (requestCancel)
 import Agent.Loop
@@ -229,10 +240,20 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       useColor = startup.startupUseColor
       stderrTty = startup.startupStderrTty
       stdoutTty = startup.startupStdoutTty
-      setWindowTitle title =
+      writeWindowTitle title =
           case fullscreen of
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
+      withIoLock action = withMVar ioLock (const action)
+  windowTitle <- newWindowTitleController
+      options.optMotionMode
+      startupWindowTitle
+      withIoLock
+      writeWindowTitle
+  let setWindowTitle = windowTitle.windowTitleSet
+      beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
+      endWindowTitleBusy = windowTitle.windowTitleEndBusy
+      windowTitleWorker = windowTitle.windowTitleWorker
       showTitleEvent = \case
         SessionTitleGenerated SessionTitleResult{..} ->
           case persist of
@@ -242,10 +263,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       PersistenceActive handle
                           | handle.sessionMeta.metaId == resultSessionId
                           , not handle.sessionMeta.metaTitleIsManual ->
-                              withMVar ioLock \_ ->
-                                  setWindowTitle
-                                      (cliWindowTitle handle.sessionMeta.metaCwd
-                                          (Just resultTitle))
+                              setWindowTitle
+                                  (cliWindowTitle handle.sessionMeta.metaCwd
+                                      (Just resultTitle))
                       _ -> pure ()
         SessionTitleFailed SessionTitleFailure{..} ->
           case persist of
@@ -901,6 +921,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
             , sessionSetWindowTitle = setWindowTitle
+            , sessionBeginWindowTitleBusy = beginWindowTitleBusy
+            , sessionEndWindowTitleBusy = endWindowTitleBusy
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
@@ -1003,12 +1025,13 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 RecapSession kind -> callbacks.runnerRunSessionRecap False env kind
                 RecapTurnSummary -> callbacks.runnerRunSessionTurnSummary env
             recapWorker
-    result <- case fullscreen of
-        Just _ ->
-            withAsync btwWorker \_ ->
+    result <- withAsync windowTitleWorker \_ ->
+        case fullscreen of
+            Just _ ->
+                withAsync btwWorker \_ ->
+                    withAsync recapWorker (const sessionAction)
+            Nothing ->
                 withAsync recapWorker (const sessionAction)
-        Nothing ->
-            withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result

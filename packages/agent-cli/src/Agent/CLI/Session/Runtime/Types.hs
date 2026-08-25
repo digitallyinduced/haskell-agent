@@ -115,6 +115,7 @@ data SessionRequest = SessionRequest
     , conversationRef :: !(IORef LiveConversation)
     , initialTurns :: ![SessionTurn]
     , persist :: !Persistence
+    , startupWindowTitle :: !Text
     , projectRoot :: !OsPath
     , home :: !OsPath
     , cwd :: !OsPath

@@ -88,6 +88,8 @@ data SessionEnv = SessionEnv
     , sessionTerminal :: !TerminalCapabilities
     , sessionFullscreen :: !(Maybe FullscreenRuntime)
     , sessionSetWindowTitle :: !(Text -> IO ())
+    , sessionBeginWindowTitleBusy :: !(IO ())
+    , sessionEndWindowTitleBusy :: !(IO ())
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
     , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())
