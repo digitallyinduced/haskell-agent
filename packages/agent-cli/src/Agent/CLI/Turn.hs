@@ -136,7 +136,7 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (forM_, void, when)
+import Control.Monad (forM_, when)
 import Control.Exception.Safe (bracket_, onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
@@ -161,6 +161,7 @@ import System.Process
     , readCreateProcessWithExitCode
     )
 import System.Timeout (timeout)
+import System.Mem (performMajorGC)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn = runOneTurnWithContext True
@@ -360,12 +361,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
                 writeIORef slotRef (PersistenceActive handle')
-                evictDurableConversation env handle'
                 forM_ fullscreen \runtime ->
                     commitFullscreenHistoryTurn
                         runtime
                         (sessionHistoryTurn turnIndex turn)
                         HistoryCommitAppend
+                evictDurableConversation env handle'
     case (restartEffort, result) of
         (Just level, _) -> do
             abortSubagentTurn rootTurnId
@@ -555,7 +556,6 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     writeIORef env.sessionTitleTurnCount titleTurns
                     let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
-                    evictDurableConversation env countedHandle
                     forM_ fullscreen \runtime ->
                         commitFullscreenHistoryTurn
                             runtime
@@ -564,6 +564,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                                 TranscriptAppend -> HistoryCommitAppend
                                 TranscriptReplace -> HistoryCommitReplace
                                 TranscriptReset -> HistoryCommitReset)
+                    evictDurableConversation env countedHandle
                     when
                         ( not countedMeta.metaTitleIsManual
                             && shouldRequestSessionTitle titleTurns
@@ -595,9 +596,10 @@ evictDurableConversation env handle = do
                 env.sessionDatabasePool
                 (sessionsRoot env.sessionHome)
                 sessionId
-    void $
+    evicted <-
         evictLiveTranscript
             env.sessionConversation generation checkpoint
+    when evicted performMajorGC
 
 -- | Wrap the last actual user payload in the Grok Build request envelope.
 -- Synthetic startup, skill, plan, and reminder messages precede it and remain

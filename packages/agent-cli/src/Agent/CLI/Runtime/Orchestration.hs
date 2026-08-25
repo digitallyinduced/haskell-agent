@@ -401,6 +401,7 @@ import System.IO
     ( hIsTerminalDevice,
       stderr,
       stdin )
+import System.Mem ( performMajorGC )
 import System.OsPath
     ( OsPath,
       decodeFS,
@@ -2124,17 +2125,6 @@ runAgentInitializedWithLock
                 (if refreshDialectContext || resumeNeedsFreshContext
                     then Nothing
                     else initialPrevious)
-        forM_ resumed \(meta, _) -> do
-            generation <-
-                currentLiveTranscriptGeneration conversationRef
-            void $
-                evictLiveTranscript
-                    conversationRef
-                    generation
-                    (durableTranscriptCheckpoint
-                        (trustedPool startup.startupDatabaseStore)
-                        root
-                        meta.metaId)
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -2142,6 +2132,18 @@ runAgentInitializedWithLock
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
+        forM_ resumed \(meta, _) -> do
+            generation <-
+                currentLiveTranscriptGeneration conversationRef
+            evicted <-
+                evictLiveTranscript
+                    conversationRef
+                    generation
+                    (durableTranscriptCheckpoint
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        meta.metaId)
+            when evicted performMajorGC
         let recordCompactionUsage usage =
                 when (usage /= emptyTokenUsage) $
                     mask_ do
