@@ -86,7 +86,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                 session.subSessionEffectiveModel
                 Nothing
                 Nothing
-                `shouldBe` ("gpt-5.6-luna", "medium")
+                `shouldBe` ("gpt-5.6-luna", "high")
 
         it "keeps an explicit child model override" do
             let rootParams =
@@ -98,6 +98,39 @@ spec = describe "Agent.CLI.SubagentStore" do
                 (Just "gpt-5.6-nano")
                 (Just "high")
                 `shouldBe` ("gpt-5.6-nano", "high")
+
+        it "honors an explicit Luna effort below the default high floor" do
+            let rootParams =
+                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                rootParams
+                "gpt-5.6-sol"
+                (Just "gpt-5.6-luna")
+                (Just "medium")
+                `shouldBe` ("gpt-5.6-luna", "medium")
+
+        it "does not lower a higher inherited Luna effort" do
+            let rootParams =
+                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "xhigh"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                rootParams
+                "gpt-5.6-luna"
+                Nothing
+                Nothing
+                `shouldBe` ("gpt-5.6-luna", "xhigh")
+
+        it "keeps inherited effort unchanged for other OpenAI models" do
+            let rootParams =
+                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
+            resolveChildModelAndEffort
+                OpenAIProvider
+                rootParams
+                "gpt-5.6-terra"
+                Nothing
+                Nothing
+                `shouldBe` ("gpt-5.6-terra", "medium")
 
     it "round-trips transcript items and meta" do
         withTempDir \dir -> do
