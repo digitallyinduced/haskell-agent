@@ -15,6 +15,7 @@ import Data.Char
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Graphics.Vty as V
 
 -- | Width of a Unicode character before any control-character visualization.
 --
@@ -63,21 +64,15 @@ displayTerminalChar char
 displayTerminalText :: Text -> Text
 displayTerminalText = Text.concatMap displayTerminalChar
 
--- | Approximate the wide/full-width ranges used by terminal emulators.
+-- | Report whether Vty's terminal-width table treats a character as wide.
+--
+-- Vty intentionally treats many standalone emoji code points as one cell,
+-- while the harness has historically reserved two cells for the emoji block.
+-- Keep that UI policy as a narrow override and delegate the rest of Unicode
+-- width classification to the renderer's own table.
 isWideCharacter :: Char -> Bool
 isWideCharacter char =
-    let code = ord char
-    in code >= 0x1100
-        && ( code <= 0x115f
-            || code == 0x2329
-            || code == 0x232a
-            || (code >= 0x2e80 && code <= 0xa4cf && code /= 0x303f)
-            || (code >= 0xac00 && code <= 0xd7a3)
-            || (code >= 0xf900 && code <= 0xfaff)
-            || (code >= 0xfe10 && code <= 0xfe19)
-            || (code >= 0xfe30 && code <= 0xfe6f)
-            || (code >= 0xff00 && code <= 0xff60)
-            || (code >= 0xffe0 && code <= 0xffe6)
-            || (code >= 0x1f300 && code <= 0x1faff)
-            || (code >= 0x20000 && code <= 0x3fffd)
-           )
+    V.safeWcwidth char == 2
+        || code >= 0x1f300 && code <= 0x1faff
+  where
+    code = ord char
