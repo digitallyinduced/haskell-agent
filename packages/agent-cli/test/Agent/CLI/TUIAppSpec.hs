@@ -44,6 +44,7 @@ import Agent.CLI.TUI.App
     , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     )
+import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
@@ -376,8 +377,8 @@ spec = do
             readIORef events `shouldReturn` [Right ()]
 
     describe "fullscreen window title" do
-        it "replays the stored session title through Vty output" do
-            titles <- newIORef ([] :: [String])
+        it "replays the stored session title as UTF-8 OSC bytes" do
+            titles <- newIORef ([] :: [ByteString.ByteString])
             input <- newFullscreenInputBuffer
             runtime <- newFullscreenRuntime
                 input
@@ -395,16 +396,21 @@ spec = do
                 False
                 initialUiState
             (_, output) <- VMock.mockTerminal (80, 24)
-            setFullscreenWindowTitle runtime "New session"
+            let title = "⠋ New session"
+            setFullscreenWindowTitle runtime title
             readIORef runtime.runtimeWindowTitle
-                `shouldReturn` Just "New session"
+                `shouldReturn` Just title
             applyStoredFullscreenWindowTitle
                 runtime
                 output
-                    { V.setOutputWindowTitle =
-                        \title -> modifyIORef' titles (<> [title])
+                    { V.outputByteBuffer =
+                        \bytes -> modifyIORef' titles (<> [bytes])
                     }
-            readIORef titles `shouldReturn` ["New session"]
+            actual <- readIORef titles
+            actual `shouldBe` [oscWindowTitleBytes title]
+            actual
+                `shouldSatisfy`
+                    any (ByteString.isInfixOf (ByteString.pack [0xE2, 0xA0, 0x8B]))
 
     describe "fullscreen Vty ownership" do
         it "shuts down the rebuilt Vty when exit follows suspension" do
