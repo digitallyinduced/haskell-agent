@@ -27,8 +27,8 @@ data LambdaPalette = LambdaPalette
     , lambdaSpark :: !V.Attr
     }
 
-lambdaArtWidget :: Int -> Widget Name
-lambdaArtWidget elapsedMillis =
+lambdaArtWidget :: Bool -> Int -> Widget Name
+lambdaArtWidget colorEnabled elapsedMillis =
     B.Widget B.Fixed B.Fixed do
         context <- B.getContext
         dimAttr <- B.lookupAttrName Theme.lambdaDimAttr
@@ -64,6 +64,7 @@ lambdaArtWidget elapsedMillis =
                 V.vertCat
                     [ V.horizCat
                         [ renderLambdaCell
+                            colorEnabled
                             palette
                             elapsedMillis
                             composition
@@ -145,7 +146,8 @@ buildSolidLambdaRows upperHeight lowerHeight strokeWidth =
         mainStart + index
 
 renderLambdaCell
-    :: LambdaPalette
+    :: Bool
+    -> LambdaPalette
     -> Int
     -> LambdaComposition
     -> [String]
@@ -156,6 +158,7 @@ renderLambdaCell
     -> Int
     -> V.Image
 renderLambdaCell
+    colorEnabled
     palette
     elapsedMillis
     composition
@@ -181,6 +184,7 @@ renderLambdaCell
                 localY = y - composition.lambdaMarginY
                 (attr, animatedCharacter) =
                     animatedLambdaStroke
+                        colorEnabled
                         palette
                         elapsedMillis
                         logoWidth
@@ -205,7 +209,8 @@ lambdaLogoChar rows marginX marginY x y
     localY = y - marginY
 
 animatedLambdaStroke
-    :: LambdaPalette
+    :: Bool
+    -> LambdaPalette
     -> Int
     -> Int
     -> Int
@@ -213,8 +218,9 @@ animatedLambdaStroke
     -> Int
     -> Char
     -> (V.Attr, Char)
-animatedLambdaStroke palette elapsedMillis width height x y character =
+animatedLambdaStroke colorEnabled palette elapsedMillis width height x y character =
     ( Theme.interpolateForeground
+        colorEnabled
         palette.lambdaDim
         palette.lambdaSpark
         opacity

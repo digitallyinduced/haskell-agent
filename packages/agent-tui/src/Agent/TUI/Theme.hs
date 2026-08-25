@@ -328,6 +328,7 @@ waitingPulseAttr True mode trough elapsedMillis
         V.defAttr `V.withForeColor` waitingAccentPeak
     | otherwise =
         waveForegroundFrom
+            True
             trough
             waitingAccentPeak
             (0.3 + 0.7 * pulseBrightness elapsedMillis)
@@ -342,7 +343,7 @@ waveCell True trough peak brightness glyph
     | brightness <= 0.04 =
         V.char V.defAttr ' '
     | otherwise =
-        V.char (waveForegroundFrom trough peak brightness) glyph
+        V.char (waveForegroundFrom True trough peak brightness) glyph
 
 wavePeakFor :: AttrName -> V.Color
 wavePeakFor attr
@@ -351,11 +352,14 @@ wavePeakFor attr
 
 -- | Paint a live accent cell at the given traveling-wave brightness.
 --
--- Blends peak toward trough as 24-bit sRGB (@RGBColor@, not Vty's linear
--- conversion). Brightness 0 is the trough, 1 is the peak — no extra floor,
--- so the bar can disappear into the page.
-waveForegroundFrom :: V.Color -> V.Color -> Double -> V.Attr
-waveForegroundFrom trough peak brightness =
+-- When color is enabled, blends peak toward trough as 24-bit sRGB
+-- (@RGBColor@, not Vty's linear conversion). Brightness 0 is the trough,
+-- 1 is the peak. When color is disabled, keep the default attribute so
+-- @NO_COLOR@ / monochrome maps are not bypassed by raw RGB.
+waveForegroundFrom :: Bool -> V.Color -> V.Color -> Double -> V.Attr
+waveForegroundFrom False _ _ _ =
+    V.defAttr
+waveForegroundFrom True trough peak brightness =
     case blendRgb trough peak (max 0.0 (min 1.0 brightness)) of
         Just blended -> V.defAttr `V.withForeColor` blended
         Nothing -> V.defAttr `V.withForeColor` peak
@@ -368,15 +372,17 @@ waveForeground bgAttr fgAttr brightness =
             let
                 peak = brightenColor fg
                 trough = fromMaybe waveTrough (backgroundColor bgAttr)
-            in waveForegroundFrom trough peak brightness
+            in waveForegroundFrom True trough peak brightness
         Nothing ->
             styleSteps fgAttr (max 0.0 (min 1.0 brightness))
 
 -- | Blend @from@'s foreground toward @to@'s foreground. Used for the empty
 -- conversation sheen so the highlight sweeps instead of jumping between
 -- four named attributes.
-interpolateForeground :: V.Attr -> V.Attr -> Double -> V.Attr
-interpolateForeground fromAttr toAttr opacity =
+interpolateForeground :: Bool -> V.Attr -> V.Attr -> Double -> V.Attr
+interpolateForeground False fromAttr toAttr opacity =
+    if opacity >= 0.5 then toAttr else fromAttr
+interpolateForeground True fromAttr toAttr opacity =
     case (attrColor (V.attrForeColor fromAttr), attrColor (V.attrForeColor toAttr)) of
         (Just from, Just to) ->
             case blendRgb from to opacity of

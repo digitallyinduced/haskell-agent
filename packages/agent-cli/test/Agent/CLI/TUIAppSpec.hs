@@ -408,14 +408,14 @@ spec = do
         it "crops the empty-conversation art to tiny render contexts" do
             let image =
                     V.picImage $
-                        renderWidget Nothing [lambdaArtWidget 0] (5, 3)
+                        renderWidget Nothing [lambdaArtWidget True 0] (5, 3)
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
 
         it "sweeps the empty-conversation sheen over time" do
             let rendered elapsed =
                     show $
-                        renderWidget Nothing [lambdaArtWidget elapsed] (42, 21)
+                        renderWidget Nothing [lambdaArtWidget True elapsed] (42, 21)
             rendered 0 `shouldNotBe` rendered 400
 
         it "shows quick-start actions only when the empty pane has room" do

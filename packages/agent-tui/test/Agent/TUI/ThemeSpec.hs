@@ -108,8 +108,8 @@ spec = do
                 `shouldBe` Theme.thinkingWavePeak
             Theme.wavePeakFor Theme.toolAttr
                 `shouldBe` Theme.runningWavePeak
-            let trough = Theme.waveForegroundFrom Theme.waveTrough Theme.runningWavePeak 0.0
-                peak = Theme.waveForegroundFrom Theme.waveTrough Theme.runningWavePeak 1.0
+            let trough = Theme.waveForegroundFrom True Theme.waveTrough Theme.runningWavePeak 0.0
+                peak = Theme.waveForegroundFrom True Theme.waveTrough Theme.runningWavePeak 1.0
             V.attrForeColor trough `shouldBe` V.SetTo Theme.waveTrough
             V.attrForeColor peak `shouldBe` V.SetTo Theme.runningWavePeak
 
@@ -133,6 +133,9 @@ spec = do
                     Theme.waitingPulseAttr True MotionOff Theme.waveTrough 1300
             V.attrForeColor
                 (Theme.waitingPulseAttr False MotionFull Theme.waveTrough 200)
+                `shouldBe` V.Default
+            V.attrForeColor
+                (Theme.waveForegroundFrom False Theme.waveTrough Theme.runningWavePeak 0.8)
                 `shouldBe` V.Default
 
 terminalForeground :: AttrName -> V.MaybeDefault V.Color

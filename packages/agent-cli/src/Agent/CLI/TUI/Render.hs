@@ -1251,11 +1251,12 @@ drawEmptyConversation state =
                         vBox
                             [ vLimit
                                 (max 8 (height - quickStartReservedRows))
-                                (hCenter (lambdaArtWidget frame))
+                                (hCenter (lambdaArtWidget colorEnabled frame))
                             , hCenter (drawQuickStartPanel state)
                             ]
-                else center (lambdaArtWidget frame)
+                else center (lambdaArtWidget colorEnabled frame)
   where
+    colorEnabled = state.appRuntime.runtimeColor
     frame
         | userActionPending state = 0
         | otherwise =
