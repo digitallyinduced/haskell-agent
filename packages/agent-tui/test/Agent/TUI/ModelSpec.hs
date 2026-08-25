@@ -1,6 +1,10 @@
 module Agent.TUI.ModelSpec (spec) where
 
 import Agent.TUI.Model
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    )
 import Agent.Loop
     ( LoopEvent(..)
     , emptyTurnOutput
@@ -675,7 +679,7 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
             _ -> expectationFailure "expected one running edit block"
 
-    it "renders todo_write as a checklist block" do
+    it "keeps todo_write in a live panel instead of scrollback" do
         let call =
                 functionToolCall
                     "todo-1"
@@ -689,33 +693,36 @@ spec = describe "fullscreen UI reducer" do
                 , callKind = FunctionCallKind
                 }
             started =
-                Foldable.toList $
-                    (.uiBlocks) $
-                        apply
-                            [ UiLoop TurnStarted
-                            , UiLoop (ToolStarted call)
-                            ]
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
             finished =
-                Foldable.toList $
-                    (.uiBlocks) $
-                        apply
-                            [ UiLoop TurnStarted
-                            , UiLoop (ToolStarted call)
-                            , UiLoop (ToolFinished result)
-                            ]
-        case started of
-            [block] -> do
-                block.blockKind `shouldBe` BlockTodo
-                block.blockTitle `shouldBe` "todo_write"
-                block.blockBody `shouldBe` "Find and clone repos"
-            _ -> expectationFailure "expected one running todo block"
-        case finished of
-            [block] -> do
-                block.blockKind `shouldBe` BlockTodo
-                block.blockTitle `shouldBe` "todo_write"
-                block.blockBody
-                    `shouldBe` "✓ Find and clone repos\n▶ Investigate Grok Build"
-            _ -> expectationFailure "expected one completed todo block"
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    ]
+            done =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result
+                        { output = "- [completed] 1: Find and clone repos"
+                        })
+                    ]
+        Foldable.toList started.uiBlocks `shouldBe` []
+        started.uiActivity `shouldBe` "todo_write"
+        visibleTodoList started `shouldBe` []
+        Foldable.toList finished.uiBlocks `shouldBe` []
+        map (.todoLineText) (visibleTodoList finished)
+            `shouldBe` ["Find and clone repos", "Investigate Grok Build"]
+        map (.todoLineStatus) (visibleTodoList finished)
+            `shouldBe` [TodoDisplayCompleted, TodoDisplayInProgress]
+        Foldable.toList done.uiBlocks `shouldBe` []
+        visibleTodoList done `shouldBe` []
+        done.uiTodos
+            `shouldBe` [TodoDisplayLine TodoDisplayCompleted "Find and clone repos"]
 
     it "formats collaboration result JSON for display" do
         let call =

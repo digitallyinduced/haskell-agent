@@ -29,6 +29,7 @@ module Agent.TUI.Model
     , timestampNewMessageBlocks
     , progressNotice
     , successNotice
+    , visibleTodoList
     , uiNextDeadlineMillis
     , uiNeedsTick
     , warningNotice
@@ -36,9 +37,11 @@ module Agent.TUI.Model
     ) where
 
 import Agent.TUI.Presentation
-    ( formatSearchReplaceDiff
+    ( TodoDisplayLine
+    , formatSearchReplaceDiff
     , formatToolOutput
-    , todoCallPreview
+    , todoListFromToolOutput
+    , todoListHasOpenWork
     , toolCallInput
     , toolCallTitle
     )
@@ -65,6 +68,7 @@ import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Char (isSpace)
+import Data.Maybe (fromMaybe)
 
 newtype BlockId = BlockId Int
     deriving (Eq, Ord, Show)
@@ -184,6 +188,7 @@ data UiState = UiState
     , uiTurnStartBlock :: !Int
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
+    , uiTodos :: ![TodoDisplayLine]
     }
     deriving (Eq, Show)
 
@@ -260,7 +265,15 @@ initialUiState = UiState
     , uiTurnStartBlock = 0
     , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
+    , uiTodos = []
     }
+
+-- | Checklist shown above the prompt. Hidden once every item is done so a
+-- finished list does not linger into the next turn.
+visibleTodoList :: UiState -> [TodoDisplayLine]
+visibleTodoList state
+    | todoListHasOpenWork state.uiTodos = state.uiTodos
+    | otherwise = []
 
 -- | Status-only blocks can appear before the first user turn, but the
 -- conversation is still empty from the user's perspective.
@@ -442,6 +455,7 @@ reduceUi event state = case event of
             , uiAttemptStartBlock = 0
             , uiToolCalls = Map.empty
             , uiRetryCountdown = Nothing
+            , uiTodos = []
             }
     UiSetFollow follow ->
         state
@@ -667,30 +681,35 @@ reduceLoop event state = case event of
             , uiNoticeElapsedMillis = 0
             , uiAttemptStartBlock = Seq.length finalized.uiBlocks
             }
-    ToolStarted call ->
-        let
-            kind = toolBlockKind call.name
-            title = toolCallTitle call
-            blockIndex = Seq.length state.uiBlocks
-            body = case canonicalToolName call.name of
-                "search_replace" ->
-                    formatSearchReplaceDiff call.arguments
-                "todo_write" -> todoCallPreview call
-                "update_plan" -> todoCallPreview call
-                _ -> ""
-            detail = toolCallInput call
-        in appendBlock kind title body detail
-            BlockRunning (Just call.callId)
+    ToolStarted call
+        | isTodoTool call.name ->
             state
                 { uiRunning = True
                 , uiAwaitingInput = False
-                , uiActivity = title
-                , uiToolCalls =
-                    Map.insert
-                        call.callId
-                        (blockIndex, call)
-                        state.uiToolCalls
+                , uiActivity = toolCallTitle call
                 }
+        | otherwise ->
+            let
+                kind = toolBlockKind call.name
+                title = toolCallTitle call
+                blockIndex = Seq.length state.uiBlocks
+                body = case canonicalToolName call.name of
+                    "search_replace" ->
+                        formatSearchReplaceDiff call.arguments
+                    _ -> ""
+                detail = toolCallInput call
+            in appendBlock kind title body detail
+                BlockRunning (Just call.callId)
+                state
+                    { uiRunning = True
+                    , uiAwaitingInput = False
+                    , uiActivity = title
+                    , uiToolCalls =
+                        Map.insert
+                            call.callId
+                            (blockIndex, call)
+                            state.uiToolCalls
+                    }
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
@@ -700,6 +719,7 @@ reduceLoop event state = case event of
                 Just (_, call) ->
                     result
                         { output = formatToolOutput call result.output }
+            todos = fromMaybe state.uiTodos (todoListFromToolOutput result.output)
             next =
                 state
                     { uiRunning = True
@@ -707,6 +727,7 @@ reduceLoop event state = case event of
                     , uiActivity = "Thinking…"
                     , uiToolCalls =
                         Map.delete result.callId state.uiToolCalls
+                    , uiTodos = todos
                     }
         in case activeCall of
             Nothing -> next
@@ -1103,6 +1124,10 @@ selectionAfterTruncate blocks selected =
         _ ->
             let index = Seq.length blocks - 1
             in (\block -> (index, block)) <$> Seq.lookup index blocks
+
+isTodoTool :: Text -> Bool
+isTodoTool name =
+    canonicalToolName name `elem` ["todo_write", "update_plan"]
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName

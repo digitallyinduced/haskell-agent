@@ -184,6 +184,7 @@ import Agent.TUI.Motion
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
+    , liveTodoPanelLines
     , parseTodoList
     , permissionToolCallPrompt
     , todoStatusGlyph
@@ -1703,6 +1704,7 @@ drawMain state =
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
                 , drawFollowStatus state.appUi
+                , drawLiveTodos state.appUi
                 , drawPromptActivity state
                 , Composer.drawComposer state
                 , drawFooter state
@@ -2283,6 +2285,28 @@ drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
         txt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+
+drawLiveTodos :: UiState -> Widget Name
+drawLiveTodos ui =
+    case liveTodoPanelLines 8 (visibleTodoList ui) of
+        [] -> emptyWidget
+        lines_ ->
+            padLeftRight 2 $
+                vBox (map drawLiveTodoLine lines_)
+
+drawLiveTodoLine :: Text -> Widget Name
+drawLiveTodoLine line
+    | "… +" `Text.isPrefixOf` line =
+        withAttr Theme.mutedAttr (txt line)
+    | otherwise =
+        withAttr (todoStatusAttr (todoLineStatusFromText line)) (txtWrap line)
+
+todoLineStatusFromText :: Text -> TodoDisplayStatus
+todoLineStatusFromText line
+    | "▶" `Text.isPrefixOf` line = TodoDisplayInProgress
+    | "✓" `Text.isPrefixOf` line = TodoDisplayCompleted
+    | "✗" `Text.isPrefixOf` line = TodoDisplayCancelled
+    | otherwise = TodoDisplayPending
 
 drawPromptActivity :: AppState -> Widget Name
 drawPromptActivity state =
