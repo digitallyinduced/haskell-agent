@@ -109,6 +109,8 @@ data ReplAction
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
+    | ReplSearch !Text
+    -- ^ Search persisted conversation turns and open matching sessions.
     | ReplCompact (Maybe Text)
     -- ^ Optional focus note for what to keep while compacting history.
     | ReplClear
@@ -174,6 +176,7 @@ slashCommands =
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
+    , cmd "search" [] "/search <QUERY>" "Search past conversations and resume a match" True
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
@@ -365,6 +368,12 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplLogin
                     else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
+            "search" ->
+                let query =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null query
+                    then ReplCommandError "usage: /search <QUERY>"
+                    else ReplSearch query
             "compact" ->
                 let focus =
                         Text.strip (Text.drop (Text.length command) line)

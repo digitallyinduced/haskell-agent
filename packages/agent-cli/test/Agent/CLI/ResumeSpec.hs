@@ -10,6 +10,7 @@ import Agent.CLI.Session
 import Agent.Dialect (DialectId(..))
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
+import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
@@ -96,6 +97,17 @@ spec = do
             endResumeSearch searched
                 `shouldSatisfy` (not . (.resumeBrowserSearching))
 
+        it "keeps PostgreSQL search results visible after applying a query" do
+            let applied =
+                    applyResumeSearchResults
+                        "database migration"
+                        (take 1 entries)
+                        browser0
+            applied.resumeBrowserAppliedQuery
+                `shouldBe` Just "database migration"
+            map (.resumeId) (visibleResumeBrowser applied)
+                `shouldBe` ["one"]
+
         it "moves, expands, and removes the selected session" do
             let moved = moveResumeBrowser 1 browser0
                 expanded = toggleResumeExpanded moved
@@ -114,6 +126,40 @@ spec = do
             resumeSourceLabel
                 (cycleResumeSource (cycleResumeSource browser0)).resumeBrowserSource
                 `shouldBe` "All"
+
+    describe "resumeSearchEntries" do
+        it "deduplicates ranked turn matches and attaches the best excerpt" do
+            let at = posixSecondsToUTCTime 120
+                results =
+                    [ ConversationSearchResult
+                        "two" 3 at
+                        "migrate state to postgres"
+                        (Just "the database migration is complete")
+                        0.9
+                    , ConversationSearchResult
+                        "two" 1 at
+                        "older postgres mention"
+                        Nothing
+                        0.4
+                    , ConversationSearchResult
+                        "one" 2 at
+                        "search previous sessions"
+                        Nothing
+                        0.3
+                    ]
+                entries =
+                    resumeSearchEntries
+                        [ sampleMeta "one" "first"
+                        , sampleMeta "two" "second"
+                        ]
+                        results
+            map (.resumeId) entries `shouldBe` ["two", "one"]
+            fmap (.resumeMatch) entries
+                `shouldBe`
+                    [ Just
+                        "user: migrate state to postgres  ·  assistant: the database migration is complete"
+                    , Just "user: search previous sessions"
+                    ]
 
     describe "groupResumeEntries" do
         it "groups matching cwd basenames while preserving first-seen order" do

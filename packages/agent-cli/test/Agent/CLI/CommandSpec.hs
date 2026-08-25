@@ -188,6 +188,14 @@ spec = do
             parseReplLine "/resume a b"
                 `shouldBe` ReplCommandError "usage: /resume [ID]"
 
+        it "searches past conversations with the full query suffix" do
+            parseReplLine "/search postgres migration"
+                `shouldBe` ReplSearch "postgres migration"
+            parseReplLine "/SEARCH   keep  spaces"
+                `shouldBe` ReplSearch "keep  spaces"
+            parseReplLine "/search"
+                `shouldBe` ReplCommandError "usage: /search <QUERY>"
+
         it "opens the agent hierarchy" do
             parseReplLine "/agents" `shouldBe` ReplAgents
             parseReplLine "/a" `shouldBe` ReplAgents
@@ -268,6 +276,7 @@ spec = do
                     , "rename"
                     , "login"
                     , "resume"
+                    , "search"
                     , "compact"
                     , "clear"
                     , "new"

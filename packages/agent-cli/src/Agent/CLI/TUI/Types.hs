@@ -94,6 +94,7 @@ data AppEvent
         !ResumeBrowser
         !(Text -> IO (Either Text ResumeEntry))
         !(Text -> IO (Either Text ()))
+        !(Text -> IO (Either Text [ResumeEntry]))
         !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
     | AppSetSlashCatalog !SlashCatalog
@@ -184,6 +185,7 @@ data AppState = AppState
     , appResumeReply :: !(Maybe (TMVar (Maybe ResumeEntry)))
     , appResumeLoad :: !(Maybe (Text -> IO (Either Text ResumeEntry)))
     , appResumeDelete :: !(Maybe (Text -> IO (Either Text ())))
+    , appResumeSearch :: !(Maybe (Text -> IO (Either Text [ResumeEntry])))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
