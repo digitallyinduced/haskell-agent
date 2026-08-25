@@ -374,6 +374,12 @@ spec = do
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
 
+        it "sweeps the empty-conversation sheen over time" do
+            let rendered elapsed =
+                    show $
+                        renderWidget Nothing [lambdaArtWidget elapsed] (42, 21)
+            rendered 0 `shouldNotBe` rendered 400
+
         it "shows quick-start actions only when the empty pane has room" do
             quickStartVisible 100 30 `shouldBe` True
             quickStartVisible 47 30 `shouldBe` False

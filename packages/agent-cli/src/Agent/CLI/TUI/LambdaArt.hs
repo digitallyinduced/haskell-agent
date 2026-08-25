@@ -4,6 +4,7 @@ module Agent.CLI.TUI.LambdaArt
     ) where
 
 import Agent.CLI.TUI.Types (Name)
+import Agent.TUI.Motion (shineOpacity)
 import qualified Agent.TUI.Theme as Theme
 import Brick (Widget)
 import qualified Brick.Types as B
@@ -27,7 +28,7 @@ data LambdaPalette = LambdaPalette
     }
 
 lambdaArtWidget :: Int -> Widget Name
-lambdaArtWidget frame =
+lambdaArtWidget elapsedMillis =
     B.Widget B.Fixed B.Fixed do
         context <- B.getContext
         dimAttr <- B.lookupAttrName Theme.lambdaDimAttr
@@ -49,12 +50,13 @@ lambdaArtWidget frame =
                     composition.lambdaLowerHeight
                     composition.lambdaStrokeWidth
             logoWidth = maximum (0 : map length rows)
+            logoHeight = length rows
             canvasWidth = logoWidth + 2 * composition.lambdaMarginX
-            canvasHeight = length rows + 2 * composition.lambdaMarginY
+            canvasHeight = logoHeight + 2 * composition.lambdaMarginY
             particles =
                 lambdaOrbitParticles
                     palette
-                    frame
+                    (elapsedMillis `div` 160)
                     canvasWidth
                     canvasHeight
                     composition.lambdaHasOrbit
@@ -63,9 +65,11 @@ lambdaArtWidget frame =
                     [ V.horizCat
                         [ renderLambdaCell
                             palette
-                            frame
+                            elapsedMillis
                             composition
                             rows
+                            logoWidth
+                            logoHeight
                             particles
                             x
                             y
@@ -145,11 +149,22 @@ renderLambdaCell
     -> Int
     -> LambdaComposition
     -> [String]
+    -> Int
+    -> Int
     -> [((Int, Int), Char, V.Attr)]
     -> Int
     -> Int
     -> V.Image
-renderLambdaCell palette frame composition rows particles x y =
+renderLambdaCell
+    palette
+    elapsedMillis
+    composition
+    rows
+    logoWidth
+    logoHeight
+    particles
+    x
+    y =
     case lambdaLogoChar rows composition.lambdaMarginX
         composition.lambdaMarginY x y of
         ' ' ->
@@ -167,7 +182,9 @@ renderLambdaCell palette frame composition rows particles x y =
                 (attr, animatedCharacter) =
                     animatedLambdaStroke
                         palette
-                        frame
+                        elapsedMillis
+                        logoWidth
+                        logoHeight
                         localX
                         localY
                         character
@@ -192,36 +209,30 @@ animatedLambdaStroke
     -> Int
     -> Int
     -> Int
+    -> Int
+    -> Int
     -> Char
     -> (V.Attr, Char)
-animatedLambdaStroke palette frame x y character
-    | distance == 0 =
-        (palette.lambdaSpark, energizedStroke character)
-    | distance <= 2 =
-        (palette.lambdaGlow, character)
-    | distance <= 5 =
-        (palette.lambdaTrail, character)
-    | otherwise =
-        (palette.lambdaDim, character)
+animatedLambdaStroke palette elapsedMillis width height x y character =
+    ( Theme.interpolateForeground
+        palette.lambdaDim
+        palette.lambdaSpark
+        opacity
+    , if opacity >= 0.24
+        then energizedStroke character
+        else character
+    )
   where
-    period = 36
-    phase = frame `mod` period
-    oppositePhase = (phase + period `div` 2) `mod` period
-    cellPhase = (y * 5 + x * 3) `mod` period
-    distance =
-        min
-            (circularDistance period phase cellPhase)
-            (circularDistance period oppositePhase cellPhase)
+    diagonal =
+        (fromIntegral x + fromIntegral (max 0 (height - 1 - y)))
+            / fromIntegral (max 1 (width + height))
+    opacity =
+        shineOpacity diagonal (fromIntegral (max 0 elapsedMillis) / 1000)
 
 energizedStroke :: Char -> Char
 energizedStroke = \case
     '_' -> '='
     _ -> '*'
-
-circularDistance :: Int -> Int -> Int -> Int
-circularDistance period left right =
-    let direct = abs (left - right)
-    in min direct (period - direct)
 
 lambdaOrbitParticles
     :: LambdaPalette

@@ -17,13 +17,20 @@ module Agent.TUI.Motion
     , motionDelayMicros
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
+    , accentBarGlyph
+    , pulseBrightness
     , quietIndicator
     , quietSpinnerFrames
+    , shineOpacity
     , transientNoticeDurationMillis
     , waitingIndicator
     , waitingPulseFrames
+    , waveBrightness
+    , waveRows
+    , waveRowsFor
     ) where
 
+import Data.Fixed (mod')
 import Data.Text (Text)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.List.NonEmpty as NonEmpty
@@ -131,11 +138,10 @@ waitingIndicator
     -> MotionMode
     -> Int
     -> Text
-waitingIndicator =
-    motionIndicator
-        waitingFrameDurationMillis
-        waitingPulseFamily
-        staticWaiting
+waitingIndicator glyphs _mode _elapsed =
+    -- Keep a static diamond; color renderers breathe its brightness instead
+    -- of cycling glyphs.
+    staticWaiting glyphs
 
 motionIndicator
     :: Int
@@ -161,13 +167,13 @@ motionFrameAt frameDurationMillis elapsedMillis frames =
         !! ((max 0 elapsedMillis `div` max 1 frameDurationMillis)
             `mod` NonEmpty.length frames)
 
--- | Scheduler cadence. Full motion deliberately stays below 30 FPS until the
--- Brick/Vty cursor-blink path has been audited at that rate.
+-- | Scheduler cadence. Fast is ~30 FPS for live rails; slow is ~12 FPS
+-- for the empty-state sheen.
 motionIntervalMicros :: MotionMode -> MotionDemand -> Int
 motionIntervalMicros mode demand = case (mode, demand) of
     (_, MotionNone) -> 1000000
-    (MotionFull, MotionSlow) -> 160000
-    (MotionFull, MotionFast) -> 80000
+    (MotionFull, MotionSlow) -> 80000
+    (MotionFull, MotionFast) -> 33000
     (MotionReduced, _) -> 500000
     (MotionOff, _) -> 1000000
 
@@ -209,9 +215,6 @@ quietFrameDurationMillis = 160
 backgroundFrameDurationMillis :: Int
 backgroundFrameDurationMillis = 320
 
-waitingFrameDurationMillis :: Int
-waitingFrameDurationMillis = 320
-
 staticForeground :: MotionGlyphSet -> Text
 staticForeground = \case
     MotionUnicode -> "●"
@@ -231,3 +234,104 @@ staticWaiting :: MotionGlyphSet -> Text
 staticWaiting = \case
     MotionUnicode -> "◆"
     MotionAscii -> "!"
+
+-- | Full-height scrollback accent rail. The heavy vertical bar lets a
+-- traveling wave paint every row without shifting layout.
+accentBarGlyph :: MotionGlyphSet -> Text
+accentBarGlyph = \case
+    MotionUnicode -> "┃"
+    MotionAscii -> "|"
+
+-- | Rows per wave cycle on a live accent rail. Lower is a tighter/faster
+-- spatial period.
+waveRows :: Int
+waveRows = 32
+
+-- | Tighten the spatial period on short rails so a 4–6 row thinking
+-- block still shows a traveling highlight instead of a flat pulse.
+waveRowsFor :: Int -> Int
+waveRowsFor height =
+    max 8 (min waveRows (max 1 height * 3))
+
+-- | 0.15 rad/tick at 30fps.
+waveRadiansPerSecond :: Double
+waveRadiansPerSecond = 0.15 * 30
+
+-- | 0.08 rad/tick at 30fps, about 1.3s per visible pulse.
+pulseRadiansPerSecond :: Double
+pulseRadiansPerSecond = 0.08 * 30
+
+-- | Traveling-wave brightness in @[0, 1]@ for one rail row.
+--
+-- @sin²(t + phase)@ with a per-row phase so the bright band walks down
+-- the rail independently of block height.
+waveBrightness
+    :: Int
+    -- ^ Elapsed milliseconds.
+    -> Int
+    -- ^ Row within the block, 0 = top.
+    -> Int
+    -- ^ Rows per full wave cycle.
+    -> Double
+waveBrightness elapsedMillis row rowsPerCycle =
+    let
+        rows = fromIntegral (max 1 rowsPerCycle)
+        phase = (fromIntegral row / rows) * 2 * pi
+        t = seconds elapsedMillis * waveRadiansPerSecond
+        sine = sin (t + phase)
+    in sine * sine
+
+-- | Temporal pulse in @[0, 1]@ shared by every "waiting on you" cue.
+pulseBrightness :: Int -> Double
+pulseBrightness elapsedMillis =
+    let
+        t = seconds elapsedMillis * pulseRadiansPerSecond
+        sine = sin t
+    in sine * sine
+
+-- | Diagonal sheen opacity in @[0, 1]@ for empty-state logo art.
+--
+-- A raised-cosine band sweeps bottom-left → top-right, then parks
+-- off-screen while a small global pulse keeps the glyph breathing.
+shineOpacity
+    :: Double
+    -- ^ Normalized diagonal position, 0 = bottom-left, 1 = top-right.
+    -> Double
+    -- ^ Seconds since the animation started.
+    -> Double
+shineOpacity diag secs =
+    let
+        p = (secs `mod'` shineCycleSeconds) / shineCycleSeconds
+        q = min 1.0 (p / shineSweepFrac)
+        bandPos = negate shineBandHalf + q * (1.0 + 2.0 * shineBandHalf)
+        pulse =
+            shinePulseAmount
+                * (0.5 - 0.5 * cos (2 * pi * secs / shinePulseSeconds))
+        distance = abs (diag - bandPos)
+        shine
+            | distance < shineBandHalf =
+                0.5 * (1.0 + cos (pi * distance / shineBandHalf))
+            | otherwise = 0.0
+    in max 0.0 (min 1.0 (pulse + shinePeak * shine))
+
+shineBandHalf :: Double
+shineBandHalf = 0.38
+
+shineCycleSeconds :: Double
+shineCycleSeconds = 4.0
+
+shineSweepFrac :: Double
+shineSweepFrac = 0.32
+
+shinePeak :: Double
+shinePeak = 0.33
+
+shinePulseAmount :: Double
+shinePulseAmount = 0.06
+
+shinePulseSeconds :: Double
+shinePulseSeconds = 5.0
+
+seconds :: Int -> Double
+seconds elapsedMillis =
+    fromIntegral (max 0 elapsedMillis) / 1000
