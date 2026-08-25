@@ -54,8 +54,8 @@ spec = do
             statePrintedText started `shouldBe` False
 
         it "streams markdown through a pure state transition" do
-            let (state1, first) = streamMarkdown "hello " emptyRenderState
-                (state2, second) = streamMarkdown "**world**" state1
+            let (state1, first) = streamMarkdown "hello\n" emptyRenderState
+                (state2, second) = streamMarkdown "world\n" state1
             statePrintedText state2 `shouldBe` False
             first <> second `shouldSatisfy` Text.isInfixOf "hello"
             first <> second `shouldSatisfy` Text.isInfixOf "world"
@@ -351,6 +351,14 @@ spec = do
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "Thinking…")
                 body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
+
+        it "reuses the live spinner when a tool round starts another turn" do
+            withRenderConfig True False \config _handle _path -> do
+                renderEvent config TurnStarted
+                first <- readIORef config.renderThinkingSpinner
+                renderEvent config TurnStarted
+                second <- readIORef config.renderThinkingSpinner
+                second `shouldBe` first
 
         it "shows retry activity on the live thinking status" do
             withRenderConfig True False \config handle path -> do
