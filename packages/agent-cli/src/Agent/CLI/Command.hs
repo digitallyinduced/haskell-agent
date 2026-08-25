@@ -93,6 +93,8 @@ data ReplAction
     | ReplCopySession
     | ReplShowTerminal
     | ReplAgents
+    | ReplShowAgentLimit
+    | ReplSetAgentLimit Int
     | ReplMcp
     | ReplGoalStatus
     | ReplGoalPause
@@ -194,7 +196,7 @@ slashCommands =
     , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
-    , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
+    , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
     , cmd "mcp" ["mcps"] "/mcp" "Manage local MCP servers" False
     , grokToolCmd "scheduler_create"
         "loop" [] "/loop [interval] <prompt>"
@@ -433,10 +435,7 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplShowTerminal
                     else ReplCommandError "usage: /terminal"
-            "agents" ->
-                if null args
-                    then ReplAgents
-                    else ReplCommandError "usage: /agents"
+            "agents" -> parseAgentsCommand args
             "mcp" ->
                 if null args
                     then ReplMcp
@@ -698,6 +697,15 @@ parsePasteCommand rest =
             _ -> (False, rest)
     in ReplPaste immediate (Text.strip caption)
 
+parseAgentsCommand :: [Text] -> ReplAction
+parseAgentsCommand = \case
+    [] -> ReplAgents
+    ["limit"] -> ReplShowAgentLimit
+    ["limit", raw] -> case reads (Text.unpack raw) of
+        [(n, "")] | n >= 1 -> ReplSetAgentLimit n
+        _ -> ReplCommandError "usage: /agents [limit [N]]"
+    _ -> ReplCommandError "usage: /agents [limit [N]]"
+
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case
     [] -> ReplShowEffort
@@ -906,6 +914,7 @@ completeSlashArgs catalog cmd word =
 
 argCompletions :: SlashCatalog -> SlashCommand -> [Text]
 argCompletions catalog spec = case spec.slashName of
+    "agents" -> ["limit"]
     "effort" -> reasoningEfforts
     "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]

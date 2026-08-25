@@ -62,6 +62,7 @@ library
                     , process
                     , safe-exceptions
                     , text
+                    , temporary
                     , time
                     , transformers
                     , unix
@@ -103,5 +104,6 @@ test-suite agent-grok-build-dialect-test
                     , hspec
                     , safe-exceptions
                     , text
+                    , temporary
                     , time
                     , unix

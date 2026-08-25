@@ -25,6 +25,7 @@ spec = do
                 , "--bash"
                 , "--yolo"
                 , "--max-turns", "3"
+                , "--max-concurrent-agents", "64"
                 , "--compact-threshold", "1200"
                 , "--effort", "high"
                 , "-p", "hello"
@@ -36,6 +37,7 @@ spec = do
                     , optBash = True
                     , optYolo = True
                     , optMaxTurns = 3
+                    , optMaxConcurrentAgents = Just 64
                     , optCompactThreshold = Just 1200
                     , optEffort = Just "high"
                     , optPrompt = Just "hello"
@@ -101,6 +103,14 @@ spec = do
             parseArgs ["--managed-turn-file", "turn.json"]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optManagedTurnFile = Just (fromFilePath "turn.json") })
+
+        it "requires a positive concurrent agent limit" do
+            parseArgs ["--max-concurrent-agents", "0"] `shouldSatisfy` isLeft
+            parseArgs ["--max-concurrent-agents", "-1"] `shouldSatisfy` isLeft
+            parseArgs ["--max-concurrent-agents", "nope"] `shouldSatisfy` isLeft
+            parseArgs ["--max-concurrent-agents", "8"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optMaxConcurrentAgents = Just 8 })
 
         it "requires a positive compaction threshold" do
             parseArgs ["--compact-threshold", "0"] `shouldSatisfy` isLeft

@@ -93,6 +93,8 @@ data SessionEnv = SessionEnv
     , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
     , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())
     , sessionAbortSubagentTurn :: !(Maybe RootTurnId -> IO ())
+    , sessionConcurrentLimit :: !(IO Int)
+    , sessionSetConcurrentLimit :: !(Int -> IO Text)
     , sessionOnPersisted :: !(SessionHandle -> IO ())
     , sessionReset :: !(IO ())
     }

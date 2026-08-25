@@ -38,6 +38,7 @@ import Agent.TUI.Model
     , UiState(..)
     , initialUiState
     , reduceUi
+    , visibleTodoList
     , timestampNewMessageBlocks
     , warningNotice
     )
@@ -224,6 +225,48 @@ spec = do
             rendered `shouldSatisfy`
                 Text.isInfixOf "Inspect AppState before continuing."
             rendered `shouldNotSatisfy` Text.isInfixOf "`AppState`"
+
+        it "keeps live todos to one row each so the prompt stays visible" do
+            let todoCall =
+                    functionToolCall
+                        "todo-1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"Keep this list\"}]}"
+                longItem =
+                    "Investigate a very long remaining task that would wrap \
+                    \across many columns if the panel used wrapping text"
+                todoResult = ToolCallResult
+                    { callId = "todo-1"
+                    , output =
+                        "- [completed] 1: Find and clone repos\n\
+                        \- [in_progress] 2: "
+                            <> longItem
+                    , callKind = FunctionCallKind
+                    }
+                ui =
+                    reduceUi
+                        (UiLoop (ToolFinished todoResult))
+                        (reduceUi
+                            (UiLoop (ToolStarted todoCall))
+                            (reduceUi (UiLoop TurnStarted) baseState.appUi))
+                app = baseState { appUi = ui }
+                size = (40, 16)
+                rows =
+                    pictureRows
+                        (renderWidget
+                            (Just Theme.monochrome)
+                            (drawApp app)
+                            size)
+                        size
+                rendered = Text.unlines rows
+            length (filter (Text.isInfixOf "Find and clone repos") rows)
+                `shouldBe` 1
+            length (filter (Text.isInfixOf "Investigate a very long") rows)
+                `shouldBe` 1
+            rendered `shouldSatisfy` Text.isInfixOf "Thinking"
+            rendered `shouldSatisfy` Text.isInfixOf "Type a follow-up"
+            visibleTodoList ui
+                `shouldSatisfy` (not . null)
 
         it "renders a selected child with the retained conversation renderer" do
             let target = AgentChild (SubagentId "renderer")

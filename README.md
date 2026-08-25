@@ -259,6 +259,16 @@ the existing always-loaded learned-skill startup context.
 
 Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
 
+### Voice dictation
+
+Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop.
+On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM directly to
+`wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
+Audio is sent while you speak, and xAI's partial transcript is displayed live.
+Dictation uses the same configured Grok OAuth subscription or managed xAI
+API-key credential as the xAI provider; it does not run an external app server. Set
+`XAI_STT_LANGUAGE` to a supported language code to override the default `en`.
+
 ### Claude Code subscription
 
 Install Claude Code, authenticate it with a first-party Claude subscription,

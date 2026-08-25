@@ -65,6 +65,7 @@ module Agent.CLI.TUI.App
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
+import Agent.CLI.Dictation (insertDictation)
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
@@ -184,6 +185,7 @@ import Agent.TUI.Motion
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
+    , liveTodoPanelLines
     , parseTodoList
     , permissionToolCallPrompt
     , todoStatusGlyph
@@ -1703,6 +1705,7 @@ drawMain state =
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
                 , drawFollowStatus state.appUi
+                , drawLiveTodos state.appUi
                 , drawPromptActivity state
                 , Composer.drawComposer state
                 , drawFooter state
@@ -2283,6 +2286,28 @@ drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
         txt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+
+drawLiveTodos :: UiState -> Widget Name
+drawLiveTodos ui =
+    case liveTodoPanelLines 8 (visibleTodoList ui) of
+        [] -> emptyWidget
+        lines_ ->
+            padLeftRight 2 $
+                vBox (map (vLimit 1 . drawLiveTodoLine) lines_)
+
+drawLiveTodoLine :: Text -> Widget Name
+drawLiveTodoLine line
+    | "… +" `Text.isPrefixOf` line =
+        withAttr Theme.mutedAttr (txt line)
+    | otherwise =
+        withAttr (todoStatusAttr (todoLineStatusFromText line)) (txt line)
+
+todoLineStatusFromText :: Text -> TodoDisplayStatus
+todoLineStatusFromText line
+    | "▶" `Text.isPrefixOf` line = TodoDisplayInProgress
+    | "✓" `Text.isPrefixOf` line = TodoDisplayCompleted
+    | "✗" `Text.isPrefixOf` line = TodoDisplayCancelled
+    | otherwise = TodoDisplayPending
 
 drawPromptActivity :: AppState -> Widget Name
 drawPromptActivity state =
@@ -2873,9 +2898,9 @@ drawFooter state =
                         "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
-                            "Enter queue  │  Ctrl+Enter/Ctrl+O send now  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  Tab scrollback"
+                            "Enter queue  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback"
                         | otherwise ->
-                            "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+                            "Enter send  │  Ctrl+R dictate  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Tab scrollback"
 
 drawPermission :: AppState -> PermissionOverlay -> Widget Name
 drawPermission state permission =
@@ -3783,6 +3808,23 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
+    AppEvent (AppDictationFinished result) ->
+        case result of
+            Left message ->
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            warningNotice ("Dictation failed: " <> message)
+            Right transcript -> do
+                state <- get
+                let ui = state.appUi
+                    (draft, cursor) =
+                        insertDictation ui.uiDraft ui.uiCursor transcript
+                applyLocalUiEvent (UiSetDraft draft cursor)
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            successNotice "Dictation inserted."
     AppEvent (AppSetWindowTitle title) -> do
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
