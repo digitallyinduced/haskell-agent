@@ -3,6 +3,7 @@ module Agent.Responses.Types.Tools
     ( ResponseTool(..)
     , ResponseToolType(..)
     , responseToolTypeText
+    , knownResponseTool
     , FunctionTool(..)
     ) where
 
@@ -110,9 +111,19 @@ data ResponseTool
     | UnknownResponseTool !TaggedObject
     deriving stock (Eq, Show)
 
+-- | Hosted or built-in Responses tool whose wire @type@ comes from
+-- 'ResponseToolType', not a caller-supplied tag string.
+knownResponseTool :: ResponseToolType -> Aeson.Object -> ResponseTool
+knownResponseTool toolType fields =
+    KnownResponseTool toolType TaggedObject
+        { tag = responseToolTypeText toolType
+        , fields
+        }
+
 instance ToJSON ResponseTool where
     toJSON (FunctionToolValue value) = toJSON value
-    toJSON (KnownResponseTool _ value) = toJSON value
+    toJSON (KnownResponseTool toolType TaggedObject { fields }) =
+        objectWith fields [Just (field "type" (responseToolTypeText toolType))]
     toJSON (UnknownResponseTool value) = toJSON value
 
 instance FromJSON ResponseTool where

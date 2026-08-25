@@ -134,6 +134,14 @@ spec = do
             object <- expectObject value
             KeyMap.lookup "include" object `shouldBe` Nothing
 
+        it "serializes hosted tools from ResponseToolType, not a tag string" do
+            let mismatched = KnownResponseTool ToolXSearch TaggedObject
+                    { tag = "web_search"
+                    , fields = KeyMap.empty
+                    }
+            Aeson.toJSON mismatched `shouldBe` Aeson.object
+                ["type" .= ("x_search" :: Text)]
+
         it "injects hosted x_search when the caller omitted it" do
             let value = requestValue defaultClientOptions
                     (setTools (Just []) sampleRequest)
@@ -324,14 +332,9 @@ sampleRequest = defaultResponseCreateParams
             , strict = Nothing
             , extraFields = mempty
             }
-        , KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            , fields = KeyMap.singleton "external_web_access" (Aeson.Bool True)
-            }
-        , KnownResponseTool ToolComputer TaggedObject
-            { tag = "computer"
-            , fields = mempty
-            }
+        , knownResponseTool ToolWebSearch
+            (KeyMap.singleton "external_web_access" (Aeson.Bool True))
+        , knownResponseTool ToolComputer mempty
         ]
     , reasoning = Just (reasoningConfig "high")
     , include = Just [ResponseInclude "reasoning.encrypted_content"]

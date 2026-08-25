@@ -17,6 +17,7 @@ import Agent.Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
+import Agent.CLI.Tools (hostedSearchToolNames)
 import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
@@ -89,7 +90,7 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    available = hostedSearchTools dialect ++ toolNames
+    available = hostedSearchToolNames dialect ++ toolNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
             grokSystemPromptForTools
@@ -108,11 +109,6 @@ systemPromptForTools
                 isNonInteractive
         ClaudeCodePromptStyle ->
             claudeCodeSystemPrompt cwd today
-
-hostedSearchTools :: Dialect -> [Text]
-hostedSearchTools dialect =
-    "web_search"
-        : ["x_search" | dialectPromptStyle dialect == GrokBuildPromptStyle]
 
 -- | Tell the model about its second filesystem sandbox root without changing
 -- the project/worktree used for relative paths.

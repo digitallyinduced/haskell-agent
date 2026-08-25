@@ -251,7 +251,7 @@ import Agent.CLI.Terminal
       reportTerminalCwd,
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
-import Agent.CLI.Tools ( schemasFromAppTools )
+import Agent.CLI.Tools ( hostedSearchToolCollisions, schemasFromAppTools )
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
@@ -658,11 +658,10 @@ mcpToolCollision existingTools = go
   where
     existing =
         Map.fromList $
-            ("web_search", "built-in web search")
-                : ("x_search", "built-in X search")
-                : [ (canonicalToolName tool.appToolName, "built-in tool")
-                  | tool <- existingTools
-                  ]
+            hostedSearchToolCollisions
+                ++ [ (canonicalToolName tool.appToolName, "built-in tool")
+                   | tool <- existingTools
+                   ]
 
     go [] = Nothing
     go (registration : rest) =

@@ -99,22 +99,15 @@ withHostedXSearch ResponseCreateParams { tools = existing, .. } =
 isHostedXSearch :: ResponseTool -> Bool
 isHostedXSearch = \case
     KnownResponseTool ToolXSearch _ -> True
-    UnknownResponseTool tagged | tagged.tag == "x_search" -> True
+    UnknownResponseTool tagged
+        | tagged.tag == responseToolTypeText ToolXSearch -> True
     _ -> False
 
 hostedWebSearchTool :: ResponseTool
-hostedWebSearchTool =
-    KnownResponseTool ToolWebSearch TaggedObject
-        { tag = "web_search"
-        , fields = KeyMap.empty
-        }
+hostedWebSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
 
 hostedXSearchTool :: ResponseTool
-hostedXSearchTool =
-    KnownResponseTool ToolXSearch TaggedObject
-        { tag = "x_search"
-        , fields = KeyMap.empty
-        }
+hostedXSearchTool = knownResponseTool ToolXSearch KeyMap.empty
 
 xaiReasoningEffort :: Maybe Text -> Text
 xaiReasoningEffort = \case
