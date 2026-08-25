@@ -483,6 +483,36 @@ spec = describe "fullscreen UI reducer" do
                 replacementBlock.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected retained and replacement blocks"
 
+    it "drops tool block positions when a running turn ends" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"work\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "exit: 0\nlate final output"
+                , callKind = FunctionCallKind
+                }
+            ended =
+                reduceUi (UiTurnEnded BlockCancelled) $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted call)
+                        ]
+            afterLateEvents =
+                applyFrom
+                    ended
+                    [ UiLoop (ToolOutputUpdated "c1" "late live output")
+                    , UiLoop (ToolFinished result)
+                    ]
+        ended.uiToolCalls `shouldBe` mempty
+        case Foldable.toList afterLateEvents.uiBlocks of
+            [block] -> do
+                block.blockBody `shouldBe` ""
+                block.blockState `shouldBe` BlockCancelled
+            _ -> expectationFailure "expected one cancelled tool block"
+
     it "replaces a live snapshot with the final tool result" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
             result = ToolCallResult
