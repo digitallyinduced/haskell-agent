@@ -16,6 +16,7 @@ import Agent.CLI.TUI.App
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
+    , mergeConversationView
     , motionDemandFor
     , lambdaArtWidget
     , quickStartRows
@@ -56,6 +57,7 @@ import Agent.ToolDispatch
     )
 import Agent.TUI.Model
 import Agent.TUI.Motion
+import Data.Foldable (find)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -358,6 +360,37 @@ spec = do
             selectedAgentConversation AgentRoot [rootEntry, child]
                 `shouldBe` Nothing
 
+        it "preserves child block selection and expansion across snapshots" do
+            let replay =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiUserSubmitted "investigate"
+                        , UiLoop TurnStarted
+                        , UiLoop (ReasoningDelta "compare paths")
+                        , UiAssistantHistory "done"
+                        ]
+            case find
+                    ((== BlockThinking) . (.blockKind))
+                    replay.uiBlocks of
+                Nothing ->
+                    expectationFailure "expected a reasoning block"
+                Just reasoning -> do
+                    let previous =
+                            reduceUi
+                                (UiActivateBlock reasoning.blockId)
+                                replay
+                        merged = mergeConversationView previous replay
+                    merged.uiSelectedBlock
+                        `shouldBe` Just reasoning.blockId
+                    fmap (.blockExpanded)
+                        (find
+                            ((== reasoning.blockId) . (.blockId))
+                            merged.uiBlocks)
+                        `shouldBe` Just True
+                    mergeConversationView previous initialUiState
+                        `shouldBe` initialUiState
+
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
             let renderCell widget =
@@ -628,6 +661,7 @@ rootEntry = AgentEntry
     , agentModel = Nothing
     , agentSteps = []
     , agentTranscript = []
+    , agentConversation = initialUiState
     }
 
 childEntry :: Int -> AgentEntry
@@ -638,6 +672,7 @@ childEntry index = AgentEntry
     , agentModel = Just "gpt-5.6-luna"
     , agentSteps = []
     , agentTranscript = []
+    , agentConversation = initialUiState
     }
   where
     name :: Text

@@ -53,9 +53,9 @@ import Agent.CLI.AgentViewport
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
-    , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
+    , responseItemsToUiState
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleEvent(..)
@@ -467,7 +467,8 @@ import Agent.CLI.TUI.App
     )
 import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
-    ( UiEvent(..)
+    ( BlockState(..)
+    , UiEvent(..)
     , UiState(..)
     , infoNotice
     , progressNotice
@@ -3215,10 +3216,56 @@ runSession SessionRequest{..} SessionBackend{..} = do
                             | includeSummaries ->
                                 responseItemPreviewLines 12 items
                             | otherwise ->
-                                responseItemLines items
+                                []
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
+                conversationFor target status items
+                    | includeSummaries = initialUiState
+                    | target /= selected = initialUiState
+                    | target == AgentRoot = initialUiState
+                    | otherwise =
+                        settleConversation items status $
+                            responseItemsToUiState
+                                options.optShowRawReasoning
+                                items
+                settleConversation items status conversation =
+                    case status of
+                        Pending -> conversation
+                        Running -> conversation
+                        Completed result ->
+                            let settled =
+                                    finalizeAll BlockComplete conversation
+                            in case result of
+                                Just text
+                                    | null items
+                                    , not (Text.null (Text.strip text)) ->
+                                        reduceUi
+                                            (UiAssistantHistory
+                                                (Text.strip text))
+                                            settled
+                                _ -> settled
+                        Errored message ->
+                            reduceUi
+                                (UiErrorMessage
+                                    (if Text.null (Text.strip message)
+                                        then "Agent failed."
+                                        else Text.strip message))
+                                (finalizeAll BlockFailed conversation)
+                        Interrupted ->
+                            finalizeAll BlockCancelled conversation
+                        Closed ->
+                            finalizeAll BlockComplete conversation
+                        NotFound ->
+                            reduceUi
+                                (UiErrorMessage
+                                    "Agent transcript is unavailable.")
+                                (finalizeAll BlockFailed conversation)
+                  where
+                    finalizeAll terminal ui =
+                        reduceUi
+                            (UiTurnEnded terminal)
+                            ui { uiTurnStartBlock = 0 }
             rootSteps <-
                 if null agents
                     then pure []
@@ -3235,13 +3282,21 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     , agentSteps = rootSteps
                     , agentTranscript =
                         transcriptLines AgentRoot rootItems
+                    , agentConversation = initialUiState
                     }
             children <- mapConcurrentlyBounded 8
-                (materializeChild transcriptLines sessions)
+                (materializeChild
+                    transcriptLines
+                    conversationFor
+                    sessions)
                 agents
             pure (selected, rootEntry : children)
           where
-            materializeChild transcriptLines sessions (path, agentId, status) = do
+            materializeChild
+                    transcriptLines
+                    conversationFor
+                    sessions
+                    (path, agentId, status) = do
                 let target = AgentChild agentId
                 items <- case Map.lookup agentId sessions of
                     Nothing -> pure []
@@ -3270,6 +3325,8 @@ runSession SessionRequest{..} SessionBackend{..} = do
                             <$> Map.lookup agentId sessions
                     , agentSteps = steps
                     , agentTranscript = transcript
+                    , agentConversation =
+                        conversationFor target status items
                     }
         hydrateSelectedAgent agentId = do
             effectiveModel <- readIORef modelRef
