@@ -67,7 +67,9 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-1"
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
                     , status = Nothing
                     , extraFields = KeyMap.empty
                     }
@@ -124,6 +126,8 @@ spec = do
             let oversized = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
                     , callId = "call-1"
+                    , name = Nothing
+                    , namespace = Nothing
                     , output = Aeson.String (Text.replicate 10_000 "x")
                     , status = Just ItemCompleted
                     , extraFields = KeyMap.empty
@@ -146,10 +150,12 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-oversized"
                     , name = "apply_patch"
+                    , namespace = Nothing
                     , arguments =
                         Text.replicate
                             (remoteCompactionMaxStringLength + 1)
                             "x"
+                    , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
                     , extraFields = KeyMap.empty
                     }
@@ -178,6 +184,7 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-custom"
                     , name = "apply_patch"
+                    , namespace = Nothing
                     , input =
                         Text.replicate
                             (remoteCompactionMaxStringLength + 1)
@@ -300,6 +307,7 @@ spec = do
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
     assistant text = MessageItem ResponseMessage
@@ -308,6 +316,7 @@ spec = do
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
     isSummary (MessageItem m) =
@@ -342,20 +351,16 @@ spec = do
             Aeson.Error err -> error err
     agentMessage :: Text.Text -> Text.Text -> Text.Text -> ResponseItem
     agentMessage author recipient text =
-        KnownResponseItem ItemAgentMessage TaggedObject
-            { tag = "agent_message"
-            , fields = KeyMap.fromList
-                [ ("author", Aeson.String author)
-                , ("recipient", Aeson.String recipient)
-                , ("content", Aeson.toJSON
-                    [ Aeson.object
-                        [ "type" .= ("input_text" :: Text.Text)
-                        , "text" .= text
-                        ]
-                    ])
-                ]
+        AgentMessageItem ResponseAgentMessage
+            { messageId = Nothing
+            , author = Just author
+            , recipient = Just recipient
+            , content = [InputTextPart text Nothing KeyMap.empty]
+            , passthrough = Nothing
+            , extraFields = KeyMap.empty
             }
-    checkpoint name = KnownResponseItem ItemCompaction TaggedObject
-        { tag = "compaction"
-        , fields = KeyMap.fromList [("name", Aeson.String name)]
+    checkpoint name = CompactionItemValue CompactionItem
+        { itemId = Nothing
+        , encryptedContent = Nothing
+        , extraFields = KeyMap.fromList [("name", Aeson.String name)]
         }

@@ -206,6 +206,7 @@ messageItem text = MessageItem ResponseMessage
     , role = RoleAssistant
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 

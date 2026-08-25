@@ -109,6 +109,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
             Right taskPath <- pure (parseTaskPath "/root/research/worker")
@@ -638,6 +639,7 @@ messageItem role text = MessageItem ResponseMessage
     , role
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 

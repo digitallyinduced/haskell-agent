@@ -241,12 +241,11 @@ groupedToolValues tool = case tool of
 
 additionalToolsItem :: [Aeson.Value] -> ResponseItem
 additionalToolsItem tools =
-    UnknownResponseItem TaggedObject
-        { tag = "additional_tools"
-        , fields = KeyMap.fromList
-            [ (Key.fromText "role", Aeson.String "developer")
-            , (Key.fromText "tools", Aeson.toJSON tools)
-            ]
+    AdditionalToolsItemValue AdditionalToolsItem
+        { itemId = Nothing
+        , role = "developer"
+        , tools
+        , extraFields = KeyMap.empty
         }
 
 baseInstructionItems :: Text -> [ResponseItem]
@@ -260,12 +259,14 @@ baseInstructionItems instructionText
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
-            , extraFields = KeyMap.singleton
-                (Key.fromText "internal_chat_message_metadata_passthrough")
-                (Aeson.object
-                    [ "content_item_kinds"
-                        Aeson..= (["model.base_instructions"] :: [Text])
-                    ])
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just ["model.base_instructions"]
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            , extraFields = KeyMap.empty
             }
         ]
 
@@ -305,6 +306,7 @@ decodeTool value = case Aeson.fromJSON value of
 
 additionalToolsValues :: Maybe ResponseItem -> [Aeson.Value]
 additionalToolsValues = \case
+    Just (AdditionalToolsItemValue item) -> item.tools
     Just (UnknownResponseItem TaggedObject{tag = "additional_tools", fields}) ->
         arrayField "tools" fields
     _ -> []
@@ -325,19 +327,16 @@ firstBaseInstructionText = \case
 
 isAdditionalToolsItem :: ResponseItem -> Bool
 isAdditionalToolsItem = \case
+    AdditionalToolsItemValue{} -> True
     UnknownResponseItem TaggedObject{tag = "additional_tools"} -> True
     _ -> False
 
 isBaseInstructionsItem :: ResponseItem -> Bool
 isBaseInstructionsItem = \case
-    MessageItem ResponseMessage{role = RoleDeveloper, extraFields} ->
-        case KeyMap.lookup
-                (Key.fromText "internal_chat_message_metadata_passthrough")
-                extraFields of
-            Just (Aeson.Object metadata) ->
-                "model.base_instructions"
-                    `elem` arrayTextField "content_item_kinds" metadata
-            _ -> False
+    MessageItem ResponseMessage{role = RoleDeveloper, passthrough} ->
+        maybe False
+            ("model.base_instructions" `elem`)
+            (passthrough >>= (.contentItemKinds))
     _ -> False
 
 responseInputItems :: Maybe ResponseInput -> [ResponseItem]
@@ -351,6 +350,7 @@ responseInputItems = \case
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
         ]

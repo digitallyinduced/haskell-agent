@@ -139,23 +139,19 @@ requestInputPrefix = \case
 
 isAdditionalTools :: ResponseItem -> Bool
 isAdditionalTools = \case
+    AdditionalToolsItemValue{} -> True
     UnknownResponseItem TaggedObject { tag = "additional_tools" } -> True
     _ -> False
 
 isBaseInstructions :: ResponseItem -> Bool
 isBaseInstructions = \case
-    MessageItem ResponseMessage { role = RoleDeveloper, extraFields } ->
-        case KeyMap.lookup
-                (Key.fromText "internal_chat_message_metadata_passthrough")
-                extraFields of
-            Just (Aeson.Object metadata) ->
-                case KeyMap.lookup
-                        (Key.fromText "content_item_kinds")
-                        metadata of
-                    Just (Aeson.Array kinds) ->
-                        Aeson.String "model.base_instructions" `elem` kinds
-                    _ -> False
-            _ -> False
+    MessageItem ResponseMessage { role = RoleDeveloper, passthrough } ->
+        case passthrough of
+            Just metadata ->
+                maybe False
+                    ("model.base_instructions" `elem`)
+                    metadata.contentItemKinds
+            Nothing -> False
     _ -> False
 
 -- Responses Lite rejects image-detail hints. Match Codex by removing them
@@ -173,12 +169,15 @@ stripResponsesLiteImageDetails = \case
             , role = message.role
             , status = message.status
             , phase = message.phase
+            , passthrough = message.passthrough
             , extraFields = message.extraFields
             }
     FunctionCallOutputItem callOutput ->
         FunctionCallOutputItem FunctionCallOutput
             { itemId = callOutput.itemId
             , callId = callOutput.callId
+            , name = callOutput.name
+            , namespace = callOutput.namespace
             , output = stripInputImageDetailValue callOutput.output
             , status = callOutput.status
             , extraFields = callOutput.extraFields
@@ -229,6 +228,7 @@ normalizeRequestItem = \case
                 , role = message.role
                 , status = message.status
                 , phase = message.phase
+                , passthrough = message.passthrough
                 , extraFields = message.extraFields
                 }
     item -> item
@@ -263,6 +263,7 @@ userMessageItem text = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -277,34 +278,30 @@ multimodalFilesItem text images files = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
 agentMessageItem :: InterAgentMessage -> ResponseItem
-agentMessageItem message = KnownResponseItem ItemAgentMessage TaggedObject
-    { tag = "agent_message"
-    , fields = KeyMap.fromList
-        [ (Key.fromText "author", Aeson.String message.messageAuthor)
-        , (Key.fromText "recipient", Aeson.String message.messageRecipient)
-        , (Key.fromText "content", Aeson.toJSON (agentMessageContent message))
-        ]
+agentMessageItem message = AgentMessageItem ResponseAgentMessage
+    { messageId = Nothing
+    , author = Just message.messageAuthor
+    , recipient = Just message.messageRecipient
+    , content = agentMessageContent message
+    , passthrough = Nothing
+    , extraFields = KeyMap.empty
     }
 
-agentMessageContent :: InterAgentMessage -> [Aeson.Value]
+agentMessageContent :: InterAgentMessage -> [ResponseContentPart]
 agentMessageContent message = case message.messageContent of
     PlainInterAgentContent _ ->
-        [inputTextValue (renderInterAgentMessage message)]
+        [InputTextPart (renderInterAgentMessage message) Nothing KeyMap.empty]
     EncryptedInterAgentContent encrypted ->
-        [ inputTextValue (renderInterAgentMessageHeader message)
-        , Aeson.object
-            [ "type" Aeson..= ("encrypted_content" :: Text)
-            , "encrypted_content" Aeson..= encrypted
-            ]
-        ]
-  where
-    inputTextValue text = Aeson.object
-        [ "type" Aeson..= ("input_text" :: Text)
-        , "text" Aeson..= text
+        [ InputTextPart
+            (renderInterAgentMessageHeader message)
+            Nothing
+            KeyMap.empty
+        , EncryptedContentPart encrypted KeyMap.empty
         ]
 
 multimodalUserItem :: Text -> [ImageAttachment] -> ResponseItem
@@ -317,6 +314,7 @@ multimodalUserItem text images = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -351,6 +349,8 @@ toolResultToItem result = case result.callKind of
     FunctionCallKind -> FunctionCallOutputItem FunctionCallOutput
         { itemId = Nothing
         , callId = result.callId
+        , name = Nothing
+        , namespace = Nothing
         , output = Aeson.String result.output
         , status = Nothing
         , extraFields = KeyMap.empty
@@ -387,18 +387,20 @@ tokenUsageFromResponse = maybe emptyTokenUsage \usage ->
 responseItemToToolCall :: ResponseItem -> Maybe ToolCall
 responseItemToToolCall = \case
     FunctionCallItem call ->
-        let toolName = namespacedToolName call.extraFields call.name
+        let toolName = namespacedToolName call.namespace call.name
         in Just ToolCall
             { callId = call.callId
             , name = toolName
             , arguments = call.arguments
             , callKind = FunctionCallKind
             , argumentsEncrypted =
-                encryptedCollaborationArguments toolName call.extraFields
+                encryptedCollaborationArguments
+                    toolName
+                    call.encryptedFunctionArgs
             }
     CustomToolCallItem call -> Just ToolCall
         { callId = call.callId
-        , name = namespacedToolName call.extraFields call.name
+        , name = namespacedToolName call.namespace call.name
         , arguments = call.input
         , callKind = CustomCallKind
         , argumentsEncrypted = False
@@ -491,27 +493,22 @@ formatPercent value
         Text.pack (show (round value :: Int))
     | otherwise = Text.pack (printf "%.1f" value)
 
-encryptedCollaborationArguments :: Text -> Aeson.Object -> Bool
-encryptedCollaborationArguments toolName extras =
+encryptedCollaborationArguments :: Text -> Maybe [Text] -> Bool
+encryptedCollaborationArguments toolName encryptedFunctionArgs =
     toolName `elem`
         [ "collaboration.spawn_agent"
         , "collaboration.send_message"
         , "collaboration.followup_task"
         ]
-        && not plaintextOverride
-  where
-    plaintextOverride =
-        case KeyMap.lookup (Key.fromText "encrypted_function_args") extras of
-            Just (Aeson.Array values) -> null values
-            _ -> False
+        && encryptedFunctionArgs /= Just []
 
-namespacedToolName :: Aeson.Object -> Text -> Text
-namespacedToolName extras name = case KeyMap.lookup (Key.fromText "namespace") extras of
-    Just (Aeson.String namespace)
-        | not (Text.null namespace) ->
-            if Text.isSuffixOf "." namespace || Text.isSuffixOf "::" namespace
-                then namespace <> name
-                else namespace <> "." <> name
+namespacedToolName :: Maybe Text -> Text -> Text
+namespacedToolName namespace name = case namespace of
+    Just value
+        | not (Text.null value) ->
+            if Text.isSuffixOf "." value || Text.isSuffixOf "::" value
+                then value <> name
+                else value <> "." <> name
     _ -> name
 
 assistantTextFromResponse :: Response -> Maybe Text

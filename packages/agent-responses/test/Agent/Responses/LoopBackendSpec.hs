@@ -25,6 +25,7 @@ import Agent.Responses.LoopBackend
 import Agent.Responses.Types
     ( MessageContent(..)
     , FunctionCallOutput(..)
+    , InternalChatMetadata(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
@@ -247,11 +248,14 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , role = RoleUser
                 , status = Nothing
                 , phase = Nothing
+                , passthrough = Nothing
                 , extraFields = KeyMap.empty
                 }
             toolOutput = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
                 , callId = "call-1"
+                , name = Nothing
+                , namespace = Nothing
                 , output = Aeson.object
                     [ "type" Aeson..= ("input_image" :: Text.Text)
                     , "detail" Aeson..= ("high" :: Text.Text)
@@ -314,10 +318,14 @@ developerMessage messageText contentItemKinds =
         , role = RoleDeveloper
         , status = Nothing
         , phase = Nothing
-        , extraFields = KeyMap.singleton
-            (Key.fromText "internal_chat_message_metadata_passthrough")
-            (Aeson.object
-                [ "content_item_kinds" Aeson..= contentItemKinds ])
+        , passthrough = Just InternalChatMetadata
+            { turnId = Nothing
+            , createTime = Nothing
+            , contentItemKinds = Just contentItemKinds
+            , executedToolCalls = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , extraFields = KeyMap.empty
         }
 
 jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value

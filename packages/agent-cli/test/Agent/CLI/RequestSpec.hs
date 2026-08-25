@@ -186,6 +186,7 @@ spec = describe "requestParams" do
 
 isAdditionalTools :: ResponseItem -> Bool
 isAdditionalTools = \case
+    AdditionalToolsItemValue{} -> True
     UnknownResponseItem TaggedObject{tag = "additional_tools"} -> True
     _ -> False
 
@@ -193,7 +194,9 @@ isBaseInstructions :: ResponseItem -> Bool
 isBaseInstructions = \case
     MessageItem message ->
         message.role == RoleDeveloper
-            && message.extraFields /= KeyMap.empty
+            && maybe False
+                ("model.base_instructions" `elem`)
+                (message.passthrough >>= (.contentItemKinds))
             && case message.content of
                 MessageContentParts [InputTextPart{ text = "base instructions" }] ->
                     True
@@ -249,6 +252,7 @@ userMessage value = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -275,6 +279,8 @@ withText nextText ResponseCreateParams { text = _, .. } =
 
 additionalToolValues :: ResponseCreateParams -> [Aeson.Value]
 additionalToolValues params = case params.input of
+    Just (ResponseInputItems (AdditionalToolsItemValue item : _)) ->
+        item.tools
     Just (ResponseInputItems
         (UnknownResponseItem TaggedObject{tag = "additional_tools", fields} : _)) ->
             case KeyMap.lookup (Key.fromText "tools") fields of

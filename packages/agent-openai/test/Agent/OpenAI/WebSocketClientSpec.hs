@@ -30,7 +30,9 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-1"
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
                     , extraFields = KeyMap.empty
                     }
@@ -324,12 +326,14 @@ sampleLitePrefixRequest = sampleRequest
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
-            , extraFields = KeyMap.singleton
-                (Key.fromText "internal_chat_message_metadata_passthrough")
-                (Aeson.object
-                    [ "content_item_kinds"
-                        Aeson..= (["model.base_instructions"] :: [Text])
-                    ])
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just ["model.base_instructions"]
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            , extraFields = KeyMap.empty
             }
         ])
     }

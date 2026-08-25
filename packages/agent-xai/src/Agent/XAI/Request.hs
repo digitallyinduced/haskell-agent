@@ -12,11 +12,7 @@ import Agent.Responses.Request
     )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
-import qualified Data.Aeson as Aeson
-import Data.Aeson.Key (fromText)
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Foldable (toList)
-import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -70,6 +66,7 @@ buildRequest options request =
                     , role = RoleSystem
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -106,6 +103,7 @@ requestInputItems request = case request.input of
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
         ]
@@ -117,45 +115,30 @@ requestInputItems request = case request.input of
 -- Preserve the readable collaboration context as an ordinary user message.
 normalizeInputItem :: ResponseItem -> ResponseItem
 normalizeInputItem = \case
-    KnownResponseItem ItemAgentMessage tagged ->
+    AgentMessageItem message ->
         MessageItem ResponseMessage
             { messageId = Nothing
             , content = MessageContentParts
-                [InputTextPart (agentMessageText tagged) Nothing KeyMap.empty]
+                [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
     item -> item
 
-agentMessageText :: TaggedObject -> Text
-agentMessageText tagged =
-    case KeyMap.lookup (fromText "content") tagged.fields of
-        Just (Aeson.Array parts)
-            | not (null texts) -> Text.intercalate "\n" texts
-          where
-            texts = mapMaybe contentPartText (toList parts)
-        _ -> fallback
-  where
-    fallback = case
-        ( textField "author" tagged.fields
-        , textField "recipient" tagged.fields
-        ) of
-        (Just author, Just recipient) ->
-            "Agent message from " <> author <> " to " <> recipient
-        (Just author, Nothing) -> "Agent message from " <> author
-        (Nothing, Just recipient) -> "Agent message to " <> recipient
-        (Nothing, Nothing) -> "Agent message"
-
-contentPartText :: Aeson.Value -> Maybe Text
-contentPartText = \case
-    Aeson.Object object
-        | textField "type" object == Just "input_text" ->
-            textField "text" object
-    _ -> Nothing
-
-textField :: Text -> Aeson.Object -> Maybe Text
-textField name object = case KeyMap.lookup (fromText name) object of
-    Just (Aeson.String value) -> Just value
-    _ -> Nothing
+agentMessageText :: ResponseAgentMessage -> Text
+agentMessageText message =
+    case
+        [ text
+        | InputTextPart { text } <- message.content
+        ]
+    of
+        texts@(_ : _) -> Text.intercalate "\n" texts
+        [] -> case (message.author, message.recipient) of
+            (Just author, Just recipient) ->
+                "Agent message from " <> author <> " to " <> recipient
+            (Just author, Nothing) -> "Agent message from " <> author
+            (Nothing, Just recipient) -> "Agent message to " <> recipient
+            (Nothing, Nothing) -> "Agent message"

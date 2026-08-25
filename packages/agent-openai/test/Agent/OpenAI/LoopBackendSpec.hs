@@ -36,6 +36,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 request = withRequestInput baseParams [legacySummary]
@@ -51,6 +52,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -72,26 +74,41 @@ spec = do
                     , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
                     }
             case turnInputsToItems [AgentMessage message] of
-                [item] -> Aeson.toJSON item `shouldBe` Aeson.object
-                    [ "type" Aeson..= ("agent_message" :: Text)
-                    , "author" Aeson..= ("/root" :: Text)
-                    , "recipient" Aeson..= ("/root/worker" :: Text)
-                    , "content" Aeson..=
-                        [ Aeson.object
-                            [ "type" Aeson..= ("input_text" :: Text)
-                            , "text" Aeson..=
-                                ("Message Type: NEW_TASK\n\
-                                \Task name: /root/worker\n\
-                                \Sender: /root\n\
-                                \Payload:\n" :: Text)
-                            ]
-                        , Aeson.object
-                            [ "type" Aeson..= ("encrypted_content" :: Text)
-                            , "encrypted_content" Aeson..=
-                                ("gAAAAA-ciphertext" :: Text)
+                [item@(AgentMessageItem encoded)] -> do
+                    encoded.author `shouldBe` Just "/root"
+                    encoded.recipient `shouldBe` Just "/root/worker"
+                    encoded.content `shouldBe`
+                        [ InputTextPart
+                            "Message Type: NEW_TASK\n\
+                            \Task name: /root/worker\n\
+                            \Sender: /root\n\
+                            \Payload:\n"
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart "gAAAAA-ciphertext" KeyMap.empty
+                        ]
+                    Aeson.fromJSON (Aeson.toJSON item)
+                        `shouldBe` Aeson.Success item
+                    Aeson.toJSON item `shouldBe` Aeson.object
+                        [ "type" Aeson..= ("agent_message" :: Text)
+                        , "author" Aeson..= ("/root" :: Text)
+                        , "recipient" Aeson..= ("/root/worker" :: Text)
+                        , "content" Aeson..=
+                            [ Aeson.object
+                                [ "type" Aeson..= ("input_text" :: Text)
+                                , "text" Aeson..=
+                                    ("Message Type: NEW_TASK\n\
+                                    \Task name: /root/worker\n\
+                                    \Sender: /root\n\
+                                    \Payload:\n" :: Text)
+                                ]
+                            , Aeson.object
+                                [ "type" Aeson..= ("encrypted_content" :: Text)
+                                , "encrypted_content" Aeson..=
+                                    ("gAAAAA-ciphertext" :: Text)
+                                ]
                             ]
                         ]
-                    ]
                 other ->
                     expectationFailure ("expected one agent_message, got " <> show other)
 
@@ -1340,7 +1357,9 @@ functionCallItemWithExtras callId name arguments extraFields =
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , arguments
+    , encryptedFunctionArgs = Nothing
     , status = Just ItemCompleted
     , extraFields
     }
@@ -1350,6 +1369,7 @@ customCallItem callId name input = CustomToolCallItem CustomToolCall
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , input
     , status = Just ItemCompleted
     , extraFields = KeyMap.empty
@@ -1362,13 +1382,15 @@ assistantItem text = MessageItem ResponseMessage
     , role = RoleAssistant
     , status = Just ItemCompleted
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
 compactionItem :: Text -> ResponseItem
-compactionItem _ = KnownResponseItem ItemCompaction TaggedObject
-    { tag = "compaction"
-    , fields = KeyMap.empty
+compactionItem _ = CompactionItemValue CompactionItem
+    { itemId = Nothing
+    , encryptedContent = Nothing
+    , extraFields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent

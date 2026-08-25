@@ -156,6 +156,7 @@ spec = do
                         , role = RoleAssistant
                         , status = Nothing
                         , phase = Nothing
+                        , passthrough = Nothing
                         , extraFields = KeyMap.empty
                         }
                 inputs = [UserMessage "fix the failure"]

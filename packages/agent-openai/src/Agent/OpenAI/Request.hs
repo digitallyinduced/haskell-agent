@@ -37,7 +37,14 @@ stripContentItemKindsItem :: ResponseItem -> ResponseItem
 stripContentItemKindsItem = \case
     MessageItem message ->
         MessageItem message
-            { extraFields = stripContentItemKindsFields message.extraFields }
+            { passthrough = stripItemPassthrough message.passthrough
+            , extraFields = stripContentItemKindsFields message.extraFields
+            }
+    AgentMessageItem message ->
+        AgentMessageItem message
+            { passthrough = stripItemPassthrough message.passthrough
+            , extraFields = stripContentItemKindsFields message.extraFields
+            }
     FunctionCallItem value ->
         FunctionCallItem value
             { extraFields = stripContentItemKindsFields value.extraFields }
@@ -56,12 +63,56 @@ stripContentItemKindsItem = \case
     ItemReferenceValue value ->
         ItemReferenceValue value
             { extraFields = stripContentItemKindsFields value.extraFields }
+    AdditionalToolsItemValue value ->
+        AdditionalToolsItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    LocalShellCallItem value ->
+        LocalShellCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ToolSearchCallItem value ->
+        ToolSearchCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ToolSearchOutputItem value ->
+        ToolSearchOutputItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    WebSearchCallItem value ->
+        WebSearchCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ImageGenerationCallItem value ->
+        ImageGenerationCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    CompactionItemValue value ->
+        CompactionItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    CompactionTriggerItemValue value ->
+        CompactionTriggerItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ContextCompactionItemValue value ->
+        ContextCompactionItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
     KnownResponseItem itemType tagged ->
         KnownResponseItem itemType tagged
             { fields = stripContentItemKindsFields tagged.fields }
     UnknownResponseItem tagged ->
         UnknownResponseItem tagged
             { fields = stripContentItemKindsFields tagged.fields }
+
+stripItemPassthrough
+    :: Maybe InternalChatMetadata
+    -> Maybe InternalChatMetadata
+stripItemPassthrough = \case
+    Nothing -> Nothing
+    Just metadata ->
+        let cleaned = metadata { contentItemKinds = Nothing }
+        in if cleaned == InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Nothing
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            then Nothing
+            else Just cleaned
 
 stripContentItemKindsFields :: Aeson.Object -> Aeson.Object
 stripContentItemKindsFields fields =
