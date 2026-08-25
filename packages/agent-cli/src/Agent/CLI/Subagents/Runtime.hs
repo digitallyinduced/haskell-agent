@@ -939,6 +939,7 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
                 , commitBackendState = writeIORef session.subSessionTranscript
                 }
             , loopTools = toolRegistry
+            , loopToolSpeculation = Nothing
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns
             , loopOnEvent = onEvent

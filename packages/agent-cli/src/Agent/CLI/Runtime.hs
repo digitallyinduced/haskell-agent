@@ -647,6 +647,10 @@ import Agent.Tools.Secret
     ( SecretPrompt(..)
     , SecretPromptHooks(..)
     )
+import Agent.Tools.Speculation
+    ( closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
@@ -2256,21 +2260,27 @@ runAgentInitializedWithLock
                         subagentSessions agentTypesRef
                     closeSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
-        closeAll =
-            closeAgents
+    toolSpeculation <-
+        if provider == OpenAIProvider && options.optSpeculativeReadFile
+            then Just <$> newToolSpeculationRuntime allTools
+            else pure Nothing
+    let closeAll =
+            mapM_ closeToolSpeculationRuntime toolSpeculation
                 `finally`
-                    (closeSessionProcessManager sessionProcessManager
+                    (closeAgents
                         `finally`
-                            ((readIORef activeSessionLock
-                                >>= mapM_ releaseSessionLock)
+                            (closeSessionProcessManager sessionProcessManager
                                 `finally`
-                                    (closeExtraTools
+                                    ((readIORef activeSessionLock
+                                        >>= mapM_ releaseSessionLock)
                                         `finally`
-                                            (MCP.releaseMcpFleetLease mcpLease
+                                            (closeExtraTools
                                                 `finally`
-                                                    (coding.codingClose
+                                                    (MCP.releaseMcpFleetLease mcpLease
                                                         `finally`
-                                                            cleanupScratch)))))
+                                                            (coding.codingClose
+                                                                `finally`
+                                                                    cleanupScratch))))))
     flip finally closeAll do
         case
                 mcpToolCollision
@@ -2409,6 +2419,7 @@ runAgentInitializedWithLock
                                 , dialect
                                 , policy
                                 , allTools
+                                , toolSpeculation
                                 , suspendGhci = coding.codingSuspendGhci
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
@@ -2682,6 +2693,7 @@ runAgentInitializedWithLock
                                         lockedOpenAiSession
                                             options.optCompactThreshold
                                             options.optShowRawReasoning
+                                            toolSpeculation
                                             wsLock
                                             tokenProvider
                                             activeConnectionRef

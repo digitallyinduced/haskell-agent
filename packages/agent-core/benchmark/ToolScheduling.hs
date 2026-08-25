@@ -154,6 +154,7 @@ runWorkload workload callCount delayMicros = do
                 , commitBackendState = writeIORef state
                 }
             , loopTools = registry
+            , loopToolSpeculation = Nothing
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = \_ -> pure ()

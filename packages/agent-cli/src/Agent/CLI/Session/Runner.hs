@@ -710,6 +710,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 , commitBackendState = writeLiveTranscript conversationRef
                 }
             , loopTools = toolRegistry
+            , loopToolSpeculation = toolSpeculation
             , loopDispatch = defaultLoopDispatch
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop

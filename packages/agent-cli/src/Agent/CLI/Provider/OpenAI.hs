@@ -16,6 +16,7 @@ import Agent.Loop
 import Agent.OpenAI.LoopBackend
     ( openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWithReasoningVisibility
+    , openAiBackendWithReasoningVisibilityAndToolSpeculation
     , openAiResponseSenderReconnecting
     )
 import Agent.OpenAI.WebSocketClient (CodexConn)
@@ -24,6 +25,7 @@ import Agent.Provider
     , TokenProvider
     )
 import Agent.Responses.Types (ResponseCreateParams)
+import Agent.Tools.Speculation (ToolSpeculationRuntime)
 import Control.Concurrent.MVar
     ( MVar
     , withMVar
@@ -44,6 +46,7 @@ data OpenAiPersistentConnection
 lockedOpenAiSession
     :: Maybe Int
     -> Bool
+    -> Maybe ToolSpeculationRuntime
     -> MVar ()
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
@@ -51,8 +54,8 @@ lockedOpenAiSession
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession compactThreshold showRawReasoning wsLock provider activeConnection
-        getParams contextTokens
+lockedOpenAiSession compactThreshold showRawReasoning toolSpeculation wsLock provider
+        activeConnection getParams contextTokens
         recordCompactionUsage =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
@@ -84,10 +87,18 @@ lockedOpenAiSession compactThreshold showRawReasoning wsLock provider activeConn
                 onEvent
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWithReasoningVisibility
-                    showRawReasoning
-                    sendResponse
-                    getParams
+                case toolSpeculation of
+                    Nothing ->
+                        openAiBackendWithReasoningVisibility
+                            showRawReasoning
+                            sendResponse
+                            getParams
+                    Just speculation ->
+                        openAiBackendWithReasoningVisibilityAndToolSpeculation
+                            showRawReasoning
+                            speculation
+                            sendResponse
+                            getParams
         compactSender request =
             sendAuxiliary request Nothing (const (pure ()))
         compactingBackend =

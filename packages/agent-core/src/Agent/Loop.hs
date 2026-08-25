@@ -52,6 +52,12 @@ import Agent.Tools.Types
     , dispatchRegisteredToolCall
     , toolSchedulingPlanFor
     )
+import Agent.Tools.Speculation
+    ( ToolSpeculationRuntime
+    , discardToolSpeculation
+    , resetToolSpeculationRuntime
+    , takeToolSpeculation
+    )
 import Control.Concurrent.Async
     ( Async
     , mapConcurrently
@@ -257,6 +263,7 @@ data LoopConfig = LoopConfig
     { loopBackend :: !Backend
     , loopBackendState :: !BackendStateStore
     , loopTools :: !ToolRegistry
+    , loopToolSpeculation :: !(Maybe ToolSpeculationRuntime)
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
@@ -361,6 +368,9 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                 { loopOnEvent = emitLoopEvent eventPump
                 }
             finish state progress result = do
+                mapM_
+                    resetToolSpeculationRuntime
+                    config.loopToolSpeculation
                 writeIORef progressRef (state, progress)
                 pure LoopExecution
                     { executionState = state
@@ -853,31 +863,60 @@ runPreparedToolCall
 runPreparedToolCall config (PreparedToolCall call approval) = do
     cancelled <- isCancelled config.loopCancel
     if cancelled
-        then pure Nothing
+        then do
+            mapM_
+                (`discardToolSpeculation` call)
+                config.loopToolSpeculation
+            pure Nothing
         else do
             config.loopOnEvent (ToolStarted call)
             result <- case approval of
-                ToolApprovalDenied denial ->
+                ToolApprovalDenied denial -> do
+                    mapM_
+                        (`discardToolSpeculation` call)
+                        config.loopToolSpeculation
                     pure ToolCallResult
                         { callId = call.callId
                         , output = denial
                         , callKind = call.callKind
                         }
-                ToolApprovalRejected ->
+                ToolApprovalRejected -> do
+                    mapM_
+                        (`discardToolSpeculation` call)
+                        config.loopToolSpeculation
                     pure ToolCallResult
                         { callId = call.callId
                         , output = "Tool call rejected by user."
                         , callKind = call.callKind
                         }
                 ToolApprovalGranted ->
-                    dispatchRegisteredToolCall
-                        config.loopDispatch
-                            { toolDispatchOnOutput = \progressCall output ->
-                                config.loopDispatch.toolDispatchOnOutput progressCall output
-                                    >> config.loopOnEvent
-                                        (ToolOutputUpdated progressCall.callId output)
-                            }
-                        config.loopTools
-                        call
+                    maybe
+                        (pure Nothing)
+                        (`takeToolSpeculation` call)
+                        config.loopToolSpeculation
+                    >>= \case
+                        Just toolResult ->
+                            pure ToolCallResult
+                                { callId = call.callId
+                                , output =
+                                    config.loopDispatch.toolDispatchFormatResult
+                                        toolResult
+                                , callKind = call.callKind
+                                }
+                        Nothing ->
+                            dispatchRegisteredToolCall
+                                config.loopDispatch
+                                    { toolDispatchOnOutput =
+                                        \progressCall output ->
+                                            config.loopDispatch.toolDispatchOnOutput
+                                                progressCall
+                                                output
+                                                >> config.loopOnEvent
+                                                    (ToolOutputUpdated
+                                                        progressCall.callId
+                                                        output)
+                                    }
+                                config.loopTools
+                                call
             config.loopOnEvent (ToolFinished result)
             pure (Just result)

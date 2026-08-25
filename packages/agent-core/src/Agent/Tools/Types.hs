@@ -16,6 +16,7 @@ module Agent.Tools.Types
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , withToolResourceClaims
+    , withToolSpeculation
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -34,6 +35,7 @@ import Agent.ToolDispatch
     , ToolCallResult
     , ToolDispatchConfig
     , ToolHandler
+    , ToolSpeculator
     , canonicalToolName
     , dispatchToolHandler
     , handlerName
@@ -88,6 +90,7 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
+    , appToolSpeculator :: !(Maybe ToolSpeculator)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -181,6 +184,7 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolSpeculator = Nothing
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -213,6 +217,7 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolSpeculator = Nothing
     }
 
 withToolResourceClaims
@@ -221,6 +226,15 @@ withToolResourceClaims
     -> AppTool
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
+
+-- | Attach an opt-in, best-effort streamed-argument speculator to a tool.
+-- Speculators are consumed only after normal approval and scheduling.
+withToolSpeculation
+    :: ToolSpeculator
+    -> AppTool
+    -> AppTool
+withToolSpeculation speculator tool =
+    tool { appToolSpeculator = Just speculator }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -249,6 +263,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
+    , appToolSpeculator = Nothing
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry

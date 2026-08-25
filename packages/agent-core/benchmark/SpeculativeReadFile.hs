@@ -1,9 +1,11 @@
 module Main (main) where
 
 import Agent.Loop (defaultLoopDispatch)
-import Agent.Responses.Types
 import Agent.ToolDispatch
-    ( ToolCallResult(..)
+    ( ToolArgumentStreamEvent(..)
+    , ToolCall(..)
+    , ToolCallResult(..)
+    , ToolCallStreamRef(..)
     , functionToolCall
     )
 import Agent.Tools.FileSystem.ReadFile
@@ -11,6 +13,16 @@ import Agent.Tools.FileSystem.ReadFile
     , readFileToolWithSpeculation
     )
 import Agent.Tools.FileSystem.ReadFileSpeculation
+import Agent.Tools.Speculation
+    ( ToolSpeculationRuntime
+    , closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , resetToolSpeculationRuntime
+    , retainToolSpeculation
+    , takeToolSpeculation
+    , waitForToolSpeculation
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv
@@ -24,7 +36,6 @@ import Control.Exception (evaluate)
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM, unless, when)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (ord)
@@ -101,22 +112,25 @@ main = do
                             baselineRegistry
                             Nothing
                     _ ->
-                        bracket
-                            (newReadFileSpeculation env)
-                            closeReadFileSpeculation
-                            \cache -> do
-                                warmWorkspaceIndex cache
-                                registry <- requireRegistry
-                                    [readFileToolWithSpeculation env (Just cache)]
-                                runBenchmark
-                                    workloadArg
-                                    workload
-                                    fileMiB
-                                    tailMillis
-                                    sampleCount
-                                    env
-                                    registry
-                                    (Just cache)
+                        do
+                            cache <- newReadFileSpeculation env
+                            let tool =
+                                    readFileToolWithSpeculation env (Just cache)
+                            bracket
+                                (newToolSpeculationRuntime [tool])
+                                closeToolSpeculationRuntime
+                                \runtime -> do
+                                    warmWorkspaceIndex runtime
+                                    registry <- requireRegistry [tool]
+                                    runBenchmark
+                                        workloadArg
+                                        workload
+                                        fileMiB
+                                        tailMillis
+                                        sampleCount
+                                        env
+                                        registry
+                                        (Just (cache, runtime))
         _ ->
             die $
                 "usage: speculative-read-file-bench "
@@ -153,12 +167,12 @@ runBenchmark
     -> Int
     -> ToolEnv
     -> ToolRegistry
-    -> Maybe ReadFileSpeculation
+    -> Maybe (ReadFileSpeculation, ToolSpeculationRuntime)
     -> IO ()
 runBenchmark workloadArg workload fileMiB tailMillis sampleCount env registry
         speculation = do
     samples <- forM [1 .. sampleCount] \sampleIndex -> do
-        mapM_ resetReadFileSpeculation speculation
+        mapM_ (resetToolSpeculationRuntime . snd) speculation
         let callId = "benchmark-" <> Text.pack (show sampleIndex)
         measure $
             runWorkload
@@ -172,7 +186,10 @@ runBenchmark workloadArg workload fileMiB tailMillis sampleCount env registry
     unless (length distinctChecksums == 1) $
         die ("benchmark outputs differed: " <> show distinctChecksums)
     let result = median samples
-    metrics <- traverse readReadFileSpeculationMetrics speculation
+    metrics <-
+        traverse
+            (readReadFileSpeculationMetrics . fst)
+            speculation
     let (started, hits, misses) = case metrics of
             Nothing -> (0, 0, 0)
             Just values ->
@@ -199,77 +216,89 @@ runWorkload
     -> Int
     -> ToolEnv
     -> ToolRegistry
-    -> Maybe ReadFileSpeculation
+    -> Maybe (ReadFileSpeculation, ToolSpeculationRuntime)
     -> Text
     -> IO Int
 runWorkload workload tailMillis _env registry speculation callId = do
     let arguments = readArguments benchmarkTarget
-        finalItem = finalReadCall (Just callId) callId arguments
         call = functionToolCall callId "read_file" arguments
         delay = when (tailMillis > 0) (threadDelay (tailMillis * 1000))
     case workload of
         Baseline -> delay
         SpeculativeComplete ->
-            withCache speculation \cache -> do
-                observeReadFileStreamEvent cache $
+            withRuntime speculation \runtime -> do
+                observeToolArgumentEvent runtime $
                     outputItemAdded (Just callId) (Just 0) callId ""
-                observeReadFileStreamEvent cache $
+                observeToolArgumentEvent runtime $
                     argumentsDelta
                         (Just callId)
                         (Just 0)
                         arguments
                 delay
-                finishStream cache (Just callId) finalItem arguments
+                finishStream runtime (Just callId) call
         SpeculativePrefix ->
-            withCache speculation \cache -> do
-                observeReadFileStreamEvent cache $
+            withRuntime speculation \runtime -> do
+                observeToolArgumentEvent runtime $
                     outputItemAdded (Just callId) (Just 0) callId ""
-                observeReadFileStreamEvent cache $
+                observeToolArgumentEvent runtime $
                     argumentsDelta
                         (Just callId)
                         (Just 0)
                         "{\"target_file\":\"bench/spec"
                 delay
-                finishStream cache (Just callId) finalItem arguments
-    result <- dispatchRegisteredToolCall defaultLoopDispatch registry call
-    unless ("1→" `Text.isPrefixOf` result.output) $
-        die ("unexpected read_file result: " <> Text.unpack result.output)
-    evaluate (checksumText result.output)
+                finishStream runtime (Just callId) call
+    output <-
+        case speculation of
+            Just (_, runtime) ->
+                takeToolSpeculation runtime call >>= \case
+                    Just result -> pure (formatToolResult result)
+                    Nothing -> dispatchNormally call
+            Nothing -> dispatchNormally call
+    unless ("1→" `Text.isPrefixOf` output) $
+        die ("unexpected read_file result: " <> Text.unpack output)
+    evaluate (checksumText output)
   where
-    withCache Nothing _ = die "speculative mode requires a cache"
-    withCache (Just cache) action = action cache
+    withRuntime Nothing _ = die "speculative mode requires a runtime"
+    withRuntime (Just (_, runtime)) action = action runtime
+
+    dispatchNormally call = do
+        result <-
+            dispatchRegisteredToolCall defaultLoopDispatch registry call
+        pure result.output
+
+formatToolResult :: Either Text Text -> Text
+formatToolResult = \case
+    Left err -> "Error: " <> err
+    Right output -> output
 
 finishStream
-    :: ReadFileSpeculation
+    :: ToolSpeculationRuntime
     -> Maybe Text
-    -> ResponseItem
-    -> Text
+    -> ToolCall
     -> IO ()
-finishStream cache itemId finalItem arguments = do
-    observeReadFileStreamEvent cache $
+finishStream runtime itemId call = do
+    observeToolArgumentEvent runtime $
         argumentsDone
             itemId
             (Just 0)
-            arguments
-    observeReadFileStreamEvent cache $
-        ResponseOutputItemDoneEvent
-            { item = finalItem
-            , outputIndex = Just 0
-            , sequenceNumber = Nothing
-            , eventExtraFields = KeyMap.empty
+            call.arguments
+    observeToolArgumentEvent runtime $
+        ToolCallStreamCompleted
+            { argumentStreamRefs = streamRefs itemId (Just 0)
+            , argumentStreamCall = call
             }
-    retainFinalReadFileCalls cache [finalItem]
+    retainToolSpeculation runtime [call]
 
-warmWorkspaceIndex :: ReadFileSpeculation -> IO ()
-warmWorkspaceIndex cache = do
-    observeReadFileStreamEvent cache $
+warmWorkspaceIndex :: ToolSpeculationRuntime -> IO ()
+warmWorkspaceIndex runtime = do
+    observeToolArgumentEvent runtime $
         outputItemAdded
             (Just "benchmark-index-warmup")
             (Just 0)
             "benchmark-index-warmup"
             ""
-    waitForReadFileSpeculation cache
-    resetReadFileSpeculation cache
+    waitForToolSpeculation runtime
+    resetToolSpeculationRuntime runtime
 
 measure :: IO Int -> IO Sample
 measure action = do
@@ -328,70 +357,47 @@ readArguments target =
             Aeson.encode $
                 Aeson.object ["target_file" Aeson..= target]
 
-finalReadCall :: Maybe Text -> Text -> Text -> ResponseItem
-finalReadCall itemId callId arguments =
-    FunctionCallItem FunctionCall
-        { itemId
-        , callId
-        , name = "read_file"
-        , arguments
-        , status = Nothing
-        , extraFields = KeyMap.empty
-        }
-
 outputItemAdded
     :: Maybe Text
     -> Maybe Int
     -> Text
     -> Text
-    -> ResponseStreamEvent
+    -> ToolArgumentStreamEvent
 outputItemAdded itemId outputIndex callId arguments =
-    ResponseOutputItemAddedEvent
-        { item = finalReadCall itemId callId arguments
-        , outputIndex
-        , sequenceNumber = Nothing
-        , eventExtraFields = KeyMap.empty
+    ToolArgumentsStarted
+        { argumentStreamRefs = streamRefs itemId outputIndex
+        , argumentStreamCallId = callId
+        , argumentStreamName = Just "read_file"
+        , argumentStreamArguments = arguments
         }
 
 argumentsDelta
     :: Maybe Text
     -> Maybe Int
     -> Text
-    -> ResponseStreamEvent
+    -> ToolArgumentStreamEvent
 argumentsDelta itemId outputIndex delta =
-    OtherResponseStreamEvent
-        { otherEventType = EventFunctionCallArgumentsDelta
-        , sequenceNumber = Nothing
-        , eventExtraFields =
-            KeyMap.fromList
-                [ ("item_id", maybe Aeson.Null Aeson.String itemId)
-                , ("output_index", maybe
-                    Aeson.Null
-                    (Aeson.Number . fromIntegral)
-                    outputIndex)
-                , ("delta", Aeson.String delta)
-                ]
+    ToolArgumentsDelta
+        { argumentStreamRefs = streamRefs itemId outputIndex
+        , argumentStreamDelta = delta
         }
 
 argumentsDone
     :: Maybe Text
     -> Maybe Int
     -> Text
-    -> ResponseStreamEvent
+    -> ToolArgumentStreamEvent
 argumentsDone itemId outputIndex arguments =
-    OtherResponseStreamEvent
-        { otherEventType = EventFunctionCallArgumentsDone
-        , sequenceNumber = Nothing
-        , eventExtraFields =
-            KeyMap.fromList
-                [ ("item_id", maybe Aeson.Null Aeson.String itemId)
-                , ("output_index", maybe
-                    Aeson.Null
-                    (Aeson.Number . fromIntegral)
-                    outputIndex)
-                , ("arguments", Aeson.String arguments)
-                ]
+    ToolArgumentsDone
+        { argumentStreamRefs = streamRefs itemId outputIndex
+        , argumentStreamName = Nothing
+        , argumentStreamArguments = arguments
         }
+
+streamRefs :: Maybe Text -> Maybe Int -> [ToolCallStreamRef]
+streamRefs itemId outputIndex =
+    maybe [] (pure . ToolCallStreamItem) itemId
+        <> maybe [] (pure . ToolCallStreamOutput) outputIndex
 
 writeSizedTextFile :: FilePath -> Int -> IO ()
 writeSizedTextFile path byteCount =

@@ -2,19 +2,21 @@ module Agent.Tools.FileSystem.ReadFileSpeculation
     ( ReadFileSpeculation
     , ReadFileSpeculationMetrics(..)
     , newReadFileSpeculation
+    , readFileToolSpeculator
+    , readFileToolSpeculation
     , closeReadFileSpeculation
     , resetReadFileSpeculation
-    , retainFinalReadFileCalls
-    , observeReadFileStreamEvent
-    , takeSpeculatedRead
     , waitForReadFileSpeculation
     , readReadFileSpeculationMetrics
     ) where
 
 import Agent.OsPath (fromText, unsafeToFilePath)
-import Agent.Responses.Types
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ActiveToolSpeculation(..)
+    , ToolArgumentUpdate(..)
+    , ToolCall(..)
+    , ToolSpeculator(..)
+    , ToolSpeculatorSession(..)
     , canonicalToolName
     , decodeToolArguments
     , toolArgumentsValue
@@ -42,8 +44,7 @@ import Control.Concurrent.MVar
     )
 import Control.Exception (evaluate)
 import Control.Exception.Safe
-    ( SomeException
-    , mask
+    ( mask
     , onException
     , tryAny
     )
@@ -61,7 +62,6 @@ import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe, isNothing)
 import qualified Data.Set as Set
-import qualified Data.Scientific as Scientific
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -94,19 +94,15 @@ data SpeculationState = SpeculationState
     { closed :: !Bool
     , workspacePaths :: !(Maybe (Set.Set Text))
     , workspaceIndexTask :: !(Maybe (Async ()))
-    , partialCalls :: !(Map.Map StreamCallKey PartialReadCall)
+    , nextCallKey :: !Int
+    , partialCalls :: !(Map.Map ReadCallKey PartialReadCall)
     }
 
-data StreamCallKey
-    = StreamCallItem !Text
-    | StreamCallOutput !Int
+newtype ReadCallKey = ReadCallKey Int
     deriving (Eq, Ord, Show)
 
 data PartialReadCall = PartialReadCall
-    { partialItemId :: !(Maybe Text)
-    , partialOutputIndex :: !(Maybe Int)
-    , partialCallId :: !Text
-    , partialArguments :: !Text
+    { partialArguments :: !Text
     , partialCandidate :: !(Maybe ReadCandidate)
     }
 
@@ -170,6 +166,7 @@ newReadFileSpeculation environment = do
         { closed = False
         , workspacePaths = Nothing
         , workspaceIndexTask = Nothing
+        , nextCallKey = 0
         , partialCalls = Map.empty
         }
     metrics <- newIORef emptyMetrics
@@ -212,113 +209,102 @@ resetReadFileSpeculation speculation = do
                 }
         cancelAndJoinAll tasks
 
--- | Observe one Responses stream event. This function is deliberately
--- best-effort: speculation failures must never fail the model response.
-observeReadFileStreamEvent
-    :: ReadFileSpeculation
-    -> ResponseStreamEvent
-    -> IO ()
-observeReadFileStreamEvent speculation event = do
-    _ <- tryAny (observe event) :: IO (Either SomeException ())
-    pure ()
-  where
-    observe = \case
-        ResponseCreatedEvent{} ->
-            resetReadFileSpeculation speculation
-        ResponseOutputItemAddedEvent
-            { item = FunctionCallItem call, outputIndex } ->
-                observeFunctionCall speculation outputIndex call
-        ResponseOutputItemDoneEvent
-            { item = FunctionCallItem call, outputIndex } ->
-                observeFunctionCall speculation outputIndex call
-        OtherResponseStreamEvent
-            { otherEventType = EventFunctionCallArgumentsDelta
-            , eventExtraFields
-            } ->
-                case
-                    ( textField "item_id" eventExtraFields
-                    , intField "output_index" eventExtraFields
-                    , textField "delta" eventExtraFields
-                    )
-                of
-                    (itemId, outputIndex, Just delta) ->
-                        appendArguments speculation itemId outputIndex delta
-                    _ -> pure ()
-        OtherResponseStreamEvent
-            { otherEventType = EventFunctionCallArgumentsDone
-            , eventExtraFields
-            } ->
-                case
-                    ( textField "item_id" eventExtraFields
-                    , intField "output_index" eventExtraFields
-                    , textField "name" eventExtraFields
-                    , textField "arguments" eventExtraFields
-                    )
-                of
-                    (itemId, outputIndex, name, Just arguments) ->
-                        setArguments
-                            speculation
-                            itemId
-                            outputIndex
-                            name
-                            arguments
-                    _ -> pure ()
-        _ -> pure ()
+-- | Registration-time factory. Opening it creates the session-scoped filename
+-- index and shared speculative-read budget; each streamed call then receives
+-- its own incremental parser state.
+readFileToolSpeculator :: ToolEnv -> ToolSpeculator
+readFileToolSpeculator environment =
+    ToolSpeculator $
+        readFileToolSpeculatorSession
+            <$> newReadFileSpeculation environment
 
-observeFunctionCall
+-- | Attach an already-created cache, primarily for tests and benchmarks.
+readFileToolSpeculation :: ReadFileSpeculation -> ToolSpeculator
+readFileToolSpeculation speculation =
+    ToolSpeculator (pure (readFileToolSpeculatorSession speculation))
+
+readFileToolSpeculatorSession
     :: ReadFileSpeculation
-    -> Maybe Int
-    -> FunctionCall
-    -> IO ()
-observeFunctionCall speculation outputIndex call
-    | canonicalToolName call.name /= "read_file" = pure ()
-    | otherwise = forM_ (primaryCallKey call.itemId outputIndex) \callKey -> do
+    -> ToolSpeculatorSession
+readFileToolSpeculatorSession speculation = ToolSpeculatorSession
+    { startToolSpeculation = startReadFileCall speculation
+    , closeToolSpeculatorSession = closeReadFileSpeculation speculation
+    }
+
+startReadFileCall
+    :: ReadFileSpeculation
+    -> ToolCall
+    -> IO ActiveToolSpeculation
+startReadFileCall speculation call
+    | canonicalToolName call.name /= "read_file" =
+        pure inertToolSpeculation
+    | otherwise = do
         startWorkspaceIndex speculation
-        retired <- modifyMVar speculation.state \current ->
-            if current.closed
-                then pure (current, [])
-                else do
-                    let priorEntry =
-                            lookupPartialCall
-                                call.itemId outputIndex current.partialCalls
-                        prior = snd <$> priorEntry
-                        partial = PartialReadCall
-                            { partialItemId =
-                                call.itemId
-                                    <|> (prior >>= (.partialItemId))
-                            , partialOutputIndex =
-                                outputIndex
-                                    <|> (prior >>= (.partialOutputIndex))
-                            , partialCallId = call.callId
-                            , partialArguments =
-                                if Text.null call.arguments
-                                    then maybe "" (.partialArguments) prior
-                                    else call.arguments
-                            , partialCandidate =
-                                prior >>= (.partialCandidate)
-                            }
-                        withoutAlias = maybe current.partialCalls
-                            (\(priorKey, _) ->
-                                Map.delete priorKey current.partialCalls)
-                            priorEntry
-                        updated = current
-                            { partialCalls =
-                                Map.insert callKey partial withoutAlias
-                            }
-                    refreshCallCandidate speculation callKey updated
+        (maybeCallKey, retired) <-
+            modifyMVar speculation.state \current ->
+                if current.closed
+                    then pure (current, (Nothing, []))
+                    else do
+                        let callKey = ReadCallKey current.nextCallKey
+                            inserted =
+                                current
+                                    { nextCallKey = current.nextCallKey + 1
+                                    , partialCalls =
+                                        Map.insert
+                                            callKey
+                                            PartialReadCall
+                                                { partialArguments =
+                                                    call.arguments
+                                                , partialCandidate = Nothing
+                                                }
+                                            current.partialCalls
+                                    }
+                        refreshCallCandidate speculation callKey inserted
+                            >>= \(updated, replaced) ->
+                                pure (updated, (Just callKey, replaced))
         cancelRetiredCandidates speculation retired
+        pure $
+            maybe
+                inertToolSpeculation
+                (activeReadFileSpeculation speculation)
+                maybeCallKey
 
-appendArguments
+activeReadFileSpeculation
     :: ReadFileSpeculation
-    -> Maybe Text
-    -> Maybe Int
-    -> Text
+    -> ReadCallKey
+    -> ActiveToolSpeculation
+activeReadFileSpeculation speculation callKey = ActiveToolSpeculation
+    { updateToolArguments =
+        updateReadFileArguments speculation callKey
+    , finalizeToolSpeculation =
+        finalizeReadFileCall speculation callKey
+    , takeToolSpeculatedResult =
+        takeSpeculatedReadCall speculation callKey
+    , cancelActiveToolSpeculation =
+        cancelReadFileCall speculation callKey
+    , waitActiveToolSpeculation =
+        waitForReadFileCall speculation callKey
+    }
+
+inertToolSpeculation :: ActiveToolSpeculation
+inertToolSpeculation = ActiveToolSpeculation
+    { updateToolArguments = \_ -> pure ()
+    , finalizeToolSpeculation = \_ -> pure ()
+    , takeToolSpeculatedResult = \_ -> pure Nothing
+    , cancelActiveToolSpeculation = pure ()
+    , waitActiveToolSpeculation = pure ()
+    }
+
+updateReadFileArguments
+    :: ReadFileSpeculation
+    -> ReadCallKey
+    -> ToolArgumentUpdate
     -> IO ()
-appendArguments speculation itemId outputIndex delta = do
+updateReadFileArguments speculation callKey update = do
     retired <- modifyMVar speculation.state \current ->
-        case lookupPartialCall itemId outputIndex current.partialCalls of
+        case Map.lookup callKey current.partialCalls of
             Nothing -> pure (current, [])
-            Just (callKey, partial)
+            Just partial
                 | current.closed -> pure (current, [])
                 | otherwise ->
                     refreshCallCandidate speculation callKey $
@@ -327,84 +313,71 @@ appendArguments speculation itemId outputIndex delta = do
                                 Map.insert
                                     callKey
                                     partial
-                                        { partialItemId =
-                                            itemId
-                                                <|> partial.partialItemId
-                                        , partialOutputIndex =
-                                            outputIndex
-                                                <|> partial.partialOutputIndex
-                                        , partialArguments =
-                                            partial.partialArguments <> delta
+                                        { partialArguments =
+                                            applyArgumentUpdate
+                                                partial.partialArguments
+                                                update
                                         }
                                     current.partialCalls
                             }
     cancelRetiredCandidates speculation retired
 
-setArguments
+applyArgumentUpdate :: Text -> ToolArgumentUpdate -> Text
+applyArgumentUpdate current = \case
+    ToolArgumentDeltaUpdate delta -> current <> delta
+    ToolArgumentDoneUpdate arguments -> arguments
+
+finalizeReadFileCall
     :: ReadFileSpeculation
-    -> Maybe Text
-    -> Maybe Int
-    -> Maybe Text
-    -> Text
+    -> ReadCallKey
+    -> ToolCall
     -> IO ()
-setArguments speculation itemId outputIndex name arguments = do
-    let maybeCallKey = primaryCallKey itemId outputIndex
-    case maybeCallKey of
-        Nothing -> pure ()
-        Just callKey -> do
-            startWorkspaceIndex speculation
-            retired <- modifyMVar speculation.state \current ->
-                if current.closed
-                    then pure (current, [])
-                    else case
-                        lookupPartialCall itemId outputIndex current.partialCalls
-                    of
-                        Just (priorKey, partial) ->
-                            refreshCallCandidate speculation callKey $
-                                current
-                                    { partialCalls =
-                                        Map.insert
-                                            callKey
-                                            partial
-                                                { partialItemId =
-                                                    itemId
-                                                        <|> partial.partialItemId
-                                                , partialOutputIndex =
-                                                    outputIndex
-                                                        <|> partial.partialOutputIndex
-                                                , partialArguments = arguments
-                                                }
-                                            (Map.delete
-                                                priorKey
-                                                current.partialCalls)
-                                    }
-                        Nothing
-                            | maybe False
-                                ((== "read_file") . canonicalToolName)
-                                name ->
-                                    refreshCallCandidate speculation callKey $
-                                        current
-                                            { partialCalls =
-                                                Map.insert
-                                                    callKey
-                                                    PartialReadCall
-                                                        { partialItemId = itemId
-                                                        , partialOutputIndex =
-                                                            outputIndex
-                                                        , partialCallId = ""
-                                                        , partialArguments =
-                                                            arguments
-                                                        , partialCandidate =
-                                                            Nothing
-                                                        }
-                                                    current.partialCalls
-                                            }
-                            | otherwise -> pure (current, [])
-            cancelRetiredCandidates speculation retired
+finalizeReadFileCall speculation callKey call
+    | canonicalToolName call.name /= "read_file" =
+        cancelReadFileCall speculation callKey
+    | otherwise =
+        updateReadFileArguments
+            speculation
+            callKey
+            (ToolArgumentDoneUpdate call.arguments)
+
+cancelReadFileCall
+    :: ReadFileSpeculation
+    -> ReadCallKey
+    -> IO ()
+cancelReadFileCall speculation callKey = do
+    tasks <- modifyMVar speculation.state \current ->
+        let selected =
+                Map.lookup callKey current.partialCalls
+                    >>= (.partialCandidate)
+            updated =
+                current
+                    { partialCalls =
+                        Map.delete callKey current.partialCalls
+                    }
+        in pure
+            ( updated
+            , maybe [] (pure . (.candidateTask)) selected
+            )
+    recordCancelledTasks speculation tasks
+    cancelAndJoinAll tasks
+
+waitForReadFileCall
+    :: ReadFileSpeculation
+    -> ReadCallKey
+    -> IO ()
+waitForReadFileCall speculation callKey = do
+    initial <- readMVar speculation.state
+    forM_ initial.workspaceIndexTask (void . waitCatch)
+    current <- readMVar speculation.state
+    forM_
+        (Map.lookup callKey current.partialCalls
+            >>= (.partialCandidate))
+        (void . waitCatch . (.candidateTask))
 
 refreshCallCandidate
     :: ReadFileSpeculation
-    -> StreamCallKey
+    -> ReadCallKey
     -> SpeculationState
     -> IO (SpeculationState, [Async (Maybe PrefetchedRead)])
 refreshCallCandidate speculation callKey current =
@@ -615,61 +588,29 @@ prefetchRead environment arguments
         Left err -> forceText err
         Right output -> forceText output
 
--- | Drop predictions that do not correspond to finalized @read_file@ calls.
---
--- Matching predictions remain available for normal post-response approval,
--- scheduling, and dispatch. Everything else is cancelled so an abandoned
--- partial call cannot retain a prefetched file while the session is idle.
-retainFinalReadFileCalls
-    :: ReadFileSpeculation
-    -> [ResponseItem]
-    -> IO ()
-retainFinalReadFileCalls speculation outputItems = do
-    let finalCallIds = Set.fromList
-            [ call.callId
-            | FunctionCallItem call <- outputItems
-            , canonicalToolName call.name == "read_file"
-            ]
-    tasks <- modifyMVar speculation.state \current ->
-        let (retained, removed) =
-                Map.partition
-                    (\partial ->
-                        Set.member partial.partialCallId finalCallIds)
-                    current.partialCalls
-        in pure
-            ( current { partialCalls = retained }
-            , map (.candidateTask) (activeCandidatesFor removed)
-            )
-    recordCancelledTasks speculation tasks
-    cancelAndJoinAll tasks
-
 -- | Consume a matching, fresh prefetch for the finalized tool call.
 --
 -- A miss leaves the normal @read_file@ handler responsible for all work.
-takeSpeculatedRead
+takeSpeculatedReadCall
     :: ReadFileSpeculation
+    -> ReadCallKey
     -> ToolCall
     -> IO (Maybe (Either Text Text))
-takeSpeculatedRead speculation call
-    | canonicalToolName call.name /= "read_file" = pure Nothing
+takeSpeculatedReadCall speculation callKey call
+    | canonicalToolName call.name /= "read_file" =
+        cancelReadFileCall speculation callKey >> pure Nothing
     | otherwise = mask \restore -> do
         selected <- modifyMVar speculation.state \current ->
-            case
-                [ (callKey, candidate)
-                | (callKey, partial) <- Map.toList current.partialCalls
-                , partial.partialCallId == call.callId
-                , candidate <- maybe [] pure partial.partialCandidate
-                ]
-            of
-                ((callKey, candidate) : _) ->
-                    pure
-                        ( current
-                            { partialCalls =
-                                Map.delete callKey current.partialCalls
-                            }
-                        , Just candidate
-                        )
-                [] -> pure (current, Nothing)
+            let candidate =
+                    Map.lookup callKey current.partialCalls
+                        >>= (.partialCandidate)
+            in pure
+                ( current
+                    { partialCalls =
+                        Map.delete callKey current.partialCalls
+                    }
+                , candidate
+                )
         case selected of
             Nothing -> miss speculation >> pure Nothing
             Just candidate ->
@@ -866,61 +807,11 @@ decodeJsonString raw =
         Text.encodeUtf8 $
             "\"" <> Text.pack raw <> "\""
 
-textField :: Text -> Aeson.Object -> Maybe Text
-textField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
-
-intField :: Text -> Aeson.Object -> Maybe Int
-intField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.Number value) -> Scientific.toBoundedInteger value
-        _ -> Nothing
-
-primaryCallKey :: Maybe Text -> Maybe Int -> Maybe StreamCallKey
-primaryCallKey itemId outputIndex =
-    StreamCallItem <$> itemId <|> StreamCallOutput <$> outputIndex
-
-callKeys :: Maybe Text -> Maybe Int -> [StreamCallKey]
-callKeys itemId outputIndex =
-    maybe [] (pure . StreamCallItem) itemId
-        <> maybe [] (pure . StreamCallOutput) outputIndex
-
-lookupPartialCall
-    :: Maybe Text
-    -> Maybe Int
-    -> Map.Map StreamCallKey PartialReadCall
-    -> Maybe (StreamCallKey, PartialReadCall)
-lookupPartialCall itemId outputIndex calls =
-    go (callKeys itemId outputIndex)
-        <|> findMatchingAlias (Map.toList calls)
-  where
-    go [] = Nothing
-    go (callKey : rest) =
-        case Map.lookup callKey calls of
-            Just partial -> Just (callKey, partial)
-            Nothing -> go rest
-
-    findMatchingAlias [] = Nothing
-    findMatchingAlias ((callKey, partial) : rest)
-        | matchesPartialAlias partial = Just (callKey, partial)
-        | otherwise = findMatchingAlias rest
-
-    matchesPartialAlias :: PartialReadCall -> Bool
-    matchesPartialAlias partial =
-        maybe False
-            (\value -> partial.partialItemId == Just value)
-            itemId
-            || maybe False
-                (\value -> partial.partialOutputIndex == Just value)
-                outputIndex
-
 activeCandidates :: SpeculationState -> [ReadCandidate]
 activeCandidates = activeCandidatesFor . (.partialCalls)
 
 activeCandidatesFor
-    :: Map.Map StreamCallKey PartialReadCall
+    :: Map.Map ReadCallKey PartialReadCall
     -> [ReadCandidate]
 activeCandidatesFor =
     catMaybes . map (.partialCandidate) . Map.elems

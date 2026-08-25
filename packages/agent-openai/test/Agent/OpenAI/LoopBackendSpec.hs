@@ -11,11 +11,15 @@ import Agent.OpenAI.LoopBackend
 import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
+import Agent.Tools.FileSystem.ReadFile (readFileToolWithSpeculation)
 import Agent.Tools.FileSystem.ReadFileSpeculation
-    ( closeReadFileSpeculation
-    , newReadFileSpeculation
-    , takeSpeculatedRead
+    ( newReadFileSpeculation
     , waitForReadFileSpeculation
+    )
+import Agent.Tools.Speculation
+    ( closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    , takeToolSpeculation
     )
 import Agent.Tools.Types (defaultToolEnv)
 import Control.Exception (bracket)
@@ -471,10 +475,12 @@ spec = do
             withSystemTempDirectory "openai-read-speculation" \dir -> do
                 Text.writeFile (dir </> "streamed.txt") "streamed"
                 env <- defaultToolEnv (unsafeEncodeUtf dir)
+                cache <- newReadFileSpeculation env
                 bracket
-                    (newReadFileSpeculation env)
-                    closeReadFileSpeculation
-                    \cache -> do
+                    (newToolSpeculationRuntime
+                        [readFileToolWithSpeculation env (Just cache)])
+                    closeToolSpeculationRuntime
+                    \runtime -> do
                         transcript <- newIORef []
                         let callId = "call-streamed"
                             arguments =
@@ -500,23 +506,19 @@ spec = do
                                     , sequenceNumber = Nothing
                                     , eventExtraFields = KeyMap.empty
                                     }
-                                onEvent OtherResponseStreamEvent
-                                    { otherEventType =
-                                        EventFunctionCallArgumentsDelta
+                                onEvent ResponseFunctionCallArgumentsDeltaEvent
+                                    { delta = Just arguments
+                                    , streamItemId = Nothing
+                                    , streamOutputIndex = Just 0
                                     , sequenceNumber = Nothing
-                                    , eventExtraFields = KeyMap.fromList
-                                        [ ( "output_index"
-                                          , Aeson.Number 0
-                                          )
-                                        , ("delta", Aeson.String arguments)
-                                        ]
+                                    , eventExtraFields = KeyMap.empty
                                     }
                                 waitForReadFileSpeculation cache
                                 pure $ Right $
                                     testResponse "resp-streamed" [finalCall]
                             backend =
-                                openAiBackendWithSpeculativeRead
-                                    cache
+                                openAiBackendWithToolSpeculation
+                                    runtime
                                     send
                                     (pure baseParams)
                         result <- submitWithState
@@ -535,13 +537,74 @@ spec = do
                                         arguments
                                     ]
                                     Nothing)
-                        takeSpeculatedRead
-                            cache
+                        takeToolSpeculation
+                            runtime
                             (functionToolCall
                                 callId
                                 "read_file"
                                 arguments)
                             `shouldReturn` Just (Right "1→streamed")
+
+        it "binds arguments.done speculation from the final response item" do
+            withSystemTempDirectory "openai-read-done-speculation" \dir -> do
+                Text.writeFile (dir </> "done.txt") "done"
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                cache <- newReadFileSpeculation env
+                bracket
+                    (newToolSpeculationRuntime
+                        [readFileToolWithSpeculation env (Just cache)])
+                    closeToolSpeculationRuntime
+                    \runtime -> do
+                        transcript <- newIORef []
+                        let itemId = "item-done"
+                            callId = "call-done"
+                            arguments =
+                                "{\"target_file\":\"done.txt\"}"
+                            finalCall =
+                                FunctionCallItem FunctionCall
+                                    { itemId = Just itemId
+                                    , callId
+                                    , name = "read_file"
+                                    , arguments
+                                    , status = Just ItemCompleted
+                                    , extraFields = KeyMap.empty
+                                    }
+                            send _request _previous onEvent = do
+                                onEvent ResponseFunctionCallArgumentsDoneEvent
+                                    { arguments = Just arguments
+                                    , functionName = Just "read_file"
+                                    , streamItemId = Just itemId
+                                    , streamOutputIndex = Nothing
+                                    , sequenceNumber = Nothing
+                                    , eventExtraFields = KeyMap.empty
+                                    }
+                                waitForReadFileSpeculation cache
+                                pure $ Right $
+                                    testResponse "resp-done" [finalCall]
+                            backend =
+                                openAiBackendWithToolSpeculation
+                                    runtime
+                                    send
+                                    (pure baseParams)
+                            call =
+                                functionToolCall
+                                    callId
+                                    "read_file"
+                                    arguments
+                        result <- submitWithState
+                            transcript
+                            backend
+                            Nothing
+                            [UserMessage "read it"]
+                            (const (pure ()))
+                        result `shouldBe`
+                            Right
+                                (emptyTurnOutput
+                                    "resp-done"
+                                    [call]
+                                    Nothing)
+                        takeToolSpeculation runtime call
+                            `shouldReturn` Just (Right "1→done")
 
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []

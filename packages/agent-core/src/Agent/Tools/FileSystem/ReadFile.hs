@@ -10,7 +10,6 @@ import Agent.ToolDispatch
     , decodeToolArguments
     , toolArgumentsValue
     , typedTool
-    , typedToolWithCall
     )
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
@@ -18,7 +17,8 @@ import Agent.Tools.FileSystem.ReadFile.Internal
     )
 import Agent.Tools.FileSystem.ReadFileSpeculation
     ( ReadFileSpeculation
-    , takeSpeculatedRead
+    , readFileToolSpeculation
+    , readFileToolSpeculator
     )
 import Agent.Tools.IO (resolveForRead)
 import Agent.Tools.Scheduling
@@ -32,18 +32,31 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     , withToolResourceClaims
+    , withToolSpeculation
     )
 import Data.Text (Text)
 
 readFileTool :: ToolEnv -> AppTool
 readFileTool env =
-    readFileToolWithSpeculation env Nothing
+    withToolSpeculation
+        (readFileToolSpeculator env)
+        (baseReadFileTool env)
 
 readFileToolWithSpeculation
     :: ToolEnv
     -> Maybe ReadFileSpeculation
     -> AppTool
 readFileToolWithSpeculation env speculation =
+    maybe
+        (baseReadFileTool env)
+        (\cache ->
+            withToolSpeculation
+                (readFileToolSpeculation cache)
+                (baseReadFileTool env))
+        speculation
+
+baseReadFileTool :: ToolEnv -> AppTool
+baseReadFileTool env =
     withToolResourceClaims (readFileClaims env) $
     jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
@@ -55,23 +68,7 @@ readFileToolWithSpeculation env speculation =
     ]
     True
     ParallelSafe
-    handler
-  where
-    handler = case speculation of
-        Nothing -> typedTool "read_file" (runReadFile env)
-        Just cache ->
-            typedToolWithCall "read_file" (runReadFileSpeculative env cache)
-
-runReadFileSpeculative
-    :: ToolEnv
-    -> ReadFileSpeculation
-    -> ToolCall
-    -> ReadFileArgs
-    -> IO (Either Text Text)
-runReadFileSpeculative env speculation call args =
-    takeSpeculatedRead speculation call >>= \case
-        Just result -> pure result
-        Nothing -> runReadFile env args
+    (typedTool "read_file" (runReadFile env))
 
 readFileClaims
     :: ToolEnv

@@ -4,6 +4,12 @@ module Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , ToolCallResult(..)
+    , ToolCallStreamRef(..)
+    , ToolArgumentStreamEvent(..)
+    , ToolArgumentUpdate(..)
+    , ToolSpeculator(..)
+    , ToolSpeculatorSession(..)
+    , ActiveToolSpeculation(..)
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -70,6 +76,84 @@ data ToolCallResult = ToolCallResult
     , output :: !Text
     , callKind :: !ToolCallKind
     } deriving (Eq, Show)
+
+-- | Provider-neutral references used to correlate streamed argument events
+-- with the output item they belong to. Providers may expose one or both
+-- references; the speculation runtime keeps aliases together.
+data ToolCallStreamRef
+    = ToolCallStreamItem !Text
+    | ToolCallStreamOutput !Int
+    | ToolCallStreamCall !Text
+    deriving (Eq, Ord, Show)
+
+-- | Canonical lifecycle events consumed by tool argument speculators. Provider
+-- adapters translate their native stream events into this small vocabulary.
+data ToolArgumentStreamEvent
+    = ToolArgumentsStarted
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamCallId :: !Text
+        , argumentStreamName :: !(Maybe Text)
+        , argumentStreamArguments :: !Text
+        }
+    | ToolArgumentsDelta
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamDelta :: !Text
+        }
+    | ToolArgumentsDone
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamName :: !(Maybe Text)
+        , argumentStreamArguments :: !Text
+        }
+    | ToolCallStreamCompleted
+        { argumentStreamRefs :: ![ToolCallStreamRef]
+        , argumentStreamCall :: !ToolCall
+        }
+    deriving (Eq, Show)
+
+data ToolArgumentUpdate
+    = ToolArgumentDeltaUpdate !Text
+    | ToolArgumentDoneUpdate !Text
+    deriving (Eq, Show)
+
+-- | Registration-time factory for a tool-owned speculation session. The
+-- factory is opened only when speculation is enabled, so ordinary tool
+-- registration remains pure and has no background-work cost. Speculators
+-- produce only a final result; streaming output snapshots remain the ordinary
+-- handler's responsibility.
+newtype ToolSpeculator = ToolSpeculator
+    { openToolSpeculator :: IO ToolSpeculatorSession
+    }
+
+-- | Session-scoped resources shared by every speculative call for one tool.
+-- For example, @read_file@ keeps its workspace filename index here.
+data ToolSpeculatorSession = ToolSpeculatorSession
+    { startToolSpeculation
+        :: ToolCall
+        -> IO ActiveToolSpeculation
+    , closeToolSpeculatorSession
+        :: IO ()
+    }
+
+-- | One streamed tool call's IO state machine. Implementations can internally
+-- use @ParserState -> ToolArgumentUpdate -> IO ParserState@ while keeping that
+-- state, speculative workers, and validation logic private. Cancellation is
+-- followed by 'waitActiveToolSpeculation' so implementations may split
+-- signalling and joining if useful.
+data ActiveToolSpeculation = ActiveToolSpeculation
+    { updateToolArguments
+        :: ToolArgumentUpdate
+        -> IO ()
+    , finalizeToolSpeculation
+        :: ToolCall
+        -> IO ()
+    , takeToolSpeculatedResult
+        :: ToolCall
+        -> IO (Maybe (Either Text Text))
+    , cancelActiveToolSpeculation
+        :: IO ()
+    , waitActiveToolSpeculation
+        :: IO ()
+    }
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall

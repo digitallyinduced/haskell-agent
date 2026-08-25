@@ -1281,6 +1281,7 @@ testConfig backend = do
             [ typedTool "echo" $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
             ]
+        , loopToolSpeculation = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()

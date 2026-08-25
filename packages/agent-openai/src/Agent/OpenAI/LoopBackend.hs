@@ -14,8 +14,8 @@ module Agent.OpenAI.LoopBackend
     , openAiResponseSenderWithRetryPolicy
     , openAiBackendWith
     , openAiBackendWithReasoningVisibility
-    , openAiBackendWithSpeculativeRead
-    , openAiBackendWithReasoningVisibilityAndSpeculativeRead
+    , openAiBackendWithToolSpeculation
+    , openAiBackendWithReasoningVisibilityAndToolSpeculation
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
@@ -62,14 +62,21 @@ import Agent.Responses.LoopBackend
     , withRequestInput
     )
 import Agent.Responses.Types
-import Agent.Tools.FileSystem.ReadFileSpeculation
-    ( ReadFileSpeculation
-    , observeReadFileStreamEvent
-    , retainFinalReadFileCalls
-    , resetReadFileSpeculation
+import Agent.ToolDispatch
+    ( ToolArgumentStreamEvent(..)
+    , ToolCall
+    , functionToolCall
+    , ToolCallStreamRef(..)
+    )
+import Agent.Tools.Speculation
+    ( ToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , resetToolSpeculationRuntime
+    , retainToolSpeculation
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (onException)
+import Control.Monad (forM_)
 import Control.Retry
     ( RetryPolicyM
     , applyPolicy
@@ -80,7 +87,7 @@ import Control.Retry
     , rsPreviousDelay
     )
 import Data.IORef
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -522,33 +529,32 @@ openAiBackendWithReasoningVisibility showRawReasoning =
         Nothing
         transientStreamingResultPolicy
 
--- | OpenAI WebSocket backend with invisible, best-effort @read_file@
--- prefetching driven by streamed function-call argument deltas.
-openAiBackendWithSpeculativeRead
-    :: ReadFileSpeculation
+-- | OpenAI backend with invisible, best-effort streamed tool preparation.
+openAiBackendWithToolSpeculation
+    :: ToolSpeculationRuntime
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithSpeculativeRead speculation =
-    openAiBackendWithReasoningVisibilityAndSpeculativeRead
+openAiBackendWithToolSpeculation speculation =
+    openAiBackendWithReasoningVisibilityAndToolSpeculation
         False
         speculation
 
--- | Speculative @read_file@ prefetching with explicit raw-reasoning
+-- | OpenAI backend with streamed tool preparation and explicit raw-reasoning
 -- visibility.
-openAiBackendWithReasoningVisibilityAndSpeculativeRead
+openAiBackendWithReasoningVisibilityAndToolSpeculation
     :: Bool
-    -> ReadFileSpeculation
+    -> ToolSpeculationRuntime
     -> (ResponseCreateParams
         -> Maybe Text
         -> (ResponseStreamEvent -> IO ())
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithReasoningVisibilityAndSpeculativeRead
+openAiBackendWithReasoningVisibilityAndToolSpeculation
         showRawReasoning speculation =
     openAiBackendWithRetryPolicyAndFeatures
         showRawReasoning
@@ -571,7 +577,7 @@ openAiBackendWithRetryPolicy =
 
 openAiBackendWithRetryPolicyAndFeatures
     :: Bool
-    -> Maybe ReadFileSpeculation
+    -> Maybe ToolSpeculationRuntime
     -> RetryPolicyM IO
     -> (ResponseCreateParams
         -> Maybe Text
@@ -582,7 +588,7 @@ openAiBackendWithRetryPolicyAndFeatures
 openAiBackendWithRetryPolicyAndFeatures
         showRawReasoning speculation retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
-        mapM_ resetReadFileSpeculation speculation
+        mapM_ resetToolSpeculationRuntime speculation
         let submit = do
                 baseParams <- sanitizeCodexRequest <$> getParams
                 let newItems = turnInputsToItems inputs
@@ -595,10 +601,9 @@ openAiBackendWithRetryPolicyAndFeatures
                     fullRequest =
                         withRequestInput baseParams (history <> newItems)
                     emit event = do
-                        mapM_
-                            (\cache ->
-                                observeReadFileStreamEvent cache event)
-                            speculation
+                        forM_ speculation \runtime ->
+                            forM_ (responseEventToToolArgumentEvent event) $
+                                observeToolArgumentEvent runtime
                         mapM_ onLoopEvent
                             (Responses.streamEventToLoopEventWithRawReasoning
                                 showRawReasoning
@@ -616,27 +621,31 @@ openAiBackendWithRetryPolicyAndFeatures
                         | isJust initialPrevious
                         , isResponseChainCompatibilityError err
                         , not (null history) -> do
-                            mapM_ resetReadFileSpeculation speculation
+                            mapM_ resetToolSpeculationRuntime speculation
                             sendRetrying onLoopEvent fullRequest Nothing emit
                         | otherwise -> pure (Left err)
                     Right response -> pure (Right response)
                 case recovered of
                     Left err -> do
-                        mapM_ resetReadFileSpeculation speculation
+                        mapM_ resetToolSpeculationRuntime speculation
                         pure (Left err)
                     Right response -> do
                         mapM_
-                            (\cache ->
-                                retainFinalReadFileCalls
-                                    cache
-                                    response.output)
+                            (\runtime -> do
+                                mapM_
+                                    (observeToolArgumentEvent runtime)
+                                    (responseToolCallCompletions
+                                        response.output)
+                                retainToolSpeculation
+                                    runtime
+                                    (responseToolCalls response.output))
                             speculation
                         pure $ Right BackendResult
                             { backendOutput = responseToTurnOutput response
                             , backendState =
                                 history <> newItems <> response.output
                             }
-        submit `onException` mapM_ resetReadFileSpeculation speculation
+        submit `onException` mapM_ resetToolSpeculationRuntime speculation
   where
     sendRetrying onLoopEvent request previousResponseId onStreamEvent = do
         emittedLoopEvent <- newIORef False
@@ -665,13 +674,106 @@ openAiBackendWithRetryPolicyAndFeatures
                                 onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
-                                mapM_ resetReadFileSpeculation speculation
+                                mapM_ resetToolSpeculationRuntime speculation
                                 go emittedLoopEvent nextStatus
                 _ -> pure result
 
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =
     exponentialBackoff 5_000_000 <> limitRetries 3
+
+responseEventToToolArgumentEvent
+    :: ResponseStreamEvent
+    -> Maybe ToolArgumentStreamEvent
+responseEventToToolArgumentEvent = \case
+    ResponseOutputItemAddedEvent
+        { item = FunctionCallItem call
+        , outputIndex
+        } ->
+            Just $
+                ToolArgumentsStarted
+                    { argumentStreamRefs =
+                        responseCallRefs call.itemId outputIndex
+                    , argumentStreamCallId = call.callId
+                    , argumentStreamName = Just call.name
+                    , argumentStreamArguments = call.arguments
+                    }
+    ResponseFunctionCallArgumentsDeltaEvent
+        { streamItemId
+        , streamOutputIndex
+        , delta = Just value
+        } ->
+            Just $
+                ToolArgumentsDelta
+                    { argumentStreamRefs =
+                        responseCallRefs streamItemId streamOutputIndex
+                    , argumentStreamDelta = value
+                    }
+    ResponseFunctionCallArgumentsDoneEvent
+        { streamItemId
+        , streamOutputIndex
+        , functionName
+        , arguments = Just value
+        } ->
+            Just $
+                ToolArgumentsDone
+                    { argumentStreamRefs =
+                        responseCallRefs streamItemId streamOutputIndex
+                    , argumentStreamName = functionName
+                    , argumentStreamArguments = value
+                    }
+    ResponseOutputItemDoneEvent
+        { item = FunctionCallItem call
+        , outputIndex
+        } ->
+            Just $
+                ToolCallStreamCompleted
+                    { argumentStreamRefs =
+                        responseCallRefs call.itemId outputIndex
+                    , argumentStreamCall =
+                        functionToolCall
+                            call.callId
+                            call.name
+                            call.arguments
+                    }
+    _ -> Nothing
+
+responseToolCalls :: [ResponseItem] -> [ToolCall]
+responseToolCalls =
+    mapMaybe \case
+        FunctionCallItem call ->
+            Just $
+                functionToolCall
+                    call.callId
+                    call.name
+                    call.arguments
+        _ -> Nothing
+
+responseToolCallCompletions
+    :: [ResponseItem]
+    -> [ToolArgumentStreamEvent]
+responseToolCallCompletions =
+    mapMaybe \case
+        FunctionCallItem call ->
+            Just $
+                ToolCallStreamCompleted
+                    { argumentStreamRefs =
+                        responseCallRefs call.itemId Nothing
+                    , argumentStreamCall =
+                        functionToolCall
+                            call.callId
+                            call.name
+                            call.arguments
+                    }
+        _ -> Nothing
+
+responseCallRefs
+    :: Maybe Text
+    -> Maybe Int
+    -> [ToolCallStreamRef]
+responseCallRefs itemId outputIndex =
+    maybe [] (pure . ToolCallStreamItem) itemId
+        <> maybe [] (pure . ToolCallStreamOutput) outputIndex
 
 -- | OpenAI's default event projection: reasoning summaries are visible, while
 -- raw chain-of-thought deltas are suppressed.

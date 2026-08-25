@@ -81,6 +81,7 @@ library
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
+                    , Agent.Tools.Speculation
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Tools.FileSystem.ReadFile.Internal
@@ -173,7 +174,6 @@ benchmark speculative-read-file-bench
     main-is:          SpeculativeReadFile.hs
     ghc-options:      -O2 -threaded -rtsopts
     build-depends:    agent-core
-                    , agent-responses-types
                     , aeson
                     , base >= 4.14 && < 5
                     , bytestring
@@ -218,6 +218,7 @@ test-suite agent-core-test
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.SecretSpec
+                    , Agent.Tools.SpeculationSpec
                     , Agent.ToolDSLSpec
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
