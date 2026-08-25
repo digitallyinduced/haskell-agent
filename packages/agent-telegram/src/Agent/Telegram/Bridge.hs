@@ -2,6 +2,7 @@
 module Agent.Telegram.Bridge
     ( TelegramBridgeEnv(..)
     , withTelegramBridge
+    , withTelegramBridgeUsing
     , processTelegramCallbacks
     , processBridgeRequestBatch
     , telegramActivityDraftHtml
@@ -24,7 +25,7 @@ import qualified Agent.Telegram.Client as Client
 import Agent.Telegram.Types
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (race, wait, withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
 import Control.Monad (forM_, void, when)
 import Data.Aeson
@@ -53,9 +54,11 @@ import System.Directory
     )
 import System.FilePath
     ( addTrailingPathSeparator
+    , takeBaseName
     , takeExtension
     , (</>)
     )
+import System.IO.Error (isDoesNotExistError, tryIOError)
 
 data TelegramBridgeEnv = TelegramBridgeEnv
     { telegramBridgeClient :: !TelegramClient
@@ -109,8 +112,20 @@ instance FromJSON ApprovalRequest where
         ApprovalRequest <$> o .: "tool_name" <*> o .: "arguments"
 
 withTelegramBridge :: TelegramBridgeEnv -> IO a -> IO a
-withTelegramBridge env action =
-    withAsync (bridgeLoop env) (const action)
+withTelegramBridge env =
+    withTelegramBridgeUsing (bridgeLoop env)
+
+-- | Run a managed turn against a bridge worker. If the worker dies, the
+-- exception is raised in the owning action instead of leaving gateway
+-- requests waiting until they time out.
+withTelegramBridgeUsing :: IO () -> IO a -> IO a
+withTelegramBridgeUsing loop action =
+    withAsync loop \worker ->
+        race (wait worker) action >>= \case
+            Left () ->
+                fail "Telegram gateway bridge polling stopped"
+            Right value ->
+                pure value
 
 bridgeLoop :: TelegramBridgeEnv -> IO ()
 bridgeLoop env = go Set.empty Nothing (0 :: Int)
@@ -132,17 +147,29 @@ processBridgeRequests env seen = do
     let directory =
             unsafeToFilePath
                 (managedBridgeRequestsDirectory env.telegramBridgeRequest)
-    files <- try @_ @SomeException (listDirectory directory) >>= \case
-        Left _ -> pure []
-        Right values -> pure values
+        decode name =
+            decodeBridgeRequest (directory </> name) >>= \case
+                Right request -> pure (Just request)
+                Left err -> do
+                    respondDecodeError env name err
+                    pure Nothing
+    files <- tryIOError (retryOnFileBusy (listDirectory directory)) >>= \case
+        Left err
+            | isDoesNotExistError err ->
+                pure []
+            | otherwise ->
+                ioError err
+        Right values ->
+            pure values
     processBridgeRequestBatch
         seen
         files
-        (decodeBridgeRequest . (directory </>))
+        decode
         (processBridgeRequest env)
 
--- | Decode and dispatch one deterministic bridge polling batch. Successfully
--- decoded names are admitted exactly once before concurrent dispatch begins.
+-- | Decode and dispatch one deterministic bridge polling batch. Published
+-- JSON names are admitted exactly once, including files that fail to decode,
+-- so a malformed request cannot be retried forever.
 processBridgeRequestBatch
     :: Set.Set FilePath
     -> [FilePath]
@@ -166,18 +193,25 @@ processBridgeRequestBatch seen files decode dispatch = do
         mapConcurrentlyBounded telegramBridgeConcurrency
             (dispatch . snd)
             admitted
-    pure (foldr (Set.insert . fst) seen admitted)
+    pure (foldr Set.insert seen published)
 
 telegramBridgeConcurrency :: Int
 telegramBridgeConcurrency = 4
 
-decodeBridgeRequest :: FilePath -> IO (Maybe ManagedBridgeRequest)
+decodeBridgeRequest :: FilePath -> IO (Either Text ManagedBridgeRequest)
 decodeBridgeRequest path =
     try @_ @SomeException
         (retryOnFileBusy (LBS.readFile path)) >>= \case
-            Left _ -> pure Nothing
+            Left err ->
+                pure $ Left $
+                    "failed to read bridge request: "
+                        <> Text.pack (displayException err)
             Right bytes ->
-                pure (either (const Nothing) Just (eitherDecode bytes))
+                pure $ case eitherDecode bytes of
+                    Left err ->
+                        Left ("invalid bridge request JSON: " <> Text.pack err)
+                    Right request ->
+                        Right request
 
 processBridgeRequest :: TelegramBridgeEnv -> ManagedBridgeRequest -> IO ()
 processBridgeRequest env request =
@@ -528,6 +562,16 @@ respondError env request err =
     writeManagedBridgeResponse env.telegramBridgeRequest ManagedBridgeResponse
         { bridgeResponseVersion = 1
         , bridgeResponseId = request.bridgeRequestId
+        , bridgeResponseOk = False
+        , bridgeResponseResult = Nothing
+        , bridgeResponseError = Just err
+        }
+
+respondDecodeError :: TelegramBridgeEnv -> FilePath -> Text -> IO ()
+respondDecodeError env name err =
+    writeManagedBridgeResponse env.telegramBridgeRequest ManagedBridgeResponse
+        { bridgeResponseVersion = 1
+        , bridgeResponseId = Text.pack (takeBaseName name)
         , bridgeResponseOk = False
         , bridgeResponseResult = Nothing
         , bridgeResponseError = Just err

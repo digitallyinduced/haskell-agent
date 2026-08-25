@@ -14,13 +14,19 @@ import Agent.Tools.FileSystem.ListDir
     , renderTree
     )
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
+    , createDirectoryIfMissing
+    , emptyPermissions
     , getTemporaryDirectory
     , removeDirectoryRecursive
+    , setOwnerReadable
+    , setOwnerSearchable
+    , setOwnerWritable
+    , setPermissions
     )
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
@@ -131,15 +137,53 @@ spec = do
                         , "- flake.lock"
                         ]
 
+        it "fails when the target directory cannot be listed" do
+            withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                    locked = workspace </> "locked"
+                createDirectory workspace
+                createDirectory locked
+                writeFile (locked </> "secret.txt") "hidden\n"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                result <-
+                    withUnreadableDirectory locked $
+                        dispatchToolCall testConfig
+                            [(listDirTool env).appToolHandler]
+                            (functionToolCall "list-locked" "list_dir"
+                                "{\"target_directory\":\"locked\"}")
+                result.output `shouldSatisfy` Text.isInfixOf "Failed to list directory"
+
+        it "includes nested listing failures instead of pretending the directory is empty" do
+            withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                    visible = workspace </> "visible"
+                    nested = visible </> "locked"
+                createDirectory workspace
+                createDirectoryIfMissing True nested
+                writeFile (visible </> "ok.txt") "ok\n"
+                writeFile (nested </> "secret.txt") "hidden\n"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                result <-
+                    withUnreadableDirectory nested $
+                        dispatchToolCall testConfig
+                            [(listDirTool env).appToolHandler]
+                            (functionToolCall "list-visible" "list_dir"
+                                "{\"target_directory\":\"visible\"}")
+                result.output `shouldSatisfy` Text.isInfixOf "ok.txt"
+                result.output `shouldSatisfy` Text.isInfixOf "listing failed"
+                result.output `shouldSatisfy` (not . Text.isInfixOf "secret.txt")
+
 nodeName :: DirNode -> Text
 nodeName = \case
     FileNode name -> toText name
     DirectoryNode name _ -> toText name
+    ErrorNode name _ -> toText name
 
 childCount :: DirNode -> Int
 childCount = \case
     FileNode _ -> 0
     DirectoryNode _ children -> length children
+    ErrorNode _ _ -> 0
 
 testConfig :: ToolDispatchConfig
 testConfig = ToolDispatchConfig
@@ -149,6 +193,14 @@ testConfig = ToolDispatchConfig
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
     }
+
+withUnreadableDirectory :: FilePath -> IO a -> IO a
+withUnreadableDirectory path action = do
+    setPermissions path emptyPermissions
+    action `finally`
+        setPermissions path
+            (setOwnerSearchable True
+                (setOwnerWritable True (setOwnerReadable True emptyPermissions)))
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

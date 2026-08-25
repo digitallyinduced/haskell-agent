@@ -769,8 +769,9 @@ spec = describe "Agent.CLI.Session" do
                                     (final.sessionMeta.metaId, [normalTurn, compactTurn])
                                 ]
 
-                listed <- listSessions pool root
+                (listed, warnings) <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
+                warnings `shouldBe` []
                 deleteSession pool root handle.sessionMeta.metaId
                     `shouldReturn` Right ()
                 doesDirectoryExist handle.sessionDir `shouldReturn` False

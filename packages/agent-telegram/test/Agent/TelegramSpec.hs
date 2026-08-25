@@ -240,6 +240,43 @@ spec = describe "Agent.Telegram" do
             observed <- readIORef maximumActive
             observed `shouldSatisfy` (\value -> value > 1 && value <= 4)
 
+        it "does not retry JSON files that fail to decode" do
+            decoded <- newIORef []
+            let decode name = do
+                    modifyIORef' decoded (name :)
+                    pure Nothing
+                dispatch _ =
+                    fail "undecodable requests must not be dispatched"
+            seen <-
+                Bridge.processBridgeRequestBatch
+                    Set.empty
+                    ["bad.json", "ignored.tmp"]
+                    decode
+                    dispatch
+            seen `shouldBe` Set.fromList ["bad.json"]
+            _ <-
+                Bridge.processBridgeRequestBatch
+                    seen
+                    ["bad.json"]
+                    decode
+                    dispatch
+            readIORef decoded `shouldReturn` ["bad.json"]
+
+        it "propagates bridge polling failures to the managed turn" do
+            started <- newEmptyMVar
+            Bridge.withTelegramBridgeUsing
+                (do
+                    putMVar started ()
+                    fail "bridge listing failed")
+                (takeMVar started >> threadDelay 2_000_000)
+                `shouldThrow` anyException
+
+        it "keeps the managed turn running while the bridge polls" do
+            Bridge.withTelegramBridgeUsing
+                (threadDelay 10_000_000)
+                (pure (41 + 1 :: Int))
+                `shouldReturn` 42
+
     describe "splitTelegramText" do
         it "keeps messages within the requested limit" do
             splitTelegramText 4 "abcdefghij"

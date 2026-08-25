@@ -29,7 +29,7 @@ import Control.Concurrent.STM
     , newTVarIO
     , readTVar
     )
-import Control.Exception.Safe (displayException, tryAny)
+import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Control.Monad (filterM)
 import Data.Aeson
     ( FromJSON(..)
@@ -231,24 +231,32 @@ defaultSkillCatalogMaxChars = 8000
 discoverSkills :: SkillDiscoverOptions -> IO SkillCatalog
 discoverSkills options = do
     roots <- skillRoots options
-    results <- fmap concat $
+    discovered <-
         mapConcurrentlyBounded skillRootConcurrency
-            (\(scope, origin, root) -> do
-                exists <- doesDirectoryExist root
-                if exists
-                    then do
-                        files <- findSkillFiles options.skillsMaxDepth root
-                        mapConcurrentlyBounded skillFileConcurrency
-                            (loadSkillFile scope origin)
-                            files
-                    else pure [])
+            discoverRoot
             roots
-    let skills = [skill | Right skill <- results]
-        warnings = [warning | Left warning <- results]
+    let skills = concatMap fst discovered
+        warnings = concatMap snd discovered
     pure SkillCatalog
         { catalogSkills = sortOn skillSortKey skills
         , catalogWarnings = warnings
         }
+  where
+    discoverRoot (scope, origin, root) = do
+        exists <- doesDirectoryExist root
+        if not exists
+            then pure ([], [])
+            else do
+                (files, walkWarnings) <-
+                    findSkillFiles options.skillsMaxDepth root
+                loaded <-
+                    mapConcurrentlyBounded skillFileConcurrency
+                        (loadSkillFile scope origin)
+                        files
+                pure
+                    ( [skill | Right skill <- loaded]
+                    , walkWarnings <> [warning | Left warning <- loaded]
+                    )
 
 skillRoots :: SkillDiscoverOptions -> IO [(SkillScope, SkillOrigin, FilePath)]
 skillRoots options = do
@@ -291,19 +299,26 @@ skillRoots options = do
         GrokSkills -> ".grok" </> "skills"
         CodexSkills -> ".codex" </> "skills"
 
-findSkillFiles :: Int -> FilePath -> IO [FilePath]
+findSkillFiles :: Int -> FilePath -> IO ([FilePath], [SkillWarning])
 findSkillFiles maxDepth root = do
     seen <- newTVarIO Set.empty
-    sort <$> go seen 0 [root]
+    (files, warnings) <- go seen 0 [root]
+    pure (sort files, warnings)
   where
-    go _ depth _ | depth > maxDepth = pure []
-    go _ _ [] = pure []
+    go _ depth _ | depth > maxDepth = pure ([], [])
+    go _ _ [] = pure ([], [])
     go seen depth dirs = do
         let orderedDirs = sort dirs
         canonicalized <-
             mapConcurrentlyBounded skillDirectoryConcurrency
-                (\dir -> fmap ((,) dir) <$> tryAny (canonicalizePath dir))
+                (\dir ->
+                    tryAny (canonicalizePath dir) >>= \case
+                        Left err ->
+                            pure (Left (skillIoWarning dir err))
+                        Right canonical ->
+                            pure (Right (dir, canonical)))
                 orderedDirs
+        let walkWarnings = [warning | Left warning <- canonicalized]
         claimed <- atomically do
             visited <- readTVar seen
             let claim (current, selected) = \case
@@ -321,22 +336,33 @@ findSkillFiles maxDepth root = do
             mapConcurrentlyBounded skillDirectoryConcurrency
                 inspectDirectory
                 claimed
-        let found = concatMap fst inspected
-            children = concatMap snd inspected
-        nested <- go seen (depth + 1) children
-        pure (found <> nested)
+        let found = concatMap (\(files, _, _) -> files) inspected
+            children = concatMap (\(_, nested, _) -> nested) inspected
+            inspectWarnings = concatMap (\(_, _, warnings) -> warnings) inspected
+        (nested, nestedWarnings) <- go seen (depth + 1) children
+        pure
+            ( found <> nested
+            , walkWarnings <> inspectWarnings <> nestedWarnings
+            )
 
     inspectDirectory dir = do
         entriesResult <- tryAny (listDirectory dir)
         case entriesResult of
-            Left _ -> pure ([], [])
+            Left err ->
+                pure ([], [], [skillIoWarning dir err])
             Right entries -> do
                 let skillPath = dir </> "SKILL.md"
                 hasSkill <- doesFileExist skillPath
                 children <-
                     filterM doesDirectoryExist
                         [dir </> entry | entry <- sort entries]
-                pure ([skillPath | hasSkill], children)
+                pure ([skillPath | hasSkill], children, [])
+
+skillIoWarning :: FilePath -> SomeException -> SkillWarning
+skillIoWarning path err =
+    SkillWarning
+        (unsafeEncodeUtf path)
+        (Text.pack (displayException err))
 
 skillRootConcurrency :: Int
 skillRootConcurrency = 4
@@ -369,58 +395,69 @@ loadSkillFile scope origin path = do
                         Right frontmatter ->
                             case validateFrontmatter scope path frontmatter of
                                 Left err -> pure (Left (warning err))
-                                Right () -> do
-                                    openAi <- loadOpenAiMetadata (takeDirectory path)
-                                    let argumentHint =
-                                            frontmatter.fmArgumentHint
-                                                <|> (openAi >>= (.openAiArgumentHint))
-                                        modelInvocable =
-                                            not frontmatter.fmDisableModelInvocation
-                                                && fromMaybe True
-                                                    (openAi >>= (.openAiAllowImplicit))
-                                    pure $ Right Skill
-                                        { skillName = frontmatter.fmName
-                                        , skillDescription = frontmatter.fmDescription
-                                        , skillDisplayName =
-                                            openAi >>= (.openAiDisplayName)
-                                        , skillShortDescription =
-                                            (openAi >>= (.openAiShortDescription))
-                                                <|> Map.lookup "short-description"
-                                                    frontmatter.fmMetadata
-                                        , skillDefaultPrompt =
-                                            openAi >>= (.openAiDefaultPrompt)
-                                        , skillWhenToUse = frontmatter.fmWhenToUse
-                                        , skillContextMode = frontmatter.fmContextMode
-                                        , skillArgumentHint = argumentHint
-                                        , skillUserInvocable = frontmatter.fmUserInvocable
-                                        , skillModelInvocable = modelInvocable
-                                        , skillAllowedTools = frontmatter.fmAllowedTools
-                                        , skillModelOverride = frontmatter.fmModel
-                                        , skillEffortOverride = frontmatter.fmEffort
-                                        , skillLicense = frontmatter.fmLicense
-                                        , skillCompatibility = frontmatter.fmCompatibility
-                                        , skillMetadata = frontmatter.fmMetadata
-                                        , skillPath = unsafeEncodeUtf path
-                                        , skillDirectory = unsafeEncodeUtf (takeDirectory path)
-                                        , skillBody = Text.strip body
-                                        , skillFileText = fileText
-                                        , skillScope = scope
-                                        , skillOrigin = origin
-                                        }
+                                Right () ->
+                                    loadOpenAiMetadata (takeDirectory path) >>= \case
+                                        Left err ->
+                                            pure $ Left
+                                                (warning
+                                                    ("agents/openai.yaml: " <> err))
+                                        Right openAi -> do
+                                            let argumentHint =
+                                                    frontmatter.fmArgumentHint
+                                                        <|> (openAi >>= (.openAiArgumentHint))
+                                                modelInvocable =
+                                                    not frontmatter.fmDisableModelInvocation
+                                                        && fromMaybe True
+                                                            (openAi >>= (.openAiAllowImplicit))
+                                            pure $ Right Skill
+                                                { skillName = frontmatter.fmName
+                                                , skillDescription = frontmatter.fmDescription
+                                                , skillDisplayName =
+                                                    openAi >>= (.openAiDisplayName)
+                                                , skillShortDescription =
+                                                    (openAi >>= (.openAiShortDescription))
+                                                        <|> Map.lookup "short-description"
+                                                            frontmatter.fmMetadata
+                                                , skillDefaultPrompt =
+                                                    openAi >>= (.openAiDefaultPrompt)
+                                                , skillWhenToUse = frontmatter.fmWhenToUse
+                                                , skillContextMode = frontmatter.fmContextMode
+                                                , skillArgumentHint = argumentHint
+                                                , skillUserInvocable = frontmatter.fmUserInvocable
+                                                , skillModelInvocable = modelInvocable
+                                                , skillAllowedTools = frontmatter.fmAllowedTools
+                                                , skillModelOverride = frontmatter.fmModel
+                                                , skillEffortOverride = frontmatter.fmEffort
+                                                , skillLicense = frontmatter.fmLicense
+                                                , skillCompatibility = frontmatter.fmCompatibility
+                                                , skillMetadata = frontmatter.fmMetadata
+                                                , skillPath = unsafeEncodeUtf path
+                                                , skillDirectory = unsafeEncodeUtf (takeDirectory path)
+                                                , skillBody = Text.strip body
+                                                , skillFileText = fileText
+                                                , skillScope = scope
+                                                , skillOrigin = origin
+                                                }
   where
     warning message = SkillWarning (unsafeEncodeUtf path) message
 
-loadOpenAiMetadata :: FilePath -> IO (Maybe OpenAiMetadata)
+loadOpenAiMetadata :: FilePath -> IO (Either Text (Maybe OpenAiMetadata))
 loadOpenAiMetadata dir = do
     let path = dir </> "agents" </> "openai.yaml"
     exists <- doesFileExist path
     if not exists
-        then pure Nothing
+        then pure (Right Nothing)
         else do
             result <- tryAny (retryOnFileBusy (BS.readFile path))
             pure $ case result of
-                Left _ -> Nothing
-                Right bytes -> either (const Nothing) Just (decodeEither' bytes)
+                Left err ->
+                    Left (Text.pack (displayException err))
+                Right bytes ->
+                    case decodeEither' bytes of
+                        Left err ->
+                            Left (Text.pack (prettyPrintParseException err))
+                        Right metadata ->
+                            Right (Just metadata)
 
 splitFrontmatter :: Text -> Either Text (Text, Text)
 splitFrontmatter text =

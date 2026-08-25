@@ -86,34 +86,41 @@ runListDir env args = resolveForRead env (fromText args.targetDirectory) >>= \ca
     Right path -> doesDirectoryExist path >>= \case
         False -> pure $ Left $
             "Error: " <> args.targetDirectory <> " is not a valid directory"
-        True -> do
-            entries <- collectDir env.toolCwd path
-            let (shown, truncated) = capNodes maxListItems entries
-                tree = renderTree 0 shown
-                notice
-                    | truncated =
-                        "\nLarge directory summarized; some nested entries were omitted."
-                    | otherwise = ""
-            pure $ Right $
-                "Directory listing for " <> args.targetDirectory <> ":\n" <> tree <> notice
+        True ->
+            collectDir env.toolCwd path >>= \case
+                Left err -> pure (Left err)
+                Right entries -> do
+                    let (shown, truncated) = capNodes maxListItems entries
+                        tree = renderTree 0 shown
+                        notice
+                            | truncated =
+                                "\nLarge directory summarized; some nested entries were omitted."
+                            | otherwise = ""
+                    pure $ Right $
+                        "Directory listing for "
+                            <> args.targetDirectory
+                            <> ":\n"
+                            <> tree
+                            <> notice
 
 data DirNode
     = FileNode OsPath
     | DirectoryNode OsPath [DirNode]
+    | ErrorNode OsPath Text
     deriving (Eq, Show)
 
-collectDir :: OsPath -> OsPath -> IO [DirNode]
+collectDir :: OsPath -> OsPath -> IO (Either Text [DirNode])
 collectDir cwd path = do
     listed <- listDirectoryEntries path
     case listed of
-        Left _ -> pure []
+        Left err -> pure (Left err)
         Right raw -> do
             let visible = sortOn fst
                     [ (name, isDir)
                     | (name, isDir) <- raw
                     , not ("." `Text.isPrefixOf` toText name)
                     ]
-            fmap concat $ mapM (toNode cwd path) visible
+            Right <$> (fmap concat $ mapM (toNode cwd path) visible)
 
 toNode :: OsPath -> OsPath -> (OsPath, Bool) -> IO [DirNode]
 toNode cwd parent (name, isDir) = do
@@ -127,9 +134,12 @@ toNode cwd parent (name, isDir) = do
                 isLink <- pathIsSymbolicLink full
                 if isLink
                     then pure [FileNode name]
-                    else do
-                        children <- collectDir cwd full
-                        pure [summarizeDir name children]
+                    else
+                        collectDir cwd full >>= \case
+                            Left err ->
+                                pure [ErrorNode name err]
+                            Right children ->
+                                pure [summarizeDir name children]
 
 -- | Keep as many nodes as @budget@ allows. A directory that does not fit in
 -- full is included as a stub (and maybe a truncated child list) rather than
@@ -155,6 +165,7 @@ fill remaining restCount (node : rest) =
 takeNode :: Int -> DirNode -> (DirNode, Int, Bool)
 takeNode budget node = case node of
     FileNode name -> (FileNode name, 1, False)
+    ErrorNode name message -> (ErrorNode name message, 1, False)
     DirectoryNode name children
         | budget <= 1 ->
             ( DirectoryNode name []
@@ -174,12 +185,14 @@ countNodes :: [DirNode] -> Int
 countNodes = sum . map \case
     FileNode _ -> 1
     DirectoryNode _ children -> 1 + countNodes children
+    ErrorNode _ _ -> 1
 
 summarizeDir :: OsPath -> [DirNode] -> DirNode
 summarizeDir name children =
     let files = [file | FileNode file <- children]
         dirs = [dir | dir@DirectoryNode{} <- children]
-    in if length files > 20 && null dirs
+        errors = [err | err@ErrorNode{} <- children]
+    in if length files > 20 && null dirs && null errors
         then DirectoryNode
             (fromText (toText name <> " " <> extensionSummary files)) []
         else DirectoryNode name children
@@ -209,6 +222,14 @@ renderNodeLines depth = \case
     DirectoryNode name children ->
         (indent <> "- " <> directoryLabel name)
             : concatMap (renderNodeLines (depth + 1)) children
+    ErrorNode name message ->
+        [ indent
+            <> "- "
+            <> toText name
+            <> "/ (listing failed: "
+            <> message
+            <> ")"
+        ]
   where
     indent = Text.replicate depth "  "
 
