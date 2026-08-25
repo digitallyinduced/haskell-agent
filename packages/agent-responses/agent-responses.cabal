@@ -89,5 +89,6 @@ test-suite agent-responses-test
                     , aeson >= 2.0
                     , bytestring
                     , hspec
+                    , QuickCheck >= 2.14 && < 2.16
                     , retry
                     , text

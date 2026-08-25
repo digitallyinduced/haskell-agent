@@ -8,6 +8,13 @@ module Agent.CLI.TextLayout
     , transcriptPreviewRows
     ) where
 
+import Agent.CLI.Input
+    ( displayEditorText
+    , terminalTextWidth
+    , truncateDisplayText
+    )
+import Agent.CLI.Input.Display (displayCells)
+import Agent.CLI.Input.Types (DisplayCell(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -41,26 +48,30 @@ renderSplitPaneFrame :: SplitPaneFrame item -> Text
 renderSplitPaneFrame frame =
     Text.intercalate "\n" (header : headings : body <> [footer])
   where
-    cols = max frame.splitPaneMinColumns frame.splitPaneColumns
-    bodyRows = frame.splitPaneBodyRows
-    dividerWidth = Text.length frame.splitPaneDivider
-    divider = frame.splitPaneMutedStyle frame.splitPaneDivider
-    leftWidth =
+    cols = max 0 (max frame.splitPaneMinColumns frame.splitPaneColumns)
+    bodyRows = max 0 frame.splitPaneBodyRows
+    dividerText = truncateDisplayText cols frame.splitPaneDivider
+    dividerWidth = terminalTextWidth dividerText
+    divider = frame.splitPaneMutedStyle dividerText
+    paneWidth = max 0 (cols - dividerWidth)
+    desiredLeftWidth =
         max frame.splitPaneLeftMinWidth $
             min frame.splitPaneLeftMaxWidth
-                ((cols - dividerWidth) * 2 `div` 5)
-    rightWidth = max 1 (cols - leftWidth - dividerWidth)
+                (paneWidth * 2 `div` 5)
+    leftWidth = max 0 (min paneWidth desiredLeftWidth)
+    rightWidth = paneWidth - leftWidth
     items = frame.splitPaneItems
     itemCount = length items
     selectedIndex =
         clampSelectionIndex itemCount frame.splitPaneSelectedIndex
     shown = selectionWindow bodyRows selectedIndex items
     selected = atMay selectedIndex items
+    fittedTitle = truncateDisplayText cols frame.splitPaneTitle
     header =
-        frame.splitPanePromptStyle frame.splitPaneTitle
+        frame.splitPanePromptStyle fittedTitle
             <> frame.splitPaneMutedStyle
                 (fitTextCell
-                    (max 0 (cols - Text.length frame.splitPaneTitle))
+                    (max 0 (cols - terminalTextWidth fittedTitle))
                     (" · " <> frame.splitPaneHeaderDetail itemCount))
     headings =
         frame.splitPanePromptStyle
@@ -87,12 +98,12 @@ renderSplitPaneFrame frame =
         Nothing ->
             frame.splitPaneMutedStyle
                 (fitTextCell rightWidth frame.splitPaneEmptyTranscript)
-                : repeat ""
+                : repeat (Text.replicate rightWidth " ")
         Just item ->
             map (fitTextCell rightWidth)
                 (transcriptPreviewRows
                     rightWidth bodyRows (frame.splitPaneTranscript item))
-                <> repeat ""
+                <> repeat (Text.replicate rightWidth " ")
     body =
         take bodyRows $
             zipWith (\left right -> left <> divider <> right) leftRows rightRows
@@ -131,24 +142,42 @@ transcriptPreviewRows width count logicalLines =
 hardWrapText :: Int -> Text -> [Text]
 hardWrapText width raw
     | Text.null raw = [""]
-    | otherwise = go raw
+    | otherwise = go [] 0 (displayCells raw)
   where
     width' = max 1 width
-    go text
-        | Text.null text = []
+    go currentRev _ [] =
+        [Text.concat (reverse currentRev) | not (null currentRev)]
+    go currentRev used input@(cell : rest)
+        | cell.displayCellWidth > width' =
+            let replacement =
+                    truncateDisplayText width' cell.displayCellText
+                prefix =
+                    [ Text.concat (reverse currentRev)
+                    | not (null currentRev)
+                    ]
+            in prefix <> (replacement : go [] 0 rest)
+        | cell.displayCellWidth > 0
+            && used > 0
+            && used + cell.displayCellWidth > width' =
+                Text.concat (reverse currentRev) : go [] 0 input
         | otherwise =
-            let (line, rest) = Text.splitAt width' text
-            in line : go rest
+            go
+                (cell.displayCellText : currentRev)
+                (used + cell.displayCellWidth)
+                rest
 
 fitTextCell :: Int -> Text -> Text
 fitTextCell width raw
     | width <= 0 = ""
-    | Text.length clean <= width =
-        clean <> Text.replicate (width - Text.length clean) " "
-    | width == 1 = "…"
-    | otherwise = Text.take (width - 1) clean <> "…"
+    | otherwise =
+        fitted
+            <> Text.replicate
+                (max 0 (width - terminalTextWidth fitted))
+                " "
   where
     clean =
-        Text.map
-            (\c -> if c == '\t' || c == '\r' || c == '\n' then ' ' else c)
-            raw
+        displayEditorText $
+            Text.map
+                (\c -> if c == '\t' || c == '\r' || c == '\n' then ' ' else c)
+                raw
+    fitted = truncateDisplayText width clean

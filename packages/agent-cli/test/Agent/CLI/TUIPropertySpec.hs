@@ -4,6 +4,7 @@ import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentTarget(..)
     )
+import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( drawApp
@@ -50,6 +51,7 @@ import Data.Foldable (toList)
 import Data.IORef (readIORef)
 import Data.List (find, nub)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (mapMaybe)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -327,6 +329,20 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "tool output"
             frame `shouldSatisfy` Text.isInfixOf "Markdown kept."
 
+        it "keeps variation selectors from crossing adjacent choice widgets" do
+            let label = Text.replicate 33 "a" <> "✓"
+                detail = Text.singleton '\xfe0f' <> "detail"
+                harness =
+                    applyAction
+                        (ShowChoice
+                            ChoiceOnboarding
+                            "Sign in"
+                            ""
+                            [(label, detail)]
+                            0)
+                        (RenderHarness baseState (80, 24))
+            assertFrame harness
+
 renderTraceProperty :: AppState -> RenderTrace -> Property
 renderTraceProperty baseState (RenderTrace actions) =
     conjoin $
@@ -384,6 +400,10 @@ frameProperties label harness =
             (V.imageHeight composed === height)
         , counterexample (label <> ": top-level layer bounds")
             (all layerFits layers === True)
+        , counterexample
+            (label <> ": Vty text spans match terminal widths: "
+                <> show spanMismatches)
+            (null spanMismatches === True)
         , counterexample (label <> ": cursor bounds")
             (cursorFits width height picture.picCursor === True)
         , counterexample (label <> ": deterministic clean redraw")
@@ -402,9 +422,25 @@ frameProperties label harness =
             renderWidget (Just Theme.monochrome) [widget] size
         | widget <- widgets
         ]
+    spanMismatches =
+        concatMap (spanWidthMismatches . toList)
+            (toList (displayOpsForPic picture size))
     layerFits image =
         V.imageWidth image <= width
             && V.imageHeight image <= height
+
+spanWidthMismatches :: [SpanOp] -> [(Int, Int, Text)]
+spanWidthMismatches =
+    mapMaybe \case
+        TextSpan{textSpanOutputWidth, textSpanText} ->
+            let text = LazyText.toStrict textSpanText
+                terminalWidth = terminalTextWidth text
+            in if textSpanOutputWidth == terminalWidth
+                then Nothing
+                else Just
+                    (textSpanOutputWidth, terminalWidth, text)
+        Skip _ -> Nothing
+        RowEnd _ -> Nothing
 
 uiStateProperties :: UiState -> Property
 uiStateProperties state =
@@ -760,6 +796,9 @@ assertFrame harness = do
             V.imageWidth image `shouldSatisfy` (<= width)
             V.imageHeight image `shouldSatisfy` (<= height))
         layers
+    concatMap (spanWidthMismatches . toList)
+        (toList (displayOpsForPic picture size))
+        `shouldBe` []
     cursorFits width height picture.picCursor `shouldBe` True
   where
     app = harness.harnessApp
