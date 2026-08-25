@@ -12,6 +12,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , jsonToolParameters
     )
 import Control.Exception.Safe (bracket)
@@ -31,9 +32,14 @@ spec :: Spec
 spec = describe "Agent.Tools.PlanMode" do
     it "uses its dedicated confirmation instead of generic tool approval" do
         withTempPlan \env ->
-            case (enterPlanModeTool env).appToolApproval of
-                AlwaysReadOnly -> pure ()
-                _ -> expectationFailure "enter_plan_mode should be read-only"
+            let enter = enterPlanModeTool env
+            in do
+                case enter.appToolApproval of
+                    AlwaysReadOnly -> pure ()
+                    _ -> expectationFailure "enter_plan_mode should be read-only"
+                enter.appToolExecution `shouldBe` TurnApprovalBarrier
+                (exitPlanModeTool env).appToolExecution
+                    `shouldBe` TurnApprovalBarrier
 
     it "activates and deactivates plan mode" do
         withTempPlan \env -> do

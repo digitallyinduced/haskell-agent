@@ -7,10 +7,12 @@ import Agent.Responses.Types (ResponseItem(..), TaggedObject(..))
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import Agent.Tools.Scheduling
-    ( ToolAccess(..)
+    ( SchedulingDecision(..)
+    , ToolAccess(..)
     , ToolResource(..)
     , ToolResourceClaim(..)
     , ToolSchedulingPlan(..)
+    , nextSchedulingWave
     , schedulingPlansConflict
     )
 import Agent.Tools.Types
@@ -21,6 +23,7 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     , mkToolRegistry
     , toolExecutionPolicyFor
+    , toolSchedulingPlanFor
     , withToolResourceClaims
     )
 import Control.Concurrent (forkIO, threadDelay)
@@ -35,6 +38,7 @@ import Control.Concurrent.MVar
 import qualified Control.Exception as Exception
 import Data.Aeson (FromJSON(..))
 import Data.IORef
+import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Timeout (timeout)
@@ -459,6 +463,61 @@ spec = describe "runLoop" do
                 , tokenUsage = emptyTokenUsage
                 }
 
+    it "defers later approvals until an approval barrier finishes" do
+        transitioned <- newIORef False
+        laterRan <- newIORef False
+        approvalStates <- newIORef []
+        let barrier =
+                jsonAppToolWithExecution
+                    "barrier"
+                    ""
+                    []
+                    AlwaysReadOnly
+                    TurnApprovalBarrier
+                    (noArgsTool "barrier" do
+                        writeIORef transitioned True
+                        pure (Right "transitioned"))
+            later =
+                jsonAppToolWithExecution
+                    "later"
+                    ""
+                    []
+                    AlwaysReadOnly
+                    ParallelSafe
+                    (noArgsTool "later" do
+                        writeIORef laterRan True
+                        pure (Right "unexpected"))
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "barrier" "{}"
+                , functionToolCall "c2" "later" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let approve :: ToolCall -> IO (Either Text Bool)
+            approve call = do
+                active <- readIORef transitioned
+                modifyIORef' approvalStates (<> [(call.name, active)])
+                if call.name == "later" && active
+                    then pure (Left "blocked after transition")
+                    else pure (Right True)
+            config = config0
+                { loopTools = registryFromTools [barrier, later]
+                , loopApprove = approve
+                }
+        runLoop config Nothing "go" `shouldReturn` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "ok"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        readIORef approvalStates `shouldReturn`
+            [("barrier", False), ("later", True)]
+        readIORef laterRan `shouldReturn` False
+
     it "keeps sequential calls as barriers around parallel-safe batches" do
         firstSafeStarted <- newEmptyMVar
         secondSafeStarted <- newEmptyMVar
@@ -556,6 +615,205 @@ spec = describe "runLoop" do
                 putMVar release ()
                 result <- wait running
                 result `shouldSatisfy` either (const False) (const True)
+
+    it "emits scheduling snapshots with call ids and blockers" do
+        events <- newIORef []
+        let tools =
+                [ resourceTool "first" "file:a" (pure (Right "first"))
+                , resourceTool "conflicting" "file:a" (pure (Right "conflicting"))
+                , resourceTool "independent" "file:b" (pure (Right "independent"))
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "first" "{}"
+                , functionToolCall "c2" "conflicting" "{}"
+                , functionToolCall "c3" "independent" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldSatisfy` either (const False) (const True)
+        seen <- reverse <$> readIORef events
+        let snapshots =
+                [ snapshot
+                | ToolSchedulingUpdated snapshot <- seen
+                ]
+        snapshots `shouldBe`
+            [ ToolSchedulingSnapshot
+                { schedulingReadyCallIds = ["c1", "c3"]
+                , schedulingBlockedCallIds = [("c2", "c1")]
+                }
+            , ToolSchedulingSnapshot
+                { schedulingReadyCallIds = ["c2"]
+                , schedulingBlockedCallIds = []
+                }
+            ]
+
+    it "does not report denied calls as running in scheduling snapshots" do
+        events <- newIORef []
+        let tools =
+                [ resourceTool "denied" "file:a" (pure (Right "unexpected"))
+                , resourceTool "allowed" "file:b" (pure (Right "allowed"))
+                ]
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "denied" "{}"
+                , functionToolCall "c2" "allowed" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools tools
+                , loopApprove = \call ->
+                    pure (Right (call.name /= "denied"))
+                , loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "go"
+        result `shouldSatisfy` either (const False) (const True)
+        seen <- reverse <$> readIORef events
+        let snapshots =
+                [ snapshot
+                | ToolSchedulingUpdated snapshot <- seen
+                ]
+        snapshots `shouldBe`
+            [ ToolSchedulingSnapshot
+                { schedulingReadyCallIds = ["c2"]
+                , schedulingBlockedCallIds = []
+                }
+            ]
+
+    it "cancels while dynamic resource claims are resolving" do
+        resolverStarted <- newEmptyMVar
+        resolverRelease <- newEmptyMVar
+        handlerStarted <- newEmptyMVar
+        let tool =
+                withToolResourceClaims
+                    (\_ -> do
+                        putMVar resolverStarted ()
+                        takeMVar resolverRelease
+                        pure $ Right
+                            [ ToolResourceClaim ToolWrite $
+                                ToolNamedResource "blocked-resolver"
+                            ])
+                    (jsonAppToolWithExecution
+                        "slow-resolver"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        TurnSequential
+                        (noArgsTool "slow-resolver" do
+                            putMVar handlerStarted ()
+                            pure (Right "unexpected")))
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "slow-resolver" "{}"]
+                Nothing
+            ]
+        config0 <- testConfig backend
+        let config =
+                config0 { loopTools = registryFromTools [tool] }
+        withAsync (runLoop config Nothing "go") \running -> do
+            timeout concurrencyProbeMicros (takeMVar resolverStarted)
+                `shouldReturn` Just ()
+            requestCancel config.loopCancel
+            timeout concurrencyProbeMicros (wait running)
+                `shouldReturn` Just (Left (LoopCancelled []))
+            tryReadMVar handlerStarted `shouldReturn` Nothing
+
+    it "resolves claims after a preceding exclusive call finishes" do
+        transitioned <- newIORef False
+        resolutionStates <- newIORef []
+        let transition =
+                jsonAppToolWithExecution
+                    "transition"
+                    ""
+                    []
+                    AlwaysReadOnly
+                    TurnSequential
+                    (noArgsTool "transition" do
+                        writeIORef transitioned True
+                        pure (Right "transitioned"))
+            dependent =
+                withToolResourceClaims
+                    (\_ -> do
+                        current <- readIORef transitioned
+                        modifyIORef' resolutionStates (<> [current])
+                        pure $ Right
+                            [ ToolResourceClaim ToolWrite $
+                                ToolNamedResource "dependent"
+                            ])
+                    (jsonAppToolWithExecution
+                        "dependent"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        TurnSequential
+                        (noArgsTool "dependent" (pure (Right "dependent"))))
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "transition" "{}"
+                , functionToolCall "c2" "dependent" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        result <- runLoop
+            config0
+                { loopTools =
+                    registryFromTools [transition, dependent]
+                }
+            Nothing
+            "go"
+        result `shouldSatisfy` either (const False) (const True)
+        readIORef resolutionStates `shouldReturn` [True]
+
+    it "resolves each dynamic scheduling plan once" do
+        resolverCalls <- newIORef (0 :: Int)
+        let tool =
+                withToolResourceClaims
+                    (\_ -> do
+                        modifyIORef' resolverCalls (+ 1)
+                        pure $ Right
+                            [ ToolResourceClaim ToolWrite $
+                                ToolNamedResource "shared"
+                            ])
+                    (jsonAppToolWithExecution
+                        "writer"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        TurnSequential
+                        (noArgsTool "writer" (pure (Right "ok"))))
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [ functionToolCall "c1" "writer" "{}"
+                , functionToolCall "c2" "writer" "{}"
+                , functionToolCall "c3" "writer" "{}"
+                ]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "ok")
+            ]
+        config0 <- testConfig backend
+        result <- runLoop
+            config0 { loopTools = registryFromTools [tool] }
+            Nothing
+            "go"
+        result `shouldSatisfy` either (const False) (const True)
+        readIORef resolverCalls `shouldReturn` 3
 
     it "returns concurrent tool results in model order" do
         firstStarted <- newEmptyMVar
@@ -757,22 +1015,104 @@ spec = describe "runLoop" do
         result `shouldSatisfy` either (const False) (const True)
         readIORef resolverCalls `shouldReturn` 0
 
+    it "treats an empty dynamic resource set as an exclusive plan" do
+        let tool =
+                withToolResourceClaims
+                    (\_ -> pure (Right []))
+                    (jsonAppToolWithExecution
+                        "empty"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        ParallelSafe
+                        (noArgsTool "empty" (pure (Right "ok"))))
+            call = functionToolCall "c1" "empty" "{}"
+        let registry = registryFromTools [tool]
+        plan <- toolSchedulingPlanFor registry call
+        plan `shouldBe` ToolExclusive
+
+    it "keeps approval barriers exclusive even when claims are attached" do
+        let tool =
+                withToolResourceClaims
+                    (\_ -> pure $ Right
+                        [ ToolResourceClaim ToolRead $
+                            ToolNamedResource "state"
+                        ])
+                    (jsonAppToolWithExecution
+                        "barrier"
+                        ""
+                        []
+                        AlwaysReadOnly
+                        TurnApprovalBarrier
+                        (noArgsTool "barrier" (pure (Right "ok"))))
+            registry = registryFromTools [tool]
+        plan <- toolSchedulingPlanFor registry
+            (functionToolCall "c1" "barrier" "{}")
+        plan `shouldBe` ToolExclusive
+
+    it "selects a stable wave and reports the earliest blocker" do
+        let writePlan name =
+                Just
+                    (ToolResourceClaims
+                        (ToolResourceClaim
+                            ToolWrite
+                            (ToolNamedResource name) :| []))
+            decision =
+                nextSchedulingWave
+                    [ (1 :: Int, writePlan "a")
+                    , (2, writePlan "a")
+                    , (3, writePlan "b")
+                    , (4, writePlan "a")
+                    ]
+        decision `shouldBe` SchedulingDecision
+            { schedulingReady = [1, 3]
+            , schedulingBlocked = [(2, 1), (4, 1)]
+            }
+
+    it "progresses blocked calls without starving later independent work" do
+        let writePlan name =
+                Just
+                    (ToolResourceClaims
+                        (ToolResourceClaim
+                            ToolWrite
+                            (ToolNamedResource name) :| []))
+            firstWave =
+                nextSchedulingWave
+                    [ (1 :: Int, writePlan "a")
+                    , (2, writePlan "a")
+                    , (3, writePlan "b")
+                    ]
+            secondWave =
+                nextSchedulingWave
+                    [ (2 :: Int, writePlan "a") ]
+        firstWave `shouldBe` SchedulingDecision
+            { schedulingReady = [1, 3]
+            , schedulingBlocked = [(2, 1)]
+            }
+        secondWave `shouldBe` SchedulingDecision
+            { schedulingReady = [2]
+            , schedulingBlocked = []
+            }
+
     it "detects overlapping filesystem resource claims" do
         let root = unsafeEncodeUtf "/workspace/src"
             file = unsafeEncodeUtf "/workspace/src/Main.hs"
             other = unsafeEncodeUtf "/workspace/test/Spec.hs"
             readTree =
                 ToolResourceClaims
-                    [ToolResourceClaim ToolRead (ToolPathTree root)]
+                    (ToolResourceClaim ToolRead (ToolPathTree root) :| [])
             writeFile path =
                 ToolResourceClaims
-                    [ToolResourceClaim ToolWrite (ToolPath path)]
+                    (ToolResourceClaim ToolWrite (ToolPath path) :| [])
         schedulingPlansConflict readTree (writeFile file) `shouldBe` True
         schedulingPlansConflict readTree (writeFile other) `shouldBe` False
         schedulingPlansConflict
             (ToolResourceClaims
-                [ToolResourceClaim ToolRead ToolAllPaths])
-            (writeFile other)
+                (ToolResourceClaim ToolRead ToolAllResources :| []))
+            (ToolResourceClaims
+                (ToolResourceClaim
+                    ToolWrite
+                    (ToolNamedResource "database-scope:user") :| []))
             `shouldBe` True
 
     it "treats unknown tools as sequential" do
@@ -1103,6 +1443,10 @@ spec = describe "runLoop" do
             , TurnFinished $ emptyTurnOutput "resp-1"
                 [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 Nothing
+            , ToolSchedulingUpdated ToolSchedulingSnapshot
+                { schedulingReadyCallIds = ["c1"]
+                , schedulingBlockedCallIds = []
+                }
             , ToolStarted (functionToolCall "c1" "echo" "{\"message\":\"hi\"}")
             , ToolFinished (functionResult "c1" "echo:hi")
             , TurnStarted

@@ -75,7 +75,12 @@ import Agent.CLI.Style
     , motionGlyphSet
     , style
     )
-import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
+import Agent.Loop
+    ( LoopError(..)
+    , LoopEvent(..)
+    , ToolSchedulingSnapshot(..)
+    , TurnOutput(..)
+    )
 import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
@@ -538,6 +543,9 @@ renderEventUnlocked config = \case
             if visible
                 then paintThinkingFrame config
                 else startThinkingSpinnerUnlocked config
+    ToolSchedulingUpdated snapshot ->
+        writeIORef config.renderActivityRef
+            (schedulingActivity snapshot)
     -- The append-only renderer cannot safely repaint accumulated snapshots
     -- without duplicating output in terminal scrollback. The retained TUI
     -- handles these updates; minimal mode prints the final ToolFinished result.
@@ -551,6 +559,16 @@ renderEventUnlocked config = \case
                 (Map.lookup result.callId calls)
         putTextLn config.renderStderr
             (roleToolOutput config.renderColor (truncateToolOutput output))
+
+schedulingActivity :: ToolSchedulingSnapshot -> Text
+schedulingActivity snapshot =
+    let running = length snapshot.schedulingReadyCallIds
+        queued = length snapshot.schedulingBlockedCallIds
+    in "Running " <> Text.pack (show running) <> " tool"
+        <> if running == 1 then "" else "s"
+        <> if queued == 0
+            then ""
+            else "; " <> Text.pack (show queued) <> " queued"
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.

@@ -47,6 +47,7 @@ import Agent.TUI.Motion
     )
 import Agent.Loop
     ( LoopEvent(..)
+    , ToolSchedulingSnapshot(..)
     , TokenUsage
     , TurnOutput(..)
     , emptyTokenUsage
@@ -665,6 +666,19 @@ reduceLoop event state = case event of
                         (blockIndex, call)
                         state.uiToolCalls
                 }
+    ToolSchedulingUpdated snapshot ->
+        let running = length snapshot.schedulingReadyCallIds
+            queued = length snapshot.schedulingBlockedCallIds
+            activity =
+                "Running " <> Text.pack (show running) <> " tool"
+                    <> if running == 1 then "" else "s"
+                    <> if queued == 0
+                        then ""
+                        else
+                            "; "
+                                <> Text.pack (show queued)
+                                <> " queued"
+        in state { uiActivity = activity }
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->

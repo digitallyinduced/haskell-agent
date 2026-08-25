@@ -29,6 +29,7 @@ import Agent.Subagents
     )
 import Agent.Subagents.TaskPath
     ( TaskPath
+    , joinTaskPath
     , resolveTaskPath
     , taskPathRoot
     , taskPathText
@@ -54,11 +55,23 @@ import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
     )
-import Agent.ToolDispatch (ToolCall(..), typedTool, typedToolWithCall)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    , typedToolWithCall
+    )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withToolResourceClaims
     )
 import Data.Aeson (FromJSON(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
@@ -149,7 +162,9 @@ instance FromJSON SpawnAgentArgs where
         <*> optText object_ "fork_turns"
 
 spawnAgentTool :: MultiAgentContext -> AppTool
-spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
+spawnAgentTool ctx =
+    withToolResourceClaims (spawnResourceClaims ctx) $
+    jsonTool "spawn_agent" spawnAgentDescription
     [ PropertySchema "task_name" PropertyString True $ Just
         "Task name for the new agent. Use lowercase letters, digits, and underscores."
     , PropertySchema "message"
@@ -174,6 +189,21 @@ spawnAgentDescription =
     \/root/task1 and you spawn_agent with task_name \"task_3\" the agent will \
     \have canonical task name /root/task1/task_3. You may refer to this agent \
     \as task_3 or /root/task1/task_3. Returns the canonical task_name."
+
+spawnResourceClaims
+    :: MultiAgentContext
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+spawnResourceClaims ctx call =
+    pure $ do
+        args <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text SpawnAgentArgs
+        path <- joinTaskPath ctx.multiTaskPath args.taskName
+        Right
+            [ registryWriteClaim
+            , ToolResourceClaim ToolWrite
+                (ToolNamedResource ("agent-task:" <> taskPathText path)) ]
 
 runSpawn :: MultiAgentContext -> ToolCall -> SpawnAgentArgs -> IO (Either Text Text)
 runSpawn ctx call args
@@ -333,7 +363,9 @@ instance FromJSON MessageArgs where
         <*> reqText object_ "message"
 
 sendMessageTool :: MultiAgentContext -> AppTool
-sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
+sendMessageTool ctx =
+    withToolResourceClaims (messageResourceClaims ctx) $
+    jsonTool "send_message" sendMessageDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Relative or canonical task name to message (from spawn_agent)."
     , PropertySchema "message"
@@ -364,7 +396,9 @@ runSendMessage ctx call args
                             (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
-followupTaskTool ctx = jsonTool "followup_task" followupDescription
+followupTaskTool ctx =
+    withToolResourceClaims (messageResourceClaims ctx) $
+    jsonTool "followup_task" followupDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
     , PropertySchema "message"
@@ -379,6 +413,18 @@ followupDescription =
     "Send a follow-up task to an existing non-root target agent and trigger a \
     \turn if it is idle. If the target is already running, deliver the task \
     \promptly at message boundaries."
+
+messageResourceClaims
+    :: MultiAgentContext
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+messageResourceClaims ctx call =
+    pure $ do
+        args <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text MessageArgs
+        target <- targetResourceClaim ctx ToolWrite args.target
+        Right [registryReadClaim, target]
 
 runFollowup :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runFollowup ctx call args
@@ -487,6 +533,14 @@ listAgentsDescription =
     "List live agents in the current root thread tree. Optionally filter by \
     \task-path prefix."
 
+registryReadClaim :: ToolResourceClaim
+registryReadClaim =
+    ToolResourceClaim ToolRead (ToolNamedResource "agent-registry")
+
+registryWriteClaim :: ToolResourceClaim
+registryWriteClaim =
+    ToolResourceClaim ToolWrite (ToolNamedResource "agent-registry")
+
 runListAgents :: MultiAgentContext -> ListAgentsArgs -> IO (Either Text Text)
 runListAgents ctx args = do
     agents <- listAgents ctx.multiRegistry args.pathPrefix
@@ -510,7 +564,9 @@ instance FromJSON InterruptAgentArgs where
     parseJSON = objectArgs \object_ -> InterruptAgentArgs <$> reqText object_ "target"
 
 interruptAgentTool :: MultiAgentContext -> AppTool
-interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
+interruptAgentTool ctx =
+    withToolResourceClaims (targetResourceClaims ctx ToolWrite) $
+    jsonTool "interrupt_agent" interruptDescription
     [ PropertySchema "target" PropertyString True $ Just
         "Agent id or canonical task name to interrupt (from spawn_agent)."
     ]
@@ -522,6 +578,32 @@ interruptDescription :: Text
 interruptDescription =
     "Interrupt an agent's current turn, if any, and return its previous status. \
     \The agent remains available for messages and follow-up tasks."
+
+targetResourceClaims
+    :: MultiAgentContext
+    -> ToolAccess
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+targetResourceClaims ctx access call =
+    pure $ do
+        args <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text InterruptAgentArgs
+        target <- targetResourceClaim ctx access args.target
+        Right [registryReadClaim, target]
+
+targetResourceClaim
+    :: MultiAgentContext
+    -> ToolAccess
+    -> Text
+    -> Either Text ToolResourceClaim
+targetResourceClaim ctx access target =
+    agentClaim access <$> resolveTaskPath ctx.multiTaskPath target
+
+agentClaim :: ToolAccess -> TaskPath -> ToolResourceClaim
+agentClaim access path =
+    ToolResourceClaim access
+        (ToolNamedResource ("agent-task:" <> taskPathText path))
 
 encryptedString :: Text -> PropertyType
 encryptedString description = PropertyRaw $ object

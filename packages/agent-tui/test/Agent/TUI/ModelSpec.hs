@@ -3,6 +3,7 @@ module Agent.TUI.ModelSpec (spec) where
 import Agent.TUI.Model
 import Agent.Loop
     ( LoopEvent(..)
+    , ToolSchedulingSnapshot(..)
     , emptyTurnOutput
     )
 import Agent.ToolDispatch
@@ -209,6 +210,19 @@ spec = describe "fullscreen UI reducer" do
                 Just
                     (warningNotice
                         "Codex usage is low: primary 8% left.")
+
+    it "shows scheduling diagnostics while a tool wave is running" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop
+                        (ToolSchedulingUpdated
+                            ToolSchedulingSnapshot
+                                { schedulingReadyCallIds = ["c1", "c3"]
+                                , schedulingBlockedCallIds = [("c2", "c1")]
+                                })
+                    ]
+        state.uiActivity `shouldBe` "Running 2 tools; 1 queued"
 
     it "separates a partial response from its automatic retry" do
         let message =

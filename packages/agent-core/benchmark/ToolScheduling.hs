@@ -31,7 +31,7 @@ import Agent.Tools.Types
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception (evaluate)
-import Control.Monad (forM)
+import Control.Monad (forM, forM_)
 import Data.IORef
     ( atomicModifyIORef'
     , newIORef
@@ -57,6 +57,7 @@ data Workload
     = OldSequential
     | NewDisjoint
     | NewConflicting
+    | NewMixed !Int
     | ExistingParallel
     deriving (Eq, Show)
 
@@ -73,6 +74,10 @@ main = do
         then pure ()
         else die "RTS statistics are disabled; run with +RTS -T"
     getArgs >>= \case
+        ["matrix", delayArg, sampleCountArg] -> do
+            delayMicros <- parseNonNegative "delay microseconds" delayArg
+            sampleCount <- parsePositive "sample count" sampleCountArg
+            runMatrix delayMicros sampleCount
         [workloadArg, callCountArg, delayArg, sampleCountArg] -> do
             workload <- parseWorkload workloadArg
             callCount <- parsePositive "call count" callCountArg
@@ -89,19 +94,89 @@ main = do
                 result.wallMillis
                 result.cpuMillis
                 result.allocatedBytes
+        [workloadArg, callCountArg, delayArg, sampleCountArg, contentionArg] -> do
+            contention <- parsePercent contentionArg
+            workload <- parseWorkloadWithContention workloadArg contention
+            callCount <- parsePositive "call count" callCountArg
+            delayMicros <- parseNonNegative "delay microseconds" delayArg
+            sampleCount <- parsePositive "sample count" sampleCountArg
+            samples <- forM [1 .. sampleCount] \_ ->
+                measure (runWorkload workload callCount delayMicros)
+            let result = median samples
+            printf
+                "%s,%d,%d,%d,%.3f,%.3f,%d\n"
+                workloadArg
+                callCount
+                delayMicros
+                contention
+                result.wallMillis
+                result.cpuMillis
+                result.allocatedBytes
         _ ->
             die $
-                "usage: tool-scheduling-bench WORKLOAD CALLS DELAY_US SAMPLES\n"
+                "usage: tool-scheduling-bench WORKLOAD CALLS DELAY_US SAMPLES [CONTENTION_PERCENT]\n"
+                    <> "   or: tool-scheduling-bench matrix DELAY_US SAMPLES\n"
                     <> "workloads: old-sequential, new-disjoint, "
-                    <> "new-conflicting, existing-parallel"
+                    <> "new-conflicting, new-mixed, existing-parallel\n"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "old-sequential" -> pure OldSequential
     "new-disjoint" -> pure NewDisjoint
     "new-conflicting" -> pure NewConflicting
+    "new-mixed" -> pure (NewMixed 50)
     "existing-parallel" -> pure ExistingParallel
     other -> die ("unknown workload: " <> other)
+
+parsePercent :: String -> IO Int
+parsePercent raw =
+    case reads raw of
+        [(value, "")]
+            | value >= 0 && value <= 100 -> pure value
+        _ -> die ("invalid contention percentage: " <> raw)
+
+parseWorkloadWithContention :: String -> Int -> IO Workload
+parseWorkloadWithContention raw contention =
+    case raw of
+        "new-mixed" -> pure (NewMixed contention)
+        _ -> parseWorkload raw
+
+runMatrix :: Int -> Int -> IO ()
+runMatrix delayMicros sampleCount =
+    forM_ [8, 32, 128] \callCount -> do
+        forM_ ["old-sequential", "existing-parallel"] \workload -> do
+            parsed <- parseWorkload workload
+            samples <- forM [1 .. sampleCount] \_ ->
+                measure (runWorkload parsed callCount delayMicros)
+            let result = median samples
+            printf
+                "%s,%d,%d,%d,%.3f,%.3f,%d\n"
+                workload
+                callCount
+                delayMicros
+                (if workload == "old-sequential" then 100 else 0 :: Int)
+                result.wallMillis
+                result.cpuMillis
+                result.allocatedBytes
+        forM_ ["new-disjoint", "new-mixed", "new-conflicting"] \workload ->
+            forM_ [0, 50, 100] \contention ->
+                if workload == "new-disjoint" && contention /= 0
+                    || workload == "new-conflicting" && contention /= 100
+                    then pure ()
+                    else do
+                        parsed <- parseWorkloadWithContention workload contention
+                        samples <- forM [1 .. sampleCount] \_ ->
+                            measure (runWorkload parsed callCount delayMicros)
+                        let result = median samples
+                        printf
+                            "%s,%d,%d,%d,%.3f,%.3f,%d\n"
+                            workload
+                            callCount
+                            delayMicros
+                            contention
+                            result.wallMillis
+                            result.cpuMillis
+                            result.allocatedBytes
 
 parsePositive :: String -> String -> IO Int
 parsePositive label raw =
@@ -142,7 +217,7 @@ runWorkload workload callCount delayMicros = do
                 }
         tools =
             zipWith
-                (benchmarkTool workload delayMicros)
+                (benchmarkTool workload delayMicros callCount)
                 [1 ..]
                 names
         registry =
@@ -165,8 +240,8 @@ runWorkload workload callCount delayMicros = do
         Right LoopResult { turnsUsed } -> turnsUsed + callCount
         Left err -> error (show err)
 
-benchmarkTool :: Workload -> Int -> Int -> Text -> AppTool
-benchmarkTool workload delayMicros index name =
+benchmarkTool :: Workload -> Int -> Int -> Int -> Text -> AppTool
+benchmarkTool workload delayMicros callCount index name =
     addClaims $
         jsonAppToolWithExecution
             name
@@ -179,16 +254,21 @@ benchmarkTool workload delayMicros index name =
                 pure (Right "ok"))
   where
     execution = case workload of
-        ExistingParallel -> ParallelSafe
-        _ -> TurnSequential
+        OldSequential -> TurnSequential
+        _ -> ParallelSafe
     addClaims = case workload of
         NewDisjoint ->
             withToolResourceClaims
-                (const (pure (Right [writeClaim resourceName])))
+                (dynamicClaims False)
         NewConflicting ->
             withToolResourceClaims
-                (const (pure (Right [writeClaim "shared"])))
+                (dynamicClaims True)
+        NewMixed contention ->
+            withToolResourceClaims
+                (dynamicClaims (index * 100 <= contention * max 1 callCount))
         _ -> id
+    dynamicClaims shared _ =
+        pure (Right [writeClaim (if shared then "shared" else resourceName)])
     resourceName = "resource-" <> Text.pack (show index)
     writeClaim resource =
         ToolResourceClaim ToolWrite (ToolNamedResource resource)

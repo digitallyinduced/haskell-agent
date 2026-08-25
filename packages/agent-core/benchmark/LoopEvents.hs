@@ -316,6 +316,12 @@ eventWeight = \case
     TurnStarted -> 1
     TurnFinished _ -> 1
     ToolStarted call -> Text.length call.callId
+    ToolSchedulingUpdated snapshot ->
+        sum (map Text.length snapshot.schedulingReadyCallIds)
+            + sum
+                [ Text.length blocked + Text.length blocker
+                | (blocked, blocker) <- snapshot.schedulingBlockedCallIds
+                ]
     ToolOutputUpdated callId output ->
         Text.length callId + Text.length output
     ToolFinished result ->

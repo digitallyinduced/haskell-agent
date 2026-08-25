@@ -6,13 +6,22 @@ import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
     )
-import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
-import Agent.ToolDispatch (customToolCall, functionToolCall)
-import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.ToolDispatch
+    ( ToolCallResult(..)
+    , ToolDispatchConfig(..)
+    , customToolCall
+    , functionToolCall
+    )
+import Agent.Tools.PlanMode (activatePlanMode)
+import Agent.Tools.Scheduling
+    ( ToolSchedulingPlan(..)
+    , schedulingPlansConflict
+    )
 import Agent.Tools.Types
     ( AppTool(..)
     , defaultToolEnv
+    , dispatchRegisteredToolCall
     , mkToolRegistry
     , toolSchedulingPlanFor
     )
@@ -68,27 +77,6 @@ spec = describe "Codex dialect" do
                 "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\n\
                 \global\n\n--- project-doc ---\n\nproject\n</INSTRUCTIONS>"
 
-    it "classifies only strict observational shell commands as read-only" do
-        map shellCommandIsReadOnly
-            [ "rg --files"
-            , "sed -n '1,80p' src/Main.hs"
-            , "git diff -- src/Main.hs"
-            , "gh pr view 123 --json statusCheckRollup"
-            ]
-            `shouldBe` replicate 4 True
-        map shellCommandIsReadOnly
-            [ "git status --short"
-            , "git fetch origin"
-            , "cat src/Main.hs > copy"
-            , "printf x | tee output"
-            , "nix develop -c cabal test"
-            , "bash -c 'rg foo'"
-            , "find . -delete"
-            , "sed -n '/pattern/w output' src/Main.hs"
-            , "git diff --output=copy"
-            ]
-            `shouldBe` replicate 9 False
-
     it "derives disjoint apply_patch resources from patch paths" do
         withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
@@ -106,6 +94,12 @@ spec = describe "Codex dialect" do
             same <- toolSchedulingPlanFor registry (patch "p3" "a.txt")
             schedulingPlansConflict first second `shouldBe` False
             schedulingPlansConflict first same `shouldBe` True
+
+            activatePlanMode coding.codexPlanMode
+            blocked <- dispatchRegisteredToolCall testDispatchConfig registry
+                (patch "p4" "blocked.txt")
+            blocked.output `shouldSatisfy`
+                Text.isInfixOf "file edits are not allowed in plan mode"
             coding.codexClose
 
     it "serializes write_stdin only per shell session" do
@@ -121,8 +115,12 @@ spec = describe "Codex dialect" do
             first <- toolSchedulingPlanFor registry (stdin "s1" "1")
             second <- toolSchedulingPlanFor registry (stdin "s2" "2")
             same <- toolSchedulingPlanFor registry (stdin "s3" "1")
+            shell <- toolSchedulingPlanFor registry
+                (functionToolCall "shell" "shell_command"
+                    "{\"command\":\"pwd\"}")
             schedulingPlansConflict first second `shouldBe` False
             schedulingPlansConflict first same `shouldBe` True
+            shell `shouldBe` ToolExclusive
             coding.codexClose
 
 withTempDir :: (FilePath -> IO a) -> IO a
@@ -132,3 +130,12 @@ withTempDir action = do
         (mkdtemp (tmp </> "agent-codex-dialect-XXXXXX"))
         removeDirectoryRecursive
         action
+
+testDispatchConfig :: ToolDispatchConfig
+testDispatchConfig = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "unknown:" <> name
+    , toolDispatchFormatResult = either ("ERR " <>) id
+    , toolDispatchFormatException = \name _ -> "EX " <> name
+    , toolDispatchOnException = \_ _ -> pure ()
+    , toolDispatchOnOutput = \_ _ -> pure ()
+    }
