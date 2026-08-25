@@ -30,6 +30,7 @@ import Control.Exception.Safe
     , displayException
     , finally
     , fromException
+    , throwIO
     , tryAny
     )
 import Control.Monad (unless, void)
@@ -229,16 +230,16 @@ awaitCreated connection = do
 receiveTranscripts
     :: WS.Connection
     -> MVar TranscriptState
-    -> MVar ()
+    -> MVar (Either SomeException ())
     -> (Text -> IO ())
     -> IO ()
 receiveTranscripts connection state finished onTranscript =
-    loop `finally` void (tryPutMVar finished ())
+    tryAny loop >>= void . tryPutMVar finished
   where
     loop = do
         bytes <- WS.receiveData connection
         case decodeTranscriptEvent bytes of
-            Left _ -> pure ()
+            Left _ -> loop
             Right event -> do
                 current <- modifyMVar state \previous ->
                     let next = applyTranscriptEvent event previous
@@ -251,13 +252,9 @@ receiveTranscripts connection state finished onTranscript =
                     _ ->
                         pure ()
                 case event of
-                    TranscriptDone{} ->
-                        void (tryPutMVar finished ())
-                    TranscriptError{} ->
-                        void (tryPutMVar finished ())
-                    _ ->
-                        pure ()
-        loop
+                    TranscriptDone{} -> pure ()
+                    TranscriptError{} -> pure ()
+                    _ -> loop
 
 applyTranscriptEvent :: TranscriptEvent -> TranscriptState -> TranscriptState
 applyTranscriptEvent event state =
@@ -289,13 +286,18 @@ applyTranscriptEvent event state =
         | Text.null (Text.strip text) = values
         | otherwise = values <> [text]
 
-waitForTranscript :: MVar TranscriptState -> MVar () -> IO Text
+waitForTranscript
+    :: MVar TranscriptState
+    -> MVar (Either SomeException ())
+    -> IO Text
 waitForTranscript state finished = do
     completedInTime <- Timeout.timeout (30 * 1_000_000) (takeMVar finished)
     case completedInTime of
         Nothing ->
             fail "timed out waiting for xAI transcription"
-        Just () -> do
+        Just (Left err) ->
+            throwIO err
+        Just (Right ()) -> do
             current <- readMVar state
             case current.failure of
                 Just message ->

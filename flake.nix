@@ -431,6 +431,7 @@
                                             "${agentCliExecutable}/bin/agent-cli" \
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
+                                                pkgs.ffmpeg
                                                 pkgs.postgresql_18
                                                 haskellPackages.ghc
                                             ]}"
