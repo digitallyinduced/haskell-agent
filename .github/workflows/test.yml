@@ -88,15 +88,20 @@ jobs:
             exit 1
           fi
 
-          if ! command -v setfacl >/dev/null; then
+          setfacl_bin="$(command -v setfacl || true)"
+          if [[ -z "$setfacl_bin" \
+            && -x /run/current-system/sw/bin/setfacl ]]; then
+            setfacl_bin=/run/current-system/sw/bin/setfacl
+          fi
+          if [[ -z "$setfacl_bin" ]]; then
             echo "::error title=Missing setfacl::setfacl is required to grant the Nix build user read-only access to staged credentials"
             exit 1
           fi
-          setfacl -m g:nixbld:--x "$credential_home"
+          "$setfacl_bin" -m g:nixbld:--x "$credential_home"
           find "$credential_home" -type d \
-            -exec setfacl -m g:nixbld:r-x {} +
+            -exec "$setfacl_bin" -m g:nixbld:r-x {} +
           find "$credential_home" -type f \
-            -exec setfacl -m g:nixbld:r-- {} +
+            -exec "$setfacl_bin" -m g:nixbld:r-- {} +
 
           "$nix_bin" flake check \
             --impure \
