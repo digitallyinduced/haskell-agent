@@ -131,7 +131,7 @@ import Agent.Tools.PlanMode
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
-import Control.Exception.Safe (onException, tryAny)
+import Control.Exception.Safe (bracket_, onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
     , readIORef
@@ -157,7 +157,14 @@ import System.Process
 import System.Timeout (timeout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
-runOneTurn env@SessionEnv
+runOneTurn env promptText inputs =
+    bracket_
+        env.sessionBeginWindowTitleBusy
+        env.sessionEndWindowTitleBusy
+        (runOneTurnBusy env promptText inputs)
+
+runOneTurnBusy :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
+runOneTurnBusy env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
     , sessionConversation = conversationRef
