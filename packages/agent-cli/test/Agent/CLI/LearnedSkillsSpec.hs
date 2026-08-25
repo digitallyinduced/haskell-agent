@@ -1,5 +1,6 @@
 module Agent.CLI.LearnedSkillsSpec (spec) where
 
+import Agent.CLI (learnAboutUserOnboardingPrompt)
 import Agent.CLI.LearnedSkills
 import Agent.Store.Postgres.Scope
     ( Scope(..)
@@ -199,6 +200,34 @@ spec = do
             rendered `shouldContainText` "Narrow instructions"
             rendered `shouldNotContainText` "Broad instructions"
             omitted `shouldBe` 0
+
+        it "injects an always-loaded user technical profile in startup context" do
+            let
+                profile =
+                    (skill "user-technical-profile" SkillAlways)
+                        { learnedSkillScope = testScope UserScope
+                        , learnedSkillInstructions =
+                            "Prefer Nix flakes and fast GHCi iteration."
+                        }
+                (context, omitted) =
+                    formatLearnedSkillContext 8000 [profile]
+                rendered = maybe "" id context
+            rendered `shouldContainText` "user-technical-profile"
+            rendered `shouldContainText`
+                "Prefer Nix flakes and fast GHCi iteration."
+            omitted `shouldBe` 0
+
+    describe "learnAboutUserOnboardingPrompt" do
+        it "starts the skill when no technical profile exists" do
+            learnAboutUserOnboardingPrompt []
+                `shouldSatisfy` maybe False (Text.isInfixOf "$learn-about-user")
+
+        it "does not repeat onboarding when the profile already exists" do
+            let profile =
+                    (skill "user-technical-profile" SkillAlways)
+                        { learnedSkillScope = testScope UserScope
+                        }
+            learnAboutUserOnboardingPrompt [profile] `shouldBe` Nothing
 
 testEnv :: LearnedSkillToolsEnv
 testEnv = LearnedSkillToolsEnv

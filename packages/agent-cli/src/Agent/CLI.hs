@@ -16,6 +16,7 @@ module Agent.CLI
     , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
+    , learnAboutUserOnboardingPrompt
     , run
     , withRestoredCurrentDirectory
     ) where
@@ -231,6 +232,7 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Types (renderStoreError)
 import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Skill (LearnedSkill(..))
 import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume
     ( ResumeEntry(..)
@@ -1642,48 +1644,52 @@ runAgentInitializedWithLock
                 CustomResponsesConnection responses -> Just
                     (connection.connectionId, responses)
                 BuiltinConnection _ -> Nothing
-    (initialLoaded, customBearerToken) <- case customResponses of
-        Nothing -> do
-            builtinLoaded <-
-                loadStartupAuth startup transition requestedProvider
-            pure (builtinLoaded, Nothing)
-        Just (connectionId, responses) -> do
-            token <- case responses.responsesApiKeyEnv of
-                Nothing
-                    | responses.responsesApiKeyOptional -> pure ""
-                    | otherwise ->
-                        startupDie startup $
-                            "custom connection "
-                                <> Text.unpack connectionId
-                                <> " requires api_key_env or api_key_optional=true"
-                Just envName ->
-                    lookupEnv (Text.unpack envName) >>= \case
-                        Just value | not (null value) -> pure (Text.pack value)
-                        _
-                            | responses.responsesApiKeyOptional -> pure ""
-                            | otherwise ->
-                                startupDie startup $
-                                    "custom connection "
-                                        <> Text.unpack connectionId
-                                        <> " requires environment variable "
-                                        <> Text.unpack envName
-            let credential = Credential
-                    { accessToken = token
-                    , accountId = connectionId
-                    , leaseId = Nothing
-                    , provider = OpenRouterProvider
-                    }
-            pure
-                ( LoadedAuth
-                    { loadedProvider = OpenRouterProvider
-                    , loadedTokenProvider =
-                        staticCredentialProvider ApiBilled credential
-                    , loadedAccountLabel = const (pure connectionId)
-                    , loadedSelectionId = Nothing
-                    , loadedOpenAiPool = Nothing
-                    }
-                , if Text.null token then Nothing else Just token
-                )
+    ((initialLoaded, learnAboutUserRequested), customBearerToken) <-
+        case customResponses of
+            Nothing -> do
+                startupAuth <-
+                    loadStartupAuth startup transition requestedProvider
+                pure (startupAuth, Nothing)
+            Just (connectionId, responses) -> do
+                token <- case responses.responsesApiKeyEnv of
+                    Nothing
+                        | responses.responsesApiKeyOptional -> pure ""
+                        | otherwise ->
+                            startupDie startup $
+                                "custom connection "
+                                    <> Text.unpack connectionId
+                                    <> " requires api_key_env or api_key_optional=true"
+                    Just envName ->
+                        lookupEnv (Text.unpack envName) >>= \case
+                            Just value
+                                | not (null value) -> pure (Text.pack value)
+                            _
+                                | responses.responsesApiKeyOptional -> pure ""
+                                | otherwise ->
+                                    startupDie startup $
+                                        "custom connection "
+                                            <> Text.unpack connectionId
+                                            <> " requires environment variable "
+                                            <> Text.unpack envName
+                let credential = Credential
+                        { accessToken = token
+                        , accountId = connectionId
+                        , leaseId = Nothing
+                        , provider = OpenRouterProvider
+                        }
+                pure
+                    ( ( LoadedAuth
+                            { loadedProvider = OpenRouterProvider
+                            , loadedTokenProvider =
+                                staticCredentialProvider ApiBilled credential
+                            , loadedAccountLabel = const (pure connectionId)
+                            , loadedSelectionId = Nothing
+                            , loadedOpenAiPool = Nothing
+                            }
+                      , False
+                      )
+                    , if Text.null token then Nothing else Just token
+                    )
     (loaded, startupAccountIds) <- case customResponses of
         Just _ -> pure (initialLoaded, Nothing)
         Nothing
@@ -2762,7 +2768,7 @@ runAgentInitializedWithLock
                                         projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
-                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                    runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                         previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                                         multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel selectAccount claimCurrentSession compactRunner activeBackend btwBackend)
                             >>= \case
@@ -2826,7 +2832,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (if isJust customGenericOptions then Nothing else Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
                     ClaudeCodeProvider -> do
@@ -2887,7 +2893,7 @@ runAgentInitializedWithLock
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                                runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                                     previousRef persist projectRoot home cwd Nothing Nothing startupContext skillsRef skillInvocationsRef escPaused interrupt
                                     multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel Nothing claimCurrentSession compactRunner activeBackend btwBackend
                     OpenRouterProvider -> do
@@ -2959,7 +2965,7 @@ runAgentInitializedWithLock
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
-                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
+                        runSession catalog inferredTarget.targetConnectionId options provider dialect policy allTools coding.codingSuspendGhci coding.codingGrokRuntime mcpFleet.mcpFleetRegistrations mcpFleet.mcpFleetWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns
                             previousRef persist projectRoot home cwd (Just tokenProvider) loaded.loadedOpenAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt
                             multiCtx rootTurnRef subagentSessions pendingNotices subagentStoreRoot agentTypesRef legacySubagentTarget usageRef activeAccountRef activeAccountIdRef activeSelectionRef resolveActiveAccountLabel (Just selectHttpAccount) claimCurrentSession compactRunner activeBackend btwBackend
           where
@@ -3239,6 +3245,7 @@ runSession
     -> ToolEnv
     -> PlanModeEnv
     -> StartupRuntime
+    -> Bool
     -> DatabaseScopes
     -> Maybe ManagedTurnRequest
     -> Maybe PendingTurn
@@ -3277,7 +3284,7 @@ runSession
     -> Backend
     -> BtwBackendFactory
     -> IO RunResult
-runSession catalog connectionId options provider dialect policy allTools suspendGhci grokRuntime mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
+runSession catalog connectionId options provider dialect policy allTools suspendGhci grokRuntime mcpRegistrations mcpWarnings ghciEnabledRef bashEnabledRef toolEnv planMode startup learnAboutUserRequested databaseScopes promptRequest pendingTurn unavailableProviders startupUnavailable paramsRef transcriptRef initialTurns previous persist projectRoot home cwd tokenProvider openAiPool startupContext skillsRef skillInvocationsRef escPaused interrupt multiCtx rootTurnRef subagentSessions pendingNotices storeRoot agentTypes legacyTarget usageRef accountRef accountIdRef selectionRef accountLabel selectAccount onPersisted compactRunner backend btwBackend = do
   initialPrevious <- readIORef previous
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
@@ -3516,9 +3523,10 @@ runSession catalog connectionId options provider dialect policy allTools suspend
             loadApplicableLearnedSkillsForStore
                 startup.startupDatabaseStore
                 databaseScopes >>= \case
-                    Left err ->
+                    Left err -> do
                         reportLearnedSkillWarning
                             ("learned skills unavailable: " <> err)
+                        pure []
                     Right learnedSkills -> do
                         omitted <-
                             queueLearnedSkillContextWithOmissions
@@ -3530,6 +3538,7 @@ runSession catalog connectionId options provider dialect policy allTools suspend
                                 ("learned skills: "
                                     <> Text.pack (show omitted)
                                     <> " omitted from model context due to the context budget")
+                        pure learnedSkills
         sessionReset = do
             resetLiveConversation previous transcriptRef attachmentsRef planMode
             writeIORef usageRef emptyTokenUsage
@@ -3547,7 +3556,7 @@ runSession catalog connectionId options provider dialect policy allTools suspend
             (omitted, skillContextChars) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
-            installLearnedSkills
+            void $ installLearnedSkills
                 freshAgents
                 (defaultSkillCatalogMaxChars - skillContextChars)
             fresh <- readIORef freshAgents
@@ -3917,13 +3926,16 @@ runSession catalog connectionId options provider dialect policy allTools suspend
                 queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
-            when queueInitialContext $
-                installLearnedSkills
-                    startupContext
-                    (defaultSkillCatalogMaxChars - skillContextChars)
+            learnedSkills <-
+                if queueInitialContext
+                    then installLearnedSkills
+                        startupContext
+                        (defaultSkillCatalogMaxChars - skillContextChars)
+                    else pure []
             finishStartup startup
+            pure learnedSkills
         sessionAction = do
-            initializeSkills
+            learnedSkills <- initializeSkills
             case pendingTurn of
                 Just pending ->
                     runPendingTurn
@@ -3944,8 +3956,29 @@ runSession catalog connectionId options provider dialect policy allTools suspend
                         result <- runOneTurn env request.managedTurnText skillInputs
                         finishTurn env True result
                     Nothing ->
-                        readIORef startup.startupSessionState.sessionDraft
-                            >>= replWithDraft env
+                        case learnAboutUserOnboardingPrompt learnedSkills of
+                            Just onboardingPrompt
+                                | learnAboutUserRequested
+                                , isNothing initialPrevious -> do
+                                    skillInputs <-
+                                        preparePromptSkillInputs
+                                            env
+                                            onboardingPrompt
+                                            [UserMessage onboardingPrompt]
+                                            >>= either (die . Text.unpack) pure
+                                    forM_ fullscreen \runtime ->
+                                        emitUiEvent runtime
+                                            (UiUserSubmitted onboardingPrompt)
+                                    result <-
+                                        runOneTurn
+                                            env
+                                            onboardingPrompt
+                                            skillInputs
+                                    finishTurn env False result
+                            _ ->
+                                readIORef
+                                    startup.startupSessionState.sessionDraft
+                                    >>= replWithDraft env
         btwWorker = do
             question <- readChan btwRequests
             runBtwQuestion False env question
@@ -3961,17 +3994,20 @@ loadStartupAuth
     :: StartupRuntime
     -> Maybe ProviderTransition
     -> Maybe Provider
-    -> IO LoadedAuth
+    -> IO (LoadedAuth, Bool)
 loadStartupAuth startup transition requestedProvider =
     loadTransitionAuth transition requestedProvider >>= \case
-        Right loaded -> pure loaded
+        Right loaded -> pure (loaded, False)
         Left err
             | isNothing transition
             , authErrorNeedsOnboarding err
             , Just runtime <- startup.startupFullscreen ->
-                runCredentialOnboarding startup runtime >>= \provider ->
-                    loadAuth (Just provider)
-                        >>= either (startupDie startup . Text.unpack) pure
+                runCredentialOnboarding startup runtime
+                    >>= \(provider, learnAboutUser) ->
+                        loadAuth (Just provider)
+                            >>= either
+                                (startupDie startup . Text.unpack)
+                                (\loaded -> pure (loaded, learnAboutUser))
             | otherwise ->
                 startupDie startup (Text.unpack err)
 
@@ -4020,7 +4056,7 @@ loadSelectedAccountAuth provider selectionId accountId =
 runCredentialOnboarding
     :: StartupRuntime
     -> FullscreenRuntime
-    -> IO Provider
+    -> IO (Provider, Bool)
 runCredentialOnboarding startup runtime = do
     markStartupStage startup "Choose how to connect…"
     loop
@@ -4054,7 +4090,32 @@ runCredentialOnboarding startup runtime = do
                                         connectProviderAccount color provider
                             case connected of
                                 Nothing -> loop
-                                Just _ -> pure provider
+                                Just _ -> do
+                                    markStartupStage startup
+                                        "Personalize your agent…"
+                                    learnAboutUser <-
+                                        requestFullscreenOnboarding
+                                            runtime
+                                            "Personalize your agent"
+                                            "haskell-agent can learn your technical defaults from a confirmed public GitHub profile. You review the profile before anything is saved."
+                                            [ ( "Learn from my GitHub"
+                                              , "Inspect public repositories and propose a technical profile"
+                                              )
+                                            , ( "Skip for now"
+                                              , "Run /learn-about-user whenever you want"
+                                              )
+                                            ]
+                                    pure (provider, learnAboutUser == Just 0)
+
+learnAboutUserOnboardingPrompt :: [LearnedSkill] -> Maybe Text
+learnAboutUserOnboardingPrompt learnedSkills
+    | any
+        ((== "user-technical-profile") . (.learnedSkillSlug))
+        learnedSkills =
+            Nothing
+    | otherwise =
+        Just
+            "$learn-about-user Learn my technical preferences from my public GitHub profile, show me the proposed profile, and ask before saving it."
 
 runPendingTurn
     :: PendingTurnPresentation

@@ -244,6 +244,17 @@ at this URL”, “add this OpenRouter model”, or “OpenAI released a new mod
 Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
 naturally and let the agent activate it.
 
+The built-in `learn-about-user` skill can inspect a user-confirmed public
+GitHub profile, infer technical defaults from a representative repository
+sample, show the proposed profile for correction, and save the approved result
+as an always-loaded user-scoped learned skill. Invoke it with
+`/learn-about-user`, `$learn-about-user`, or ask the agent to learn about your
+technical preferences. It does not inspect private repositories unless the
+user separately and explicitly requests that. On first-use credential
+onboarding, users can opt into this workflow or skip it and run the skill
+later. Once approved, the profile is injected into every new session through
+the existing always-loaded learned-skill startup context.
+
 ### Authentication
 
 Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.

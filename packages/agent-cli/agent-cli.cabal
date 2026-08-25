@@ -13,6 +13,7 @@ category:           Development
 build-type:         Simple
 data-files:         config/models.default.json
                   , skills/add-model/SKILL.md
+                  , skills/learn-about-user/SKILL.md
                   , skills/post-task-learning-review/SKILL.md
                   , skills/telegram-agent/SKILL.md
 
