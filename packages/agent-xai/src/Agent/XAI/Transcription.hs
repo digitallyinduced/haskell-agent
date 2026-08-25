@@ -7,6 +7,11 @@ module Agent.XAI.Transcription
     ) where
 
 import Agent.Error (ApiError(..))
+import Agent.XAI.Options
+    ( defaultGrokClientVersion
+    , grokClientIdentifier
+    , grokUserAgent
+    )
 import Agent.Provider
     ( Credential(..)
     , Provider(XAIProvider)
@@ -173,8 +178,9 @@ transcribe credential produceAudio onTranscript = do
         WS.defaultConnectionOptions
         [ ("Authorization"
           , "Bearer " <> Text.encodeUtf8 credential.accessToken)
-        , ("x-grok-client-identifier", "haskell-agent")
-        , ("User-Agent", "haskell-agent")
+        , ("x-grok-client-identifier", Text.encodeUtf8 grokClientIdentifier)
+        , ("User-Agent"
+          , Text.encodeUtf8 (grokUserAgent defaultGrokClientVersion))
         ]
         \connection -> do
             awaitCreated connection

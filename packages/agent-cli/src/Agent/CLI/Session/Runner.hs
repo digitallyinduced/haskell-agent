@@ -120,7 +120,11 @@ import Agent.CLI.Terminal
     , resolveColor
     )
 import Agent.CLI.Request (setRequestInstructionsAndTools)
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( hostedSearchToolNames
+    , requireToolRegistry
+    , schemasFromAppTools
+    )
 import Agent.CLI.Dialects
     ( filterBashTools
     , filterGhciTools
@@ -815,7 +819,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure $
                 case dialectToolLayout dialect of
                     NoHostToolLayout -> []
-                    _ -> "web_search" : projectedNames
+                    _ -> hostedSearchToolNames dialect ++ projectedNames
         shellModeFlags = \case
             ShellGhci -> (True, False)
             ShellBash -> (False, True)

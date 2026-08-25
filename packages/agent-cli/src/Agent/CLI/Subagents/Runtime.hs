@@ -43,7 +43,11 @@ import Agent.CLI.SubagentStore
     , saveSubagentState
     , subagentDiskFields
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( hostedSearchToolNames
+    , requireToolRegistry
+    , schemasFromAppTools
+    )
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
@@ -813,7 +817,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         filter (not . Text.null)
                                             [ grokSubagentSystemPrompt
                                                 codingGrokPromptTools
-                                                ("web_search" : map (.appToolName) tools)
+                                                (hostedSearchToolNames childDialect
+                                                    ++ map (.appToolName) tools)
                                                 env.subCwd
                                                 today
                                                 (Text.pack SystemInfo.os)
