@@ -220,8 +220,20 @@
                 skylightingSyntaxDirectory =
                     "${skylightingSyntaxes}/share/skylighting/xml";
 
-                haskellPackages = pkgs.haskellPackages.extend (
-                    final: previous: {
+                mkHaskellPackages = checkLocalPackages:
+                    pkgs.haskellPackages.extend (
+                    final: previous:
+                    let
+                        # User-facing builds only need the statically linked
+                        # executables. Keep the complete builds for the dev
+                        # shell and `nix flake check`.
+                        localPackage = package:
+                            if checkLocalPackages then package else
+                                pkgs.haskell.lib.dontHaddock
+                                    (pkgs.haskell.lib.dontCheck
+                                        (pkgs.haskell.lib.disableSharedLibraries
+                                            (pkgs.haskell.lib.disableLibraryProfiling package)));
+                    in {
                         pqi = pkgs.haskell.lib.dontCheck
                             (final.callHackageDirect {
                                 pkg = "pqi";
@@ -278,7 +290,7 @@
                             "skylighting-core"
                             "${skylighting}/skylighting-core"
                             { };
-                        agent-syntax =
+                        agent-syntax = localPackage (
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-syntax/package.nix { })
                                 {
@@ -290,8 +302,8 @@
                                         + ''
                                             export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                                         '';
-                                });
-                        agent-core =
+                                }));
+                        agent-core = localPackage (
                             pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-core/package.nix { }) {
                                 src = agentCoreSource;
@@ -299,45 +311,45 @@
                             [
                                 pkgs.git
                                 pkgs.ripgrep
-                            ];
-                        agent-process = pkgs.haskell.lib.overrideSrc
+                            ]);
+                        agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
                                 src = agentProcessSource;
-                            };
-                        agent-responses-types = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
+                            });
+                        agent-responses-types = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
                             src = agentResponsesTypesSource;
-                        };
-                        agent-codex-dialect = pkgs.haskell.lib.overrideSrc
+                        });
+                        agent-codex-dialect = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-codex-dialect/package.nix { })
                             {
                                 src = agentCodexDialectSource;
-                            };
-                        agent-grok-build-dialect =
+                            });
+                        agent-grok-build-dialect = localPackage (
                             pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-grok-build-dialect/package.nix { })
                                 {
                                     src = agentGrokBuildDialectSource;
-                                };
-                        agent-responses = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses/package.nix { }) {
+                                });
+                        agent-responses = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses/package.nix { }) {
                             src = agentResponsesSource;
-                        };
-                        agent-openai = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openai/package.nix { }) {
+                        });
+                        agent-openai = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openai/package.nix { }) {
                             src = agentOpenaiSource;
-                        };
-                        agent-xai = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-xai/package.nix { }) {
+                        });
+                        agent-xai = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-xai/package.nix { }) {
                             src = agentXaiSource;
-                        };
-                        agent-openrouter = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
+                        });
+                        agent-openrouter = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openrouter/package.nix { }) {
                             src = agentOpenrouterSource;
-                        };
-                        claude-agent-sdk-haskell = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
+                        });
+                        claude-agent-sdk-haskell = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/claude-agent-sdk-haskell/package.nix { }) {
                             src = claudeAgentSdkHaskellSource;
-                        };
-                        agent-claude = pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude/package.nix { }) {
+                        });
+                        agent-claude = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-claude/package.nix { }) {
                             src = agentClaudeSource;
-                        };
-                        agent-tui =
+                        });
+                        agent-tui = localPackage (
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-tui/package.nix { })
                                 {
@@ -349,46 +361,48 @@
                                         + ''
                                             export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                                         '';
-                                });
-                        agent-store = pkgs.haskell.lib.addTestToolDepends
+                                }));
+                        agent-store = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc
                                 (final.callPackage ./packages/agent-store/package.nix { })
                                 {
                                     src = agentStoreSource;
                                 })
-                            [ pkgs.postgresql_18 ];
-                        agent-cli = pkgs.haskell.lib.addTestToolDepends
+                            [ pkgs.postgresql_18 ]);
+                        agent-cli = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-cli/package.nix { }) {
                                 src = agentCliSource;
                             })
                             [
                                 pkgs.git
                                 pkgs.postgresql_18
-                            ];
-                        agent-telegram = pkgs.haskell.lib.addTestToolDepends
+                            ]);
+                        agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
                             (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
                                 src = agentTelegramSource;
                             })
-                            [ pkgs.postgresql_18 ];
+                            [ pkgs.postgresql_18 ]);
                     }
                 );
 
-                agentCorePackage = haskellPackages.agent-core;
-                agentProcessPackage = haskellPackages.agent-process;
-                agentCodexDialectPackage = haskellPackages.agent-codex-dialect;
-                agentGrokBuildDialectPackage = haskellPackages.agent-grok-build-dialect;
-                agentSyntaxPackage = haskellPackages.agent-syntax;
-                agentResponsesTypesPackage = haskellPackages.agent-responses-types;
-                agentResponsesPackage = haskellPackages.agent-responses;
-                agentOpenaiPackage = haskellPackages.agent-openai;
-                agentXaiPackage = haskellPackages.agent-xai;
-                agentOpenrouterPackage = haskellPackages.agent-openrouter;
-                claudeAgentSdkHaskellPackage = haskellPackages.claude-agent-sdk-haskell;
-                agentClaudePackage = haskellPackages.agent-claude;
-                agentTuiPackage = haskellPackages.agent-tui;
-                agentStorePackage = haskellPackages.agent-store;
-                agentCliPackage = haskellPackages.agent-cli;
-                agentTelegramPackage = haskellPackages.agent-telegram;
+                haskellPackages = mkHaskellPackages true;
+                productionHaskellPackages = mkHaskellPackages false;
+                agentCorePackage = productionHaskellPackages.agent-core;
+                agentProcessPackage = productionHaskellPackages.agent-process;
+                agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
+                agentGrokBuildDialectPackage = productionHaskellPackages.agent-grok-build-dialect;
+                agentSyntaxPackage = productionHaskellPackages.agent-syntax;
+                agentResponsesTypesPackage = productionHaskellPackages.agent-responses-types;
+                agentResponsesPackage = productionHaskellPackages.agent-responses;
+                agentOpenaiPackage = productionHaskellPackages.agent-openai;
+                agentXaiPackage = productionHaskellPackages.agent-xai;
+                agentOpenrouterPackage = productionHaskellPackages.agent-openrouter;
+                claudeAgentSdkHaskellPackage = productionHaskellPackages.claude-agent-sdk-haskell;
+                agentClaudePackage = productionHaskellPackages.agent-claude;
+                agentTuiPackage = productionHaskellPackages.agent-tui;
+                agentStorePackage = productionHaskellPackages.agent-store;
+                agentCliPackage = productionHaskellPackages.agent-cli;
+                agentTelegramPackage = productionHaskellPackages.agent-telegram;
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
                         (old: {
@@ -626,22 +640,23 @@
                 };
 
                 checks = {
-                    agent-cli = agentCliPackage;
-                    agent-telegram = agentTelegramPackage;
-                    agent-core = agentCorePackage;
-                    agent-process = agentProcessPackage;
-                    agent-codex-dialect = agentCodexDialectPackage;
-                    agent-grok-build-dialect = agentGrokBuildDialectPackage;
-                    agent-syntax = agentSyntaxPackage;
-                    agent-tui = agentTuiPackage;
-                    agent-responses-types = agentResponsesTypesPackage;
-                    agent-store = agentStorePackage;
-                    agent-responses = agentResponsesPackage;
-                    agent-openai = agentOpenaiPackage;
-                    agent-xai = agentXaiPackage;
-                    agent-openrouter = agentOpenrouterPackage;
-                    claude-agent-sdk-haskell = claudeAgentSdkHaskellPackage;
-                    agent-claude = agentClaudePackage;
+                    agent-cli = haskellPackages.agent-cli;
+                    agent-telegram = haskellPackages.agent-telegram;
+                    agent-core = haskellPackages.agent-core;
+                    agent-process = haskellPackages.agent-process;
+                    agent-codex-dialect = haskellPackages.agent-codex-dialect;
+                    agent-grok-build-dialect = haskellPackages.agent-grok-build-dialect;
+                    agent-syntax = haskellPackages.agent-syntax;
+                    agent-tui = haskellPackages.agent-tui;
+                    agent-responses-types = haskellPackages.agent-responses-types;
+                    agent-store = haskellPackages.agent-store;
+                    agent-responses = haskellPackages.agent-responses;
+                    agent-openai = haskellPackages.agent-openai;
+                    agent-xai = haskellPackages.agent-xai;
+                    agent-openrouter = haskellPackages.agent-openrouter;
+                    claude-agent-sdk-haskell =
+                        haskellPackages.claude-agent-sdk-haskell;
+                    agent-claude = haskellPackages.agent-claude;
                 } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
                     nixos-module = import ./nix/tests/telegram-module.nix {
                         inherit self nixpkgs pkgs system;
