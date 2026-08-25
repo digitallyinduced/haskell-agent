@@ -19,12 +19,6 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Approval ( toggleAlwaysApprove )
 import Agent.CLI.Artifact ( fencedCodeBlock, lastDiffBlock )
 import Agent.CLI.Auth ()
-import Agent.CLI.Clipboard
-    ( formatImageSize,
-      loadImagesFromPastedText,
-      nonEmptyClipboardImages,
-      readClipboardImagesForPaste,
-      readClipboardImagesImageFirst )
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
@@ -109,6 +103,15 @@ import Agent.CLI.ReplMode ( replModeLabel )
 import Agent.CLI.Request ()
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
+import Agent.CLI.Runtime.Repl.Attachments
+    ( AttachmentContext(..)
+    , attachImagesFromPrompt
+    , clearAttachments
+    , handleClipboardPaste
+    , handleClipboardPasteOrText
+    , pasteAttachments
+    , showAttachments
+    )
 import Agent.CLI.Runtime.Types
     ( RunResult(RunRestart, RunSwitchProvider, RunSwitchWorktree,
                 RunReload, RunQuit) )
@@ -138,8 +141,6 @@ import Agent.CLI.Session
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnItems) )
-import Agent.CLI.Session.Attachments
-    ( putImagePreview, queueAttachedImages, queueClipboardImages )
 import Agent.CLI.Session.Choices
     ( accountUsageText,
       atMay,
@@ -206,8 +207,7 @@ import Agent.GrokBuild.Dialect.Workflow
     ( formatWorkflowRuns, workflowRunSnapshots )
 import Agent.Loop
     ( TurnInput(UserMessage, UserMultimodal, userText, userImages),
-      LoopEvent(ActivityUpdated),
-      ImageAttachment(imageBytes, imageMime) )
+      LoopEvent(ActivityUpdated) )
 import Agent.OpenAI.Compaction
     ( clearSessionUserText,
       compactSessionUserText,
@@ -270,7 +270,6 @@ import System.Exit ()
 import System.IO ( stdout, hFlush, stderr )
 import System.OsPath ( takeDirectory )
 import System.Posix.Files ()
-import qualified Data.ByteString as BS ( length )
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
 import qualified Agent.MCP as MCP ()
@@ -322,7 +321,6 @@ handleReplLine
             , sessionRefreshSkills = refreshSkills
             , sessionGrokRuntime = grokRuntime
             , sessionDraft = draftRef
-            , sessionPreviewId = previewIdRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionAccountId = accountIdRef
@@ -375,64 +373,19 @@ handleReplLine
                     putStr "\ESC[2A\r\ESC[J"
                     hFlush stdout
             continueWith keptDraft
-    ReplClipboardPaste keptDraft clipboardPasteImages -> do
-        case clipboardPasteImages of
-            Just images@(_:_) -> do
-                message <- queueAttachedImages
-                    conversationRef
-                    previewIdRef
-                    stdoutColor
-                    (isNothing fullscreen)
-                    images
-                syncFullscreenImagePreviews
-                fullscreenEvent (UiSetNotice Nothing)
-                displayInfo message $
-                    Text.putStrLn
-                        (roleMuted stdoutColor
-                            (glyphOk <> message))
-            _ ->
-                queueClipboardImages
-                    conversationRef
-                    previewIdRef
-                    stdoutColor
-                    (isNothing fullscreen)
-                    >>= \case
-                        Left err ->
-                            displayError err do
-                                errColor <- resolveColor stderr
-                                Text.hPutStrLn stderr (roleError errColor err)
-                        Right message -> do
-                            syncFullscreenImagePreviews
-                            displayInfo message $
-                                Text.putStrLn
-                                    (roleMuted stdoutColor
-                                        (glyphOk <> message))
-        continueWith keptDraft
-    ReplClipboardPasteOrText keptDraft pasted pastedDraft -> do
-        pastedImages <- loadImagesFromPastedText pasted
-        imagesResult <- case pastedImages of
-            Just images@(_:_) -> pure (Just images)
-            _ ->
-                nonEmptyClipboardImages
-                    <$> readClipboardImagesImageFirst
-        case imagesResult of
-            Just images -> do
-                message <- queueAttachedImages
-                    conversationRef
-                    previewIdRef
-                    stdoutColor
-                    (isNothing fullscreen)
-                    images
-                syncFullscreenImagePreviews
-                fullscreenEvent (UiSetNotice Nothing)
-                displayInfo message $
-                    Text.putStrLn
-                        (roleMuted stdoutColor
-                            (glyphOk <> message))
-                continueWith keptDraft
-            _ -> do
-                fullscreenEvent (UiSetNotice Nothing)
-                continueWith pastedDraft
+    ReplClipboardPaste keptDraft clipboardPasteImages ->
+        handleClipboardPaste
+            attachmentContext
+            stdoutColor
+            keptDraft
+            clipboardPasteImages
+    ReplClipboardPasteOrText keptDraft pasted pastedDraft ->
+        handleClipboardPasteOrText
+            attachmentContext
+            stdoutColor
+            keptDraft
+            pasted
+            pastedDraft
     ReplChooseModel keptDraft -> do
         writeIORef draftRef keptDraft
         chooseModel (continueWith keptDraft)
@@ -468,22 +421,14 @@ handleReplLine
                         -- rather than bitmap bytes. Treat a prompt that is
                         -- only image path(s) as an attach + in-terminal preview,
                         -- matching Grok Build's paste chip.
-                        pastedImages <- loadImagesFromPastedText text
-                        case pastedImages of
-                            Just images@(_:_) -> do
-                                message <- queueAttachedImages
-                                    conversationRef
-                                    previewIdRef
-                                    color
-                                    (isNothing fullscreen)
-                                    images
-                                syncFullscreenImagePreviews
-                                displayInfo message $
-                                    Text.putStrLn
-                                        (roleMuted color
-                                            (glyphOk <> message))
-                                continue
-                            _ -> do
+                        attached <-
+                            attachImagesFromPrompt
+                                attachmentContext
+                                color
+                                text
+                        if attached
+                            then continue
+                            else do
                                 pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
                                     setFullscreenImagePreviews runtime []
@@ -573,93 +518,15 @@ handleReplLine
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
                         continue
-                    ReplPaste pasteImmediate pasteCaption -> do
-                        color <- resolveColor stdout
-                        errColor <- resolveColor stderr
-                        imagesResult <- readClipboardImagesForPaste
-                        case imagesResult of
-                            Left err -> do
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError errColor err)
-                                continue
-                            Right [] -> do
-                                displayError "no image found on the clipboard" $
-                                    Text.hPutStrLn stderr
-                                        (roleError errColor
-                                            "no image found on the clipboard")
-                                continue
-                            Right images -> do
-                                let sizes =
-                                        Text.intercalate ", "
-                                            [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
-                                            | img <- images
-                                            ]
-                                if pasteImmediate
-                                    then do
-                                        let promptText =
-                                                if Text.null pasteCaption
-                                                    then "See attached image."
-                                                    else pasteCaption
-                                        when (isNothing fullscreen) $
-                                            putImagePreview previewIdRef color images
-                                        displayInfo ("pasted " <> sizes) $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    (glyphOk <> "pasted " <> sizes))
-                                        resetRenderPrintedText render
-                                        fullscreenEvent
-                                            (UiUserSubmitted promptText)
-                                        let turnInputs =
-                                                [ UserMultimodal
-                                                    { userText = promptText
-                                                    , userImages = images
-                                                    }
-                                                ]
-                                        result <- runOneTurn env promptText turnInputs
-                                        finishTurn False result
-                                    else do
-                                        message <- queueAttachedImages
-                                            conversationRef
-                                            previewIdRef
-                                            color
-                                            (isNothing fullscreen)
-                                            images
-                                        syncFullscreenImagePreviews
-                                        displayInfo message $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    (glyphOk <> message))
-                                        continue
-                    ReplShowAttachments -> do
-                        pending <- readLiveAttachments conversationRef
-                        color <- resolveColor stdout
-                        let message =
-                                if null pending
-                                    then "attachments: (none)"
-                                    else "attachments: "
-                                        <> Text.intercalate ", "
-                                            [ img.imageMime
-                                                <> " ("
-                                                <> formatImageSize
-                                                    (BS.length img.imageBytes)
-                                                <> ")"
-                                            | img <- pending
-                                            ]
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphSession <> message))
-                        continue
-                    ReplClearAttachments -> do
-                        modifyLiveAttachments conversationRef (\_ -> ([], ()))
-                        forM_ fullscreen \runtime ->
-                            setFullscreenImagePreviews runtime []
-                        color <- resolveColor stdout
-                        displayInfo "attachments cleared" $
-                            Text.putStrLn
-                                (roleMuted color
-                                    (glyphOk <> "attachments cleared"))
-                        continue
+                    ReplPaste pasteImmediate pasteCaption ->
+                        pasteAttachments
+                            attachmentContext
+                            pasteImmediate
+                            pasteCaption
+                    ReplShowAttachments ->
+                        showAttachments attachmentContext
+                    ReplClearAttachments ->
+                        clearAttachments attachmentContext
                     ReplShowAgentLimit -> do
                         limit <- env.sessionConcurrentLimit
                         let message =
@@ -1498,16 +1365,18 @@ handleReplLine
                 result <- runOneTurn env original skillInputs
                 finishTurn False result
     continue = continueWith ""
+    attachmentContext =
+        AttachmentContext
+            { attachmentSession = env
+            , attachmentContinueWith = continueWith
+            , attachmentFinishTurn = finishTurn
+            }
     legacy action = case fullscreen of
         Nothing -> action
         Just runtime -> withFullscreenSuspended runtime action
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
-    syncFullscreenImagePreviews =
-        forM_ fullscreen \runtime ->
-            readLiveAttachments conversationRef
-                >>= setFullscreenImagePreviews runtime
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiSystemMessage message)
