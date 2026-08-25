@@ -13,6 +13,12 @@ import Agent.Tools.Scheduling
     , ToolSchedulingPlan(..)
     , schedulingPlansConflict
     )
+import Agent.Tools.Speculation
+    ( closeToolSpeculationRuntime
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , retainToolSpeculation
+    )
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
@@ -1135,6 +1141,54 @@ spec = describe "runLoop" do
             , ToolOutputUpdated "c1" "partial:hi"
             , ToolFinished (functionResult "c1" "complete:hi")
             ]
+
+    it "does not rerun a streamed handler after its consume phase throws" do
+        calls <- newIORef (0 :: Int)
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1"
+                [functionToolCall "c1" "explode" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        let call =
+                functionToolCall "c1" "explode" "{\"message\":\"hi\"}"
+            tool =
+                jsonAppToolWithExecution
+                    "explode"
+                    ""
+                    []
+                    AlwaysReadOnly
+                    ParallelSafe
+                    (typedTool "explode" \(EchoArgs _) -> do
+                        modifyIORef' calls (+ 1)
+                        Exception.throwIO (userError "boom"))
+        Exception.bracket
+            (newToolSpeculationRuntime [tool])
+            closeToolSpeculationRuntime
+            \runtime -> do
+                observeToolArgumentEvent runtime $
+                    ToolArgumentsStarted
+                        { argumentStreamRefs =
+                            [ToolCallStreamItem "item-explode"]
+                        , argumentStreamCallId = call.callId
+                        , argumentStreamName = Just call.name
+                        , argumentStreamArguments = call.arguments
+                        }
+                retainToolSpeculation runtime [call]
+                config0 <- testConfig backend
+                let config = config0
+                        { loopTools = registryFromTools [tool]
+                        , loopToolSpeculation = Just runtime
+                        }
+                runLoop config Nothing "hello"
+                    `shouldReturn` Right LoopResult
+                        { finalResponseId = "resp-2"
+                        , finalText = Just "done"
+                        , turnsUsed = 2
+                        , tokenUsage = emptyTokenUsage
+                        }
+                readIORef calls `shouldReturn` 1
 
 
     it "returns LoopCancelled when the cancel flag is set during tools" do

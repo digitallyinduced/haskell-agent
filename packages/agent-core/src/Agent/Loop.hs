@@ -890,16 +890,18 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                         , callKind = call.callKind
                         }
                 ToolApprovalGranted ->
-                    maybe
-                        (pure Nothing)
-                        (\runtime ->
-                            takeToolSpeculationEmitting runtime call \output ->
-                                config.loopDispatch.toolDispatchOnOutput call output
-                                    >> config.loopOnEvent
-                                        (ToolOutputUpdated call.callId output))
-                        config.loopToolSpeculation
-                    >>= \case
-                        Just toolResult ->
+                    tryAny
+                        (maybe
+                            (pure Nothing)
+                            (\runtime ->
+                                takeToolSpeculationEmitting runtime call \output ->
+                                    config.loopDispatch.toolDispatchOnOutput call output
+                                        >> config.loopOnEvent
+                                            (ToolOutputUpdated call.callId output))
+                            config.loopToolSpeculation) >>= \case
+                        Left exception ->
+                            toolExceptionResult config call exception
+                        Right (Just toolResult) ->
                             pure ToolCallResult
                                 { callId = call.callId
                                 , output =
@@ -907,7 +909,7 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                                         toolResult
                                 , callKind = call.callKind
                                 }
-                        Nothing ->
+                        Right Nothing ->
                             dispatchRegisteredToolCall
                                 config.loopDispatch
                                     { toolDispatchOnOutput =
@@ -924,3 +926,21 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                                 call
             config.loopOnEvent (ToolFinished result)
             pure (Just result)
+
+toolExceptionResult
+    :: LoopConfig
+    -> ToolCall
+    -> SomeException
+    -> IO ToolCallResult
+toolExceptionResult config call exception = do
+    _ <-
+        tryAny
+            (config.loopDispatch.toolDispatchOnException call.name exception)
+    pure ToolCallResult
+        { callId = call.callId
+        , output =
+            config.loopDispatch.toolDispatchFormatException
+                call.name
+                exception
+        , callKind = call.callKind
+        }

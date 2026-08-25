@@ -67,6 +67,7 @@ import Control.Exception.Safe
     , finally
     , mask
     , onException
+    , throwIO
     , tryAny
     )
 import Control.Monad (foldM, forM_, guard, join, void)
@@ -347,9 +348,9 @@ retainToolSpeculation runtime calls = do
     forM_ retained \(entryId, _entry, call) ->
         feedPrefix runtime entryId (const call.arguments)
 
--- | Finish one interpreter after normal approval and scheduling. Any
--- synchronous interpreter failure becomes an ordinary miss, which falls
--- back to the ordinary tool handler.
+-- | Finish one interpreter after normal approval and scheduling. Failures
+-- before the real handler starts become ordinary misses; failures once
+-- consumption begins propagate so callers cannot repeat tool side effects.
 takeToolSpeculation
     :: ToolSpeculationRuntime
     -> ToolCall
@@ -376,7 +377,7 @@ takeToolSpeculationEmitting runtime call emit = do
         | otherwise = do
             enqueueCommand entry (DeliverDone call emit)
             waitCatch entry.interpreterWorker >>= \case
-                Left _ -> pure Nothing
+                Left exception -> throwIO exception
                 Right result -> pure result
 
 discardToolSpeculation
@@ -531,42 +532,57 @@ runStreamed
     -> IO (Maybe ToolResult)
 runStreamed (StreamedTool start interpret consume close) queue =
     mask \restore -> do
-        initial <- start
-        live <- newIORef (Just initial)
-        let
-            commit state = writeIORef live (Just state)
-            finished = writeIORef live Nothing
-            closeLive = do
-                pending <- atomicModifyIORef live \s -> (Nothing, s)
-                mapM_ close pending
-            go state = restore (step state) `onException` closeLive
-            step state =
-                atomically (readTQueue queue) >>= \case
-                    ReachArgumentBarrier reached -> do
-                        atomically (putTMVar reached ())
-                        go state
-                    DeliverPrefix text ->
-                        interpret state (ToolPrefix text) >>= \case
-                            Right next -> do
-                                commit next
-                                go next
-                            Left (_, next) -> do
-                                -- Parsed early; keep state until ToolDone
-                                -- consumes the typed args.
-                                commit next
-                                go next
-                    DeliverDone call emit ->
-                        interpret state (ToolDone call.arguments) >>= \case
-                            Left (args, next) -> do
-                                result <- consume call emit args next
-                                close next
-                                finished
-                                pure (Just result)
-                            Right leftover -> do
-                                close leftover
-                                finished
-                                pure Nothing
-        go initial
+        tryAny start >>= \case
+            Left (_ :: SomeException) ->
+                pure Nothing
+            Right initial -> do
+                live <- newIORef (Just initial)
+                let
+                    commit state = writeIORef live (Just state)
+                    closeLive = do
+                        pending <- atomicModifyIORef live \s -> (Nothing, s)
+                        mapM_ close pending
+                    go state = restore (step state) `onException` closeLive
+                    interpretSafely state input =
+                        tryAny (interpret state input)
+                    step state =
+                        atomically (readTQueue queue) >>= \case
+                            ReachArgumentBarrier reached -> do
+                                atomically (putTMVar reached ())
+                                go state
+                            DeliverPrefix text ->
+                                interpretSafely state (ToolPrefix text) >>= \case
+                                    Left (_ :: SomeException) -> do
+                                        closeLive
+                                        pure Nothing
+                                    Right (Right next) -> do
+                                        commit next
+                                        go next
+                                    Right (Left (_, next)) -> do
+                                        -- Parsed early; keep state until
+                                        -- ToolDone consumes the typed args.
+                                        commit next
+                                        go next
+                            DeliverDone call emit ->
+                                interpretSafely state
+                                    (ToolDone call.arguments) >>= \case
+                                        Left (_ :: SomeException) -> do
+                                            closeLive
+                                            pure Nothing
+                                        Right (Left (args, next)) -> do
+                                            -- From this point the real handler
+                                            -- may run. Its failure must not be
+                                            -- reported as a miss or the caller
+                                            -- could execute side effects twice.
+                                            commit next
+                                            result <- consume call emit args next
+                                            closeLive
+                                            pure (Just result)
+                                        Right (Right leftover) -> do
+                                            commit leftover
+                                            closeLive
+                                            pure Nothing
+                go initial
 
 feedPrefix
     :: ToolSpeculationRuntime

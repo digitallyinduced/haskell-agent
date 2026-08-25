@@ -233,14 +233,14 @@ spec = describe "ToolSpeculationRuntime" do
         readIORef probe.cancellations `shouldReturn` [0, 1]
         readIORef probe.closes `shouldReturn` 1
 
-    it "turns prepared-result failures into ordinary misses" do
+    it "propagates consume failures instead of signalling a retryable miss" do
         withProbeRuntime True \_ runtime -> do
             let call = functionToolCall "call-fail" "probe" "{}"
             observeToolArgumentEvent runtime $
                 startedEvent (ToolCallStreamItem "item-fail") call
             retainToolSpeculation runtime [call]
 
-            takeToolSpeculation runtime call `shouldReturn` Nothing
+            takeToolSpeculation runtime call `shouldThrow` anyIOException
 
 withProbeRuntime
     :: Bool
