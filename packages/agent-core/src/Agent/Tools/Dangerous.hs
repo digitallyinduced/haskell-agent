@@ -79,13 +79,15 @@ isRmCommand cmd =
 flagsHaveRecursiveForce :: [Text] -> Bool
 flagsHaveRecursiveForce args =
     let flags = takeWhile isFlag args
-        clustered = Text.concat (map stripDashes flags)
+        shortFlags = filter (not . isLongFlag) flags
+        clustered = Text.concat (map stripDashes shortFlags)
         lower = Text.map toLower clustered
         hasR = Text.any (== 'r') lower || any isLongRecursive flags
         hasF = Text.any (== 'f') lower || any isLongForce flags
     in hasR && hasF
   where
     isFlag t = Text.isPrefixOf "-" t
+    isLongFlag t = Text.isPrefixOf "--" t
     stripDashes = Text.dropWhile (== '-')
     isLongRecursive t =
         let x = Text.toLower t

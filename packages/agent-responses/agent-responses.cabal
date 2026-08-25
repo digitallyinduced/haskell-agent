@@ -88,6 +88,7 @@ test-suite agent-responses-test
                     , agent-responses-types
                     , aeson >= 2.0
                     , bytestring
+                    , containers
                     , hspec
                     , QuickCheck >= 2.14 && < 2.16
                     , retry
