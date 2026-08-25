@@ -139,6 +139,15 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf url
             out `shouldSatisfy` Text.isInfixOf "\ESC]8;;\ESC\\"
 
+        it "keeps a link's displayed URL suffix inside its OSC 8 hyperlink" do
+            let url = "https://github.com/digitallyinduced/haskell-agent/pull/537"
+                opener = "\ESC]8;;" <> url <> "\ESC\\"
+                out = renderMarkdown True ("Merged PR [#537](" <> url <> ").")
+                afterOpener = Text.drop (Text.length opener) (snd (Text.breakOn opener out))
+                linkedPayload = fst (Text.breakOn "\ESC]8;;\ESC\\" afterOpener)
+            linkedPayload `shouldSatisfy` Text.isInfixOf "#537"
+            linkedPayload `shouldSatisfy` Text.isInfixOf url
+
         it "restores heading styling after nested code" do
             let out = renderMarkdown True "# before `code` after"
                 afterCode = snd (Text.breakOn "code" out)
