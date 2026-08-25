@@ -55,11 +55,11 @@ jobs:
           trap cleanup EXIT
 
           credential_source_home="$HOME"
-          account_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+          account_home=/var/lib/github-runner-haskell-agent
           if [[ ! -f "$credential_source_home/.codex/auth.json" \
             && ! -f "$credential_source_home/.grok/auth.json" \
             && ! -d "$credential_source_home/.haskell-agent/credentials" \
-            && -n "$account_home" ]]; then
+            && -d "$account_home" ]]; then
             credential_source_home="$account_home"
           fi
 
