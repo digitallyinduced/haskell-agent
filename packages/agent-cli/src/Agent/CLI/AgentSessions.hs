@@ -19,7 +19,10 @@ module Agent.CLI.AgentSessions
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.Error (formatException)
-import Agent.Process (terminateProcessGroup)
+import Agent.Process
+    ( terminateProcessGroupWith
+    , terminateThenKillPolicy
+    )
 import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionActivity(..)
@@ -526,7 +529,7 @@ waitForManagedExit = waitForProcess
 terminateManagedProcess :: ProcessHandle -> IO ()
 terminateManagedProcess process = do
     processGroup <- getPid process
-    terminateProcessGroup processGroup process
+    terminateProcessGroupWith terminateThenKillPolicy processGroup process
 
 signalManagedSessionReady :: Either Text () -> IO ()
 signalManagedSessionReady result =

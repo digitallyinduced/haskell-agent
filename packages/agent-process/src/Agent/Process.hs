@@ -1,5 +1,9 @@
 module Agent.Process
-    ( terminateProcessGroup
+    ( ProcessTerminationPolicy(..)
+    , defaultProcessTerminationPolicy
+    , terminateThenKillPolicy
+    , terminateProcessGroup
+    , terminateProcessGroupWith
     ) where
 
 import Control.Concurrent (threadDelay)
@@ -8,6 +12,7 @@ import Control.Monad (unless, void)
 import Data.Either (isRight)
 import System.Posix.Signals
     ( nullSignal
+    , Signal
     , sigINT
     , sigKILL
     , sigTERM
@@ -20,20 +25,61 @@ import System.Process
     , terminateProcess
     )
 
--- | Stop a child process and its descendants with bounded escalation.
+data ProcessTerminationPolicy = ProcessTerminationPolicy
+    { firstSignal :: !Signal
+    , firstWaitMilliseconds :: !Int
+    , secondSignal :: !(Maybe Signal)
+    , secondWaitMilliseconds :: !Int
+    }
+
+-- | The normal policy used by shared process owners.
+defaultProcessTerminationPolicy :: ProcessTerminationPolicy
+defaultProcessTerminationPolicy = ProcessTerminationPolicy
+    { firstSignal = sigINT
+    , firstWaitMilliseconds = 250
+    , secondSignal = Just sigTERM
+    , secondWaitMilliseconds = 750
+    }
+
+-- | Compatibility policy for callers that historically sent TERM, waited
+-- two seconds, and then escalated directly to KILL.
+terminateThenKillPolicy :: ProcessTerminationPolicy
+terminateThenKillPolicy = ProcessTerminationPolicy
+    { firstSignal = sigTERM
+    , firstWaitMilliseconds = 2_000
+    , secondSignal = Nothing
+    , secondWaitMilliseconds = 0
+    }
+
+-- | Stop a child process and its descendants with the shared default policy.
 terminateProcessGroup
     :: Maybe ProcessGroupID
     -> ProcessHandle
     -> IO ()
-terminateProcessGroup groupId processHandle = do
+terminateProcessGroup = terminateProcessGroupWith defaultProcessTerminationPolicy
+
+-- | Stop a child process and its descendants with an explicit escalation
+-- policy.
+terminateProcessGroupWith
+    :: ProcessTerminationPolicy
+    -> Maybe ProcessGroupID
+    -> ProcessHandle
+    -> IO ()
+terminateProcessGroupWith policy groupId processHandle = do
     alive <- processGroupAlive groupId processHandle
     whenAlive alive do
-        signalGroup sigINT
-        interrupted <- waitForProcessGroupExit groupId processHandle 250
+        signalGroup (firstSignal policy)
+        interrupted <- waitForProcessGroupExit
+            groupId
+            processHandle
+            (firstWaitMilliseconds policy)
         unless interrupted do
-            signalGroup sigTERM
+            mapM_ signalGroup (secondSignal policy)
             void $ try @_ @SomeException (terminateProcess processHandle)
-            terminated <- waitForProcessGroupExit groupId processHandle 750
+            terminated <- waitForProcessGroupExit
+                groupId
+                processHandle
+                (secondWaitMilliseconds policy)
             unless terminated do
                 signalGroup sigKILL
                 void $ try @_ @SomeException (terminateProcess processHandle)
