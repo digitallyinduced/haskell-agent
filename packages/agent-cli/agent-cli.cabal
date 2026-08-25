@@ -47,6 +47,8 @@ library
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
+                    , Agent.CLI.Clipboard.Linux
+                    , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI

@@ -14,26 +14,26 @@ module Agent.CLI.Clipboard
     , formatImageSize
     ) where
 
+import Agent.CLI.Clipboard.Linux
+    ( readLinuxClipboardImage
+    , readLinuxClipboardText
+    )
+import Agent.CLI.Clipboard.MacOS
+    ( readMacClipboardImage
+    , readMacClipboardPaths
+    , readMacClipboardText
+    )
 import Agent.CLI.Error (formatException)
 import Agent.Loop (ImageAttachment(..))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (filterM)
-import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Char (toLower)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory
-    ( doesFileExist
-    , findExecutable
-    , getTemporaryDirectory
-    , removeFile
-    )
-import System.Exit (ExitCode(..))
+import System.Directory (doesFileExist)
 import System.FilePath (takeExtension)
-import System.IO (hClose, openBinaryTempFile)
 import System.Info (os)
-import System.Process (readProcessWithExitCode)
 
 -- | What we could usefully take from the clipboard for /paste.
 data ClipboardContent
@@ -248,7 +248,7 @@ readClipboardImageBytes
 
 readClipboardText :: IO (Either Text Text)
 readClipboardText
-    | os == "darwin" = runTextCmd "pbpaste" []
+    | os == "darwin" = readMacClipboardText
     | os == "linux" = readLinuxClipboardText
     | otherwise = pure (Left "clipboard text is not supported on this platform yet")
 
@@ -256,168 +256,6 @@ readClipboardPaths :: IO [FilePath]
 readClipboardPaths
     | os == "darwin" = readMacClipboardPaths
     | otherwise = pure []
-
---------------------------------------------------------------------------------
--- macOS
---------------------------------------------------------------------------------
-
-readMacClipboardImage :: IO (Either Text ImageAttachment)
-readMacClipboardImage = do
-    png <- readMacClipboardClass "«class PNGf»"
-    case png of
-        Right bytes | not (BS.null bytes) ->
-            pure (Right (ImageAttachment "image/png" bytes))
-        _ -> do
-            jpg <- readMacClipboardClass "JPEG picture"
-            case jpg of
-                Right bytes | not (BS.null bytes) ->
-                    pure (Right (ImageAttachment "image/jpeg" bytes))
-                _ ->
-                    pure (Left "no image found on the clipboard")
-
-readMacClipboardPaths :: IO [FilePath]
-readMacClipboardPaths = do
-    result <- tryAny $
-        readProcessWithExitCode "osascript"
-            [ "-e"
-            , "try\n\
-              \  set theFiles to the clipboard as list\n\
-              \  set paths to {}\n\
-              \  repeat with f in theFiles\n\
-              \    try\n\
-              \      set end of paths to POSIX path of f\n\
-              \    end try\n\
-              \  end repeat\n\
-              \  set AppleScript's text item delimiters to linefeed\n\
-              \  return paths as text\n\
-              \on error\n\
-              \  try\n\
-              \    return POSIX path of (the clipboard as «class furl»)\n\
-              \  on error\n\
-              \    return \"\"\n\
-              \  end try\n\
-              \end try"
-            ]
-            ""
-    pure $ case result of
-        Right (ExitSuccess, out, _) ->
-            filter (not . null) (lines out)
-        Right (ExitFailure _, _, _) -> []
-        Left _ -> []
-
-readMacClipboardClass :: String -> IO (Either Text ByteString)
-readMacClipboardClass typeClass = do
-    tmpDir <- getTemporaryDirectory
-    result <- tryAny do
-        (path, handle) <- openBinaryTempFile tmpDir "agent-clipboard-.bin"
-        hClose handle
-        removeFile path
-        let script =
-                unlines
-                    [ "try"
-                    , "  set clipData to the clipboard as " <> typeClass
-                    , "  set outFile to open for access POSIX file "
-                        <> appleString path
-                        <> " with write permission"
-                    , "  set eof of outFile to 0"
-                    , "  write clipData to outFile"
-                    , "  close access outFile"
-                    , "  return \"ok\""
-                    , "on error errMsg"
-                    , "  try"
-                    , "    close access POSIX file " <> appleString path
-                    , "  end try"
-                    , "  error errMsg"
-                    , "end try"
-                    ]
-        (code, _out, err) <- readProcessWithExitCode "osascript" ["-e", script] ""
-        case code of
-            ExitSuccess -> do
-                bytes <- BS.readFile path
-                _ <- tryAny (removeFile path)
-                pure (Right bytes)
-            ExitFailure _ -> do
-                _ <- tryAny (removeFile path)
-                pure (Left (clipboardErrorMessage typeClass err))
-    case result of
-        Left ex -> pure (Left (formatException ex))
-        Right value -> pure value
-
---------------------------------------------------------------------------------
--- Linux
---------------------------------------------------------------------------------
-
-readLinuxClipboardImage :: IO (Either Text ImageAttachment)
-readLinuxClipboardImage = do
-    tools <- findLinuxClipboardTools
-    case tools of
-        [] -> pure (Left linuxClipboardUnavailableError)
-        _ -> do
-            png <- firstRight
-                [ runBytesCmd executable (linuxImageArgs tool "image/png")
-                | tool <- tools
-                , let executable = linuxClipboardExecutable tool
-                ]
-            case png of
-                Right bytes | not (BS.null bytes) ->
-                    pure (Right (ImageAttachment "image/png" bytes))
-                _ -> do
-                    jpg <- firstRight
-                        [ runBytesCmd executable
-                            (linuxImageArgs tool "image/jpeg")
-                        | tool <- tools
-                        , let executable = linuxClipboardExecutable tool
-                        ]
-                    case jpg of
-                        Right bytes | not (BS.null bytes) ->
-                            pure (Right (ImageAttachment "image/jpeg" bytes))
-                        Left err -> pure (Left err)
-                        Right _ -> pure (Left "no image found on the clipboard")
-
-readLinuxClipboardText :: IO (Either Text Text)
-readLinuxClipboardText = do
-    tools <- findLinuxClipboardTools
-    case tools of
-        [] -> pure (Left linuxClipboardUnavailableError)
-        _ ->
-            firstRight
-                [ runTextCmd executable (linuxTextArgs tool)
-                | tool <- tools
-                , let executable = linuxClipboardExecutable tool
-                ]
-
-data LinuxClipboardTool
-    = WlPaste FilePath
-    | Xclip FilePath
-
-findLinuxClipboardTools :: IO [LinuxClipboardTool]
-findLinuxClipboardTools = do
-    wlPaste <- findExecutable "wl-paste"
-    xclip <- findExecutable "xclip"
-    pure $
-        maybe [] (pure . WlPaste) wlPaste
-            <> maybe [] (pure . Xclip) xclip
-
-linuxClipboardExecutable :: LinuxClipboardTool -> FilePath
-linuxClipboardExecutable = \case
-    WlPaste executable -> executable
-    Xclip executable -> executable
-
-linuxImageArgs :: LinuxClipboardTool -> String -> [String]
-linuxImageArgs tool mime = case tool of
-    WlPaste _ -> ["-t", mime]
-    Xclip _ -> ["-selection", "clipboard", "-t", mime, "-o"]
-
-linuxTextArgs :: LinuxClipboardTool -> [String]
-linuxTextArgs = \case
-    WlPaste _ -> ["-n"]
-    Xclip _ -> ["-selection", "clipboard", "-o"]
-
-linuxClipboardUnavailableError :: Text
-linuxClipboardUnavailableError =
-    "no clipboard reader is available on this Linux host; install \
-    \wl-clipboard (Wayland) or xclip (X11). On a remote server, upload the \
-    \image and paste its server-side path instead."
 
 --------------------------------------------------------------------------------
 -- Shared helpers
@@ -453,77 +291,3 @@ mimeForPath path = case map toLower (takeExtension path) of
     ".webp" -> "image/webp"
     ".bmp" -> "image/bmp"
     _ -> "image/png"
-
-runTextCmd :: FilePath -> [String] -> IO (Either Text Text)
-runTextCmd cmd args = do
-    result <- tryAny (readProcessWithExitCode cmd args "")
-    pure $ case result of
-        Left ex -> Left (formatException ex)
-        Right (ExitSuccess, out, _) -> Right (Text.pack out)
-        Right (ExitFailure _, _, err) ->
-            Left (Text.strip (Text.pack err))
-
-runBytesCmd :: FilePath -> [String] -> IO (Either Text ByteString)
-runBytesCmd cmd args = do
-    tmpDir <- getTemporaryDirectory
-    result <- tryAny do
-        (path, handle) <- openBinaryTempFile tmpDir "agent-clipboard-.bin"
-        hClose handle
-        removeFile path
-        (code, _, err) <- readProcessWithExitCode "bash"
-            [ "-c"
-            , shellQuote cmd
-                <> " "
-                <> unwords (map shellQuote args)
-                <> " > "
-                <> shellQuote path
-            ]
-            ""
-        case code of
-            ExitSuccess -> do
-                bytes <- BS.readFile path
-                _ <- tryAny (removeFile path)
-                if BS.null bytes
-                    then pure (Left "no image found on the clipboard")
-                    else pure (Right bytes)
-            ExitFailure _ -> do
-                _ <- tryAny (removeFile path)
-                pure (Left (Text.strip (Text.pack err)))
-    case result of
-        Left ex -> pure (Left (formatException ex))
-        Right value -> pure value
-
-shellQuote :: String -> String
-shellQuote s = '\'' : go s
-  where
-    go [] = "'"
-    go ('\'':xs) = "'\\''" <> go xs
-    go (c:xs) = c : go xs
-
-firstRight :: [IO (Either Text a)] -> IO (Either Text a)
-firstRight [] = pure (Left "no image found on the clipboard")
-firstRight (action:rest) = do
-    result <- action
-    case result of
-        Right value -> pure (Right value)
-        Left err -> do
-            more <- firstRight rest
-            case more of
-                Right value -> pure (Right value)
-                Left _ -> pure (Left err)
-
-clipboardErrorMessage :: String -> String -> Text
-clipboardErrorMessage typeClass err =
-    let cleaned = Text.strip (Text.pack err)
-        lower = Text.pack (map toLower typeClass)
-    in if Text.null cleaned
-        then "no image found on the clipboard (" <> lower <> ")"
-        else "clipboard: " <> cleaned
-
-appleString :: FilePath -> String
-appleString path = "\"" <> escapeApple path <> "\""
-  where
-    escapeApple = concatMap \case
-        '"' -> "\\\""
-        '\\' -> "\\\\"
-        c -> [c]
