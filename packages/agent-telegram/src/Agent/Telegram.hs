@@ -30,6 +30,7 @@ module Agent.Telegram
     , reactionMessageText
     , telegramReactionEmoji
     , telegramReplyText
+    , telegramAgentPrompt
     , transcribeWithXAI
     , downloadTelegramMediaAttachmentsWith
     ) where
@@ -1012,6 +1013,7 @@ rekeyPendingAction updateId = \case
 runQueuedMediaTurn :: TelegramRuntime -> TelegramPendingMediaTurn -> IO Text
 runQueuedMediaTurn runtime pending = do
     handle <- sessionForPrompt runtime pending.pendingMediaChat pending.pendingMediaText
+    let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     attachments <- downloadTelegramMediaAttachments runtime handle pending
     let imageAttachments =
             [ media
@@ -1024,7 +1026,7 @@ runQueuedMediaTurn runtime pending = do
             ]
         request = ManagedTurnRequest
             { managedTurnVersion = 1
-            , managedTurnText = pending.pendingMediaText
+            , managedTurnText = agentPrompt
             , managedTurnImages = imageAttachments
             , managedTurnFiles = fileAttachments
             , managedTurnBridgeDirectory = Nothing
@@ -1090,7 +1092,7 @@ runQueuedMediaTurn runtime pending = do
                                 Just turnIndex
                                     | maybe True (< turnIndex) priorTurnIndex
                                     , latestTurnMatches
-                                        pending.pendingMediaText
+                                        agentPrompt
                                         turns ->
                                         pure (renderLatestTurn turns)
                                 _ ->
@@ -1398,12 +1400,7 @@ runAgentTurn
     -> IO Text
 runAgentTurn runtime key userId replyToMessageId prompt = do
     handle <- sessionForPrompt runtime key prompt
-    let agentPrompt =
-            prompt
-                <> "\n\n[Telegram delivery context: If the best response is \
-                \only a lightweight acknowledgement, you may respond with \
-                \exactly one standard Telegram reaction emoji. Otherwise \
-                \respond normally. Do not mention this delivery context.]"
+    let agentPrompt = telegramAgentPrompt prompt
     runManagedAgentTurn
         runtime
         handle
@@ -1412,6 +1409,19 @@ runAgentTurn runtime key userId replyToMessageId prompt = do
         replyToMessageId
         (managedTurnRequestFromText agentPrompt)
         agentPrompt
+
+telegramAgentPrompt :: Text -> Text
+telegramAgentPrompt prompt =
+    prompt
+        <> "\n\n[Telegram delivery context: You are conversing in Telegram. \
+        \Keep messages concise and conversational; avoid terminal-style \
+        \verbosity unless the user asks for detail. Your answer and available \
+        \reasoning summaries are shown to the user as a live Telegram draft \
+        \while you work, followed by your normal final response. If the best \
+        \complete response \
+        \is only a lightweight acknowledgement, you may instead respond with \
+        \exactly one standard Telegram reaction emoji. Do not mention these \
+        \delivery instructions.]"
 
 runManagedAgentTurn
     :: TelegramRuntime
@@ -1659,20 +1669,19 @@ withTelegramProgress client key action =
         action
 
 withTelegramProgressUsing :: IO () -> IO () -> IO a -> IO a
-withTelegramProgressUsing sendTyping sendDraft action =
+withTelegramProgressUsing sendTyping sendDraft action = do
+    -- Seed the native draft once. The managed-turn bridge takes ownership of
+    -- refreshing it with live reasoning, response, and tool activity.
+    void (tryAny sendDraft)
     withAsync progressLoop (const action)
   where
-    progressLoop = loop (0 :: Int)
-    loop tick = do
-        -- Chat actions expire after roughly five seconds. Rich drafts last
-        -- longer, so refresh typing every four seconds and the draft every
-        -- fifth tick. Both are best-effort: the final reply remains durable
-        -- even when a client or Bot API version does not support rich drafts.
+    progressLoop = loop
+    loop = do
+        -- Chat actions expire after roughly five seconds. Keep typing as a
+        -- fallback for clients that do not support native rich drafts.
         void (tryAny sendTyping)
-        when (tick `mod` 5 == 0) $
-            void (tryAny sendDraft)
         threadDelay 4_000_000
-        loop (tick + 1)
+        loop
 
 loadTelegramState :: OsPath -> IO TelegramState
 loadTelegramState path = do
