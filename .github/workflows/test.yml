@@ -44,16 +44,14 @@ jobs:
 
           account_home=/var/lib/github-runner-haskell-agent
           credential_home="$(mktemp -d \
-            "$account_home/.agent-functional-credentials.XXXXXX")"
+            "$GITHUB_WORKSPACE/.agent-functional-credentials.XXXXXX")"
           chmod 700 "$credential_home"
-          chmod 701 "$account_home"
           export AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME="$credential_home"
 
           cleanup() {
             set +e
             find "$credential_home" -type f -exec shred -u {} +
             rm -r "$credential_home"
-            chmod 700 "$account_home"
           }
           trap cleanup EXIT
 
