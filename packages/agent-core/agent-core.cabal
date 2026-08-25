@@ -39,6 +39,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Auth.JWT
                     , Agent.Cancel
+                    , Agent.Concurrent
                     , Agent.Dialect
                     , Agent.Error
                     , Agent.FileRetry
@@ -154,6 +155,15 @@ benchmark loop-events-bench
                     , base >= 4.14 && < 5
                     , text
 
+benchmark concurrent-discovery-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ConcurrentDiscovery.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+
 test-suite agent-core-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -161,6 +171,7 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.Auth.JWTSpec
                     , Agent.CancelSpec
+                    , Agent.ConcurrentSpec
                     , Agent.DialectSpec
                     , Agent.ErrorSpec
                     , Agent.Http.HeaderSpec
