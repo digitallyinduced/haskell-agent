@@ -23,11 +23,12 @@ import qualified Graphics.Vty as V
 accentRail
     :: MotionGlyphSet
     -> AttrName
+    -> Bool
     -> V.Color
     -> Maybe Int
     -> Widget n
     -> Widget n
-accentRail glyphs attrName trough waveElapsed content =
+accentRail glyphs attrName colorEnabled trough waveElapsed content =
     Widget Greedy Fixed do
         context <- getContext
         attr <- lookupAttrName attrName
@@ -44,6 +45,7 @@ accentRail glyphs attrName trough waveElapsed content =
                 Just elapsedMillis ->
                     V.vertCat
                         [ Theme.waveCell
+                            colorEnabled
                             trough
                             peak
                             (waveBrightness elapsedMillis row rows)
@@ -55,14 +57,15 @@ accentRail glyphs attrName trough waveElapsed content =
 
 -- | Live header: the leading spinner rides the same wave as row 0 of the
 -- rail; the rest of the title stays muted so the rail is what moves.
-waveHeader :: AttrName -> V.Color -> Int -> Text.Text -> Widget n
-waveHeader attrName trough elapsedMillis title =
+waveHeader :: AttrName -> Bool -> V.Color -> Int -> Text.Text -> Widget n
+waveHeader attrName colorEnabled trough elapsedMillis title =
     case Text.uncons title of
         Nothing -> emptyWidget
         Just (glyph, rest) ->
             hBox
                 [ raw
                     ( Theme.waveCell
+                        colorEnabled
                         trough
                         (Theme.wavePeakFor attrName)
                         (waveBrightness elapsedMillis 0 (waveRowsFor 1))

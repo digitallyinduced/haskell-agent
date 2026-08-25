@@ -1,5 +1,5 @@
 { mkDerivation, aeson, agent-core, agent-syntax, base, brick
-, containers, hspec, lib, text, vty
+, containers, hspec, lib, QuickCheck, text, vty
 }:
 mkDerivation {
   pname = "agent-tui";
@@ -9,8 +9,9 @@ mkDerivation {
     aeson agent-core agent-syntax base brick containers text vty
   ];
   testHaskellDepends = [
-    agent-core agent-syntax base brick hspec text vty
+    agent-core agent-syntax base brick containers hspec QuickCheck text
+    vty
   ];
   description = "Retained terminal UI for the universal agent harness";
-  license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";
+  license = lib.meta.getLicenseFromSpdxId "MIT";
 }

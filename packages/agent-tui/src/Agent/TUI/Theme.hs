@@ -66,7 +66,7 @@ module Agent.TUI.Theme
     ) where
 
 import Agent.Syntax (SyntaxClass(..))
-import Agent.TUI.Motion (pulseBrightness)
+import Agent.TUI.Motion (MotionMode(..), pulseBrightness)
 import Brick (AttrMap, AttrName, attrMap, attrName)
 import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
@@ -320,17 +320,25 @@ ansiIndexRgb index =
             | otherwise = color240Rgb index
     in RGBColor red green blue
 
-waitingPulseAttr :: V.Color -> Int -> V.Attr
-waitingPulseAttr trough elapsedMillis =
-    waveForegroundFrom
-        trough
-        waitingAccentPeak
-        (0.3 + 0.7 * pulseBrightness elapsedMillis)
+waitingPulseAttr :: Bool -> MotionMode -> V.Color -> Int -> V.Attr
+waitingPulseAttr False _ _ _ =
+    V.defAttr
+waitingPulseAttr True mode trough elapsedMillis
+    | mode /= MotionFull =
+        V.defAttr `V.withForeColor` waitingAccentPeak
+    | otherwise =
+        waveForegroundFrom
+            trough
+            waitingAccentPeak
+            (0.3 + 0.7 * pulseBrightness elapsedMillis)
 
 -- | Paint a rail cell. Near-zero brightness uses a default-attr space so the
 -- bar disappears into the real page even when the trough RGB is approximate.
-waveCell :: V.Color -> V.Color -> Double -> Char -> V.Image
-waveCell trough peak brightness glyph
+-- Without color, keep the glyph on the default attribute so NO_COLOR is honored.
+waveCell :: Bool -> V.Color -> V.Color -> Double -> Char -> V.Image
+waveCell False _ _ _ glyph =
+    V.char V.defAttr glyph
+waveCell True trough peak brightness glyph
     | brightness <= 0.04 =
         V.char V.defAttr ' '
     | otherwise =

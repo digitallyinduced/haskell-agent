@@ -133,6 +133,7 @@ import Agent.CLI.Style
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
+      commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
       setFullscreenImagePreviews,
@@ -175,8 +176,8 @@ import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
     ( infoNotice,
       progressNotice,
-      UiEvent(UiUserSubmitted, UiRecapStarted, UiConversationCleared,
-              UiSetNotice, UiErrorMessage, UiSystemMessage) )
+      UiEvent(UiUserSubmitted, UiRecapStarted, UiSetNotice, UiErrorMessage,
+              UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
@@ -354,7 +355,7 @@ handleReplLine
                             _ -> do
                                 pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
-                                    setFullscreenImagePreviews runtime []
+                                    commitFullscreenImagePreviews runtime pendingImages
                                 resetRenderPrintedText render
                                 let turnInputs =
                                         if null pendingImages
@@ -391,7 +392,7 @@ handleReplLine
                                     modifyLiveAttachments conversationRef
                                         \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
-                                    setFullscreenImagePreviews runtime []
+                                    commitFullscreenImagePreviews runtime pendingImages
                                 let userText =
                                         if Text.null arguments
                                             then "Use the "
@@ -564,7 +565,6 @@ handleReplLine
                                     Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
-                                fullscreenEvent UiConversationCleared
                                 fullscreenEvent
                                     (UiSystemMessage outcome.compactSummary)
                                 let message =
@@ -692,7 +692,7 @@ handleReplLine
         pendingImages <-
             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
         forM_ fullscreen \runtime ->
-            setFullscreenImagePreviews runtime []
+            commitFullscreenImagePreviews runtime pendingImages
         let turnInputs =
                 if null pendingImages
                     then [UserMessage expanded]

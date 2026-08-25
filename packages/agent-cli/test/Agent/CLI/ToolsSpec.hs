@@ -75,7 +75,8 @@ spec = describe "schemasFromAppTools" do
             killTask = testTool "kill_task"
         case schemasFromAppTools grokBuildDialect
             [terminal, task, getOutput, waitTasks, killTask] of
-            [ _
+            [ KnownResponseTool ToolWebSearch _
+                , KnownResponseTool ToolXSearch _
                 , FunctionToolValue terminalTool
                 , FunctionToolValue taskTool
                 , FunctionToolValue getOutputTool
@@ -118,7 +119,7 @@ spec = describe "schemasFromAppTools" do
 
     it "builds a loose grok-build function tool for xAI" do
         case schemasFromAppTools grokBuildDialect [jsonTool] of
-            [_, FunctionToolValue tool] -> do
+            [KnownResponseTool ToolWebSearch _, KnownResponseTool ToolXSearch _, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Nothing
                 required_ tool `shouldBe` Just (Aeson.toJSON (["target_file"] :: [Text]))
@@ -162,7 +163,7 @@ spec = describe "schemasFromAppTools" do
                 AlwaysReadOnly
                 (noArgsTool "seo_auth_status" (pure (Right "ok")))
         case schemasFromAppTools grokBuildDialect [tool] of
-            [_, FunctionToolValue function] -> do
+            [KnownResponseTool ToolWebSearch _, KnownResponseTool ToolXSearch _, FunctionToolValue function] -> do
                 function.name `shouldBe` "seo_auth_status"
                 function.parameters `shouldBe` Just parameters
                 function.strict `shouldBe` Nothing

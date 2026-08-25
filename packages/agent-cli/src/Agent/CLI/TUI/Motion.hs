@@ -12,6 +12,7 @@ module Agent.CLI.TUI.Motion
     , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , userActionPending
     ) where
@@ -267,3 +268,9 @@ nativeProgressKeepaliveDue blocked previousBucket ui =
     not blocked
         && ui.uiRunning
         && ui.uiElapsedMillis `div` 5000 > previousBucket
+
+-- | A completed turn gets one final frame even while terminal focus throttling
+-- suppresses ordinary streaming and animation redraws.
+turnCompletionRequiresRedraw :: UiState -> UiState -> Bool
+turnCompletionRequiresRedraw previous next =
+    previous.uiRunning && not next.uiRunning

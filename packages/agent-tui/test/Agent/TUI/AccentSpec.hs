@@ -11,7 +11,6 @@ import Brick
     , viewport
     )
 import Brick.Types (ViewportType(..))
-import Control.Exception (evaluate)
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as V
@@ -52,17 +51,17 @@ spec = describe "accent rail" do
             widget =
                 viewport () Vertical $
                     sampleRail Nothing 3
-        _ <-
-            evaluate $
-                renderWidget
-                    (Just Theme.terminalDefault)
-                    [widget]
-                    (20, 6)
-        pure ()
+            image =
+                V.picImage $
+                    renderWidget
+                        (Just Theme.terminalDefault)
+                        [widget]
+                        (20, 6)
+        V.imageHeight image `shouldSatisfy` (> 0)
 
 sampleRail :: Maybe Int -> Int -> Widget ()
 sampleRail waveElapsed rows =
-    accentRail MotionUnicode Theme.toolAttr Theme.waveTrough waveElapsed $
+    accentRail MotionUnicode Theme.toolAttr True Theme.waveTrough waveElapsed $
         vBox (replicate rows (str "body"))
 
 containsAccentBar :: String -> Bool

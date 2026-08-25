@@ -57,6 +57,10 @@ library
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
                     , Agent.CLI.Runtime.Orchestration
+                    , Agent.CLI.Runtime.Orchestration.Background
+                    , Agent.CLI.Runtime.Orchestration.Concurrent
+                    , Agent.CLI.Runtime.Orchestration.Restart
+                    , Agent.CLI.Runtime.Orchestration.Startup
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
@@ -84,6 +88,7 @@ library
                     , Agent.CLI.TUI.Composer.Edit
                     , Agent.CLI.TUI.LambdaArt
                     , Agent.CLI.TUI.Motion
+                    , Agent.CLI.TUI.Render
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AccountSelection
@@ -437,6 +442,16 @@ benchmark clipboard-latency-bench
                     , directory
                     , filepath
                     , safe-exceptions
+                    , text
+
+benchmark composer-paste-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ComposerPasteLatency.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
                     , text
 
 benchmark transcript-scrolling-bench

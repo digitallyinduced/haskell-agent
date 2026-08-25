@@ -9,6 +9,15 @@ import Agent.CLI.Markdown
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
+import Test.QuickCheck
+    ( Gen
+    , counterexample
+    , elements
+    , forAll
+    , listOf1
+    , (===)
+    )
 
 stripAnsi :: Text -> Text
 stripAnsi text = case Text.break (== '\ESC') text of
@@ -18,6 +27,28 @@ stripAnsi text = case Text.break (== '\ESC') text of
             let afterEsc = Text.drop 1 rest
                 dropped = Text.drop 1 (Text.dropWhile (/= 'm') afterEsc)
             in before <> stripAnsi dropped
+
+osc8Payload :: Text -> Text -> Maybe Text
+osc8Payload url output = do
+    let opener = "\ESC]8;;" <> url <> "\ESC\\"
+        afterOpener = snd (Text.breakOn opener output)
+    if Text.null afterOpener
+        then Nothing
+        else
+            let payload =
+                    Text.drop (Text.length opener) afterOpener
+                (linked, closer) =
+                    Text.breakOn "\ESC]8;;\ESC\\" payload
+            in if Text.null closer then Nothing else Just linked
+
+safeLink :: Gen (Text, Text)
+safeLink = do
+    label <- Text.pack <$> listOf1 (elements safeLabelCharacters)
+    path <- Text.pack <$> listOf1 (elements safePathCharacters)
+    pure (label, "https://example.test/" <> path)
+  where
+    safeLabelCharacters = ['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9']
+    safePathCharacters = safeLabelCharacters <> "-_/"
 
 spec :: Spec
 spec = do
@@ -141,12 +172,18 @@ spec = do
 
         it "keeps a link's displayed URL suffix inside its OSC 8 hyperlink" do
             let url = "https://github.com/digitallyinduced/haskell-agent/pull/537"
-                opener = "\ESC]8;;" <> url <> "\ESC\\"
                 out = renderMarkdown True ("Merged PR [#537](" <> url <> ").")
-                afterOpener = Text.drop (Text.length opener) (snd (Text.breakOn opener out))
-                linkedPayload = fst (Text.breakOn "\ESC]8;;\ESC\\" afterOpener)
-            linkedPayload `shouldSatisfy` Text.isInfixOf "#537"
-            linkedPayload `shouldSatisfy` Text.isInfixOf url
+            stripAnsi <$> osc8Payload url out
+                `shouldBe` Just ("#537 (" <> url <> ")")
+
+        prop "keeps every generated displayed link inside its OSC 8 span" $
+            forAll safeLink \(label, url) ->
+                let out =
+                        renderMarkdown True
+                            ("[" <> label <> "](" <> url <> ")")
+                    expected = label <> " (" <> url <> ")"
+                in counterexample (show out) $
+                    (stripAnsi <$> osc8Payload url out) === Just expected
 
         it "restores heading styling after nested code" do
             let out = renderMarkdown True "# before `code` after"

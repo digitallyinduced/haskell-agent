@@ -6,7 +6,7 @@ module Agent.CLI.Provider.OpenAI
 
 import Agent.CLI.Compaction
     ( OpenAiCompactionSender
-    , autoCompactOpenAiBackendWithSender
+    , autoCompactOpenAiBackendWithSenderAndHook
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.Loop
@@ -62,10 +62,11 @@ lockedOpenAiSession
     -> IO ResponseCreateParams
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
+    -> IO ()
     -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession compactThreshold showRawReasoning wsLock fallbackActive
         provider activeConnection getParams contextTokens
-        recordCompactionUsage =
+        recordCompactionUsage onCompacted =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
                 credential
@@ -139,11 +140,12 @@ lockedOpenAiSession compactThreshold showRawReasoning wsLock fallbackActive
                                 sendHttpCompaction request
                         _ -> pure result
         compactingBackend =
-            autoCompactOpenAiBackendWithSender
+            autoCompactOpenAiBackendWithSenderAndHook
                 compactThreshold
                 compactSender
                 recordCompactionUsage
                 getParams
+                onCompacted
                 contextTokens
                 baseBackend
         turnScopedBackend =

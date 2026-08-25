@@ -34,6 +34,10 @@ spec = describe "Agent.CLI.ModelConfig" do
         fmap (.catalogModelId)
             (catalogDefaultForProvider catalog OpenRouterProvider)
             `shouldBe` Just "stealth/ox-alpha"
+        catalogContextWindowFor catalog "xai" "grok-4.6"
+            `shouldBe` Just 500_000
+        catalogContextWindowFor catalog "openrouter" "stealth/ox-alpha"
+            `shouldBe` Just 1_048_576
         fmap (.catalogModelId)
             (catalogModelsForConnection "openai" catalog)
             `shouldBe`
@@ -60,6 +64,7 @@ spec = describe "Agent.CLI.ModelConfig" do
                 , "    \"connection\": \"ollama\","
                 , "    \"model\": \"qwen2.5-coder:32b\","
                 , "    \"dialect\": \"generic-responses\","
+                , "    \"context_window\": 32768,"
                 , "    \"label\": \"local\""
                 , "  }]"
                 , "}"
@@ -88,6 +93,35 @@ spec = describe "Agent.CLI.ModelConfig" do
             `shouldBe` ["qwen2.5-coder:32b"]
         fmap (.catalogModelDialect) custom
             `shouldBe` [GenericResponsesDialect]
+        fmap (.catalogModelContextWindow) custom
+            `shouldBe` [Just 32_768]
+
+    it "uses the effective configured wire model after a transport remap" do
+        defaults <- readPackagedDefaults
+        let overlay =
+                "{\"version\":1,\"models\":[{\"id\":\"source-model\",\"connection\":\"openrouter\",\"dialect\":\"generic-responses\",\"context_window\":32000},{\"id\":\"provider/target-model\",\"connection\":\"openrouter\",\"dialect\":\"generic-responses\",\"context_window\":128000}]}"
+        catalog <- expectRight
+            (mergeModelConfigs
+                ("models.default.json", defaults)
+                (Just ("models.json", overlay)))
+        catalogContextWindowForTransport
+            catalog
+            "openrouter"
+            "source-model"
+            "source-model"
+            `shouldBe` Just 32_000
+        catalogContextWindowForTransport
+            catalog
+            "openrouter"
+            "source-model"
+            "provider/target-model"
+            `shouldBe` Just 128_000
+        catalogContextWindowForTransport
+            catalog
+            "openrouter"
+            "source-model"
+            "provider/missing-model"
+            `shouldBe` Nothing
 
     it "replaces shipped model metadata by stable id without moving entries" do
         defaults <- readPackagedDefaults
@@ -143,6 +177,15 @@ spec = describe "Agent.CLI.ModelConfig" do
             ("models.default.json", defaults)
             (Just ("models.json", overlay))
             `shouldSatisfy` leftContains "requires api_key_env"
+
+    it "rejects non-positive model context windows" do
+        defaults <- readPackagedDefaults
+        let overlay =
+                "{\"version\":1,\"connections\":{\"local\":{\"api\":\"responses\",\"base_url\":\"http://localhost/v1\",\"api_key_optional\":true}},\"models\":[{\"id\":\"local\",\"connection\":\"local\",\"dialect\":\"generic-responses\",\"context_window\":0}]}"
+        mergeModelConfigs
+            ("models.default.json", defaults)
+            (Just ("models.json", overlay))
+            `shouldSatisfy` leftContains "context_window must be positive"
 
     it "loads ~/.haskell-agent/models.json over an explicit default path" $
         withTempDirectory "agent-model-config-" \root -> do

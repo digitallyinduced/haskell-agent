@@ -38,7 +38,8 @@ import System.IO (Handle)
 import System.OsPath (OsPath)
 
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
--- whatever instructions were already in history.
+-- whatever instructions were already in history; callers pass an empty
+-- history after a persisted transcript-replacement boundary.
 loadAgentsContext
     :: Handle
     -> Maybe FullscreenRuntime

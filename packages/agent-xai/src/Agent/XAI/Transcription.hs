@@ -7,6 +7,11 @@ module Agent.XAI.Transcription
     ) where
 
 import Agent.Error (ApiError(..))
+import Agent.XAI.Options
+    ( defaultGrokClientVersion
+    , grokClientIdentifier
+    , grokUserAgent
+    )
 import Agent.Provider
     ( Credential(..)
     , Provider(XAIProvider)
@@ -30,6 +35,7 @@ import Control.Exception.Safe
     , displayException
     , finally
     , fromException
+    , isSyncException
     , throwIO
     , tryAny
     )
@@ -136,10 +142,14 @@ transcribePcmWithXAI provider produceAudio onTranscript =
             else do
                 result <- tryAny
                     (transcribe credential produceAudio onTranscript)
-                pure $ case result of
-                    Left err -> Left (transcriptionException err)
+                case result of
+                    Left err
+                        | isSyncException err ->
+                            pure (Left (transcriptionException err))
+                        | otherwise ->
+                            throwIO err
                     Right transcript ->
-                        Right transcript
+                        pure (Right transcript)
 
 transcriptionException :: SomeException -> ApiError
 transcriptionException err =
@@ -173,8 +183,9 @@ transcribe credential produceAudio onTranscript = do
         WS.defaultConnectionOptions
         [ ("Authorization"
           , "Bearer " <> Text.encodeUtf8 credential.accessToken)
-        , ("x-grok-client-identifier", "haskell-agent")
-        , ("User-Agent", "haskell-agent")
+        , ("x-grok-client-identifier", Text.encodeUtf8 grokClientIdentifier)
+        , ("User-Agent"
+          , Text.encodeUtf8 (grokUserAgent defaultGrokClientVersion))
         ]
         \connection -> do
             awaitCreated connection

@@ -1,6 +1,7 @@
 module Agent.TUI.ThemeSpec (spec) where
 
 import Agent.Syntax (SyntaxClass(..))
+import Agent.TUI.Motion (MotionMode(..))
 import qualified Agent.TUI.Theme as Theme
 import Brick (AttrName)
 import Brick.AttrMap (attrMapLookup)
@@ -122,11 +123,17 @@ spec = do
 
         it "breathes the waiting diamond without leaving the unit range" do
             let samples =
-                    [ Theme.waitingPulseAttr Theme.waveTrough elapsed
+                    [ Theme.waitingPulseAttr True MotionFull Theme.waveTrough elapsed
                     | elapsed <- [0, 200, 650, 1300]
                     ]
             length (nub (map V.attrForeColor samples))
                 `shouldSatisfy` (> 1)
+            Theme.waitingPulseAttr True MotionOff Theme.waveTrough 0
+                `shouldBe`
+                    Theme.waitingPulseAttr True MotionOff Theme.waveTrough 1300
+            V.attrForeColor
+                (Theme.waitingPulseAttr False MotionFull Theme.waveTrough 200)
+                `shouldBe` V.Default
 
 terminalForeground :: AttrName -> V.MaybeDefault V.Color
 terminalForeground =

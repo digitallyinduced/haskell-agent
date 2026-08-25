@@ -54,10 +54,37 @@ have to be.
   and execution policies are the current foundation for deeper work with
   LLMs, ADTs, type checkers, effect systems, and program verification.
 
-The harness also includes the capabilities expected of a modern coding agent:
-persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
-web search, and interactive terminal interfaces. Those are important product
-features, but not the core differentiation.
+## Features
+
+- **Choice of models and billing:** use OpenAI/Codex, xAI/Grok, OpenRouter, or
+  Claude Code through subscriptions or API keys, and add local or hosted
+  Responses-compatible models through the user model catalog.
+- **Interactive terminal workflow:** choose between fullscreen and inline
+  interfaces with streaming Markdown, live todo progress, one-shot operation,
+  and image attachments from files or the clipboard.
+- **PostgreSQL-backed memory and portable sessions:** persist conversations and
+  scoped learned guidance, resume or search past work, compact long histories,
+  and switch supported providers without losing the pending turn or durable
+  session state.
+- **Efficient long-running agents:** page persisted history on demand and
+  virtualize TUI scrolling to bound memory and rendering work as conversations
+  grow.
+- **Parallel agents and isolated work:** delegate to persisted subagents with a
+  configurable concurrency limit and create fresh sessions in managed Git
+  worktrees.
+- **Built-in coding tools:** run shell commands, opt into a persistent GHCi
+  workspace, search the web, and connect local MCP servers. Approval policies
+  keep mutating operations under user control.
+- **Guided agent workflows:** use plan mode, reusable skills, and scoped learned
+  guidance for repeatable tasks and project or user preferences.
+- **Multimodal input and live voice dictation:** attach images and files, or
+  press `Ctrl+R` on macOS to stream microphone audio to xAI and insert the live
+  transcript into the prompt.
+- **Telegram access:** run a durable, allowlisted Telegram gateway with
+  per-conversation sessions, multimodal messages, approvals, retries, and
+  bounded concurrent processing.
+
+These are important product features, but not the core differentiation.
 
 ## Install
 
@@ -218,6 +245,7 @@ Responses API at `POST /v1/responses` can be configured as:
       "connection": "ollama",
       "model": "qwen2.5-coder:32b",
       "dialect": "generic-responses",
+      "context_window": 32768,
       "label": "local"
     }
   ]
@@ -227,6 +255,10 @@ Responses API at `POST /v1/responses` can be configured as:
 Select it with `agent-cli --model qwen-local` or from `/model`. For an
 authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
 that variable. Omit `"api_key_optional": true` when the key is required.
+Set `context_window` to the model endpoint's documented token limit so
+`/compact` can bound both its summary request and the installed snapshot.
+Inference still works when this metadata is absent, but `/compact` refuses to
+guess a portable model's limit.
 
 Supported dialects are:
 
@@ -261,10 +293,12 @@ Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
 
 ### Voice dictation
 
-Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop.
-On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM directly to
-`wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
-Audio is sent while you speak, and xAI's partial transcript is displayed live.
+Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop
+(or `Esc` to cancel). Recording stays in the TUI; it does not suspend or close
+the session. On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM
+directly to `wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
+Audio is sent while you speak, and xAI's partial transcript is displayed live in the
+status notice.
 Dictation uses the same configured Grok OAuth subscription or managed xAI
 API-key credential as the xAI provider; it does not run an external app server. Set
 `XAI_STT_LANGUAGE` to a supported language code to override the default `en`.

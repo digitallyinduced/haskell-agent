@@ -4,6 +4,7 @@ module Agent.Telegram.Bridge
     , withTelegramBridge
     , processTelegramCallbacks
     , processBridgeRequestBatch
+    , telegramActivityDraftHtml
     ) where
 
 import Agent.CLI.GatewayBridge
@@ -21,6 +22,7 @@ import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import qualified Agent.Telegram.Client as Client
 import Agent.Telegram.Types
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
@@ -37,6 +39,7 @@ import Data.Aeson
     )
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (isPrefixOf, sort)
+import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
@@ -110,13 +113,16 @@ withTelegramBridge env action =
     withAsync (bridgeLoop env) (const action)
 
 bridgeLoop :: TelegramBridgeEnv -> IO ()
-bridgeLoop env = go Set.empty (0 :: Int)
+bridgeLoop env = go Set.empty Nothing (0 :: Int)
   where
-    go seen tick = do
+    go seen lastDraft tick = do
         seen' <- processBridgeRequests env seen
-        when (tick `mod` 40 == 0) (publishActivity env)
+        lastDraft' <-
+            if tick `mod` 10 == 0
+                then publishActivity env lastDraft (tick `mod` 200 == 0)
+                else pure lastDraft
         threadDelay 100_000
-        go seen' (tick + 1)
+        go seen' lastDraft' (tick + 1)
 
 processBridgeRequests
     :: TelegramBridgeEnv
@@ -439,36 +445,73 @@ callbackChatMatches binding callback =
         Nothing -> False
         Just key -> key == binding.callbackBindingChat
 
-publishActivity :: TelegramBridgeEnv -> IO ()
-publishActivity env = do
+publishActivity
+    :: TelegramBridgeEnv
+    -> Maybe Text
+    -> Bool
+    -> IO (Maybe Text)
+publishActivity env previous forceRefresh = do
     let path = unsafeToFilePath
             (managedBridgeActivityPath env.telegramBridgeRequest)
     exists <- doesFileExist path
-    status <-
+    activity <-
         if not exists
-            then pure "Thinking…"
+            then pure Nothing
             else
                 try @_ @SomeException
                     (retryOnFileBusy (LBS.readFile path)) >>= \case
-                        Left _ -> pure "Thinking…"
+                        Left _ -> pure Nothing
                         Right bytes ->
                             pure case
                                     eitherDecode bytes
                                         :: Either String ManagedActivity
                                 of
-                                Right activity ->
-                                    Text.take 100
-                                        activity.managedActivityMessage
-                                Left _ -> "Thinking…"
-    void $ try @_ @SomeException $
-        Client.sendTypingAction
-            env.telegramBridgeClient
-            env.telegramBridgeChat
-    void $ try @_ @SomeException $
-        Client.sendThinkingDraft
-            env.telegramBridgeClient
-            env.telegramBridgeChat
-            status
+                                Right value -> Just value
+                                Left _ -> Nothing
+    let next = activity <&> \value ->
+            telegramActivityDraftHtml
+                value.managedActivityMessage
+                value.managedActivityReasoning
+                value.managedActivityResponse
+    forM_ next \html ->
+        when (forceRefresh || Just html /= previous) $
+            void $ try @_ @SomeException $
+                Client.sendStreamingDraft
+                    env.telegramBridgeClient
+                    env.telegramBridgeChat
+                    html
+    pure (next <|> previous)
+
+telegramActivityDraftHtml :: Text -> Text -> Text -> Text
+telegramActivityDraftHtml status reasoningText responseText =
+    "<tg-thinking>"
+        <> escapeDraftText thinkingText
+        <> "</tg-thinking>"
+        <> if Text.null response
+            then ""
+            else "<p>" <> escapeDraftText response <> "</p>"
+  where
+    reasoning = Text.strip reasoningText
+    thinkingText =
+        Text.takeEnd 1200 $
+            if Text.null reasoning
+                then status
+                else
+                    if status `elem`
+                        ["Thinking…", "Writing reply…", "Finishing…"]
+                        then reasoning
+                        else status <> "\n" <> reasoning
+    response = Text.takeEnd 2600 responseText
+
+escapeDraftText :: Text -> Text
+escapeDraftText =
+    Text.replace "\n" "<br>" . Text.concatMap \case
+        '<' -> "&lt;"
+        '>' -> "&gt;"
+        '&' -> "&amp;"
+        '"' -> "&quot;"
+        '\'' -> "&#39;"
+        character -> Text.singleton character
 
 respondOk :: TelegramBridgeEnv -> ManagedBridgeRequest -> Value -> IO ()
 respondOk env request result =
