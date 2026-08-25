@@ -267,7 +267,7 @@ spec = describe "bounded fullscreen history window" do
             `shouldBe` Seq.singleton (HistoryCursor 2)
         historyWindowLoadedBytes window `shouldSatisfy` (<= 180)
 
-    it "projects reasoning, tool calls, outputs, and assistant text" do
+    it "omits persisted reasoning while projecting tool and assistant history" do
         let projected =
                 sessionHistoryTurn
                     (12 :: Int)
@@ -280,7 +280,9 @@ spec = describe "bounded fullscreen history window" do
                             , summary =
                                 [ ReasoningSummaryPart
                                     { partType = "summary_text"
-                                    , text = Just "Checked the schema"
+                                    , text =
+                                        Just
+                                            "Don't mention skills. Brief summary for the user."
                                     , extraFields = KeyMap.empty
                                     }
                                 ]
@@ -293,13 +295,17 @@ spec = describe "bounded fullscreen history window" do
                             { itemId = Nothing
                             , callId = "call-1"
                             , name = "shell_command"
+                            , namespace = Nothing
                             , arguments = "{\"command\":\"pwd\"}"
+                            , encryptedFunctionArgs = Nothing
                             , status = Nothing
                             , extraFields = KeyMap.empty
                             }
                         , FunctionCallOutputItem FunctionCallOutput
                             { itemId = Nothing
                             , callId = "call-1"
+                            , name = Nothing
+                            , namespace = Nothing
                             , output = Aeson.String "/tmp/project"
                             , status = Nothing
                             , extraFields = KeyMap.empty
@@ -310,13 +316,15 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks
             `shouldBe`
                 [ BlockUser
-                , BlockThinking
                 , BlockShell
                 , BlockAssistant
                 ]
         map (.blockBody) blocks
             `shouldSatisfy`
                 any (Text.isInfixOf "/tmp/project")
+        map (.blockBody) blocks
+            `shouldSatisfy`
+                all (not . Text.isInfixOf "Don't mention skills")
 
     it "does not rematerialise the compacted prefix of replacement turns" do
         let projected =
@@ -406,6 +414,7 @@ userMessage text =
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -417,6 +426,7 @@ assistantMessage text =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
