@@ -37,6 +37,7 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
+    other-modules:    Agent.Telegram.Classify
     exposed-modules:  Agent.Telegram
                     , Agent.Telegram.Bridge
                     , Agent.Telegram.Client
