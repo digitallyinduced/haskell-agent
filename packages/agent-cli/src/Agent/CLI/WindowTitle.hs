@@ -3,6 +3,7 @@ module Agent.CLI.WindowTitle
     ( WindowTitleController(..)
     , busyWindowTitle
     , newWindowTitleController
+    , oscWindowTitleBytes
     ) where
 
 import Agent.CLI.Style (spinnerFrames)
@@ -21,7 +22,10 @@ import Control.Concurrent.STM
     , writeTVar
     )
 import Control.Monad (forM_, when)
+import Data.ByteString (ByteString)
 import Data.Text (Text)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 
 data WindowTitleController = WindowTitleController
     { windowTitleSet :: !(Text -> IO ())
@@ -108,3 +112,20 @@ newWindowTitleController motionMode initialTitle withOutputLock writeTitle = do
 
 busyWindowTitle :: Text -> Text -> Text
 busyWindowTitle frame title = frame <> " " <> title
+
+-- | OSC 2 window-title bytes, UTF-8 encoded.
+-- Vty's 'setOutputWindowTitle' Latin-1 packs the title, which garbles braille
+-- spinner frames. Write this payload with 'outputByteBuffer' instead.
+oscWindowTitleBytes :: Text -> ByteString
+oscWindowTitleBytes title =
+    TextEncoding.encodeUtf8
+        ("\ESC]2;" <> sanitizeOscWindowTitle title <> "\a")
+
+sanitizeOscWindowTitle :: Text -> Text
+sanitizeOscWindowTitle =
+    Text.filter \c ->
+        c /= '\ESC'
+            && c /= '\a'
+            && c /= '\n'
+            && c /= '\r'
+            && c /= '\x9c'

@@ -134,6 +134,7 @@ import Agent.CLI.Resume
     )
 import Agent.CLI.Render (formatElapsed)
 import Agent.CLI.Style (motionGlyphSet)
+import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
@@ -647,7 +648,8 @@ setFullscreenWindowTitle runtime title = do
     enqueueAppEvent runtime (AppSetWindowTitle title)
 
 -- | Brick/Vty owns the terminal, so titles must go through Vty output
--- rather than stdout OSC writes.
+-- rather than stdout OSC writes. Use UTF-8 OSC bytes; Vty's title setter
+-- Latin-1 packs the string and garbles braille spinner frames.
 applyStoredFullscreenWindowTitle :: FullscreenRuntime -> V.Output -> IO ()
 applyStoredFullscreenWindowTitle runtime output =
     readIORef runtime.runtimeWindowTitle
@@ -655,7 +657,7 @@ applyStoredFullscreenWindowTitle runtime output =
 
 writeOutputWindowTitle :: V.Output -> Text -> IO ()
 writeOutputWindowTitle output title =
-    V.setOutputWindowTitle output (Text.unpack title)
+    V.outputByteBuffer output (oscWindowTitleBytes title)
 
 setFullscreenImagePreviews
     :: FullscreenRuntime
