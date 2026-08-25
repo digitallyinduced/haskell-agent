@@ -131,7 +131,9 @@ import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
+    , kittyAltCsiBodies
     , kittyCtrlCsiBodies
+    , kittyCtrlUnderscoreCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -754,6 +756,19 @@ fullscreenVtyConfig =
                  )
                | body <- kittySuperVCsiBodies
                ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar '_') [V.MCtrl]
+                 )
+               | body <- kittyCtrlUnderscoreCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar character) [V.MMeta]
+                 )
+               | character <- ['b', 'd', 'f']
+               , body <- kittyAltCsiBodies character
+               ]
         }
 
 -- | Enable the smallest Kitty keyboard protocol mode needed for modified
@@ -1069,6 +1084,8 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
+        , appKillChain = False
+        , appUndo = []
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
         , appSubmittedImagePreviews = Map.empty

@@ -24,6 +24,7 @@ import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Graphics.Vty as V
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import Test.QuickCheck
@@ -116,6 +117,45 @@ spec = describe "fullscreen composer" do
             `shouldBe` (["…", ""], (1, 0))
         draftCursorLocation womanTechnologist 1 `shouldBe` (0, 0)
         draftCursorLocation womanTechnologist 3 `shouldBe` (0, 2)
+
+    it "moves the cursor between logical lines preserving the column" do
+        verticalCursorMove 1 "one\ntwo three" 2 `shouldBe` Just 6
+        verticalCursorMove (-1) "one\ntwo" 6 `shouldBe` Just 2
+
+    it "keeps vertical movement inside the draft edges" do
+        verticalCursorMove (-1) "one\ntwo" 2 `shouldBe` Nothing
+        verticalCursorMove 1 "one\ntwo" 6 `shouldBe` Nothing
+        verticalCursorMove (-1) "one" 1 `shouldBe` Nothing
+        verticalCursorMove 1 "one" 1 `shouldBe` Nothing
+
+    it "clamps vertical movement to shorter target lines" do
+        verticalCursorMove 1 "abcdef\nxy" 5 `shouldBe` Just 9
+
+    it "does not split wide characters when moving vertically" do
+        verticalCursorMove 1 "abc\n\20320\22909" 3 `shouldBe` Just 5
+        verticalCursorMove (-1) "\20320\22909\nabcd" 6 `shouldBe` Just 1
+        verticalCursorMove (-1) "\20320\22909\nabcd" 7 `shouldBe` Just 2
+
+    it "combines consecutive kills in the kill direction" do
+        combineKill KillBackward "foo " "bar" `shouldBe` "foo bar"
+        combineKill KillForward " bar" "foo" `shouldBe` "foo bar"
+
+    it "classifies kill keys for kill-buffer accumulation" do
+        isKillKey (V.EvKey (V.KChar 'w') [V.MCtrl]) `shouldBe` True
+        isKillKey (V.EvKey (V.KChar 'k') [V.MCtrl, V.MShift])
+            `shouldBe` True
+        isKillKey (V.EvKey (V.KChar 'd') [V.MMeta]) `shouldBe` True
+        isKillKey (V.EvKey V.KBS [V.MMeta]) `shouldBe` True
+        isKillKey (V.EvKey V.KBS []) `shouldBe` False
+        isKillKey (V.EvKey (V.KChar 'd') [V.MCtrl]) `shouldBe` False
+        isKillKey (V.EvKey (V.KChar 'x') [V.MCtrl]) `shouldBe` False
+
+    it "keeps the slash selection visible while scrolling" do
+        slashMenuWindowStart 6 4 3 `shouldBe` 0
+        slashMenuWindowStart 6 10 0 `shouldBe` 0
+        slashMenuWindowStart 6 10 2 `shouldBe` 0
+        slashMenuWindowStart 6 10 5 `shouldBe` 3
+        slashMenuWindowStart 6 10 9 `shouldBe` 4
 
     modifyMaxSuccess (const 500) $
         prop "wraps generated Unicode drafts without overflowing rows" $
