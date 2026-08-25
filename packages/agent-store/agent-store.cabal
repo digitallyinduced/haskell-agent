@@ -97,6 +97,21 @@ benchmark custom-catalog-inspection-bench
                     , temporary
                     , text
 
+benchmark session-history-paging-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SessionHistoryPaging.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-store
+                    , base >= 4.14 && < 5
+                    , contravariant
+                    , hasql
+                    , safe-exceptions
+                    , temporary
+                    , text
+                    , time
+
 test-suite agent-store-test
     import:           common-opts
     type:             exitcode-stdio-1.0

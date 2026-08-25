@@ -5,7 +5,9 @@ import Agent.CLI.Resume
 import Agent.CLI.Session
     ( LegacySubagentTarget(..)
     , SessionMeta(..)
+    , SessionResumeStats(..)
     , SessionTurn(..)
+    , TranscriptEffect(..)
     )
 import Agent.Dialect (DialectId(..))
 import System.OsPath (unsafeEncodeUtf)
@@ -46,6 +48,27 @@ spec = do
             let entry = resumeEntryFromMeta (sampleMeta "abc" "first")
             entry.resumeLoaded `shouldBe` False
             entry.resumeTurnCount `shouldBe` 0
+
+        it "keeps full-session counts and first prompt when the preview is truncated" do
+            let recent = [sampleTurn { turnUserText = "later question" }]
+                stats = SessionResumeStats
+                    { resumeStatsTurnCount = 80
+                    , resumeStatsMessageCount = 160
+                    , resumeStatsToolCount = 12
+                    , resumeStatsFirstPrompt = Just "hello"
+                    }
+                entry =
+                    resumeEntryFromPage
+                        (sampleMeta "abc" "first")
+                        stats
+                        recent
+            entry.resumeLoaded `shouldBe` True
+            entry.resumeTurnCount `shouldBe` 80
+            entry.resumeMessageCount `shouldBe` 160
+            entry.resumeToolCount `shouldBe` 12
+            entry.resumePrompt `shouldBe` "hello"
+            entry.resumeTranscript
+                `shouldSatisfy` any (Text.isInfixOf "later question")
 
     describe "applyResumeKey" do
         let entries =
@@ -223,6 +246,7 @@ sampleTurn =
         , turnResponseId = Nothing
         , turnItems = []
         , turnUsage = Nothing
+        , turnEffect = TranscriptAppend
         }
 
 sampleMeta :: Text.Text -> Text.Text -> SessionMeta

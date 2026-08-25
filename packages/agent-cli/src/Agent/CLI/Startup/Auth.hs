@@ -55,7 +55,6 @@ import Data.Time.Clock
     , getCurrentTime
     )
 import System.Exit (die)
-import System.IO (stderr)
 
 setStartupNotice :: Maybe FullscreenRuntime -> Text -> IO ()
 setStartupNotice fullscreen message =
@@ -83,7 +82,10 @@ markStartupStage startup label = do
 startupDie :: StartupRuntime -> String -> IO a
 startupDie startup message =
     case startup.startupFullscreen of
-        Nothing -> die message
+        Nothing
+            | startup.startupBackground ->
+                throwIO (StartupFailure message)
+            | otherwise -> die message
         Just _ -> throwIO (StartupFailure message)
 
 loadStartupAuth
@@ -154,7 +156,7 @@ runCredentialOnboarding startup runtime = do
                         Just (provider, _) -> do
                             connected <-
                                 withFullscreenSuspended runtime $
-                                    resolveColor stderr >>= \color ->
+                                    resolveColor startup.startupStderr >>= \color ->
                                         connectProviderAccount color provider
                             case connected of
                                 Nothing -> loop

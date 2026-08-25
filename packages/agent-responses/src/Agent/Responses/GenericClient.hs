@@ -148,6 +148,7 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
     , classifyStreamError
     , classifyFailedResponse =
         ConnectionError . failedStreamResponseMessage
+    , incompleteAsFailure = False
     }
 
 transientResultPolicy :: RetryPolicyM IO

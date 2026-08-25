@@ -20,8 +20,11 @@ import Agent.CLI.ProviderTransition
     , TurnResult(..)
     )
 import Agent.CLI.TUI.App
-    ( emitUiEvent
+    ( commitFullscreenHistoryTurn
+    , emitUiEvent
     )
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.CLI.TUI.Types (HistoryCommit(..))
 import Agent.TUI.Model
     ( BlockState(..)
     , UiEvent(..)
@@ -46,11 +49,13 @@ import Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , SessionTurnPage(..)
+    , TranscriptEffect(..)
     , Persistence(..)
     , PersistenceState(..)
-    , appendTurnWithMetaUpdate
+    , appendTurnWithMetaUpdateIndexed
     , ensureSession
-    , loadSession
+    , loadRecentSessionTurns
     , sessionConversationText
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
@@ -95,6 +100,7 @@ import Agent.CLI.TurnState
     , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
+    , turnReplacesTranscript
     )
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Loop
@@ -124,7 +130,7 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Control.Exception.Safe (onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
@@ -140,7 +146,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Time.LocalTime (getZonedTime, localDay, zonedTimeToLocalTime)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode(..))
-import System.IO (stderr, stdout)
+import System.IO (Handle)
 import System.Info (os)
 import qualified System.OsPath
 import System.Process
@@ -158,6 +164,7 @@ runOneTurn env@SessionEnv
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionStartupContext = startupContext
+    , sessionBackground = background
     , sessionEscPaused = escPaused
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
@@ -171,12 +178,14 @@ runOneTurn env@SessionEnv
     , sessionAbortSubagentTurn = abortSubagentTurn
     , sessionOnPersisted = onPersisted
     } promptText inputs = do
+  let stdoutHandle = render.renderStdout
+      stderrHandle = render.renderStderr
   -- Clear the prior turn before publishing this flag to Ctrl-C / Esc.
   -- Resetting inside runLoopInputs could erase the one-shot Esc signal.
   resetCancel config.loopCancel
   writeIORef env.sessionRestartEffort Nothing
   withTurnCancel interrupt config.loopCancel $
-    (if isJust fullscreen
+    (if isJust fullscreen || background
         then id
         else withEscCancel config.loopCancel escPaused) do
     applyPendingSessionTitles env
@@ -205,8 +214,8 @@ runOneTurn env@SessionEnv
                             (UiSystemMessage
                                 ("session: " <> handle.sessionMeta.metaId))
                     Nothing -> do
-                        color <- resolveColor stderr
-                        putTextLn stderr
+                        color <- resolveColor stderrHandle
+                        putTextLn stderrHandle
                             (roleMuted color
                                 (glyphSession <> "session: "
                                     <> handle.sessionMeta.metaId))
@@ -264,7 +273,7 @@ runOneTurn env@SessionEnv
     startedAt <- stateStartedAt <$> readIORef render.renderState
     wallStarted <- getCurrentTime
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
-        emitTerminalSequence terminal stdout osc133CommandStart
+        emitTerminalSequence terminal stdoutHandle osc133CommandStart
     rootTurnId <- beginSubagentTurn
     execution <- runLoopInputsDetailed config prev turnInputs
         `onException`
@@ -295,12 +304,19 @@ runOneTurn env@SessionEnv
                         , turnAssistantText = Nothing
                         , turnError = Just errorText
                         , turnResponseId = Nothing
+                        , turnEffect = TranscriptAppend
                         , turnItems = retainedItems
                         , turnUsage = Nothing
                         }
-                handle' <- appendTurnWithMetaUpdate handle turn \meta ->
+                (handle', turnIndex) <-
+                    appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
                 writeIORef slotRef (PersistenceActive handle')
+                forM_ fullscreen \runtime ->
+                    commitFullscreenHistoryTurn
+                        runtime
+                        (sessionHistoryTurn turnIndex turn)
+                        HistoryCommitAppend
     case (restartEffort, result) of
         (Just level, _) -> do
             abortSubagentTurn rootTurnId
@@ -320,7 +336,7 @@ runOneTurn env@SessionEnv
         (Nothing, Left cancelled@(LoopCancelled _)) -> do
             restorePlanStateAfterIncomplete planMode initialPlanState
             finishTerminal (isNothing fullscreen)
-                terminal wallStarted finishedAt 130 Nothing
+                stdoutHandle terminal wallStarted finishedAt 130 Nothing
             abortSubagentTurn rootTurnId
             -- turnInputs already contains any startup context consumed above.
             -- Checkpoint it instead of restoring it separately, which would
@@ -336,9 +352,10 @@ runOneTurn env@SessionEnv
                         (UiSystemMessage
                             ("cancelled · " <> elapsedDetail model))
                 Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr (formatLoopErrorColored color cancelled)
-                    putTextLn stderr
+                    color <- resolveColor stderrHandle
+                    putTextLn stderrHandle
+                        (formatLoopErrorColored color cancelled)
+                    putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
             persistIncomplete (inputOnlyTurnItems prepared) "cancelled"
             pure TurnCancelled
@@ -358,7 +375,7 @@ runOneTurn env@SessionEnv
                                 emitUiEvent runtime
                                     (UiTurnEnded BlockFailed)
                         finishTerminal (isNothing fullscreen)
-                            terminal wallStarted finishedAt 1
+                            stdoutHandle terminal wallStarted finishedAt 1
                             (Just "Agent provider unavailable")
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
@@ -370,7 +387,7 @@ runOneTurn env@SessionEnv
                 _ -> do
                     restorePlanStateAfterIncomplete planMode initialPlanState
                     finishTerminal (isNothing fullscreen)
-                        terminal wallStarted finishedAt 1
+                        stdoutHandle terminal wallStarted finishedAt 1
                         (Just "Agent turn failed")
                     commitConversationPatch
                         (finishConversation prepared ConversationFailed)
@@ -386,17 +403,18 @@ runOneTurn env@SessionEnv
                                             <> "\n"
                                             <> elapsedDetail model))
                         Nothing -> do
-                            color <- resolveColor stderr
-                            putTextLn stderr
+                            color <- resolveColor stderrHandle
+                            putTextLn stderrHandle
                                 (formatLoopErrorColoredAt color finishedAt err)
-                            putTextLn stderr
+                            putTextLn stderrHandle
                                 (formatTurnStatus color "error" (elapsedDetail model))
                     persistIncomplete (inputOnlyTurnItems prepared)
                         (formatLoopErrorPersistedAt finishedAt err)
                     pure TurnFailed
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
-                terminal wallStarted finishedAt 0 (Just "Agent finished")
+                stdoutHandle terminal wallStarted finishedAt 0
+                (Just "Agent finished")
             finishSubagentTurn rootTurnId
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
@@ -424,19 +442,25 @@ runOneTurn env@SessionEnv
                                     (successNotice
                                         ("Finished · " <> detail))))
                     Nothing -> do
-                        color <- resolveColor stderr
-                        putTextLn stderr
+                        color <- resolveColor stderrHandle
+                        putTextLn stderrHandle
                             (formatTurnStatus color "ok" detail)
             followUp <- handleProposedPlan planMode loopResult.finalText
             printedText <- renderPrintedText render
             case (fullscreen, printedText, assistantText) of
                 (Just _, _, _) -> pure ()
                 (Nothing, False, Just text) | not (Text.null (Text.strip text)) -> do
-                    useColor <- resolveColor stdout
-                    putTextLn stdout (renderAssistantText useColor text)
+                    useColor <- resolveColor stdoutHandle
+                    putTextLn stdoutHandle (renderAssistantText useColor text)
                 _ -> pure ()
             let newItems =
                     turnNewItems beforeItems execution.executionState
+                effect =
+                    if turnReplacesTranscript
+                        beforeItems
+                        execution.executionState
+                        then TranscriptReplace
+                        else TranscriptAppend
             case persist of
                 PersistenceDisabled -> pure ()
                 PersistenceEnabled slotRef -> do
@@ -450,15 +474,25 @@ runOneTurn env@SessionEnv
                             , turnAssistantText = assistantText
                             , turnError = Nothing
                             , turnResponseId = Just loopResult.finalResponseId
+                            , turnEffect = effect
                             , turnItems = newItems
                             , turnUsage = Just loopResult.tokenUsage
                             }
                     titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
-                    countedHandle <- appendTurnWithMetaUpdate handle turn \meta ->
-                        meta { metaTitleUserTurns = titleTurns }
+                    (countedHandle, turnIndex) <-
+                        appendTurnWithMetaUpdateIndexed handle turn \meta ->
+                            meta { metaTitleUserTurns = titleTurns }
                     writeIORef env.sessionTitleTurnCount titleTurns
                     let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
+                    forM_ fullscreen \runtime ->
+                        commitFullscreenHistoryTurn
+                            runtime
+                            (sessionHistoryTurn turnIndex turn)
+                            (case effect of
+                                TranscriptAppend -> HistoryCommitAppend
+                                TranscriptReplace -> HistoryCommitReplace
+                                TranscriptReset -> HistoryCommitReset)
                     when
                         ( not countedMeta.metaTitleIsManual
                             && shouldRequestSessionTitle titleTurns
@@ -618,17 +652,18 @@ checkpointIncompleteTurn beforeItems turnInputs =
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =
-    loadSession
+    loadRecentSessionTurns
         env.sessionDatabasePool
         (System.OsPath.takeDirectory handle.sessionDir)
         handle.sessionMeta.metaId
+        24
         >>= \case
             Left _ -> pure ()
-            Right (_, turns) ->
+            Right page ->
                 requestSessionTitle env.sessionTitleManager
                     handle.sessionMeta.metaId
                     milestone
-                    (sessionConversationText turns)
+                    (sessionConversationText (map snd page.pageTurns))
 
 applyPendingSessionTitles :: SessionEnv -> IO ()
 applyPendingSessionTitles env =
@@ -665,21 +700,23 @@ restorePlanStateAfterIncomplete planMode =
 
 finishTerminal
     :: Bool
+    -> Handle
     -> TerminalCapabilities
     -> UTCTime
     -> UTCTime
     -> Int
     -> Maybe Text
     -> IO ()
-finishTerminal semanticPrompts terminal started finished exitCode notification = do
+finishTerminal
+        semanticPrompts output terminal started finished exitCode notification = do
     when (semanticPrompts && terminal.terminalSemanticPrompts) $
-        emitTerminalSequence terminal stdout
+        emitTerminalSequence terminal output
             (osc133CommandFinished (Just exitCode))
     let seconds = realToFrac (diffUTCTime finished started) :: Double
     case notification of
         Just message
             | exitCode /= 0 || seconds >= 10 ->
-                notifyTerminal terminal stdout message
+                notifyTerminal terminal output message
         _ -> pure ()
 
 handleProposedPlan

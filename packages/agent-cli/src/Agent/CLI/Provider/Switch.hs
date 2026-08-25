@@ -31,7 +31,6 @@ import Agent.CLI.Auth
     , loadAuthForAccount
     , preferredOpenAiTokenProvider
     )
-import Agent.CLI.Command (setModel)
 import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
@@ -40,7 +39,7 @@ import Agent.CLI.Error
 import Agent.CLI.ModelConfig
     ( ModelCatalog
     , builtinConnectionId
-    , loadModelCatalog
+    , loadModelCatalogAt
     )
 import Agent.CLI.Models
     ( ModelOption(..)
@@ -56,6 +55,7 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , saveProjectModel
     )
+import Agent.CLI.Request (setRequestModel)
 import Agent.CLI.ProviderAvailability
     ( probeLoadedAutomaticAvailability
     , probeLoadedAvailability
@@ -145,7 +145,8 @@ import System.Directory.OsPath
     , getHomeDirectory
     )
 import System.IO
-    ( stderr
+    ( Handle
+    , stderr
     , stdout
     )
 import System.OsPath (OsPath)
@@ -223,7 +224,7 @@ applyModelChange
 applyModelChange
         projectRoot provider connection name transportModel dialectId
         paramsRef render previous persist = do
-    modifyIORef' paramsRef (setModel name)
+    modifyIORef' paramsRef (setRequestModel provider name)
     writeIORef render.renderModelRef name
     saveProjectModel projectRoot ModelTarget
         { targetProvider = provider
@@ -470,6 +471,8 @@ requestAutomaticProviderFallback env apiError pending = do
         Just tokenProvider ->
             chooseAutomaticProviderTransition
                 env.sessionModelCatalog
+                env.sessionCwd
+                env.sessionRender.renderStderr
                 env.sessionFullscreen
                 (tokenProviderBillingMode tokenProvider)
                 env.sessionProvider
@@ -489,6 +492,7 @@ requestStartupProviderFallback env apiError = do
         Just tokenProvider ->
             chooseStartupProviderTransition
                 env.sessionModelCatalog
+                env.sessionCwd
                 env.sessionFullscreen
                 (tokenProviderBillingMode tokenProvider)
                 env.sessionProvider
@@ -497,21 +501,26 @@ requestStartupProviderFallback env apiError = do
                 apiError
 
 continueAutomaticFallback
-    :: Maybe FullscreenRuntime
+    :: Maybe OsPath
+    -> Handle
+    -> Maybe FullscreenRuntime
     -> ProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
-continueAutomaticFallback fullscreen failed apiError =
+continueAutomaticFallback cwdHint stderrHandle fullscreen failed apiError =
     case ( failed.transitionAutomaticBilling
          , failed.transitionPendingTurn
          ) of
         (Just billing, Just pending) -> do
             home <- getHomeDirectory
-            loadModelCatalog home >>= \case
+            cwd <- maybe getCurrentDirectory pure cwdHint
+            loadModelCatalogAt home cwd >>= \case
                 Left _ -> pure Nothing
                 Right catalog ->
                     chooseAutomaticProviderTransition
                         catalog
+                        cwd
+                        stderrHandle
                         fullscreen
                         billing
                         failed.transitionTarget.targetProvider
@@ -523,6 +532,8 @@ continueAutomaticFallback fullscreen failed apiError =
 
 chooseAutomaticProviderTransition
     :: ModelCatalog
+    -> OsPath
+    -> Handle
     -> Maybe FullscreenRuntime
     -> BillingMode
     -> Provider
@@ -532,7 +543,8 @@ chooseAutomaticProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseAutomaticProviderTransition
-    catalog fullscreen sourceBilling current unavailable0 sessionId pending apiError =
+    catalog cwd stderrHandle fullscreen
+        sourceBilling current unavailable0 sessionId pending apiError =
     tryCandidates unavailable candidates
   where
     unavailable = markUnavailable current unavailable0
@@ -542,7 +554,7 @@ chooseAutomaticProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget sourceBilling choice >>= \case
+            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
                 Left err -> do
                     let message =
                             "skipping "
@@ -551,8 +563,8 @@ chooseAutomaticProviderTransition
                             <> err
                     case fullscreen of
                         Nothing -> do
-                            color <- resolveColor stderr
-                            putTextLn stderr (roleMuted color message)
+                            color <- resolveColor stderrHandle
+                            putTextLn stderrHandle (roleMuted color message)
                         Just runtime ->
                             emitUiEvent runtime (UiSystemMessage message)
                     tryCandidates
@@ -567,8 +579,8 @@ chooseAutomaticProviderTransition
                             <> choice.modelTarget.targetModelId
                     case fullscreen of
                         Nothing -> do
-                            color <- resolveColor stderr
-                            putTextLn stderr
+                            color <- resolveColor stderrHandle
+                            putTextLn stderrHandle
                                 (roleWarn color (glyphWarn <> message))
                         Just runtime ->
                             emitUiEvent runtime (UiSystemMessage message)
@@ -587,6 +599,7 @@ chooseAutomaticProviderTransition
 
 chooseStartupProviderTransition
     :: ModelCatalog
+    -> OsPath
     -> Maybe FullscreenRuntime
     -> BillingMode
     -> Provider
@@ -595,7 +608,7 @@ chooseStartupProviderTransition
     -> ApiError
     -> IO (Maybe ProviderTransition)
 chooseStartupProviderTransition
-    catalog fullscreen sourceBilling current unavailable0 sessionId apiError =
+    catalog cwd fullscreen sourceBilling current unavailable0 sessionId apiError =
     tryCandidates unavailable candidates
   where
     unavailable = markUnavailable current unavailable0
@@ -605,7 +618,7 @@ chooseStartupProviderTransition
         [] -> pure Nothing
         rawChoice : rest -> do
             choice <- resolveModelOptionDialect rawChoice
-            validateAutomaticProviderTarget sourceBilling choice >>= \case
+            validateAutomaticProviderTarget cwd sourceBilling choice >>= \case
                 Left err -> do
                     let message =
                             "skipping "
@@ -673,10 +686,11 @@ validateProviderTarget choice =
         loadValidatedProviderTarget probeLoadedAvailability choice
 
 validateAutomaticProviderTarget
-    :: BillingMode
+    :: OsPath
+    -> BillingMode
     -> ModelOption
     -> IO (Either Text (Maybe SelectedAccount))
-validateAutomaticProviderTarget sourceBilling choice = do
+validateAutomaticProviderTarget cwd sourceBilling choice = do
     let provider = choice.modelTarget.targetProvider
     if not (providerSupportsUsageAccountSelection provider)
         then fmap (Nothing <$) $
@@ -684,7 +698,6 @@ validateAutomaticProviderTarget sourceBilling choice = do
                 probeLoadedAutomaticAvailability
                 choice
         else do
-            cwd <- getCurrentDirectory
             projectRoot <- resolveProjectRoot cwd
             settings <- loadProjectSettings projectRoot
             let rememberedIds = fmap

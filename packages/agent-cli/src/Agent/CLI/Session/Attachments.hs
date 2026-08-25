@@ -16,14 +16,15 @@ import Agent.CLI.ImagePreview
     , previewRowsFor
     , renderImagePreview
     )
+import Agent.CLI.Session.History
+    ( LiveConversation
+    , modifyLiveAttachments
+    )
 import Agent.CLI.Style (roleMuted)
 import Agent.Loop (ImageAttachment(..))
 import Control.Monad (when)
 import qualified Data.ByteString as BS
-import Data.IORef
-    ( IORef
-    , atomicModifyIORef'
-    )
+import Data.IORef (IORef, atomicModifyIORef')
 import Data.Maybe
     ( fromMaybe
     , isJust
@@ -41,14 +42,14 @@ import System.IO
 -- | Queue clipboard / Finder-paste images and optionally draw an in-terminal
 -- thumbnail. The caller reports the returned message through the active UI.
 queueAttachedImages
-    :: IORef [ImageAttachment]
+    :: IORef LiveConversation
     -> IORef Int
     -> Bool
     -> Bool
     -> [ImageAttachment]
     -> IO Text
 queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
-    (added, pendingCount) <- atomicModifyIORef' attachmentsRef \existing ->
+    (added, pendingCount) <- modifyLiveAttachments attachmentsRef \existing ->
         let (pending, unique) =
                 appendUniqueImageAttachments existing images
         in (pending, (unique, length pending))
@@ -87,7 +88,7 @@ queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
                 <> " queued)"
 
 queueClipboardImages
-    :: IORef [ImageAttachment]
+    :: IORef LiveConversation
     -> IORef Int
     -> Bool
     -> Bool

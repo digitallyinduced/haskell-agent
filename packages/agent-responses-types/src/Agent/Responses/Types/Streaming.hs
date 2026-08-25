@@ -241,7 +241,10 @@ instance FromJSON ResponseStreamError where
     parseJSON = withObject "ResponseStreamError" $ \o -> ResponseStreamError
         <$> o .:? "type"
         <*> o .:? "code"
-        <*> o .: "message"
+        -- Some Responses gateways emit code/type without a human-readable
+        -- message. Keep the wire shape permissive so those errors can still
+        -- be classified instead of aborting event decoding.
+        <*> o .:? "message" .!= ""
         <*> o .:? "param"
         <*> o .:? "resets_in_seconds"
         <*> pure (without ["message"] o)
@@ -618,7 +621,7 @@ instance FromJSON ResponseStreamEvent where
                     streamError <- ResponseStreamError
                         <$> pure Nothing
                         <*> object .:? "code"
-                        <*> object .: "message"
+                        <*> object .:? "message" .!= ""
                         <*> object .:? "param"
                         <*> object .:? "resets_in_seconds"
                         <*> pure (without ["type", "sequence_number", "message"] object)

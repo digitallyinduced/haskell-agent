@@ -10,11 +10,39 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.Foldable (toList)
 import Data.IORef
 import Data.Text (Text)
 
 spec :: Spec
 spec = do
+  describe "CodexTurnState" do
+    it "keeps the first token through tool calls and clears it at turn end" do
+        turnState <- newCodexTurnState
+        recordCodexTurnState turnState " "
+        recordCodexTurnState turnState "ts-first"
+        recordCodexTurnState turnState "ts-later"
+        readCodexTurnState turnState `shouldReturn` Just "ts-first"
+
+        finishCodexTurnStateResponse turnState
+            (responseWithOutput
+                [ FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-1"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                ])
+        readCodexTurnState turnState `shouldReturn` Just "ts-first"
+
+        finishCodexTurnStateResponse turnState
+            (responseWithOutput [])
+        readCodexTurnState turnState `shouldReturn` Nothing
+
   describe "buildCodexWsHeaders" do
     it "advertises remote compaction v2 on the session handshake" do
         let credential = Credential
@@ -32,6 +60,27 @@ spec = do
         field "store" (buildWsPayloadWithOptions defaultCodexWsOptions request Nothing)
             `shouldBe` Just (Aeson.Bool False)
 
+    it "forces stream=true for the Codex WebSocket contract" do
+        let request = sampleRequest { stream = Just False }
+        field "stream" (buildWsPayloadWithOptions defaultCodexWsOptions request Nothing)
+            `shouldBe` Just (Aeson.Bool True)
+
+    it "marks Responses Lite requests in client metadata" do
+        let payload =
+                buildWsPayloadWithOptions
+                    defaultCodexWsOptions sampleRequest Nothing
+        (field "client_metadata" payload >>= field
+            "ws_request_header_x_openai_internal_codex_responses_lite")
+            `shouldBe` Just (Aeson.String "true")
+
+        let generic = withModel (Just "gpt-generic") sampleRequest
+        (field "client_metadata"
+            (buildWsPayloadWithOptions
+                defaultCodexWsOptions generic Nothing)
+            >>= field
+                "ws_request_header_x_openai_internal_codex_responses_lite")
+            `shouldBe` Nothing
+
     it "strips prompt cache retention from Codex requests" do
         let request = withPromptCacheRetention (Just "24h") sampleRequest
             payload = buildWsPayloadWithOptions
@@ -40,11 +89,48 @@ spec = do
         field "previous_response_id" payload
             `shouldBe` Just (Aeson.String "previous-1")
 
+    it "forces parallel_tool_calls false on Responses Lite requests" do
+        let request = withParallelToolCalls (Just True) sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        field "parallel_tool_calls" payload `shouldBe` Just (Aeson.Bool False)
+
+        let generic = withModel (Just "gpt-generic") request
+        field "parallel_tool_calls"
+            (buildWsPayloadWithOptions defaultCodexWsOptions generic Nothing)
+            `shouldBe` Just (Aeson.Bool True)
+
+    it "strips Responses Lite content_item_kinds from the wire payload" do
+        let payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions sampleLitePrefixRequest Nothing
+        case field "input" payload of
+            Just (Aeson.Array items) ->
+                case toList items of
+                    [Aeson.Object message] -> do
+                        KeyMap.lookup
+                            (Key.fromText
+                                "internal_chat_message_metadata_passthrough")
+                            message
+                            `shouldBe` Nothing
+                        field "role" (Aeson.Object message)
+                            `shouldBe` Just (Aeson.String "developer")
+                    other ->
+                        expectationFailure
+                            ("expected one developer message, got "
+                                <> show other)
+            other ->
+                expectationFailure
+                    ("expected input array, got " <> show other)
+
     it "does not request server-managed compaction by default" do
         contextManagement defaultCodexWsOptions `shouldBe` Nothing
 
     it "serializes a positive server-side compaction threshold" do
-        let options = CodexWsOptions { compactThreshold = Just 180000 }
+        let options = CodexWsOptions
+                { compactThreshold = Just 180000
+                , sendIdleTimeoutMicros = defaultCodexWsOptions.sendIdleTimeoutMicros
+                , receiveIdleTimeoutMicros = defaultCodexWsOptions.receiveIdleTimeoutMicros
+                }
         contextManagement options `shouldBe` Just (Aeson.toJSON
             [ Aeson.object
                 [ "type" Aeson..= ("compaction" :: Text)
@@ -53,7 +139,11 @@ spec = do
             ])
 
     it "omits non-positive thresholds" do
-        let options = CodexWsOptions { compactThreshold = Just 0 }
+        let options = CodexWsOptions
+                { compactThreshold = Just 0
+                , sendIdleTimeoutMicros = defaultCodexWsOptions.sendIdleTimeoutMicros
+                , receiveIdleTimeoutMicros = defaultCodexWsOptions.receiveIdleTimeoutMicros
+                }
         contextManagement options `shouldBe` Nothing
 
   describe "retryTransientWsResultWithPolicy" do
@@ -126,6 +216,59 @@ spec = do
             [EventResponseCreated, EventResponseCompleted]
             \response -> response.output `shouldBe` []
 
+    it "skips malformed frames and continues to the terminal response" do
+        testPartialTerminalResponse
+            [ "{not-json"
+            , lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , lifecycleFrame "response.completed" (Aeson.object [])
+            ]
+            [EventResponseCreated, EventResponseCompleted]
+            \response -> response.output `shouldBe` []
+
+    it "rejects response.incomplete with the server reason" do
+        frames <- newIORef
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , lifecycleFrame "response.incomplete"
+                (Aeson.object
+                    [ "incomplete_details" Aeson..= Aeson.object
+                        [ "reason" Aeson..=
+                            ("max_output_tokens" :: Text)
+                        ]
+                    ])
+            ]
+        receiveCount <- newIORef (0 :: Int)
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        callbackTypes <- newIORef ([] :: [StreamEventType])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = do
+                    modifyIORef' receiveCount (+ 1)
+                    atomicModifyIORef' frames \case
+                        frame : rest -> (rest, Right frame)
+                        [] -> error "unexpected receive after terminal event"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+            onEvent event =
+                modifyIORef' callbackTypes
+                    (<> [responseStreamEventType event])
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions onEvent
+
+        result `shouldBe` Left
+            (ConnectionError "response.incomplete: max_output_tokens")
+        readIORef callbackTypes `shouldReturn`
+            [EventResponseCreated, EventResponseIncomplete]
+        readIORef receiveCount `shouldReturn` 2
+        readIORef completeCount `shouldReturn` 0
+        readIORef invalidations `shouldReturn`
+            ["WebSocket response incomplete"]
+        readIORef frames `shouldReturn` []
+
 testPartialTerminalResponse
     :: [LBS.ByteString]
     -> [StreamEventType]
@@ -184,6 +327,28 @@ field name = \case
     Aeson.Object object -> KeyMap.lookup name object
     _ -> Nothing
 
+sampleLitePrefixRequest :: ResponseCreateParams
+sampleLitePrefixRequest = sampleRequest
+    { input = Just (ResponseInputItems
+        [ MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [InputTextPart "base instructions" Nothing KeyMap.empty]
+            , role = RoleDeveloper
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just ["model.base_instructions"]
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            , extraFields = KeyMap.empty
+            }
+        ])
+    }
+
 sampleRequest :: ResponseCreateParams
 sampleRequest = defaultResponseCreateParams
     { model = Just "gpt-5.6-sol"
@@ -207,3 +372,24 @@ withPromptCacheRetention
 withPromptCacheRetention nextRetention
         ResponseCreateParams { promptCacheRetention = _, .. } =
     ResponseCreateParams { promptCacheRetention = nextRetention, .. }
+
+withParallelToolCalls
+    :: Maybe Bool -> ResponseCreateParams -> ResponseCreateParams
+withParallelToolCalls nextValue ResponseCreateParams { parallelToolCalls = _, .. } =
+    ResponseCreateParams { parallelToolCalls = nextValue, .. }
+
+withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
+withModel nextModel ResponseCreateParams { model = _, .. } =
+    ResponseCreateParams { model = nextModel, .. }
+
+responseWithOutput :: [ResponseItem] -> Response
+responseWithOutput output =
+    case Aeson.fromJSON $ Aeson.object
+            [ "id" Aeson..= ("resp-test" :: Text)
+            , "created_at" Aeson..= (0 :: Int)
+            , "model" Aeson..= ("gpt-test" :: Text)
+            , "status" Aeson..= ("completed" :: Text)
+            , "output" Aeson..= output
+            ] of
+        Aeson.Success response -> response
+        Aeson.Error err -> error err

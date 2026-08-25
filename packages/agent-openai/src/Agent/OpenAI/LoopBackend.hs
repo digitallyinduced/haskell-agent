@@ -19,6 +19,8 @@ module Agent.OpenAI.LoopBackend
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
+    , withCodexTurnStateScope
+    , isOpenAiWebSocketTransportFailure
     , statelessResponsesBackend
     , turnInputsToItems
     , responseToTurnOutput
@@ -36,12 +38,22 @@ import Agent.Error
     , isInlineRetryableProviderResponseError
     )
 import qualified Agent.Responses.LoopBackend as Responses
-import Agent.Loop (Backend(..), BackendResult(..), LoopEvent(..))
+import Agent.Loop
+    ( Backend(..)
+    , BackendResult(..)
+    , LoopEvent(..)
+    , TurnInput(..)
+    )
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
     ( CodexConn
+    , CodexTurnState
+    , codexConnTurnState
+    , copyCodexTurnState
     , sendWsRequestWithEvents
+    , sendWsRequestWithEventsPreservingTurnState
+    , resetCodexTurnState
     , withCodexWsRetrying
     , withCodexWsRetryingAfter
     )
@@ -76,7 +88,7 @@ import Agent.Tools.Speculation
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (onException)
-import Control.Monad (forM_)
+import Control.Monad (forM_, when)
 import Control.Retry
     ( RetryPolicyM
     , applyPolicy
@@ -102,9 +114,12 @@ openAiBackend
     :: CodexConn
     -> IO ResponseCreateParams
     -> Backend
-openAiBackend conn =
-    openAiBackendWith \request previousResponseId onEvent ->
-        sendWsRequestWithEvents conn request previousResponseId onEvent
+openAiBackend conn getParams =
+    withCodexTurnStateScope (pure (codexConnTurnState conn)) $
+        openAiBackendWith
+            (\request previousResponseId onEvent ->
+                sendWsRequestWithEvents conn request previousResponseId onEvent)
+            getParams
 
 -- | OpenAI backend with explicit raw-reasoning visibility. Normal Codex
 -- sessions should use 'openAiBackend', which displays summaries only.
@@ -113,10 +128,12 @@ openAiBackendWithRawReasoning
     -> CodexConn
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithRawReasoning showRawReasoning conn =
-    openAiBackendWithReasoningVisibility showRawReasoning
-        \request previousResponseId onEvent ->
-            sendWsRequestWithEvents conn request previousResponseId onEvent
+openAiBackendWithRawReasoning showRawReasoning conn getParams =
+    withCodexTurnStateScope (pure (codexConnTurnState conn)) $
+        openAiBackendWithReasoningVisibility showRawReasoning
+            (\request previousResponseId onEvent ->
+                sendWsRequestWithEvents conn request previousResponseId onEvent)
+            getParams
 
 -- | Reuse the session WebSocket while it is healthy, reconnecting after it dies.
 openAiBackendReconnecting
@@ -126,13 +143,16 @@ openAiBackendReconnecting
     -> CodexConn
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendReconnecting provider currentCredential connectionHealthy conn =
-    openAiBackendWith
-        (openAiResponseSenderReconnecting
-            provider
-            currentCredential
-            connectionHealthy
-            conn)
+openAiBackendReconnecting provider currentCredential connectionHealthy conn
+        getParams =
+    withCodexTurnStateScope (pure (codexConnTurnState conn)) $
+        openAiBackendWith
+            (openAiResponseSenderReconnecting
+                provider
+                currentCredential
+                connectionHealthy
+                conn)
+            getParams
 
 -- | Send a Responses request through the active Codex WebSocket while it is
 -- healthy, with the same replay-safe fresh-connection recovery used by the
@@ -149,6 +169,7 @@ openAiResponseSenderReconnecting
     -> IO (Either ApiError Response)
 openAiResponseSenderReconnecting =
     openAiResponseSenderReconnectingWhen
+        sendWsRequestWithEvents
         streamOutputObserved
         markLoopReplayUnsafe
 
@@ -171,6 +192,7 @@ openAiAuxiliaryResponseSenderReconnecting provider currentCredential
         transientStreamingResultPolicy
         auxiliaryOutputObserved
         (openAiResponseSenderReconnectingWhen
+            sendWsRequestWithEventsPreservingTurnState
             auxiliaryOutputObserved
             markAuxiliaryReplayUnsafe
             provider
@@ -179,7 +201,12 @@ openAiAuxiliaryResponseSenderReconnecting provider currentCredential
             conn)
 
 openAiResponseSenderReconnectingWhen
-    :: (ResponseStreamEvent -> Bool)
+    :: (CodexConn
+        -> ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> (ResponseStreamEvent -> Bool)
     -> (ApiError -> ApiError)
     -> TokenProvider
     -> Credential
@@ -189,8 +216,8 @@ openAiResponseSenderReconnectingWhen
     -> Maybe Text
     -> (ResponseStreamEvent -> IO ())
     -> IO (Either ApiError Response)
-openAiResponseSenderReconnectingWhen observed markObservedFailure provider
-        currentCredential connectionHealthy conn =
+openAiResponseSenderReconnectingWhen sendOnConnection observed
+        markObservedFailure provider currentCredential connectionHealthy conn =
     openAiResponseSenderWithConnectionRecoveryUsing
         observed
         markObservedFailure
@@ -199,7 +226,7 @@ openAiResponseSenderReconnectingWhen observed markObservedFailure provider
         sendFresh
   where
     sendCurrent request previousResponseId onEvent =
-        sendWsRequestWithEvents conn request previousResponseId onEvent
+        sendOnConnection conn request previousResponseId onEvent
     sendFresh previousFailure request previousResponseId onEvent =
         case previousFailure >>= \err ->
                 (\failure ->
@@ -218,14 +245,16 @@ openAiResponseSenderReconnectingWhen observed markObservedFailure provider
                     (sendOnFresh request previousResponseId onEvent)
     sendOnFresh request previousResponseId onEvent freshConn _credential =
         do
+            copyCodexTurnState conn freshConn
             emittedOutput <- newIORef False
             result <-
-                sendWsRequestWithEvents freshConn request previousResponseId
+                sendOnConnection freshConn request previousResponseId
                     \event -> do
                         if observed event
                             then writeIORef emittedOutput True
                             else pure ()
                         onEvent event
+            copyCodexTurnState freshConn conn
             emitted <- readIORef emittedOutput
             pure $ case result of
                 Left err | emitted -> Left (markObservedFailure err)
@@ -483,7 +512,7 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
             onEvent event
         case result of
             Left err
-                | isWebSocketTransportFailure err -> do
+                | isOpenAiWebSocketTransportFailure err -> do
                     writeIORef fallbackActive True
                     emitted <- readIORef emittedModelOutput
                     if emitted
@@ -497,9 +526,35 @@ openAiBackendWithTransportFallback fallbackActive primary fallback =
         ReasoningDelta {} -> True
         _ -> False
 
-    isWebSocketTransportFailure = \case
-        ConnectionError {} -> True
-        ProviderError WebSocketConnectionLimitReached _ _ -> True
+-- | Errors that indicate the Codex Responses WebSocket transport is
+-- unavailable rather than that the logical request itself was rejected.
+isOpenAiWebSocketTransportFailure :: ApiError -> Bool
+isOpenAiWebSocketTransportFailure = \case
+    ConnectionError {} -> True
+    ProviderError WebSocketConnectionLimitReached _ _ -> True
+    -- A server that does not support the Responses WebSocket protocol
+    -- advertises that explicitly with HTTP 426.
+    HttpError 426 _ -> True
+    _ -> False
+
+-- | Reset Codex sticky-routing state when a backend submission starts a new
+-- logical turn, while preserving it for tool continuations in the same turn.
+--
+-- Keep this wrapper outside automatic compaction and connection recovery:
+-- compaction may mint the token needed by the immediately following request,
+-- and recovery retries must replay the same turn state rather than clearing it.
+withCodexTurnStateScope :: IO CodexTurnState -> Backend -> Backend
+withCodexTurnStateScope getTurnState (Backend submit) =
+    Backend \state previousResponseId inputs onEvent -> do
+        when (startsNewLogicalTurn inputs) $
+            getTurnState >>= resetCodexTurnState
+        submit state previousResponseId inputs onEvent
+  where
+    startsNewLogicalTurn turnInputs =
+        not (null turnInputs) && not (any isCompletedTool turnInputs)
+
+    isCompletedTool = \case
+        CompletedTool{} -> True
         _ -> False
 
 -- | Same mapping as 'openAiBackend', with an injectable transport for tests.
@@ -600,14 +655,6 @@ openAiBackendWithRetryPolicyAndFeatures
                     -- retained prefix.
                     fullRequest =
                         withRequestInput baseParams (history <> newItems)
-                    emit event = do
-                        forM_ speculation \runtime ->
-                            forM_ (responseEventToToolArgumentEvent event) $
-                                observeToolArgumentEvent runtime
-                        mapM_ onLoopEvent
-                            (Responses.streamEventToLoopEventWithRawReasoning
-                                showRawReasoning
-                                event)
                     (initialRequest, initialPrevious) =
                         case previousResponseId of
                             Nothing | not (null history) ->
@@ -615,14 +662,14 @@ openAiBackendWithRetryPolicyAndFeatures
                             _ -> (deltaRequest, previousResponseId)
                 result <-
                     sendRetrying
-                        onLoopEvent initialRequest initialPrevious emit
+                        onLoopEvent initialRequest initialPrevious
                 recovered <- case result of
                     Left err
                         | isJust initialPrevious
                         , isResponseChainCompatibilityError err
                         , not (null history) -> do
                             mapM_ resetToolSpeculationRuntime speculation
-                            sendRetrying onLoopEvent fullRequest Nothing emit
+                            sendRetrying onLoopEvent fullRequest Nothing
                         | otherwise -> pure (Left err)
                     Right response -> pure (Right response)
                 case recovered of
@@ -647,17 +694,28 @@ openAiBackendWithRetryPolicyAndFeatures
                             }
         submit `onException` mapM_ resetToolSpeculationRuntime speculation
   where
-    sendRetrying onLoopEvent request previousResponseId onStreamEvent = do
-        emittedLoopEvent <- newIORef False
-        go emittedLoopEvent defaultRetryStatus
+    sendRetrying onLoopEvent request previousResponseId = do
+        emittedRawOutput <- newIORef False
+        emittedVisibleOutput <- newIORef False
+        go emittedRawOutput emittedVisibleOutput defaultRetryStatus
       where
-        go emittedLoopEvent retryStatus = do
+        go emittedRawOutput emittedVisibleOutput retryStatus = do
             result <- send request previousResponseId \event -> do
                 if streamOutputObserved event
-                    then writeIORef emittedLoopEvent True
+                    then writeIORef emittedRawOutput True
                     else pure ()
-                onStreamEvent event
-            emitted <- readIORef emittedLoopEvent
+                forM_ speculation \runtime ->
+                    forM_ (responseEventToToolArgumentEvent event) $
+                        observeToolArgumentEvent runtime
+                mapM_
+                    (\loopEvent -> do
+                        when (isVisibleModelOutput loopEvent) $
+                            writeIORef emittedVisibleOutput True
+                        onLoopEvent loopEvent)
+                    (Responses.streamEventToLoopEventWithRawReasoning
+                        showRawReasoning
+                        event)
+            emitted <- readIORef emittedRawOutput
             case result of
                 Left apiError
                     | not emitted
@@ -675,8 +733,18 @@ openAiBackendWithRetryPolicyAndFeatures
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
                                 mapM_ resetToolSpeculationRuntime speculation
-                                go emittedLoopEvent nextStatus
+                                go emittedRawOutput emittedVisibleOutput nextStatus
+                    | emitted -> do
+                        visible <- readIORef emittedVisibleOutput
+                        pure $ if visible
+                            then result
+                            else Left (replayUnsafeError "model output" apiError)
                 _ -> pure result
+
+    isVisibleModelOutput = \case
+        TextDelta{} -> True
+        ReasoningDelta{} -> True
+        _ -> False
 
 transientStreamingResultPolicy :: RetryPolicyM IO
 transientStreamingResultPolicy =

@@ -78,6 +78,43 @@ spec = do
             input <- expectArray (KeyMap.lookup "input" object)
             length input `shouldBe` 1
 
+        it "flattens resumed OpenAI agent messages into Grok user messages" do
+            let agentMessage = AgentMessageItem ResponseAgentMessage
+                    { messageId = Nothing
+                    , author = Just "researcher"
+                    , recipient = Just "root"
+                    , content =
+                        [ InputTextPart
+                            "Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it."
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart
+                            "opaque-provider-payload"
+                            KeyMap.empty
+                        ]
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                request = setInstructions Nothing $
+                    setInput
+                        (Just (ResponseInputItems [agentMessage]))
+                        sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            input <- expectArray (KeyMap.lookup "input" object)
+            input `shouldBe`
+                [ Aeson.object
+                    [ "type" .= ("message" :: Text)
+                    , "role" .= ("user" :: Text)
+                    , "content" .=
+                        [ Aeson.object
+                            [ "type" .= ("input_text" :: Text)
+                            , "text" .= ("Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it." :: Text)
+                            ]
+                        ]
+                    ]
+                ]
+
         it "maps web_search, keeps function tools, and drops the computer tool" do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value
@@ -265,6 +302,7 @@ sampleRequest = defaultResponseCreateParams
             , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = mempty
             }
         ])
@@ -319,6 +357,10 @@ setInclude newInclude ResponseCreateParams { include = _, .. } =
 setModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 setModel newModel ResponseCreateParams { model = _, .. } =
     ResponseCreateParams { model = newModel, .. }
+
+setInput :: Maybe ResponseInput -> ResponseCreateParams -> ResponseCreateParams
+setInput newInput ResponseCreateParams { input = _, .. } =
+    ResponseCreateParams { input = newInput, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

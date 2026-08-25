@@ -107,6 +107,8 @@ toolOutputRequest model history call = defaultResponseCreateParams
         [ FunctionCallOutputItem FunctionCallOutput
             { itemId = Nothing
             , callId = call.callId
+            , name = Nothing
+            , namespace = Nothing
             , output = Aeson.object ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
             , status = Nothing
             , extraFields = mempty
@@ -140,6 +142,7 @@ userMessage text = MessageItem ResponseMessage
     , content = MessageContentParts [InputTextPart text Nothing mempty]
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = mempty
     }
 

@@ -9,6 +9,7 @@ import Agent.CLI.Notification
     ( AttentionRequest(InputRequested)
     , notifyAttention
     )
+import Agent.CLI.Error (formatApiErrorAt)
 import Agent.CLI.Project (saveProjectAccount)
 import Agent.CLI.Recap (RecapRequest(RecapTurnSummary))
 import Agent.CLI.Provider.Switch
@@ -27,6 +28,7 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.Runtime.Types
     ( PendingTurnPresentation(..)
     , RunResult(..)
+    , StartupFailure(..)
     )
 import Agent.CLI.Session.Interaction
     ( setSessionEffort
@@ -34,7 +36,11 @@ import Agent.CLI.Session.Interaction
     )
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.SessionEnv (SessionEnv(..))
-import Agent.CLI.Render (RenderConfig, renderPrintedText)
+import Agent.CLI.Render
+    ( RenderConfig(..)
+    , putTextLn
+    , renderPrintedText
+    )
 import Agent.CLI.TUI.App
     ( emitUiEvent
     , hasQueuedFullscreenInput
@@ -42,7 +48,8 @@ import Agent.CLI.TUI.App
 import Agent.CLI.Turn (runOneTurn)
 import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.TUI.Model (UiEvent(..))
-import Control.Monad (when)
+import Control.Exception.Safe (throwIO)
+import Control.Monad (unless, when)
 import Data.IORef
     ( readIORef
     , writeIORef
@@ -51,7 +58,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
 import System.Exit (exitFailure)
-import System.IO (stderr)
 
 data SessionContinuation = SessionContinuation
     { resumeSession :: SessionEnv -> IO RunResult
@@ -137,7 +143,10 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
             else continuation.resumeSession env
     TurnFailed ->
         if exitAfter
-            then exitFailure
+            then
+                if env.sessionBackground
+                    then throwIO (StartupFailure "agent turn failed")
+                    else exitFailure
             else do
                 case env.sessionFullscreen of
                     Nothing -> putTrailingNewline env.sessionRender
@@ -175,12 +184,26 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                         Just providerTransition ->
                             pure (RunSwitchProvider providerTransition)
                         Nothing -> do
-                            reportProviderUnavailable
-                                env.sessionFullscreen apiError
+                            if env.sessionBackground
+                                then
+                                    putTextLn
+                                        env.sessionRender.renderStderr
+                                        (formatApiErrorAt now apiError)
+                                else
+                                    reportProviderUnavailable
+                                        env.sessionFullscreen apiError
                             if exitAfter
-                                then exitFailure
+                                then
+                                    if env.sessionBackground
+                                        then throwIO
+                                            (StartupFailure
+                                                "agent provider unavailable")
+                                        else exitFailure
                                 else do
-                                    notifyAttention stderr InputRequested
+                                    unless env.sessionBackground $
+                                        notifyAttention
+                                            env.sessionRender.renderStderr
+                                            InputRequested
                                     continuation.resumeSessionWithDraft
                                         env
                                         pending.pendingPromptText
@@ -193,11 +216,11 @@ continueAfterTurn continuation env = do
     queued <- case env.sessionFullscreen of
         Nothing -> pure False
         Just runtime -> hasQueuedFullscreenInput runtime
-    when (not queued) $
-        notifyAttention stderr InputRequested
+    when (not queued && not env.sessionBackground) $
+        notifyAttention env.sessionRender.renderStderr InputRequested
     continuation.resumeSession env
 
 putTrailingNewline :: RenderConfig -> IO ()
 putTrailingNewline render = do
     didPrint <- renderPrintedText render
-    when didPrint (putStrLn "")
+    when didPrint (putTextLn render.renderStdout "")

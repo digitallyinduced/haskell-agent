@@ -2,10 +2,11 @@ module Agent.CLI.ConnectivitySpec (spec) where
 
 import Agent.CLI.Connectivity
     ( reconnectDelayMicros
+    , transientRetryDelayMicros
     , withConnectionRecoveryUsing
     )
 import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.Error (ApiError(..))
+import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -24,7 +25,7 @@ spec = describe "withConnectionRecovery" do
         seen <- newIORef []
         events <- newIORef []
         let backend = withConnectionRecoveryUsing
-                (\attempt -> modifyIORef' waits (<> [attempt]))
+                (\delay -> modifyIORef' waits (<> [delay]))
                 (Backend \state previous inputs _ -> do
                     modifyIORef' seen (<> [(previous, inputs)])
                     attempt <- atomicModifyIORef' attempts \n -> (n + 1, n + 1)
@@ -47,7 +48,7 @@ spec = describe "withConnectionRecovery" do
                     emptyTurnOutput "response" [] (Just "done")
                 , backendState = []
                 }
-        readIORef waits `shouldReturn` [1, 2]
+        readIORef waits `shouldReturn` [1_000_000, 2_000_000]
         readIORef seen `shouldReturn`
             [ (Just "previous", inputs)
             , (Just "previous", inputs)
@@ -62,11 +63,12 @@ spec = describe "withConnectionRecovery" do
             , ActivityUpdated "Checking internet connection…"
             ]
 
-    it "does not retry non-connection provider errors" do
+    it "does not retry non-transient provider errors" do
         waits <- newIORef []
-        let expected = HttpError 503 "unavailable"
+        let expected =
+                ProviderError InvalidRequestError "bad request" Nothing
             backend = withConnectionRecoveryUsing
-                (\attempt -> modifyIORef' waits (<> [attempt]))
+                (\delay -> modifyIORef' waits (<> [delay]))
                 (Backend \_ _ _ _ -> pure (Left expected))
         result <- backend.submitTurn [] Nothing [] (const (pure ()))
         result `shouldBe` Left expected
@@ -102,7 +104,7 @@ spec = describe "withConnectionRecovery" do
         waits <- newIORef []
         events <- newIORef []
         let backend = withConnectionRecoveryUsing
-                (\attempt -> modifyIORef' waits (<> [attempt]))
+                (\delay -> modifyIORef' waits (<> [delay]))
                 (Backend \state _ _ onEvent -> do
                     attempt <- atomicModifyIORef' attempts
                         \n -> (n + 1, n + 1)
@@ -130,7 +132,7 @@ spec = describe "withConnectionRecovery" do
                 , backendState = []
                 }
         readIORef attempts `shouldReturn` 2
-        readIORef waits `shouldReturn` [1]
+        readIORef waits `shouldReturn` [1_000_000]
         readIORef events `shouldReturn`
             [ TextDelta "partial"
             , ActivityUpdated
@@ -173,6 +175,77 @@ spec = describe "withConnectionRecovery" do
                 }
         readIORef seen `shouldReturn` [expected, expected]
         readIORef pending `shouldReturn` []
+
+    it "restarts partial output after a transient provider error" do
+        attempts <- newIORef (0 :: Int)
+        waits <- newIORef []
+        events <- newIORef []
+        let backend = withConnectionRecoveryUsing
+                (\delay -> modifyIORef' waits (<> [delay]))
+                (Backend \state _ _ onEvent -> do
+                    attempt <- atomicModifyIORef' attempts
+                        \n -> (n + 1, n + 1)
+                    if attempt == 1
+                        then do
+                            onEvent (ReasoningDelta "partial thought")
+                            pure $
+                                Left
+                                    (ProviderError
+                                        ApiErrorType
+                                        "internal error"
+                                        Nothing)
+                        else
+                            pure $
+                                Right BackendResult
+                                    { backendOutput =
+                                        emptyTurnOutput
+                                            "response" [] (Just "done")
+                                    , backendState = state
+                                    })
+        result <- backend.submitTurn [] Nothing []
+            (\event -> modifyIORef' events (<> [event]))
+        result `shouldBe`
+            Right BackendResult
+                { backendOutput =
+                    emptyTurnOutput "response" [] (Just "done")
+                , backendState = []
+                }
+        readIORef attempts `shouldReturn` 2
+        readIORef waits `shouldReturn` [3_000_000]
+        readIORef events `shouldReturn`
+            [ ReasoningDelta "partial thought"
+            , ActivityUpdated
+                "Provider returned a temporary error; retrying automatically in 3s (attempt 1/2; Esc or Ctrl-C to cancel)…"
+            , ActivityUpdated
+                "Retrying provider request (attempt 1/2)…"
+            , ResponseRestarted
+                "Provider interrupted the response; restarting automatically. The new attempt may repeat partial output shown above."
+            ]
+
+    it "stops after two transient provider retries" do
+        attempts <- newIORef (0 :: Int)
+        waits <- newIORef []
+        let expected =
+                ProviderError ApiErrorType "internal error" Nothing
+            backend = withConnectionRecoveryUsing
+                (\delay -> modifyIORef' waits (<> [delay]))
+                (Backend \_ _ _ _ -> do
+                    modifyIORef' attempts (+ 1)
+                    pure (Left expected))
+        result <- backend.submitTurn [] Nothing [] (const (pure ()))
+        result `shouldBe` Left expected
+        readIORef attempts `shouldReturn` 3
+        readIORef waits `shouldReturn` [3_000_000, 6_000_000]
+
+    it "honors a bounded provider Retry-After" do
+        transientRetryDelayMicros
+            (ProviderError ServiceUnavailableError "later" (Just 9))
+            1
+            `shouldBe` 9_000_000
+        transientRetryDelayMicros
+            (ProviderError ServiceUnavailableError "later" (Just 120))
+            1
+            `shouldBe` 60_000_000
 
     it "backs off to a bounded polling interval" do
         map reconnectDelayMicros [1 .. 7]

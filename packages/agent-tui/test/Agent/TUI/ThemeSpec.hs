@@ -49,6 +49,15 @@ spec = do
                 (attrMapLookup Theme.selectedAttr Theme.terminalDefault)
                 `shouldBe` V.SetTo V.reverseVideo
 
+        it "gives user messages a palette gray panel distinct from assistant messages" do
+            let user = attrMapLookup Theme.userAttr Theme.terminalDefault
+                userMuted = attrMapLookup Theme.userMutedAttr Theme.terminalDefault
+                assistant = attrMapLookup Theme.assistantAttr Theme.terminalDefault
+            V.attrBackColor user `shouldBe` V.SetTo V.brightBlack
+            V.attrBackColor userMuted `shouldBe` V.SetTo V.brightBlack
+            V.attrBackColor assistant `shouldBe` V.Default
+            V.attrForeColor userMuted `shouldBe` V.Default
+
         it "does not introduce colors in monochrome mode" do
             map
                 ( \syntaxClass ->
@@ -63,6 +72,14 @@ spec = do
                     replicate
                         (length allSyntaxClasses)
                         (V.Default, V.Default)
+
+        it "does not paint user message panels in monochrome mode" do
+            V.attrBackColor
+                (attrMapLookup Theme.userAttr Theme.monochrome)
+                `shouldBe` V.Default
+            V.attrBackColor
+                (attrMapLookup Theme.userMutedAttr Theme.monochrome)
+                `shouldBe` V.Default
 
 terminalForeground :: AttrName -> V.MaybeDefault V.Color
 terminalForeground =

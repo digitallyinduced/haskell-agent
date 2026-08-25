@@ -27,7 +27,7 @@ import Agent.CLI.Style
     , roleWarn
     )
 import Agent.CLI.Terminal (resolveColor)
-import Agent.OsPath (toText)
+import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Skills
 import Agent.Tools.Types (ToolEnv, setToolSkillRoots)
 import Control.Monad (void, when)
@@ -80,7 +80,7 @@ loadSkillsCatalogQuiet
 loadSkillsCatalogQuiet options home projectRoot cwd
     | not options.optSkills = pure (SkillCatalog [] [])
     | otherwise = do
-        builtinRoot <- packagedSkillsRoot
+        builtinRoot <- packagedSkillsRoot cwd
         discoverSkills SkillDiscoverOptions
             { skillsHome = home
             , skillsProjectRoot = projectRoot
@@ -90,14 +90,14 @@ loadSkillsCatalogQuiet options home projectRoot cwd
                 [(AgentSkills, unsafeEncodeUtf builtinRoot)]
             }
 
-packagedSkillsRoot :: IO FilePath
-packagedSkillsRoot = do
+packagedSkillsRoot :: OsPath -> IO FilePath
+packagedSkillsRoot cwd = do
     installedSkill <- getDataFileName "skills/add-model/SKILL.md"
     executable <- Environment.getExecutablePath
-    cwd <- Directory.getCurrentDirectory
     let roots =
             take 16 (iterate FilePath.takeDirectory executable)
-                <> take 8 (iterate FilePath.takeDirectory cwd)
+                <> take 8
+                    (iterate FilePath.takeDirectory (unsafeToFilePath cwd))
         candidates =
             FilePath.takeDirectory (FilePath.takeDirectory installedSkill)
                 : [ root FilePath.</> "packages/agent-cli/skills"

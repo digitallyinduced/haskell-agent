@@ -66,6 +66,7 @@ buildRequest options request =
                     , role = RoleSystem
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -94,7 +95,7 @@ xaiReasoningEffort = \case
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
 requestInputItems request = case request.input of
-    Just (ResponseInputItems items) -> items
+    Just (ResponseInputItems items) -> map normalizeInputItem items
     Just (ResponseInputText inputText) ->
         [ MessageItem ResponseMessage
             { messageId = Nothing
@@ -102,7 +103,42 @@ requestInputItems request = case request.input of
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
         ]
     Nothing -> []
+
+-- OpenAI stores inter-agent collaboration messages as the provider-specific
+-- @agent_message@ item. Resumed transcripts can retain those items when the
+-- user switches to Grok, whose Responses union does not recognize that tag.
+-- Preserve the readable collaboration context as an ordinary user message.
+normalizeInputItem :: ResponseItem -> ResponseItem
+normalizeInputItem = \case
+    AgentMessageItem message ->
+        MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
+            , role = RoleUser
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Nothing
+            , extraFields = KeyMap.empty
+            }
+    item -> item
+
+agentMessageText :: ResponseAgentMessage -> Text
+agentMessageText message =
+    case
+        [ text
+        | InputTextPart { text } <- message.content
+        ]
+    of
+        texts@(_ : _) -> Text.intercalate "\n" texts
+        [] -> case (message.author, message.recipient) of
+            (Just author, Just recipient) ->
+                "Agent message from " <> author <> " to " <> recipient
+            (Just author, Nothing) -> "Agent message from " <> author
+            (Nothing, Just recipient) -> "Agent message to " <> recipient
+            (Nothing, Nothing) -> "Agent message"

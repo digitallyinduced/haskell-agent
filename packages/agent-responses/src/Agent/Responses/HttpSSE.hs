@@ -102,15 +102,21 @@ performResponsesHttpSse
                 then case finishSseDecoder decoder of
                     Left err -> pure (Left err)
                     Right trailing -> do
-                        mapM_ emit trailing
+                        let delivered = takeThroughTerminal trailing
+                        mapM_ emit delivered
                         pure $ buildResponse
-                            (reverse reversedEvents <> trailing)
+                            (reverse reversedEvents
+                                <> filter retainForResponse delivered)
                 else case feedSseDecoder decoder chunk of
                     Left err -> pure (Left err)
                     Right (nextDecoder, events) -> do
-                        mapM_ emit events
-                        let retained = filter retainForResponse events
-                        go nextDecoder (reverse retained <> reversedEvents)
+                        let delivered = takeThroughTerminal events
+                        mapM_ emit delivered
+                        let retained = filter retainForResponse delivered
+                            allEvents = reverse retained <> reversedEvents
+                        if any isTerminal delivered
+                            then pure (buildResponse (reverse allEvents))
+                            else go nextDecoder allEvents
 
     consumeBody body = LBS.fromChunks <$> readChunks []
       where
@@ -141,3 +147,20 @@ retainForResponse = \case
     ResponseNestedErrorEvent {} -> True
     ResponseFailedEvent {} -> True
     _ -> False
+
+isTerminal :: ResponseStreamEvent -> Bool
+isTerminal = \case
+    ResponseCompletedEvent {} -> True
+    ResponseDoneEvent {} -> True
+    ResponseIncompleteEvent {} -> True
+    ResponseFailedEvent {} -> True
+    ResponseErrorEvent {} -> True
+    ResponseNestedErrorEvent {} -> True
+    _ -> False
+
+takeThroughTerminal :: [ResponseStreamEvent] -> [ResponseStreamEvent]
+takeThroughTerminal = \case
+    [] -> []
+    event : rest
+        | isTerminal event -> [event]
+        | otherwise -> event : takeThroughTerminal rest

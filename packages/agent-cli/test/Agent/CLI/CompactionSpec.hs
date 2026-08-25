@@ -255,6 +255,35 @@ spec = do
             map requestItems seen
                 `shouldBe` [history <> [compactionTriggerItem]]
 
+        it "disables parallel tool calls for Responses Lite remote compaction" do
+            requests <- newIORef []
+            let provider = tokenProvider SubscriptionBilled \_ ->
+                    error "remote compaction unexpectedly requested credentials"
+                send _ request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                history = [userTextItem "old context"]
+                params = defaultResponseCreateParams
+                    { model = Just "gpt-5.6-sol"
+                    , instructions = Just "keep these instructions"
+                    , store = Just True
+                    , tools = Just []
+                    }
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    params
+                    history
+                    100
+                    Nothing
+            case result of
+                Left err -> expectationFailure (show err)
+                Right outcome ->
+                    outcome.compactSummary
+                        `shouldBe` "Context compacted remotely."
+            map (.parallelToolCalls) <$> readIORef requests
+                `shouldReturn` [Just False]
+
         it "keeps focused manual compaction on local summarization" do
             requests <- newIORef []
             let provider = tokenProvider SubscriptionBilled \_ ->
@@ -461,7 +490,7 @@ spec = do
                                     }
                 reconnectingContinuation =
                     withConnectionRecoveryUsing
-                        (\attempt -> modifyIORef' waits (<> [attempt]))
+                        (\delay -> modifyIORef' waits (<> [delay]))
                         continuation
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -476,7 +505,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef continuationCalls `shouldReturn` 2
-            readIORef waits `shouldReturn` [1]
+            readIORef waits `shouldReturn` [1_000_000]
             readIORef seenPrevious `shouldReturn` [Nothing, Nothing]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
@@ -485,7 +514,9 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-1"
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
                     , status = Nothing
                     , extraFields = mempty
                     }

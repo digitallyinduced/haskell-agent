@@ -59,9 +59,7 @@ import Agent.TUI.Model
     )
 import Agent.TUI.Presentation (liveTodoPanelLines)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import Data.Foldable (toList)
 import Data.IORef (IORef)
 import Data.List (findIndex, sortOn)
 import qualified Data.Map.Strict as Map
@@ -630,6 +628,8 @@ responseContentText = \case
     InputImagePart{} -> ["[image]"]
     InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
     InputAudioPart{} -> ["[audio]"]
+    EncryptedContentPart{} -> []
+    PlainTextPart{text} -> [text]
     UnknownContentPart{} -> []
 
 appendResponseItem :: Bool -> UiState -> ResponseItem -> UiState
@@ -667,10 +667,19 @@ appendResponseItem showRawReasoning state = \case
             reasoning.status
             (reasoningDisplayText showRawReasoning reasoning)
             state
-    KnownResponseItem ItemAgentMessage tagged ->
+    AgentMessageItem message ->
         maybe state
             (\text -> reduceUi (UiUserSubmitted text) state)
-            (nonEmptyDisplayText (taggedContentText tagged))
+            (nonEmptyDisplayText (agentMessagePlainText message))
+    AdditionalToolsItemValue{} -> state
+    LocalShellCallItem{} -> state
+    ToolSearchCallItem{} -> state
+    ToolSearchOutputItem{} -> state
+    WebSearchCallItem{} -> state
+    ImageGenerationCallItem{} -> state
+    CompactionItemValue{} -> state
+    CompactionTriggerItemValue{} -> state
+    ContextCompactionItemValue{} -> state
     KnownResponseItem{} -> state
     ItemReferenceValue{} -> state
     UnknownResponseItem{} -> state
@@ -758,25 +767,22 @@ reasoningContentText :: ResponseContentPart -> [Text]
 reasoningContentText = \case
     ReasoningTextPart{text} -> [text]
     SummaryTextPart{text} -> [text]
+    PlainTextPart{text} -> [text]
     _ -> []
 
-taggedContentText :: TaggedObject -> Text
-taggedContentText tagged =
-    case KeyMap.lookup "content" tagged.fields of
-        Just (Aeson.Array values) ->
-            Text.intercalate "\n" (concatMap taggedPartText (toList values))
-        Just value ->
-            Text.intercalate "\n" (taggedPartText value)
-        Nothing -> ""
-
-taggedPartText :: Aeson.Value -> [Text]
-taggedPartText = \case
-    Aeson.String text -> [text]
-    Aeson.Object object ->
-        case KeyMap.lookup "text" object of
-            Just (Aeson.String text) -> [text]
+agentMessagePlainText :: ResponseAgentMessage -> Text
+agentMessagePlainText message =
+    Text.intercalate "\n"
+        [ text
+        | part <- message.content
+        , text <- case part of
+            InputTextPart{text} -> [text]
+            OutputTextPart{text} -> [text]
+            ReasoningTextPart{text} -> [text]
+            SummaryTextPart{text} -> [text]
+            PlainTextPart{text} -> [text]
             _ -> []
-    _ -> []
+        ]
 
 renderToolOutputValue :: Aeson.Value -> Text
 renderToolOutputValue = \case

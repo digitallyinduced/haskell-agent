@@ -8,6 +8,11 @@ import Agent.Error
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
+import Agent.OpenAI.WebSocketClient
+    ( newCodexTurnState
+    , readCodexTurnState
+    , recordCodexTurnState
+    )
 import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
@@ -48,6 +53,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 request = withRequestInput baseParams [legacySummary]
@@ -63,6 +69,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -84,26 +91,41 @@ spec = do
                     , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
                     }
             case turnInputsToItems [AgentMessage message] of
-                [item] -> Aeson.toJSON item `shouldBe` Aeson.object
-                    [ "type" Aeson..= ("agent_message" :: Text)
-                    , "author" Aeson..= ("/root" :: Text)
-                    , "recipient" Aeson..= ("/root/worker" :: Text)
-                    , "content" Aeson..=
-                        [ Aeson.object
-                            [ "type" Aeson..= ("input_text" :: Text)
-                            , "text" Aeson..=
-                                ("Message Type: NEW_TASK\n\
-                                \Task name: /root/worker\n\
-                                \Sender: /root\n\
-                                \Payload:\n" :: Text)
-                            ]
-                        , Aeson.object
-                            [ "type" Aeson..= ("encrypted_content" :: Text)
-                            , "encrypted_content" Aeson..=
-                                ("gAAAAA-ciphertext" :: Text)
+                [item@(AgentMessageItem encoded)] -> do
+                    encoded.author `shouldBe` Just "/root"
+                    encoded.recipient `shouldBe` Just "/root/worker"
+                    encoded.content `shouldBe`
+                        [ InputTextPart
+                            "Message Type: NEW_TASK\n\
+                            \Task name: /root/worker\n\
+                            \Sender: /root\n\
+                            \Payload:\n"
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart "gAAAAA-ciphertext" KeyMap.empty
+                        ]
+                    Aeson.fromJSON (Aeson.toJSON item)
+                        `shouldBe` Aeson.Success item
+                    Aeson.toJSON item `shouldBe` Aeson.object
+                        [ "type" Aeson..= ("agent_message" :: Text)
+                        , "author" Aeson..= ("/root" :: Text)
+                        , "recipient" Aeson..= ("/root/worker" :: Text)
+                        , "content" Aeson..=
+                            [ Aeson.object
+                                [ "type" Aeson..= ("input_text" :: Text)
+                                , "text" Aeson..=
+                                    ("Message Type: NEW_TASK\n\
+                                    \Task name: /root/worker\n\
+                                    \Sender: /root\n\
+                                    \Payload:\n" :: Text)
+                                ]
+                            , Aeson.object
+                                [ "type" Aeson..= ("encrypted_content" :: Text)
+                                , "encrypted_content" Aeson..=
+                                    ("gAAAAA-ciphertext" :: Text)
+                                ]
                             ]
                         ]
-                    ]
                 other ->
                     expectationFailure ("expected one agent_message, got " <> show other)
 
@@ -196,8 +218,14 @@ spec = do
                             [ (Key.fromText "namespace", Aeson.String "collaboration")
                             , (Key.fromText "encrypted_function_args", Aeson.Array mempty)
                             ])]
+                worktree = responseToTurnOutput $ testResponse "resp-worktree"
+                    [functionCallItemWithExtras "fc3" "spawn_agent_in_worktree"
+                        "{\"task_name\":\"worker\",\"message\":\"gAAAAA\"}"
+                        (KeyMap.fromList
+                            [(Key.fromText "namespace", Aeson.String "collaboration")])]
             map (.argumentsEncrypted) encrypted.toolCalls `shouldBe` [True]
             map (.argumentsEncrypted) plaintext.toolCalls `shouldBe` [False]
+            map (.argumentsEncrypted) worktree.toolCalls `shouldBe` [False]
 
         it "joins multiple assistant messages" do
             let turn = responseToTurnOutput $ testResponse "resp-text"
@@ -491,7 +519,9 @@ spec = do
                                     { itemId = Nothing
                                     , callId
                                     , name = "read_file"
+                                    , namespace = Nothing
                                     , arguments = ""
+                                    , encryptedFunctionArgs = Nothing
                                     , status = Nothing
                                     , extraFields = KeyMap.empty
                                     }
@@ -567,7 +597,9 @@ spec = do
                                     { itemId = Just itemId
                                     , callId
                                     , name = "read_file"
+                                    , namespace = Nothing
                                     , arguments
+                                    , encryptedFunctionArgs = Nothing
                                     , status = Just ItemCompleted
                                     , extraFields = KeyMap.empty
                                     }
@@ -1254,6 +1286,44 @@ spec = do
             readIORef fallbackActive `shouldReturn` True
             readIORef fallbackCalls `shouldReturn` 0
 
+        it "does not replay after a non-visible output item was received" do
+            fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let connectionFailure = ConnectionError "socket closed"
+                outputEvent = ResponseOutputItemDoneEvent
+                    { item = assistantItem "partial"
+                    , outputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendPrimary _request _previous onEvent = do
+                    modifyIORef' primaryCalls (+ 1)
+                    onEvent outputEvent
+                    pure (Left connectionFailure)
+                primary = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    sendPrimary
+                    (pure baseParams)
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "duplicate")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left
+                (replayUnsafeModelFailure connectionFailure)
+            readIORef fallbackActive `shouldReturn` False
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 0
+
         it "falls back immediately after a websocket connection-limit error" do
             fallbackActive <- newIORef False
             primaryCalls <- newIORef (0 :: Int)
@@ -1308,6 +1378,35 @@ spec = do
                 "bad request" Nothing)
             readIORef fallbackActive `shouldReturn` False
             readIORef fallbackCalls `shouldReturn` 0
+
+    describe "withCodexTurnStateScope" do
+        it "resets on a new prompt and preserves tool continuations" do
+            turnState <- newCodexTurnState
+            recordCodexTurnState turnState "stale"
+            observed <- newIORef []
+            transcript <- newIORef []
+            let rawBackend =
+                    Backend \state _previous _inputs _onEvent -> do
+                        value <- readCodexTurnState turnState
+                        modifyIORef' observed (<> [value])
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput "resp-state" [] (Just "ok")
+                            , backendState = state
+                            }
+                backend =
+                    withCodexTurnStateScope
+                        (pure turnState)
+                        rawBackend
+            _ <- submitWithState transcript backend Nothing
+                [UserMessage "new turn"] (const (pure ()))
+            recordCodexTurnState turnState "current"
+            _ <- submitWithState transcript backend (Just "resp-state")
+                [CompletedTool (functionResult "call-1" "done")]
+                (const (pure ()))
+
+            readIORef observed
+                `shouldReturn` [Nothing, Just "current"]
 
 --------------------------------------------------------------------------------
 -- Fixtures
@@ -1416,7 +1515,9 @@ functionCallItemWithExtras callId name arguments extraFields =
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , arguments
+    , encryptedFunctionArgs = Nothing
     , status = Just ItemCompleted
     , extraFields
     }
@@ -1426,6 +1527,7 @@ customCallItem callId name input = CustomToolCallItem CustomToolCall
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , input
     , status = Just ItemCompleted
     , extraFields = KeyMap.empty
@@ -1438,13 +1540,15 @@ assistantItem text = MessageItem ResponseMessage
     , role = RoleAssistant
     , status = Just ItemCompleted
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
 compactionItem :: Text -> ResponseItem
-compactionItem _ = KnownResponseItem ItemCompaction TaggedObject
-    { tag = "compaction"
-    , fields = KeyMap.empty
+compactionItem _ = CompactionItemValue CompactionItem
+    { itemId = Nothing
+    , encryptedContent = Nothing
+    , extraFields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent
@@ -1561,6 +1665,14 @@ replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =
     ProviderError (UnknownErrorType "replay_unsafe")
         ( "provider failed after auxiliary response output; refusing to replay: "
+            <> Text.pack (show failure)
+        )
+        Nothing
+
+replayUnsafeModelFailure :: ApiError -> ApiError
+replayUnsafeModelFailure failure =
+    ProviderError (UnknownErrorType "replay_unsafe")
+        ( "provider failed after model output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing

@@ -27,17 +27,16 @@ module Agent.OpenAI.Compaction
     , newSessionUserText
     ) where
 
+import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Maybe (mapMaybe)
+import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import qualified Data.Vector as Vector
 
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
@@ -57,13 +56,15 @@ maxRetainedAgentMessageTokens = 10_000
 -- | The exact sentinel understood by the remote compaction v2 protocol.
 compactionTriggerItem :: ResponseItem
 compactionTriggerItem =
-    KnownResponseItem ItemCompactionTrigger TaggedObject
-        { tag = "compaction_trigger"
-        , fields = KeyMap.empty
+    CompactionTriggerItemValue CompactionTriggerItem
+        { extraFields = KeyMap.empty
         }
 
 -- | Build a normal streaming Responses request whose final input item asks the
 -- model to emit an opaque compaction checkpoint.
+--
+-- Regular Codex compaction enables parallel tool calls. Responses Lite
+-- rejects that value, so keep the flag false for sol/terra/luna.
 buildRemoteCompactionRequest
     :: ResponseCreateParams
     -> [ResponseItem]
@@ -72,7 +73,8 @@ buildRemoteCompactionRequest params history =
     case withRequestInput params (history <> [compactionTriggerItem]) of
         ResponseCreateParams{..} ->
             ResponseCreateParams
-                { parallelToolCalls = Just True
+                { parallelToolCalls =
+                    Just (not (maybe False isCodexResponsesLiteModel model))
                 , previousResponseId = Nothing
                 , store = Just False
                 , stream = Just True
@@ -134,7 +136,9 @@ sanitizeOversizedToolCall = \case
                 { itemId = call.itemId
                 , callId = call.callId
                 , name = call.name
+                , namespace = call.namespace
                 , arguments = oversizedFunctionArguments
+                , encryptedFunctionArgs = call.encryptedFunctionArgs
                 , status = call.status
                 , extraFields = call.extraFields
                 }
@@ -144,6 +148,7 @@ sanitizeOversizedToolCall = \case
                 { itemId = call.itemId
                 , callId = call.callId
                 , name = call.name
+                , namespace = call.namespace
                 , input = oversizedToolArgumentsMessage
                 , status = call.status
                 , extraFields = call.extraFields
@@ -156,6 +161,8 @@ rewriteOversizedToolOutput = \case
         Just $ FunctionCallOutputItem FunctionCallOutput
             { itemId = output.itemId
             , callId = output.callId
+            , name = output.name
+            , namespace = output.namespace
             , output = Aeson.String contextWindowTruncatedOutputMessage
             , status = output.status
             , extraFields = output.extraFields
@@ -169,14 +176,14 @@ rewriteOversizedToolOutput = \case
             , status = output.status
             , extraFields = output.extraFields
             }
-    KnownResponseItem ItemToolSearchOutput tagged ->
-        Just $ KnownResponseItem ItemToolSearchOutput TaggedObject
-            { tag = tagged.tag
-            , fields =
-                KeyMap.insert
-                    (Key.fromText "tools")
-                    (Aeson.Array Vector.empty)
-                    tagged.fields
+    ToolSearchOutputItem output ->
+        Just $ ToolSearchOutputItem ToolSearchOutput
+            { itemId = output.itemId
+            , callId = output.callId
+            , status = output.status
+            , execution = output.execution
+            , tools = []
+            , extraFields = output.extraFields
             }
     _ -> Nothing
 
@@ -191,7 +198,7 @@ extractRemoteCompactionItem response
     | otherwise =
         case
             [ item
-            | item@(KnownResponseItem ItemCompaction _) <- response.output
+            | item@(CompactionItemValue _) <- response.output
             ]
         of
             [item] -> Right item
@@ -263,44 +270,30 @@ isRemoteRetainedItem = \case
             && maybe True
                 (not . isGeneratedContextUserText)
                 (messageText message)
-    KnownResponseItem ItemAgentMessage tagged ->
-        not (isDiscardedAgentMessage tagged)
-            && itemTokenCount (KnownResponseItem ItemAgentMessage tagged)
+    AgentMessageItem message ->
+        not (isDiscardedAgentMessage message)
+            && itemTokenCount (AgentMessageItem message)
                 <= maxRetainedAgentMessageTokens
     _ -> False
 
-isDiscardedAgentMessage :: TaggedObject -> Bool
-isDiscardedAgentMessage tagged =
-    let author = taggedTextField "author" tagged
-        recipient = taggedTextField "recipient" tagged
-        firstText = taggedFirstContentText tagged
+isDiscardedAgentMessage :: ResponseAgentMessage -> Bool
+isDiscardedAgentMessage message =
+    let firstText =
+            listToMaybe
+                [ text
+                | InputTextPart { text } <- message.content
+                ]
         descendantProgress =
-            case (author, recipient, firstText) of
-                (Just author_, Just recipient_, Just text_) ->
-                    Text.isPrefixOf (recipient_ <> "/") author_
-                        && Text.isPrefixOf "Message Type: MESSAGE\n" text_
+            case (message.author, message.recipient, firstText) of
+                (Just author, Just recipient, Just text) ->
+                    Text.isPrefixOf (recipient <> "/") author
+                        && Text.isPrefixOf "Message Type: MESSAGE\n" text
                 _ -> False
         completion =
             maybe False
                 (Text.isPrefixOf "Message Type: FINAL_ANSWER\n")
                 firstText
     in descendantProgress || completion
-
-taggedTextField :: Text -> TaggedObject -> Maybe Text
-taggedTextField name tagged =
-    case KeyMap.lookup (Key.fromText name) tagged.fields of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
-
-taggedFirstContentText :: TaggedObject -> Maybe Text
-taggedFirstContentText tagged = do
-    Aeson.Array content <-
-        KeyMap.lookup (Key.fromText "content") tagged.fields
-    first <- content Vector.!? 0
-    Aeson.Object object <- pure first
-    Aeson.String text <-
-        KeyMap.lookup (Key.fromText "text") object
-    pure text
 
 truncateRetainedGroups :: Int -> [RetainedGroup] -> [ResponseItem]
 truncateRetainedGroups maxTokens groups =
@@ -345,6 +338,7 @@ contentPartTokenCount = \case
     RefusalPart { refusal } -> estimateTokens refusal
     ReasoningTextPart { text } -> estimateTokens text
     SummaryTextPart { text } -> estimateTokens text
+    PlainTextPart { text } -> estimateTokens text
     _ -> 0
 
 truncateItemText :: Int -> ResponseItem -> Maybe ResponseItem
@@ -379,6 +373,7 @@ replaceMessageContent message nextContent =
         , role = message.role
         , status = message.status
         , phase = message.phase
+        , passthrough = message.passthrough
         , extraFields = message.extraFields
         }
 
@@ -421,6 +416,7 @@ partText = \case
     RefusalPart { refusal } -> Just refusal
     ReasoningTextPart { text } -> Just text
     SummaryTextPart { text } -> Just text
+    PlainTextPart { text } -> Just text
     _ -> Nothing
 
 partTextValue :: ResponseContentPart -> Text
@@ -438,6 +434,8 @@ replacePartText value = \case
         ReasoningTextPart value extraFields
     SummaryTextPart { extraFields } ->
         SummaryTextPart value extraFields
+    PlainTextPart { extraFields } ->
+        PlainTextPart value extraFields
     part -> part
 
 takeTokenBudget :: Int -> Text -> Text
@@ -518,6 +516,7 @@ userTextItem text = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -536,6 +535,7 @@ assistantSummaryItem summary =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -554,7 +554,7 @@ compactTranscriptAtLastCheckpoint items = go [] (reverse items)
     go _ [] = items
     go after (item : before) =
         case item of
-            KnownResponseItem ItemCompaction _ -> item : after
+            CompactionItemValue{} -> item : after
             _ -> go (item : after) before
 
 -- | Session turns that represent a compaction checkpoint.
@@ -585,7 +585,7 @@ isTranscriptResetTurn text =
 
 hasCompactionCheckpoint :: [ResponseItem] -> Bool
 hasCompactionCheckpoint = any \case
-    KnownResponseItem ItemCompaction _ -> True
+    CompactionItemValue{} -> True
     MessageItem message
         | message.role == RoleAssistant ->
             maybe False

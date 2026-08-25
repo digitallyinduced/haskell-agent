@@ -169,6 +169,7 @@ sampleRequest = defaultResponseCreateParams
             , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = mempty
             }
         ])

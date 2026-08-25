@@ -34,6 +34,7 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
         "No terminal response event found in xAI SSE stream"
     , classifyStreamError
     , classifyFailedResponse = failedResponseError
+    , incompleteAsFailure = False
     }
 
 failedResponseError :: ResponseFailure -> ApiError

@@ -20,20 +20,27 @@ import Agent.Responses.LoopBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
+    , withRequestInput
     )
 import Agent.Responses.Types
     ( MessageContent(..)
+    , FunctionCallOutput(..)
+    , InternalChatMetadata(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
     , ResponseStreamEvent(..)
     , StreamEventType(..)
+    , ResponseInput(..)
+    , ResponseCreateParams(..)
+    , TaggedObject(..)
     , defaultResponseCreateParams
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Key as Key
 import Data.IORef
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import Test.Hspec
 
@@ -171,6 +178,109 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
             , ReasoningDelta "**Planning the fix**"
             ]
 
+    it "preserves request input prefixes when adding transcript items" do
+        let prefix = UnknownResponseItem TaggedObject
+                { tag = "additional_tools"
+                , fields = KeyMap.empty
+                }
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [prefix])
+                }
+            request = withRequestInput params (turnInputsToItems [UserMessage "hello"])
+        case request.input of
+            Just (ResponseInputItems (first : second : _)) -> do
+                first `shouldBe` prefix
+                second `shouldSatisfy` isUserMessage
+            _ -> expectationFailure "expected preserved input prefix"
+
+    it "replaces arbitrary prior input instead of replaying it as a prefix" do
+        let stale = turnInputsToItems [UserMessage "stale"]
+            fresh = turnInputsToItems [UserMessage "fresh"]
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems stale)
+                }
+            request = withRequestInput params fresh
+        request.input `shouldBe` Just (ResponseInputItems fresh)
+
+    it "preserves only developer items marked as base instructions" do
+        let additional = UnknownResponseItem TaggedObject
+                { tag = "additional_tools"
+                , fields = KeyMap.empty
+                }
+            unmarkedDeveloper = developerMessage
+                "not base"
+                ["some.other.kind"]
+            markedDeveloper = developerMessage
+                "base"
+                ["other", "model.base_instructions"]
+            stale = case turnInputsToItems [UserMessage "stale"] of
+                [item] -> item
+                _ -> error "expected one stale user item"
+            fresh = turnInputsToItems [UserMessage "fresh"]
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems
+                    [ additional
+                    , markedDeveloper
+                    , unmarkedDeveloper
+                    , stale
+                    ])
+                }
+            request = withRequestInput params fresh
+        request.input `shouldBe` Just
+            (ResponseInputItems (additional : markedDeveloper : fresh))
+
+    it "strips image detail hints from Lite messages and tool outputs" do
+        let additional = UnknownResponseItem TaggedObject
+                { tag = "additional_tools"
+                , fields = KeyMap.empty
+                }
+            imageMessage = MessageItem ResponseMessage
+                { messageId = Nothing
+                , content = MessageContentParts
+                    [ InputImagePart
+                        { detail = Just "high"
+                        , fileId = Nothing
+                        , imageUrl = Just "data:image/png;base64,AA=="
+                        , promptCacheBreakpoint = Nothing
+                        , extraFields = KeyMap.empty
+                        }
+                    ]
+                , role = RoleUser
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                , extraFields = KeyMap.empty
+                }
+            toolOutput = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "call-1"
+                , name = Nothing
+                , namespace = Nothing
+                , output = Aeson.object
+                    [ "type" Aeson..= ("input_image" :: Text.Text)
+                    , "detail" Aeson..= ("high" :: Text.Text)
+                    , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
+                    ]
+                , status = Nothing
+                , extraFields = KeyMap.empty
+                }
+            params = defaultResponseCreateParams
+                { input = Just (ResponseInputItems [additional])
+                }
+            request = withRequestInput params [imageMessage, toolOutput]
+        case request.input of
+            Just (ResponseInputItems
+                [ _
+                , MessageItem ResponseMessage
+                    { content = MessageContentParts [InputImagePart{detail}]
+                    }
+                , FunctionCallOutputItem FunctionCallOutput{output}
+                ]) -> do
+                    detail `shouldBe` Nothing
+                    jsonField "detail" output `shouldBe` Nothing
+            other -> expectationFailure
+                ("unexpected normalized Lite input: " <> show other)
+
 credential :: String -> Credential
 credential label = Credential
     { accessToken = "token-" <> Text.pack label
@@ -188,3 +298,37 @@ isInputImage :: ResponseContentPart -> Bool
 isInputImage = \case
     InputImagePart{} -> True
     _ -> False
+
+isUserMessage :: ResponseItem -> Bool
+isUserMessage = \case
+    MessageItem message ->
+        message.role == RoleUser
+            && case message.content of
+                MessageContentParts [InputTextPart{ text = value }] ->
+                    value == "hello"
+                _ -> False
+    _ -> False
+
+developerMessage :: Text.Text -> [Text.Text] -> ResponseItem
+developerMessage messageText contentItemKinds =
+    MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts
+            [InputTextPart messageText Nothing KeyMap.empty]
+        , role = RoleDeveloper
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Just InternalChatMetadata
+            { turnId = Nothing
+            , createTime = Nothing
+            , contentItemKinds = Just contentItemKinds
+            , executedToolCalls = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , extraFields = KeyMap.empty
+        }
+
+jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value
+jsonField fieldName = \case
+    Aeson.Object object -> KeyMap.lookup (Key.fromText fieldName) object
+    _ -> Nothing

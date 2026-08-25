@@ -77,8 +77,11 @@ instance ToJSON ResponseError where
 
 instance FromJSON ResponseError where
     parseJSON = withObject "ResponseError" $ \o -> ResponseError
-        <$> o .: "code"
-        <*> o .: "message"
+        -- Failed responses are occasionally reduced to only one of these
+        -- fields. Treat both as optional on input while retaining the stable
+        -- non-optional public representation.
+        <$> o .:? "code" .!= ""
+        <*> o .:? "message" .!= ""
         <*> pure (without ["code", "message"] o)
 
 data IncompleteDetails = IncompleteDetails

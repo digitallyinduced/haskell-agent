@@ -66,6 +66,7 @@ import qualified Agent.CLI.TUIAppSpec as TUIAppSpec
 import qualified Agent.CLI.TUIBridgeSpec as TUIBridgeSpec
 import qualified Agent.CLI.TUIComposerSpec as TUIComposerSpec
 import qualified Agent.CLI.TUIImagePreviewSpec as TUIImagePreviewSpec
+import qualified Agent.CLI.TUIHistorySpec as TUIHistorySpec
 import qualified Agent.CLI.TUIPropertySpec as TUIPropertySpec
 import qualified Agent.CLI.TUIScrollSpec as TUIScrollSpec
 import qualified Agent.CLI.TUITranscriptSpec as TUITranscriptSpec
@@ -139,6 +140,7 @@ main = hspec do
     TUIBridgeSpec.spec
     TUIComposerSpec.spec
     TUIImagePreviewSpec.spec
+    TUIHistorySpec.spec
     TUIPropertySpec.spec
     TUIScrollSpec.spec
     TUITranscriptSpec.spec

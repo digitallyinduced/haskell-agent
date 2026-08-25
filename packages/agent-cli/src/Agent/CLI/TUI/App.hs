@@ -48,6 +48,10 @@ module Agent.CLI.TUI.App
     , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
+    , commitFullscreenHistoryTurn
+    , clearFullscreenHistorySource
+    , reloadFullscreenHistorySource
+    , setFullscreenHistorySource
     , setFullscreenSessionActions
     , fullscreenBounds
     , fullscreenVtyConfig
@@ -125,7 +129,7 @@ import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
-    , kittyCtrlVCsiBodies
+    , kittyCtrlCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -134,6 +138,22 @@ import Agent.CLI.Terminal
 import qualified Agent.TUI.Theme as Theme
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import qualified Agent.CLI.TUI.Composer as Composer
+import Agent.CLI.TUI.History
+    ( HistoryCursor(..)
+    , HistoryDirection(..)
+    , HistoryGeneration(..)
+    , HistoryPage(..)
+    , HistoryRequest(..)
+    , HistoryTurn(..)
+    , HistoryWindow(..)
+    , appendHistoryTurn
+    , applyHistoryPage
+    , clearHistoryRequest
+    , emptyHistoryWindow
+    , historyWindowRequest
+    , historyWindowSetAnchors
+    , markHistoryRequest
+    )
 import Agent.CLI.TUI.LambdaArt
     ( lambdaArtWidget
     )
@@ -210,6 +230,7 @@ import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
+import Control.Applicative ((<|>))
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forever, unless, void, when, (>=>))
@@ -218,14 +239,17 @@ import Control.Concurrent.STM
     , atomically
     , check
     , newEmptyTMVarIO
+    , newTQueueIO
     , newTVarIO
     , orElse
     , putTMVar
     , readTVar
     , readTMVar
+    , readTQueue
     , registerDelay
     , retry
     , takeTMVar
+    , writeTQueue
     , writeTVar
     )
 import Agent.CLI.Recap
@@ -240,17 +264,26 @@ import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
 import Data.IORef
-    ( modifyIORef'
+    ( atomicModifyIORef'
+    , modifyIORef'
     , newIORef
     , readIORef
     , writeIORef
     )
-import Data.List (find, findIndex, intersperse, nub, sort, sortOn)
+import Data.List
+    ( find
+    , findIndex
+    , intersperse
+    , nub
+    , sort
+    , sortOn
+    )
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -326,6 +359,9 @@ newFullscreenRuntimeWithSyntaxLoader
         mailbox <- AppEventMailbox <$> newTVarIO Seq.empty
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
+        historyRequests <- newTQueueIO
+        historySource <- newIORef Nothing
+        historyGeneration <- newIORef 0
         imagePreviews <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
@@ -381,6 +417,9 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeSyntaxLoadFinished = syntaxLoadFinished
             , runtimeInitial = initial
             , runtimeSessionActions = sessionActions
+            , runtimeHistoryRequests = historyRequests
+            , runtimeHistorySource = historySource
+            , runtimeHistoryGeneration = historyGeneration
             }
 
 setFullscreenSessionActions
@@ -411,6 +450,86 @@ setFullscreenSessionActions
             , sessionAgentSnapshot = agentSnapshot
             , sessionAgentSelect = agentSelect
             }
+
+setFullscreenHistorySource
+    :: FullscreenRuntime
+    -> Text
+    -> (HistoryRequest -> IO (Either Text HistoryPage))
+    -> HistoryPage
+    -> IO ()
+setFullscreenHistorySource runtime key loader initialPage = do
+    previous <- readIORef runtime.runtimeHistorySource
+    writeIORef runtime.runtimeHistorySource $
+        Just FullscreenHistorySource
+            { historySourceKey = key
+            , historySourceLoad = loader
+            }
+    case previous of
+        Just source
+            | source.historySourceKey == key -> pure ()
+        _ -> resetFullscreenHistory runtime initialPage
+
+reloadFullscreenHistorySource
+    :: FullscreenRuntime
+    -> Text
+    -> (HistoryRequest -> IO (Either Text HistoryPage))
+    -> HistoryPage
+    -> IO ()
+reloadFullscreenHistorySource runtime key loader initialPage = do
+    writeIORef runtime.runtimeHistorySource $
+        Just FullscreenHistorySource
+            { historySourceKey = key
+            , historySourceLoad = loader
+            }
+    resetFullscreenHistory runtime initialPage
+
+clearFullscreenHistorySource :: FullscreenRuntime -> IO ()
+clearFullscreenHistorySource runtime = do
+    writeIORef runtime.runtimeHistorySource Nothing
+    resetFullscreenHistory runtime
+        (HistoryPage
+            { historyPageGeneration = HistoryGeneration 0
+            , historyPageDirection = HistoryNewer
+            , historyPageTurns = Seq.empty
+            , historyPageGenerationStart = HistoryCursor 0
+            , historyPageTotalTurns = 0
+            , historyPageHasOlder = False
+            , historyPageHasNewer = False
+            })
+
+commitFullscreenHistoryTurn
+    :: FullscreenRuntime
+    -> HistoryTurn
+    -> HistoryCommit
+    -> IO ()
+commitFullscreenHistoryTurn runtime turn commit = do
+    source <- readIORef runtime.runtimeHistorySource
+    case source of
+        Nothing -> pure ()
+        Just _ -> do
+            generation <- case commit of
+                HistoryCommitAppend ->
+                    HistoryGeneration
+                        <$> readIORef runtime.runtimeHistoryGeneration
+                _ ->
+                    atomicModifyIORef'
+                        runtime.runtimeHistoryGeneration
+                        \current ->
+                            let next = current + 1
+                            in (next, HistoryGeneration next)
+            enqueueAppEvent runtime
+                (AppHistoryCommitted generation turn commit)
+
+resetFullscreenHistory :: FullscreenRuntime -> HistoryPage -> IO ()
+resetFullscreenHistory runtime initialPage = do
+    generation <- atomicModifyIORef'
+        runtime.runtimeHistoryGeneration
+        \current ->
+            let next = current + 1
+            in (next, HistoryGeneration next)
+    enqueueAppEvent runtime
+        (AppHistoryReset
+            initialPage { historyPageGeneration = generation })
 
 loadSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
 loadSyntaxHighlighterForRuntime runtime = do
@@ -599,13 +718,16 @@ fullscreenVtyConfig =
             ]
             <> [ ( Nothing
                  , "\ESC[" <> body
-                 , V.EvKey (V.KChar 'v') [modifier]
+                 , V.EvKey (V.KChar character) [V.MCtrl]
                  )
-               | (modifier, bodies) <-
-                    [ (V.MCtrl, kittyCtrlVCsiBodies)
-                    , (V.MMeta, kittySuperVCsiBodies)
-                    ]
-               , body <- bodies
+               | character <- ['a'..'z']
+               , body <- kittyCtrlCsiBodies character
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'v') [V.MMeta]
+                 )
+               | body <- kittySuperVCsiBodies
                ]
         }
 
@@ -773,34 +895,37 @@ runFullscreen runtime workerAction = do
                 withAsync (eventPump runtime) \_eventPump ->
                     withAsync (recapTicker runtime) \_recapTicker ->
                         withAsync
-                            (loadSyntaxHighlighterForRuntime runtime)
-                            \_syntaxLoader ->
+                            historyLoader
+                            \_historyLoader ->
                             withAsync
-                                (void (waitCatch worker)
-                                    >> enqueueAppEvent runtime AppStop)
-                                \_notifier -> do
-                                    finalState <-
-                                        customMain
-                                            initialVty
-                                            buildVty
-                                            (Just runtime.runtimeEvents)
-                                            fullscreenApp
-                                            initialState
-                                        `finally`
-                                            runtime.runtimeNativeProgress False
-                                    when (not finalState.appWorkerStopped) $
-                                        atomically $
-                                            Composer.appendFullscreenInput
-                                                runtime.runtimeInput
-                                                FullscreenInput
-                                                    { fullscreenInputLine =
-                                                        ReplEof
-                                                    , fullscreenInputQueued =
-                                                        False
-                                                    , fullscreenInputDisplay =
-                                                        Nothing
-                                                    }
-                                    wait worker
+                                (loadSyntaxHighlighterForRuntime runtime)
+                                \_syntaxLoader ->
+                                    withAsync
+                                        (void (waitCatch worker)
+                                            >> enqueueAppEvent runtime AppStop)
+                                        \_notifier -> do
+                                            finalState <-
+                                                customMain
+                                                    initialVty
+                                                    buildVty
+                                                    (Just runtime.runtimeEvents)
+                                                    fullscreenApp
+                                                    initialState
+                                                `finally`
+                                                    runtime.runtimeNativeProgress False
+                                            when (not finalState.appWorkerStopped) $
+                                                atomically $
+                                                    Composer.appendFullscreenInput
+                                                        runtime.runtimeInput
+                                                        FullscreenInput
+                                                            { fullscreenInputLine =
+                                                                ReplEof
+                                                            , fullscreenInputQueued =
+                                                                False
+                                                            , fullscreenInputDisplay =
+                                                                Nothing
+                                                            }
+                                            wait worker
   where
     recapTicker _runtime = forever do
         threadDelay 20_000_000
@@ -853,6 +978,32 @@ runFullscreen runtime workerAction = do
                     pure snapshot
         agentTicker previous'
 
+    historyLoader = do
+        request <- atomically (readTQueue runtime.runtimeHistoryRequests)
+        source <- readIORef runtime.runtimeHistorySource
+        result <- case source of
+            Nothing ->
+                pure (Left "Session history is unavailable.")
+            Just current ->
+                tryAny (current.historySourceLoad request) >>= \case
+                    Left err ->
+                        pure (Left (Text.pack (show err)))
+                    Right loaded ->
+                        pure loaded
+        let normalized =
+                fmap
+                    (\page ->
+                        page
+                            { historyPageGeneration =
+                                request.historyRequestGeneration
+                            , historyPageDirection =
+                                request.historyRequestDirection
+                            })
+                    result
+        enqueueAppEvent runtime
+            (AppHistoryLoaded request normalized)
+        historyLoader
+
 -- | Construct the retained application state shared by the live entry point
 -- and renderer tests. Generated tests should start from the same defaults as
 -- a real fullscreen session instead of assembling an approximate state.
@@ -866,6 +1017,15 @@ initialFullscreenAppState
 initialFullscreenAppState runtime history initialAgent initialAgents initialClock =
     AppState
         { appUi = runtime.runtimeInitial
+        , appHistoryWindow =
+            emptyHistoryWindow
+                (HistoryGeneration 0)
+                historyWindowTurnBudget
+                historyWindowBlockBudget
+                historyWindowByteBudget
+        , appHistorySelectedBlock = Nothing
+        , appHistoryLiveStart = Nothing
+        , appNextHistoryBlockId = -1
         , appPermissionReply = Nothing
         , appRuntime = runtime
         , appSlashIndex = 0
@@ -907,6 +1067,259 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appSyntaxHighlighter = Nothing
         , appTerminalFocus = TerminalFocusUnknown
         }
+
+historyWindowTurnBudget :: Int
+historyWindowTurnBudget = 200
+
+historyWindowBlockBudget :: Int
+historyWindowBlockBudget = 1200
+
+historyWindowByteBudget :: Int
+historyWindowByteBudget = 8 * 1024 * 1024
+
+resetHistoryPage :: HistoryPage -> AppState -> AppState
+resetHistoryPage page state =
+    let
+        empty =
+            emptyHistoryWindow
+                page.historyPageGeneration
+                historyWindowTurnBudget
+                historyWindowBlockBudget
+                historyWindowByteBudget
+        (nextBlockId, remapped) =
+            remapHistoryPage state.appNextHistoryBlockId page
+        window =
+            either (const empty) id (applyHistoryPage remapped empty)
+    in state
+        { appUi = reduceUi UiConversationCleared state.appUi
+        , appHistoryWindow = window
+        , appHistorySelectedBlock = Nothing
+        , appHistoryLiveStart = Nothing
+        , appNextHistoryBlockId = nextBlockId
+        , appCompletionFlashes = Map.empty
+        , appConversationAnchor = Nothing
+        }
+
+setHistoryGeneration :: HistoryGeneration -> AppState -> AppState
+setHistoryGeneration generation state =
+    state
+        { appHistoryWindow =
+            state.appHistoryWindow
+                { historyWindowGeneration = generation
+                , historyWindowPending = Set.empty
+                }
+        }
+
+applyLoadedHistoryPage :: HistoryPage -> AppState -> AppState
+applyLoadedHistoryPage page state =
+    if page.historyPageGeneration
+        /= state.appHistoryWindow.historyWindowGeneration
+        then state
+        else
+            let
+                (nextBlockId, remapped) =
+                    remapHistoryPage state.appNextHistoryBlockId page
+                anchored =
+                    historyWindowSetAnchors
+                        (historyEdgeCursor
+                            page.historyPageDirection
+                            state.appHistoryWindow)
+                        (state.appHistorySelectedBlock >>=
+                            historyCursorForBlock
+                                state.appHistoryWindow)
+                        state.appHistoryWindow
+                window =
+                    either
+                        (const anchored)
+                        id
+                        (applyHistoryPage remapped anchored)
+                selected =
+                    state.appHistorySelectedBlock >>= \blockId ->
+                        if historyContainsBlock blockId window
+                            then Just blockId
+                            else Nothing
+            in state
+                { appHistoryWindow = window
+                , appHistorySelectedBlock = selected
+                , appNextHistoryBlockId = nextBlockId
+                }
+
+clearHistoryPending :: HistoryRequest -> AppState -> AppState
+clearHistoryPending request state =
+    state
+        { appHistoryWindow =
+            clearHistoryRequest request state.appHistoryWindow
+        }
+
+commitLiveHistoryTurn
+    :: HistoryTurn
+    -> HistoryCommit
+    -> AppState
+    -> AppState
+commitLiveHistoryTurn durableTurn commit state =
+    let
+        start =
+            case state.appHistoryLiveStart of
+                Just index -> index
+                Nothing
+                    | commit == HistoryCommitAppend ->
+                        Seq.length state.appUi.uiBlocks
+                    | otherwise -> 0
+        (nextBlockId, remappedBlocks) =
+            remapHistoryBlocks
+                state.appNextHistoryBlockId
+                durableTurn.historyTurnBlocks
+        remappedTurn =
+            durableTurn { historyTurnBlocks = remappedBlocks }
+        baseWindow =
+            case commit of
+                HistoryCommitAppend -> state.appHistoryWindow
+                HistoryCommitReplace ->
+                    emptyHistoryWindow
+                        state.appHistoryWindow.historyWindowGeneration
+                        historyWindowTurnBudget
+                        historyWindowBlockBudget
+                        historyWindowByteBudget
+                HistoryCommitReset ->
+                    emptyHistoryWindow
+                        state.appHistoryWindow.historyWindowGeneration
+                        historyWindowTurnBudget
+                        historyWindowBlockBudget
+                        historyWindowByteBudget
+        replacementPage =
+            HistoryPage
+                { historyPageGeneration =
+                    state.appHistoryWindow.historyWindowGeneration
+                , historyPageDirection = HistoryNewer
+                , historyPageTurns = Seq.singleton remappedTurn
+                , historyPageGenerationStart =
+                    remappedTurn.historyTurnCursor
+                , historyPageTotalTurns = 1
+                , historyPageHasOlder = False
+                , historyPageHasNewer = False
+                }
+        window =
+            case commit of
+                HistoryCommitAppend ->
+                    appendHistoryTurn remappedTurn baseWindow
+                _ ->
+                    either
+                        (const baseWindow)
+                        id
+                        (applyHistoryPage replacementPage baseWindow)
+        ui = truncateUiBlocks start state.appUi
+    in state
+        { appUi = ui
+        , appHistoryWindow = window
+        , appHistorySelectedBlock = Nothing
+        , appHistoryLiveStart = Nothing
+        , appNextHistoryBlockId = nextBlockId
+        , appConversationAnchor = Nothing
+        , appCompletionFlashes =
+            retainExistingFlashes ui state.appCompletionFlashes
+        }
+
+truncateUiBlocks :: Int -> UiState -> UiState
+truncateUiBlocks count ui =
+    let
+        blocks = Seq.take (max 0 count) ui.uiBlocks
+        indices =
+            Map.fromList
+                [ (block.blockId, index)
+                | (index, block) <- zip [0 ..] (toList blocks)
+                ]
+        selectedIndex =
+            ui.uiSelectedBlock >>= (`Map.lookup` indices)
+    in ui
+        { uiBlocks = blocks
+        , uiSelectedBlock =
+            selectedIndex >>= \index ->
+                (.blockId) <$> Seq.lookup index blocks
+        , uiSelectedBlockIndex = selectedIndex
+        , uiBlockIndices = indices
+        , uiTurnStartBlock = min count ui.uiTurnStartBlock
+        , uiAttemptStartBlock = min count ui.uiAttemptStartBlock
+        , uiToolCalls =
+            Map.filter
+                (\(index, _) -> index < count)
+                ui.uiToolCalls
+        , uiRetryCountdown = Nothing
+        }
+
+remapHistoryPage :: Int -> HistoryPage -> (Int, HistoryPage)
+remapHistoryPage nextId page =
+    let
+        (remaining, turns) =
+            foldl'
+                (\(current, accumulated) turn ->
+                    let (next, blocks) =
+                            remapHistoryBlocks
+                                current
+                                turn.historyTurnBlocks
+                    in (next, accumulated |> turn
+                        { historyTurnBlocks = blocks }))
+                (nextId, Seq.empty)
+                page.historyPageTurns
+    in (remaining, page { historyPageTurns = turns })
+
+remapHistoryBlocks :: Int -> Seq UiBlock -> (Int, Seq UiBlock)
+remapHistoryBlocks nextId =
+    foldl'
+        (\(current, blocks) block ->
+            ( current - 1
+            , blocks |> block { blockId = BlockId current }
+            ))
+        (nextId, Seq.empty)
+
+historyContainsBlock :: BlockId -> HistoryWindow -> Bool
+historyContainsBlock blockId =
+    any
+        (any ((== blockId) . (.blockId))
+            . toList
+            . (.historyTurnBlocks))
+        . toList
+        . (.historyWindowTurns)
+
+historyCursorForBlock
+    :: HistoryWindow
+    -> BlockId
+    -> Maybe HistoryCursor
+historyCursorForBlock window blockId =
+    (.historyTurnCursor)
+        <$> find
+            (any ((== blockId) . (.blockId))
+                . toList
+                . (.historyTurnBlocks))
+            (toList window.historyWindowTurns)
+
+historyEdgeCursor
+    :: HistoryDirection
+    -> HistoryWindow
+    -> Maybe HistoryCursor
+historyEdgeCursor direction window =
+    (.historyTurnCursor) <$> case direction of
+        HistoryOlder -> window.historyWindowTurns Seq.!? 0
+        HistoryNewer ->
+            window.historyWindowTurns
+                Seq.!? (Seq.length window.historyWindowTurns - 1)
+
+historyPageAnchorBlock
+    :: HistoryDirection
+    -> HistoryWindow
+    -> Maybe BlockId
+historyPageAnchorBlock direction window =
+    edgeTurn >>= edgeBlock
+  where
+    turns = window.historyWindowTurns
+    edgeTurn = case direction of
+        HistoryOlder -> turns Seq.!? 0
+        HistoryNewer -> turns Seq.!? (Seq.length turns - 1)
+    edgeBlock turn =
+        let blocks = turn.historyTurnBlocks
+        in case direction of
+            HistoryOlder -> (.blockId) <$> blocks Seq.!? 0
+            HistoryNewer ->
+                (.blockId) <$> blocks Seq.!? (Seq.length blocks - 1)
 
 wrapNativePreviewVty :: FullscreenRuntime -> V.Vty -> IO V.Vty
 wrapNativePreviewVty runtime vty
@@ -1522,8 +1935,13 @@ copyCodeBlock
 copyCodeBlock target blockId codeIndex = do
     state <- get
     let code =
-            conversationUiForTarget target state
-                >>= \ui -> selectedBlock ui blockId
+            (case target of
+                AgentRoot ->
+                    historyBlock state.appHistoryWindow blockId
+                        <|> selectedBlock state.appUi blockId
+                AgentChild _ ->
+                    conversationUiForTarget target state
+                        >>= \ui -> selectedBlock ui blockId)
                 >>= fencedCodeBlock codeIndex . (.blockBody)
     case code of
         Nothing ->
@@ -1918,17 +2336,24 @@ drawConversationPane state =
                     viewport ConversationViewport Vertical $
                         padLeftRight 2 (drawAgentConversation state entry)
         Nothing
-            | conversationIsEmpty state.appUi ->
+            | conversationIsEmpty state.appUi
+                && Seq.null
+                    state.appHistoryWindow.historyWindowTurns ->
                 padLeftRight 2 $
                     vBox
                         [ drawTranscript state
                         , drawEmptyConversation state
                         ]
             | otherwise ->
-                withVScrollBarRenderer conversationScrollbarRenderer $
-                    withVScrollBars OnRight $
-                        viewport ConversationViewport Vertical $
-                            padLeftRight 2 (drawTranscript state)
+                vBox $
+                    historyRangeWidgets state
+                        <> [ withVScrollBarRenderer
+                                conversationScrollbarRenderer $
+                                withVScrollBars OnRight $
+                                    viewport ConversationViewport Vertical $
+                                        padLeftRight 2
+                                            (drawTranscript state)
+                           ]
 
 selectedChildEntry :: AppState -> Maybe AgentEntry
 selectedChildEntry state =
@@ -2413,9 +2838,30 @@ waitingIndicatorAttr state =
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
     vBox $
-        [drawConversationBlocks state AgentRoot state.appUi]
+        [ vBox $
+            olderGap
+                <> map
+                    (drawBlock state AgentRoot state.appUi)
+                    historicalBlocks
+                <> newerGap
+                <> [drawConversationBlocks state AgentRoot state.appUi]
+        ]
             <> conversationReserveWidgets anchor
   where
+    historicalBlocks =
+        concatMap
+            (toList . (.historyTurnBlocks))
+            (toList state.appHistoryWindow.historyWindowTurns)
+    olderGap =
+        historyGapWidget
+            HistoryOlder
+            state.appHistoryWindow.historyWindowHasOlder
+            state.appHistoryWindow.historyWindowPending
+    newerGap =
+        historyGapWidget
+            HistoryNewer
+            state.appHistoryWindow.historyWindowHasNewer
+            state.appHistoryWindow.historyWindowPending
     anchor = state.appConversationAnchor
 
 -- | Cache completed transcript blocks in moderately sized groups.
@@ -2473,6 +2919,87 @@ drawConversationBlocks state target ui =
         map
             (drawTranscriptChunk state target ui)
             (Transcript.transcriptChunks ui.uiBlocks)
+
+historyRangeWidgets :: AppState -> [Widget Name]
+historyRangeWidgets state =
+    case historyRangeText state.appHistoryWindow of
+        Nothing -> []
+        Just range ->
+            [ padLeftRight 2 $
+                withAttr Theme.mutedAttr $
+                    hCenter (txt range)
+            ]
+
+historyRangeText :: HistoryWindow -> Maybe Text
+historyRangeText window = do
+    firstTurn <- window.historyWindowTurns Seq.!? 0
+    lastTurn <-
+        window.historyWindowTurns
+            Seq.!? (Seq.length window.historyWindowTurns - 1)
+    let HistoryCursor generationStart =
+            window.historyWindowGenerationStart
+        HistoryCursor firstCursor = firstTurn.historyTurnCursor
+        HistoryCursor lastCursor = lastTurn.historyTurnCursor
+        total = window.historyWindowTotalTurns
+        firstPosition = max 1 (firstCursor - generationStart + 1)
+        lastPosition = max firstPosition (lastCursor - generationStart + 1)
+        virtualized =
+            window.historyWindowHasOlder
+                || window.historyWindowHasNewer
+                || fromIntegral (Seq.length window.historyWindowTurns) < total
+        available =
+            [ label
+            | (isAvailable, label) <-
+                [ (window.historyWindowHasOlder, "older")
+                , (window.historyWindowHasNewer, "newer")
+                ]
+            , isAvailable
+            ]
+        suffix =
+            case available of
+                [] -> ""
+                labels ->
+                    " · "
+                        <> Text.intercalate "/" labels
+                        <> " load on scroll"
+    if total <= 0 || not virtualized
+        then Nothing
+        else
+            Just $
+                "Turns "
+                    <> showText firstPosition
+                    <> "–"
+                    <> showText (min total lastPosition)
+                    <> " of "
+                    <> showText total
+                    <> suffix
+
+historyGapWidget
+    :: HistoryDirection
+    -> Bool
+    -> Set.Set HistoryDirection
+    -> [Widget Name]
+historyGapWidget direction available pending
+    | not available = []
+    | otherwise =
+        [ padTopBottom 1 $
+            withAttr Theme.mutedAttr $
+                hCenter $
+                    txt $
+                        if direction `Set.member` pending
+                            then "… loading " <> directionLabel <> " turns …"
+                            else
+                                "… "
+                                    <> directionLabel
+                                    <> " persisted turns are unloaded …"
+        ]
+  where
+    directionLabel = case direction of
+        HistoryOlder -> "older"
+        HistoryNewer -> "newer"
+
+showText :: Show a => a -> Text
+showText = Text.pack . show
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =
@@ -2581,21 +3108,35 @@ drawQuickStartPanel state =
 
 drawBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Widget Name
 drawBlock state target ui block =
-    let selected = ui.uiSelectedBlock == Just block.blockId
+    let selected =
+            ui.uiSelectedBlock == Just block.blockId
+                || (target == AgentRoot
+                    && state.appHistorySelectedBlock == Just block.blockId)
         highlighted =
             selected
                 && state.appUi.uiFocus == FocusScrollback
                 && state.appAgentSelected == target
+        marker =
+            txt (if highlighted then "❯ " else "  ")
         content = case block.blockKind of
             BlockUser ->
                 withAttr Theme.userAttr $
                     padAll 1 $
-                        timestampedMessage block.blockTimestamp
-                            (terminalTxtWrap block.blockBody)
+                        hBox
+                            [ withAttr
+                                (if highlighted
+                                    then Theme.borderActiveAttr
+                                    else Theme.userMutedAttr)
+                                marker
+                            , timestampedMessage
+                                Theme.userMutedAttr
+                                block.blockTimestamp
+                                (terminalTxtWrap block.blockBody)
+                            ]
             BlockAssistant ->
                 padLeft (Pad 3) $
                     padRight (Pad 1) $
-                        timestampedMessage block.blockTimestamp $
+                        timestampedMessage Theme.mutedAttr block.blockTimestamp $
                             withAttr Theme.assistantAttr
                                 (markdownWidgetWithSyntaxHighlightingAndLinks
                                     state.appSyntaxHighlighter
@@ -2656,14 +3197,17 @@ drawBlock state target ui block =
         rendered =
             clickable (ConversationBlock target block.blockId) $
                 padBottom (Pad 1) $
-                    hBox
-                        [ withAttr
-                            (if highlighted
-                                then Theme.borderActiveAttr
-                                else Theme.mutedAttr)
-                            (txt (if highlighted then "❯ " else "  "))
-                        , framed
-                        ]
+                    case block.blockKind of
+                        BlockUser -> framed
+                        _ ->
+                            hBox
+                                [ withAttr
+                                    (if highlighted
+                                        then Theme.borderActiveAttr
+                                        else Theme.mutedAttr)
+                                    marker
+                                , framed
+                                ]
     in if cacheableBlock state target ui block
         then cached
             (ConversationBlockCache
@@ -2675,13 +3219,13 @@ drawBlock state target ui block =
             rendered
         else rendered
 
-timestampedMessage :: Text -> Widget Name -> Widget Name
-timestampedMessage timestamp body
+timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
+timestampedMessage timestampAttr timestamp body
     | Text.null timestamp = body
     | otherwise =
         hBox
             [ padRight Max body
-            , withAttr Theme.mutedAttr
+            , withAttr timestampAttr
                 (terminalTxt ("  " <> timestamp))
             ]
 
@@ -3527,11 +4071,24 @@ applyConversationUiEvent renderedContentHeight uiEvent state =
                             (if null state.appUi.uiBlocks
                                 then 0
                                 else renderedContentHeight)
+                , appHistoryLiveStart =
+                    case state.appHistoryLiveStart of
+                        Just start -> Just start
+                        Nothing -> Just (Seq.length state.appUi.uiBlocks)
                 }
         UiConversationCleared ->
             state
                 { appConversationAnchor = Nothing
                 , appConversationReflowQueued = False
+                , appHistoryWindow =
+                    emptyHistoryWindow
+                        state.appHistoryWindow.historyWindowGeneration
+                        historyWindowTurnBudget
+                        historyWindowBlockBudget
+                        historyWindowByteBudget
+                , appHistorySelectedBlock = Nothing
+                , appHistoryLiveStart = Nothing
+                , appNextHistoryBlockId = -1
                 }
         _ -> state
 
@@ -3889,6 +4446,53 @@ handleEventInner event = case event of
                 modify' \current ->
                     current { appSyntaxHighlighter = Just loaded }
                 invalidateCache
+    AppEvent (AppHistoryReset page) -> do
+        modify' (resetHistoryPage page)
+        invalidateCache
+        queueConversationReflow
+    AppEvent (AppHistoryLoaded request result) -> do
+        state <- get
+        when
+            (request.historyRequestGeneration
+                == state.appHistoryWindow.historyWindowGeneration)
+            do
+                let anchorBlock =
+                        historyPageAnchorBlock
+                            request.historyRequestDirection
+                            state.appHistoryWindow
+                case result of
+                    Left err ->
+                        modify' \current ->
+                            applyUiEvent
+                                (UiSetNotice
+                                    (Just (warningNotice
+                                        ("Could not load session history: "
+                                            <> err))))
+                                (clearHistoryPending request current)
+                    Right page ->
+                        modify' (applyLoadedHistoryPage page)
+                invalidateCache
+                case anchorBlock of
+                    Nothing -> pure ()
+                    Just blockId ->
+                        makeVisible
+                            (ConversationBlock AgentRoot blockId)
+                queueConversationReflow
+    AppEvent (AppHistoryCommitted generation turn commit) -> do
+        state <- get
+        let currentGeneration =
+                state.appHistoryWindow.historyWindowGeneration
+            applicable = case commit of
+                HistoryCommitAppend ->
+                    currentGeneration == generation
+                _ ->
+                    currentGeneration < generation
+        when applicable do
+            modify'
+                (commitLiveHistoryTurn turn commit
+                    . setHistoryGeneration generation)
+            invalidateCache
+            queueConversationReflow
     AppEvent (AppAgentSnapshot selected entries) -> do
         state <- get
         let normalized =
@@ -4452,20 +5056,7 @@ handleMouseDown name button =
         V.BScrollDown -> scrollConversationBy mouseScrollLines
         V.BLeft -> case name of
             ConversationBlock target ident ->
-                case target of
-                    AgentRoot ->
-                        applyLocalUiEventWith
-                            (UiActivateBlock ident)
-                            (applyUiEvent
-                                (UiFocusChanged FocusScrollback))
-                    AgentChild _ -> do
-                        modify' $
-                            applyChildConversationUiEvent
-                                target
-                                (UiActivateBlock ident)
-                        applyLocalUiEvent
-                            (UiFocusChanged FocusScrollback)
-                        queueConversationReflow
+                activateConversationBlock target ident
             ComposerArea ->
                 applyLocalUiEvent (UiFocusChanged FocusComposer)
             _ -> pure ()
@@ -4490,11 +5081,13 @@ handleScrollbackKey = \case
         | V.MCtrl `elem` modifiers -> scrollConversationHalfPage Down
     V.EvKey V.KHome [] -> do
         leaveFollow
+        requestHistoryPage HistoryOlder
         vScrollToBeginning scroll
         queueConversationReflow
     V.EvKey V.KEnd [] -> resumeConversationFollow
     V.EvKey (V.KChar 'g') [] -> do
         leaveFollow
+        requestHistoryPage HistoryOlder
         vScrollToBeginning scroll
         queueConversationReflow
     V.EvKey (V.KChar 'G') [] -> resumeConversationFollow
@@ -4511,24 +5104,49 @@ handleScrollbackKey = \case
     moveBlock delta = do
         state <- get
         let target = state.appAgentSelected
-        applyActiveConversationUiEvent (UiMoveSelection delta)
-        state <- get
-        case (.uiSelectedBlock) =<< conversationUiForTarget target state of
-            Just ident -> do
-                makeVisible (ConversationBlock target ident)
+            blocks = conversationBlocks target state
+            selected =
+                selectedConversationBlockId target state
+            current =
+                fromMaybe
+                    (if delta < 0 then length blocks else -1)
+                    (selected >>= \ident ->
+                        findIndex ((== ident) . (.blockId)) blocks)
+            nextIndex =
+                max 0 (min (length blocks - 1) (current + delta))
+        case drop nextIndex blocks of
+            block : _ -> do
+                selectConversationBlock target block.blockId
+                makeVisible (ConversationBlock target block.blockId)
                 queueConversationReflow
-            Nothing -> pure ()
+            [] -> pure ()
     toggle = do
-        applyActiveConversationUiEvent UiToggleSelected
+        state <- get
+        case (state.appAgentSelected, state.appHistorySelectedBlock) of
+            (AgentRoot, Just blockId) ->
+                modify' \current ->
+                    current
+                        { appHistoryWindow =
+                            mapHistoryBlock
+                                blockId
+                                (\block ->
+                                    block
+                                        { blockExpanded =
+                                            not block.blockExpanded
+                                        })
+                                current.appHistoryWindow
+                        }
+            _ -> applyActiveConversationUiEvent UiToggleSelected
         queueConversationReflow
     focusComposer =
-        applyLocalUiEvent (UiFocusChanged FocusComposer)
+        do
+            modify' \state -> state { appHistorySelectedBlock = Nothing }
+            applyLocalUiEvent (UiFocusChanged FocusComposer)
     leaveFollow =
         applyLocalUiEvent (UiSetFollow False)
     copySelected = do
         state <- get
-        let ui = activeConversationUi state
-        case ui.uiSelectedBlock >>= selectedBlock ui of
+        case selectedConversationBlock state.appAgentSelected state of
             Nothing -> pure ()
             Just block -> do
                 copied <- liftIO $
@@ -4587,6 +5205,11 @@ conversationViewportHeight =
 
 scrollConversationBy :: Int -> EventM Name AppState ()
 scrollConversationBy amount = do
+    state <- get
+    when (state.appAgentSelected == AgentRoot && amount /= 0) $
+        requestHistoryNear
+            (if amount < 0 then HistoryOlder else HistoryNewer)
+            amount
     viewportBounds <-
         lookupViewport ConversationViewport >>= \case
             Just (VP _ top (_, height) (_, contentHeight)) ->
@@ -4606,6 +5229,46 @@ scrollConversationBy amount = do
             queueConversationReflow
   where
     scroll = viewportScroll ConversationViewport
+
+requestHistoryNear
+    :: HistoryDirection
+    -> Int
+    -> EventM Name AppState ()
+requestHistoryNear direction amount =
+    lookupViewport ConversationViewport >>= \case
+        Nothing -> requestHistoryPage direction
+        Just (VP _ top (_, height) (_, contentHeight)) ->
+            let nearEdge = case direction of
+                    HistoryOlder ->
+                        top + amount <= max 1 height
+                    HistoryNewer ->
+                        top + height + amount
+                            >= contentHeight - max 1 height
+            in when nearEdge (requestHistoryPage direction)
+
+requestHistoryPage
+    :: HistoryDirection
+    -> EventM Name AppState ()
+requestHistoryPage direction = do
+    state <- get
+    case
+        if state.appAgentSelected == AgentRoot
+            then historyWindowRequest direction state.appHistoryWindow
+            else Nothing of
+        Nothing -> pure ()
+        Just request -> do
+            modify' \current ->
+                current
+                    { appHistoryWindow =
+                        markHistoryRequest
+                            direction
+                            current.appHistoryWindow
+                    }
+            liftIO $
+                atomically $
+                    writeTQueue
+                        state.appRuntime.runtimeHistoryRequests
+                        request
 
 setConversationFollow :: Bool -> EventM Name AppState ()
 setConversationFollow follow =
@@ -4673,3 +5336,151 @@ isSubmittedPrompt = \case
 selectedBlock :: UiState -> BlockId -> Maybe UiBlock
 selectedBlock state ident =
     find ((== ident) . (.blockId)) (toList state.uiBlocks)
+
+conversationBlocks :: AgentTarget -> AppState -> [UiBlock]
+conversationBlocks target state =
+    case target of
+        AgentRoot ->
+            concatMap
+                (toList . (.historyTurnBlocks))
+                (toList state.appHistoryWindow.historyWindowTurns)
+                <> toList state.appUi.uiBlocks
+        AgentChild _ ->
+            maybe [] (toList . (.uiBlocks))
+                (conversationUiForTarget target state)
+
+historyBlock :: HistoryWindow -> BlockId -> Maybe UiBlock
+historyBlock window ident =
+    find ((== ident) . (.blockId)) $
+        concatMap
+            (toList . (.historyTurnBlocks))
+            (toList window.historyWindowTurns)
+
+selectedConversationBlockId
+    :: AgentTarget
+    -> AppState
+    -> Maybe BlockId
+selectedConversationBlockId target state =
+    case target of
+        AgentRoot ->
+            state.appHistorySelectedBlock
+                <|> state.appUi.uiSelectedBlock
+        AgentChild _ ->
+            conversationUiForTarget target state
+                >>= (.uiSelectedBlock)
+
+selectedConversationBlock
+    :: AgentTarget
+    -> AppState
+    -> Maybe UiBlock
+selectedConversationBlock target state =
+    selectedConversationBlockId target state >>= \ident ->
+        find ((== ident) . (.blockId))
+            (conversationBlocks target state)
+
+selectConversationBlock
+    :: AgentTarget
+    -> BlockId
+    -> EventM Name AppState ()
+selectConversationBlock target ident = do
+    state <- get
+    case target of
+        AgentRoot ->
+            case historyBlock state.appHistoryWindow ident of
+                Just _ ->
+                    modify' \current ->
+                        current
+                            { appHistorySelectedBlock = Just ident
+                            , appUi =
+                                (reduceUi
+                                    (UiFocusChanged FocusScrollback)
+                                    current.appUi)
+                                    { uiSelectedBlock = Nothing
+                                    , uiSelectedBlockIndex = Nothing
+                                    }
+                            }
+                Nothing -> do
+                    modify' \current ->
+                        current { appHistorySelectedBlock = Nothing }
+                    applyLocalUiEventWith
+                        (UiSelectBlock ident)
+                        (applyUiEvent
+                            (UiFocusChanged FocusScrollback))
+        AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiSelectBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+
+activateConversationBlock
+    :: AgentTarget
+    -> BlockId
+    -> EventM Name AppState ()
+activateConversationBlock target ident = do
+    state <- get
+    case target of
+        AgentRoot ->
+            case historyBlock state.appHistoryWindow ident of
+                Just _ -> do
+                    selectConversationBlock target ident
+                    modify' \current ->
+                        current
+                            { appHistoryWindow =
+                                mapHistoryBlock
+                                    ident
+                                    (\block ->
+                                        block
+                                            { blockExpanded =
+                                                not block.blockExpanded
+                                            })
+                                    current.appHistoryWindow
+                            }
+                Nothing -> do
+                    modify' \current ->
+                        current { appHistorySelectedBlock = Nothing }
+                    applyLocalUiEventWith
+                        (UiActivateBlock ident)
+                        (applyUiEvent
+                            (UiFocusChanged FocusScrollback))
+        AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiActivateBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+    queueConversationReflow
+
+mapHistoryBlock
+    :: BlockId
+    -> (UiBlock -> UiBlock)
+    -> HistoryWindow
+    -> HistoryWindow
+mapHistoryBlock ident update window =
+    window
+        { historyWindowTurns =
+            fmap
+                (\turn ->
+                    turn
+                        { historyTurnBlocks =
+                            fmap
+                                (\block ->
+                                    if block.blockId == ident
+                                        then update block
+                                        else block)
+                                turn.historyTurnBlocks
+                        })
+                window.historyWindowTurns
+        }

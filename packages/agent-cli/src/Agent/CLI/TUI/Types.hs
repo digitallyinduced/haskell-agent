@@ -8,6 +8,8 @@ module Agent.CLI.TUI.Types
     , ChoiceOverlay(..)
     , FullscreenInput(..)
     , FullscreenInputBuffer(..)
+    , FullscreenHistorySource(..)
+    , HistoryCommit(..)
     , FullscreenRuntime(..)
     , FullscreenSessionActions(..)
     , Name(..)
@@ -26,6 +28,13 @@ import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
 import Agent.CLI.Resume (ResumeBrowser, ResumeEntry)
 import Agent.CLI.TUI.ImagePreview (TuiImagePreview)
+import Agent.CLI.TUI.History
+    ( HistoryGeneration
+    , HistoryPage
+    , HistoryRequest
+    , HistoryTurn
+    , HistoryWindow
+    )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import Agent.Loop (ImageAttachment)
 import Agent.TUI.Model (BlockId, UiEvent, UiState)
@@ -33,9 +42,10 @@ import Agent.Syntax (SyntaxHighlighter)
 import Agent.TUI.Motion (MotionDemand, MotionMode)
 import Brick (Location)
 import Brick.BChan (BChan)
-import Control.Concurrent.STM (TMVar, TVar)
+import Control.Concurrent.STM (TMVar, TQueue, TVar)
 import Control.Exception.Safe (SomeException)
 import Data.IORef (IORef)
+import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
@@ -118,6 +128,14 @@ data AppEvent
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)
+    | AppHistoryReset !HistoryPage
+    | AppHistoryLoaded
+        !HistoryRequest
+        !(Either Text HistoryPage)
+    | AppHistoryCommitted
+        !HistoryGeneration
+        !HistoryTurn
+        !HistoryCommit
     | AppConversationReflow
     | AppMotionTick
     | AppRecapPoll
@@ -143,6 +161,18 @@ data FullscreenInput = FullscreenInput
 
 newtype FullscreenInputBuffer =
     FullscreenInputBuffer (TVar (Seq FullscreenInput))
+
+data FullscreenHistorySource = FullscreenHistorySource
+    { historySourceKey :: !Text
+    , historySourceLoad
+        :: !(HistoryRequest -> IO (Either Text HistoryPage))
+    }
+
+data HistoryCommit
+    = HistoryCommitAppend
+    | HistoryCommitReplace
+    | HistoryCommitReset
+    deriving (Eq, Show)
 
 data FullscreenRuntime = FullscreenRuntime
     { runtimeEvents :: !(BChan AppEvent)
@@ -173,6 +203,9 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeSyntaxLoadFinished :: !(NominalDiffTime -> IO ())
     , runtimeInitial :: !UiState
     , runtimeSessionActions :: !(IORef FullscreenSessionActions)
+    , runtimeHistoryRequests :: !(TQueue HistoryRequest)
+    , runtimeHistorySource :: !(IORef (Maybe FullscreenHistorySource))
+    , runtimeHistoryGeneration :: !(IORef Int64)
     }
 
 -- | Provider/session-scoped actions behind one long-lived terminal runtime.
@@ -190,6 +223,10 @@ data FullscreenSessionActions = FullscreenSessionActions
 
 data AppState = AppState
     { appUi :: !UiState
+    , appHistoryWindow :: !HistoryWindow
+    , appHistorySelectedBlock :: !(Maybe BlockId)
+    , appHistoryLiveStart :: !(Maybe Int)
+    , appNextHistoryBlockId :: !Int
     , appPermissionReply :: !(Maybe (TMVar (Maybe PermissionChoice)))
     , appRuntime :: !FullscreenRuntime
     , appSlashIndex :: !Int

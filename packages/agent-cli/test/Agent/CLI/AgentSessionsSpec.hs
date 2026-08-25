@@ -8,7 +8,7 @@ import Agent.CLI.Session
 import Agent.CLI.SessionLock
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopDispatch)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import Agent.Provider (Provider(..))
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -31,6 +31,7 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Managed (stopManagedPostgres)
 import Agent.Store.Types (renderStoreError)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception.Safe (SomeException, bracket, finally, try)
 import Data.IORef
 import qualified Data.Text as Text
@@ -40,7 +41,7 @@ import qualified System.Directory as Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import qualified System.FilePath as FilePath
 import System.Posix.Temp (mkdtemp)
-import System.Posix.Process (forkProcess, getProcessStatus)
+import System.Posix.Process (forkProcess, getProcessID, getProcessStatus)
 import System.Posix.Signals (sigKILL, signalProcess)
 import Test.Hspec
 
@@ -48,7 +49,10 @@ isReadOnly :: ApprovalRule -> Bool
 isReadOnly AlwaysReadOnly = True
 isReadOnly _ = False
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
+
+toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
@@ -109,6 +113,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                 , turnResponseId = Nothing
                 , turnItems = []
                 , turnUsage = Nothing
+                , turnEffect = TranscriptAppend
                 }
             result <- runTool env "read_agent_session" $
                 "{\"session_id\":\"" <> handle.sessionMeta.metaId <> "\"}"
@@ -156,6 +161,80 @@ spec = describe "Agent.CLI.AgentSessions" do
                 "{\"session_id\":\"../outside\"}"
             result `shouldSatisfy` Text.isInfixOf "invalid session id"
 
+    it "runs CLI session turns inside the current process" $
+        withTempSessionThreadManager ["same-process"] \_ manager -> do
+            parentPid <- getProcessID
+            observedPid <- newEmptyMVar
+            launched <- launchSessionThread manager "same-process" do
+                getProcessID >>= putMVar observedPid
+                pure (Right ())
+            launched `shouldBe` Right "started session same-process"
+            takeMVar observedPid `shouldReturn` parentPid
+            waitForThreadStatus manager "same-process" "completed"
+
+    it "serializes and reports in-process session turns" $
+        withTempSessionThreadManager ["blocked", "failed"] \_ manager -> do
+            started <- newEmptyMVar
+            release <- newEmptyMVar
+            first <- launchSessionThread manager "blocked" do
+                putMVar started ()
+                takeMVar release
+                pure (Right ())
+            first `shouldBe` Right "started session blocked"
+            takeMVar started
+            second <- launchSessionThread
+                manager
+                "blocked"
+                (pure (Right ()))
+            second `shouldSatisfy` \case
+                Left err -> "already running" `Text.isInfixOf` err
+                Right _ -> False
+            putMVar release ()
+            waitForThreadStatus manager "blocked" "completed"
+
+            failed <- launchSessionThread
+                manager
+                "failed"
+                (pure (Left "boom"))
+            failed `shouldBe` Right "started session failed"
+            waitForThreadStatus manager "failed" "failed (boom)"
+
+    it "cancels and joins in-process turns when the runtime closes" $ do
+        withTempSessionThreadManager ["long-running"] \_ manager -> do
+            started <- newEmptyMVar
+            stopped <- newEmptyMVar
+            launched <- launchSessionThread manager "long-running" $
+                (do
+                    putMVar started ()
+                    threadDelay 30000000
+                    pure (Right ()))
+                `finally` putMVar stopped ()
+            launched `shouldBe` Right "started session long-running"
+            takeMVar started
+            closeSessionThreadManager manager
+            takeMVar stopped
+            launchSessionThread manager "later" (pure (Right ()))
+                `shouldReturn` Left "agent session manager is closed"
+
+    it "evicts terminal in-process status before checking external locks" $
+        withTempSessionThreadManager ["terminal"] \root manager -> do
+            launched <- launchSessionThread
+                manager
+                "terminal"
+                (pure (Right ()))
+            launched `shouldBe` Right "started session terminal"
+            waitForThreadStatus manager "terminal" "completed"
+            acquired <-
+                acquireSessionLock
+                    (root </> unsafeEncodeUtf "terminal")
+                    "terminal"
+            lock <- either (fail . Text.unpack) pure acquired
+            sessionThreadStatus manager "terminal"
+                `shouldReturn` "running"
+            releaseSessionLock lock
+            sessionThreadStatus manager "terminal"
+                `shouldReturn` "idle"
+
     it "serializes background turns with a cross-process session lock" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             script <- writeFakeAgent root
@@ -177,9 +256,12 @@ spec = describe "Agent.CLI.AgentSessions" do
     it "closes scoped children concurrently and rejects later launches" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "stopped"
+                started = toFilePath root FilePath.</> "started"
             script <- writeFakeAgentBody root
                 ("trap 'printf stopped > " <> shellQuote marker
-                    <> "; exit 0' TERM INT\nsleep 30\n")
+                    <> "; exit 0' TERM INT\nprintf started > "
+                    <> shellQuote started
+                    <> "\nsleep 30\n")
             withExecutableOverride script do
                 handle <- createSession (testCreateAt pool root root)
                 manager <-
@@ -190,6 +272,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                     manager True ApproveAll True False handle "one"
                     `shouldReturn`
                         Right ("started session " <> handle.sessionMeta.metaId)
+                waitForFile started
                 closeSessionProcessManager manager
                 waitForFile marker
                 launchSessionTurn
@@ -507,6 +590,44 @@ waitForSessionStatus manager sessionId expected = go (100 :: Int)
             if actual == expected
                 then pure ()
                 else threadDelay 20000 >> go (attempts - 1)
+
+waitForThreadStatus
+    :: SessionThreadManager
+    -> Text.Text
+    -> Text.Text
+    -> IO ()
+waitForThreadStatus manager sessionId expected = go (100 :: Int)
+  where
+    go attempts
+        | attempts <= 0 = do
+            actual <- sessionThreadStatus manager sessionId
+            actual `shouldBe` expected
+        | otherwise = do
+            actual <- sessionThreadStatus manager sessionId
+            if actual == expected
+                then pure ()
+                else threadDelay 20000 >> go (attempts - 1)
+
+withTempSessionThreadManager
+    :: [Text.Text]
+    -> (OsPath -> SessionThreadManager -> IO a)
+    -> IO a
+withTempSessionThreadManager sessionIds action = do
+    tmp <- Directory.getTemporaryDirectory
+    bracket
+        (mkdtemp (tmp FilePath.</> "ha-threads"))
+        Directory.removeDirectoryRecursive
+        \basePath -> do
+            mapM_
+                (Directory.createDirectory
+                    . (basePath FilePath.</>)
+                    . Text.unpack)
+                sessionIds
+            let root = fromFilePath basePath
+            bracket
+                (newSessionThreadManager root)
+                closeSessionThreadManager
+                (action root)
 
 shellQuote :: FilePath -> String
 shellQuote path = "'" <> concatMap escape path <> "'"

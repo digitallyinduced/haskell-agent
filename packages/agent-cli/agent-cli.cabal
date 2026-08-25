@@ -47,12 +47,20 @@ library
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
+                    , Agent.CLI.Clipboard.Linux
+                    , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
                     , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
+                    , Agent.CLI.Runtime.Internal
+                    , Agent.CLI.Runtime.HistorySource
+                    , Agent.CLI.Runtime.Persistence
+                    , Agent.CLI.Runtime.Recap
+                    , Agent.CLI.Runtime.Repl
+                    , Agent.CLI.Runtime.Repl.Commands
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
@@ -153,6 +161,8 @@ library
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Composer
+                    , Agent.CLI.TUI.History
+                    , Agent.CLI.TUI.SessionHistory
                     , Agent.CLI.TUI.ImagePreview
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Transcript
@@ -355,6 +365,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIPropertySpec
+                    , Agent.CLI.TUIHistorySpec
                     , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.TUITranscriptSpec
                     , Agent.CLI.UsageSpec

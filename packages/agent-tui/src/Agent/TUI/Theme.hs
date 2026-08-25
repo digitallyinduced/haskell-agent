@@ -45,6 +45,7 @@ module Agent.TUI.Theme
     , todoPendingAttr
     , toolAttr
     , userAttr
+    , userMutedAttr
     , waitingDimAttr
     , waitingMidAttr
     , completionFlashAttr
@@ -58,7 +59,7 @@ import Data.Bits ((.|.))
 import qualified Graphics.Vty as V
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
-userAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
+userAttr, userMutedAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
@@ -74,6 +75,7 @@ headerAttr = attrName "header"
 footerAttr = attrName "footer"
 mutedAttr = attrName "muted"
 userAttr = attrName "user"
+userMutedAttr = attrName "user-muted"
 assistantAttr = attrName "assistant"
 thinkingAttr = attrName "thinking"
 toolAttr = attrName "tool"
@@ -143,7 +145,8 @@ terminalDefault =
         , (headerAttr, V.defAttr `V.withStyle` V.bold)
         , (footerAttr, palette V.brightBlack)
         , (mutedAttr, palette V.brightBlack)
-        , (userAttr, V.defAttr `V.withStyle` V.bold)
+        , (userAttr, userPanelAttr `V.withStyle` V.bold)
+        , (userMutedAttr, userPanelAttr `V.withStyle` V.dim)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, palette V.yellow)
         , (waitingDimAttr, palette V.brightBlack)
@@ -201,6 +204,7 @@ monochrome =
         , (footerAttr, V.defAttr)
         , (mutedAttr, V.defAttr)
         , (userAttr, V.defAttr `V.withStyle` V.bold)
+        , (userMutedAttr, V.defAttr `V.withStyle` V.dim)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, V.defAttr)
         , (waitingDimAttr, V.defAttr)
@@ -250,3 +254,9 @@ monochrome =
 
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr
+
+-- | Grok-style user-prompt panel: a full-width wash one step off the page
+-- background. Bright black is the ANSI gray slot, so Ghostty light/dark
+-- palettes keep the card readable without fixing an RGB background.
+userPanelAttr :: V.Attr
+userPanelAttr = V.withBackColor V.defAttr V.brightBlack
