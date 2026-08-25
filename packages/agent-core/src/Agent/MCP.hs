@@ -1118,7 +1118,7 @@ mcpSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 grokSearchTool :: McpFleet -> AppTool
@@ -1242,7 +1242,7 @@ grokSearchTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 callCatalogEntryWithReconnect
@@ -1377,7 +1377,7 @@ mcpCallTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 grokUseTool :: McpFleet -> AppTool
@@ -1419,7 +1419,7 @@ grokUseTool fleet = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 searchArguments :: Value -> (Maybe Text, Maybe Text, Int)
@@ -1779,7 +1779,7 @@ appToolFor client tool = AppTool
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
   where
     qualifiedName = qualifiedMcpToolName

@@ -8,6 +8,7 @@ module Agent.ResourceScope
     , newResourceScope
     , closeResourceScope
     , allocateResource
+    , allocateAcquireResource
     , registerResource
     , releaseResource
     ) where
@@ -30,6 +31,7 @@ import Control.Monad.Trans.Resource
     , release
     , runInternalState
     )
+import Data.Acquire (Acquire, allocateAcquire)
 
 newtype ResourceScope = ResourceScope (MVar (Maybe InternalState))
 
@@ -54,6 +56,15 @@ allocateResource
 allocateResource scope acquire cleanup =
     withOpenScope scope \state -> do
         (key, value) <- runInScope state (allocate acquire cleanup)
+        pure (ResourceKey key, value)
+
+allocateAcquireResource
+    :: ResourceScope
+    -> Acquire a
+    -> IO (ResourceKey, a)
+allocateAcquireResource scope acquire =
+    withOpenScope scope \state -> do
+        (key, value) <- runInScope state (allocateAcquire acquire)
         pure (ResourceKey key, value)
 
 registerResource :: ResourceScope -> IO () -> IO ResourceKey

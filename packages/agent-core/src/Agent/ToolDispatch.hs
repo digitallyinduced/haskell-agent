@@ -7,9 +7,11 @@ module Agent.ToolDispatch
     , ToolCallStreamRef(..)
     , ToolArgumentStreamEvent(..)
     , ToolArgumentUpdate(..)
-    , ToolSpeculator(..)
-    , ToolSpeculatorSession(..)
-    , ActiveToolSpeculation(..)
+    , ToolArgumentStreamItem(..)
+    , ToolArgumentSource
+    , PreparedToolResult
+    , ToolArgumentInterpreter
+    , ToolArgumentInterpreterFactory
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -36,6 +38,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseEither)
+import Data.Acquire (Acquire)
 import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -86,7 +89,7 @@ data ToolCallStreamRef
     | ToolCallStreamCall !Text
     deriving (Eq, Ord, Show)
 
--- | Canonical lifecycle events consumed by tool argument speculators. Provider
+-- | Canonical lifecycle events consumed by tool argument interpreters. Provider
 -- adapters translate their native stream events into this small vocabulary.
 data ToolArgumentStreamEvent
     = ToolArgumentsStarted
@@ -115,45 +118,35 @@ data ToolArgumentUpdate
     | ToolArgumentDoneUpdate !Text
     deriving (Eq, Show)
 
--- | Registration-time factory for a tool-owned speculation session. The
--- factory is opened only when speculation is enabled, so ordinary tool
--- registration remains pure and has no background-work cost. Speculators
--- produce only a final result; streaming output snapshots remain the ordinary
--- handler's responsibility.
-newtype ToolSpeculator = ToolSpeculator
-    { openToolSpeculator :: IO ToolSpeculatorSession
-    }
+-- | Semantic input consumed by one tool-owned streamed-argument interpreter.
+-- Resource shutdown is deliberately not represented here: abandoning the
+-- interpreter cancels its owner scope instead of sending a synthetic event.
+data ToolArgumentStreamItem
+    = ToolArgumentStreamUpdate !ToolArgumentUpdate
+    | ToolArgumentStreamFinal !ToolCall
+    deriving (Eq, Show)
 
--- | Session-scoped resources shared by every speculative call for one tool.
--- For example, @read_file@ keeps its workspace filename index here.
-data ToolSpeculatorSession = ToolSpeculatorSession
-    { startToolSpeculation
-        :: ToolCall
-        -> IO ActiveToolSpeculation
-    , closeToolSpeculatorSession
-        :: IO ()
-    }
+-- | Blocking source for one correlated tool call's argument stream.
+type ToolArgumentSource = IO ToolArgumentStreamItem
 
--- | One streamed tool call's IO state machine. Implementations can internally
--- use @ParserState -> ToolArgumentUpdate -> IO ParserState@ while keeping that
--- state, speculative workers, and validation logic private. Cancellation is
--- followed by 'waitActiveToolSpeculation' so implementations may split
--- signalling and joining if useful.
-data ActiveToolSpeculation = ActiveToolSpeculation
-    { updateToolArguments
-        :: ToolArgumentUpdate
-        -> IO ()
-    , finalizeToolSpeculation
-        :: ToolCall
-        -> IO ()
-    , takeToolSpeculatedResult
-        :: ToolCall
-        -> IO (Maybe (Either Text Text))
-    , cancelActiveToolSpeculation
-        :: IO ()
-    , waitActiveToolSpeculation
-        :: IO ()
-    }
+-- | Validation/consumption deferred until normal approval and scheduling have
+-- completed. The authoritative call is supplied again so the interpreter can
+-- reject a stale or mismatched prepared value.
+type PreparedToolResult =
+    ToolCall -> IO (Maybe (Either Text Text))
+
+-- | A scoped streamed-argument interpreter. The function owns all
+-- tool-specific incremental parsing and speculative optimization. It returns
+-- a prepared result action after receiving 'ToolArgumentStreamFinal'.
+type ToolArgumentInterpreter =
+    ToolCall
+    -> ToolArgumentSource
+    -> IO PreparedToolResult
+
+-- | Session-scoped acquisition of an interpreter function. For example,
+-- @read_file@ acquires its shared workspace filename index here.
+type ToolArgumentInterpreterFactory =
+    Acquire ToolArgumentInterpreter
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall

@@ -10,24 +10,52 @@ module Agent.Tools.Speculation
     , waitForToolSpeculation
     ) where
 
+import Agent.ResourceScope
+    ( ResourceKey
+    , ResourceScope
+    , allocateAcquireResource
+    , allocateResource
+    , closeResourceScope
+    , newResourceScope
+    , releaseResource
+    )
 import Agent.ToolDispatch
-    ( ActiveToolSpeculation(..)
+    ( PreparedToolResult
+    , ToolArgumentInterpreter
     , ToolArgumentStreamEvent(..)
+    , ToolArgumentStreamItem(..)
     , ToolArgumentUpdate(..)
     , ToolCall(..)
     , ToolCallStreamRef(..)
-    , ToolSpeculator(..)
-    , ToolSpeculatorSession(..)
     , canonicalToolName
     , functionToolCall
     )
 import Agent.Tools.Types (AppTool(..))
 import Control.Applicative ((<|>))
+import Control.Concurrent.Async
+    ( Async
+    , asyncWithUnmask
+    , cancel
+    , poll
+    , race
+    , waitCatch
+    )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
     , newMVar
     , readMVar
+    )
+import Control.Concurrent.STM
+    ( TMVar
+    , TQueue
+    , atomically
+    , newEmptyTMVarIO
+    , newTQueueIO
+    , putTMVar
+    , readTQueue
+    , takeTMVar
+    , writeTQueue
     )
 import Control.Exception.Safe
     ( SomeException
@@ -36,25 +64,21 @@ import Control.Exception.Safe
     , onException
     , tryAny
     )
-import Control.Monad (foldM, forM_, guard, void)
-import Data.IORef
-    ( atomicModifyIORef'
-    , newIORef
-    , readIORef
-    )
+import Control.Monad (foldM, forM_, guard, unless, void)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 
--- | Session-scoped router for tool-owned speculative argument parsers.
+-- | Session-scoped router for tool-owned streamed-argument interpreters.
 --
 -- Provider adapters feed this runtime a small provider-neutral event stream.
--- It owns transport-call correlation and lifecycle cleanup; each registered
--- tool owns only the parser and speculative work for one call.
+-- It owns transport-call correlation and scoped interpreter processes; each
+-- registered tool sees only a blocking stream of semantic argument updates.
 data ToolSpeculationRuntime = ToolSpeculationRuntime
-    { sessions :: !(Map.Map Text ToolSpeculatorSession)
+    { interpreters :: !(Map.Map Text ToolArgumentInterpreter)
+    , resources :: !ResourceScope
     , state :: !(MVar RuntimeState)
     }
 
@@ -67,70 +91,70 @@ data RuntimeState = RuntimeState
 
 data ActiveEntry = ActiveEntry
     { toolName :: !Text
-    , callId :: !(Maybe Text)
+    , entryCallId :: !(Maybe Text)
     , finalized :: !Bool
-    , speculation :: !ActiveToolSpeculation
+    , argumentQueue :: !(TQueue ArgumentStreamCommand)
+    , interpreterWorker :: !(Async PreparedToolResult)
+    , resourceKey :: !ResourceKey
     }
+
+data ArgumentStreamCommand
+    = DeliverArgumentItem !ToolArgumentStreamItem
+    | ReachArgumentBarrier !(TMVar ())
 
 newToolSpeculationRuntime
     :: [AppTool]
     -> IO ToolSpeculationRuntime
 newToolSpeculationRuntime tools = mask \restore -> do
-    openedRef <- newIORef ([] :: [ToolSpeculatorSession])
-    let cleanup =
-            readIORef openedRef
-                >>= mapM_
-                    (\session ->
-                        safeIO session.closeToolSpeculatorSession)
-        openOne
-            :: Map.Map Text ToolSpeculatorSession
-            -> AppTool
-            -> IO (Map.Map Text ToolSpeculatorSession)
-        openOne current tool =
-            case tool.appToolSpeculator of
-                Nothing -> pure current
-                Just factory
-                    | Map.member name current -> pure current
-                    | otherwise ->
-                    tryAny (restore factory.openToolSpeculator) >>= \case
-                        Left (_ :: SomeException) -> pure current
-                        Right session -> do
-                            atomicModifyIORef' openedRef \opened ->
-                                (session : opened, ())
-                            pure (Map.insert name session current)
-                  where
-                    name = canonicalToolName tool.appToolName
-    sessions <-
-        restore (foldM openOne Map.empty tools)
-            `onException` cleanup
+    resources <- newResourceScope
+    interpreters <-
+        restore (foldM (openOne resources) Map.empty tools)
+            `onException` closeResourceScope resources
     state <- newMVar RuntimeState
         { closed = False
         , nextEntryId = 0
         , aliases = Map.empty
         , activeEntries = Map.empty
         }
-    pure ToolSpeculationRuntime { sessions, state }
+    pure ToolSpeculationRuntime { interpreters, resources, state }
+  where
+    openOne
+        :: ResourceScope
+        -> Map.Map Text ToolArgumentInterpreter
+        -> AppTool
+        -> IO (Map.Map Text ToolArgumentInterpreter)
+    openOne resources current tool =
+        case tool.appToolArgumentInterpreter of
+            Nothing -> pure current
+            Just acquireInterpreter
+                | Map.member name current -> pure current
+                | otherwise ->
+                    tryAny
+                        (allocateAcquireResource
+                            resources
+                            acquireInterpreter) >>= \case
+                        Left (_ :: SomeException) -> pure current
+                        Right (_, interpreter) ->
+                            pure (Map.insert name interpreter current)
+              where
+                name = canonicalToolName tool.appToolName
 
 closeToolSpeculationRuntime :: ToolSpeculationRuntime -> IO ()
 closeToolSpeculationRuntime runtime = mask \restore -> do
-    (wasOpen, entries) <-
+    wasOpen <-
         modifyMVar runtime.state \current ->
             if current.closed
-                then pure (current, (False, []))
+                then pure (current, False)
                 else pure
                     ( current
                         { closed = True
                         , aliases = Map.empty
                         , activeEntries = Map.empty
                         }
-                    , (True, Map.elems current.activeEntries)
+                    , True
                     )
     if wasOpen
-        then
-            restore (cancelEntries entries)
-                `finally`
-                    forM_ (Map.elems runtime.sessions) \session ->
-                        restore (safeIO session.closeToolSpeculatorSession)
+        then restore (closeResourceScope runtime.resources)
         else pure ()
 
 resetToolSpeculationRuntime :: ToolSpeculationRuntime -> IO ()
@@ -145,10 +169,10 @@ resetToolSpeculationRuntime runtime = do
                     }
                 , Map.elems current.activeEntries
                 )
-    cancelEntries entries
+    releaseEntries entries
 
 -- | Best-effort provider-neutral stream observation. Synchronous failures in
--- speculative code are contained and leave ordinary tool execution intact.
+-- interpreter plumbing are contained and leave ordinary tool execution intact.
 observeToolArgumentEvent
     :: ToolSpeculationRuntime
     -> ToolArgumentStreamEvent
@@ -184,8 +208,10 @@ observeToolArgumentEvent runtime event = do
                 lookupActive runtime argumentStreamRefs Nothing >>= mapM_
                     (\(entryId, entry) ->
                         runEntryAction runtime entryId $
-                            entry.speculation.updateToolArguments
-                                (ToolArgumentDeltaUpdate argumentStreamDelta))
+                            enqueueArgumentItem entry $
+                                ToolArgumentStreamUpdate $
+                                    ToolArgumentDeltaUpdate
+                                        argumentStreamDelta)
         ToolArgumentsDone
             { argumentStreamRefs
             , argumentStreamName
@@ -213,8 +239,10 @@ observeToolArgumentEvent runtime event = do
                                     argumentStreamRefs
                 forM_ active \(entryId, entry) ->
                     runEntryAction runtime entryId $
-                        entry.speculation.updateToolArguments
-                            (ToolArgumentDoneUpdate argumentStreamArguments)
+                        enqueueArgumentItem entry $
+                            ToolArgumentStreamUpdate $
+                                ToolArgumentDoneUpdate
+                                    argumentStreamArguments
         ToolCallStreamCompleted
             { argumentStreamRefs
             , argumentStreamCall
@@ -226,11 +254,18 @@ observeToolArgumentEvent runtime event = do
                         (withCallRef
                             argumentStreamCall.callId
                             argumentStreamRefs)
-                forM_ active \(entryId, _) ->
-                    finalizeEntry runtime entryId argumentStreamCall
+                -- Output-item completion is useful streamed information, but
+                -- the completed response retained below remains authoritative.
+                forM_ active \(entryId, entry) ->
+                    runEntryAction runtime entryId $
+                        enqueueArgumentItem entry $
+                            ToolArgumentStreamUpdate $
+                                ToolArgumentDoneUpdate
+                                    argumentStreamCall.arguments
 
--- | Keep only calls present in the authoritative completed response and
--- finalize each retained parser with the complete arguments.
+-- | Keep only calls present in the authoritative completed response and send
+-- each retained interpreter its terminal call. Calls omitted from the response
+-- are released immediately.
 retainToolSpeculation
     :: ToolSpeculationRuntime
     -> [ToolCall]
@@ -249,7 +284,7 @@ retainToolSpeculation runtime calls = do
                     let retainedWithCalls =
                             mapMaybe
                                 (\(entryId, entry) -> do
-                                    finalCallId <- entry.callId
+                                    finalCallId <- entry.entryCallId
                                     finalCall <- Map.lookup finalCallId finalCalls
                                     guard $
                                         entry.toolName
@@ -298,13 +333,13 @@ retainToolSpeculation runtime calls = do
                           , abandonedEntries
                           )
                         )
-    cancelEntries abandoned
+    releaseEntries abandoned
     forM_ retained \(entryId, entry, call) ->
         runEntryAction runtime entryId $
-            entry.speculation.finalizeToolSpeculation call
+            enqueueArgumentItem entry (ToolArgumentStreamFinal call)
 
--- | Consume one finalized speculative result after normal approval and
--- scheduling. Any failure becomes a miss so the ordinary handler can run.
+-- | Consume one prepared result after normal approval and scheduling. Any
+-- synchronous interpreter or validation failure becomes an ordinary miss.
 takeToolSpeculation
     :: ToolSpeculationRuntime
     -> ToolCall
@@ -313,16 +348,20 @@ takeToolSpeculation runtime call = do
     selected <- removeByCallId runtime call.callId
     case selected of
         Nothing -> pure Nothing
-        Just entry -> do
-            result <-
-                tryAny
-                    (entry.speculation.takeToolSpeculatedResult call)
-                    :: IO
-                        (Either
-                            SomeException
-                            (Maybe (Either Text Text)))
-            closeEntry entry
-            pure (either (const Nothing) id result)
+        Just entry ->
+            consume entry `finally` safeReleaseEntry entry
+  where
+    consume entry
+        | not (entryMatchesCall entry call) = pure Nothing
+        | otherwise = do
+            unless entry.finalized $
+                enqueueArgumentItem entry (ToolArgumentStreamFinal call)
+            waitCatch entry.interpreterWorker >>= \case
+                Left _ -> pure Nothing
+                Right prepared ->
+                    tryAny (prepared call) >>= \case
+                        Left (_ :: SomeException) -> pure Nothing
+                        Right result -> pure result
 
 discardToolSpeculation
     :: ToolSpeculationRuntime
@@ -330,15 +369,31 @@ discardToolSpeculation
     -> IO ()
 discardToolSpeculation runtime call =
     removeByCallId runtime call.callId
-        >>= mapM_ closeEntry
+        >>= mapM_ safeReleaseEntry
 
+-- | Wait until each active interpreter has processed all argument items
+-- currently queued for it, or until the interpreter itself has completed.
 waitForToolSpeculation :: ToolSpeculationRuntime -> IO ()
 waitForToolSpeculation runtime = do
     entries <-
         Map.elems . (.activeEntries)
             <$> readMVar runtime.state
-    forM_ entries \entry ->
-        safeIO entry.speculation.waitActiveToolSpeculation
+    forM_ entries waitForEntry
+
+waitForEntry :: ActiveEntry -> IO ()
+waitForEntry entry =
+    poll entry.interpreterWorker >>= \case
+        Just _ -> pure ()
+        Nothing -> do
+            reached <- newEmptyTMVarIO
+            atomically $
+                writeTQueue
+                    entry.argumentQueue
+                    (ReachArgumentBarrier reached)
+            void $
+                race
+                    (atomically (takeTMVar reached))
+                    (void (waitCatch entry.interpreterWorker))
 
 ensureActive
     :: ToolSpeculationRuntime
@@ -361,15 +416,10 @@ ensureActive runtime call rawRefs =
                                     pure (current, Nothing)
                                 | otherwise -> do
                                     let callId =
-                                            nonEmpty call.callId <|> entry.callId
+                                            nonEmpty call.callId
+                                                <|> entry.entryCallId
                                         updatedEntry =
-                                            ActiveEntry
-                                                { toolName = entry.toolName
-                                                , callId
-                                                , finalized = entry.finalized
-                                                , speculation =
-                                                    entry.speculation
-                                                }
+                                            entry { entryCallId = callId }
                                         updated =
                                             attachAliases
                                                 entryId
@@ -392,27 +442,29 @@ ensureActive runtime call rawRefs =
                             case
                                 Map.lookup
                                     (canonicalToolName call.name)
-                                    runtime.sessions
+                                    runtime.interpreters
                             of
                                 Nothing -> pure (current, Nothing)
-                                Just session -> do
+                                Just interpreter -> do
                                     started <-
                                         tryAny
-                                            (session.startToolSpeculation call)
+                                            (startInterpreter
+                                                runtime
+                                                interpreter
+                                                call)
                                     case started of
                                         Left (_ :: SomeException) ->
                                             pure (current, Nothing)
                                         Right active -> do
                                             let entryId = current.nextEntryId
-                                                entry = ActiveEntry
-                                                    { toolName =
-                                                        canonicalToolName
-                                                            call.name
-                                                    , callId =
-                                                        nonEmpty call.callId
-                                                    , finalized = False
-                                                    , speculation = active
-                                                    }
+                                                entry =
+                                                    active
+                                                        { toolName =
+                                                            canonicalToolName
+                                                                call.name
+                                                        , entryCallId =
+                                                            nonEmpty call.callId
+                                                        }
                                                 inserted =
                                                     current
                                                         { nextEntryId =
@@ -433,6 +485,44 @@ ensureActive runtime call rawRefs =
                                                 , Just (entryId, entry)
                                                 )
                     _ -> pure (current, Nothing)
+
+startInterpreter
+    :: ToolSpeculationRuntime
+    -> ToolArgumentInterpreter
+    -> ToolCall
+    -> IO ActiveEntry
+startInterpreter runtime interpreter call = mask \_ -> do
+    argumentQueue <- newTQueueIO
+    (resourceKey, interpreterWorker) <-
+        allocateResource
+            runtime.resources
+            (asyncWithUnmask \unmask ->
+                unmask $
+                    interpreter
+                        call
+                        (readArgumentSource argumentQueue))
+            stopInterpreter
+    pure ActiveEntry
+        { toolName = ""
+        , entryCallId = Nothing
+        , finalized = False
+        , argumentQueue
+        , interpreterWorker
+        , resourceKey
+        }
+
+readArgumentSource :: TQueue ArgumentStreamCommand -> IO ToolArgumentStreamItem
+readArgumentSource queue =
+    atomically (readTQueue queue) >>= \case
+        DeliverArgumentItem item -> pure item
+        ReachArgumentBarrier reached -> do
+            atomically (putTMVar reached ())
+            readArgumentSource queue
+
+enqueueArgumentItem :: ActiveEntry -> ToolArgumentStreamItem -> IO ()
+enqueueArgumentItem entry item =
+    atomically $
+        writeTQueue entry.argumentQueue (DeliverArgumentItem item)
 
 lookupActive
     :: ToolSpeculationRuntime
@@ -499,7 +589,7 @@ discardEntry runtime entryId = do
     entry <- modifyMVar runtime.state \current ->
         let (updated, removed) = removeEntry entryId current
         in pure (updated, removed)
-    mapM_ closeEntry entry
+    mapM_ safeReleaseEntry entry
 
 removeEntry
     :: Int
@@ -513,13 +603,16 @@ removeEntry entryId current =
     , Map.lookup entryId current.activeEntries
     )
 
-cancelEntries :: [ActiveEntry] -> IO ()
-cancelEntries = mapM_ closeEntry
+releaseEntries :: [ActiveEntry] -> IO ()
+releaseEntries = mapM_ safeReleaseEntry
 
-closeEntry :: ActiveEntry -> IO ()
-closeEntry entry = do
-    safeIO entry.speculation.cancelActiveToolSpeculation
-    safeIO entry.speculation.waitActiveToolSpeculation
+safeReleaseEntry :: ActiveEntry -> IO ()
+safeReleaseEntry = safeIO . releaseResource . (.resourceKey)
+
+stopInterpreter :: Async a -> IO ()
+stopInterpreter worker = do
+    cancel worker
+    void (waitCatch worker)
 
 runEntryAction
     :: ToolSpeculationRuntime
@@ -532,43 +625,10 @@ runEntryAction runtime entryId action =
         Left (_ :: SomeException) ->
             discardEntry runtime entryId
 
-finalizeEntry
-    :: ToolSpeculationRuntime
-    -> Int
-    -> ToolCall
-    -> IO ()
-finalizeEntry runtime entryId call = do
-    selected <-
-        modifyMVar runtime.state \current ->
-            case Map.lookup entryId current.activeEntries of
-                Just entry
-                    | entryMatchesCall entry call
-                    , not entry.finalized ->
-                        let updatedEntry =
-                                entry
-                                    { callId =
-                                        nonEmpty call.callId <|> entry.callId
-                                    , finalized = True
-                                    }
-                        in pure
-                            ( current
-                                { activeEntries =
-                                    Map.insert
-                                        entryId
-                                        updatedEntry
-                                        current.activeEntries
-                                }
-                            , Just updatedEntry
-                            )
-                _ -> pure (current, Nothing)
-    forM_ selected \entry ->
-        runEntryAction runtime entryId $
-            entry.speculation.finalizeToolSpeculation call
-
 entryMatchesCall :: ActiveEntry -> ToolCall -> Bool
 entryMatchesCall entry call =
     entry.toolName == canonicalToolName call.name
-        && callIdsCompatible entry.callId (nonEmpty call.callId)
+        && callIdsCompatible entry.entryCallId (nonEmpty call.callId)
 
 callIdsCompatible :: Maybe Text -> Maybe Text -> Bool
 callIdsCompatible (Just existing) (Just incoming) = existing == incoming

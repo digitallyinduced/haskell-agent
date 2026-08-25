@@ -21,7 +21,6 @@ import Agent.Tools.Speculation
     , resetToolSpeculationRuntime
     , retainToolSpeculation
     , takeToolSpeculation
-    , waitForToolSpeculation
     )
 import Agent.Tools.Types
     ( AppTool
@@ -120,7 +119,7 @@ main = do
                                 (newToolSpeculationRuntime [tool])
                                 closeToolSpeculationRuntime
                                 \runtime -> do
-                                    warmWorkspaceIndex runtime
+                                    warmWorkspaceIndex cache
                                     registry <- requireRegistry [tool]
                                     runBenchmark
                                         workloadArg
@@ -289,16 +288,8 @@ finishStream runtime itemId call = do
             }
     retainToolSpeculation runtime [call]
 
-warmWorkspaceIndex :: ToolSpeculationRuntime -> IO ()
-warmWorkspaceIndex runtime = do
-    observeToolArgumentEvent runtime $
-        outputItemAdded
-            (Just "benchmark-index-warmup")
-            (Just 0)
-            "benchmark-index-warmup"
-            ""
-    waitForToolSpeculation runtime
-    resetToolSpeculationRuntime runtime
+warmWorkspaceIndex :: ReadFileSpeculation -> IO ()
+warmWorkspaceIndex = waitForReadFileSpeculation
 
 measure :: IO Int -> IO Sample
 measure action = do

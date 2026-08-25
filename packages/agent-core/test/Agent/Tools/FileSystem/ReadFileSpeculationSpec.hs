@@ -89,7 +89,7 @@ spec = describe "read_file speculation" do
                     outputItemAdded itemId outputIndex callId ""
                 -- Let the session-scoped workspace index finish before
                 -- testing the incremental filename prediction itself.
-                waitForToolSpeculation runtime
+                waitForReadFileSpeculation cache
                 observeToolArgumentEvent runtime $
                     argumentsDelta
                         itemId
@@ -179,7 +179,7 @@ spec = describe "read_file speculation" do
                         "{\"target_file\":\"src/range-target.txt\",\"offset\":2,\"limit\":1}"
                 observeToolArgumentEvent runtime $
                     outputItemAdded itemId outputIndex callId ""
-                waitForToolSpeculation runtime
+                waitForReadFileSpeculation cache
                 observeToolArgumentEvent runtime $
                     argumentsDelta
                         itemId
@@ -260,6 +260,7 @@ spec = describe "read_file speculation" do
             observeToolArgumentEvent runtime $
                 argumentsDelta (Just "item-stale") (Just 0) arguments
             waitForToolSpeculation runtime
+            waitForReadFileSpeculation cache
             Text.writeFile path "new-content"
             retainRead runtime callId arguments
 
@@ -309,6 +310,48 @@ spec = describe "read_file speculation" do
 
             metrics <- readReadFileSpeculationMetrics cache
             metrics.speculativeReadsStarted `shouldBe` 4
+
+    it "releases speculative-read capacity after preparing a result" do
+        withSpeculation \dir env cache runtime -> do
+            forM_ [1 :: Int .. 4] \index -> do
+                let suffix = Text.pack (show index)
+                    target = "retained-" <> suffix <> ".txt"
+                    callId = "call-retained-" <> suffix
+                    itemId = Just ("item-retained-" <> suffix)
+                Text.writeFile (dir </> Text.unpack target) suffix
+                observeToolArgumentEvent runtime $
+                    outputItemAdded itemId (Just index) callId ""
+                observeToolArgumentEvent runtime $
+                    argumentsDelta
+                        itemId
+                        (Just index)
+                        (readArguments target)
+            waitForToolSpeculation runtime
+
+            dispatchRead
+                env
+                cache
+                runtime
+                "call-retained-1"
+                (readArguments "retained-1.txt")
+                `shouldReturn` "1→1"
+
+            Text.writeFile (dir </> "retained-5.txt") "5"
+            observeToolArgumentEvent runtime $
+                outputItemAdded
+                    (Just "item-retained-5")
+                    (Just 5)
+                    "call-retained-5"
+                    ""
+            observeToolArgumentEvent runtime $
+                argumentsDelta
+                    (Just "item-retained-5")
+                    (Just 5)
+                    (readArguments "retained-5.txt")
+            waitForToolSpeculation runtime
+
+            metrics <- readReadFileSpeculationMetrics cache
+            metrics.speculativeReadsStarted `shouldBe` 5
 
 withSpeculation
     :: (FilePath

@@ -17,8 +17,8 @@ import Agent.Tools.FileSystem.ReadFile.Internal
     )
 import Agent.Tools.FileSystem.ReadFileSpeculation
     ( ReadFileSpeculation
-    , readFileToolSpeculation
-    , readFileToolSpeculator
+    , readFileArgumentInterpreter
+    , readFileArgumentInterpreterWithCache
     )
 import Agent.Tools.IO (resolveForRead)
 import Agent.Tools.Scheduling
@@ -31,15 +31,15 @@ import Agent.Tools.Types
     , ToolEnv
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withToolArgumentInterpreter
     , withToolResourceClaims
-    , withToolSpeculation
     )
 import Data.Text (Text)
 
 readFileTool :: ToolEnv -> AppTool
 readFileTool env =
-    withToolSpeculation
-        (readFileToolSpeculator env)
+    withToolArgumentInterpreter
+        (readFileArgumentInterpreter env)
         (baseReadFileTool env)
 
 readFileToolWithSpeculation
@@ -50,8 +50,8 @@ readFileToolWithSpeculation env speculation =
     maybe
         (baseReadFileTool env)
         (\cache ->
-            withToolSpeculation
-                (readFileToolSpeculation cache)
+            withToolArgumentInterpreter
+                (readFileArgumentInterpreterWithCache cache)
                 (baseReadFileTool env))
         speculation
 

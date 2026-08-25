@@ -16,7 +16,7 @@ module Agent.Tools.Types
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
     , withToolResourceClaims
-    , withToolSpeculation
+    , withToolArgumentInterpreter
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -35,7 +35,7 @@ import Agent.ToolDispatch
     , ToolCallResult
     , ToolDispatchConfig
     , ToolHandler
-    , ToolSpeculator
+    , ToolArgumentInterpreterFactory
     , canonicalToolName
     , dispatchToolHandler
     , handlerName
@@ -90,7 +90,8 @@ data AppTool = AppTool
     , appToolApproval :: !ApprovalRule
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
-    , appToolSpeculator :: !(Maybe ToolSpeculator)
+    , appToolArgumentInterpreter
+        :: !(Maybe ToolArgumentInterpreterFactory)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -184,7 +185,7 @@ jsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 -- | Construct a JSON tool from an already-built JSON Schema value. Dynamic
@@ -217,7 +218,7 @@ rawJsonAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 withToolResourceClaims
@@ -227,14 +228,14 @@ withToolResourceClaims
 withToolResourceClaims resolver tool =
     tool { appToolResourceClaims = Just resolver }
 
--- | Attach an opt-in, best-effort streamed-argument speculator to a tool.
--- Speculators are consumed only after normal approval and scheduling.
-withToolSpeculation
-    :: ToolSpeculator
+-- | Attach an opt-in streamed-argument interpreter to a tool. Any prepared
+-- result is consumed only after normal approval and scheduling.
+withToolArgumentInterpreter
+    :: ToolArgumentInterpreterFactory
     -> AppTool
     -> AppTool
-withToolSpeculation speculator tool =
-    tool { appToolSpeculator = Just speculator }
+withToolArgumentInterpreter interpreter tool =
+    tool { appToolArgumentInterpreter = Just interpreter }
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool
@@ -263,7 +264,7 @@ freeformApplyPatchAppToolWithExecution
     , appToolApproval = approval
     , appToolExecution = execution
     , appToolResourceClaims = Nothing
-    , appToolSpeculator = Nothing
+    , appToolArgumentInterpreter = Nothing
     }
 
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry

@@ -20,6 +20,7 @@ import Agent.Tools.Speculation
     ( closeToolSpeculationRuntime
     , newToolSpeculationRuntime
     , takeToolSpeculation
+    , waitForToolSpeculation
     )
 import Agent.Tools.Types (defaultToolEnv)
 import Control.Exception (bracket)
@@ -513,6 +514,7 @@ spec = do
                                     , sequenceNumber = Nothing
                                     , eventExtraFields = KeyMap.empty
                                     }
+                                waitForToolSpeculation runtime
                                 waitForReadFileSpeculation cache
                                 pure $ Right $
                                     testResponse "resp-streamed" [finalCall]
@@ -578,6 +580,7 @@ spec = do
                                     , sequenceNumber = Nothing
                                     , eventExtraFields = KeyMap.empty
                                     }
+                                waitForToolSpeculation runtime
                                 waitForReadFileSpeculation cache
                                 pure $ Right $
                                     testResponse "resp-done" [finalCall]

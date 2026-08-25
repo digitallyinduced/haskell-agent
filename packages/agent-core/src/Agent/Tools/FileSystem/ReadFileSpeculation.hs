@@ -2,21 +2,21 @@ module Agent.Tools.FileSystem.ReadFileSpeculation
     ( ReadFileSpeculation
     , ReadFileSpeculationMetrics(..)
     , newReadFileSpeculation
-    , readFileToolSpeculator
-    , readFileToolSpeculation
+    , readFileArgumentInterpreter
+    , readFileArgumentInterpreterWithCache
     , closeReadFileSpeculation
-    , resetReadFileSpeculation
     , waitForReadFileSpeculation
     , readReadFileSpeculationMetrics
     ) where
 
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolDispatch
-    ( ActiveToolSpeculation(..)
+    ( PreparedToolResult
+    , ToolArgumentInterpreter
+    , ToolArgumentInterpreterFactory
+    , ToolArgumentStreamItem(..)
     , ToolArgumentUpdate(..)
     , ToolCall(..)
-    , ToolSpeculator(..)
-    , ToolSpeculatorSession(..)
     , canonicalToolName
     , decodeToolArguments
     , toolArgumentsValue
@@ -33,6 +33,7 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
+    , race
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -44,23 +45,26 @@ import Control.Concurrent.MVar
     )
 import Control.Exception (evaluate)
 import Control.Exception.Safe
-    ( mask
-    , onException
+    ( bracket
+    , mask
     , tryAny
     )
-import Control.Monad (forM_, guard, void)
+import Control.Monad (forM_, guard, void, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Acquire (mkAcquire)
 import Data.Char (isSpace)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
+    , modifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import qualified Data.Map.Strict as Map
-import Data.Maybe (catMaybes, fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -78,12 +82,9 @@ import System.Posix.Files
     )
 import System.Process (readProcessWithExitCode)
 
--- | A session-scoped cache for invisible, best-effort @read_file@ prefetches.
---
--- The WebSocket backend feeds streamed function-call events into this value.
--- The normal tool handler consumes a prefetched snapshot only after the model
--- response has completed and the loop has performed its usual approval and
--- resource scheduling.
+-- | Session-scoped resources shared by every @read_file@ argument
+-- interpreter. Per-call argument and candidate state lives inside the
+-- interpreter function rather than in this shared cache.
 data ReadFileSpeculation = ReadFileSpeculation
     { environment :: !ToolEnv
     , state :: !(MVar SpeculationState)
@@ -94,11 +95,12 @@ data SpeculationState = SpeculationState
     { closed :: !Bool
     , workspacePaths :: !(Maybe (Set.Set Text))
     , workspaceIndexTask :: !(Maybe (Async ()))
-    , nextCallKey :: !Int
-    , partialCalls :: !(Map.Map ReadCallKey PartialReadCall)
+    , nextTaskKey :: !Int
+    , activeTasks
+        :: !(Map.Map ReadTaskKey (Async (Maybe PrefetchedRead)))
     }
 
-newtype ReadCallKey = ReadCallKey Int
+newtype ReadTaskKey = ReadTaskKey Int
     deriving (Eq, Ord, Show)
 
 data PartialReadCall = PartialReadCall
@@ -108,6 +110,7 @@ data PartialReadCall = PartialReadCall
 
 data ReadCandidate = ReadCandidate
     { candidateArguments :: !ReadFileArgs
+    , candidateTaskKey :: !ReadTaskKey
     , candidateTask :: !(Async (Maybe PrefetchedRead))
     }
 
@@ -166,276 +169,197 @@ newReadFileSpeculation environment = do
         { closed = False
         , workspacePaths = Nothing
         , workspaceIndexTask = Nothing
-        , nextCallKey = 0
-        , partialCalls = Map.empty
+        , nextTaskKey = 0
+        , activeTasks = Map.empty
         }
     metrics <- newIORef emptyMetrics
     let speculation = ReadFileSpeculation { environment, state, metrics }
-    -- Build the filename index during session startup so a first read_file
-    -- call can be predicted from its earliest useful path prefix.
     startWorkspaceIndex speculation
     pure speculation
 
--- | Cancel and join every worker owned by this speculation cache.
+-- | Close the shared index and any speculative reads still registered with
+-- this session. Normally per-call owner cancellation releases the reads first.
 closeReadFileSpeculation :: ReadFileSpeculation -> IO ()
 closeReadFileSpeculation speculation = do
-    (indexTask, candidateTasks) <- modifyMVar speculation.state \current ->
-        pure
-            ( current
-                { closed = True
-                , workspaceIndexTask = Nothing
-                , partialCalls = Map.empty
-                }
-            , ( current.workspaceIndexTask
-              , map (.candidateTask) (activeCandidates current)
-              )
-            )
+    (indexTask, candidateTasks) <-
+        modifyMVar speculation.state \current ->
+            pure
+                ( current
+                    { closed = True
+                    , workspaceIndexTask = Nothing
+                    , activeTasks = Map.empty
+                    }
+                , (current.workspaceIndexTask, Map.elems current.activeTasks)
+                )
     forM_ indexTask cancelAndJoin
     cancelAndJoinAll candidateTasks
 
--- | Clear per-response predictions while retaining the workspace path index.
-resetReadFileSpeculation :: ReadFileSpeculation -> IO ()
-resetReadFileSpeculation speculation = do
-    tasks <- modifyMVar speculation.state \current ->
-        pure
-            ( current { partialCalls = Map.empty }
-            , map (.candidateTask) (activeCandidates current)
-            )
-    unlessNull tasks do
-        modifyMetrics speculation \current ->
-            current
-                { speculativeReadsCancelled =
-                    current.speculativeReadsCancelled + length tasks
-                }
-        cancelAndJoinAll tasks
-
--- | Registration-time factory. Opening it creates the session-scoped filename
--- index and shared speculative-read budget; each streamed call then receives
--- its own incremental parser state.
-readFileToolSpeculator :: ToolEnv -> ToolSpeculator
-readFileToolSpeculator environment =
-    ToolSpeculator $
-        readFileToolSpeculatorSession
-            <$> newReadFileSpeculation environment
+readFileArgumentInterpreter :: ToolEnv -> ToolArgumentInterpreterFactory
+readFileArgumentInterpreter environment =
+    runReadFileArgumentInterpreter
+        <$> mkAcquire
+            (newReadFileSpeculation environment)
+            closeReadFileSpeculation
 
 -- | Attach an already-created cache, primarily for tests and benchmarks.
-readFileToolSpeculation :: ReadFileSpeculation -> ToolSpeculator
-readFileToolSpeculation speculation =
-    ToolSpeculator (pure (readFileToolSpeculatorSession speculation))
-
-readFileToolSpeculatorSession
+readFileArgumentInterpreterWithCache
     :: ReadFileSpeculation
-    -> ToolSpeculatorSession
-readFileToolSpeculatorSession speculation = ToolSpeculatorSession
-    { startToolSpeculation = startReadFileCall speculation
-    , closeToolSpeculatorSession = closeReadFileSpeculation speculation
-    }
+    -> ToolArgumentInterpreterFactory
+readFileArgumentInterpreterWithCache speculation =
+    runReadFileArgumentInterpreter
+        <$> mkAcquire
+            (pure speculation)
+            closeReadFileSpeculation
 
-startReadFileCall
+runReadFileArgumentInterpreter
     :: ReadFileSpeculation
-    -> ToolCall
-    -> IO ActiveToolSpeculation
-startReadFileCall speculation call
+    -> ToolArgumentInterpreter
+runReadFileArgumentInterpreter speculation call source
     | canonicalToolName call.name /= "read_file" =
-        pure inertToolSpeculation
+        pure (const (pure Nothing))
     | otherwise = do
         startWorkspaceIndex speculation
-        (maybeCallKey, retired) <-
-            modifyMVar speculation.state \current ->
-                if current.closed
-                    then pure (current, (Nothing, []))
-                    else do
-                        let callKey = ReadCallKey current.nextCallKey
-                            inserted =
-                                current
-                                    { nextCallKey = current.nextCallKey + 1
-                                    , partialCalls =
-                                        Map.insert
-                                            callKey
-                                            PartialReadCall
-                                                { partialArguments =
-                                                    call.arguments
-                                                , partialCandidate = Nothing
-                                                }
-                                            current.partialCalls
-                                    }
-                        refreshCallCandidate speculation callKey inserted
-                            >>= \(updated, replaced) ->
-                                pure (updated, (Just callKey, replaced))
-        cancelRetiredCandidates speculation retired
-        pure $
-            maybe
-                inertToolSpeculation
-                (activeReadFileSpeculation speculation)
-                maybeCallKey
+        bracket
+            (newIORef PartialReadCall
+                { partialArguments = call.arguments
+                , partialCandidate = Nothing
+                })
+            (cleanupPartialCall speculation)
+            \partialRef -> do
+                refreshCallCandidate speculation partialRef
+                finalCall <-
+                    consumeArgumentStream
+                        speculation
+                        partialRef
+                        source
+                updatePartialArguments
+                    partialRef
+                    (ToolArgumentDoneUpdate finalCall.arguments)
+                partial <- readIORef partialRef
+                prepared <-
+                    prepareReadResult
+                        speculation
+                        finalCall
+                        partial.partialCandidate
+                writeIORef
+                    partialRef
+                    partial { partialCandidate = Nothing }
+                pure prepared
 
-activeReadFileSpeculation
+consumeArgumentStream
     :: ReadFileSpeculation
-    -> ReadCallKey
-    -> ActiveToolSpeculation
-activeReadFileSpeculation speculation callKey = ActiveToolSpeculation
-    { updateToolArguments =
-        updateReadFileArguments speculation callKey
-    , finalizeToolSpeculation =
-        finalizeReadFileCall speculation callKey
-    , takeToolSpeculatedResult =
-        takeSpeculatedReadCall speculation callKey
-    , cancelActiveToolSpeculation =
-        cancelReadFileCall speculation callKey
-    , waitActiveToolSpeculation =
-        waitForReadFileCall speculation callKey
-    }
+    -> IORef PartialReadCall
+    -> IO ToolArgumentStreamItem
+    -> IO ToolCall
+consumeArgumentStream speculation partialRef source =
+    awaitArgumentStreamItem speculation partialRef source >>= \case
+        ToolArgumentStreamUpdate update -> do
+            updatePartialArguments partialRef update
+            refreshCallCandidate speculation partialRef
+            consumeArgumentStream speculation partialRef source
+        ToolArgumentStreamFinal call -> pure call
 
-inertToolSpeculation :: ActiveToolSpeculation
-inertToolSpeculation = ActiveToolSpeculation
-    { updateToolArguments = \_ -> pure ()
-    , finalizeToolSpeculation = \_ -> pure ()
-    , takeToolSpeculatedResult = \_ -> pure Nothing
-    , cancelActiveToolSpeculation = pure ()
-    , waitActiveToolSpeculation = pure ()
-    }
-
-updateReadFileArguments
+awaitArgumentStreamItem
     :: ReadFileSpeculation
-    -> ReadCallKey
+    -> IORef PartialReadCall
+    -> IO ToolArgumentStreamItem
+    -> IO ToolArgumentStreamItem
+awaitArgumentStreamItem speculation partialRef source = do
+    partial <- readIORef partialRef
+    pendingIndex <- pendingWorkspaceIndex speculation partial
+    case pendingIndex of
+        Nothing -> source
+        Just indexTask ->
+            race (void (waitCatch indexTask)) source >>= \case
+                Left () -> do
+                    refreshCallCandidate speculation partialRef
+                    awaitArgumentStreamItem speculation partialRef source
+                Right item -> pure item
+
+pendingWorkspaceIndex
+    :: ReadFileSpeculation
+    -> PartialReadCall
+    -> IO (Maybe (Async ()))
+pendingWorkspaceIndex speculation partial
+    | not (isNothing partial.partialCandidate) = pure Nothing
+    | otherwise =
+        case targetFileProgress partial.partialArguments of
+            Just (TargetFilePrefix prefix)
+                | Text.length prefix >= minimumPredictionPrefix ->
+                    (.workspaceIndexTask)
+                        <$> readMVar speculation.state
+            _ -> pure Nothing
+
+updatePartialArguments
+    :: IORef PartialReadCall
     -> ToolArgumentUpdate
     -> IO ()
-updateReadFileArguments speculation callKey update = do
-    retired <- modifyMVar speculation.state \current ->
-        case Map.lookup callKey current.partialCalls of
-            Nothing -> pure (current, [])
-            Just partial
-                | current.closed -> pure (current, [])
-                | otherwise ->
-                    refreshCallCandidate speculation callKey $
-                        current
-                            { partialCalls =
-                                Map.insert
-                                    callKey
-                                    partial
-                                        { partialArguments =
-                                            applyArgumentUpdate
-                                                partial.partialArguments
-                                                update
-                                        }
-                                    current.partialCalls
-                            }
-    cancelRetiredCandidates speculation retired
+updatePartialArguments partialRef update =
+    modifyIORef' partialRef \partial ->
+        partial
+            { partialArguments =
+                applyArgumentUpdate partial.partialArguments update
+            }
 
 applyArgumentUpdate :: Text -> ToolArgumentUpdate -> Text
 applyArgumentUpdate current = \case
     ToolArgumentDeltaUpdate delta -> current <> delta
     ToolArgumentDoneUpdate arguments -> arguments
 
-finalizeReadFileCall
+cleanupPartialCall
     :: ReadFileSpeculation
-    -> ReadCallKey
-    -> ToolCall
+    -> IORef PartialReadCall
     -> IO ()
-finalizeReadFileCall speculation callKey call
-    | canonicalToolName call.name /= "read_file" =
-        cancelReadFileCall speculation callKey
-    | otherwise =
-        updateReadFileArguments
-            speculation
-            callKey
-            (ToolArgumentDoneUpdate call.arguments)
-
-cancelReadFileCall
-    :: ReadFileSpeculation
-    -> ReadCallKey
-    -> IO ()
-cancelReadFileCall speculation callKey = do
-    tasks <- modifyMVar speculation.state \current ->
-        let selected =
-                Map.lookup callKey current.partialCalls
-                    >>= (.partialCandidate)
-            updated =
-                current
-                    { partialCalls =
-                        Map.delete callKey current.partialCalls
-                    }
-        in pure
-            ( updated
-            , maybe [] (pure . (.candidateTask)) selected
-            )
-    recordCancelledTasks speculation tasks
-    cancelAndJoinAll tasks
-
-waitForReadFileCall
-    :: ReadFileSpeculation
-    -> ReadCallKey
-    -> IO ()
-waitForReadFileCall speculation callKey = do
-    initial <- readMVar speculation.state
-    forM_ initial.workspaceIndexTask (void . waitCatch)
-    current <- readMVar speculation.state
-    forM_
-        (Map.lookup callKey current.partialCalls
-            >>= (.partialCandidate))
-        (void . waitCatch . (.candidateTask))
+cleanupPartialCall speculation partialRef =
+    readIORef partialRef
+        >>= mapM_
+            (cancelReadCandidate speculation)
+            . (.partialCandidate)
 
 refreshCallCandidate
     :: ReadFileSpeculation
-    -> ReadCallKey
-    -> SpeculationState
-    -> IO (SpeculationState, [Async (Maybe PrefetchedRead)])
-refreshCallCandidate speculation callKey current =
-    case Map.lookup callKey current.partialCalls of
-        Nothing -> pure (current, [])
-        Just partial -> do
-            let progress = targetFileProgress partial.partialArguments
-            let desired = desiredCandidate current partial progress
-            case (partial.partialCandidate, desired) of
-                (Just existing, Just (arguments, _))
-                    -- The prefetch stores the complete raw file contents.
-                    -- Later offset/limit fields only change formatting, so
-                    -- keep the existing read whenever the target is stable.
-                    | existing.candidateArguments.targetFile
-                        == arguments.targetFile ->
-                        pure (current, [])
-                (Just existing, Nothing)
-                    | candidateStillMatches
-                        progress
-                        existing.candidateArguments.targetFile ->
-                        pure (current, [])
-                (existing, next) -> do
-                    let atCapacity =
-                            isNothing existing
-                                && length (activeCandidates current)
-                                    >= maximumConcurrentSpeculativeReads
-                    nextCandidate <-
-                        if atCapacity
-                            then pure Nothing
-                            else traverse
-                                (\(arguments, kind) -> do
-                                    worker <-
-                                        startPrefetch speculation arguments
-                                    modifyMetrics
-                                        speculation
-                                        (recordStart kind)
-                                    pure ReadCandidate
-                                        { candidateArguments = arguments
-                                        , candidateTask = worker
-                                        })
-                                next
-                    pure
-                        ( current
-                            { partialCalls =
-                                Map.insert
-                                    callKey
-                                    partial
-                                        { partialCandidate = nextCandidate }
-                                    current.partialCalls
-                            }
-                        , maybe
-                            []
-                            (pure . (.candidateTask))
-                            existing
-                        )
+    -> IORef PartialReadCall
+    -> IO ()
+refreshCallCandidate speculation partialRef = mask \_ -> do
+    partial <- readIORef partialRef
+    current <- readMVar speculation.state
+    let progress = targetFileProgress partial.partialArguments
+        desired =
+            desiredCandidate
+                current.workspacePaths
+                partial
+                progress
+    case (partial.partialCandidate, desired) of
+        (Just existing, Just (arguments, _))
+            -- The prefetch stores complete raw file contents. Later
+            -- offset/limit fields only change formatting.
+            | existing.candidateArguments.targetFile
+                == arguments.targetFile ->
+                pure ()
+        (Just existing, Nothing)
+            | candidateStillMatches
+                progress
+                existing.candidateArguments.targetFile ->
+                pure ()
+        (existing, next) -> do
+            writeIORef
+                partialRef
+                partial { partialCandidate = Nothing }
+            forM_ existing (cancelReadCandidate speculation)
+            nextCandidate <-
+                case next of
+                    Nothing -> pure Nothing
+                    Just (arguments, kind) ->
+                        startReadCandidate
+                            speculation
+                            arguments
+                            kind
+            writeIORef
+                partialRef
+                partial { partialCandidate = nextCandidate }
 
 desiredCandidate
-    :: SpeculationState
+    :: Maybe (Set.Set Text)
     -> PartialReadCall
     -> Maybe TargetFileProgress
     -> Maybe (ReadFileArgs, PredictionKind)
@@ -449,10 +373,11 @@ desiredCandidate _ partial (Just (TargetFileComplete target))
                 (decodeReadFileArgs partial.partialArguments)
             , CompletePrediction
             )
-desiredCandidate current partial
+desiredCandidate workspacePaths partial
         (Just progress@(TargetFilePrefix prefix))
     | Text.length prefix < minimumPredictionPrefix = Nothing
-    | candidateStillMatches (Just progress)
+    | candidateStillMatches
+        (Just progress)
         (maybe
             ""
             ((.targetFile) . (.candidateArguments))
@@ -460,13 +385,12 @@ desiredCandidate current partial
             (\candidate ->
                 (candidate.candidateArguments, PrefixPrediction))
                 <$> partial.partialCandidate
-    | otherwise = case current.workspacePaths of
-        Just paths ->
+    | otherwise =
+        workspacePaths >>= \paths ->
             fmap
                 (\target ->
                     (defaultReadFileArgs target, PrefixPrediction))
                 (uniqueWorkspaceCandidate prefix paths)
-        Nothing -> Nothing
 
 candidateStillMatches :: Maybe TargetFileProgress -> Text -> Bool
 candidateStillMatches progress candidateTarget =
@@ -493,6 +417,74 @@ uniqueWorkspaceCandidate prefix paths
             (rest, ("./" <>))
         | otherwise = (prefix, id)
 
+startReadCandidate
+    :: ReadFileSpeculation
+    -> ReadFileArgs
+    -> PredictionKind
+    -> IO (Maybe ReadCandidate)
+startReadCandidate speculation arguments kind = mask \_ -> do
+    candidate <-
+        modifyMVar speculation.state \current ->
+            if current.closed
+                || Map.size current.activeTasks
+                    >= maximumConcurrentSpeculativeReads
+                then pure (current, Nothing)
+                else do
+                    let taskKey = ReadTaskKey current.nextTaskKey
+                    worker <-
+                        asyncWithUnmask \restore ->
+                            restore
+                                (prefetchRead
+                                    speculation.environment
+                                    arguments)
+                    pure
+                        ( current
+                            { nextTaskKey = current.nextTaskKey + 1
+                            , activeTasks =
+                                Map.insert
+                                    taskKey
+                                    worker
+                                    current.activeTasks
+                            }
+                        , Just ReadCandidate
+                            { candidateArguments = arguments
+                            , candidateTaskKey = taskKey
+                            , candidateTask = worker
+                            }
+                        )
+    forM_ candidate \_ ->
+        modifyMetrics speculation (recordStart kind)
+    pure candidate
+
+releaseReadTask :: ReadFileSpeculation -> ReadTaskKey -> IO Bool
+releaseReadTask speculation taskKey =
+    modifyMVar speculation.state \current ->
+        let existed = Map.member taskKey current.activeTasks
+        in pure
+            ( current
+                { activeTasks =
+                    Map.delete taskKey current.activeTasks
+                }
+            , existed
+            )
+
+cancelReadCandidate
+    :: ReadFileSpeculation
+    -> ReadCandidate
+    -> IO ()
+cancelReadCandidate speculation candidate = do
+    released <-
+        releaseReadTask
+            speculation
+            candidate.candidateTaskKey
+    when released $
+        modifyMetrics speculation \current ->
+            current
+                { speculativeReadsCancelled =
+                    current.speculativeReadsCancelled + 1
+                }
+    cancelAndJoin candidate.candidateTask
+
 startWorkspaceIndex :: ReadFileSpeculation -> IO ()
 startWorkspaceIndex speculation =
     modifyMVar_ speculation.state \current ->
@@ -505,23 +497,14 @@ startWorkspaceIndex speculation =
             _ -> pure current
 
 installWorkspaceIndex :: ReadFileSpeculation -> Set.Set Text -> IO ()
-installWorkspaceIndex speculation paths = do
-    retired <- modifyMVar speculation.state \current ->
+installWorkspaceIndex speculation paths =
+    modifyMVar_ speculation.state \current ->
         if current.closed
-            then pure (current, [])
-            else do
-                let indexed = current
-                        { workspacePaths = Just paths
-                        , workspaceIndexTask = Nothing
-                        }
-                foldRefresh indexed [] (Map.keys indexed.partialCalls)
-    cancelRetiredCandidates speculation retired
-  where
-    foldRefresh current retired [] = pure (current, retired)
-    foldRefresh current retired (itemId : rest) =
-        refreshCallCandidate speculation itemId current
-            >>= \(next, newlyRetired) ->
-                foldRefresh next (retired <> newlyRetired) rest
+            then pure current
+            else pure current
+                { workspacePaths = Just paths
+                , workspaceIndexTask = Nothing
+                }
 
 workspaceFileIndex :: ToolEnv -> IO (Set.Set Text)
 workspaceFileIndex environment = do
@@ -541,14 +524,6 @@ workspaceFileIndex environment = do
         Right (ExitSuccess, output, _) ->
             filter (not . Text.null) (Text.splitOn "\0" (Text.pack output))
         _ -> []
-
-startPrefetch
-    :: ReadFileSpeculation
-    -> ReadFileArgs
-    -> IO (Async (Maybe PrefetchedRead))
-startPrefetch speculation arguments =
-    asyncWithUnmask \restore ->
-        restore (prefetchRead speculation.environment arguments)
 
 prefetchRead :: ToolEnv -> ReadFileArgs -> IO (Maybe PrefetchedRead)
 prefetchRead environment arguments
@@ -588,116 +563,134 @@ prefetchRead environment arguments
         Left err -> forceText err
         Right output -> forceText output
 
--- | Consume a matching, fresh prefetch for the finalized tool call.
---
--- A miss leaves the normal @read_file@ handler responsible for all work.
-takeSpeculatedReadCall
+prepareReadResult
     :: ReadFileSpeculation
-    -> ReadCallKey
     -> ToolCall
-    -> IO (Maybe (Either Text Text))
-takeSpeculatedReadCall speculation callKey call
-    | canonicalToolName call.name /= "read_file" =
-        cancelReadFileCall speculation callKey >> pure Nothing
-    | otherwise = mask \restore -> do
-        selected <- modifyMVar speculation.state \current ->
-            let candidate =
-                    Map.lookup callKey current.partialCalls
-                        >>= (.partialCandidate)
-            in pure
-                ( current
-                    { partialCalls =
-                        Map.delete callKey current.partialCalls
-                    }
-                , candidate
-                )
-        case selected of
-            Nothing -> miss speculation >> pure Nothing
-            Just candidate ->
-                restore (consumeCandidate candidate)
-                    `onException` cancelAndJoin candidate.candidateTask
+    -> Maybe ReadCandidate
+    -> IO PreparedToolResult
+prepareReadResult speculation finalCall candidate
+    | canonicalToolName finalCall.name /= "read_file" = do
+        forM_ candidate (cancelReadCandidate speculation)
+        pure (missPreparedResult speculation)
+    | otherwise =
+        case candidate of
+            Nothing -> pure (missPreparedResult speculation)
+            Just selected ->
+                prepareCandidate selected
   where
-    consumeCandidate candidate =
+    prepareCandidate :: ReadCandidate -> IO PreparedToolResult
+    prepareCandidate selected =
+        case decodeFinalArguments finalCall of
+            Left _ -> cancelMiss selected
+            Right finalArguments ->
+                resolveForRead
+                    speculation.environment
+                    (fromText finalArguments.targetFile) >>= \case
+                        Left _ -> cancelMiss selected
+                        Right finalPath ->
+                            waitCatch selected.candidateTask >>= \case
+                                Left _ -> do
+                                    releaseCandidate selected
+                                    pure (missPreparedResult speculation)
+                                Right Nothing -> do
+                                    releaseCandidate selected
+                                    pure (missPreparedResult speculation)
+                                Right (Just prefetched)
+                                    | equalFilePath
+                                        finalPath
+                                        prefetched.prefetchedResolvedPath -> do
+                                            releaseCandidate selected
+                                            pure $
+                                                consumePrefetchedRead
+                                                    speculation
+                                                    prefetched
+                                    | otherwise ->
+                                        cancelMiss selected
+
+    cancelMiss :: ReadCandidate -> IO PreparedToolResult
+    cancelMiss selected = do
+        cancelReadCandidate speculation selected
+        pure (missPreparedResult speculation)
+
+    releaseCandidate :: ReadCandidate -> IO ()
+    releaseCandidate selected =
+        void $
+            releaseReadTask
+                speculation
+                selected.candidateTaskKey
+
+consumePrefetchedRead
+    :: ReadFileSpeculation
+    -> PrefetchedRead
+    -> PreparedToolResult
+consumePrefetchedRead speculation prefetched call
+    | canonicalToolName call.name /= "read_file" =
+        missPreparedResult speculation call
+    | otherwise =
         case decodeFinalArguments call of
-            Left _ -> cancelMiss candidate
-            Right finalArguments -> do
-                finalResolved <-
-                    resolveForRead
-                        speculation.environment
-                        (fromText finalArguments.targetFile)
-                case finalResolved of
-                    Left _ -> cancelMiss candidate
-                    Right finalPath ->
-                        waitAndCheck
-                            candidate
-                            finalArguments
-                            finalPath
+            Left _ -> missPreparedResult speculation call
+            Right finalArguments ->
+                resolveForRead
+                    speculation.environment
+                    (fromText finalArguments.targetFile) >>= \case
+                        Left _ -> missPreparedResult speculation call
+                        Right finalPath
+                            | not
+                                (equalFilePath
+                                    finalPath
+                                    prefetched.prefetchedResolvedPath) ->
+                                missPreparedResult speculation call
+                            | otherwise ->
+                                fileFingerprint finalPath >>= \case
+                                    Just current
+                                        | current
+                                            == prefetched.prefetchedFingerprint -> do
+                                                modifyMetrics
+                                                    speculation
+                                                    \metrics ->
+                                                        metrics
+                                                            { speculativeReadHits =
+                                                                metrics.speculativeReadHits
+                                                                    + 1
+                                                            }
+                                                pure . Just $
+                                                    if
+                                                        prefetched.prefetchedArguments
+                                                            == finalArguments
+                                                        then
+                                                            prefetched.prefetchedOutput
+                                                        else
+                                                            formatReadFileContent
+                                                                prefetched.prefetchedContent
+                                                                finalArguments
+                                    _ -> do
+                                        modifyMetrics speculation \metrics ->
+                                            metrics
+                                                { speculativeReadStale =
+                                                    metrics.speculativeReadStale
+                                                        + 1
+                                                }
+                                        missPreparedResult speculation call
 
-    decodeFinalArguments :: ToolCall -> Either Text ReadFileArgs
-    decodeFinalArguments finalCall =
-        decodeToolArguments
-            (toolArgumentsValue finalCall.arguments)
+decodeFinalArguments :: ToolCall -> Either Text ReadFileArgs
+decodeFinalArguments call =
+    decodeToolArguments (toolArgumentsValue call.arguments)
 
-    cancelMiss :: ReadCandidate -> IO (Maybe (Either Text Text))
-    cancelMiss candidate = do
-        cancelAndJoin candidate.candidateTask
-        modifyMetrics speculation \metrics ->
-            metrics
-                { speculativeReadsCancelled =
-                    metrics.speculativeReadsCancelled + 1
-                }
-        miss speculation
-        pure Nothing
-
-    waitAndCheck
-        :: ReadCandidate
-        -> ReadFileArgs
-        -> OsPath
-        -> IO (Maybe (Either Text Text))
-    waitAndCheck candidate finalArguments finalPath =
-        waitCatch candidate.candidateTask >>= \case
-            Left _ -> miss speculation >> pure Nothing
-            Right Nothing -> miss speculation >> pure Nothing
-            Right (Just prefetched)
-                | not
-                    (equalFilePath
-                        finalPath
-                        prefetched.prefetchedResolvedPath) ->
-                    miss speculation >> pure Nothing
-                | otherwise ->
-                    fileFingerprint finalPath >>= \case
-                        Just current
-                            | current == prefetched.prefetchedFingerprint -> do
-                                modifyMetrics speculation \metrics ->
-                                    metrics
-                                        { speculativeReadHits =
-                                            metrics.speculativeReadHits + 1
-                                        }
-                                pure . Just $
-                                    if prefetched.prefetchedArguments
-                                            == finalArguments
-                                        then prefetched.prefetchedOutput
-                                        else
-                                            formatReadFileContent
-                                                prefetched.prefetchedContent
-                                                finalArguments
-                        _ -> do
-                            modifyMetrics speculation \metrics ->
-                                metrics
-                                    { speculativeReadStale =
-                                        metrics.speculativeReadStale + 1
-                                    }
-                            miss speculation
-                            pure Nothing
+missPreparedResult :: ReadFileSpeculation -> PreparedToolResult
+missPreparedResult speculation _ = do
+    modifyMetrics speculation \metrics ->
+        metrics
+            { speculativeReadMisses =
+                metrics.speculativeReadMisses + 1
+            }
+    pure Nothing
 
 waitForReadFileSpeculation :: ReadFileSpeculation -> IO ()
 waitForReadFileSpeculation speculation = do
     initial <- readMVar speculation.state
     forM_ initial.workspaceIndexTask (void . waitCatch)
     current <- readMVar speculation.state
-    forM_
-        (activeCandidates current)
-        (void . waitCatch . (.candidateTask))
+    forM_ (Map.elems current.activeTasks) (void . waitCatch)
 
 readReadFileSpeculationMetrics
     :: ReadFileSpeculation
@@ -807,32 +800,6 @@ decodeJsonString raw =
         Text.encodeUtf8 $
             "\"" <> Text.pack raw <> "\""
 
-activeCandidates :: SpeculationState -> [ReadCandidate]
-activeCandidates = activeCandidatesFor . (.partialCalls)
-
-activeCandidatesFor
-    :: Map.Map ReadCallKey PartialReadCall
-    -> [ReadCandidate]
-activeCandidatesFor =
-    catMaybes . map (.partialCandidate) . Map.elems
-
-recordCancelledTasks :: ReadFileSpeculation -> [Async a] -> IO ()
-recordCancelledTasks speculation tasks =
-    unlessNull tasks $
-        modifyMetrics speculation \current ->
-            current
-                { speculativeReadsCancelled =
-                    current.speculativeReadsCancelled + length tasks
-                }
-
-cancelRetiredCandidates
-    :: ReadFileSpeculation
-    -> [Async (Maybe PrefetchedRead)]
-    -> IO ()
-cancelRetiredCandidates speculation tasks = do
-    recordCancelledTasks speculation tasks
-    cancelAndJoinAll tasks
-
 recordStart
     :: PredictionKind
     -> ReadFileSpeculationMetrics
@@ -854,14 +821,6 @@ recordStart kind metrics =
                     metrics.speculativeCompletePredictions + 1
                 }
 
-miss :: ReadFileSpeculation -> IO ()
-miss speculation =
-    modifyMetrics speculation \metrics ->
-        metrics
-            { speculativeReadMisses =
-                metrics.speculativeReadMisses + 1
-            }
-
 modifyMetrics
     :: ReadFileSpeculation
     -> (ReadFileSpeculationMetrics -> ReadFileSpeculationMetrics)
@@ -877,10 +836,6 @@ cancelAndJoin :: Async a -> IO ()
 cancelAndJoin worker = do
     cancel worker
     void (waitCatch worker)
-
-unlessNull :: [a] -> IO () -> IO ()
-unlessNull values action =
-    if null values then pure () else action
 
 minimumPredictionPrefix :: Int
 minimumPredictionPrefix = 4

@@ -1,6 +1,7 @@
 module Agent.ResourceScopeSpec (spec) where
 
 import Agent.ResourceScope
+import Data.Acquire (mkAcquire)
 import Data.IORef
 import Test.Hspec
 
@@ -20,6 +21,20 @@ spec = describe "Agent.ResourceScope" do
         key <- registerResource scope $
             atomicModifyIORef' releases \n -> (n + 1, ())
         releaseResource key
+        releaseResource key
+        closeResourceScope scope
+        readIORef releases `shouldReturn` 1
+
+    it "owns Acquire values until explicit release" do
+        releases <- newIORef (0 :: Int)
+        scope <- newResourceScope
+        (key, value) <-
+            allocateAcquireResource scope $
+                mkAcquire
+                    (pure ("value" :: String))
+                    (\_ -> atomicModifyIORef' releases \n -> (n + 1, ()))
+        value `shouldBe` "value"
+        readIORef releases `shouldReturn` 0
         releaseResource key
         closeResourceScope scope
         readIORef releases `shouldReturn` 1
