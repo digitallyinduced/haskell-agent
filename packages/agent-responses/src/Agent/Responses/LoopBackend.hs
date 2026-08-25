@@ -478,6 +478,8 @@ streamOutputObserved event = case event of
         responseFragmentHasOutput responseValue
     ResponseOutputItemAddedEvent{} -> True
     ResponseOutputItemDoneEvent{} -> True
+    ResponseFunctionCallArgumentsDeltaEvent{} -> True
+    ResponseFunctionCallArgumentsDoneEvent{} -> True
     ResponseCustomToolInputDeltaEvent{} -> True
     ResponseCustomToolInputDoneEvent{} -> True
     ResponseReasoningSummaryPartAddedEvent{} -> True
