@@ -1,5 +1,11 @@
 module Agent.GrokBuild.DialectSpec (spec) where
 
+import Agent.GrokBuild.Dialect.Shell
+    ( GrokSession(..)
+    , PersistentShell(..)
+    , closeGrokSession
+    , newGrokSession
+    )
 import Agent.GrokBuild.Dialect.ProjectInstructions (formatGrokAgentsMd)
 import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
@@ -11,16 +17,19 @@ import Agent.GrokBuild.Dialect.Runtime
     )
 import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
+import Agent.OsPath (unsafeToFilePath)
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
+import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket)
+import Data.Bits ((.&.))
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
-import System.FilePath ((</>))
+import System.Directory (doesFileExist)
+import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
-import System.Posix.Temp (mkdtemp)
+import System.Posix.Files (fileMode, getFileStatus)
 import Test.Hspec
 
 spec :: Spec
@@ -64,6 +73,19 @@ spec = describe "Grok Build dialect" do
             names `shouldNotContain` ["shell_command", "apply_patch"]
             coding.grokClose
 
+    it "owns a private temporary shell environment file until session close" do
+        path <- withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            bracket (newGrokSession env) closeGrokSession \session -> do
+                shell <- readMVar session.grokShell
+                let path = unsafeToFilePath shell.shellEnvFile
+                doesFileExist path `shouldReturn` True
+                mode <- fileMode <$> getFileStatus path
+                mode .&. 0o777 `shouldBe` 0o600
+                pure path
+        doesFileExist path `shouldReturn` False
+        doesFileExist (path <> ".cwd") `shouldReturn` False
+
     it "formats and neutralizes project instruction reminders" do
         let loaded = LoadedAgentsMd
                 { loadedGlobal = Nothing
@@ -81,9 +103,4 @@ spec = describe "Grok Build dialect" do
             Nothing -> expectationFailure "expected rendered instructions"
 
 withTempDir :: (FilePath -> IO a) -> IO a
-withTempDir action = do
-    tmp <- getTemporaryDirectory
-    bracket
-        (mkdtemp (tmp </> "agent-grok-build-dialect-XXXXXX"))
-        removeDirectoryRecursive
-        action
+withTempDir = withSystemTempDirectory "agent-grok-build-dialect"

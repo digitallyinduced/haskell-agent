@@ -73,7 +73,6 @@ import Agent.CLI.Style
     , roleWarn
     , terminalGreen
     , terminalRed
-    , terminalYellow
     , motionGlyphSet
     , style
     )
@@ -82,14 +81,9 @@ import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
     , SearchReplaceLine(..)
-    , TodoDisplayLine(..)
-    , TodoDisplayStatus(..)
     , formatToolOutput
     , parseSearchReplaceDiff
-    , parseTodoList
     , summarizeToolCall
-    , todoCallPreview
-    , todoStatusGlyph
     , toolDetail
     )
 import Agent.ToolDispatch
@@ -536,10 +530,11 @@ renderEventUnlocked config = \case
         commitThinkingUnlocked config
         modifyIORef' config.renderToolCalls (Map.insert call.callId call)
         writeIORef config.renderActivityRef (summarizeToolCall call)
-        putTextLn config.renderStderr (formatToolStarted config.renderColor call)
-        let extra = formatToolBody config.renderColor call
-        unless (Text.null extra) do
-            putTextLn config.renderStderr extra
+        unless (isTodoTool call.name) do
+            putTextLn config.renderStderr (formatToolStarted config.renderColor call)
+            let extra = formatToolBody config.renderColor call
+            unless (Text.null extra) do
+                putTextLn config.renderStderr extra
         when config.renderShowThinking do
             visible <- readIORef config.renderThinkingVisible
             if visible
@@ -559,11 +554,15 @@ renderEventUnlocked config = \case
                 maybeCall
             painted = case maybeCall of
                 Just call
-                    | canonicalToolName call.name `elem` ["todo_write", "update_plan"] ->
-                        formatTodoOutput config.renderColor formatted
+                    | isTodoTool call.name -> Nothing
                 _ ->
-                    roleToolOutput config.renderColor (truncateToolOutput formatted)
-        putTextLn config.renderStderr painted
+                    Just
+                        (roleToolOutput
+                            config.renderColor
+                            (truncateToolOutput formatted))
+        case painted of
+            Nothing -> pure ()
+            Just line -> putTextLn config.renderStderr line
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -960,47 +959,14 @@ toolChrome name = case canonicalToolName name of
     "skill_rollback" -> ToolChrome "Restored skill" ToolDetailMuted
     _ -> ToolChrome name ToolDetailMuted
 
+isTodoTool :: Text -> Bool
+isTodoTool name =
+    canonicalToolName name `elem` ["todo_write", "update_plan"]
+
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case canonicalToolName call.name of
     "search_replace" -> formatSearchReplaceDiff color call.arguments
-    "todo_write" -> formatTodoPreview color call
-    "update_plan" -> formatTodoPreview color call
     _ -> ""
-
-formatTodoPreview :: Bool -> ToolCall -> Text
-formatTodoPreview color call =
-    let preview = todoCallPreview call
-    in if Text.null preview
-        then ""
-        else paintTodoLine color (TodoDisplayLine TodoDisplayPending preview)
-
-formatTodoOutput :: Bool -> Text -> Text
-formatTodoOutput color output =
-    let parsed = parseTodoList output
-        shown = take 3 parsed
-        hidden = length parsed - length shown
-        rows = map (paintTodoLine color) shown
-        overflow
-            | hidden > 0 =
-                [ glyphToolAccent
-                    <> glyphToolOut
-                    <> roleMuted color
-                        ("… +" <> Text.pack (show hidden) <> " lines")
-                ]
-            | otherwise = []
-    in Text.intercalate "\n" (rows <> overflow)
-
-paintTodoLine :: Bool -> TodoDisplayLine -> Text
-paintTodoLine color line =
-    let glyph = todoStatusGlyph line.todoLineStatus
-        body = glyph <> " " <> line.todoLineText
-        painted = case line.todoLineStatus of
-            TodoDisplayPending -> roleMuted color body
-            TodoDisplayInProgress ->
-                style color [terminalYellow] body
-            TodoDisplayCompleted -> roleSuccess color body
-            TodoDisplayCancelled -> roleMuted color body
-    in glyphToolAccent <> glyphToolOut <> painted
 
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text

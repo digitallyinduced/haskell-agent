@@ -25,6 +25,7 @@ module Agent.Subagents.Registry
     , spawnSubagentAtForTurn
     , spawnSubagentAtPreparedForTurn
     , spawnSubagentAtWithCwdPrepared
+    , spawnSubagentAtWithCwdPreparedForTurn
     , restoreSubagent
     , restoreSubagentAt
     , restoreSubagentAtStatus

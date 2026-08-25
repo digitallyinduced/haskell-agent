@@ -230,6 +230,7 @@ spec = describe "schemasFromAppTools" do
             \registry -> do
                 let context = MultiAgentContext
                         { multiRegistry = registry
+                        , multiCwd = unsafeEncodeUtf "/tmp"
                         , multiSelfId = Nothing
                         , multiDepth = 0
                         , multiTaskPath = taskPathRoot

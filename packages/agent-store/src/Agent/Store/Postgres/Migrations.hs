@@ -135,7 +135,14 @@ coreMigrations =
         { migrationVersion = 7
         , migrationName = "session recap summaries"
         , migrationStatements =
-            [ addSessionRecapColumnsStatement ]
+            [ "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS last_recap text"
+            , "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS last_turn_summary text"
+            , "ALTER TABLE IF EXISTS harness.sessions\
+              \ ADD COLUMN IF NOT EXISTS last_recap_main_turns\
+              \ bigint NOT NULL DEFAULT 0"
+            ]
         }
     ]
 
@@ -205,24 +212,6 @@ migrateToolOutputsToTextStatement =
     \       ADD COLUMN IF NOT EXISTS\
     \         output_kind text NOT NULL DEFAULT 'encoded'\
     \       CHECK (output_kind IN ('text', 'encoded'));\
-    \   END IF;\
-    \ END\
-    \ $ha$"
-
--- Partial upgrade fixtures may not have created harness.sessions yet.
--- Skip the recap columns until a later migration recreates that table.
-addSessionRecapColumnsStatement :: ByteString
-addSessionRecapColumnsStatement =
-    "DO $ha$\
-    \ BEGIN\
-    \   IF to_regclass('harness.sessions') IS NOT NULL THEN\
-    \     ALTER TABLE harness.sessions\
-    \       ADD COLUMN IF NOT EXISTS last_recap text;\
-    \     ALTER TABLE harness.sessions\
-    \       ADD COLUMN IF NOT EXISTS last_turn_summary text;\
-    \     ALTER TABLE harness.sessions\
-    \       ADD COLUMN IF NOT EXISTS last_recap_main_turns\
-    \         bigint NOT NULL DEFAULT 0;\
     \   END IF;\
     \ END\
     \ $ha$"

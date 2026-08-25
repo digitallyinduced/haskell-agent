@@ -114,6 +114,7 @@ data AppEvent
     | AppSetModelIds ![Text]
       -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)

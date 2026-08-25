@@ -70,13 +70,8 @@ import Data.Time
     , addUTCTime
     , fromGregorian
     )
-import System.Directory
-    ( getTemporaryDirectory
-    , removeDirectoryRecursive
-    )
-import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
-import System.Posix.Temp (mkdtemp)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -508,6 +503,7 @@ call tools name arguments =
 
 rootContext registry = MultiAgentContext
     registry
+    (unsafeEncodeUtf "/tmp")
     Nothing
     0
     taskPathRoot
@@ -520,6 +516,7 @@ rootContext registry = MultiAgentContext
 
 childContext registry = MultiAgentContext
     registry
+    (unsafeEncodeUtf "/tmp")
     (Just (SubagentId "agent-parent"))
     1
     taskPathRoot
@@ -561,9 +558,4 @@ fake name = AppTool
     }
 
 withTempDir :: (FilePath -> IO a) -> IO a
-withTempDir action = do
-    tmp <- getTemporaryDirectory
-    bracket
-        (mkdtemp (tmp </> "agent-grok-runtime-XXXXXX"))
-        removeDirectoryRecursive
-        action
+withTempDir = withSystemTempDirectory "agent-grok-runtime"

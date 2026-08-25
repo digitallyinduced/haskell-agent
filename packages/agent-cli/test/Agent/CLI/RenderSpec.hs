@@ -185,14 +185,14 @@ spec = do
                 `shouldSatisfy` Text.isInfixOf "delete src/Old.hs"
 
     describe "formatToolBody" do
-        it "previews the first todo_write item while the call is running" do
+        it "does not dump todo_write arguments into linear chrome" do
             formatToolBody False
                 (functionToolCall
                     "c1"
                     "todo_write"
                     "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\"},\
                     \{\"id\":\"2\",\"content\":\"Investigate Codex\"}]}")
-                `shouldBe` "❙ ┊ □ Find and clone repos"
+                `shouldBe` ""
 
     describe "formatLoopError" do
         it "explains a max-turn stop" do
@@ -589,7 +589,7 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "ok"
 
-        it "renders completed todo_write checklists with truncation" do
+        it "suppresses todo_write from linear scrollback" do
             withRenderConfig False False \config handle path -> do
                 let call =
                         functionToolCall
@@ -601,16 +601,13 @@ spec = do
                     { callId = "c1"
                     , output =
                         "- [completed] 1: Find and clone Grok Build and Codex repos\n\
-                        \- [completed] 2: Investigate how Grok Build summarizes completed sessions in TUI\n\
-                        \- [completed] 3: Investigate how Codex summarizes completed sessions in TUI\n\
-                        \- [pending] 4: Implement matching chrome"
+                        \- [pending] 2: Investigate Codex"
                     , callKind = FunctionCallKind
                     })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` Text.isInfixOf "◆ todo_write"
-                body `shouldSatisfy` Text.isInfixOf "✓ Find and clone Grok Build and Codex repos"
-                body `shouldSatisfy` Text.isInfixOf "… +1 lines"
+                body `shouldNotSatisfy` Text.isInfixOf "todo_write"
+                body `shouldNotSatisfy` Text.isInfixOf "Find and clone"
                 body `shouldNotSatisfy` Text.isInfixOf "[completed]"
 
         it "keeps thinking plain when color is off" do
