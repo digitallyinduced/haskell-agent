@@ -49,6 +49,7 @@ library
                     , Agent.Store.Postgres.Skill
     other-modules:    Agent.Store.Custom.QueryResult
                     , Agent.Store.Postgres.Custom.Sql
+                    , Agent.Store.Postgres.Custom.Types
                     , Agent.Store.Postgres.Skill.Types
                     , Agent.Store.Postgres.Session.Types
                     , Agent.Store.Postgres.Hasql
