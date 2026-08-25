@@ -54,22 +54,31 @@ jobs:
           }
           trap cleanup EXIT
 
+          credential_source_home="$HOME"
+          account_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
+          if [[ ! -f "$credential_source_home/.codex/auth.json" \
+            && ! -f "$credential_source_home/.grok/auth.json" \
+            && ! -d "$credential_source_home/.haskell-agent/credentials" \
+            && -n "$account_home" ]]; then
+            credential_source_home="$account_home"
+          fi
+
           credentials_found=0
-          if [[ -f "$HOME/.codex/auth.json" ]]; then
+          if [[ -f "$credential_source_home/.codex/auth.json" ]]; then
             mkdir -p "$credential_home/.codex"
-            install -m 600 "$HOME/.codex/auth.json" \
+            install -m 600 "$credential_source_home/.codex/auth.json" \
               "$credential_home/.codex/auth.json"
             credentials_found=1
           fi
-          if [[ -f "$HOME/.grok/auth.json" ]]; then
+          if [[ -f "$credential_source_home/.grok/auth.json" ]]; then
             mkdir -p "$credential_home/.grok"
-            install -m 600 "$HOME/.grok/auth.json" \
+            install -m 600 "$credential_source_home/.grok/auth.json" \
               "$credential_home/.grok/auth.json"
             credentials_found=1
           fi
-          if [[ -d "$HOME/.haskell-agent/credentials" ]]; then
+          if [[ -d "$credential_source_home/.haskell-agent/credentials" ]]; then
             mkdir -p "$credential_home/.haskell-agent"
-            cp -R "$HOME/.haskell-agent/credentials" \
+            cp -R "$credential_source_home/.haskell-agent/credentials" \
               "$credential_home/.haskell-agent/credentials"
             chmod -R go-rwx "$credential_home/.haskell-agent/credentials"
             credentials_found=1
