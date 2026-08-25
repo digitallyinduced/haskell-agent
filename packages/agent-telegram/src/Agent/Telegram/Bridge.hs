@@ -3,6 +3,7 @@ module Agent.Telegram.Bridge
     ( TelegramBridgeEnv(..)
     , withTelegramBridge
     , processTelegramCallbacks
+    , processBridgeRequestBatch
     ) where
 
 import Agent.CLI.GatewayBridge
@@ -16,13 +17,14 @@ import Agent.CLI.GatewayBridge
     )
 import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
 import Agent.FileRetry (retryOnFileBusy)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import qualified Agent.Telegram.Client as Client
 import Agent.Telegram.Types
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
-import Control.Monad (foldM, forM_, void, when)
+import Control.Monad (forM_, void, when)
 import Data.Aeson
     ( FromJSON(..)
     , Result(..)
@@ -34,9 +36,9 @@ import Data.Aeson
     , (.:?)
     )
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, sort)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -127,20 +129,41 @@ processBridgeRequests env seen = do
     files <- try @_ @SomeException (listDirectory directory) >>= \case
         Left _ -> pure []
         Right values -> pure values
+    processBridgeRequestBatch
+        seen
+        files
+        (decodeBridgeRequest . (directory </>))
+        (processBridgeRequest env)
+
+-- | Decode and dispatch one deterministic bridge polling batch. Successfully
+-- decoded names are admitted exactly once before concurrent dispatch begins.
+processBridgeRequestBatch
+    :: Set.Set FilePath
+    -> [FilePath]
+    -> (FilePath -> IO (Maybe request))
+    -> (request -> IO ())
+    -> IO (Set.Set FilePath)
+processBridgeRequestBatch seen files decode dispatch = do
     let published =
-            filter
-                (\name ->
-                    takeExtension name == ".json"
-                        && name `Set.notMember` seen)
-                files
-        processOne seen name = do
-            let path = directory </> name
-            decodeBridgeRequest path >>= \case
-                Nothing -> pure seen
-                Just request -> do
-                    processBridgeRequest env request
-                    pure (Set.insert name seen)
-    foldM processOne seen published
+            sort $
+                filter
+                    (\name ->
+                        takeExtension name == ".json"
+                            && name `Set.notMember` seen)
+                    files
+    decoded <-
+        mapConcurrentlyBounded telegramBridgeConcurrency
+            (\name -> fmap ((,) name) <$> decode name)
+            published
+    let admitted = catMaybes decoded
+    void $
+        mapConcurrentlyBounded telegramBridgeConcurrency
+            (dispatch . snd)
+            admitted
+    pure (foldr (Set.insert . fst) seen admitted)
+
+telegramBridgeConcurrency :: Int
+telegramBridgeConcurrency = 4
 
 decodeBridgeRequest :: FilePath -> IO (Maybe ManagedBridgeRequest)
 decodeBridgeRequest path =

@@ -35,8 +35,6 @@ import Agent.CLI.AccountSelection
     )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
-    , authErrorNeedsOnboarding
-    , loadAuth
     , loadAuthForAccount
     , preferredOpenAiTokenProvider
     , probeLoadedAuthCredential
@@ -55,9 +53,9 @@ import Agent.CLI.AgentViewport
     , formatAgentStatus
     , pickAgentViewport
     , renderAgentViewportPanelFor
-    , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
+    , responseItemsToUiState
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleEvent(..)
@@ -100,14 +98,22 @@ import Agent.CLI.AccountPicker
     , accountPickerRow
     , loadAllAccountPickerOptions
     )
-import Agent.CLI.Btw
-    ( formatBtwError
-    , runBtwWithCancel
+import Agent.CLI.Recap
+    ( RecapKind(..)
+    , RecapOutcome(..)
+    , RecapRequest(..)
+    , autoRecapIdleThreshold
+    , formatRecapError
+    , mainTurnCount
+    , recapGate
+    , recapPreview
+    , recapUnavailableToast
+    , runRecapWithCancel
+    , runTurnSummaryWithCancel
     )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
-    ( appendUniqueImageAttachments
-    , formatImageSize
+    ( formatImageSize
     , loadImagesFromPastedText
     , nonEmptyClipboardImages
     , readClipboardImagesForPaste
@@ -139,7 +145,8 @@ import Agent.CLI.Database.Storage
     , runStorageCommand
     )
 import Agent.CLI.LearnedSkills
-    ( learnedSkillTools
+    ( defaultLearnedSkillContextMaxChars
+    , learnedSkillTools
     , queueLearnedSkillContextWithOmissions
     )
 import Agent.CLI.LearnedSkills.Store
@@ -150,12 +157,6 @@ import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
     , formatApiErrorRetryCountdownParts
-    )
-import Agent.CLI.ImagePreview
-    ( detectImagePreviewProtocol
-    , previewColumnsFor
-    , previewRowsFor
-    , renderImagePreview
     )
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -246,7 +247,6 @@ import Agent.Store.Postgres
 import Agent.Store.Types (renderStoreError)
 import Agent.Store.Postgres.Connection (StorePool)
 import qualified Agent.Store.Postgres.Session as StoreSession
-import Agent.Store.Postgres.Skill (LearnedSkill(..))
 import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume
     ( ResumeEntry(..)
@@ -283,7 +283,6 @@ import Agent.CLI.Prompt
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
     , ProviderRecoveryPreference(..)
@@ -327,7 +326,6 @@ import Agent.CLI.Render
     , clearThinking
     , emptyMarkdownStreamState
     , putTextLn
-    , renderAssistantText
     , renderEvent
     )
 import Agent.CLI.Session
@@ -338,12 +336,24 @@ import Agent.CLI.Session.Choices
     , modelChoice
     , showAccountUsage
     )
+import Agent.CLI.Session.Attachments
+    ( putImagePreview
+    , queueAttachedImages
+    , queueClipboardImages
+    )
 import Agent.CLI.Session.History
     ( detectGitBranch
     , foldSessionItems
     , hydrateUiHistory
     , resetLiveConversation
     )
+import Agent.CLI.Session.Interaction
+    ( buildPromptState
+    , runBtwQuestion
+    , setSessionEffort
+    , syncFullscreenPrompt
+    )
+import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.Session.Selection
     ( currentSessionId
     , handleConversationSearch
@@ -388,6 +398,14 @@ import Agent.CLI.Startup.Format
     ( formatRepositoryPath
     , formatStartupDuration
     , formatStartupTimings
+    )
+import Agent.CLI.Startup.Auth
+    ( learnAboutUserOnboardingPrompt
+    , loadStartupAuth
+    , markStartupStage
+    , recordStartupTiming
+    , setStartupNotice
+    , startupDie
     )
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(..)
@@ -451,7 +469,6 @@ import Agent.CLI.TUI.App
     , readFullscreenLineWithCatalog
     , requestFullscreenPermission
     , requestFullscreenChoiceWithBody
-    , requestFullscreenOnboarding
     , requestFullscreenResume
     , requestFullscreenSecret
     , requestFullscreenText
@@ -463,7 +480,7 @@ import Agent.CLI.TUI.App
     )
 import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
-    ( PromptState(..)
+    ( BlockState(..)
     , UiEvent(..)
     , UiState(..)
     , infoNotice
@@ -491,7 +508,8 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
-import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Cancel (requestCancel)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Claude
     ( ClaudeCodeAuth(..)
     , ClaudeCodeOptions(..)
@@ -528,7 +546,6 @@ import Agent.Skills
     , SkillCatalog(..)
     , SkillInvocation(..)
     , SkillWarning(..)
-    , defaultSkillCatalogMaxChars
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -636,7 +653,16 @@ import Agent.XAI.LoopBackend (xaiBackend)
 import qualified Agent.XAI.Options as XAI
 import qualified Agent.XAI.Usage as XAIUsage
 import Control.Applicative ((<|>))
-import Control.Concurrent.Async (link, waitSTM, withAsync)
+import Control.Concurrent.Async
+    ( cancel
+    , concurrently
+    , concurrently_
+    , link
+    , waitCatch
+    , waitEitherCatch
+    , waitSTM
+    , withAsync
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
@@ -656,6 +682,7 @@ import Control.Exception.Safe
     ( SomeException
     , catchAny
     , finally
+    , mask
     , mask_
     , onException
     , throwIO
@@ -676,9 +703,7 @@ import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
 import Text.Printf (printf)
 import Data.Time.Clock
-    ( NominalDiffTime
-    , UTCTime
-    , addUTCTime
+    ( UTCTime
     , diffUTCTime
     , getCurrentTime
     , utctDay
@@ -699,7 +724,6 @@ import System.Exit (ExitCode(..), die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
 import System.Mem.StableName (StableName, makeStableName)
 import System.Process (readProcessWithExitCode)
-import System.Timeout (timeout)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -885,29 +909,6 @@ withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
 
-setStartupNotice :: Maybe FullscreenRuntime -> Text -> IO ()
-setStartupNotice fullscreen message =
-    case fullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime
-                (UiSetNotice (Just (progressNotice message)))
-
-recordStartupTiming
-    :: UTCTime
-    -> IORef [(Text, NominalDiffTime)]
-    -> Text
-    -> IO ()
-recordStartupTiming startedAt timingsRef label = do
-    elapsed <- (`diffUTCTime` startedAt) <$> getCurrentTime
-    atomicModifyIORef' timingsRef \timings ->
-        (timings <> [(label, elapsed)], ())
-
-markStartupStage :: StartupRuntime -> Text -> IO ()
-markStartupStage startup label = do
-    recordStartupTiming startup.startupStartedAt startup.startupTimings label
-    setStartupNotice startup.startupFullscreen label
-
 finishStartup :: StartupRuntime -> IO ()
 finishStartup startup = do
     writeIORef startup.startupFinished True
@@ -933,12 +934,6 @@ finishStartup startup = do
                 Nothing -> putTextLn stderr message
                 Just runtime -> emitUiEvent runtime (UiSystemMessage message)
         _ -> pure ()
-
-startupDie :: StartupRuntime -> String -> IO a
-startupDie startup message =
-    case startup.startupFullscreen of
-        Nothing -> die message
-        Just _ -> throwIO (StartupFailure message)
 
 reportStartupWarning :: StartupRuntime -> Text -> IO ()
 reportStartupWarning startup message =
@@ -1222,6 +1217,7 @@ prepareAgentIteration
                         runtime
                         (requestCancel toolEnv.toolCancel)
                         (const (pure ()))
+                        (pure ())
                         (\level ->
                             readIORef restartEffortActionRef >>= ($ level))
                         (noteFullscreenCtrlC interrupt)
@@ -1275,6 +1271,7 @@ resetFullscreenSessionActions runtime =
         runtime
         (pure ())
         (const (pure ()))
+        (pure ())
         (const (pure ()))
         -- No session-local interrupt state is alive between providers. A
         -- transition must remain escapable even if auth probing blocks.
@@ -1425,12 +1422,16 @@ runAgentInitializedWithLock
         deriveDatabaseScopes stateDirectory projectRootPath >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right scopes -> pure scopes
-    projectSettings <- loadProjectSettings projectRoot
-    catalog <-
-        loadModelCatalog home >>= either
-            (startupDie startup . Text.unpack)
-            pure
-    branch <- detectGitBranch cwd
+    (projectSettings, (catalogResult, branch)) <-
+        concurrently
+            (loadProjectSettings projectRoot)
+            (concurrently
+                (loadModelCatalog home)
+                (detectGitBranch cwd))
+    catalog <- either
+        (startupDie startup . Text.unpack)
+        pure
+        catalogResult
     setStartupRepository fullscreen home branch cwd
     markStartupStage startup "Loading credentials…"
     let transitionTarget = (.transitionTarget) <$> transition
@@ -1945,8 +1946,19 @@ runAgentInitializedWithLock
             atomicModifyIORef' pendingNotices \xs ->
                 (xs <> [AgentMessage message], ())
             pure (Right "queued")
+        createSubagentWorktree source =
+            createWorktree source (worktreeRoot home) >>= \case
+                Left err -> pure (Left err)
+                Right path -> pure $ Right SubagentWorktree
+                    { subagentWorktreePath = path
+                    , subagentWorktreeCleanup =
+                        removeWorktree source path >>= \case
+                            Left err -> pure (Left err)
+                            Right () -> pure (Right ())
+                    }
         multiCtx = Just MultiAgentContext
             { multiRegistry = registry
+            , multiCwd = cwd
             , multiSelfId = Nothing
             , multiDepth = 0
             , multiTaskPath = taskPathRoot
@@ -1963,16 +1975,7 @@ runAgentInitializedWithLock
                     registry
                     subagentSessions
                     agentTypesRef)
-            , multiCreateWorktree = Just \source ->
-                createWorktree source (worktreeRoot home) >>= \case
-                    Left err -> pure (Left err)
-                    Right path -> pure $ Right SubagentWorktree
-                        { subagentWorktreePath = path
-                        , subagentWorktreeCleanup =
-                            removeWorktree source path >>= \case
-                                Left err -> pure (Left err)
-                                Right () -> pure (Right ())
-                        }
+            , multiCreateWorktree = Just createSubagentWorktree
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
                     provider
@@ -2113,21 +2116,19 @@ runAgentInitializedWithLock
                         , lspStartupWarnings = []
                         }
                     )
-            | otherwise = do
-                webRuntime <-
-                    newWebFetchRuntime
+            | otherwise =
+                concurrentlyAcquire
+                    (newWebFetchRuntime
                         harnessConfig.configWebFetch
                         toolEnv >>= \case
                             Left err ->
                                 startupDie startup
                                     ("Failed to initialize web_fetch: "
                                         <> Text.unpack err)
-                            Right runtime -> pure runtime
-                lspStartup <-
-                    newLspRuntime harnessConfig.configLsp toolEnv
-                        `onException`
-                            mapM_ closeWebFetchRuntime webRuntime
-                pure (webRuntime, lspStartup)
+                            Right runtime -> pure runtime)
+                    (mapM_ closeWebFetchRuntime)
+                    (newLspRuntime harnessConfig.configLsp toolEnv)
+                    (mapM_ closeLspRuntime . (.lspStartupRuntime))
     (webFetchRuntime, lspStartup) <-
         acquireGrokExtras `onException` closeBeforeSession
     mapM_ (reportStartupWarning startup) lspStartup.lspStartupWarnings
@@ -2136,9 +2137,9 @@ runAgentInitializedWithLock
             maybe [] (pure . webFetchRuntimeTool) webFetchRuntime
                 <> maybe [] (pure . lspRuntimeTool) lspRuntime
         closeExtraTools =
-            mapM_ closeLspRuntime lspRuntime
-                `finally`
-                    mapM_ closeWebFetchRuntime webFetchRuntime
+            concurrently_
+                (mapM_ closeLspRuntime lspRuntime)
+                (mapM_ closeWebFetchRuntime webFetchRuntime)
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
@@ -2157,6 +2158,8 @@ runAgentInitializedWithLock
         Nothing -> pure ()
     ghciEnabledRef <- newIORef options.optGhci
     bashEnabledRef <- newIORef options.optBash
+    skillsRef <- newIORef (SkillCatalog [] [])
+    skillInvocationsRef <- newIORef []
     let claimCurrentSession handle = do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
@@ -2212,7 +2215,8 @@ runAgentInitializedWithLock
         sessionTools = agentSessionTools sessionToolsEnv
         gatewayTools = maybe [] managedGatewayTools promptRequest
         databaseAppTools = databaseTools databaseToolsEnv
-        learnedSkillAppTools = learnedSkillTools learnedSkillToolsEnv
+        learnedSkillAppTools =
+            learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -2310,6 +2314,7 @@ runAgentInitializedWithLock
                 , subagentLegacyTarget = legacySubagentTarget
                 , subagentConnection = inferredTarget.targetConnectionId
                 , subagentMapModel = transportModel
+                , subagentCreateWorktree = Just createSubagentWorktree
                 , subagentSessionTmp = toolEnv.toolSessionTmp
                 , subagentSpawnModelGuidance =
                     subscriptionSubagentModelGuidance
@@ -2340,9 +2345,6 @@ runAgentInitializedWithLock
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
         -- before their first prompt/turn below.
-        skillsRef <- newIORef (SkillCatalog [] [])
-        skillInvocationsRef <- newIORef []
-
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
@@ -2679,7 +2681,7 @@ runAgentInitializedWithLock
                                         freshOpenAiBackend
                                             options.optShowRawReasoning
                                             tokenProvider
-                                            (readIORef privateParams)
+                                            (pure privateParams)
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
@@ -2747,9 +2749,9 @@ runAgentInitializedWithLock
                                         dialect
                                         XAIProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef ->
+                                        (\childParams ->
                                             xaiBackend xaiOptions tokenProvider
-                                                (readIORef childParamsRef))
+                                                (pure childParams))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -2758,7 +2760,7 @@ runAgentInitializedWithLock
                                             (readIORef paramsRef)
                             btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
-                                    (readIORef privateParams)
+                                    (pure privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     runProviderCompactWith
@@ -2811,7 +2813,7 @@ runAgentInitializedWithLock
                                                     { permission =
                                                         ClaudeCodeDontAsk
                                                     }
-                                                (readIORef privateParams)
+                                                (pure privateParams)
                                                 privateTranscript
                                     privateBackend.submitTurn
                                         state
@@ -2881,9 +2883,9 @@ runAgentInitializedWithLock
                                         dialect
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef ->
+                                        (\childParams ->
                                             makeBackend
-                                                (readIORef childParamsRef))
+                                                (pure childParams))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -2891,8 +2893,7 @@ runAgentInitializedWithLock
                                         makeBackend
                                             (readIORef paramsRef)
                             btwBackend privateParams =
-                                makeBackend
-                                    (readIORef privateParams)
+                                makeBackend (pure privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     case customGenericOptions of
@@ -3161,7 +3162,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                                               (roleWarn color
                                                   (glyphWarn <> message))
                       _ -> pure ()
-  withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
+  withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
     printed <- newIORef False
     let attachmentsRef = startup.startupSessionState.sessionAttachments
@@ -3230,10 +3231,56 @@ runSession SessionRequest{..} SessionBackend{..} = do
                             | includeSummaries ->
                                 responseItemPreviewLines 12 items
                             | otherwise ->
-                                responseItemLines items
+                                []
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
+                conversationFor target status items
+                    | includeSummaries = initialUiState
+                    | target /= selected = initialUiState
+                    | target == AgentRoot = initialUiState
+                    | otherwise =
+                        settleConversation items status $
+                            responseItemsToUiState
+                                options.optShowRawReasoning
+                                items
+                settleConversation items status conversation =
+                    case status of
+                        Pending -> conversation
+                        Running -> conversation
+                        Completed result ->
+                            let settled =
+                                    finalizeAll BlockComplete conversation
+                            in case result of
+                                Just text
+                                    | null items
+                                    , not (Text.null (Text.strip text)) ->
+                                        reduceUi
+                                            (UiAssistantHistory
+                                                (Text.strip text))
+                                            settled
+                                _ -> settled
+                        Errored message ->
+                            reduceUi
+                                (UiErrorMessage
+                                    (if Text.null (Text.strip message)
+                                        then "Agent failed."
+                                        else Text.strip message))
+                                (finalizeAll BlockFailed conversation)
+                        Interrupted ->
+                            finalizeAll BlockCancelled conversation
+                        Closed ->
+                            finalizeAll BlockComplete conversation
+                        NotFound ->
+                            reduceUi
+                                (UiErrorMessage
+                                    "Agent transcript is unavailable.")
+                                (finalizeAll BlockFailed conversation)
+                  where
+                    finalizeAll terminal ui =
+                        reduceUi
+                            (UiTurnEnded terminal)
+                            ui { uiTurnStartBlock = 0 }
             rootSteps <-
                 if null agents
                     then pure []
@@ -3250,13 +3297,21 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     , agentSteps = rootSteps
                     , agentTranscript =
                         transcriptLines AgentRoot rootItems
+                    , agentConversation = initialUiState
                     }
-            children <- mapM
-                (materializeChild transcriptLines sessions)
+            children <- mapConcurrentlyBounded 8
+                (materializeChild
+                    transcriptLines
+                    conversationFor
+                    sessions)
                 agents
             pure (selected, rootEntry : children)
           where
-            materializeChild transcriptLines sessions (path, agentId, status) = do
+            materializeChild
+                    transcriptLines
+                    conversationFor
+                    sessions
+                    (path, agentId, status) = do
                 let target = AgentChild agentId
                 items <- case Map.lookup agentId sessions of
                     Nothing -> pure []
@@ -3285,6 +3340,8 @@ runSession SessionRequest{..} SessionBackend{..} = do
                             <$> Map.lookup agentId sessions
                     , agentSteps = steps
                     , agentTranscript = transcript
+                    , agentConversation =
+                        conversationFor target status items
                     }
         hydrateSelectedAgent agentId = do
             effectiveModel <- readIORef modelRef
@@ -3386,12 +3443,12 @@ runSession SessionRequest{..} SessionBackend{..} = do
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
-            (omitted, skillContextChars) <-
+            (omitted, _) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
             void $ installLearnedSkills
                 freshAgents
-                (defaultSkillCatalogMaxChars - skillContextChars)
+                defaultLearnedSkillContextMaxChars
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
@@ -3671,9 +3728,13 @@ runSession SessionRequest{..} SessionBackend{..} = do
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef
             refreshShellParams ghciEnabled bashEnabled
+    btwRequests <- newChan
+    recapRequests <- newChan
+    let
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
+            , sessionQueueRecap = writeChan recapRequests
             , sessionCompact = compactRunner
             , sessionRender = render
             , sessionProvider = provider
@@ -3737,12 +3798,12 @@ runSession SessionRequest{..} SessionBackend{..} = do
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
-    btwRequests <- newChan
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
             (writeChan btwRequests)
+            (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
                 readIORef startup.startupRestartEffort >>= ($ level))
             (noteFullscreenCtrlC interrupt)
@@ -3755,7 +3816,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                 options home projectRoot cwd
             let queueInitialContext =
                     null initialTurns && not (isJust initialPrevious)
-            (omitted, skillContextChars) <- installSkills startupContext
+            (omitted, _) <- installSkills startupContext
                 queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
@@ -3763,7 +3824,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                 if queueInitialContext
                     then installLearnedSkills
                         startupContext
-                        (defaultSkillCatalogMaxChars - skillContextChars)
+                        defaultLearnedSkillContextMaxChars
                     else pure []
             finishStartup startup
             pure learnedSkills
@@ -3816,111 +3877,21 @@ runSession SessionRequest{..} SessionBackend{..} = do
             question <- readChan btwRequests
             runBtwQuestion False env question
             btwWorker
+        recapWorker = do
+            request <- readChan recapRequests
+            case request of
+                RecapSession kind -> runSessionRecap False env kind
+                RecapTurnSummary -> runSessionTurnSummary env
+            recapWorker
     result <- case fullscreen of
-        Just _ -> withAsync btwWorker (const sessionAction)
-        Nothing -> sessionAction
+        Just _ ->
+            withAsync btwWorker \_ ->
+                withAsync recapWorker (const sessionAction)
+        Nothing ->
+            withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result
-
-loadStartupAuth
-    :: StartupRuntime
-    -> Maybe ProviderTransition
-    -> Maybe Provider
-    -> IO (LoadedAuth, Bool)
-loadStartupAuth startup transition requestedProvider =
-    loadTransitionAuth transition requestedProvider >>= \case
-        Right loaded -> pure (loaded, False)
-        Left err
-            | isNothing transition
-            , authErrorNeedsOnboarding err
-            , Just runtime <- startup.startupFullscreen ->
-                runCredentialOnboarding startup runtime
-                    >>= \(provider, learnAboutUser) ->
-                        loadAuth (Just provider)
-                            >>= either
-                                (startupDie startup . Text.unpack)
-                                (\loaded -> pure (loaded, learnAboutUser))
-            | otherwise ->
-                startupDie startup (Text.unpack err)
-
-loadTransitionAuth
-    :: Maybe ProviderTransition
-    -> Maybe Provider
-    -> IO (Either Text LoadedAuth)
-loadTransitionAuth transition requestedProvider =
-    case transition of
-        Just active
-            | Just selectionId <- active.transitionAccountSelectionId ->
-                loadSelectedAccountAuth
-                    active.transitionTarget.targetProvider
-                    selectionId
-                    (fromMaybe selectionId active.transitionAccountId)
-        _ -> loadAuth requestedProvider
-
-runCredentialOnboarding
-    :: StartupRuntime
-    -> FullscreenRuntime
-    -> IO (Provider, Bool)
-runCredentialOnboarding startup runtime = do
-    markStartupStage startup "Choose how to connect…"
-    loop
-  where
-    choices =
-        [ ( OpenAIProvider
-          , ("Sign in with ChatGPT", "Use an OpenAI subscription")
-          )
-        , ( XAIProvider
-          , ("Sign in with Grok", "Use an xAI subscription")
-          )
-        , ( OpenRouterProvider
-          , ("Add an OpenRouter API key", "Use API credits")
-          )
-        ]
-    loop =
-        requestFullscreenOnboarding
-            runtime
-            "Welcome to haskell-agent"
-            "haskell-agent can access AI models with a subscription or API key."
-            (map snd choices)
-            >>= \case
-                Nothing -> throwIO StartupCancelled
-                Just index ->
-                    case atMay index choices of
-                        Nothing -> loop
-                        Just (provider, _) -> do
-                            connected <-
-                                withFullscreenSuspended runtime $
-                                    resolveColor stderr >>= \color ->
-                                        connectProviderAccount color provider
-                            case connected of
-                                Nothing -> loop
-                                Just _ -> do
-                                    markStartupStage startup
-                                        "Personalize your agent…"
-                                    learnAboutUser <-
-                                        requestFullscreenOnboarding
-                                            runtime
-                                            "Personalize your agent"
-                                            "haskell-agent can learn your technical defaults from a confirmed public GitHub profile. You review the profile before anything is saved."
-                                            [ ( "Learn from my GitHub"
-                                              , "Inspect public repositories and propose a technical profile"
-                                              )
-                                            , ( "Skip for now"
-                                              , "Run /learn-about-user whenever you want"
-                                              )
-                                            ]
-                                    pure (provider, learnAboutUser == Just 0)
-
-learnAboutUserOnboardingPrompt :: [LearnedSkill] -> Maybe Text
-learnAboutUserOnboardingPrompt learnedSkills
-    | any
-        ((== "user-technical-profile") . (.learnedSkillSlug))
-        learnedSkills =
-            Nothing
-    | otherwise =
-        Just
-            "$learn-about-user Learn my technical preferences from my public GitHub profile, show me the proposed profile, and ask before saving it."
 
 runPendingTurn
     :: PendingTurnPresentation
@@ -3954,50 +3925,6 @@ runPendingTurnWithCooldownRetry
     finishTurnWithCooldownRetry
         allowCooldownRetry env pending.pendingExitAfter result
 
--- | A retained fullscreen runtime survives provider rebuilds. Publish the new
--- session's prompt metadata before replaying a pending turn so the composer
--- does not keep showing the exhausted provider while its replacement runs.
-syncFullscreenPrompt :: SessionEnv -> IO ()
-syncFullscreenPrompt env =
-    forM_ env.sessionFullscreen \runtime -> do
-        planState <- readIORef env.sessionPlanMode.planStateRef
-        params <- readIORef env.sessionParams
-        policy <- readIORef env.sessionPolicy
-        account <- readIORef env.sessionAccount
-        usage <- readIORef env.sessionUsage
-        attachments <- readIORef env.sessionAttachments
-        emitUiEvent runtime $ UiSetPrompt $
-            buildPromptState
-                params
-                planState
-                policy
-                account
-                (isJust env.sessionSelectAccount)
-                usage
-                (length attachments)
-
-buildPromptState
-    :: ResponseCreateParams
-    -> PlanModeState
-    -> ApprovalPolicy
-    -> Text
-    -> Bool
-    -> TokenUsage
-    -> Int
-    -> PromptState
-buildPromptState params planState policy account accountSelectable usage attachments =
-    PromptState
-        { promptModel = currentModel params
-        , promptEffort = currentEffort params
-        , promptMode =
-            replModeLabel (replModeFromState planState policy)
-        , promptAccount = account
-        , promptAccountSelectable = accountSelectable
-        , promptUsage = usage
-        , promptLimitStatus = Nothing
-        , promptAttachments = attachments
-        }
-
 finishTurn
     :: SessionEnv
     -> Bool
@@ -4013,6 +3940,7 @@ finishTurnWithCooldownRetry
     -> IO RunResult
 finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
+        env.sessionQueueRecap RecapTurnSummary
         writeIORef env.sessionUnavailableProviders []
         selectionId <- readIORef env.sessionAccountSelectionId
         accountId <- readIORef env.sessionAccountId
@@ -4063,7 +3991,13 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
             case providerRecoveryPreference
                     allowCooldownRetry now apiError of
                 RetryCurrentProviderAfter delay ->
-                    waitAndRetryPendingTurn env delay pending'
+                    waitAndRetryPendingTurn
+                        (replWithDraft env)
+                        (runPendingTurnWithCooldownRetry
+                            False RestartPendingTurn env)
+                        env
+                        delay
+                        pending'
                 TryProviderFallback ->
                     requestAutomaticProviderFallback env apiError pending'
                         >>= \case
@@ -4087,173 +4021,144 @@ continueAfterTurn env = do
         notifyAttention stderr InputRequested
     repl env
 
-waitAndRetryPendingTurn
-    :: SessionEnv
-    -> NominalDiffTime
-    -> PendingTurn
-    -> IO RunResult
-waitAndRetryPendingTurn env delay pending = do
-    startedAt <- getCurrentTime
-    let retryAt = addUTCTime (max 0 delay) startedAt
-        cancel = env.sessionLoop.loopCancel
-        renderCountdown seconds =
-            let message = automaticRetryCountdownText seconds
-            in case env.sessionFullscreen of
-                Just runtime ->
-                    emitUiEvent runtime
-                        (UiSetNotice (Just (progressNotice message)))
-                Nothing ->
-                    renderEvent env.sessionRender (ActivityUpdated message)
-        waitForCancel = do
-            let poll lastShown = do
-                    now <- getCurrentTime
-                    let remaining = max 0 (diffUTCTime retryAt now)
-                        seconds = max 0 (ceiling remaining)
-                    when (lastShown /= Just seconds) (renderCountdown seconds)
-                    if remaining <= 0
-                        then do
-                            -- Give the provider reset boundary a small margin
-                            -- so the retry does not race a rounded timestamp.
-                            isJust <$> timeout 250000 (waitCancel cancel)
-                        else do
-                            let waitMicros =
-                                    max 1 $
-                                        min 1000000
-                                            (ceiling
-                                                (realToFrac remaining
-                                                    * 1_000_000
-                                                    :: Double))
-                            cancelled <-
-                                isJust <$> timeout waitMicros (waitCancel cancel)
-                            if cancelled
-                                then pure True
-                                else poll (Just seconds)
-            poll Nothing
-        waitAction = case env.sessionFullscreen of
-            Just _ -> waitForCancel
-            Nothing ->
-                withEscCancel cancel env.sessionEscPaused waitForCancel
-    setPersistenceActivity
-        env.sessionPersist
-        "provider_cooldown"
-        "Provider temporarily unavailable; waiting before automatically retrying the pending turn."
-        (Just retryAt)
-    resetCancel cancel
-    case env.sessionFullscreen of
-        Just _ -> pure ()
-        Nothing -> renderEvent env.sessionRender TurnStarted
-    cancelled <-
-        (withTurnCancel env.sessionInterrupt cancel waitAction)
-            `finally` do
-                resetCancel cancel
-                clearPersistenceActivity env.sessionPersist
-                case env.sessionFullscreen of
-                    Just _ -> pure ()
-                    Nothing -> clearThinking env.sessionRender
-    if cancelled
-        then do
-            case env.sessionFullscreen of
-                Just runtime ->
-                    emitUiEvent runtime
-                        (UiSetNotice
-                            (Just
-                                (infoNotice
-                                    "automatic retry cancelled")))
-                Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
-                        (roleMuted color "automatic retry cancelled")
-            if pending.pendingExitAfter
-                then pure RunQuit
-                else replWithDraft env pending.pendingPromptText
-        else do
-            case env.sessionFullscreen of
-                Just runtime ->
-                    emitUiEvent runtime
-                        (UiSetNotice
-                            (Just (successNotice "retrying turn")))
-                Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
-                        (roleMuted color (glyphOk <> "retrying turn"))
-            setPersistenceActivity
-                env.sessionPersist
-                "provider_retry"
-                "Retrying the pending turn after the provider cooldown."
-                Nothing
-            runPendingTurnWithCooldownRetry
-                False RestartPendingTurn env pending
-                `finally` clearPersistenceActivity env.sessionPersist
+runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
+runSessionRecap registerCancel env kind = do
+    let fullscreen = env.sessionFullscreen
+        transcriptRef = env.sessionTranscript
+    color <- resolveColor stdout
+    transcript <- readIORef transcriptRef
+    let mainTurns = mainTurnCount transcript
+        hasMessages = mainTurns > 0
+    lastCommittedTurns <- recapWatermark env
+    lastCompletedAt <- recapLastCompletedAt env
+    now <- getCurrentTime
+    let idleOk =
+            case lastCompletedAt of
+                Nothing -> False
+                Just finished ->
+                    diffUTCTime now finished >= autoRecapIdleThreshold
+    case recapGate mainTurns lastCommittedTurns kind idleOk of
+        Left _ ->
+            case kind of
+                RecapManual -> recapUnavailable env hasMessages
+                RecapAuto -> pure ()
+        Right () -> do
+            when (kind == RecapManual) $
+                forM_ fullscreen \runtime ->
+                    emitUiEvent runtime UiRecapStarted
+            result <-
+                runRecapWithCancel
+                    (\cancel action ->
+                        if registerCancel
+                            then
+                                withTurnCancel env.sessionInterrupt cancel $
+                                    case fullscreen of
+                                        Nothing ->
+                                            withEscCancel
+                                                cancel
+                                                env.sessionEscPaused
+                                                action
+                                        Just _ -> action
+                            else action)
+                    env.sessionBtwBackend
+                    env.sessionParams
+                    transcriptRef
+                    kind
+            case result of
+                Left err ->
+                    case kind of
+                        RecapManual -> recapFailed env (formatRecapError err)
+                        RecapAuto -> pure ()
+                Right (RecapShown summary) -> do
+                    persistSessionRecap env summary mainTurns
+                    displayRecap env color summary
+                Right (RecapSuppressed summary) ->
+                    persistSessionRecap env summary mainTurns
 
-setSessionEffort :: SessionEnv -> Text -> IO ()
-setSessionEffort env level = do
-    modifyIORef' env.sessionParams (setReasoningEffort level)
-    case env.sessionFullscreen of
-        Just runtime ->
-            emitUiEvent runtime (UiSetPromptEffort level)
-        Nothing -> pure ()
+recapWatermark :: SessionEnv -> IO Int
+recapWatermark env =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure 0
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending _ _ _ -> pure 0
+                PersistenceActive handle ->
+                    pure handle.sessionMeta.metaLastRecapMainTurns
+
+recapLastCompletedAt :: SessionEnv -> IO (Maybe UTCTime)
+recapLastCompletedAt env =
+    case env.sessionPersist of
+        PersistenceDisabled -> pure Nothing
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending _ _ _ -> pure Nothing
+                PersistenceActive handle ->
+                    loadSession
+                        handle.sessionPool
+                        (takeDirectory handle.sessionDir)
+                        handle.sessionMeta.metaId
+                        >>= \case
+                            Left _ ->
+                                pure (Just handle.sessionMeta.metaUpdatedAt)
+                            Right (_, turns) ->
+                                pure $
+                                    case reverse turns of
+                                        turn : _ -> Just turn.turnAt
+                                        [] -> Just handle.sessionMeta.metaUpdatedAt
+
+persistSessionRecap :: SessionEnv -> Text -> Int -> IO ()
+persistSessionRecap env summary mainTurns =
     case env.sessionPersist of
         PersistenceDisabled -> pure ()
-        PersistenceEnabled slotRef -> do
-            slot <- readIORef slotRef
-            case slot of
-                PersistencePending pending sessionId tempDir ->
-                    writeIORef slotRef
-                        (PersistencePending
-                            pending { createEffort = level }
-                            sessionId
-                            tempDir)
+        PersistenceEnabled slotRef ->
+            readIORef slotRef >>= \case
+                PersistencePending _ _ _ -> pure ()
                 PersistenceActive handle -> do
-                    let meta = handle.sessionMeta { metaEffort = level }
-                    writeSessionMeta
-                        handle.sessionPool
-                        handle.sessionMetaPath
-                        meta
-                    writeIORef slotRef
-                        (PersistenceActive handle { sessionMeta = meta })
+                    updated <-
+                        setSessionRecap (recapPreview summary) mainTurns handle
+                    writeIORef slotRef (PersistenceActive updated)
 
-runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
-runBtwQuestion registerCancel env question = do
-    let fullscreen = env.sessionFullscreen
-    color <- resolveColor stdout
-    forM_ fullscreen \runtime ->
-        emitUiEvent runtime
-            (UiSetNotice (Just (progressNotice "btw · asking…")))
+displayRecap :: SessionEnv -> Bool -> Text -> IO ()
+displayRecap env color summary =
+    let message = "Recap: " <> summary
+    in case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiRecapReady summary)
+        Nothing ->
+            putTextLn stdout (roleMuted color message)
+
+recapUnavailable :: SessionEnv -> Bool -> IO ()
+recapUnavailable env hasMessages =
+    recapFailed env (recapUnavailableToast hasMessages)
+
+recapFailed :: SessionEnv -> Text -> IO ()
+recapFailed env message = do
+    color <- resolveColor stderr
+    case env.sessionFullscreen of
+        Just runtime ->
+            emitUiEvent runtime (UiRecapUnavailable message)
+        Nothing ->
+            putTextLn stderr (roleMuted color message)
+
+runSessionTurnSummary :: SessionEnv -> IO ()
+runSessionTurnSummary env = do
     result <-
-        runBtwWithCancel
-            (\cancel action ->
-                if registerCancel
-                    then
-                        withTurnCancel env.sessionInterrupt cancel $
-                            case fullscreen of
-                                Nothing ->
-                                    withEscCancel
-                                        cancel
-                                        env.sessionEscPaused
-                                        action
-                                Just _ -> action
-                    else action)
+        runTurnSummaryWithCancel
+            (\_ action -> action)
             env.sessionBtwBackend
             env.sessionParams
             env.sessionTranscript
-            question
-    forM_ fullscreen \runtime ->
-        emitUiEvent runtime (UiSetNotice Nothing)
     case result of
-        Left err -> do
-            errorColor <- resolveColor stderr
-            let message = formatBtwError err
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime (UiErrorMessage message)
-                Nothing ->
-                    putTextLn stderr (roleError errorColor message)
-        Right answer ->
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime (UiAssistantHistory answer)
-                Nothing ->
-                    putTextLn stdout (renderAssistantText color answer)
+        Left _ -> pure ()
+        Right summary ->
+            case env.sessionPersist of
+                PersistenceDisabled -> pure ()
+                PersistenceEnabled slotRef ->
+                    readIORef slotRef >>= \case
+                        PersistencePending _ _ _ -> pure ()
+                        PersistenceActive handle -> do
+                            updated <- setSessionTurnSummary summary handle
+                            writeIORef slotRef (PersistenceActive updated)
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
@@ -5140,6 +5045,15 @@ replWithDraft env@SessionEnv
                     ReplBtw question -> do
                         runBtwQuestion True env question
                         continue
+                    ReplRecap ->
+                        case fullscreen of
+                            Just runtime -> do
+                                emitUiEvent runtime UiRecapStarted
+                                env.sessionQueueRecap (RecapSession RecapManual)
+                                continue
+                            Nothing -> do
+                                runSessionRecap True env RecapManual
+                                continue
                     ReplResume maybeId -> do
                         handleResume databasePool fullscreen maybeId persist >>= \case
                             Nothing -> continue
@@ -5180,6 +5094,9 @@ replWithDraft env@SessionEnv
                                                 , metaInputTokens = 0
                                                 , metaOutputTokens = 0
                                                 , metaCachedTokens = 0
+                                                , metaLastRecap = Nothing
+                                                , metaLastTurnSummary = Nothing
+                                                , metaLastRecapMainTurns = 0
                                                 }
                                         writeSessionMeta
                                             handle'.sessionPool
@@ -5882,6 +5799,59 @@ replWithDraft env@SessionEnv
                             (roleError color
                                 "terminal clipboard is unavailable")
 
+concurrentlyAcquire
+    :: IO a
+    -> (a -> IO ())
+    -> IO b
+    -> (b -> IO ())
+    -> IO (a, b)
+concurrentlyAcquire acquireLeft releaseLeft acquireRight releaseRight =
+    mask \restore ->
+        withAsync (restore acquireLeft) \leftWorker ->
+            withAsync (restore acquireRight) \rightWorker -> do
+                let cleanupResult release = \case
+                        Left _ -> pure ()
+                        Right value -> release value
+                    cancelAndCleanup = do
+                        cancel leftWorker
+                        cancel rightWorker
+                        leftResult <- waitCatch leftWorker
+                        rightResult <- waitCatch rightWorker
+                        cleanupResult releaseLeft leftResult
+                        cleanupResult releaseRight rightResult
+                first <-
+                    restore (waitEitherCatch leftWorker rightWorker)
+                        `onException` cancelAndCleanup
+                case first of
+                    Left (Left exception) -> do
+                        cancel rightWorker
+                        waitCatch rightWorker >>= cleanupResult releaseRight
+                        throwIO exception
+                    Right (Left exception) -> do
+                        cancel leftWorker
+                        waitCatch leftWorker >>= cleanupResult releaseLeft
+                        throwIO exception
+                    Left (Right leftValue) -> do
+                        rightResult <-
+                            restore (waitCatch rightWorker)
+                                `onException` releaseLeft leftValue
+                        case rightResult of
+                            Left exception -> do
+                                releaseLeft leftValue
+                                throwIO exception
+                            Right rightValue ->
+                                pure (leftValue, rightValue)
+                    Right (Right rightValue) -> do
+                        leftResult <-
+                            restore (waitCatch leftWorker)
+                                `onException` releaseRight rightValue
+                        case leftResult of
+                            Left exception -> do
+                                releaseRight rightValue
+                                throwIO exception
+                            Right leftValue ->
+                                pure (leftValue, rightValue)
+
 requestReload
     :: Maybe FullscreenRuntime
     -> Persistence
@@ -6033,88 +6003,6 @@ setNativeProgress handle active = do
                 | otherwise = osc9ProgressRemove
         Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
-
--- | Queue clipboard / Finder-paste images and optionally draw an in-terminal
--- thumbnail. The caller reports the returned message through the active UI.
-queueAttachedImages
-    :: IORef [ImageAttachment]
-    -> IORef Int
-    -> Bool
-    -> Bool
-    -> [ImageAttachment]
-    -> IO Text
-queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
-    (added, pendingCount) <- atomicModifyIORef' attachmentsRef \existing ->
-        let (pending, unique) =
-                appendUniqueImageAttachments existing images
-        in (pending, (unique, length pending))
-    let sizes =
-            Text.intercalate ", "
-                [ img.imageMime <> " (" <> formatImageSize (BS.length img.imageBytes) <> ")"
-                | img <- added
-                ]
-        duplicateCount = length images - length added
-        queued = Text.pack (show pendingCount)
-    when (showPreview && not (null added)) $
-        putImagePreview previewIdRef color added
-    pure $ case (added, duplicateCount) of
-        ([], _) ->
-            "image already attached — not added again ("
-                <> queued
-                <> " queued)"
-        (_, 0) ->
-            "attached "
-                <> sizes
-                <> " — send with next message ("
-                <> queued
-                <> " queued)"
-        _ ->
-            "attached "
-                <> sizes
-                <> "; skipped "
-                <> Text.pack (show duplicateCount)
-                <> " duplicate image"
-                <> (if duplicateCount == 1 then "" else "s")
-                <> " ("
-                <> queued
-                <> " queued)"
-
-queueClipboardImages
-    :: IORef [ImageAttachment]
-    -> IORef Int
-    -> Bool
-    -> Bool
-    -> IO (Either Text Text)
-queueClipboardImages
-    attachmentsRef
-    previewIdRef
-    color
-    showPreview = do
-    imagesResult <- readClipboardImagesForPaste
-    case imagesResult of
-        Right images@(_:_) ->
-            Right <$> queueAttachedImages
-                attachmentsRef previewIdRef color showPreview images
-        Right [] ->
-            pure (Left "no image found on the clipboard")
-        Left err -> pure (Left err)
-
-putImagePreview :: IORef Int -> Bool -> [ImageAttachment] -> IO ()
-putImagePreview previewIdRef color images = do
-    protocol <- detectImagePreviewProtocol stdout
-    inTmux <- isJust <$> lookupEnv "TMUX"
-    size <- getTerminalSize
-    let (termRows, termCols) = fromMaybe (24, 80) size
-        columns = previewColumnsFor termCols
-        rows = previewRowsFor termRows
-    startId <- atomicModifyIORef' previewIdRef \n ->
-        (n + max 1 (length images), n)
-    case renderImagePreview protocol inTmux (roleMuted color) columns rows startId images of
-        Nothing -> pure ()
-        Just block -> do
-            -- Graphics sequences must not go through the Solarized wash.
-            Text.putStrLn block
-            hFlush stdout
 
 putTrailingNewline :: IORef Bool -> IO ()
 putTrailingNewline printed = do

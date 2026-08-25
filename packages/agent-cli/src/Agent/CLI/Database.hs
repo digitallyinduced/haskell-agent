@@ -49,9 +49,11 @@ instance FromJSON DatabaseScope where
 
 -- | Storage callbacks for the three model-facing database operations.
 --
--- Successful values are encoded as JSON in the tool result.  Store errors are
--- already sanitized 'Text' because database exception details can contain SQL
--- values that should not be copied into the transcript.
+-- Structured database values are encoded as JSON in the tool result. Conversation
+-- search is rendered as labeled text because its results are primarily read by
+-- the model and by humans rather than consumed as a machine-readable payload.
+-- Store errors are already sanitized 'Text' because database exception details
+-- can contain SQL values that should not be copied into the transcript.
 data DatabaseToolsEnv = DatabaseToolsEnv
     { databaseDescribeScope
         :: !(DatabaseScope -> IO (Either Text Value))
@@ -105,6 +107,23 @@ instance FromJSON ConversationSearchArgs where
         ConversationSearchArgs
             <$> object .: "query"
             <*> (object .:? "limit" >>= pure . maybe 10 id)
+
+data ConversationSearchMatch
+    = ConversationSearchMatch
+        !Text
+        !Integer
+        !(Maybe Text)
+        !Text
+        !(Maybe Text)
+
+instance FromJSON ConversationSearchMatch where
+    parseJSON = withObject "ConversationSearchMatch" \object ->
+        ConversationSearchMatch
+            <$> object .: "session_id"
+            <*> object .: "turn_index"
+            <*> object .:? "occurred_at"
+            <*> object .: "user_text"
+            <*> object .:? "assistant_text"
 
 databaseTools :: DatabaseToolsEnv -> [AppTool]
 databaseTools env =
@@ -184,7 +203,8 @@ conversationSearchTool env = jsonTool
     "conversation_search"
     ( "Search user and assistant messages from past, non-deleted conversations. "
         <> "Use this when earlier decisions, preferences, facts, or work may be "
-        <> "relevant. Results are ranked by PostgreSQL full-text search."
+        <> "relevant. Results are ranked by PostgreSQL full-text search and "
+        <> "returned as readable labeled text."
     )
     [ PropertySchema "query" PropertyString True $ Just
         "Words or a natural-language web-search-style query."
@@ -198,7 +218,8 @@ conversationSearchTool env = jsonTool
             then pure (Left "conversation search query must not be empty")
             else if limit < 1 || limit > 100
                 then pure (Left "conversation search limit must be between 1 and 100")
-                else encodeResult <$> env.databaseSearchConversations query limit)
+                else fmap (>>= renderConversationSearchResult) $
+                    env.databaseSearchConversations query limit)
 
 scopeProperty :: PropertySchema
 scopeProperty = PropertySchema
@@ -213,3 +234,32 @@ scopeProperty = PropertySchema
 encodeResult :: Either Text Value -> Either Text Text
 encodeResult =
     fmap (Text.decodeUtf8 . LBS.toStrict . Aeson.encode)
+
+renderConversationSearchResult :: Value -> Either Text Text
+renderConversationSearchResult value =
+    case Aeson.fromJSON value of
+        Aeson.Error errorMessage ->
+            Left $
+                "conversation search returned an unexpected result: "
+                    <> Text.pack errorMessage
+        Aeson.Success matches ->
+            Right $ case matches of
+                [] -> "(no matching conversations)"
+                _ -> Text.intercalate "\n\n" $
+                    zipWith renderConversationSearchMatch [1 :: Int ..] matches
+
+renderConversationSearchMatch :: Int -> ConversationSearchMatch -> Text
+renderConversationSearchMatch
+    matchNumber
+    (ConversationSearchMatch sessionId turnIndex occurredAt userText assistantText) =
+        Text.intercalate "\n" $
+            [ "Match " <> Text.pack (show matchNumber)
+            , "Session: " <> sessionId
+            , "Turn: " <> Text.pack (show turnIndex)
+            ]
+                <> maybe [] (\timestamp -> ["Occurred at: " <> timestamp]) occurredAt
+                <> ["User:", indentText userText]
+                <> maybe [] (\text -> ["Assistant:", indentText text]) assistantText
+
+indentText :: Text -> Text
+indentText = Text.intercalate "\n" . map ("  " <>) . Text.lines

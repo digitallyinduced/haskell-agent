@@ -90,6 +90,12 @@ spec = describe "tool presentation" do
             `shouldBe` "Enter API token"
 
     it "renders learned-skill mutations with scope, slug, and approval intent" do
+        summarizeToolCall
+            (functionToolCall
+                "view"
+                "view_skill"
+                "{\"scope\":\"repository\",\"name\":\"postgres-sessions\"}")
+            `shouldBe` "Viewed skill repository/postgres-sessions"
         let create = functionToolCall
                 "skill"
                 "skill_create"
@@ -139,3 +145,55 @@ spec = describe "tool presentation" do
         formatToolOutput call
             "{\"agents\":[{\"agent_status\":\"running\"},null]}"
             `shouldBe` "(no live agents)"
+
+    it "summarizes conversation search calls while preserving text output" do
+        let call = functionToolCall
+                "search"
+                "conversation_search"
+                "{\"query\":\"postgres memory\",\"limit\":5}"
+        summarizeToolCall call
+            `shouldBe` "Searched conversations postgres memory"
+        formatToolOutput call "Match 1\nUser:\n  A question"
+            `shouldBe` "Match 1\nUser:\n  A question"
+
+    it "summarizes persisted agent-session conversation tools" do
+        let create = functionToolCall
+                "create" "create_agent_session"
+                "{\"message\":\"work\",\"title\":\"research\"}"
+            readSession = functionToolCall
+                "read" "read_agent_session"
+                "{\"session_id\":\"session-1\",\"limit\":20}"
+            message = functionToolCall
+                "message" "send_agent_session_message"
+                "{\"session_id\":\"session-1\",\"message\":\"continue\"}"
+        summarizeToolCall create `shouldBe` "Created agent session research"
+        summarizeToolCall readSession `shouldBe` "Read agent session session-1"
+        summarizeToolCall message `shouldBe`
+            "Messaged agent session session-1"
+
+    it "keeps todo_write chrome on the wire name and renders checklist glyphs" do
+        let call = functionToolCall
+                "todo"
+                "todo_write"
+                "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\",\"status\":\"completed\"}]}"
+        toolCallTitle call `shouldBe` "todo_write"
+        todoCallPreview call `shouldBe` "Find and clone repos"
+        formatToolOutput call
+            "- [completed] 1: Find and clone repos\n\
+            \- [in_progress] 2: Investigate Grok Build\n\
+            \- [pending] 3: Investigate Codex\n\
+            \- [cancelled] 4: Skip leftover work"
+            `shouldBe`
+                "✓ Find and clone repos\n\
+                \▶ Investigate Grok Build\n\
+                \□ Investigate Codex\n\
+                \✗ Skip leftover work"
+
+    it "formats Codex update_plan output as the same checklist" do
+        let call = functionToolCall "plan" "update_plan" "{\"plan\":[]}"
+        toolCallTitle call `shouldBe` "update_plan"
+        formatToolOutput call
+            "Plan updated:\n- [completed] Clone the repo\n- [pending] Open a PR"
+            `shouldBe`
+                "✓ Clone the repo\n\
+                \□ Open a PR"

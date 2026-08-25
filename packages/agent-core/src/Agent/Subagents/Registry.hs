@@ -25,6 +25,7 @@ module Agent.Subagents.Registry
     , spawnSubagentAtForTurn
     , spawnSubagentAtPreparedForTurn
     , spawnSubagentAtWithCwdPrepared
+    , spawnSubagentAtWithCwdPreparedForTurn
     , restoreSubagent
     , restoreSubagentAt
     , restoreSubagentAtStatus
@@ -58,6 +59,10 @@ import Agent.Cancel
     , requestCancel
     , resetCancel
     , waitCancel
+    )
+import Agent.Concurrent
+    ( forConcurrentlyBounded_
+    , mapConcurrentlyBounded
     )
 import Agent.InterAgentMessage
     ( InterAgentMessage(..)
@@ -97,7 +102,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Trans.Resource (runResourceT)
 import Data.Acquire (Acquire, allocateAcquire, mkAcquire, withAcquire)
 import Data.IORef
-import Data.List (sortOn)
+import Data.List (groupBy, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Ord (Down(..))
@@ -294,8 +299,11 @@ closeSubagentRegistryLocked registry = do
     records <- atomically do
         writeTVar registry.registryClosed True
         Map.elems <$> readTVar registry.registryAgents
-    mapM_ (shutdownRecord registry) $
-        sortOn (Down . (.recordDepth)) records
+    mapM_
+        (forConcurrentlyBounded_ 8 (shutdownRecord registry))
+        (groupBy
+            (\left right -> left.recordDepth == right.recordDepth)
+            (sortOn (Down . (.recordDepth)) records))
 
 -- | Shut down live children and reopen the registry for a fresh session.
 resetSubagentRegistry :: SubagentRegistry -> IO ()
@@ -1141,7 +1149,9 @@ abortRootTurn registry rootTurnId =
             modifyTVar' registry.registryAbortedRootTurns (Set.insert rootTurnId)
             agents <- Map.elems <$> readTVar registry.registryAgents
             fmap concat $ mapM selectOwned agents
-        settled <- mapM (interruptRecordForTurn registry rootTurnId) records
+        settled <- mapConcurrentlyBounded 8
+            (interruptRecordForTurn registry rootTurnId)
+            records
         mapM_
             (\record -> notifySettled registry record.recordId Interrupted)
             [record | (record, True) <- zip records settled]
@@ -1215,7 +1225,9 @@ interruptActiveSubagents registry =
             records <- filterMSTM isActiveRecord agents
             pure (wasClosed, records)
         (do
-            settled <- mapM (interruptRecord registry) records
+            settled <- mapConcurrentlyBounded 8
+                (interruptRecord registry)
+                records
             mapM_
                 (\record -> notifySettled registry record.recordId Interrupted)
                 [record | (record, True) <- zip records settled])

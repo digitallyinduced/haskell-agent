@@ -14,6 +14,7 @@ module Agent.CLI.Render
     , formatLoopErrorPersistedAt
     , formatSearchReplaceDiff
     , formatThinkingBlock
+    , formatToolBody
     , formatToolOutput
     , formatToolStarted
     , formatTurnStatus
@@ -72,6 +73,7 @@ import Agent.CLI.Style
     , roleWarn
     , terminalGreen
     , terminalRed
+    , terminalYellow
     , motionGlyphSet
     , style
     )
@@ -80,9 +82,14 @@ import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
     , SearchReplaceLine(..)
+    , TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
     , formatToolOutput
     , parseSearchReplaceDiff
+    , parseTodoList
     , summarizeToolCall
+    , todoCallPreview
+    , todoStatusGlyph
     , toolDetail
     )
 import Agent.ToolDispatch
@@ -546,11 +553,17 @@ renderEventUnlocked config = \case
     ToolFinished result -> do
         calls <- readIORef config.renderToolCalls
         modifyIORef' config.renderToolCalls (Map.delete result.callId)
-        let output = maybe result.output
+        let maybeCall = Map.lookup result.callId calls
+            formatted = maybe result.output
                 (`formatToolOutput` result.output)
-                (Map.lookup result.callId calls)
-        putTextLn config.renderStderr
-            (roleToolOutput config.renderColor (truncateToolOutput output))
+                maybeCall
+            painted = case maybeCall of
+                Just call
+                    | canonicalToolName call.name `elem` ["todo_write", "update_plan"] ->
+                        formatTodoOutput config.renderColor formatted
+                _ ->
+                    roleToolOutput config.renderColor (truncateToolOutput formatted)
+        putTextLn config.renderStderr painted
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -934,12 +947,13 @@ toolChrome name = case canonicalToolName name of
     "followup_task" -> ToolChrome "Followed up with" ToolDetailMuted
     "list_agents" -> ToolChrome "Listed agents" ToolDetailMuted
     "interrupt_agent" -> ToolChrome "Interrupted" ToolDetailMuted
-    "update_plan" -> ToolChrome "Updated" ToolDetailMuted
+    "todo_write" -> ToolChrome "todo_write" ToolDetailNone
+    "update_plan" -> ToolChrome "update_plan" ToolDetailNone
     "enter_plan_mode" -> ToolChrome "Entered" ToolDetailMuted
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
     "skill_search" -> ToolChrome "Searched skills" ToolDetailMuted
-    "skill_read" -> ToolChrome "Read skill" ToolDetailMuted
+    "view_skill" -> ToolChrome "Viewed skill" ToolDetailMuted
     "skill_create" -> ToolChrome "Learned" ToolDetailMuted
     "skill_update" -> ToolChrome "Updated skill" ToolDetailMuted
     "skill_archive" -> ToolChrome "Archived skill" ToolDetailMuted
@@ -949,7 +963,44 @@ toolChrome name = case canonicalToolName name of
 formatToolBody :: Bool -> ToolCall -> Text
 formatToolBody color call = case canonicalToolName call.name of
     "search_replace" -> formatSearchReplaceDiff color call.arguments
+    "todo_write" -> formatTodoPreview color call
+    "update_plan" -> formatTodoPreview color call
     _ -> ""
+
+formatTodoPreview :: Bool -> ToolCall -> Text
+formatTodoPreview color call =
+    let preview = todoCallPreview call
+    in if Text.null preview
+        then ""
+        else paintTodoLine color (TodoDisplayLine TodoDisplayPending preview)
+
+formatTodoOutput :: Bool -> Text -> Text
+formatTodoOutput color output =
+    let parsed = parseTodoList output
+        shown = take 3 parsed
+        hidden = length parsed - length shown
+        rows = map (paintTodoLine color) shown
+        overflow
+            | hidden > 0 =
+                [ glyphToolAccent
+                    <> glyphToolOut
+                    <> roleMuted color
+                        ("… +" <> Text.pack (show hidden) <> " lines")
+                ]
+            | otherwise = []
+    in Text.intercalate "\n" (rows <> overflow)
+
+paintTodoLine :: Bool -> TodoDisplayLine -> Text
+paintTodoLine color line =
+    let glyph = todoStatusGlyph line.todoLineStatus
+        body = glyph <> " " <> line.todoLineText
+        painted = case line.todoLineStatus of
+            TodoDisplayPending -> roleMuted color body
+            TodoDisplayInProgress ->
+                style color [terminalYellow] body
+            TodoDisplayCompleted -> roleSuccess color body
+            TodoDisplayCancelled -> roleMuted color body
+    in glyphToolAccent <> glyphToolOut <> painted
 
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text

@@ -652,7 +652,7 @@ handleComposerKey
         modify' \current ->
             current
                 { appPasted = False
-                , appHistory = text : current.appHistory
+                , appHistory = Bridge.pushHistory text current.appHistory
                 , appHistoryIndex = Nothing
                 , appHistoryDraft = ""
                 }
@@ -696,7 +696,8 @@ handleComposerKey
                         \current ->
                             current
                                 { appPasted = False
-                                , appHistory = draft : current.appHistory
+                                , appHistory =
+                                    Bridge.pushHistory draft current.appHistory
                                 , appHistoryIndex = Nothing
                                 , appHistoryDraft = ""
                                 , appSlashIndex = 0

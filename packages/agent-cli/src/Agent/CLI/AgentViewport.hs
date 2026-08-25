@@ -24,6 +24,7 @@ module Agent.CLI.AgentViewport
     , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
+    , responseItemsToUiState
     , selectAgentTarget
     , selectedAgentEntry
     ) where
@@ -36,16 +37,38 @@ import Agent.CLI.TextLayout
     , clampSelectionIndex
     , renderSplitPaneFrame
     )
+import Agent.Loop (LoopEvent(..))
+import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
-import Agent.ToolDispatch (customToolCall, functionToolCall)
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , customToolCall
+    , functionToolCall
+    )
+import Agent.TUI.Model
+    ( BlockKind(..)
+    , BlockState(..)
+    , UiBlock(..)
+    , UiEvent(..)
+    , UiState(..)
+    , initialUiState
+    , reduceUi
+    )
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
+import Data.Foldable (toList)
 import Data.IORef (IORef)
 import Data.List (findIndex, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
 import System.Console.ANSI (getTerminalSize)
 import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
@@ -83,6 +106,7 @@ data AgentEntry = AgentEntry
     , agentModel :: !(Maybe Text)
     , agentSteps :: ![AgentStep]
     , agentTranscript :: ![Text]
+    , agentConversation :: !UiState
     }
     deriving (Eq, Show)
 
@@ -310,6 +334,15 @@ pickAgentViewport color selected entries = do
 
 responseItemLines :: [ResponseItem] -> [Text]
 responseItemLines = concatMap responseItemLineList
+
+-- | Replay a persisted provider transcript through the same retained UI model
+-- used by the root conversation. The agent picker still consumes compact text
+-- lines, while the fullscreen child view receives rich Markdown, reasoning,
+-- and tool blocks without maintaining a second presentation model.
+responseItemsToUiState :: Bool -> [ResponseItem] -> UiState
+responseItemsToUiState showRawReasoning =
+    normalizeTranscriptUi
+        . foldl' (appendResponseItem showRawReasoning) initialUiState
 
 -- | Keep a compact agent preview: the first line for picker context plus
 -- only the most recent logical lines for the live pane. Earlier response
@@ -591,6 +624,181 @@ responseContentText = \case
     InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
     InputAudioPart{} -> ["[audio]"]
     UnknownContentPart{} -> []
+
+appendResponseItem :: Bool -> UiState -> ResponseItem -> UiState
+appendResponseItem showRawReasoning state = \case
+    MessageItem message ->
+        appendResponseMessage message state
+    FunctionCallItem item ->
+        maybe state
+            (\call -> reduceUi (UiLoop (ToolStarted call)) state)
+            (responseItemToToolCall (FunctionCallItem item))
+    CustomToolCallItem item ->
+        maybe state
+            (\call -> reduceUi (UiLoop (ToolStarted call)) state)
+            (responseItemToToolCall (CustomToolCallItem item))
+    FunctionCallOutputItem output ->
+        reduceUi
+            (UiLoop
+                (ToolFinished ToolCallResult
+                    { callId = output.callId
+                    , output = renderToolOutputValue output.output
+                    , callKind = FunctionCallKind
+                    }))
+            state
+    CustomToolCallOutputItem output ->
+        reduceUi
+            (UiLoop
+                (ToolFinished ToolCallResult
+                    { callId = output.callId
+                    , output = renderToolOutputValue output.output
+                    , callKind = CustomCallKind
+                    }))
+            state
+    ReasoningItemValue reasoning ->
+        appendReasoningItem
+            reasoning.status
+            (reasoningDisplayText showRawReasoning reasoning)
+            state
+    KnownResponseItem ItemAgentMessage tagged ->
+        maybe state
+            (\text -> reduceUi (UiUserSubmitted text) state)
+            (nonEmptyDisplayText (taggedContentText tagged))
+    KnownResponseItem{} -> state
+    ItemReferenceValue{} -> state
+    UnknownResponseItem{} -> state
+
+appendResponseMessage :: ResponseMessage -> UiState -> UiState
+appendResponseMessage message state =
+    case nonEmptyDisplayText (responseMessageText message.content) of
+        Nothing -> state
+        Just text -> case message.role of
+            RoleUser -> reduceUi (UiUserSubmitted text) state
+            RoleAssistant -> reduceUi (UiAssistantHistory text) state
+            RoleSystem -> reduceUi (UiSystemMessage text) state
+            RoleDeveloper ->
+                reduceUi (UiSystemMessage ("Developer:\n" <> text)) state
+            RoleUnknown role ->
+                reduceUi
+                    (UiSystemMessage (role <> ":\n" <> text))
+                    state
+
+appendReasoningItem :: Maybe ItemStatus -> Text -> UiState -> UiState
+appendReasoningItem status raw state =
+    case nonEmptyDisplayText raw of
+        Nothing -> state
+        Just text ->
+            let
+                firstBlock = reasoningStartIndex state
+                previousTurnStart = state.uiTurnStartBlock
+                previousAttemptStart = state.uiAttemptStartBlock
+                previousToolCalls = state.uiToolCalls
+                streamed =
+                    reduceUi
+                        (UiLoop (ReasoningDelta text))
+                        state
+                            { uiTurnStartBlock = firstBlock
+                            , uiAttemptStartBlock = firstBlock
+                            }
+                settled = case status of
+                    Just ItemInProgress -> streamed
+                    _ ->
+                        reduceUi
+                            (UiTurnEnded (itemTerminalState status))
+                            streamed
+            in settled
+                { uiTurnStartBlock = previousTurnStart
+                , uiAttemptStartBlock = previousAttemptStart
+                , uiToolCalls = previousToolCalls
+                }
+
+reasoningStartIndex :: UiState -> Int
+reasoningStartIndex state =
+    case Seq.viewr state.uiBlocks of
+        _ Seq.:> block
+            | block.blockKind == BlockThinking
+            , block.blockState == BlockStreaming ->
+                max 0 (Seq.length state.uiBlocks - 1)
+        _ -> Seq.length state.uiBlocks
+
+itemTerminalState :: Maybe ItemStatus -> BlockState
+itemTerminalState = \case
+    Just ItemIncomplete -> BlockFailed
+    Just (ItemStatusUnknown status)
+        | Text.toLower status `elem`
+            ["failed", "error", "cancelled", "canceled"] ->
+                BlockFailed
+    _ -> BlockComplete
+
+reasoningDisplayText :: Bool -> ReasoningItem -> Text
+reasoningDisplayText showRawReasoning reasoning =
+    Text.intercalate "\n" $
+        filter (not . Text.null . Text.strip) $
+            summaryText
+                <> if showRawReasoning
+                    then rawText
+                    else []
+  where
+    summaryText =
+        [ text
+        | part <- reasoning.summary
+        , Just text <- [part.text]
+        ]
+    rawText =
+        maybe [] (concatMap reasoningContentText) reasoning.content
+
+reasoningContentText :: ResponseContentPart -> [Text]
+reasoningContentText = \case
+    ReasoningTextPart{text} -> [text]
+    SummaryTextPart{text} -> [text]
+    _ -> []
+
+taggedContentText :: TaggedObject -> Text
+taggedContentText tagged =
+    case KeyMap.lookup "content" tagged.fields of
+        Just (Aeson.Array values) ->
+            Text.intercalate "\n" (concatMap taggedPartText (toList values))
+        Just value ->
+            Text.intercalate "\n" (taggedPartText value)
+        Nothing -> ""
+
+taggedPartText :: Aeson.Value -> [Text]
+taggedPartText = \case
+    Aeson.String text -> [text]
+    Aeson.Object object ->
+        case KeyMap.lookup "text" object of
+            Just (Aeson.String text) -> [text]
+            _ -> []
+    _ -> []
+
+renderToolOutputValue :: Aeson.Value -> Text
+renderToolOutputValue = \case
+    Aeson.String text -> text
+    Aeson.Null -> ""
+    value ->
+        TextEncoding.decodeUtf8 $
+            LBS.toStrict (Aeson.encode value)
+
+normalizeTranscriptUi :: UiState -> UiState
+normalizeTranscriptUi state =
+    state
+        { uiRunning = any blockIsLive state.uiBlocks
+        , uiActivity =
+            if any blockIsLive state.uiBlocks
+                then "Working…"
+                else "Ready"
+        , uiCompletionRemainingMillis = 0
+        , uiNotice = Nothing
+        , uiRetryCountdown = Nothing
+        }
+  where
+    blockIsLive block =
+        block.blockState `elem` [BlockStreaming, BlockRunning]
+
+nonEmptyDisplayText :: Text -> Maybe Text
+nonEmptyDisplayText raw =
+    let stripped = Text.strip raw
+    in if Text.null stripped then Nothing else Just stripped
 
 labelled :: Text -> Text -> [Text]
 labelled prefix raw =

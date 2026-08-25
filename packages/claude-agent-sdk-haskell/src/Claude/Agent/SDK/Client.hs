@@ -89,7 +89,6 @@ data ClaudeSDKClient = ClaudeSDKClient
     { clientOptions :: !ClaudeAgentOptions
     , clientTransportFactory :: !TransportFactory
     , clientInitialPrevious :: !(Maybe Text)
-    , clientInitialPreviousConsumed :: !(IORef Bool)
     , clientState :: !(IORef ClientState)
     , clientInterruptEpoch :: !(IORef Int)
     , clientCommitLock :: !(MVar ())
@@ -100,6 +99,7 @@ data ClientState = ClientState
     { stateRunning :: !(Maybe RunningClient)
     , stateHadCompletedTurn :: !Bool
     , stateNeedsFreshSession :: !Bool
+    , stateInitialPreviousConsumed :: !Bool
     }
 
 data RunningClient = RunningClient
@@ -153,7 +153,6 @@ withClaudeSDKClientWithTransport options transportFactory =
     bracket acquire release
   where
     acquire = do
-        initialConsumed <- newIORef False
         state <- newIORef emptyClientState
         interruptEpoch <- newIORef 0
         commitLock <- newMVar ()
@@ -162,7 +161,6 @@ withClaudeSDKClientWithTransport options transportFactory =
             { clientOptions = options
             , clientTransportFactory = transportFactory
             , clientInitialPrevious = options.resume
-            , clientInitialPreviousConsumed = initialConsumed
             , clientState = state
             , clientInterruptEpoch = interruptEpoch
             , clientCommitLock = commitLock
@@ -217,9 +215,12 @@ withClaudeSDKTurn
                         (nonEmptyText (model <|> client.clientOptions.model))
                         (nonEmptyText (effort <|> client.clientOptions.effort))
                 when consumeInitialPrevious $
-                    writeIORef
-                        client.clientInitialPreviousConsumed
-                        True
+                    atomicModifyIORef' client.clientState \state ->
+                        ( state
+                            { stateInitialPreviousConsumed = True
+                            }
+                        , ()
+                        )
                 pure turn
             case prepared of
                 Left exception ->
@@ -462,6 +463,7 @@ emptyClientState = ClientState
     { stateRunning = Nothing
     , stateHadCompletedTurn = False
     , stateNeedsFreshSession = False
+    , stateInitialPreviousConsumed = False
     }
 
 selectPrevious
@@ -474,7 +476,8 @@ selectPrevious client explicit =
             pure (Just selected, False)
         Nothing -> do
             consumed <-
-                readIORef client.clientInitialPreviousConsumed
+                (.stateInitialPreviousConsumed)
+                    <$> readIORef client.clientState
             let initial =
                     if consumed
                         then Nothing
@@ -525,6 +528,8 @@ prepareTurn client previous model effort = do
                 emptyClientState
                     { stateNeedsFreshSession =
                         oldState.stateNeedsFreshSession
+                    , stateInitialPreviousConsumed =
+                        oldState.stateInitialPreviousConsumed
                     }
             running <-
                 startRunningClient
@@ -536,6 +541,8 @@ prepareTurn client previous model effort = do
                     { stateRunning = Just running
                     , stateHadCompletedTurn = completed
                     , stateNeedsFreshSession = False
+                    , stateInitialPreviousConsumed =
+                        oldState.stateInitialPreviousConsumed
                     }
             writeIORef client.clientState state
             pure (running, state, isNewStart mode)
