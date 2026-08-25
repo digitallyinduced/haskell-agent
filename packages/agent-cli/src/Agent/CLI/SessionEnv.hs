@@ -46,7 +46,6 @@ data SessionEnv = SessionEnv
     , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionPrevious :: !(IORef (Maybe Text))
-    , sessionPrinted :: !(IORef Bool)
     , sessionParams :: !(IORef ResponseCreateParams)
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionTranscript :: !(IORef [ResponseItem])

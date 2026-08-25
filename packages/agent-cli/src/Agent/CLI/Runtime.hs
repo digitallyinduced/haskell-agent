@@ -316,10 +316,14 @@ import Agent.CLI.ProviderTransition
 import Agent.CLI.SessionState (SessionState(..), newSessionState)
 import Agent.CLI.Render
     ( RenderConfig(..)
+    , RenderState(..)
+    , beginRenderTurn
     , clearThinking
-    , emptyMarkdownStreamState
+    , emptyRenderState
     , putTextLn
     , renderEvent
+    , renderPrintedText
+    , resetRenderPrintedText
     )
 import Agent.CLI.Session
 import Agent.CLI.Session.Choices
@@ -615,7 +619,6 @@ import Agent.GrokBuild.Dialect.Workflow
     , workflowRunSnapshots
     )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
-import Agent.TextBuffer (emptyTextBuffer)
 import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
@@ -3167,17 +3170,10 @@ runSession SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
-    printed <- newIORef False
     let attachmentsRef = startup.startupSessionState.sessionAttachments
         previewIdRef = startup.startupSessionState.sessionPreviewId
-    markdownState <- newIORef emptyMarkdownStreamState
-    liveActive <- newIORef False
-    thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
-    reasoningBuffer <- newIORef emptyTextBuffer
-    activityRef <- newIORef "Thinking…"
-    startedAtRef <- newIORef Nothing
-    toolCallsRef <- newIORef Map.empty
+    renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
@@ -3531,20 +3527,13 @@ runSession SessionRequest{..} SessionBackend{..} = do
     syncStore
     let render = RenderConfig
             { renderShowThinking = stderrTty
-            , renderThinkingVisible = thinkingVisible
             , renderThinkingSpinner = spinnerRef
-            , renderReasoningBuffer = reasoningBuffer
+            , renderState = renderStateRef
             , renderColor = useColor
-            , renderPrintedText = printed
-            , renderMarkdownState = markdownState
-            , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr
             , renderModelRef = modelRef
-            , renderActivityRef = activityRef
-            , renderStartedAt = startedAtRef
-            , renderToolCalls = toolCallsRef
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
@@ -3564,11 +3553,13 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     case event of
                         TurnStarted -> do
                             now <- getCurrentTime
-                            writeIORef startedAtRef (Just now)
-                            writeIORef activityRef "Thinking…"
-                        TextDelta _ -> writeIORef printed True
+                            modifyIORef' renderStateRef (beginRenderTurn now)
+                        TextDelta _ ->
+                            modifyIORef' renderStateRef
+                                (\state -> state{statePrintedText = True})
                         ToolStarted _ ->
-                            writeIORef activityRef "Running tool…"
+                            modifyIORef' renderStateRef
+                                (\state -> state{stateActivity = "Running tool…"})
                         _ -> pure ()
                     emitUiEvent runtime (UiLoop event)
         shellToolAllowed call = do
@@ -3759,7 +3750,6 @@ runSession SessionRequest{..} SessionBackend{..} = do
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionPrevious = previous
-            , sessionPrinted = printed
             , sessionParams = paramsRef
             , sessionPolicy = policyRef
             , sessionTranscript = transcriptRef
@@ -4083,7 +4073,6 @@ replWithDraft env@SessionEnv
     , sessionDialect = dialect
     , sessionStartupUnavailable = startupUnavailableRef
     , sessionPrevious = previous
-    , sessionPrinted = printed
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
     , sessionPersist = persist
@@ -4441,7 +4430,7 @@ replWithDraft env@SessionEnv
                                 pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
                                     setFullscreenImagePreviews runtime []
-                                writeIORef printed False
+                                resetRenderPrintedText render
                                 let turnInputs =
                                         if null pendingImages
                                             then [UserMessage text]
@@ -4496,7 +4485,7 @@ replWithDraft env@SessionEnv
                                                 invocation arguments)
                                         , userInput
                                         ]
-                                writeIORef printed False
+                                resetRenderPrintedText render
                                 fullscreenEvent (UiUserSubmitted line)
                                 result <- runOneTurn env line skillInputs
                                 finishTurn env False result
@@ -4560,7 +4549,7 @@ replWithDraft env@SessionEnv
                                             Text.putStrLn
                                                 (roleMuted color
                                                     (glyphOk <> "pasted " <> sizes))
-                                        writeIORef printed False
+                                        resetRenderPrintedText render
                                         fullscreenEvent
                                             (UiUserSubmitted promptText)
                                         let turnInputs =
@@ -5446,7 +5435,7 @@ replWithDraft env@SessionEnv
                     Text.hPutStrLn stderr (roleError color err)
                 next
             Right skillInputs -> do
-                writeIORef printed False
+                resetRenderPrintedText render
                 fullscreenEvent (UiUserSubmitted original)
                 result <- runOneTurn env original skillInputs
                 finishTurn env False result
@@ -5850,7 +5839,7 @@ enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
 enterPlanFromSlash env@SessionEnv
     { sessionPlanMode = planMode
     , sessionPersist = persist
-    , sessionPrinted = printed
+    , sessionRender = render
     , sessionFullscreen = fullscreen
     } maybeDescription = do
     discardStore <- newIORef Nothing
@@ -5879,7 +5868,7 @@ enterPlanFromSlash env@SessionEnv
             path <- planFilePath planMode
             let message = "plan mode on (" <> toText path <> ")"
             report message (glyphSession <> message)
-            writeIORef printed False
+            resetRenderPrintedText render
             case fullscreen of
                 Nothing -> pure ()
                 Just runtime ->
@@ -5898,7 +5887,7 @@ enterPlanFromSlash env@SessionEnv
                                 pure (Just providerTransition)
                 _ -> do
                     when (isNothing fullscreen) $
-                        putTrailingNewline printed
+                        putTrailingNewline render
                     pure Nothing
 
 preparePromptSkillInputs
@@ -5933,8 +5922,8 @@ setNativeProgress handle active = do
         Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
         hFlush handle
 
-putTrailingNewline :: IORef Bool -> IO ()
-putTrailingNewline printed = do
-    didPrint <- readIORef printed
+putTrailingNewline :: RenderConfig -> IO ()
+putTrailingNewline render = do
+    didPrint <- renderPrintedText render
     if didPrint then putStrLn "" else pure ()
 

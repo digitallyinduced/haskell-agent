@@ -34,6 +34,7 @@ import Agent.CLI.Session.Interaction
     )
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Render (RenderConfig, renderPrintedText)
 import Agent.CLI.TUI.App
     ( emitUiEvent
     , hasQueuedFullscreenInput
@@ -43,8 +44,7 @@ import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Monad (when)
 import Data.IORef
-    ( IORef
-    , readIORef
+    ( readIORef
     , writeIORef
     )
 import Data.Text (Text)
@@ -123,14 +123,14 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                 selectionId
                 accountId
         case env.sessionFullscreen of
-            Nothing -> putTrailingNewline env.sessionPrinted
+            Nothing -> putTrailingNewline env.sessionRender
             Just _ -> pure ()
         if exitAfter
             then pure RunQuit
             else continueAfterTurn continuation env
     TurnCancelled -> do
         case env.sessionFullscreen of
-            Nothing -> putTrailingNewline env.sessionPrinted
+            Nothing -> putTrailingNewline env.sessionRender
             Just _ -> pure ()
         if exitAfter
             then pure RunQuit
@@ -140,7 +140,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
             then exitFailure
             else do
                 case env.sessionFullscreen of
-                    Nothing -> putTrailingNewline env.sessionPrinted
+                    Nothing -> putTrailingNewline env.sessionRender
                     Just _ -> pure ()
                 continueAfterTurn continuation env
     TurnRestartRequested level pending -> do
@@ -197,7 +197,7 @@ continueAfterTurn continuation env = do
         notifyAttention stderr InputRequested
     continuation.resumeSession env
 
-putTrailingNewline :: IORef Bool -> IO ()
-putTrailingNewline printed = do
-    didPrint <- readIORef printed
+putTrailingNewline :: RenderConfig -> IO ()
+putTrailingNewline render = do
+    didPrint <- renderPrintedText render
     when didPrint (putStrLn "")
