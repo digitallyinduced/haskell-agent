@@ -5,6 +5,7 @@ module Agent.CLI.TUI.Composer
     , appendFullscreenInput
     , applyComposerUiEvent
     , composerEscapeAction
+    , composerScrollbackAvailable
     , controlAttr
     , controlInteractionAttr
     , decodePaste
@@ -51,6 +52,7 @@ import Agent.CLI.Options (reasoningEfforts)
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.CLI.TUI.Composer.Buffer
 import Agent.CLI.TUI.Composer.Edit
+import Agent.CLI.TUI.History (HistoryWindow, historyWindowHasBlocks)
 import Agent.CLI.TUI.Types
 import qualified Agent.TUI.Theme as Theme
 import Agent.TUI.Model
@@ -82,6 +84,10 @@ type ApplyLocalUiEvent =
     UiEvent
     -> (AppState -> AppState)
     -> EventM Name AppState ()
+
+composerScrollbackAvailable :: UiState -> HistoryWindow -> Bool
+composerScrollbackAvailable ui history =
+    not (Seq.null ui.uiBlocks) || historyWindowHasBlocks history
 
 drawSlashMenu :: AppState -> Widget Name
 drawSlashMenu state = case currentSlashMenu state of
@@ -550,7 +556,10 @@ handleComposerKey
             case slashMenu of
                 Just menu -> acceptSlash menu
                 Nothing ->
-                    when (not (Seq.null ui.uiBlocks)) $
+                    when
+                        (composerScrollbackAvailable
+                            ui
+                            state.appHistoryWindow) $
                         modifyUi (UiFocusChanged FocusScrollback)
         V.EvKey V.KEnter [V.MShift] ->
             insertText "\n"

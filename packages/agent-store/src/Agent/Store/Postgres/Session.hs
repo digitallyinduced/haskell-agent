@@ -12,6 +12,7 @@
 module Agent.Store.Postgres.Session
     ( SessionMetadata(..)
     , SessionLegacyTarget(..)
+    , TranscriptEffect(..)
     , SessionTurn(..)
     , SessionUsage(..)
     , StoredSession(..)
@@ -23,8 +24,17 @@ module Agent.Store.Postgres.Session
     , createSession
     , replaceSessionMetadata
     , appendSessionTurn
+    , appendSessionTurnIndexed
     , loadSession
     , loadSessions
+    , loadSessionMetadata
+    , loadActiveSession
+    , SessionTurnPage(..)
+    , SessionResumeStats(..)
+    , loadRecentSessionTurns
+    , loadSessionTurnsBefore
+    , loadSessionTurnsAfter
+    , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
     , searchConversationTurns
@@ -68,6 +78,25 @@ data SessionLegacyTarget = SessionLegacyTarget
     }
     deriving (Eq, Show)
 
+data SessionTurnPage = SessionTurnPage
+    { sessionPageTurns :: ![StoredTurn]
+    , sessionPageGenerationStart :: !Int64
+    , sessionPageTotal :: !Int64
+    , sessionPageHasOlder :: !Bool
+    , sessionPageHasNewer :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | Full-session aggregates for resume UI. The transcript preview stays
+-- paged; these fields describe the whole stored conversation.
+data SessionResumeStats = SessionResumeStats
+    { sessionResumeTurnCount :: !Int64
+    , sessionResumeMessageCount :: !Int64
+    , sessionResumeToolCount :: !Int64
+    , sessionResumeFirstPrompt :: !(Maybe Text)
+    }
+    deriving (Eq, Show)
+
 data SessionMetadata = SessionMetadata
     { sessionMetadataKey :: !Text
     , sessionMetadataVersion :: !Int32
@@ -102,12 +131,19 @@ data SessionUsage = SessionUsage
     }
     deriving (Eq, Show)
 
+data TranscriptEffect
+    = TranscriptAppend
+    | TranscriptReplace
+    | TranscriptReset
+    deriving (Eq, Show)
+
 data SessionTurn = SessionTurn
     { sessionTurnOccurredAt :: !UTCTime
     , sessionTurnUserText :: !Text
     , sessionTurnAssistantText :: !(Maybe Text)
     , sessionTurnError :: !(Maybe Text)
     , sessionTurnResponseId :: !(Maybe Text)
+    , sessionTurnEffect :: !TranscriptEffect
     , sessionTurnItems :: ![StoredResponseItem]
     , sessionTurnUsage :: !(Maybe SessionUsage)
     }
@@ -231,6 +267,8 @@ sessionSchemaStatements =
       \ assistant_text text,\
       \ error_text text,\
       \ response_id text,\
+      \ transcript_effect text NOT NULL DEFAULT 'append'\
+      \   CHECK (transcript_effect IN ('append', 'replace', 'reset')),\
       \ usage_input_tokens bigint,\
       \ usage_output_tokens bigint,\
       \ usage_cached_tokens bigint,\
@@ -256,6 +294,11 @@ sessionSchemaStatements =
       \ ON harness.session_turns USING gin (search_vector)"
     , "CREATE INDEX IF NOT EXISTS session_turns_session_time_idx\
       \ ON harness.session_turns (session_id, occurred_at DESC)"
+    , "CREATE INDEX IF NOT EXISTS session_turns_session_index_idx\
+      \ ON harness.session_turns (session_id, turn_index)"
+    , "CREATE INDEX IF NOT EXISTS session_turns_checkpoint_idx\
+      \ ON harness.session_turns (session_id, turn_index DESC)\
+      \ WHERE transcript_effect <> 'append'"
     ]
     <> sessionItemSchemaStatements
     <> [ "CREATE TABLE IF NOT EXISTS harness.legacy_session_imports (\
@@ -345,6 +388,15 @@ appendSessionTurn
     -> SessionMetadata
     -> IO (Either StoreError Bool)
 appendSessionTurn pool turn metadata =
+    fmap (fmap (maybe False (const True))) $
+        appendSessionTurnIndexed pool turn metadata
+
+appendSessionTurnIndexed
+    :: StorePool
+    -> SessionTurn
+    -> SessionMetadata
+    -> IO (Either StoreError (Maybe Int64))
+appendSessionTurnIndexed pool turn metadata =
     withSession pool $
         Transactions.transaction Transactions.Serializable Transactions.Write do
             _ <- Transaction.statement
@@ -352,7 +404,7 @@ appendSessionTurn pool turn metadata =
                 blockingAdvisoryLockStatement
             changed <- Transaction.statement metadata appendProjectionStatement
             case changed of
-                Nothing -> pure False
+                Nothing -> pure Nothing
                 Just (sessionId, sequence, turnIndex) -> do
                     eventId <- Transaction.statement
                         EventInsert
@@ -372,7 +424,7 @@ appendSessionTurn pool turn metadata =
                             }
                         insertTurnStatement
                     insertResponseItems turnId turn.sessionTurnItems
-                    pure True
+                    pure (Just turnIndex)
 
 loadSession
     :: StorePool
@@ -433,6 +485,141 @@ assembleSessions sessionKeys metadata turns =
                     { storedMetadata = value
                     , storedTurns = decodedTurns
                     }
+
+loadSessionMetadata
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe SessionMetadata))
+loadSessionMetadata pool sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement sessionKey loadMetadataStatement
+
+loadActiveSession
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe StoredSession))
+loadActiveSession pool sessionKey =
+    withSession pool
+        (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
+            metadata <- Transaction.statement sessionKey loadMetadataStatement
+            case metadata of
+                Nothing -> pure (Right Nothing)
+                Just value -> do
+                    rows <- Transaction.statement sessionKey loadActiveTurnsStatement
+                    turns <- forM rows loadStoredTurn
+                    pure do
+                        decodedTurns <- sequence turns
+                        pure $ Just StoredSession
+                            { storedMetadata = value
+                            , storedTurns = decodedTurns
+                            })
+        >>= flattenDataResult
+
+loadRecentSessionTurns
+    :: StorePool
+    -> Text
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadRecentSessionTurns pool sessionKey limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement (sessionKey, fromIntegral (max 1 limit + 1))
+            loadRecentTurnsStatement)
+        (max 1 limit)
+        PageRecent
+
+loadSessionTurnsBefore
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionTurnsBefore pool sessionKey cursor limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            (sessionKey, cursor, fromIntegral (max 1 limit + 1))
+            loadTurnsBeforeStatement)
+        (max 1 limit)
+        PageBefore
+
+loadSessionTurnsAfter
+    :: StorePool
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadSessionTurnsAfter pool sessionKey cursor limit =
+    loadTurnPage pool sessionKey
+        (Transaction.statement
+            (sessionKey, cursor, fromIntegral (max 1 limit + 1))
+            loadTurnsAfterStatement)
+        (max 1 limit)
+        PageAfter
+
+loadSessionResumeStats
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe SessionResumeStats))
+loadSessionResumeStats pool sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement sessionKey loadResumeStatsStatement
+
+data PageMode = PageRecent | PageBefore | PageAfter
+    deriving (Eq, Show)
+
+loadTurnPage
+    :: StorePool
+    -> Text
+    -> Transaction.Transaction [TurnRow]
+    -> Int
+    -> PageMode
+    -> IO (Either StoreError (Maybe SessionTurnPage))
+loadTurnPage pool sessionKey loadRows limit mode =
+    withSession pool
+        (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
+            metadata <- Transaction.statement sessionKey loadMetadataStatement
+            case metadata of
+                Nothing -> pure (Right Nothing)
+                Just _ -> do
+                    rows0 <- loadRows
+                    (generationStart, total) <-
+                        Transaction.statement sessionKey currentGenerationStatement
+                    let visibleRows = case mode of
+                            PageRecent -> reverse (take limit rows0)
+                            PageBefore -> reverse (take limit rows0)
+                            PageAfter -> take limit rows0
+                    turns <- forM visibleRows loadStoredTurn
+                    pure do
+                        decoded <- sequence turns
+                        let generationEnd =
+                                generationStart + max 0 total - 1
+                            (hasOlder, hasNewer) =
+                                case decoded of
+                                    firstTurn : rest ->
+                                        let lastTurn =
+                                                foldl
+                                                    (\_ current -> current)
+                                                    firstTurn
+                                                    rest
+                                        in
+                                            ( firstTurn.storedTurnIndex
+                                                > generationStart
+                                            , lastTurn.storedTurnIndex
+                                                < generationEnd
+                                            )
+                                    [] -> case mode of
+                                        PageRecent -> (False, False)
+                                        PageBefore -> (False, total > 0)
+                                        PageAfter -> (total > 0, False)
+                        pure $ Just SessionTurnPage
+                            { sessionPageTurns = decoded
+                            , sessionPageGenerationStart = generationStart
+                            , sessionPageTotal = total
+                            , sessionPageHasOlder = hasOlder
+                            , sessionPageHasNewer = hasNewer
+                            })
+        >>= flattenDataResult
 
 loadSessionEvents
     :: StorePool
@@ -599,6 +786,7 @@ data TurnRow = TurnRow
     , turnRowAssistantText :: !(Maybe Text)
     , turnRowError :: !(Maybe Text)
     , turnRowResponseId :: !(Maybe Text)
+    , turnRowEffect :: !Text
     , turnRowUsageInput :: !(Maybe Int64)
     , turnRowUsageOutput :: !(Maybe Int64)
     , turnRowUsageCached :: !(Maybe Int64)
@@ -609,6 +797,7 @@ loadStoredTurn row = do
     items <- loadResponseItems row.turnRowId
     pure do
         decodedItems <- items
+        effect <- decodeTranscriptEffect row.turnRowEffect
         usage <- decodeUsage
             row.turnRowUsageInput
             row.turnRowUsageOutput
@@ -622,6 +811,7 @@ loadStoredTurn row = do
                 , sessionTurnAssistantText = row.turnRowAssistantText
                 , sessionTurnError = row.turnRowError
                 , sessionTurnResponseId = row.turnRowResponseId
+                , sessionTurnEffect = effect
                 , sessionTurnItems = decodedItems
                 , sessionTurnUsage = usage
                 }
@@ -642,6 +832,27 @@ decodeUsage input output cached =
                 , sessionUsageCachedTokens = cached'
                 }
         _ -> Left "stored session turn has partial usage counters"
+
+decodeTranscriptEffect :: Text -> Either Text TranscriptEffect
+decodeTranscriptEffect value = case value of
+    "append" -> Right TranscriptAppend
+    "replace" -> Right TranscriptReplace
+    "reset" -> Right TranscriptReset
+    _ -> Left ("unknown transcript effect: " <> value)
+
+transcriptEffectText :: TranscriptEffect -> Text
+transcriptEffectText effect = case effect of
+    TranscriptAppend -> "append"
+    TranscriptReplace -> "replace"
+    TranscriptReset -> "reset"
+
+flattenDataResult
+    :: Either StoreError (Either Text a)
+    -> IO (Either StoreError a)
+flattenDataResult = pure . \case
+    Left err -> Left err
+    Right (Left err) -> Left (StoreDataError err)
+    Right (Right value) -> Right value
 
 sessionExistsStatement :: Statement Text Bool
 sessionExistsStatement = mkStatement
@@ -732,9 +943,10 @@ insertTurnStatement = mkStatement
     "INSERT INTO harness.session_turns (\
     \ session_id, event_id, turn_index, event_sequence, occurred_at,\
     \ user_text, assistant_text, error_text, response_id,\
+    \ transcript_effect,\
     \ usage_input_tokens, usage_output_tokens, usage_cached_tokens\
     \ ) VALUES (\
-    \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12\
+    \ $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
     \ ) RETURNING turn_id::text"
     ( ((.turnInsertSessionId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> ((.turnInsertEventId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
@@ -745,6 +957,7 @@ insertTurnStatement = mkStatement
         <> (turnAssistantText >$< Encoders.param (Encoders.nullable Encoders.text))
         <> (turnError >$< Encoders.param (Encoders.nullable Encoders.text))
         <> (turnResponseId >$< Encoders.param (Encoders.nullable Encoders.text))
+        <> (turnEffect >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> ((usageField (.sessionUsageInputTokens) . (.turnInsertTurn))
             >$< Encoders.param (Encoders.nullable Encoders.int8))
         <> ((usageField (.sessionUsageOutputTokens) . (.turnInsertTurn))
@@ -770,6 +983,8 @@ insertTurnStatement = mkStatement
     turnError value = value.turnInsertTurn.sessionTurnError
     turnResponseId :: TurnInsert -> Maybe Text
     turnResponseId value = value.turnInsertTurn.sessionTurnResponseId
+    turnEffect :: TurnInsert -> Text
+    turnEffect value = transcriptEffectText value.turnInsertTurn.sessionTurnEffect
 
 loadMetadataManyStatement :: Statement [Text] [SessionMetadata]
 loadMetadataManyStatement = mkStatement
@@ -778,6 +993,14 @@ loadMetadataManyStatement = mkStatement
            \ ORDER BY array_position($1::text[], session_key)")
     textArrayParams
     (Decoders.rowList metadataRow)
+    True
+
+loadMetadataStatement :: Statement Text (Maybe SessionMetadata)
+loadMetadataStatement = mkStatement
+    (metadataSelectSql
+        <> " WHERE session_key = $1 AND deleted_at IS NULL")
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe metadataRow)
     True
 
 listMetadataStatement :: Statement () [SessionMetadata]
@@ -803,9 +1026,9 @@ metadataSelectSql =
 loadTurnsManyStatement :: Statement [Text] [(Text, TurnRow)]
 loadTurnsManyStatement = mkStatement
     "SELECT s.session_key, t.turn_id::text, t.turn_index, t.event_sequence,\
-    \ t.occurred_at,\
-    \ t.user_text, t.assistant_text, t.error_text, t.response_id,\
-    \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens\
+    \ t.occurred_at, t.user_text, t.assistant_text, t.error_text,\
+    \ t.response_id, t.transcript_effect, t.usage_input_tokens,\
+    \ t.usage_output_tokens, t.usage_cached_tokens\
     \ FROM harness.session_turns t\
     \ JOIN harness.sessions s ON s.session_id = t.session_id\
     \ WHERE s.session_key = ANY($1::text[]) AND s.deleted_at IS NULL\
@@ -816,6 +1039,171 @@ loadTurnsManyStatement = mkStatement
             <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> turnRowDecoder)
     True
+
+loadActiveTurnsStatement :: Statement Text [TurnRow]
+loadActiveTurnsStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index >= COALESCE((\
+           \   SELECT checkpoint.turn_index\
+           \   FROM harness.session_turns checkpoint\
+           \   WHERE checkpoint.session_id = s.session_id\
+           \     AND checkpoint.transcript_effect <> 'append'\
+           \   ORDER BY checkpoint.turn_index DESC\
+           \   LIMIT 1\
+           \ ), 0)\
+           \ ORDER BY t.turn_index ASC")
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowList turnRowDecoder)
+    True
+
+loadRecentTurnsStatement :: Statement (Text, Int64) [TurnRow]
+loadRecentTurnsStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index >= COALESCE((\
+           \   SELECT checkpoint.turn_index\
+           \   FROM harness.session_turns checkpoint\
+           \   WHERE checkpoint.session_id = s.session_id\
+           \     AND checkpoint.transcript_effect <> 'append'\
+           \   ORDER BY checkpoint.turn_index DESC\
+           \   LIMIT 1\
+           \ ), 0)\
+           \ ORDER BY t.turn_index DESC\
+           \ LIMIT $2")
+    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList turnRowDecoder)
+    True
+
+loadTurnsBeforeStatement :: Statement (Text, Int64, Int64) [TurnRow]
+loadTurnsBeforeStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index < $2\
+           \ AND t.turn_index >= COALESCE((\
+           \   SELECT checkpoint.turn_index\
+           \   FROM harness.session_turns checkpoint\
+           \   WHERE checkpoint.session_id = s.session_id\
+           \     AND checkpoint.transcript_effect <> 'append'\
+           \   ORDER BY checkpoint.turn_index DESC\
+           \   LIMIT 1\
+           \ ), 0)\
+           \ ORDER BY t.turn_index DESC\
+           \ LIMIT $3")
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList turnRowDecoder)
+    True
+
+loadTurnsAfterStatement :: Statement (Text, Int64, Int64) [TurnRow]
+loadTurnsAfterStatement = mkStatement
+    (turnSelectSql
+        <> " WHERE s.session_key = $1\
+           \ AND t.turn_index > $2\
+           \ AND t.turn_index >= COALESCE((\
+           \   SELECT checkpoint.turn_index\
+           \   FROM harness.session_turns checkpoint\
+           \   WHERE checkpoint.session_id = s.session_id\
+           \     AND checkpoint.transcript_effect <> 'append'\
+           \   ORDER BY checkpoint.turn_index DESC\
+           \   LIMIT 1\
+           \ ), 0)\
+           \ ORDER BY t.turn_index ASC\
+           \ LIMIT $3")
+    ( ((\(value, _, _) -> value)
+        >$< Encoders.param (Encoders.nonNullable Encoders.text))
+        <> ((\(_, value, _) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+        <> ((\(_, _, value) -> value)
+            >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    )
+    (Decoders.rowList turnRowDecoder)
+    True
+
+currentGenerationStatement :: Statement Text (Int64, Int64)
+currentGenerationStatement = mkStatement
+    "WITH target AS (\
+    \ SELECT session_id\
+    \ FROM harness.sessions\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ ), generation AS (\
+    \ SELECT COALESCE((\
+    \   SELECT t.turn_index\
+    \   FROM harness.session_turns t\
+    \   JOIN target ON target.session_id = t.session_id\
+    \   WHERE t.transcript_effect <> 'append'\
+    \   ORDER BY t.turn_index DESC\
+    \   LIMIT 1\
+    \ ), 0) AS start_index\
+    \ )\
+    \ SELECT generation.start_index, count(t.turn_id)::bigint\
+    \ FROM generation\
+    \ LEFT JOIN target ON true\
+    \ LEFT JOIN harness.session_turns t\
+    \   ON t.session_id = target.session_id\
+    \   AND t.turn_index >= generation.start_index\
+    \ GROUP BY generation.start_index"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.singleRow $
+        (,)
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+    True
+
+loadResumeStatsStatement :: Statement Text (Maybe SessionResumeStats)
+loadResumeStatsStatement = mkStatement
+    "WITH target AS (\
+    \ SELECT session_id\
+    \ FROM harness.sessions\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ )\
+    \ SELECT\
+    \   (SELECT count(*)::bigint\
+    \    FROM harness.session_turns t\
+    \    JOIN target ON target.session_id = t.session_id),\
+    \   (SELECT COALESCE(sum(\
+    \      (CASE WHEN btrim(t.user_text) <> '' THEN 1 ELSE 0 END)\
+    \      + (CASE WHEN t.assistant_text IS NOT NULL\
+    \               AND btrim(t.assistant_text) <> '' THEN 1 ELSE 0 END)\
+    \    ), 0)::bigint\
+    \    FROM harness.session_turns t\
+    \    JOIN target ON target.session_id = t.session_id),\
+    \   (SELECT count(*)::bigint\
+    \    FROM harness.session_response_items i\
+    \    JOIN harness.session_turns t ON t.turn_id = i.turn_id\
+    \    JOIN target ON target.session_id = t.session_id\
+    \    WHERE i.storage_kind IN ('function_call', 'custom_tool_call')),\
+    \   (SELECT t.user_text\
+    \    FROM harness.session_turns t\
+    \    JOIN target ON target.session_id = t.session_id\
+    \    WHERE btrim(t.user_text) <> ''\
+    \    ORDER BY t.turn_index ASC\
+    \    LIMIT 1)\
+    \ FROM target"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe $
+        SessionResumeStats
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nullable Decoders.text))
+    True
+
+turnSelectSql :: Text
+turnSelectSql =
+    "SELECT t.turn_id::text, t.turn_index, t.event_sequence, t.occurred_at,\
+    \ t.user_text, t.assistant_text, t.error_text, t.response_id,\
+    \ t.transcript_effect,\
+    \ t.usage_input_tokens, t.usage_output_tokens, t.usage_cached_tokens\
+    \ FROM harness.session_turns t\
+    \ JOIN harness.sessions s ON s.session_id = t.session_id"
 
 turnRowDecoder :: Decoders.Row TurnRow
 turnRowDecoder =
@@ -828,6 +1216,7 @@ turnRowDecoder =
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nonNullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.int8)
         <*> Decoders.column (Decoders.nullable Decoders.int8)
         <*> Decoders.column (Decoders.nullable Decoders.int8)

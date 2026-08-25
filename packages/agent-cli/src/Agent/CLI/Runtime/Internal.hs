@@ -174,7 +174,8 @@ import Agent.CLI.Session
       allocateSessionTemp,
       cleanupPendingPersistence,
       ensureSession,
-      loadSession,
+      loadActiveSession,
+      loadRecentSessionTurns,
       persistenceTempDir,
       removeSessionTemp,
       resumeHint,
@@ -192,10 +193,14 @@ import Agent.CLI.Session
       SessionTurn )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
+import Agent.CLI.Runtime.HistorySource
+    ( emptyFullscreenHistoryPage
+    , loadFullscreenHistoryPage
+    , sessionUiPageSize
+    )
 import Agent.CLI.Session.History
     ( detectGitBranch,
       foldSessionItems,
-      hydrateUiHistory,
       readLiveTranscript,
       writeLiveTranscript,
       LiveConversation(liveTranscript, livePreviousResponseId) )
@@ -262,15 +267,22 @@ import Agent.CLI.Subagents.Runtime
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer,
       FullscreenRuntime,
+      clearFullscreenHistorySource,
       emitUiEvent,
       newFullscreenInputBuffer,
       newFullscreenRuntime,
       queuedFullscreenInputDisplays,
       requestFullscreenChoiceWithBody,
       runFullscreen,
+      setFullscreenHistorySource,
       setFullscreenSessionActions,
       setFullscreenWindowTitle,
       withFullscreenSuspended )
+import Agent.CLI.TUI.History
+    ( HistoryDirection(HistoryNewer)
+    , HistoryGeneration(..)
+    )
+import Agent.CLI.TUI.SessionHistory (sessionHistoryPage)
 import Agent.CLI.Terminal
     ( copyTerminalClipboard,
       detectTerminalCapabilities,
@@ -351,7 +363,8 @@ import Agent.Subagents
       setSubagentRunner )
 import Agent.Subagents.TaskPath ( taskPathRoot )
 import Agent.TUI.Model
-    ( progressNotice,
+    ( initialUiState,
+      progressNotice,
       reduceUi,
       warningNotice,
       UiEvent(UiSystemMessage, UiSetRepository, UiSetNotice),
@@ -1012,7 +1025,7 @@ prepareAgentIterationTracked
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
-                    loadSession sessionPool root sessionId >>= \case
+                    loadActiveSession sessionPool root sessionId >>= \case
                         Left err -> do
                             signalReady (Left err)
                             failPreparation (Text.unpack err)
@@ -1053,8 +1066,7 @@ prepareAgentIterationTracked
     agentSelectRef <- newIORef (\_ -> pure ())
     restartEffortActionRef <- newIORef (\_ -> pure ())
     queuedInputDisplays <- queuedFullscreenInputDisplays fullscreenInputs
-    let initialTurns = maybe [] snd resumed
-        fullscreenEnabled =
+    let fullscreenEnabled =
             stdinTty
                 && stdoutTty
                 && not (isOneShot options)
@@ -1072,7 +1084,7 @@ prepareAgentIterationTracked
                         (toText (takeFileName (takeDirectory initialCwd))
                             <> "/"
                             <> toText (takeFileName initialCwd)))
-                    (hydrateUiHistory initialTurns)))
+                    initialUiState))
                         { uiQueuedInputs = queuedInputDisplays }
     firstFrameReady <-
         if isJust activeFullscreen || not fullscreenEnabled
@@ -1107,6 +1119,28 @@ prepareAgentIterationTracked
                     useColor
                     initialFullscreenState
             | otherwise -> pure Nothing
+    forM_ fullscreen \runtime ->
+        case resumed of
+            Nothing ->
+                clearFullscreenHistorySource runtime
+            Just (meta, _) ->
+                loadRecentSessionTurns
+                    sessionPool
+                    root
+                    meta.metaId
+                    sessionUiPageSize >>= \case
+                        Left err ->
+                            failPreparation (Text.unpack err)
+                        Right page ->
+                            setFullscreenHistorySource
+                                runtime
+                                meta.metaId
+                                (loadFullscreenHistoryPage
+                                    sessionPool root meta.metaId)
+                                (sessionHistoryPage
+                                    (HistoryGeneration 0)
+                                    HistoryNewer
+                                    page)
     writeIORef uiRuntimeRef fullscreen
     resumeLock <- readIORef resumeLockRef
     let action =
@@ -1979,6 +2013,20 @@ runAgentInitializedWithLock
                 inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effort promptText resumed
     writeIORef persistSlotRef persist
+    forM_ fullscreen \runtime ->
+        reservedSessionId persist >>= \case
+            Nothing ->
+                clearFullscreenHistorySource runtime
+            Just sessionId ->
+                setFullscreenHistorySource
+                    runtime
+                    sessionId
+                    (loadFullscreenHistoryPage
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        sessionId)
+                    (emptyFullscreenHistoryPage
+                        (HistoryGeneration 0))
     (sessionTmp, ephemeralSessionId) <-
         persistenceTempDir persist >>= \case
             Just tempDir -> pure (tempDir, Nothing)

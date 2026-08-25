@@ -34,9 +34,11 @@ import Agent.CLI.Session
     , SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , SessionTurnPage(..)
     , createSession
     , loadSessionActivity
-    , loadSession
+    , loadRecentSessionTurns
+    , loadSessionMeta
     , sessionTempDirForId
     , sessionTitleFromPrompt
     )
@@ -875,17 +877,26 @@ runReadAgentSession
     -> ReadAgentSessionArgs
     -> IO (Either Text Text)
 runReadAgentSession env args =
-    loadSession env.toolsPool env.toolsRoot args.sessionId >>= \case
+    loadSessionMeta env.toolsPool env.toolsRoot args.sessionId >>= \case
         Left err -> pure (Left err)
-        Right (meta, turns) -> do
-            status <- env.toolsSessionStatus args.sessionId
-            activity <-
-                if status == "running"
-                    then loadSessionActivity env.toolsRoot args.sessionId
-                    else pure Nothing
+        Right meta -> do
             let limit = min 100 (max 1 (fromMaybe 20 args.limit))
-                recent = drop (max 0 (length turns - limit)) turns
-            pure $ Right $ renderAgentSession meta status activity recent
+            loadRecentSessionTurns
+                env.toolsPool env.toolsRoot args.sessionId limit >>= \case
+                    Left err -> pure (Left err)
+                    Right page -> do
+                        status <- env.toolsSessionStatus args.sessionId
+                        activity <-
+                            if status == "running"
+                                then loadSessionActivity
+                                    env.toolsRoot args.sessionId
+                                else pure Nothing
+                        pure $ Right $
+                            renderAgentSession
+                                meta
+                                status
+                                activity
+                                (map snd page.pageTurns)
 
 data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     { sessionId :: Text
@@ -921,9 +932,10 @@ runSendAgentSessionMessage env args
         current <- env.toolsCurrentSessionId
         if current == Just args.sessionId
             then pure (Left "cannot message the current agent session")
-            else loadSession env.toolsPool env.toolsRoot args.sessionId >>= \case
+            else loadSessionMeta
+                    env.toolsPool env.toolsRoot args.sessionId >>= \case
                 Left err -> pure (Left err)
-                Right (meta, _) ->
+                Right meta ->
                     launchToolSessionTurn
                         env
                         (sessionHandle env.toolsPool env.toolsRoot meta)

@@ -101,6 +101,8 @@ import Agent.CLI.Render
       resetRenderPrintedText )
 import Agent.CLI.ReplMode ( replModeLabel )
 import Agent.CLI.Request ()
+import Agent.CLI.Runtime.HistorySource
+    ( reloadFullscreenHistoryForHandle )
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
 import Agent.CLI.Runtime.Repl.Attachments
@@ -117,8 +119,8 @@ import Agent.CLI.Runtime.Types
                 RunReload, RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
-    ( appendTurnKeepTitle,
-      appendTurnWithMetaUpdate,
+    ( appendTurnKeepTitleIndexed,
+      appendTurnWithMetaUpdateIndexed,
       createSession,
       ensureSession,
       loadSession,
@@ -140,7 +142,9 @@ import Agent.CLI.Session
                   metaCwd, metaTitle),
       SessionTransfer(transferTurns, SessionTransfer, transferMeta),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
-                  turnAssistantText, turnError, turnResponseId, turnItems) )
+                  turnAssistantText, turnError, turnResponseId, turnEffect,
+                  turnItems),
+      TranscriptEffect(TranscriptReplace, TranscriptReset) )
 import Agent.CLI.Session.Choices
     ( accountUsageText,
       atMay,
@@ -180,10 +184,13 @@ import Agent.CLI.Style
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
+      commitFullscreenHistoryTurn,
       emitUiEvent,
       requestFullscreenChoiceWithBody,
       setFullscreenImagePreviews,
       withFullscreenSuspended )
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.CLI.TUI.Types (HistoryCommit(..))
 import Agent.CLI.Terminal
     ( copyTerminalClipboard, formatTerminalCapabilities, resolveColor )
 import Agent.CLI.Tools ()
@@ -857,6 +864,7 @@ handleReplLine
                                                 , turnAssistantText = Just outcome.compactSummary
                                                 , turnError = Nothing
                                                 , turnResponseId = Nothing
+                                                , turnEffect = TranscriptReplace
                                                 , turnItems = outcome.compactHistory
                                                 -- Compaction response usage is
                                                 -- recorded immediately by
@@ -864,13 +872,18 @@ handleReplLine
                                                 -- response-level failures.
                                                 , turnUsage = Nothing
                                                 }
-                                        handle' <-
-                                            appendTurnWithMetaUpdate handle turn
+                                        (handle', turnIndex) <-
+                                            appendTurnWithMetaUpdateIndexed handle turn
                                                 \meta -> meta
                                                     { metaLastResponseId = Nothing
                                                     }
                                         writeIORef slotRef
                                             (PersistenceActive handle')
+                                        forM_ fullscreen \runtime ->
+                                            commitFullscreenHistoryTurn
+                                                runtime
+                                                (sessionHistoryTurn turnIndex turn)
+                                                HistoryCommitReplace
                                 continue
                     ReplPlan _
                         | provider == ClaudeCodeProvider -> do
@@ -927,10 +940,12 @@ handleReplLine
                                                     Just "Conversation cleared."
                                                 , turnError = Nothing
                                                 , turnResponseId = Nothing
+                                                , turnEffect = TranscriptReset
                                                 , turnItems = []
                                                 , turnUsage = Nothing
                                                 }
-                                        handle' <- appendTurnKeepTitle handle turn
+                                        (handle', turnIndex) <-
+                                            appendTurnKeepTitleIndexed handle turn
                                         let meta = handle'.sessionMeta
                                                 { metaLastResponseId = Nothing
                                                 , metaUpdatedAt = now
@@ -947,6 +962,11 @@ handleReplLine
                                             meta
                                         writeIORef slotRef
                                             (PersistenceActive handle'{sessionMeta = meta})
+                                        forM_ fullscreen \runtime ->
+                                            commitFullscreenHistoryTurn
+                                                runtime
+                                                (sessionHistoryTurn turnIndex turn)
+                                                HistoryCommitReset
                                         pure
                                             ("conversation cleared (session "
                                                 <> meta.metaId
@@ -1021,10 +1041,12 @@ handleReplLine
                                             Just "Started a new session."
                                         , turnError = Nothing
                                         , turnResponseId = Nothing
+                                        , turnEffect = TranscriptReset
                                         , turnItems = []
                                         , turnUsage = Nothing
                                         }
-                                handle' <- appendTurnKeepTitle handle turn
+                                (handle', _) <-
+                                    appendTurnKeepTitleIndexed handle turn
                                 let meta = handle'.sessionMeta
                                 env.sessionOnPersisted handle'
                                 env.sessionSetTempDir handle'.sessionTempDir
@@ -1034,6 +1056,10 @@ handleReplLine
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
+                                forM_ fullscreen \runtime ->
+                                    reloadFullscreenHistoryForHandle
+                                        runtime
+                                        handle'
                                 setWindowTitle
                                     (cliWindowTitle meta.metaCwd
                                         (Just meta.metaTitle))

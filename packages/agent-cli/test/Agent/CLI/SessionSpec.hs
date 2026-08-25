@@ -603,6 +603,7 @@ spec = describe "Agent.CLI.Session" do
                             , outputTokens = 4
                             , cachedTokens = 2
                             }
+                        , turnEffect = TranscriptAppend
                         }
                     compactTurn = SessionTurn
                         { turnAt = fixedTime
@@ -612,6 +613,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnResponseId = Nothing
                         , turnItems = []
                         , turnUsage = Nothing
+                        , turnEffect = TranscriptReplace
                         }
                 withNormal <- appendTurn handle normalTurn
                 final <- appendTurnWithMetaUpdate withNormal compactTurn
@@ -669,6 +671,7 @@ spec = describe "Agent.CLI.Session" do
                         , turnResponseId = Nothing
                         , turnItems = []
                         , turnUsage = Nothing
+                        , turnEffect = TranscriptAppend
                         }
                 createDirectory dir
                 LBS.writeFile (toFilePath metaPath) (Aeson.encode meta)
@@ -729,6 +732,7 @@ spec = describe "Agent.CLI.Session" do
                     , turnResponseId = Nothing
                     , turnItems = []
                     , turnUsage = Nothing
+                    , turnEffect = TranscriptAppend
                     }
             Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
 
@@ -740,6 +744,22 @@ spec = describe "Agent.CLI.Session" do
                         , metaLastRecapMainTurns = 3
                         }
             Aeson.eitherDecode (Aeson.encode meta) `shouldBe` Right meta
+
+        it "infers transcript effects when importing legacy JSON turns" do
+            let legacy = Aeson.object
+                    [ "at" Aeson..= fixedTime
+                    , "userText" Aeson..= ("/compact focus" :: Text.Text)
+                    , "assistantText" Aeson..= (Nothing :: Maybe Text.Text)
+                    , "error" Aeson..= (Nothing :: Maybe Text.Text)
+                    , "responseId" Aeson..= (Nothing :: Maybe Text.Text)
+                    , "items" Aeson..= ([] :: [ResponseItem])
+                    , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
+                    ]
+                decoded =
+                    Aeson.eitherDecode (Aeson.encode legacy)
+                        :: Either String SessionTurn
+            fmap (\turn -> turn.turnEffect) decoded
+                `shouldBe` Right TranscriptReplace
 
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate

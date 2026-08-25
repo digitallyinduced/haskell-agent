@@ -20,8 +20,11 @@ import Agent.CLI.ProviderTransition
     , TurnResult(..)
     )
 import Agent.CLI.TUI.App
-    ( emitUiEvent
+    ( commitFullscreenHistoryTurn
+    , emitUiEvent
     )
+import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
+import Agent.CLI.TUI.Types (HistoryCommit(..))
 import Agent.TUI.Model
     ( BlockState(..)
     , UiEvent(..)
@@ -46,11 +49,13 @@ import Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , SessionTurnPage(..)
+    , TranscriptEffect(..)
     , Persistence(..)
     , PersistenceState(..)
-    , appendTurnWithMetaUpdate
+    , appendTurnWithMetaUpdateIndexed
     , ensureSession
-    , loadSession
+    , loadRecentSessionTurns
     , sessionConversationText
     , sessionTitleFromPrompt
     , setGeneratedSessionTitle
@@ -95,6 +100,7 @@ import Agent.CLI.TurnState
     , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
+    , turnReplacesTranscript
     )
 import Agent.Dialect (DialectId(..), dialectId)
 import Agent.Loop
@@ -124,7 +130,7 @@ import Agent.Tools.PlanMode
     , writePlanMarkdown
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Control.Monad (when)
+import Control.Monad (forM_, when)
 import Control.Exception.Safe (onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
@@ -298,12 +304,19 @@ runOneTurn env@SessionEnv
                         , turnAssistantText = Nothing
                         , turnError = Just errorText
                         , turnResponseId = Nothing
+                        , turnEffect = TranscriptAppend
                         , turnItems = retainedItems
                         , turnUsage = Nothing
                         }
-                handle' <- appendTurnWithMetaUpdate handle turn \meta ->
+                (handle', turnIndex) <-
+                    appendTurnWithMetaUpdateIndexed handle turn \meta ->
                     meta { metaLastResponseId = Nothing }
                 writeIORef slotRef (PersistenceActive handle')
+                forM_ fullscreen \runtime ->
+                    commitFullscreenHistoryTurn
+                        runtime
+                        (sessionHistoryTurn turnIndex turn)
+                        HistoryCommitAppend
     case (restartEffort, result) of
         (Just level, _) -> do
             abortSubagentTurn rootTurnId
@@ -442,6 +455,12 @@ runOneTurn env@SessionEnv
                 _ -> pure ()
             let newItems =
                     turnNewItems beforeItems execution.executionState
+                effect =
+                    if turnReplacesTranscript
+                        beforeItems
+                        execution.executionState
+                        then TranscriptReplace
+                        else TranscriptAppend
             case persist of
                 PersistenceDisabled -> pure ()
                 PersistenceEnabled slotRef -> do
@@ -455,15 +474,25 @@ runOneTurn env@SessionEnv
                             , turnAssistantText = assistantText
                             , turnError = Nothing
                             , turnResponseId = Just loopResult.finalResponseId
+                            , turnEffect = effect
                             , turnItems = newItems
                             , turnUsage = Just loopResult.tokenUsage
                             }
                     titleTurns <- (+ 1) <$> readIORef env.sessionTitleTurnCount
-                    countedHandle <- appendTurnWithMetaUpdate handle turn \meta ->
-                        meta { metaTitleUserTurns = titleTurns }
+                    (countedHandle, turnIndex) <-
+                        appendTurnWithMetaUpdateIndexed handle turn \meta ->
+                            meta { metaTitleUserTurns = titleTurns }
                     writeIORef env.sessionTitleTurnCount titleTurns
                     let countedMeta = countedHandle.sessionMeta
                     writeIORef slotRef (PersistenceActive countedHandle)
+                    forM_ fullscreen \runtime ->
+                        commitFullscreenHistoryTurn
+                            runtime
+                            (sessionHistoryTurn turnIndex turn)
+                            (case effect of
+                                TranscriptAppend -> HistoryCommitAppend
+                                TranscriptReplace -> HistoryCommitReplace
+                                TranscriptReset -> HistoryCommitReset)
                     when
                         ( not countedMeta.metaTitleIsManual
                             && shouldRequestSessionTitle titleTurns
@@ -623,17 +652,18 @@ checkpointIncompleteTurn beforeItems turnInputs =
 
 requestConversationTitle :: SessionEnv -> SessionHandle -> Int -> IO ()
 requestConversationTitle env handle milestone =
-    loadSession
+    loadRecentSessionTurns
         env.sessionDatabasePool
         (System.OsPath.takeDirectory handle.sessionDir)
         handle.sessionMeta.metaId
+        24
         >>= \case
             Left _ -> pure ()
-            Right (_, turns) ->
+            Right page ->
                 requestSessionTitle env.sessionTitleManager
                     handle.sessionMeta.metaId
                     milestone
-                    (sessionConversationText turns)
+                    (sessionConversationText (map snd page.pageTurns))
 
 applyPendingSessionTitles :: SessionEnv -> IO ()
 applyPendingSessionTitles env =
