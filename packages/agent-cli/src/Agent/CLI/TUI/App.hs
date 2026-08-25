@@ -3207,7 +3207,7 @@ drawBlock state target ui block =
                 withAttr Theme.mutedAttr
                     (terminalTxtWrap block.blockBody)
             BlockRecap ->
-                accentBlock
+                accentMarkdownBlock
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> "Recap")
                     (visibleBody block)
