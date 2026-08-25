@@ -53,6 +53,9 @@ library
                     , Agent.CLI.Provider.Switch
                     , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
+                    , Agent.CLI.Runtime.Internal
+                    , Agent.CLI.Runtime.Persistence
+                    , Agent.CLI.Runtime.Recap
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
