@@ -59,10 +59,15 @@ spec = describe "Agent.Tools.MultiAgents" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
-        let tools = multiAgentTools (rootContext registry Nothing)
+        let context = (rootContext registry Nothing)
+                { multiCreateWorktree = Just
+                    (\_ -> pure (Left "not used"))
+                }
+            tools = multiAgentTools context
         map (\tool -> (tool.appToolName, isReadOnly tool.appToolApproval)) tools
             `shouldBe`
                 [ ("spawn_agent", True)
+                , ("spawn_agent_in_worktree", True)
                 , ("wait_agent", True)
                 , ("send_message", True)
                 , ("followup_task", True)
@@ -114,17 +119,23 @@ spec = describe "Agent.Tools.MultiAgents" do
             any (Text.isInfixOf "Prefer `gpt-5.6-luna` for small tasks.")
         closeSubagentRegistry registry
 
-    it "advertises optional worktree isolation on spawn_agent" do
+    it "keeps isolation off spawn_agent and exposes a dedicated worktree tool" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
-        let propertyNames =
+        let context = (rootContext registry Nothing)
+                { multiCreateWorktree = Just
+                    (\_ -> pure (Left "not used"))
+                }
+            propertyNames name =
                 [ property.propertyName
-                | tool <- multiAgentTools (rootContext registry Nothing)
-                , tool.appToolName == "spawn_agent"
+                | tool <- multiAgentTools context
+                , tool.appToolName == name
                 , property <- fromMaybe [] (jsonToolParameters tool)
                 ]
-        propertyNames `shouldContain` ["isolation"]
+        propertyNames "spawn_agent" `shouldNotContain` ["isolation"]
+        propertyNames "spawn_agent_in_worktree"
+            `shouldMatchList` propertyNames "spawn_agent"
         closeSubagentRegistry registry
 
     it "preserves encrypted spawn payloads" do
@@ -202,10 +213,9 @@ spec = describe "Agent.Tools.MultiAgents" do
                 }
             call = ToolCall
                 { callId = "spawn-worktree"
-                , name = "collaboration.spawn_agent"
+                , name = "collaboration.spawn_agent_in_worktree"
                 , arguments =
-                    "{\"task_name\":\"worker\",\"message\":\"task\",\
-                    \\"isolation\":\"worktree\"}"
+                    "{\"task_name\":\"worker\",\"message\":\"task\"}"
                 , callKind = FunctionCallKind
                 , argumentsEncrypted = False
                 }
@@ -217,12 +227,20 @@ spec = describe "Agent.Tools.MultiAgents" do
         closeSubagentRegistry registry
         readIORef cleaned `shouldReturn` True
 
-    it "rejects worktree isolation when the host does not provide it" do
+    it "omits spawn_agent_in_worktree when the host does not provide it" do
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\_ _ _ _ -> pure $ Left LoopNoResponseId)
+            (\_ _ -> pure ())
+        map (.appToolName) (multiAgentTools (rootContext registry Nothing))
+            `shouldNotContain` ["spawn_agent_in_worktree"]
+        closeSubagentRegistry registry
+
+    it "rejects the removed spawn_agent isolation argument" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         let call = ToolCall
-                { callId = "spawn-worktree-unavailable"
+                { callId = "spawn-legacy-isolation"
                 , name = "collaboration.spawn_agent"
                 , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
@@ -232,7 +250,8 @@ spec = describe "Agent.Tools.MultiAgents" do
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools (rootContext registry Nothing))) call
-        result.output `shouldSatisfy` Text.isInfixOf "unavailable"
+        result.output `shouldSatisfy`
+            Text.isInfixOf "use spawn_agent_in_worktree"
         closeSubagentRegistry registry
 
     it "rejects zero fork turns" do
