@@ -16,6 +16,7 @@ module Agent.Telegram.Types
     , TelegramPendingTurn(..)
     , TelegramPendingReply(..)
     , TelegramPendingMediaTurn(..)
+    , TelegramPendingLeave(..)
     , TelegramPendingCallback(..)
     , TelegramRetryMetadata(..)
     , TelegramDeadLetter(..)
@@ -38,6 +39,8 @@ module Agent.Telegram.Types
     , TelegramDice(..)
     , TelegramUser(..)
     , TelegramChat(..)
+    , TelegramChatMember(..)
+    , TelegramChatMemberUpdated(..)
     , TelegramMessage(..)
     , TelegramReactionType(..)
     , TelegramMessageReaction(..)
@@ -68,7 +71,7 @@ import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.List (sortOn)
+import Data.List (sort, sortOn)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -97,6 +100,10 @@ instance ToJSON PendingChatAction where
             [ "kind" .= ("media_turn" :: Text)
             , "mediaTurn" .= pending
             ]
+        LeaveUnauthorizedChat pending -> object
+            [ "kind" .= ("leave" :: Text)
+            , "leave" .= pending
+            ]
 
 instance FromJSON PendingChatAction where
     parseJSON = withObject "PendingChatAction" \o -> do
@@ -105,6 +112,7 @@ instance FromJSON PendingChatAction where
             "reply" -> DeliverReply <$> o .: "reply"
             "turn" -> RunPendingTurn <$> o .: "turn"
             "media_turn" -> RunPendingMediaTurn <$> o .: "mediaTurn"
+            "leave" -> LeaveUnauthorizedChat <$> o .: "leave"
             _ -> fail ("unknown pending Telegram action: " <> Text.unpack kind)
 
 instance ToJSON TelegramApprovalMode where
@@ -261,6 +269,7 @@ data TelegramState = TelegramState
     , deliveryCheckpoints :: !(Map Text Int)
     , deadLetters :: ![TelegramDeadLetter]
     , outboundMessageIds :: !(Map TelegramChatKey (Set Integer))
+    , authorizedGroupChatIds :: !(Set Integer)
     } deriving (Eq, Show)
 
 instance ToJSON TelegramState where
@@ -289,6 +298,12 @@ instance ToJSON TelegramState where
                 | queue <- Map.elems state.pendingQueues
                 , RunPendingMediaTurn pending <- Map.elems queue
                 ]
+        , "pendingLeaves" .=
+            sortOn (.pendingLeaveUpdateId)
+                [ pending
+                | queue <- Map.elems state.pendingQueues
+                , LeaveUnauthorizedChat pending <- Map.elems queue
+                ]
         , "pendingCallbacks" .= Map.elems state.pendingCallbacks
         , "callbackBindings" .= Map.elems state.callbackBindings
         , "retryMetadata" .= Map.toList state.retryMetadata
@@ -298,6 +313,7 @@ instance ToJSON TelegramState where
             [ TelegramOutboundMessages key (Set.toList messageIds)
             | (key, messageIds) <- Map.toList state.outboundMessageIds
             ]
+        , "authorizedGroupChats" .= sort (Set.toList state.authorizedGroupChatIds)
         ]
 
 instance FromJSON TelegramState where
@@ -314,6 +330,9 @@ instance FromJSON TelegramState where
         pendingReplies <- o .:? "pendingReplies" .!= ([] :: [TelegramPendingReply])
         pendingMediaTurns <-
             o .:? "pendingMediaTurns" .!= ([] :: [TelegramPendingMediaTurn])
+        pendingLeaves <-
+            o .:? "pendingLeaves" .!= ([] :: [TelegramPendingLeave])
+        storedAuthorized <- o .:? "authorizedGroupChats"
         storedCallbacks <-
             o .:? "pendingCallbacks" .!= ([] :: [TelegramPendingCallback])
         storedCallbackBindings <-
@@ -325,15 +344,23 @@ instance FromJSON TelegramState where
         deadLetters <- o .:? "deadLetters" .!= []
         outboundMessages <-
             o .:? "outboundMessages" .!= ([] :: [TelegramOutboundMessages])
-        pure TelegramState
-            { telegramStateVersion = 2
-            , nextUpdateId
-            , bindings =
+        let bindings =
                 foldr
                     (\binding ->
                         Map.insert binding.bindingChat binding.bindingSessionId)
                     Map.empty
                     storedBindings
+            authorizedGroupChatIds = case storedAuthorized of
+                Just ids -> Set.fromList ids
+                Nothing -> Set.fromList
+                    [ key.chatId
+                    | key <- Map.keys bindings
+                    , key.chatId < 0
+                    ]
+        pure TelegramState
+            { telegramStateVersion = 2
+            , nextUpdateId
+            , bindings
             , pendingQueues =
                 foldl'
                     (flip insertPendingAction)
@@ -341,6 +368,7 @@ instance FromJSON TelegramState where
                     ( map RunPendingTurn pendingTurns
                         <> map DeliverReply pendingReplies
                         <> map RunPendingMediaTurn pendingMediaTurns
+                        <> map LeaveUnauthorizedChat pendingLeaves
                     )
             , pendingCallbacks =
                 Map.fromList
@@ -360,6 +388,7 @@ instance FromJSON TelegramState where
                     [ (messages.outboundChat, Set.fromList messages.outboundIds)
                     | messages <- outboundMessages
                     ]
+            , authorizedGroupChatIds
             }
 
 data TelegramOutboundMessages = TelegramOutboundMessages
@@ -460,6 +489,23 @@ instance FromJSON TelegramPendingMediaTurn where
             <*> o .:? "attachments" .!= []
             <*> o .:? "edited" .!= False
             <*> o .:? "mediaGroupId"
+
+data TelegramPendingLeave = TelegramPendingLeave
+    { pendingLeaveUpdateId :: !Integer
+    , pendingLeaveChat :: !TelegramChatKey
+    } deriving (Eq, Show)
+
+instance ToJSON TelegramPendingLeave where
+    toJSON pending = object
+        [ "updateId" .= pending.pendingLeaveUpdateId
+        , "chat" .= pending.pendingLeaveChat
+        ]
+
+instance FromJSON TelegramPendingLeave where
+    parseJSON = withObject "TelegramPendingLeave" \o ->
+        TelegramPendingLeave
+            <$> o .: "updateId"
+            <*> o .: "chat"
 
 data TelegramPendingCallback = TelegramPendingCallback
     { pendingCallbackUpdateId :: !Integer
@@ -623,6 +669,34 @@ instance FromJSON TelegramChat where
     parseJSON = withObject "TelegramChat" \o ->
         TelegramChat <$> o .: "id" <*> o .: "type"
 
+data TelegramChatMember = TelegramChatMember
+    { chatMemberUser :: !TelegramUser
+    , chatMemberStatus :: !Text
+    , chatMemberIsMember :: !(Maybe Bool)
+    } deriving (Eq, Show)
+
+instance FromJSON TelegramChatMember where
+    parseJSON = withObject "TelegramChatMember" \o ->
+        TelegramChatMember
+            <$> o .: "user"
+            <*> o .: "status"
+            <*> o .:? "is_member"
+
+data TelegramChatMemberUpdated = TelegramChatMemberUpdated
+    { chatMemberUpdatedChat :: !TelegramChat
+    , chatMemberUpdatedFrom :: !TelegramUser
+    , chatMemberUpdatedOld :: !TelegramChatMember
+    , chatMemberUpdatedNew :: !TelegramChatMember
+    } deriving (Eq, Show)
+
+instance FromJSON TelegramChatMemberUpdated where
+    parseJSON = withObject "TelegramChatMemberUpdated" \o ->
+        TelegramChatMemberUpdated
+            <$> o .: "chat"
+            <*> o .: "from"
+            <*> o .: "old_chat_member"
+            <*> o .: "new_chat_member"
+
 data TelegramMessage = TelegramMessage
     { messageId :: !Integer
     , messageFrom :: !(Maybe TelegramUser)
@@ -647,6 +721,7 @@ data TelegramMessage = TelegramMessage
     , messageForwardOrigin :: !(Maybe Value)
     , messageEditDate :: !(Maybe Integer)
     , messageReplyTo :: !(Maybe TelegramMessage)
+    , messageNewChatMembers :: ![TelegramUser]
     } deriving (Eq, Show)
 
 instance FromJSON TelegramMessage where
@@ -675,6 +750,7 @@ instance FromJSON TelegramMessage where
             <*> o .:? "forward_origin"
             <*> o .:? "edit_date"
             <*> o .:? "reply_to_message"
+            <*> (o .:? "new_chat_members" .!= [])
 
 data TelegramReactionType = TelegramReactionType
     { reactionType :: !Text
@@ -959,6 +1035,7 @@ data TelegramUpdate = TelegramUpdate
     , updateEditedMessage :: !(Maybe TelegramMessage)
     , updateMessageReaction :: !(Maybe TelegramMessageReaction)
     , updateCallbackQuery :: !(Maybe TelegramCallbackQuery)
+    , updateMyChatMember :: !(Maybe TelegramChatMemberUpdated)
     } deriving (Eq, Show)
 
 instance FromJSON TelegramUpdate where
@@ -969,6 +1046,7 @@ instance FromJSON TelegramUpdate where
             <*> o .:? "edited_message"
             <*> o .:? "message_reaction"
             <*> o .:? "callback_query"
+            <*> o .:? "my_chat_member"
 
 data TelegramCallbackQuery = TelegramCallbackQuery
     { callbackQueryId :: !Text
@@ -1019,6 +1097,7 @@ data PendingChatAction
     = DeliverReply !TelegramPendingReply
     | RunPendingTurn !TelegramPendingTurn
     | RunPendingMediaTurn !TelegramPendingMediaTurn
+    | LeaveUnauthorizedChat !TelegramPendingLeave
     deriving (Eq, Show)
 
 pendingActionUpdateId :: PendingChatAction -> Integer
@@ -1026,12 +1105,14 @@ pendingActionUpdateId = \case
     DeliverReply pending -> pending.pendingUpdateId
     RunPendingTurn pending -> pending.pendingTurnUpdateId
     RunPendingMediaTurn pending -> pending.pendingMediaUpdateId
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveUpdateId
 
 pendingActionChat :: PendingChatAction -> TelegramChatKey
 pendingActionChat = \case
     DeliverReply pending -> pending.pendingChat
     RunPendingTurn pending -> pending.pendingTurnChat
     RunPendingMediaTurn pending -> pending.pendingMediaChat
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveChat
 
 insertPendingAction
     :: PendingChatAction
@@ -1070,4 +1151,5 @@ emptyTelegramState = TelegramState
     , deliveryCheckpoints = Map.empty
     , deadLetters = []
     , outboundMessageIds = Map.empty
+    , authorizedGroupChatIds = Set.empty
     }
