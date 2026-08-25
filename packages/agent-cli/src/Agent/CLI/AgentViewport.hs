@@ -9,6 +9,7 @@ module Agent.CLI.AgentViewport
     , agentDisplayName
     , agentEntryTreeLabel
     , agentEntryTreeLabelWithGlyph
+    , agentEntryTreeLabelWithGlyphModel
     , agentStatusGlyph
     , agentStepsForStatus
     , applyAgentViewportKey
@@ -79,6 +80,7 @@ data AgentEntry = AgentEntry
     { agentTarget :: !AgentTarget
     , agentPath :: !Text
     , agentStatus :: !Text
+    , agentModel :: !(Maybe Text)
     , agentSteps :: ![AgentStep]
     , agentTranscript :: ![Text]
     }
@@ -628,6 +630,37 @@ agentEntryTreeLabelWithGlyph
     -> AgentEntry
     -> Text
 agentEntryTreeLabelWithGlyph glyph entries index entry =
+    agentEntryTreeLabelWithGlyphDetail
+        glyph
+        (entry.agentStatus <> maybe "" (" · " <>) entry.agentModel)
+        entries
+        index
+        entry
+
+-- | Compact label for the narrow fullscreen agent pane. The glyph already
+-- carries status, so prefer the model text when it is available.
+agentEntryTreeLabelWithGlyphModel
+    :: Text
+    -> [AgentEntry]
+    -> Int
+    -> AgentEntry
+    -> Text
+agentEntryTreeLabelWithGlyphModel glyph entries index entry =
+    agentEntryTreeLabelWithGlyphDetail
+        glyph
+        (maybe entry.agentStatus id entry.agentModel)
+        entries
+        index
+        entry
+
+agentEntryTreeLabelWithGlyphDetail
+    :: Text
+    -> Text
+    -> [AgentEntry]
+    -> Int
+    -> AgentEntry
+    -> Text
+agentEntryTreeLabelWithGlyphDetail glyph detail entries index entry =
     treePrefixFrom
         (laterSiblingIndex (drop (index + 1) entries))
         (pathSegments entry.agentPath)
@@ -635,7 +668,7 @@ agentEntryTreeLabelWithGlyph glyph entries index entry =
         <> "  "
         <> glyph
         <> " "
-        <> entry.agentStatus
+        <> detail
 
 agentDisplayName :: Text -> Text
 agentDisplayName path =
@@ -711,6 +744,7 @@ agentTreeRowLabel row =
         <> agentStatusGlyph entry.agentStatus
         <> " "
         <> entry.agentStatus
+        <> maybe "" (" · " <>) entry.agentModel
 
 pathSegments :: Text -> [Text]
 pathSegments path =

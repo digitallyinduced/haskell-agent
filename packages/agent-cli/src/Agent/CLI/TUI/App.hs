@@ -73,7 +73,7 @@ import Agent.CLI.AgentViewport
     , AgentStepState(..)
     , AgentTarget(..)
     , agentDisplayName
-    , agentEntryTreeLabelWithGlyph
+    , agentEntryTreeLabelWithGlyphModel
     , agentStatusGlyph
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
@@ -1938,7 +1938,7 @@ drawAgentPane state entryLimit selected hovered entries =
             row = hBox
                 [ txt
                     (marker
-                        <> agentEntryTreeLabelWithGlyph
+                        <> agentEntryTreeLabelWithGlyphModel
                             statusGlyph
                             ordered
                             index
