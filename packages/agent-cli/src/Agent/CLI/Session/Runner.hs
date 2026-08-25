@@ -30,7 +30,7 @@ import Agent.CLI.ManagedTurn
     , managedTurnInputs
     )
 import Agent.CLI.GatewayBridge
-    ( publishManagedLoopEvent
+    ( newManagedLoopEventPublisher
     , requestManagedApproval
     )
 import Agent.CLI.Approval
@@ -659,6 +659,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         emitUiEvent runtime
                             (UiSystemMessage (formatSkillOmission omitted))
     policyRef <- newIORef policy
+    managedLoopPublisher <-
+        maybe
+            (pure (const (pure ())))
+            newManagedLoopEventPublisher
+            promptRequest
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
             sessionDir <- readIORef planMode.planSessionDir
@@ -686,8 +691,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderMotionMode = options.optMotionMode
             }
         emitLoop event = do
-            forM_ promptRequest \request ->
-                publishManagedLoopEvent request event
+            managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
                 Just runtime -> do

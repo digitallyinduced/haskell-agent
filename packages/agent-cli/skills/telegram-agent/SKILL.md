@@ -74,8 +74,8 @@ disables terminal echo and stores the token in a private gateway file.
 
 ## Telegram delivery behavior
 
-- The gateway shows typing and a native rich-message draft whose text follows
-  current model/tool/retry activity.
+- The gateway shows typing and a native rich-message draft that streams the
+  current answer, available reasoning summaries, and model/tool/retry activity.
 - Agent Markdown is converted to Telegram-safe HTML, with a plain-text fallback.
 - Group and supergroup responses reply to the triggering message. Forum topics
   are isolated from one another.
