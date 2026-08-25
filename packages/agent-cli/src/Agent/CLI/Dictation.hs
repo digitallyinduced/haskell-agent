@@ -57,6 +57,8 @@ import System.Process
 dictate :: IO Text
 dictate = do
     requireExecutable "ffmpeg"
+    Text.hPutStrLn stderr "● Starting dictation…"
+    hFlush stderr
     loadAuth (Just XAIProvider) >>= \case
         Left err ->
             fail (Text.unpack err)

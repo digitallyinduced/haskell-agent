@@ -588,15 +588,9 @@ handleComposerKey
                 invalidateCache
         V.EvKey (V.KChar 'r') modifiers
             | V.MCtrl `elem` modifiers ->
-                suspendAndResume do
-                    result <- tryAny dictate
-                    writeBChan
-                        state.appRuntime.runtimeEvents
-                        (AppDictationFinished
-                            (case result of
-                                Left err -> Left (Text.pack (show err))
-                                Right transcript -> Right transcript))
-                    pure state
+                startDictation
+        V.EvKey (V.KChar '\DC2') _ ->
+            startDictation
         V.EvKey (V.KChar 'a') modifiers
             | V.MCtrl `elem` modifiers ->
                 setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
@@ -659,6 +653,18 @@ handleComposerKey
                             pastedDraft)
         _ -> pure ()
   where
+    startDictation = do
+        current <- get
+        suspendAndResume do
+            result <- tryAny dictate
+            writeBChan
+                current.appRuntime.runtimeEvents
+                (AppDictationFinished
+                    (case result of
+                        Left err -> Left (Text.pack (show err))
+                        Right transcript -> Right transcript))
+            pure current
+
     submitRaw replLine = do
         state <- get
         enqueueInput state replLine Nothing False

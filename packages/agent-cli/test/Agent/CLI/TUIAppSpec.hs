@@ -298,6 +298,14 @@ spec = do
                   , "\ESC[118:86:86;9:1u"
                   , V.EvKey (V.KChar 'v') [V.MMeta]
                   )
+                , ( Nothing
+                  , "\ESC[114;5u"
+                  , V.EvKey (V.KChar 'r') [V.MCtrl]
+                  )
+                , ( Nothing
+                  , "\ESC[114:82:82;5:1u"
+                  , V.EvKey (V.KChar 'r') [V.MCtrl]
+                  )
                 ]
 
     describe "fullscreen keyboard protocol lifecycle" do
