@@ -89,6 +89,17 @@ spec = do
         field "previous_response_id" payload
             `shouldBe` Just (Aeson.String "previous-1")
 
+    it "forces parallel_tool_calls false on Responses Lite requests" do
+        let request = withParallelToolCalls (Just True) sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        field "parallel_tool_calls" payload `shouldBe` Just (Aeson.Bool False)
+
+        let generic = withModel (Just "gpt-generic") request
+        field "parallel_tool_calls"
+            (buildWsPayloadWithOptions defaultCodexWsOptions generic Nothing)
+            `shouldBe` Just (Aeson.Bool True)
+
     it "strips Responses Lite content_item_kinds from the wire payload" do
         let payload = buildWsPayloadWithOptions
                 defaultCodexWsOptions sampleLitePrefixRequest Nothing
@@ -361,6 +372,11 @@ withPromptCacheRetention
 withPromptCacheRetention nextRetention
         ResponseCreateParams { promptCacheRetention = _, .. } =
     ResponseCreateParams { promptCacheRetention = nextRetention, .. }
+
+withParallelToolCalls
+    :: Maybe Bool -> ResponseCreateParams -> ResponseCreateParams
+withParallelToolCalls nextValue ResponseCreateParams { parallelToolCalls = _, .. } =
+    ResponseCreateParams { parallelToolCalls = nextValue, .. }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =

@@ -255,6 +255,35 @@ spec = do
             map requestItems seen
                 `shouldBe` [history <> [compactionTriggerItem]]
 
+        it "disables parallel tool calls for Responses Lite remote compaction" do
+            requests <- newIORef []
+            let provider = tokenProvider SubscriptionBilled \_ ->
+                    error "remote compaction unexpectedly requested credentials"
+                send _ request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                history = [userTextItem "old context"]
+                params = defaultResponseCreateParams
+                    { model = Just "gpt-5.6-sol"
+                    , instructions = Just "keep these instructions"
+                    , store = Just True
+                    , tools = Just []
+                    }
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    params
+                    history
+                    100
+                    Nothing
+            case result of
+                Left err -> expectationFailure (show err)
+                Right outcome ->
+                    outcome.compactSummary
+                        `shouldBe` "Context compacted remotely."
+            map (.parallelToolCalls) <$> readIORef requests
+                `shouldReturn` [Just False]
+
         it "keeps focused manual compaction on local summarization" do
             requests <- newIORef []
             let provider = tokenProvider SubscriptionBilled \_ ->

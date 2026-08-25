@@ -49,6 +49,15 @@ spec = do
             Aeson.toJSON compactionTriggerItem
                 `shouldBe` Aeson.object ["type" .= ("compaction_trigger" :: Text.Text)]
 
+        it "disables parallel tool calls for Responses Lite compaction" do
+            let params = defaultResponseCreateParams
+                    { model = Just "gpt-5.6-sol"
+                    , store = Just True
+                    , parallelToolCalls = Just True
+                    }
+                request = buildRemoteCompactionRequest params [user "hello"]
+            request.parallelToolCalls `shouldBe` Just False
+
         it "accepts exactly one compaction item alongside unrelated output" do
             let opaque = checkpoint "opaque"
                 response = completedResponse [assistant "ignored", opaque]
