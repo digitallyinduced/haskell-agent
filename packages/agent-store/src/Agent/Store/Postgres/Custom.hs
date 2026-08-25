@@ -37,6 +37,7 @@ import qualified Data.Text.Encoding as Text
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
+import qualified Hasql.Pipeline as Pipeline
 import Hasql.Pool (Pool)
 import qualified Hasql.Pool as Pool
 import qualified Hasql.Session as Session
@@ -148,18 +149,21 @@ inspectCustomSchema scopePool database =
         if not expectedIdentity
             then pure (Left scopeIdentityError)
             else do
-                objects <- Session.statement
-                    database.scopeDatabaseSchema
-                    catalogObjectsStatement
-                columns <- Session.statement
-                    database.scopeDatabaseSchema
-                    catalogColumnsStatement
-                constraints <- Session.statement
-                    database.scopeDatabaseSchema
-                    catalogConstraintsStatement
-                indexes <- Session.statement
-                    database.scopeDatabaseSchema
-                    catalogIndexesStatement
+                (objects, columns, constraints, indexes) <-
+                    Session.pipeline $
+                        (,,,)
+                            <$> Pipeline.statement
+                                database.scopeDatabaseSchema
+                                catalogObjectsStatement
+                            <*> Pipeline.statement
+                                database.scopeDatabaseSchema
+                                catalogColumnsStatement
+                            <*> Pipeline.statement
+                                database.scopeDatabaseSchema
+                                catalogConstraintsStatement
+                            <*> Pipeline.statement
+                                database.scopeDatabaseSchema
+                                catalogIndexesStatement
                 pure $ Right $
                     assembleCatalog objects columns constraints indexes
 
