@@ -39,6 +39,7 @@ import Agent.CLI.TUI.App
     , resumeSearchCursorColumn
     , selectedAgentConversation
     , setFullscreenWindowTitle
+    , syntaxLanguagesForBlocks
     , textOverlayDisplayText
     , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
@@ -80,9 +81,10 @@ import Agent.TUI.Presentation
 import Agent.TUI.Motion
 import Control.Concurrent.STM (newTChanIO)
 import qualified Data.ByteString as ByteString
-import Data.Foldable (find)
+import Data.Foldable (find, toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -92,6 +94,17 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "on-demand syntax loading" do
+        it "requests grammars used by fenced file paths" do
+            let conversation =
+                    reduceUi
+                        (UiAssistantHistory
+                            "```src/Agent/Syntax.hs\nmain = pure ()\n```\n\
+                            \```python\nprint('hello')\n```")
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.fromList ["haskell", "python"]
+
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
             let url = "https://github.com/digitallyinduced/haskell-agent"
