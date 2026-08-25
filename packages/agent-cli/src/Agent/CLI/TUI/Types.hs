@@ -61,6 +61,10 @@ data Name
     | ComposerEffort
     | ComposerMode
     | ComposerAccount
+    | QuickStartWorktree
+    | QuickStartResume
+    | QuickStartCommands
+    | QuickStartModel
     | ChoiceRow !Int
     | ResumeViewport
     | ResumeRow !Text
