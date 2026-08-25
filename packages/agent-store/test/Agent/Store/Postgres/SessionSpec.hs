@@ -6,6 +6,7 @@ import Control.Exception.Safe (finally)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), picosecondsToDiffTime)
 import System.IO.Temp (withSystemTempDirectory)
@@ -174,6 +175,126 @@ spec = describe "PostgreSQL session schema" do
                         (closeStore store)
                 ) `finally` cleanup
 
+    it "pages the active transcript around the latest replacement checkpoint" $
+        withSystemTempDirectory "ha" \stateDirectory -> do
+            let
+                config = defaultManagedPostgresConfig stateDirectory ""
+                cleanup = do
+                    _ <- stopManagedPostgres config
+                    pure ()
+            (openStore config >>= \case
+                Left err -> expectationFailure ("could not open store: " <> show err)
+                Right store ->
+                    finally
+                        (do
+                            let pool = trustedPool store
+                                now = read "2026-08-23 12:00:00 UTC"
+                                metadata = testMetadata now
+                                checkpoint =
+                                    (testTurn now)
+                                        { sessionTurnUserText = "/compact"
+                                        , sessionTurnEffect = TranscriptReplace
+                                        }
+                                appendTurn index effect =
+                                    appendSessionTurn pool
+                                        (checkpoint
+                                            { sessionTurnUserText =
+                                                "/question-" <> Text.pack (show index)
+                                            , sessionTurnAssistantText =
+                                                Just ("answer-" <> Text.pack (show index))
+                                            , sessionTurnEffect = effect
+                                            })
+                                        metadata
+                            createSession pool metadata
+                                `shouldReturn` Right True
+                            appendTurn (-1 :: Int) TranscriptAppend
+                                `shouldReturn` Right True
+                            appendTurn (0 :: Int) TranscriptAppend
+                                `shouldReturn` Right True
+                            appendSessionTurnIndexed pool checkpoint metadata
+                                `shouldReturn` Right (Just 2)
+                            appendTurn (1 :: Int) TranscriptAppend
+                                `shouldReturn` Right True
+                            appendTurn (2 :: Int) TranscriptAppend
+                                `shouldReturn` Right True
+                            appendTurn (3 :: Int) TranscriptAppend
+                                `shouldReturn` Right True
+                            loadActiveSession pool "session-1" >>= \case
+                                Right (Just stored) ->
+                                    map
+                                        (\storedTurn ->
+                                            storedTurn.storedTurn.sessionTurnUserText
+                                        )
+                                        stored.storedTurns
+                                        `shouldBe`
+                                            [ "/compact"
+                                            , "/question-1"
+                                            , "/question-2"
+                                            , "/question-3"
+                                            ]
+                                other ->
+                                    expectationFailure
+                                        ("unexpected active session: " <> show other)
+                            loadRecentSessionTurns pool "session-1" 2 >>= \case
+                                Right (Just page) -> do
+                                    map (.storedTurnIndex) page.sessionPageTurns
+                                        `shouldBe` [4, 5]
+                                    page.sessionPageGenerationStart
+                                        `shouldBe` 2
+                                    page.sessionPageTotal `shouldBe` 4
+                                    page.sessionPageHasOlder `shouldBe` True
+                                    page.sessionPageHasNewer `shouldBe` False
+                                other ->
+                                    expectationFailure
+                                        ("unexpected recent page: " <> show other)
+                            loadSessionTurnsBefore pool "session-1" 4 2 >>= \case
+                                Right (Just page) -> do
+                                    map (.storedTurnIndex) page.sessionPageTurns
+                                        `shouldBe` [2, 3]
+                                    page.sessionPageHasOlder `shouldBe` False
+                                    page.sessionPageHasNewer `shouldBe` True
+                                other ->
+                                    expectationFailure
+                                        ("unexpected before page: " <> show other)
+                            loadSessionTurnsAfter pool "session-1" 3 2 >>= \case
+                                Right (Just page) -> do
+                                    map (.storedTurnIndex) page.sessionPageTurns
+                                        `shouldBe` [4, 5]
+                                    page.sessionPageHasOlder `shouldBe` True
+                                    page.sessionPageHasNewer `shouldBe` False
+                                other ->
+                                    expectationFailure
+                                        ("unexpected after page: " <> show other)
+                            loadSessionTurnsBefore pool "session-1" 2 2 >>= \case
+                                Right (Just page) -> do
+                                    page.sessionPageTurns `shouldBe` []
+                                    page.sessionPageHasOlder `shouldBe` False
+                                    page.sessionPageHasNewer `shouldBe` True
+                                other ->
+                                    expectationFailure
+                                        ("unexpected empty before page: " <> show other)
+                            loadSessionTurnsAfter pool "session-1" 5 2 >>= \case
+                                Right (Just page) -> do
+                                    page.sessionPageTurns `shouldBe` []
+                                    page.sessionPageHasOlder `shouldBe` True
+                                    page.sessionPageHasNewer `shouldBe` False
+                                other ->
+                                    expectationFailure
+                                        ("unexpected empty after page: " <> show other)
+                            loadSessionResumeStats pool "session-1" >>= \case
+                                Right (Just stats) -> do
+                                    stats.sessionResumeTurnCount `shouldBe` 6
+                                    stats.sessionResumeMessageCount `shouldBe` 12
+                                    stats.sessionResumeToolCount `shouldBe` 12
+                                    stats.sessionResumeFirstPrompt
+                                        `shouldBe` Just "/question--1"
+                                other ->
+                                    expectationFailure
+                                        ("unexpected resume stats: " <> show other)
+                        )
+                        (closeStore store)
+                ) `finally` cleanup
+
 testMetadata :: UTCTime -> SessionMetadata
 testMetadata now = SessionMetadata
     { sessionMetadataKey = "session-1"
@@ -208,6 +329,7 @@ testTurn now = SessionTurn
     , sessionTurnAssistantText = Just "done"
     , sessionTurnError = Nothing
     , sessionTurnResponseId = Just "response-1"
+    , sessionTurnEffect = TranscriptReplace
     , sessionTurnItems =
         [ StoredMessageItem StoredMessage
             { storedMessageProviderItemId = Just "item-message"

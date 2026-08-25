@@ -15,6 +15,7 @@ module Agent.CLI.Resume
     , initialResumeState
     , insertResumeSearch
     , loadResumeEntry
+    , resumeEntryFromPage
     , moveResumeBrowser
     , pickResumeEntries
     , pickResumeSession
@@ -39,8 +40,12 @@ import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
-    , loadSession
-    , loadSessions
+    , SessionTurnPage(..)
+    , SessionResumeStats(..)
+    , TranscriptEffect(..)
+    , loadRecentSessionTurns
+    , loadSessionMeta
+    , loadSessionResumeStats
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -53,6 +58,7 @@ import Agent.Provider (providerSlug)
 import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
+import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
@@ -124,7 +130,36 @@ resumeEntryFromMeta meta = entryFromWith False meta []
 
 loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
 loadResumeEntry pool root sessionId =
-    fmap (fmap (uncurry entryFrom)) (loadSession pool root sessionId)
+    loadSessionMeta pool root sessionId >>= \case
+        Left err -> pure (Left err)
+        Right meta ->
+            loadRecentSessionTurns pool root sessionId 50 >>= \case
+                Left err -> pure (Left err)
+                Right page ->
+                    loadSessionResumeStats pool root sessionId >>= \case
+                        Left err -> pure (Left err)
+                        Right stats ->
+                            pure $ Right $
+                                resumeEntryFromPage
+                                    meta
+                                    stats
+                                    (map snd page.pageTurns)
+
+-- | Build a loaded resume entry from a bounded transcript page plus
+-- full-session aggregates. Counts and the first prompt describe the whole
+-- conversation; @turns@ is only the preview window.
+resumeEntryFromPage
+    :: SessionMeta
+    -> SessionResumeStats
+    -> [SessionTurn]
+    -> ResumeEntry
+resumeEntryFromPage meta stats turns =
+    (entryFromWith True meta turns)
+        { resumeMessageCount = stats.resumeStatsMessageCount
+        , resumeTurnCount = stats.resumeStatsTurnCount
+        , resumeToolCount = stats.resumeStatsToolCount
+        , resumePrompt = fromMaybe "" stats.resumeStatsFirstPrompt
+        }
 
 entryFrom :: SessionMeta -> [SessionTurn] -> ResumeEntry
 entryFrom = entryFromWith True
@@ -644,24 +679,23 @@ loadRecentSessions
     -> OsPath
     -> [SessionMeta]
     -> IO [(SessionMeta, [SessionTurn])]
-loadRecentSessions pool root metas = do
-    let recent = take 20 metas
-    loaded <- loadSessions pool root (map (.metaId) recent)
-    pure (zipWith loadedOrUnavailable recent loaded)
-  where
-    loadedOrUnavailable meta = \case
-        Right session -> session
-        Left err ->
-            ( meta
-            , [ SessionTurn
-                    { turnAt = meta.metaUpdatedAt
-                    , turnUserText = ""
-                    , turnAssistantText =
-                        Just ("Transcript unavailable: " <> err)
-                    , turnError = Nothing
-                    , turnResponseId = Nothing
-                    , turnItems = []
-                    , turnUsage = Nothing
-                    }
-              ]
-            )
+loadRecentSessions pool root metas =
+    forM (take 20 metas) \meta ->
+        loadRecentSessionTurns pool root meta.metaId 4 >>= \case
+            Right page -> pure (meta, map snd page.pageTurns)
+            Left err ->
+                pure
+                    ( meta
+                    , [ SessionTurn
+                            { turnAt = meta.metaUpdatedAt
+                            , turnUserText = ""
+                            , turnAssistantText =
+                                Just ("Transcript unavailable: " <> err)
+                            , turnError = Nothing
+                            , turnResponseId = Nothing
+                            , turnEffect = TranscriptAppend
+                            , turnItems = []
+                            , turnUsage = Nothing
+                            }
+                      ]
+                    )

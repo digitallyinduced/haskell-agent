@@ -15,11 +15,13 @@ module Agent.CLI.Session.History
     , writeLiveTranscript
     ) where
 
-import Agent.CLI.Session (SessionTurn(..))
+import Agent.CLI.Session
+    ( SessionTurn(..)
+    , TranscriptEffect(..)
+    )
 import Agent.Loop (ImageAttachment)
 import Agent.OpenAI.Compaction
-    ( hasCompactionCheckpoint
-    , isTranscriptResetTurn
+    ( isTranscriptResetTurn
     )
 import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
@@ -144,15 +146,10 @@ foldSessionItems :: [SessionTurn] -> [ResponseItem]
 foldSessionItems =
     concat . reverse . foldl' addTurn []
   where
-    addTurn chunks turn
-        | isTranscriptResetTurn turn.turnUserText =
-            -- /clear and /new store an empty snapshot; /compact stores the
-            -- rebuilt history. Either way, turnItems replaces prior history.
-            [turn.turnItems]
-        | hasCompactionCheckpoint turn.turnItems =
-            [turn.turnItems]
-        | otherwise =
-            turn.turnItems : chunks
+    addTurn chunks turn = case turn.turnEffect of
+        TranscriptAppend -> turn.turnItems : chunks
+        TranscriptReplace -> [turn.turnItems]
+        TranscriptReset -> [turn.turnItems]
 
 hydrateUiHistory :: [SessionTurn] -> UiState
 hydrateUiHistory = foldl' addTurn initialUiState

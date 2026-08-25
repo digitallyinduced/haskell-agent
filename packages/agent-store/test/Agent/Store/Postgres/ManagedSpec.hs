@@ -132,6 +132,49 @@ spec =
                                 (closeStorePool ownerPool)
                     ) `finally` cleanup
 
+        it "backfills transcript effects and restores turn immutability" $
+            withSystemTempDirectory "ha" \stateDirectory -> do
+                let
+                    config = defaultManagedPostgresConfig stateDirectory ""
+                    cleanup = do
+                        _ <- stopManagedPostgres config
+                        pure ()
+                (do
+                    ensureManagedPostgres config
+                        >>= (`shouldSatisfy` isRight)
+                    openStorePool config defaultPoolConfig >>= \case
+                        Left err ->
+                            expectationFailure
+                                ("could not open migration pool: " <> show err)
+                        Right ownerPool ->
+                            finally
+                                (do
+                                    runMigrations ownerPool
+                                        legacyTranscriptEffectMigrations
+                                        `shouldReturn` Right ()
+                                    runMigrations ownerPool coreMigrations
+                                        `shouldReturn` Right ()
+                                    withSession ownerPool
+                                        (Session.statement ()
+                                            migratedTranscriptEffectsStatement)
+                                        `shouldReturn`
+                                            Right
+                                                [ "append"
+                                                , "replace"
+                                                , "replace"
+                                                , "replace"
+                                                , "reset"
+                                                ]
+                                    immutable <- withSession ownerPool
+                                        (Session.script
+                                            "UPDATE harness.session_turns\
+                                            \ SET user_text = 'mutated'\
+                                            \ WHERE turn_index = 0")
+                                    immutable `shouldSatisfy` isLeft
+                                )
+                                (closeStorePool ownerPool)
+                    ) `finally` cleanup
+
         it "migrates opaque response fields to text columns" $
             withSystemTempDirectory "ha" \stateDirectory -> do
                 let
@@ -190,6 +233,97 @@ legacyMigrations =
             , "GRANT USAGE ON SCHEMA harness TO ha_runtime"
             , "GRANT SELECT ON harness.schema_migrations TO ha_runtime"
             ]
+        }
+    ]
+
+legacyTranscriptEffectMigrations :: [Migration]
+legacyTranscriptEffectMigrations =
+    [ Migration
+        { migrationVersion = 1
+        , migrationName = "initial harness storage"
+        , migrationStatements =
+            [ "CREATE TABLE harness.session_turns (\
+              \ turn_id uuid PRIMARY KEY,\
+              \ session_id uuid NOT NULL,\
+              \ turn_index bigint NOT NULL,\
+              \ user_text text NOT NULL\
+              \ )"
+            , "CREATE TABLE harness.session_response_items (\
+              \ response_item_id uuid PRIMARY KEY,\
+              \ turn_id uuid NOT NULL,\
+              \ item_type text NOT NULL\
+              \ )"
+            , "CREATE TABLE harness.session_messages (\
+              \ response_item_id uuid PRIMARY KEY,\
+              \ role_name text NOT NULL,\
+              \ content_text text\
+              \ )"
+            , "CREATE TABLE harness.session_response_content_parts (\
+              \ content_part_id uuid PRIMARY KEY,\
+              \ response_item_id uuid NOT NULL,\
+              \ text_value text\
+              \ )"
+            , "CREATE OR REPLACE FUNCTION\
+              \ harness.reject_session_fact_mutation()\
+              \ RETURNS trigger\
+              \ LANGUAGE plpgsql\
+              \ AS $$ BEGIN\
+              \ RAISE EXCEPTION 'session events and turns are immutable';\
+              \ END $$"
+            , "CREATE TRIGGER session_turns_immutable\
+              \ BEFORE UPDATE OR DELETE ON harness.session_turns\
+              \ FOR EACH ROW EXECUTE FUNCTION\
+              \ harness.reject_session_fact_mutation()"
+            , "INSERT INTO harness.session_turns\
+              \ (turn_id, session_id, turn_index, user_text) VALUES\
+              \ ('10000000-0000-0000-0000-000000000001',\
+              \  '20000000-0000-0000-0000-000000000001', 0, 'hello'),\
+              \ ('10000000-0000-0000-0000-000000000002',\
+              \  '20000000-0000-0000-0000-000000000001', 1, '/compact'),\
+              \ ('10000000-0000-0000-0000-000000000003',\
+              \  '20000000-0000-0000-0000-000000000001', 2, 'automatic'),\
+              \ ('10000000-0000-0000-0000-000000000004',\
+              \  '20000000-0000-0000-0000-000000000001', 3, 'summary'),\
+              \ ('10000000-0000-0000-0000-000000000005',\
+              \  '20000000-0000-0000-0000-000000000001', 4, '/clear')"
+            , "INSERT INTO harness.session_response_items\
+              \ (response_item_id, turn_id, item_type) VALUES\
+              \ ('30000000-0000-0000-0000-000000000001',\
+              \  '10000000-0000-0000-0000-000000000003', 'compaction'),\
+              \ ('30000000-0000-0000-0000-000000000002',\
+              \  '10000000-0000-0000-0000-000000000004', 'message'),\
+              \ ('30000000-0000-0000-0000-000000000003',\
+              \  '10000000-0000-0000-0000-000000000005', 'compaction')"
+            , "INSERT INTO harness.session_messages\
+              \ (response_item_id, role_name, content_text) VALUES\
+              \ ('30000000-0000-0000-0000-000000000002', 'assistant',\
+              \  'Compacted conversation summary: retained facts')"
+            ]
+        }
+    , Migration
+        { migrationVersion = 2
+        , migrationName = "restricted harness runtime role"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 3
+        , migrationName = "typed relational session storage"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 4
+        , migrationName = "text tool outputs"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 5
+        , migrationName = "versioned learned skills"
+        , migrationStatements = []
+        }
+    , Migration
+        { migrationVersion = 6
+        , migrationName = "typed response item fields"
+        , migrationStatements = []
         }
     ]
 
@@ -413,6 +547,15 @@ migratedToolOutputsStatement = Statement.preparable
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool)
             <*> Decoders.column (Decoders.nonNullable Decoders.bool))
+
+migratedTranscriptEffectsStatement :: Statement () [Text]
+migratedTranscriptEffectsStatement = Statement.preparable
+    "SELECT transcript_effect\
+    \ FROM harness.session_turns\
+    \ ORDER BY turn_index"
+    Encoders.noParams
+    (Decoders.rowList $
+        Decoders.column (Decoders.nonNullable Decoders.text))
 
 upgradedSchemaStatement :: Statement () (Bool, Bool, Bool)
 upgradedSchemaStatement = Statement.preparable
