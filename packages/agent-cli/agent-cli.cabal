@@ -276,9 +276,25 @@ benchmark subagent-retention-bench
                     , agent-core
                     , agent-store
                     , agent-responses
+                    , agent-responses-types
                     , aeson
                     , base >= 4.17 && < 5
                     , containers
+                    , text
+
+benchmark conversation-retention-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ConversationRetention.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-responses-types
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , safe-exceptions
                     , text
 
 benchmark history-retention-bench
