@@ -175,6 +175,9 @@ toolVerb name = case canonicalToolName name of
     "followup_task" -> "Followed up with"
     "list_agents" -> "Listed agents"
     "interrupt_agent" -> "Interrupted"
+    "create_agent_session" -> "Created agent session"
+    "read_agent_session" -> "Read agent session"
+    "send_agent_session_message" -> "Messaged agent session"
     "update_plan" -> "Updated"
     "enter_plan_mode" -> "Entered"
     "exit_plan_mode" -> "Exited"
@@ -186,6 +189,7 @@ toolVerb name = case canonicalToolName name of
     "skill_update" -> "Updated skill"
     "skill_archive" -> "Archived skill"
     "skill_rollback" -> "Restored skill"
+    "conversation_search" -> "Searched conversations"
     other -> other
 
 toolDetail :: ToolCall -> Text
@@ -214,6 +218,12 @@ toolDetail call = case canonicalToolName call.name of
     "send_message" -> jsonTextFieldDefault "target" call.arguments
     "followup_task" -> jsonTextFieldDefault "target" call.arguments
     "interrupt_agent" -> jsonTextFieldDefault "target" call.arguments
+    "create_agent_session" ->
+        firstLine (jsonTextFieldDefault "title" call.arguments)
+    "read_agent_session" ->
+        jsonTextFieldDefault "session_id" call.arguments
+    "send_agent_session_message" ->
+        jsonTextFieldDefault "session_id" call.arguments
     "list_agents" ->
         maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
     "skill_search" -> firstLine (jsonTextFieldDefault "query" call.arguments)
@@ -222,6 +232,8 @@ toolDetail call = case canonicalToolName call.name of
     "skill_update" -> skillIdentity call.arguments
     "skill_archive" -> skillIdentity call.arguments
     "skill_rollback" -> skillIdentity call.arguments
+    "conversation_search" ->
+        firstLine (jsonTextFieldDefault "query" call.arguments)
     _ -> ""
 
 skillIdentity :: Text -> Text

@@ -21,7 +21,7 @@ import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.Error (formatException)
 import Agent.CLI.Session
     ( SessionCreate(..)
-    , SessionActivity
+    , SessionActivity(..)
     , SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
@@ -65,15 +65,13 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (SomeException, try)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON(..), Value, encode, object, (.=))
-import qualified Data.Aeson as Aeson
+import Data.Aeson (FromJSON(..), encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as TextIO
 import System.Directory
     ( findExecutable
@@ -532,7 +530,7 @@ instance FromJSON CreateAgentSessionArgs where
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
     "create_agent_session"
-    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id immediately."
+    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id and status as readable text."
     [ PropertySchema "message" PropertyString True $ Just
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
@@ -616,7 +614,7 @@ instance FromJSON ReadAgentSessionArgs where
 readAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 readAgentSessionTool env = jsonTool
     "read_agent_session"
-    "Read metadata and recent user/assistant turns from a persisted agent session."
+    "Read metadata and recent user/assistant turns from a persisted agent session as readable labeled text."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted session id returned by create_agent_session or shown by /session."
     , PropertySchema "limit" PropertyInteger False $ Just
@@ -641,10 +639,7 @@ runReadAgentSession env args =
                     else pure Nothing
             let limit = min 100 (max 1 (fromMaybe 20 args.limit))
                 recent = drop (max 0 (length turns - limit)) turns
-            pure $ Right $ encodeJson $ object
-                [ "session" .= sessionJson meta status activity
-                , "turns" .= map turnJson recent
-                ]
+            pure $ Right $ renderAgentSession meta status activity recent
 
 data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     { sessionId :: Text
@@ -659,7 +654,7 @@ instance FromJSON SendAgentSessionMessageArgs where
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Fails if that session is already running."
+    "Send a message to a persisted agent session by starting a resumed background turn. Returns the session id and status as readable text; fails if that session is already running."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just
@@ -699,10 +694,7 @@ launchToolSessionTurn env handle message =
         Right launchResult -> do
             let sessionId = handle.sessionMeta.metaId
             status <- statusAfterLaunch env sessionId launchResult
-            pure $ Right $ encodeJson $ object
-                [ "session_id" .= sessionId
-                , "status" .= status
-                ]
+            pure $ Right $ renderSessionLaunch sessionId status
 
 sessionHandle :: StorePool -> OsPath -> SessionMeta -> SessionHandle
 sessionHandle pool root meta =
@@ -726,29 +718,66 @@ statusAfterLaunch env sessionId launchResult
     | "completed session " `Text.isPrefixOf` launchResult = pure "completed"
     | otherwise = env.toolsSessionStatus sessionId
 
-sessionJson :: SessionMeta -> Text -> Maybe SessionActivity -> Value
-sessionJson meta status activity = object
-    [ "id" .= meta.metaId
-    , "status" .= status
-    , "title" .= meta.metaTitle
-    , "provider" .= providerSlug meta.metaProvider
-    , "connection" .= meta.metaConnection
-    , "model" .= meta.metaModel
-    , "dialect" .= dialectSlug meta.metaDialect
-    , "reasoning_effort" .= meta.metaEffort
-    , "cwd" .= unsafeToFilePath meta.metaCwd
-    , "created_at" .= meta.metaCreatedAt
-    , "updated_at" .= meta.metaUpdatedAt
-    , "activity" .= activity
-    ]
+renderSessionLaunch :: Text -> Text -> Text
+renderSessionLaunch sessionId status =
+    "Session: " <> sessionId <> "\nStatus: " <> status
 
-turnJson :: SessionTurn -> Value
-turnJson turn = object
-    [ "at" .= turn.turnAt
-    , "user" .= turn.turnUserText
-    , "assistant" .= turn.turnAssistantText
-    , "error" .= turn.turnError
-    ]
+renderAgentSession
+    :: SessionMeta
+    -> Text
+    -> Maybe SessionActivity
+    -> [SessionTurn]
+    -> Text
+renderAgentSession meta status activity turns =
+    Text.intercalate "\n" $
+        [ "Session"
+        , "  ID: " <> meta.metaId
+        , "  Status: " <> status
+        , "  Title: " <> meta.metaTitle
+        , "  Provider: " <> providerSlug meta.metaProvider
+        , "  Connection: " <> meta.metaConnection
+        , "  Model: " <> meta.metaModel
+        , "  Dialect: " <> dialectSlug meta.metaDialect
+        , "  Reasoning effort: " <> meta.metaEffort
+        , "  Working directory: " <> Text.pack (unsafeToFilePath meta.metaCwd)
+        , "  Created at: " <> Text.pack (show meta.metaCreatedAt)
+        , "  Updated at: " <> Text.pack (show meta.metaUpdatedAt)
+        ]
+            <> maybe [] renderActivity activity
+            <> ["", "Recent turns: " <> Text.pack (show (length turns))]
+            <> case turns of
+                [] -> ["  (none)"]
+                _ -> [""] <> intercalateBlank
+                    (zipWith renderSessionTurn [1 :: Int ..] turns)
 
-encodeJson :: Value -> Text
-encodeJson = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
+renderActivity :: SessionActivity -> [Text]
+renderActivity activity =
+    [ ""
+    , "Current activity"
+    , "  Kind: " <> activity.activityKind
+    , "  Message: " <> activity.activityMessage
+    ]
+        <> maybe []
+            (\retryAt -> ["  Retry at: " <> Text.pack (show retryAt)])
+            activity.activityRetryAt
+        <> ["  Updated at: " <> Text.pack (show activity.activityUpdatedAt)]
+
+renderSessionTurn :: Int -> SessionTurn -> [Text]
+renderSessionTurn index turn =
+    [ "Turn " <> Text.pack (show index)
+    , "At: " <> Text.pack (show turn.turnAt)
+    , "User:"
+    , indentText turn.turnUserText
+    ]
+        <> maybe [] (\text -> ["Assistant:", indentText text])
+            turn.turnAssistantText
+        <> maybe [] (\text -> ["Error:", indentText text])
+            turn.turnError
+
+intercalateBlank :: [[Text]] -> [Text]
+intercalateBlank = \case
+    [] -> []
+    first : rest -> first <> concatMap ("" :) rest
+
+indentText :: Text -> Text
+indentText = Text.intercalate "\n" . map ("  " <>) . Text.lines
