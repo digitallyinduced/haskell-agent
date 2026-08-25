@@ -21,10 +21,12 @@ import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
     ( ExceptT(..)
+    , catchE
     , except
     , runExceptT
     , throwE
     )
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -195,36 +197,122 @@ applyPatch env raw =
             else applyHunks env hunks
 
 applyHunks :: ToolEnv -> [Hunk] -> ExceptT Text IO Text
-applyHunks env hunks = go hunks [] [] []
+applyHunks env hunks = do
+    (actions, resultSummary) <-
+        prepareHunks env hunks `catchE` \err ->
+            throwE $
+                "Patch validation failed; no files were changed.\n" <> err
+    mapM_ applyPreparedAction actions `catchE` \err ->
+        throwE $
+            "Patch commit failed; files may have been partially changed.\n" <> err
+    pure resultSummary
+
+data VirtualFile
+    = VirtualContents !Text
+    | VirtualMissing
+
+data PreparedAction
+    = PreparedWrite !OsPath !Text
+    | PreparedDelete !OsPath
+
+-- | Validate every hunk against an in-memory view of earlier hunks before
+-- returning any filesystem actions. A stale later hunk therefore cannot leave
+-- earlier files modified even though the overall tool call reports failure.
+prepareHunks
+    :: ToolEnv
+    -> [Hunk]
+    -> ExceptT Text IO ([PreparedAction], Text)
+prepareHunks env hunks = go hunks Map.empty [] [] [] []
   where
-    go [] added modified deleted =
-        pure (summary added modified deleted)
-    go (hunk : rest) added modified deleted = case hunk of
+    go [] _ actions added modified deleted =
+        pure
+            ( reverse actions
+            , summary added modified deleted
+            )
+    go (hunk : rest) files actions added modified deleted = case hunk of
         AddFile path contents -> do
             resolved <- resolvePath env path
-            ExceptT (writeTextFile resolved contents)
-            go rest (path : added) modified deleted
+            go
+                rest
+                (Map.insert resolved (VirtualContents contents) files)
+                (PreparedWrite resolved contents : actions)
+                (path : added)
+                modified
+                deleted
         DeleteFile path -> do
             resolved <- resolvePath env path
-            exists <- lift (doesFileExist resolved)
+            exists <- virtualFileExists resolved files
             unless exists $
                 throwE ("Failed to delete file " <> Text.pack path)
-            ExceptT (deleteTextFile resolved)
-            go rest added modified (path : deleted)
+            go
+                rest
+                (Map.insert resolved VirtualMissing files)
+                (PreparedDelete resolved : actions)
+                added
+                modified
+                (path : deleted)
         UpdateFile path moveTo chunks -> do
             resolved <- resolvePath env path
-            original <- ExceptT (readTextFile resolved)
-            newLines <- except (applyChunks chunks (Text.lines original))
+            original <- virtualFileContents path resolved files
+            newLines <- case applyChunks chunks (Text.lines original) of
+                Left err ->
+                    throwE $
+                        "Failed to update file '"
+                            <> Text.pack path
+                            <> "': "
+                            <> err
+                Right lines_ -> pure lines_
             let newContents = joinFileLines newLines original
             case moveTo of
-                Nothing -> do
-                    ExceptT (writeTextFile resolved newContents)
-                    go rest added (path : modified) deleted
+                Nothing ->
+                    go
+                        rest
+                        (Map.insert resolved (VirtualContents newContents) files)
+                        (PreparedWrite resolved newContents : actions)
+                        added
+                        (path : modified)
+                        deleted
                 Just dest -> do
                     destResolved <- resolvePath env dest
-                    ExceptT (writeTextFile destResolved newContents)
-                    ExceptT (deleteTextFile resolved)
-                    go rest added (dest : modified) deleted
+                    let movedFiles =
+                            Map.insert resolved VirtualMissing $
+                                Map.insert
+                                    destResolved
+                                    (VirtualContents newContents)
+                                    files
+                    go
+                        rest
+                        movedFiles
+                        ( PreparedDelete resolved
+                            : PreparedWrite destResolved newContents
+                            : actions
+                        )
+                        added
+                        (dest : modified)
+                        deleted
+
+    virtualFileExists resolved files =
+        case Map.lookup resolved files of
+            Just (VirtualContents _) -> pure True
+            Just VirtualMissing -> pure False
+            Nothing -> lift (doesFileExist resolved)
+
+    virtualFileContents path resolved files =
+        case Map.lookup resolved files of
+            Just (VirtualContents contents) -> pure contents
+            Just VirtualMissing ->
+                throwE $
+                    "Failed to update file '"
+                        <> Text.pack path
+                        <> "': file does not exist"
+            Nothing -> ExceptT (readTextFile resolved)
+
+applyPreparedAction :: PreparedAction -> ExceptT Text IO ()
+applyPreparedAction = \case
+    PreparedWrite path contents ->
+        ExceptT (writeTextFile path contents)
+    PreparedDelete path ->
+        ExceptT (deleteTextFile path)
 
 resolvePath :: ToolEnv -> FilePath -> ExceptT Text IO OsPath
 resolvePath env path =
