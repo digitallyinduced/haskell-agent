@@ -245,6 +245,7 @@ Responses API at `POST /v1/responses` can be configured as:
       "connection": "ollama",
       "model": "qwen2.5-coder:32b",
       "dialect": "generic-responses",
+      "context_window": 32768,
       "label": "local"
     }
   ]
@@ -254,6 +255,10 @@ Responses API at `POST /v1/responses` can be configured as:
 Select it with `agent-cli --model qwen-local` or from `/model`. For an
 authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
 that variable. Omit `"api_key_optional": true` when the key is required.
+Set `context_window` to the model endpoint's documented token limit so
+`/compact` can bound both its summary request and the installed snapshot.
+Inference still works when this metadata is absent, but `/compact` refuses to
+guess a portable model's limit.
 
 Supported dialects are:
 

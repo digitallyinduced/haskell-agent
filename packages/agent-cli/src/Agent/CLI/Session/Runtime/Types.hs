@@ -120,6 +120,7 @@ data SessionRequest = SessionRequest
     , tokenProvider :: !(Maybe TokenProvider)
     , openAiPool :: !(Maybe OpenAI.Pool)
     , startupContext :: !(IORef (Maybe Text))
+    , generatedContextReloadRef :: !(IORef (IO ()))
     , skillsRef :: !(IORef SkillCatalog)
     , skillInvocationsRef :: !(IORef [SkillInvocation])
     , escPaused :: !(IORef Bool)

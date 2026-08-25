@@ -30,7 +30,7 @@ import Agent.CLI.Command ()
 import Agent.CLI.Compaction
     ( installLiveCompactOutcome,
       runProviderCompactWith,
-      runResponsesCompactWith )
+      runResponsesCompactWithContextWindow )
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
@@ -72,6 +72,7 @@ import Agent.CLI.ModelConfig
       ResponsesConnection(..),
       builtinConnectionId,
       catalogConnection,
+      catalogContextWindowForTransport,
       loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelFor,
@@ -127,6 +128,7 @@ import Agent.CLI.ProviderTransition
                          transitionAutomaticBilling),
       TransitionCause(AutomaticFallback) )
 import Agent.CLI.Recap ()
+import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.ReplMode ()
 import Agent.CLI.Request ( requestParams )
@@ -297,6 +299,7 @@ import Agent.Provider
       TokenProvider,
       getNextToken,
       providerSlug,
+      runWithTokenProvider,
       tokenProvider,
       tokenProviderBillingMode )
 import Agent.Responses.GenericBackend
@@ -432,7 +435,7 @@ import qualified Data.Map.Strict as Map
 import qualified Agent.OpenAI.Auth as OpenAI
     ( discoverAccounts, getAccessTokenForAccount )
 import qualified Agent.OpenRouter as OpenRouter
-    ( clientOptionsFromEnv, mapModel )
+    ( clientOptionsFromEnv, createResponseWith, mapModel )
 import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
 import qualified Agent.Provider as Provider ( tokenProvider )
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
@@ -442,7 +445,9 @@ import qualified Data.Set as Set ()
 import qualified Data.Text as Text
     ( intercalate, null, pack, unpack )
 import qualified Data.Text.IO as Text ( hPutStr )
+import qualified Agent.XAI.Client as XAIClient ( createResponseWith )
 import qualified Agent.XAI.Options as XAI ( clientOptionsFromEnv )
+import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 import Agent.CLI.Runtime.Orchestration.Types
@@ -2030,6 +2035,8 @@ runAgentInitializedWithLock
                 (schemasFromAppTools dialect tools) effort
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
+            resumeNeedsFreshContext =
+                resumeNeedsGeneratedContext initialTurns
             initialPrevious = case transition of
                 Just _ -> Nothing
                 Nothing
@@ -2037,7 +2044,17 @@ runAgentInitializedWithLock
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
-        let subagentRuntime = SubagentRuntime
+        generatedContextReloadRef <- newIORef (pure ())
+        let currentModelContextWindow mapTransportModel = do
+                currentParams <- readIORef paramsRef
+                pure $ do
+                    currentModel <- currentParams.model
+                    catalogContextWindowForTransport
+                        catalog
+                        inferredTarget.targetConnectionId
+                        currentModel
+                        (mapTransportModel currentModel)
+            subagentRuntime = SubagentRuntime
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
                 , subagentBashEnabled = bashEnabledRef
@@ -2086,8 +2103,12 @@ runAgentInitializedWithLock
                 dialect
                 home
                 cwd
-                (if refreshDialectContext then [] else initialItems)
-                (if refreshDialectContext then Nothing else initialPrevious)
+                (if refreshDialectContext || resumeNeedsFreshContext
+                    then []
+                    else initialItems)
+                (if refreshDialectContext || resumeNeedsFreshContext
+                    then Nothing
+                    else initialPrevious)
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -2169,6 +2190,7 @@ runAgentInitializedWithLock
                                 , tokenProvider = sessionTokenProvider
                                 , openAiPool = sessionOpenAiPool
                                 , startupContext
+                                , generatedContextReloadRef
                                 , skillsRef
                                 , skillInvocationsRef
                                 , escPaused
@@ -2424,6 +2446,7 @@ runAgentInitializedWithLock
                                             (readIORef paramsRef)
                                             contextTokensRef
                                             recordCompactionUsage
+                                            (readIORef generatedContextReloadRef >>= id)
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
@@ -2534,14 +2557,22 @@ runAgentInitializedWithLock
                                 xaiBackend xaiOptions tokenProvider
                                     (pure privateParams)
                             compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow
+                                        (XAIRequest.mapModel xaiOptions)
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
-                                    (runProviderCompactWith
-                                        Nothing
+                                    (runResponsesCompactWithContextWindow
+                                        contextWindow
+                                        (\request ->
+                                            runWithTokenProvider tokenProvider
+                                                \credential ->
+                                                    XAIClient.createResponseWith
+                                                        xaiOptions
+                                                        credential
+                                                        request)
                                         recordCompactionUsage
-                                        provider
-                                        (Just tokenProvider)
                                         paramsRef
                                         historyRef)
                                     focus
@@ -2679,12 +2710,15 @@ runAgentInitializedWithLock
                                 makeBackend
                                     (pure privateParams)
                             compactRunner focus = do
+                                contextWindow <-
+                                    currentModelContextWindow transportModel
                                 historyRef <-
                                     newIORef =<< readLiveTranscript conversationRef
                                 installLiveCompactOutcome conversationRef Nothing
                                     (case customGenericOptions of
                                         Just genericOptions ->
-                                            runResponsesCompactWith
+                                            runResponsesCompactWithContextWindow
+                                                contextWindow
                                                 (\request ->
                                                     GenericResponses.createResponseWith
                                                         genericOptions
@@ -2699,11 +2733,17 @@ runAgentInitializedWithLock
                                                 paramsRef
                                                 historyRef
                                         Nothing ->
-                                            runProviderCompactWith
-                                                Nothing
+                                            runResponsesCompactWithContextWindow
+                                                contextWindow
+                                                (\request ->
+                                                    runWithTokenProvider
+                                                        tokenProvider
+                                                        \credential ->
+                                                            OpenRouter.createResponseWith
+                                                                openRouterOptions
+                                                                credential
+                                                                request)
                                                 recordCompactionUsage
-                                                provider
-                                                (Just tokenProvider)
                                                 paramsRef
                                                 historyRef)
                                     focus
