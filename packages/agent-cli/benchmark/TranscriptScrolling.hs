@@ -20,6 +20,7 @@ import Brick
     , viewport
     )
 import Brick.Types (RenderState)
+import Agent.CLI.TUI.Transcript (transcriptChunkSize)
 import Control.DeepSeq (force)
 import Control.Monad (replicateM)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -119,9 +120,6 @@ transcriptWidget workload blockCount bodyLines =
 representativeLine :: Text
 representativeLine =
     "Representative retained transcript text that wraps across the viewport."
-
-transcriptChunkSize :: Int
-transcriptChunkSize = 32
 
 redrawsPerSample :: Int
 redrawsPerSample = 25

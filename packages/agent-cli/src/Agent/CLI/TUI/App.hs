@@ -153,6 +153,7 @@ import Agent.Syntax
     , loadSyntaxHighlighter
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
+import qualified Agent.CLI.TUI.Transcript as Transcript
 import Agent.CLI.TUI.Types
 import Agent.TUI.Model
 import Agent.TUI.Motion
@@ -211,7 +212,7 @@ import Data.IORef
 import Data.List (find, findIndex, intersperse, nub, sort, sortOn)
 import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe, maybeToList)
 import Data.Sequence (Seq, ViewL(..), ViewR(..), (|>))
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
@@ -2203,7 +2204,7 @@ drawTranscript state =
             <> conversationReserveWidgets anchor
   where
     blockChunks =
-        toList (Seq.chunksOf transcriptChunkSize state.appUi.uiBlocks)
+        Transcript.transcriptChunks state.appUi.uiBlocks
     anchor = state.appConversationAnchor
 
 -- | Cache completed transcript blocks in moderately sized groups.
@@ -2218,36 +2219,27 @@ drawTranscript state =
 -- The final partial/live/animated group remains uncached.
 drawTranscriptChunk :: AppState -> Seq UiBlock -> Widget Name
 drawTranscriptChunk state blocks =
-    case (Seq.lookup 0 blocks, Seq.lookup (Seq.length blocks - 1) blocks) of
-        (Just firstBlock, Just lastBlock)
-            | Seq.length blocks == transcriptChunkSize
-            , all (cacheableBlock state) blocks ->
-                if chunkHasDynamicInteraction
-                    then rendered
-                    else
-                        cached
-                            (ConversationChunkCache
-                                firstBlock.blockId
-                                lastBlock.blockId)
-                            rendered
-        _ -> rendered
+    case
+        Transcript.transcriptChunkCacheKey
+            (cacheableBlock state)
+            dynamicBlockIds
+            blocks of
+        Just (firstBlockId, lastBlockId) ->
+            cached
+                (ConversationChunkCache firstBlockId lastBlockId)
+                rendered
+        Nothing -> rendered
   where
     rendered = vBox (map (drawBlock state) (toList blocks))
-    blockIds = map (.blockId) (toList blocks)
-    chunkHasDynamicInteraction =
-        any (.blockExpanded) blocks
-            || highlightedBlockInChunk
-            || codeInteractionInChunk
-    highlightedBlockInChunk =
-        state.appUi.uiFocus == FocusScrollback
-            && maybe False (`elem` blockIds) state.appUi.uiSelectedBlock
-    codeInteractionInChunk =
-        case state.appHoveredControl of
-            Just (CodeCopy blockId _) -> blockId `elem` blockIds
-            _ -> False
-
-transcriptChunkSize :: Int
-transcriptChunkSize = 32
+    dynamicBlockIds =
+        [ blockId
+        | state.appUi.uiFocus == FocusScrollback
+        , blockId <- maybeToList state.appUi.uiSelectedBlock
+        ]
+            <> [ blockId
+               | Just (CodeCopy blockId _) <-
+                    [state.appHoveredControl]
+               ]
 
 stickyPromptLayers :: AppState -> [Widget Name]
 stickyPromptLayers state =
