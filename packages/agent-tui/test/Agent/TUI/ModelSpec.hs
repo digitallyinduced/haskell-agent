@@ -724,6 +724,38 @@ spec = describe "fullscreen UI reducer" do
         done.uiTodos
             `shouldBe` [TodoDisplayLine TodoDisplayCompleted "Find and clone repos"]
 
+    it "hides pending todos once the turn is idle" do
+        let call =
+                functionToolCall
+                    "todo-1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Inspect Model.hs\"}]}"
+            result = ToolCallResult
+                { callId = "todo-1"
+                , output =
+                    "- [completed] 1: Open the file\n\
+                    \- [pending] 2: Inspect Model.hs"
+                , callKind = FunctionCallKind
+                }
+            running =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    ]
+            idle =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    , UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing))
+                    ]
+        map (.todoLineText) (visibleTodoList running)
+            `shouldBe` ["Open the file", "Inspect Model.hs"]
+        visibleTodoList idle `shouldBe` []
+        map (.todoLineText) idle.uiTodos
+            `shouldBe` ["Open the file", "Inspect Model.hs"]
+
     it "does not let ordinary tool output clobber the live todo list" do
         let todoCall =
                 functionToolCall
