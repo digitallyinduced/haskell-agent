@@ -1634,6 +1634,7 @@ drawMain state =
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
                 , drawFollowStatus state.appUi
+                , drawPromptActivity state
                 , Composer.drawComposer state
                 , drawFooter state
                 ]
@@ -2192,11 +2193,16 @@ repositoryHeaderText branch cwd =
 
 drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
-    hBox
-        [ activityWidget
-        , withAttr Theme.mutedAttr (txt elapsed)
-        , withAttr Theme.mutedAttr (txt usage)
-        ]
+    withAttr Theme.mutedAttr $
+        txt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+
+drawPromptActivity :: AppState -> Widget Name
+drawPromptActivity state =
+    padLeftRight 2 $
+        hBox
+            [ activityWidget
+            , withAttr Theme.mutedAttr (txt elapsed)
+            ]
   where
     ui = state.appUi
     waiting = userActionPending state
@@ -2235,9 +2241,6 @@ drawHeaderRight state =
                 <> formatElapsed
                     (fromIntegral ui.uiElapsedMillis / 1000)
             else ""
-    formattedUsage = formatTokenUsage ui.uiPrompt.promptUsage
-    usage =
-        if Text.null formattedUsage then "" else " │ " <> formattedUsage
 
 waitingIndicatorAttr :: AppState -> AttrName
 waitingIndicatorAttr state =
