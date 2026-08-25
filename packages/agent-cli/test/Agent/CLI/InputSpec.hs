@@ -18,6 +18,8 @@ import Agent.CLI.Input
     , truncateDisplayText
     , visibleEditorText
     )
+import Agent.CLI.Input.KeyDecoder (decodeKittyEditorKey)
+import Agent.CLI.Input.Types (EditorKey(..))
 import Data.Char (isControl)
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -208,6 +210,14 @@ spec = do
             isClipboardPasteCsiBody "99;9u" `shouldBe` False
             isClipboardPasteCsiBody "118;9:3u" `shouldBe` False
             isClipboardPasteCsiBody "not-a-key" `shouldBe` False
+
+    describe "Kitty Ctrl+R dictation" do
+        it "decodes press events as dictation and ignores key releases" do
+            decodeKittyEditorKey "114;5u" `shouldBe` Just EditorDictate
+            decodeKittyEditorKey "114;5:1u" `shouldBe` Just EditorDictate
+            decodeKittyEditorKey "114:82:82;5u" `shouldBe` Just EditorDictate
+            decodeKittyEditorKey "114;5:3u" `shouldBe` Just EditorIgnore
+            decodeKittyEditorKey "117;5u" `shouldBe` Just EditorKillStart
 
     describe "Shift+Enter" do
         it "recognizes xterm modifyOtherKeys and Kitty CSI-u encodings" do

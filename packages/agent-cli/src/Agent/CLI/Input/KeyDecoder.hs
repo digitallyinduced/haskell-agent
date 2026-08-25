@@ -92,6 +92,7 @@ decodeKittyControl modifiers codepoint
         108 -> EditorClearScreen
         110 -> EditorDown
         112 -> EditorUp
+        114 -> EditorDictate
         117 -> EditorKillStart
         119 -> EditorKillWord
         121 -> EditorYank
