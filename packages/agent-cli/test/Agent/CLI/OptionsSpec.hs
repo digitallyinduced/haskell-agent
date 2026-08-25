@@ -29,6 +29,7 @@ spec = do
                 , "--max-turns", "3"
                 , "--max-concurrent-agents", "64"
                 , "--compact-threshold", "1200"
+                , "--speculative-read-file"
                 , "--effort", "high"
                 , "-p", "hello"
                 ]
@@ -41,9 +42,14 @@ spec = do
                     , optMaxTurns = 3
                     , optMaxConcurrentAgents = Just 64
                     , optCompactThreshold = Just 1200
+                    , optSpeculativeReadFile = True
                     , optEffort = Just "high"
                     , optPrompt = Just "hello"
                     })
+
+        it "keeps speculative read_file prefetch disabled by default" do
+            parseArgs []
+                `shouldBe` Right (RunAgent defaultCliOptions)
 
         it "parses --worktree" do
             parseArgs ["--worktree"]

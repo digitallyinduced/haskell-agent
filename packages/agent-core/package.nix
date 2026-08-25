@@ -18,12 +18,12 @@ mkDerivation {
   ];
   testHaskellDepends = [
     aeson agent-responses-types async base base64-bytestring bytestring
-    containers crypton-connection directory filepath hspec retry
-    safe-exceptions stm text time tls unix websockets yaml
+    containers crypton-connection directory filepath hspec process
+    retry safe-exceptions stm text time tls unix websockets yaml
   ];
   benchmarkHaskellDepends = [
-    aeson base bytestring directory safe-exceptions text text-builder
-    unix
+    aeson agent-responses-types base bytestring containers directory
+    filepath process safe-exceptions text text-builder unix
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

@@ -71,6 +71,7 @@ library
                     , Agent.Tools.FileSystem.Grep
                     , Agent.Tools.FileSystem.ListDir
                     , Agent.Tools.FileSystem.ReadFile
+                    , Agent.Tools.FileSystem.ReadFileSpeculation
                     , Agent.Tools.Ghci
                     , Agent.Tools.Ghci.Classify
                     , Agent.Tools.Ghci.Runtime
@@ -82,6 +83,7 @@ library
                     , Agent.Tools.Scheduling
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
+    other-modules:    Agent.Tools.FileSystem.ReadFile.Internal
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , agent-process >= 0.1 && < 0.2
@@ -164,6 +166,25 @@ benchmark concurrent-discovery-bench
     build-depends:    agent-core
                     , base >= 4.14 && < 5
 
+benchmark speculative-read-file-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          SpeculativeReadFile.hs
+    ghc-options:      -O2 -threaded -rtsopts
+    build-depends:    agent-core
+                    , agent-responses-types
+                    , aeson
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , process
+                    , safe-exceptions
+                    , text
+                    , unix
+
 test-suite agent-core-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -191,6 +212,7 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.FileSystem.GrepSpec
+                    , Agent.Tools.FileSystem.ReadFileSpeculationSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
@@ -208,6 +230,7 @@ test-suite agent-core-test
                     , filepath
                     , containers
                     , hspec
+                    , process
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
                     , stm

@@ -14,6 +14,8 @@ module Agent.OpenAI.LoopBackend
     , openAiResponseSenderWithRetryPolicy
     , openAiBackendWith
     , openAiBackendWithReasoningVisibility
+    , openAiBackendWithSpeculativeRead
+    , openAiBackendWithReasoningVisibilityAndSpeculativeRead
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
@@ -60,6 +62,12 @@ import Agent.Responses.LoopBackend
     , withRequestInput
     )
 import Agent.Responses.Types
+import Agent.Tools.FileSystem.ReadFileSpeculation
+    ( ReadFileSpeculation
+    , observeReadFileStreamEvent
+    , retainFinalReadFileCalls
+    , resetReadFileSpeculation
+    )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (onException)
 import Control.Retry
@@ -509,8 +517,42 @@ openAiBackendWithReasoningVisibility
     -> IO ResponseCreateParams
     -> Backend
 openAiBackendWithReasoningVisibility showRawReasoning =
-    openAiBackendWithRetryPolicyAndReasoningVisibility
+    openAiBackendWithRetryPolicyAndFeatures
         showRawReasoning
+        Nothing
+        transientStreamingResultPolicy
+
+-- | OpenAI WebSocket backend with invisible, best-effort @read_file@
+-- prefetching driven by streamed function-call argument deltas.
+openAiBackendWithSpeculativeRead
+    :: ReadFileSpeculation
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithSpeculativeRead speculation =
+    openAiBackendWithReasoningVisibilityAndSpeculativeRead
+        False
+        speculation
+
+-- | Speculative @read_file@ prefetching with explicit raw-reasoning
+-- visibility.
+openAiBackendWithReasoningVisibilityAndSpeculativeRead
+    :: Bool
+    -> ReadFileSpeculation
+    -> (ResponseCreateParams
+        -> Maybe Text
+        -> (ResponseStreamEvent -> IO ())
+        -> IO (Either ApiError Response))
+    -> IO ResponseCreateParams
+    -> Backend
+openAiBackendWithReasoningVisibilityAndSpeculativeRead
+        showRawReasoning speculation =
+    openAiBackendWithRetryPolicyAndFeatures
+        showRawReasoning
+        (Just speculation)
         transientStreamingResultPolicy
 
 -- | Streaming retries are replay-safe only until the loop has observed output.
@@ -525,10 +567,11 @@ openAiBackendWithRetryPolicy
     -> IO ResponseCreateParams
     -> Backend
 openAiBackendWithRetryPolicy =
-    openAiBackendWithRetryPolicyAndReasoningVisibility False
+    openAiBackendWithRetryPolicyAndFeatures False Nothing
 
-openAiBackendWithRetryPolicyAndReasoningVisibility
+openAiBackendWithRetryPolicyAndFeatures
     :: Bool
+    -> Maybe ReadFileSpeculation
     -> RetryPolicyM IO
     -> (ResponseCreateParams
         -> Maybe Text
@@ -536,42 +579,64 @@ openAiBackendWithRetryPolicyAndReasoningVisibility
         -> IO (Either ApiError Response))
     -> IO ResponseCreateParams
     -> Backend
-openAiBackendWithRetryPolicyAndReasoningVisibility
-        showRawReasoning retryPolicy send getParams =
+openAiBackendWithRetryPolicyAndFeatures
+        showRawReasoning speculation retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
-        baseParams <- sanitizeCodexRequest <$> getParams
-        let newItems = turnInputsToItems inputs
-            deltaRequest = withRequestInput baseParams newItems
-            -- Live and resumed transcripts already apply compaction snapshots
-            -- as full replacements. Remote v2 intentionally keeps retained
-            -- messages before its opaque checkpoint, so replay the complete
-            -- replacement instead of trimming that retained prefix.
-            fullRequest = withRequestInput baseParams (history <> newItems)
-            emit event =
-                mapM_ onLoopEvent
-                    (Responses.streamEventToLoopEventWithRawReasoning
-                        showRawReasoning
-                        event)
-            (initialRequest, initialPrevious) =
-                case previousResponseId of
-                    Nothing | not (null history) -> (fullRequest, Nothing)
-                    _ -> (deltaRequest, previousResponseId)
-        result <- sendRetrying onLoopEvent initialRequest initialPrevious emit
-        recovered <- case result of
-            Left err
-                | isJust initialPrevious
-                , isResponseChainCompatibilityError err
-                , not (null history) ->
-                    sendRetrying onLoopEvent fullRequest Nothing emit
-                | otherwise -> pure (Left err)
-            Right response -> pure (Right response)
-        case recovered of
-            Left err -> pure (Left err)
-            Right response ->
-                pure $ Right BackendResult
-                    { backendOutput = responseToTurnOutput response
-                    , backendState = history <> newItems <> response.output
-                    }
+        mapM_ resetReadFileSpeculation speculation
+        let submit = do
+                baseParams <- sanitizeCodexRequest <$> getParams
+                let newItems = turnInputsToItems inputs
+                    deltaRequest = withRequestInput baseParams newItems
+                    -- Live and resumed transcripts already apply compaction
+                    -- snapshots as full replacements. Remote v2 intentionally
+                    -- keeps retained messages before its opaque checkpoint, so
+                    -- replay the complete replacement instead of trimming that
+                    -- retained prefix.
+                    fullRequest =
+                        withRequestInput baseParams (history <> newItems)
+                    emit event = do
+                        mapM_
+                            (\cache ->
+                                observeReadFileStreamEvent cache event)
+                            speculation
+                        mapM_ onLoopEvent
+                            (Responses.streamEventToLoopEventWithRawReasoning
+                                showRawReasoning
+                                event)
+                    (initialRequest, initialPrevious) =
+                        case previousResponseId of
+                            Nothing | not (null history) ->
+                                (fullRequest, Nothing)
+                            _ -> (deltaRequest, previousResponseId)
+                result <-
+                    sendRetrying
+                        onLoopEvent initialRequest initialPrevious emit
+                recovered <- case result of
+                    Left err
+                        | isJust initialPrevious
+                        , isResponseChainCompatibilityError err
+                        , not (null history) -> do
+                            mapM_ resetReadFileSpeculation speculation
+                            sendRetrying onLoopEvent fullRequest Nothing emit
+                        | otherwise -> pure (Left err)
+                    Right response -> pure (Right response)
+                case recovered of
+                    Left err -> do
+                        mapM_ resetReadFileSpeculation speculation
+                        pure (Left err)
+                    Right response -> do
+                        mapM_
+                            (\cache ->
+                                retainFinalReadFileCalls
+                                    cache
+                                    response.output)
+                            speculation
+                        pure $ Right BackendResult
+                            { backendOutput = responseToTurnOutput response
+                            , backendState =
+                                history <> newItems <> response.output
+                            }
+        submit `onException` mapM_ resetReadFileSpeculation speculation
   where
     sendRetrying onLoopEvent request previousResponseId onStreamEvent = do
         emittedLoopEvent <- newIORef False
@@ -600,6 +665,7 @@ openAiBackendWithRetryPolicyAndReasoningVisibility
                                 onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
+                                mapM_ resetReadFileSpeculation speculation
                                 go emittedLoopEvent nextStatus
                 _ -> pure result
 

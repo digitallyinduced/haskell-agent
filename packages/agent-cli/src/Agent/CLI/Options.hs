@@ -97,6 +97,8 @@ data CliOptions = CliOptions
       -- 'defaultMaxConcurrent'.
     , optCompactThreshold :: !(Maybe Int)
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
+    , optSpeculativeReadFile :: !Bool
+      -- ^ Prefetch predicted OpenAI WebSocket read_file calls before completion.
     , optEffort :: !(Maybe Text)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optShowRawReasoning :: !Bool
@@ -130,6 +132,7 @@ defaultCliOptions = CliOptions
     , optMaxTurns = 500
     , optMaxConcurrentAgents = Nothing
     , optCompactThreshold = Nothing
+    , optSpeculativeReadFile = False
     , optEffort = Nothing
     , optShowRawReasoning = False
     , optPrompt = Nothing
@@ -313,6 +316,9 @@ optionUpdateParser = asum
         "OpenAI auto-compaction threshold in tokens"
         (positiveIntReader "--compact-threshold")
         (\value options -> options { optCompactThreshold = Just value })
+    , flagUpdate "speculative-read-file"
+        "Prefetch predicted OpenAI WebSocket read_file calls"
+        (\options -> options { optSpeculativeReadFile = True })
     , optionUpdate "effort" "LEVEL" "Reasoning effort"
         effortReader (\value options -> options { optEffort = Just value })
     , flagUpdate "show-raw-reasoning" "Show raw OpenAI reasoning"
@@ -512,6 +518,8 @@ usage = unlines
     , "      --compact-threshold N"
     , "                          OpenAI auto-compaction threshold in tokens"
     , "                          (default: model-specific, currently 244800)"
+    , "      --speculative-read-file"
+    , "                          Prefetch predicted OpenAI WebSocket read_file calls"
     , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: xhigh for Claude Code, high for xai/grok,"
     , "                          medium otherwise)"

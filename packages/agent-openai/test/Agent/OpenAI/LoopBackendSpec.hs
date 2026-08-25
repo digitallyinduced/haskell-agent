@@ -11,6 +11,14 @@ import Agent.OpenAI.LoopBackend
 import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
+import Agent.Tools.FileSystem.ReadFileSpeculation
+    ( closeReadFileSpeculation
+    , newReadFileSpeculation
+    , takeSpeculatedRead
+    , waitForReadFileSpeculation
+    )
+import Agent.Tools.Types (defaultToolEnv)
+import Control.Exception (bracket)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -18,6 +26,10 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
@@ -454,6 +466,82 @@ spec = do
             collect False `shouldReturn` [ReasoningDelta "summary"]
             collect True `shouldReturn`
                 [ReasoningDelta "raw", ReasoningDelta "summary"]
+
+        it "retains read_file work started from streamed argument deltas" do
+            withSystemTempDirectory "openai-read-speculation" \dir -> do
+                Text.writeFile (dir </> "streamed.txt") "streamed"
+                env <- defaultToolEnv (unsafeEncodeUtf dir)
+                bracket
+                    (newReadFileSpeculation env)
+                    closeReadFileSpeculation
+                    \cache -> do
+                        transcript <- newIORef []
+                        let callId = "call-streamed"
+                            arguments =
+                                "{\"target_file\":\"streamed.txt\"}"
+                            addedCall =
+                                FunctionCallItem FunctionCall
+                                    { itemId = Nothing
+                                    , callId
+                                    , name = "read_file"
+                                    , arguments = ""
+                                    , status = Nothing
+                                    , extraFields = KeyMap.empty
+                                    }
+                            finalCall =
+                                functionCallItem
+                                    callId
+                                    "read_file"
+                                    arguments
+                            send _request _previous onEvent = do
+                                onEvent ResponseOutputItemAddedEvent
+                                    { item = addedCall
+                                    , outputIndex = Just 0
+                                    , sequenceNumber = Nothing
+                                    , eventExtraFields = KeyMap.empty
+                                    }
+                                onEvent OtherResponseStreamEvent
+                                    { otherEventType =
+                                        EventFunctionCallArgumentsDelta
+                                    , sequenceNumber = Nothing
+                                    , eventExtraFields = KeyMap.fromList
+                                        [ ( "output_index"
+                                          , Aeson.Number 0
+                                          )
+                                        , ("delta", Aeson.String arguments)
+                                        ]
+                                    }
+                                waitForReadFileSpeculation cache
+                                pure $ Right $
+                                    testResponse "resp-streamed" [finalCall]
+                            backend =
+                                openAiBackendWithSpeculativeRead
+                                    cache
+                                    send
+                                    (pure baseParams)
+                        result <- submitWithState
+                            transcript
+                            backend
+                            Nothing
+                            [UserMessage "read it"]
+                            (const (pure ()))
+                        result `shouldBe`
+                            Right
+                                (emptyTurnOutput
+                                    "resp-streamed"
+                                    [ functionToolCall
+                                        callId
+                                        "read_file"
+                                        arguments
+                                    ]
+                                    Nothing)
+                        takeSpeculatedRead
+                            cache
+                            (functionToolCall
+                                callId
+                                "read_file"
+                                arguments)
+                            `shouldReturn` Just (Right "1→streamed")
 
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
