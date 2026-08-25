@@ -174,6 +174,31 @@ spec = describe "Agent.CLI.AgentSessions" do
                     "completed"
                 closeSessionProcessManager manager
 
+    it "closes scoped children concurrently and rejects later launches" $
+        withTempStoreDir "agent-session-runtime-" \pool root -> do
+            let marker = toFilePath root FilePath.</> "stopped"
+            script <- writeFakeAgentBody root
+                ("trap 'printf stopped > " <> shellQuote marker
+                    <> "; exit 0' TERM INT\nsleep 30\n")
+            withExecutableOverride script do
+                handle <- createSession (testCreateAt pool root root)
+                manager <-
+                    newSessionProcessManagerWithLifetime
+                        ScopedSessionProcesses
+                        root
+                launchSessionTurn
+                    manager True ApproveAll True False handle "one"
+                    `shouldReturn`
+                        Right ("started session " <> handle.sessionMeta.metaId)
+                closeSessionProcessManager manager
+                waitForFile marker
+                launchSessionTurn
+                    manager True ApproveAll True False handle "two"
+                    `shouldReturn`
+                        Left
+                            ("session " <> handle.sessionMeta.metaId
+                                <> " is already running or its process manager is closed")
+
     it "forwards bash enablement to managed session turns" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let argsPath = toFilePath root FilePath.</> "agent-args"
