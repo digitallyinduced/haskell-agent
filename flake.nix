@@ -116,6 +116,7 @@
                     include = [
                         "src"
                         "test"
+                        "benchmark"
                         "agent-syntax.cabal"
                         "LICENSE"
                         "README.md"
