@@ -60,6 +60,8 @@ module Agent.CLI.TUI.App
     , wrapFullscreenKeyboardVty
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , applyStoredFullscreenWindowTitle
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
     , maskedSecretText
@@ -130,7 +132,9 @@ import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
+    , kittyAltCsiBodies
     , kittyCtrlCsiBodies
+    , kittyCtrlUnderscoreCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -170,6 +174,7 @@ import Agent.CLI.TUI.Motion
     , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , userActionPending
     )
@@ -369,6 +374,7 @@ newFullscreenRuntimeWithSyntaxLoader
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = const (pure ())
@@ -396,6 +402,7 @@ newFullscreenRuntimeWithSyntaxLoader
                 readIORef sessionActions >>= (.sessionCtrlC)
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
+            , runtimeWindowTitle = windowTitle
             , runtimeNativeProgress = nativeProgress
             , runtimeAgentSnapshot =
                 readIORef sessionActions >>= (.sessionAgentSnapshot)
@@ -555,8 +562,20 @@ emitUiEvent runtime event =
     enqueueAppEvent runtime (AppUi event)
 
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
-setFullscreenWindowTitle runtime =
-    enqueueAppEvent runtime . AppSetWindowTitle
+setFullscreenWindowTitle runtime title = do
+    writeIORef runtime.runtimeWindowTitle (Just title)
+    enqueueAppEvent runtime (AppSetWindowTitle title)
+
+-- | Brick/Vty owns the terminal, so titles must go through Vty output
+-- rather than stdout OSC writes.
+applyStoredFullscreenWindowTitle :: FullscreenRuntime -> V.Output -> IO ()
+applyStoredFullscreenWindowTitle runtime output =
+    readIORef runtime.runtimeWindowTitle
+        >>= mapM_ (writeOutputWindowTitle output)
+
+writeOutputWindowTitle :: V.Output -> Text -> IO ()
+writeOutputWindowTitle output title =
+    V.setOutputWindowTitle output (Text.unpack title)
 
 setFullscreenImagePreviews
     :: FullscreenRuntime
@@ -752,6 +771,19 @@ fullscreenVtyConfig =
                  )
                | body <- kittySuperVCsiBodies
                ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar '_') [V.MCtrl]
+                 )
+               | body <- kittyCtrlUnderscoreCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar character) [V.MMeta]
+                 )
+               | character <- ['b', 'd', 'f']
+               , body <- kittyAltCsiBodies character
+               ]
         }
 
 -- | Enable the smallest Kitty keyboard protocol mode needed for modified
@@ -895,8 +927,13 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.Hyperlink True
             when (V.supportsMode output V.Focus) $
                 V.setMode output V.Focus True
-            wrapNativePreviewVty runtime vty
-                >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
+            wrapped <-
+                wrapNativePreviewVty runtime vty
+                    >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
+            applyStoredFullscreenWindowTitle
+                runtime
+                (V.outputIface wrapped)
+            pure wrapped
     initialVty <- buildVty
     let
         initialState =
@@ -1067,6 +1104,8 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
+        , appKillChain = False
+        , appUndo = []
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
         , appSubmittedImagePreviews = Map.empty
@@ -4353,6 +4392,7 @@ refreshNativeProgressKeepalive = do
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
+    stateBeforeEvent <- get
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     state <- get
@@ -4374,7 +4414,13 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
-    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+    when
+        ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && not
+                (turnCompletionRequiresRedraw
+                    stateBeforeEvent.appUi
+                    stateAfterMotionSync.appUi)
+        ) $
         continueWithoutRedraw
   where
     isMotionTick = \case
@@ -4517,8 +4563,8 @@ handleEventInner event = case event of
                         Just $
                             successNotice "Dictation inserted."
     AppEvent (AppSetWindowTitle title) -> do
-        state <- get
-        liftIO (state.appRuntime.runtimeSetWindowTitle title)
+        vty <- getVtyHandle
+        liftIO (writeOutputWindowTitle (V.outputIface vty) title)
         modify' \current -> current { appWindowTitle = Just title }
     AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
         case highlighter of
