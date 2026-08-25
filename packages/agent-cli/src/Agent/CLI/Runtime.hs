@@ -266,7 +266,10 @@ import Agent.CLI.Prompt
     ( subscriptionSubagentModelGuidance
     , systemPromptForTools
     )
-import Agent.CLI.Request (requestParams)
+import Agent.CLI.Request
+    ( requestParams
+    , setRequestInstructionsAndTools
+    )
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , fallbackCandidates
@@ -558,6 +561,8 @@ import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
     , closeCodexConn
+    , codexConnTurnState
+    , resetCodexTurnState
     , withCodexWsCredential
     , withCodexWsWithProvider
     )
@@ -2449,6 +2454,7 @@ runAgentInitializedWithLock
                                         credential
                                         initialWsHealthy
                                         conn
+                                httpFallbackActive <- newIORef False
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
                                 let selectAccount = case loaded.loadedOpenAiPool of
@@ -2648,6 +2654,7 @@ runAgentInitializedWithLock
                                             options.optCompactThreshold
                                             options.optShowRawReasoning
                                             wsLock
+                                            httpFallbackActive
                                             tokenProvider
                                             activeConnectionRef
                                             (readIORef paramsRef)
@@ -2662,19 +2669,30 @@ runAgentInitializedWithLock
                                             tokenProvider
                                             (readIORef privateParams)
                                     compactRunner focus =
-                                        withMVar wsLock \_ ->
-                                            installCompactOutcome
-                                                previousRef
-                                                transcriptRef
-                                                (Just contextTokensRef)
-                                                (runProviderCompactWith
-                                                    (Just compactSender)
-                                                    recordCompactionUsage
-                                                    provider
-                                                    (Just tokenProvider)
-                                                    paramsRef
-                                                    transcriptRef)
-                                                focus
+                                        withMVar wsLock \_ -> do
+                                            OpenAiPersistentConnection
+                                                _credential
+                                                _connectionHealthy
+                                                activeConn <-
+                                                    readIORef activeConnectionRef
+                                            let turnState =
+                                                    codexConnTurnState activeConn
+                                                runCompact =
+                                                    installCompactOutcome
+                                                        previousRef
+                                                        transcriptRef
+                                                        (Just contextTokensRef)
+                                                        (runProviderCompactWith
+                                                            (Just compactSender)
+                                                            recordCompactionUsage
+                                                            provider
+                                                            (Just tokenProvider)
+                                                            paramsRef
+                                                            transcriptRef)
+                                                        focus
+                                            resetCodexTurnState turnState
+                                            runCompact `finally`
+                                                resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist noticingBackend
@@ -3690,12 +3708,10 @@ runSession SessionRequest{..} SessionBackend{..} = do
                         today
                         (isOneShot options)
                 toolSchemas = schemasFromAppTools dialect enabledTools
-            modifyIORef' paramsRef \ResponseCreateParams{..} ->
-                ResponseCreateParams
-                    { instructions = Just instructionText
-                    , tools = Just toolSchemas
-                    , ..
-                    }
+            modifyIORef' paramsRef $
+                setRequestInstructionsAndTools
+                    instructionText
+                    (Just toolSchemas)
         setShellMode mode = do
             let (ghciEnabled, bashEnabled) = shellModeFlags mode
             writeIORef ghciEnabledRef ghciEnabled

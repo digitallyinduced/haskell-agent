@@ -2,6 +2,7 @@
 module Agent.OpenAI.ModelMetadata
     ( CodexModelMetadata(..)
     , codexModelMetadata
+    , isCodexResponsesLiteModel
     , codexAutoCompactTokenLimitFor
     , codexEffectiveContextWindowFor
     , defaultCodexAutoCompactTokenLimit
@@ -26,17 +27,26 @@ defaultCodexEffectiveContextWindow = 258_400
 
 codexModelMetadata :: Text -> Maybe CodexModelMetadata
 codexModelMetadata modelName
-    | modelName `elem`
-        [ "gpt-5.6-sol"
-        , "gpt-5.6-terra"
-        , "gpt-5.6-luna"
-        ] =
+    | isCodexResponsesLiteModel modelName =
         Just CodexModelMetadata
             { modelContextWindow = 272_000
             , modelEffectiveContextWindow = defaultCodexEffectiveContextWindow
             , modelAutoCompactTokenLimit = defaultCodexAutoCompactTokenLimit
             }
     | otherwise = Nothing
+
+-- | Models routed through the Codex Responses Lite request dialect.
+--
+-- Keep this predicate in the shared OpenAI metadata module so the CLI,
+-- HTTP transport, and WebSocket transport cannot silently disagree about
+-- which requests need the Lite headers and input shape.
+isCodexResponsesLiteModel :: Text -> Bool
+isCodexResponsesLiteModel modelName =
+    modelName `elem`
+        [ "gpt-5.6-sol"
+        , "gpt-5.6-terra"
+        , "gpt-5.6-luna"
+        ]
 
 codexAutoCompactTokenLimitFor :: Maybe Text -> Int
 codexAutoCompactTokenLimitFor modelName =

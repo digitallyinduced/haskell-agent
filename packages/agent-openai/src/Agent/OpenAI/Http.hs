@@ -1,6 +1,7 @@
 module Agent.OpenAI.Http
     ( postCodexJson
     , decodeCodexHttpBody
+    , decodeCodexHttpBodyWithModel
     , rejectFailedCodexResponse
     ) where
 
@@ -10,7 +11,8 @@ import Agent.Responses.SSE (parseSseEvents)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , StreamAssemblyConfig(..)
-    , buildStreamResponse
+    , buildStreamResponseWithModel
+    , failedResponseMessage
     , failedStreamResponseMessage
     )
 import qualified Agent.Responses.Types as OpenAI
@@ -55,14 +57,18 @@ postCodexJson
     -> (Response -> Streams.InputStream BS.ByteString -> IO (Either ApiError value))
     -> IO (Either ApiError value)
 postCodexJson baseUrl endpoint accessToken accountId configureRequest body handler = do
-    let url = Text.dropWhileEnd (== '/') baseUrl <> endpoint
-    case URI.parseURI (Text.unpack url) of
-        Nothing -> pure $ Left (JsonDecodeError ("Invalid URL: " <> url) "")
+    case codexEndpointUri baseUrl endpoint of
+        Nothing -> pure $ Left (JsonDecodeError
+            ("Invalid URL: " <> baseUrl)
+            "")
         Just uri ->
-            let path = Text.encodeUtf8 (Text.pack uri.uriPath)
+            let url = Text.pack (URI.uriToString id uri "")
+                path = Text.encodeUtf8
+                    (Text.pack uri.uriPath <> Text.pack uri.uriQuery)
                 request = buildRequest1 $ configureRequest do
                     http POST path
                     setContentType "application/json"
+                    setHeader "Accept" "text/event-stream"
                     setHeader
                         "Authorization"
                         ("Bearer " <> Text.encodeUtf8 accessToken)
@@ -76,14 +82,33 @@ postCodexJson baseUrl endpoint accessToken accountId configureRequest body handl
                     sendRequest connection request (jsonBody body)
                     receiveResponse connection handler
 
+codexEndpointUri :: Text -> Text -> Maybe URI.URI
+codexEndpointUri baseUrl endpoint = do
+    uri <- URI.parseURI (Text.unpack baseUrl)
+    let basePath = Text.dropWhileEnd (== '/') (Text.pack uri.uriPath)
+        endpointPath = "/" <> Text.dropWhile (== '/') endpoint
+        joinedPath = Text.unpack (basePath <> endpointPath)
+    pure uri
+        { URI.uriPath = joinedPath
+        , URI.uriFragment = ""
+        }
+
 -- | Decode a successful Responses HTTP body. Streaming bodies use the same
 -- partial-response assembler as the WebSocket and provider SSE transports;
 -- compatible non-streaming hosts may still return one canonical JSON object.
 decodeCodexHttpBody :: Text -> Either ApiError OpenAI.Response
-decodeCodexHttpBody bodyText
+decodeCodexHttpBody = decodeCodexHttpBodyWithModel Nothing
+
+-- | Decode a successful Responses HTTP body while retaining the originating
+-- request model when partial lifecycle events omit the server model field.
+decodeCodexHttpBodyWithModel
+    :: Maybe Text
+    -> Text
+    -> Either ApiError OpenAI.Response
+decodeCodexHttpBodyWithModel modelHint bodyText
     | looksLikeSse bodyText = do
         events <- parseSseEvents bodyText
-        buildStreamResponse streamConfig events
+        buildStreamResponseWithModel streamConfig modelHint events
     | otherwise =
         case decodeJsonResponseBody bodyText of
             Just jsonValue -> decodeResponseValue jsonValue bodyText
@@ -112,7 +137,8 @@ decodeResponseValue jsonValue bodyText =
 rejectFailedCodexResponse :: OpenAI.Response -> Either ApiError OpenAI.Response
 rejectFailedCodexResponse response =
     case response.status of
-        OpenAI.ResponseFailed -> Left (failedResponseError response.error)
+        OpenAI.ResponseFailed -> Left (terminalResponseError response)
+        OpenAI.ResponseIncomplete -> Left (terminalResponseError response)
         _ -> Right response
 
 streamConfig :: StreamAssemblyConfig
@@ -129,6 +155,7 @@ streamConfig = StreamAssemblyConfig
             streamError.code
             streamError.retryAfter
     , classifyFailedResponse = failedStreamResponseError
+    , incompleteAsFailure = True
     }
 
 failedStreamResponseError :: ResponseFailure -> ApiError
@@ -140,15 +167,25 @@ failedStreamResponseError failure =
         failure.failureErrorCode
         Nothing
 
-failedResponseError :: Maybe OpenAI.ResponseError -> ApiError
-failedResponseError Nothing =
-    ProviderError ApiErrorType "Codex response failed without error details" Nothing
-failedResponseError (Just responseError) =
-    mkOpenAIError
-        (errorTypeFromText responseError.code)
-        responseError.message
-        (Just responseError.code)
-        Nothing
+terminalResponseError :: OpenAI.Response -> ApiError
+terminalResponseError response =
+    case response.error of
+        Just responseError
+            | not (Text.null (Text.strip responseError.code))
+                || not (Text.null (Text.strip responseError.message)) ->
+                    mkOpenAIError
+                        (if Text.null (Text.strip responseError.code)
+                            then ApiErrorType
+                            else errorTypeFromText responseError.code)
+                        (failedResponseMessage response)
+                        (if Text.null (Text.strip responseError.code)
+                            then Nothing
+                            else Just responseError.code)
+                        Nothing
+        _ ->
+            ProviderError ApiErrorType
+                (failedResponseMessage response)
+                Nothing
 
 looksLikeSse :: Text -> Bool
 looksLikeSse bodyText =

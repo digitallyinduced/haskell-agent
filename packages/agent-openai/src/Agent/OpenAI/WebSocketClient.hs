@@ -7,12 +7,23 @@ module Agent.OpenAI.WebSocketClient
     , sendWsRequest
     , sendWsRequestWithOptions
     , sendWsRequestWithEvents
+    , sendWsRequestWithEventsPreservingTurnState
     , sendWsRequestWithRawEvents
     , retryTransientWsResultWithPolicy
     , CodexWsOptions(..)
     , defaultCodexWsOptions
     , buildWsPayloadWithOptions
+    , addTurnStateToPayload
     , buildCodexWsHeaders
+    , CodexTurnState
+    , newCodexTurnState
+    , codexConnTurnState
+    , readCodexTurnState
+    , recordCodexTurnState
+    , resetCodexTurnState
+    , finishCodexTurnStateResponse
+    , copyCodexTurnState
+    , withCodexWsRetryingUsingTurnState
     , StreamEventCallback
     , RawStreamEventCallback
     , WebSocketReceiveActions(..)
@@ -25,8 +36,10 @@ module Agent.OpenAI.WebSocketClient
 import Agent.OpenAI.Auth (Pool)
 import Agent.OpenAI.Credential (poolTokenProvider)
 import Agent.Error
+import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
 import Agent.OpenAI.Features (remoteCompactionV2Feature)
+import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
@@ -56,13 +69,21 @@ import Control.Retry
     )
 import qualified Control.Exception as Exception
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    , readIORef
+    )
+import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
-import qualified Data.Text.Encoding.Error as Text (lenientDecode)
+import qualified Data.Text.Read as TextRead
 import qualified Network.WebSockets as WS
 import qualified Wuss
 
@@ -70,14 +91,55 @@ import qualified Wuss
 -- Connection handle
 --------------------------------------------------------------------------------
 
--- | An OpenAI Codex connection backed by the provider-neutral WebSocket
--- transport session from @agent-core@.
-newtype CodexConn = CodexWsConn WebSocket.WebSocketSession
+-- | Turn-scoped sticky-routing state shared by every physical transport used
+-- during one logical Codex turn. Codex treats this as a first-write-wins token:
+-- once received from response headers/metadata, it must be replayed unchanged
+-- on tool continuations, reconnects, HTTP fallback, and inline compaction.
+newtype CodexTurnState = CodexTurnState (IORef (Maybe Text))
+
+data CodexConn = CodexWsConn
+    !WebSocket.WebSocketSession
+    !CodexTurnState
+
+newCodexTurnState :: IO CodexTurnState
+newCodexTurnState = CodexTurnState <$> newIORef Nothing
+
+codexConnTurnState :: CodexConn -> CodexTurnState
+codexConnTurnState (CodexWsConn _ turnState) = turnState
+
+readCodexTurnState :: CodexTurnState -> IO (Maybe Text)
+readCodexTurnState (CodexTurnState turnState) = readIORef turnState
+
+recordCodexTurnState :: CodexTurnState -> Text -> IO ()
+recordCodexTurnState (CodexTurnState turnState) value
+    | Text.null (Text.strip value) = pure ()
+    | otherwise =
+        atomicModifyIORef' turnState \current ->
+            (current <|> Just value, ())
+
+resetCodexTurnState :: CodexTurnState -> IO ()
+resetCodexTurnState (CodexTurnState turnState) =
+    atomicModifyIORef' turnState (const (Nothing, ()))
+
+-- | End a normal model request. Tool calls keep the turn open for their output
+-- continuation; every other successful response closes the routing scope.
+finishCodexTurnStateResponse :: CodexTurnState -> Response -> IO ()
+finishCodexTurnStateResponse turnState response
+    | responseHasToolContinuation response = pure ()
+    | otherwise = resetCodexTurnState turnState
 
 -- | Close a reusable Codex connection before its owning callback returns.
 closeCodexConn :: CodexConn -> IO ()
-closeCodexConn (CodexWsConn session) =
+closeCodexConn (CodexWsConn session _) =
     WebSocket.closeWebSocketSession session "switching account"
+
+-- | Carry the current logical turn's sticky-routing token across a physical
+-- reconnect. Codex scopes this state to the turn rather than to the socket.
+copyCodexTurnState :: CodexConn -> CodexConn -> IO ()
+copyCodexTurnState source destination = do
+    snapshot <- readCodexTurnState (codexConnTurnState source)
+    let CodexTurnState destinationState = codexConnTurnState destination
+    atomicModifyIORef' destinationState (const (snapshot, ()))
 
 --------------------------------------------------------------------------------
 -- Connect
@@ -160,6 +222,18 @@ withCodexWsRetrying provider action =
     runWithTokenProvider provider \credential ->
         runConnectionAttempt credential action
 
+-- | Like 'withCodexWsRetrying', but attach every disposable physical
+-- connection to an existing logical turn. This is used by subagents whose
+-- cancellation-safe backend opens a fresh socket for each tool continuation.
+withCodexWsRetryingUsingTurnState
+    :: TokenProvider
+    -> CodexTurnState
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+withCodexWsRetryingUsingTurnState provider turnState action =
+    runWithTokenProvider provider \credential ->
+        runConnectionAttemptUsingTurnState credential turnState action
+
 -- | Like 'withCodexWsRetrying', but first reports a credential that failed on
 -- an already-open connection. This ensures an exhausted resumed-session
 -- account is cooled down before a replacement WebSocket credential is chosen.
@@ -177,26 +251,49 @@ runConnectionAttempt
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
 runConnectionAttempt =
-    runConnectionAttemptWithPolicy WebSocket.transientWsConnectRetryPolicy
+    runConnectionAttemptWithPolicyAndTurnState
+        WebSocket.transientWsConnectRetryPolicy
+        Nothing
+
+runConnectionAttemptUsingTurnState
+    :: Credential
+    -> CodexTurnState
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+runConnectionAttemptUsingTurnState credential turnState =
+    runConnectionAttemptWithPolicyAndTurnState
+        WebSocket.transientWsConnectRetryPolicy
+        (Just turnState)
+        credential
 
 runConnectionAttemptWithPolicy
     :: RetryPolicyM IO
     -> Credential
     -> (CodexConn -> Credential -> IO (Either ApiError a))
     -> IO (Either ApiError a)
-runConnectionAttemptWithPolicy _ credential _action
+runConnectionAttemptWithPolicy retryPolicy =
+    runConnectionAttemptWithPolicyAndTurnState retryPolicy Nothing
+
+runConnectionAttemptWithPolicyAndTurnState
+    :: RetryPolicyM IO
+    -> Maybe CodexTurnState
+    -> Credential
+    -> (CodexConn -> Credential -> IO (Either ApiError a))
+    -> IO (Either ApiError a)
+runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
     | credential.provider == XAIProvider = pure $ Left $ ProviderError ApiErrorType
         "XAI credentials must be used through agent-xai"
         Nothing
-runConnectionAttemptWithPolicy _ credential _action
+runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
     | credential.provider == OpenRouterProvider = pure $ Left $ ProviderError ApiErrorType
         "OpenRouter credentials must be used through agent-openrouter"
         Nothing
-runConnectionAttemptWithPolicy _ credential _action
+runConnectionAttemptWithPolicyAndTurnState _ _ credential _action
     | credential.provider == ClaudeCodeProvider = pure $ Left $ ProviderError ApiErrorType
         "Claude Code subscription sessions must use agent-claude"
         Nothing
-runConnectionAttemptWithPolicy retryPolicy credential action = do
+runConnectionAttemptWithPolicyAndTurnState retryPolicy sharedTurnState
+        credential action = do
     let headers = buildCodexWsHeaders credential
     WebSocket.retryTransientWsConnectWithPolicy
         retryPolicy
@@ -212,16 +309,21 @@ runConnectionAttemptWithPolicy retryPolicy credential action = do
                     WebSocket.withWebSocketSession
                         WebSocket.defaultWebSocketSessionOptions
                         conn
-                        (\session -> action (CodexWsConn session) credential)
+                        (\session -> do
+                            turnState <- maybe newCodexTurnState pure sharedTurnState
+                            action (CodexWsConn session turnState) credential)
 
 -- | Pure handshake-header builder exported for transport contract tests.
 buildCodexWsHeaders :: Credential -> WS.Headers
 buildCodexWsHeaders credential =
     [ ("Authorization", "Bearer " <> Text.encodeUtf8 credential.accessToken)
-    , ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
-    , ("OpenAI-Beta", "responses_websockets=2026-02-06")
-    , ("x-codex-beta-features", Text.encodeUtf8 remoteCompactionV2Feature)
     ]
+    <> [ ("chatgpt-account-id", Text.encodeUtf8 credential.accountId)
+       | not (Text.null credential.accountId)
+       ]
+    <> [ ("OpenAI-Beta", "responses_websockets=2026-02-06")
+       , ("x-codex-beta-features", Text.encodeUtf8 remoteCompactionV2Feature)
+       ]
 
 -- | Wraps an 'ApiError' from 'getAccessToken' so it can propagate out of
 -- 'withCodexWs' as an exception. The agent-loop's failover layer unwraps it
@@ -246,11 +348,18 @@ type RawStreamEventCallback = Text -> Aeson.Value -> IO ()
 -- | Optional controls for a WebSocket Responses request.
 data CodexWsOptions = CodexWsOptions
     { compactThreshold :: !(Maybe Int)
+    , sendIdleTimeoutMicros :: !(Maybe Int)
+    , receiveIdleTimeoutMicros :: !(Maybe Int)
     } deriving (Eq, Show)
 
 defaultCodexWsOptions :: CodexWsOptions
 defaultCodexWsOptions = CodexWsOptions
     { compactThreshold = Nothing
+    , sendIdleTimeoutMicros = Just 30_000_000
+    -- Reasoning-heavy turns can legitimately spend several minutes between
+    -- frames. Keep an idle guard, but match Codex's five-minute default
+    -- instead of failing healthy long-running requests after one minute.
+    , receiveIdleTimeoutMicros = Just 300_000_000
     }
 
 -- | Send a Codex request over the WebSocket and receive the complete response.
@@ -278,7 +387,13 @@ sendWsRequestWithOptions
     -> IO (Either ApiError Response)
 sendWsRequestWithOptions options cc request previousResponseId =
     retryTransientWsResultWithPolicy transientWsResultPolicy $
-        sendWsRequestWithEventsAndOptions options cc request previousResponseId (\_ -> pure ())
+        sendWsRequestWithEventsAndOptions
+            FinishNormalTurnState
+            options
+            cc
+            request
+            previousResponseId
+            (\_ -> pure ())
 
 -- | Retry short-lived provider responses on the current WebSocket. Connection
 -- failures and connection-limit responses are deliberately excluded because
@@ -311,7 +426,32 @@ sendWsRequestWithEvents
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 sendWsRequestWithEvents cc request previousResponseId onEvent =
-    sendWsRequestWithEventsAndOptions defaultCodexWsOptions cc request previousResponseId onEvent
+    sendWsRequestWithEventsAndOptions
+        FinishNormalTurnState
+        defaultCodexWsOptions
+        cc
+        request
+        previousResponseId
+        onEvent
+
+-- | Send an auxiliary request that belongs to the current logical turn, such
+-- as inline remote compaction. Its response may mint the sticky-routing token
+-- needed by the immediately following model continuation, so do not clear the
+-- token merely because the auxiliary response has no tool call.
+sendWsRequestWithEventsPreservingTurnState
+    :: CodexConn
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> StreamEventCallback
+    -> IO (Either ApiError Response)
+sendWsRequestWithEventsPreservingTurnState cc request previousResponseId onEvent =
+    sendWsRequestWithEventsAndOptions
+        PreserveTurnState
+        defaultCodexWsOptions
+        cc
+        request
+        previousResponseId
+        onEvent
 
 -- | Like 'sendWsRequestWithEvents', but exposes the raw event @type@ and JSON
 -- event object.
@@ -332,29 +472,108 @@ sendWsRequestWithRawEventsAndOptions
     -> RawStreamEventCallback
     -> IO (Either ApiError Response)
 sendWsRequestWithRawEventsAndOptions options cc request previousResponseId onEvent =
-    sendWsRequestWithEventsAndOptions options cc request previousResponseId \event ->
+    sendWsRequestWithEventsAndOptions
+        FinishNormalTurnState
+        options
+        cc
+        request
+        previousResponseId
+        \event ->
         onEvent
             (streamEventTypeText (responseStreamEventType event))
             (Aeson.toJSON event)
 
+data TurnStateCompletion
+    = FinishNormalTurnState
+    | PreserveTurnState
+    deriving (Eq)
+
 sendWsRequestWithEventsAndOptions
-    :: CodexWsOptions
+    :: TurnStateCompletion
+    -> CodexWsOptions
     -> CodexConn
     -> ResponseCreateParams
     -> Maybe Text
     -> StreamEventCallback
     -> IO (Either ApiError Response)
-sendWsRequestWithEventsAndOptions options cc request previousResponseId onEvent = case cc of
-    CodexWsConn session -> sendOverWs session
+sendWsRequestWithEventsAndOptions completion options cc request previousResponseId
+        onEvent = case cc of
+    CodexWsConn session turnState -> sendOverWs session turnState
   where
-    sendOverWs session = do
-        let wsPayload = buildWsPayloadWithOptions options request previousResponseId
+    sendOverWs session turnState = do
+        turnStateValue <- readCodexTurnState turnState
+        let wsPayload = addTurnStateToPayload turnStateValue
+                (buildWsPayloadWithOptions options request previousResponseId)
             encoded = Aeson.encode wsPayload
-        WebSocket.withWebSocketRequest session \wsRequest -> do
+        result <- WebSocket.withWebSocketRequestWithTimeout
+            options.sendIdleTimeoutMicros
+            options.receiveIdleTimeoutMicros
+            session
+            \wsRequest -> do
             sendRes <- WebSocket.sendWebSocketText wsRequest encoded
             case sendRes of
                 Left apiError -> pure (Left apiError)
-                Right () -> receiveWsResponse request.model wsRequest onEvent
+                Right () ->
+                    receiveWsResponse options request.model wsRequest
+                        (captureTurnState turnState onEvent)
+        case (completion, result) of
+            (FinishNormalTurnState, Right response) ->
+                finishCodexTurnStateResponse turnState response
+            _ -> pure ()
+        pure result
+
+captureTurnState
+    :: CodexTurnState
+    -> StreamEventCallback
+    -> StreamEventCallback
+captureTurnState turnState callback event = do
+    case responseEventTurnState event of
+        Just value -> recordCodexTurnState turnState value
+        Nothing -> pure ()
+    callback event
+
+responseHasToolContinuation :: Response -> Bool
+responseHasToolContinuation response =
+    any isToolCall response.output
+  where
+    isToolCall = \case
+        FunctionCallItem{} -> True
+        CustomToolCallItem{} -> True
+        _ -> False
+
+responseEventTurnState :: ResponseStreamEvent -> Maybe Text
+responseEventTurnState OtherResponseStreamEvent { eventExtraFields } =
+    extractTurnState eventExtraFields
+responseEventTurnState _ = Nothing
+
+extractTurnState :: Aeson.Object -> Maybe Text
+extractTurnState fields =
+    textFieldCaseInsensitive "x-codex-turn-state" fields
+        <|> textFieldCaseInsensitive "turn_state" fields
+        <|> (lookupFieldCaseInsensitive "headers" fields >>= \case
+            Aeson.Object headers ->
+                textFieldCaseInsensitive "x-codex-turn-state" headers
+                    <|> textFieldCaseInsensitive "turn_state" headers
+            _ -> Nothing)
+
+addTurnStateToPayload :: Maybe Text -> Aeson.Value -> Aeson.Value
+addTurnStateToPayload Nothing payload = payload
+addTurnStateToPayload (Just turnState) (Aeson.Object object) =
+    -- WebSocket request headers are fixed at handshake time. The Responses
+    -- WebSocket protocol carries this per-request sticky-routing value through
+    -- client_metadata instead.
+    Aeson.Object
+        (KeyMap.insert "client_metadata" metadataValue object)
+  where
+    metadataValue = case KeyMap.lookup "client_metadata" object of
+        Just (Aeson.Object metadata) ->
+            Aeson.Object
+                (KeyMap.insert "x-codex-turn-state"
+                    (Aeson.String turnState)
+                    metadata)
+        _ -> Aeson.object
+            [ "x-codex-turn-state" Aeson..= turnState ]
+addTurnStateToPayload _ payload = payload
 
 -- | Pure WebSocket envelope builder, exported for payload contract tests.
 -- All fields are flattened at the top level (not nested inside "response").
@@ -364,13 +583,29 @@ buildWsPayloadWithOptions options request previousResponseId =
         Aeson.Object object -> Aeson.Object
             $ addContextManagement
             $ addPreviousResponseId
+            $ addResponsesLiteMetadata
+            $ KeyMap.insert "stream" (Aeson.Bool True)
             $ KeyMap.insert "store" (Aeson.Bool False)
             $ KeyMap.insert "type" (Aeson.String "response.create") object
         other -> other
   where
     addPreviousResponseId = case previousResponseId of
         Just responseId -> KeyMap.insert "previous_response_id" (Aeson.String responseId)
-        Nothing -> id
+        Nothing -> KeyMap.delete "previous_response_id"
+
+    addResponsesLiteMetadata object
+        | Just modelName <- request.model
+        , isCodexResponsesLiteModel modelName =
+            let metadata = case KeyMap.lookup "client_metadata" object of
+                    Just (Aeson.Object fields) -> fields
+                    _ -> KeyMap.empty
+            in KeyMap.insert "client_metadata"
+                (Aeson.Object (KeyMap.insert
+                    "ws_request_header_x_openai_internal_codex_responses_lite"
+                    (Aeson.String "true")
+                    metadata))
+                object
+        | otherwise = object
 
     addContextManagement = case options.compactThreshold of
         Just threshold | threshold > 0 -> KeyMap.insert "context_management" (Aeson.toJSON
@@ -388,11 +623,12 @@ data WebSocketReceiveActions = WebSocketReceiveActions
     }
 
 receiveWsResponse
-    :: Maybe Text
+    :: CodexWsOptions
+    -> Maybe Text
     -> WebSocket.WebSocketRequest
     -> StreamEventCallback
     -> IO (Either ApiError Response)
-receiveWsResponse modelHint cc =
+receiveWsResponse _options modelHint cc =
     receiveWsResponseWithActions modelHint WebSocketReceiveActions
         { receiveFrame = WebSocket.receiveWebSocketData cc
         , completeRequest = WebSocket.completeWebSocketRequest cc
@@ -419,25 +655,27 @@ receiveWsResponseWithActions modelHint actions onEvent =
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
                 case ResponsesCodec.decodeResponseStreamEvent msgBytes of
-                    Left err -> do
-                        let msgPreview = Text.decodeUtf8With Text.lenientDecode (LBS.toStrict msgBytes)
+                    Left _err -> do
+                        -- Codex treats an unrecognised or malformed event as
+                        -- forward-compatible noise. Keep receiving so one
+                        -- bad frame cannot strand an otherwise valid turn.
                         logStreamStats "json_decode_error" frames' bytes'
-                        actions.invalidateRequest
-                            "received a malformed response frame"
-                        pure $ Left (JsonDecodeError (Text.pack err) (Text.take 500 msgPreview))
+                        loop assembly frames' bytes'
                     Right event -> do
                         onEvent event
                         let assembly' = applyStreamEvent assembly event
                         case event of
-                            ResponseErrorEvent { streamError } -> do
+                            ResponseErrorEvent { streamError, eventExtraFields } -> do
                                 logStreamStats "error_event" frames' bytes'
-                                actions.completeRequest
-                                pure $ Left (parseWsErrorEvent streamError)
+                                actions.invalidateRequest "WebSocket response error"
+                                pure $ Left
+                                    (parseWsErrorEvent eventExtraFields streamError)
 
-                            ResponseNestedErrorEvent { streamError } -> do
+                            ResponseNestedErrorEvent { streamError, eventExtraFields } -> do
                                 logStreamStats "error_event" frames' bytes'
-                                actions.completeRequest
-                                pure $ Left (parseWsErrorEvent streamError)
+                                actions.invalidateRequest "WebSocket response error"
+                                pure $ Left
+                                    (parseWsErrorEvent eventExtraFields streamError)
 
                             ResponseCompletedEvent{} ->
                                 finishTerminal "completed" assembly' frames' bytes' event
@@ -446,14 +684,23 @@ receiveWsResponseWithActions modelHint actions onEvent =
                                 finishTerminal "done" assembly' frames' bytes' event
 
                             ResponseIncompleteEvent{} ->
-                                finishTerminal "incomplete" assembly' frames' bytes' event
+                                do
+                                    logStreamStats "incomplete" frames' bytes'
+                                    actions.invalidateRequest
+                                        "WebSocket response incomplete"
+                                    pure $ Left
+                                        (failedResponseError
+                                            ((responseFailureFromState assembly')
+                                                { failureStatus =
+                                                    Just "incomplete" }))
 
                             ResponseFailedEvent{} -> do
                                 logStreamStats "response_failed" frames' bytes'
-                                actions.completeRequest
+                                actions.invalidateRequest "WebSocket response failed"
                                 pure $ Left
                                     (failedResponseError
-                                        (responseFailureFromState assembly'))
+                                        ((responseFailureFromState assembly')
+                                            { failureStatus = Just "failed" }))
 
                             -- Ignore other event variants (added, content
                             -- deltas, and future event types).
@@ -492,23 +739,75 @@ receiveWsResponseWithActions modelHint actions onEvent =
 -- We lift typed server errors into 'ProviderError', carrying the exact
 -- @resets_in_seconds@ (if present), so the caller can pass rate-limit windows
 -- straight through to 'Agent.OpenAI.Auth.reportRateLimit'. A code-only event
--- is also typed; only events with neither a type nor a code fall back to
--- 'ConnectionError' (apart from previous-response wording).
-parseWsErrorEvent :: ResponseStreamError -> ApiError
-parseWsErrorEvent streamError =
-    let parsedError = mkOpenAIError
+-- is also typed; untyped events use an outer HTTP status when one is
+-- available, otherwise falling back to 'ConnectionError'.
+parseWsErrorEvent :: Aeson.Object -> ResponseStreamError -> ApiError
+parseWsErrorEvent outerFields streamError =
+    let typedError =
+            nonBlank =<< (streamError.errorType <|> streamError.code)
+        retryAfter =
+            streamError.retryAfter <|> outerRetryAfter outerFields
+        parsedError = mkOpenAIError
             (maybe
-                (maybe (UnknownErrorType "") errorTypeFromText streamError.code)
+                (UnknownErrorType "")
                 errorTypeFromText
-                streamError.errorType)
+                typedError)
             streamError.message
             streamError.code
-            streamError.retryAfter
-    in case (streamError.errorType, streamError.code) of
+            retryAfter
+        outerStatus = lookupFieldCaseInsensitive "status" outerFields
+            >>= jsonInt
+        outerStatusCode = lookupFieldCaseInsensitive "status_code" outerFields
+            >>= jsonInt
+        status = outerStatus <|> outerStatusCode
+    in case (typedError, status) of
         (Just _, _) -> parsedError
-        (Nothing, Just _) -> parsedError
+        (Nothing, Just 429) ->
+            ProviderError RateLimitError streamError.message retryAfter
+        (Nothing, Just status) ->
+            HttpError status streamError.message
         (Nothing, Nothing)
             | isPreviousResponseIdError parsedError -> parsedError
             | otherwise -> ConnectionError
                 ("WebSocket error (no type): "
                     <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode streamError)))
+
+outerRetryAfter :: Aeson.Object -> Maybe Int
+outerRetryAfter outerFields = do
+    Aeson.Object headers <-
+        lookupFieldCaseInsensitive "headers" outerFields
+    value <- lookupFieldCaseInsensitive "retry-after" headers
+    case value of
+        Aeson.String text ->
+            parseRetryAfterSeconds [Text.encodeUtf8 text]
+        Aeson.Number{} ->
+            max 1 <$> jsonInt value
+        _ -> Nothing
+
+jsonInt :: Aeson.Value -> Maybe Int
+jsonInt = \case
+    Aeson.Number value -> case Aeson.fromJSON (Aeson.Number value) of
+        Aeson.Success parsed -> Just parsed
+        Aeson.Error _ -> Nothing
+    Aeson.String value -> case TextRead.decimal value of
+        Right (parsed, remainder) | Text.null remainder -> Just parsed
+        _ -> Nothing
+    _ -> Nothing
+
+lookupFieldCaseInsensitive :: Text -> Aeson.Object -> Maybe Aeson.Value
+lookupFieldCaseInsensitive wanted object =
+    snd <$> find
+        (\(key, _) ->
+            Text.toCaseFold (Key.toText key) == Text.toCaseFold wanted)
+        (KeyMap.toList object)
+
+textFieldCaseInsensitive :: Text -> Aeson.Object -> Maybe Text
+textFieldCaseInsensitive name object =
+    lookupFieldCaseInsensitive name object >>= \case
+        Aeson.String value -> Just value
+        _ -> Nothing
+
+nonBlank :: Text -> Maybe Text
+nonBlank value
+    | Text.null (Text.strip value) = Nothing
+    | otherwise = Just value

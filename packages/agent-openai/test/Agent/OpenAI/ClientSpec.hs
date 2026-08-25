@@ -4,13 +4,20 @@ import Agent.OpenAI.Client
 import Agent.OpenAI.Credential (staticBearerProvider)
 import Agent.Error
 import Agent.OpenAI.Http
+import Agent.OpenAI.WebSocketClient
+    ( newCodexTurnState
+    , readCodexTurnState
+    , recordCodexTurnState
+    )
 import Agent.Provider
 import Agent.Responses.Types
+import Control.Concurrent (threadDelay)
 import Control.Retry (constantDelay, limitRetries)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Builder as Builder
 import qualified Data.CaseInsensitive as CI
 import Data.IORef
 import Data.Text (Text)
@@ -38,6 +45,21 @@ spec = do
         it "keeps completed responses" do
             let response = responseWithStatus "completed" Nothing
             rejectFailedCodexResponse response `shouldBe` Right response
+
+        it "turns an incomplete response into an error with its reason" do
+            let response = decodeResponse (Aeson.object
+                    [ "id" .= ("response-id" :: Text)
+                    , "created_at" .= (0 :: Int)
+                    , "model" .= ("gpt-5.6-sol" :: Text)
+                    , "status" .= ("incomplete" :: Text)
+                    , "incomplete_details" .= Aeson.object
+                        [ "reason" .= ("max_output_tokens" :: Text) ]
+                    , "output" .= ([] :: [Aeson.Value])
+                    ])
+            rejectFailedCodexResponse response
+                `shouldBe` Left (ProviderError ApiErrorType
+                    "response.incomplete: max_output_tokens"
+                    Nothing)
 
     describe "retryTransientCodexResultWithPolicy" do
         it "retries ordinary Left overloads before returning success" do
@@ -102,6 +124,20 @@ spec = do
                     extractAssistantText response `shouldBe` Just "from-item"
                 Left err -> expectationFailure ("expected response, got " <> show err)
 
+        it "uses the request model for partial lifecycle frames" do
+            let body = Text.concat
+                    [ "event: response.created\n"
+                    , "data: {\"type\":\"response.created\","
+                    , "\"response\":{\"id\":\"resp-partial\"}}\n\n"
+                    , "event: response.completed\n"
+                    , "data: {\"type\":\"response.completed\","
+                    , "\"response\":{}}\n\n"
+                    ]
+            case decodeCodexHttpBodyWithModel (Just "gpt-request") body of
+                Right response -> response.model `shouldBe` "gpt-request"
+                Left err -> expectationFailure
+                    ("expected response, got " <> show err)
+
         it "accepts a non-streaming JSON Responses body" do
             let body = Text.decodeUtf8 $ LBS.toStrict $ Aeson.encode $ Aeson.object
                     [ "id" .= ("resp-json" :: Text)
@@ -134,12 +170,146 @@ spec = do
             lookup "chatgpt-account-id" request.headers `shouldBe` Nothing
             lookup "x-codex-beta-features" request.headers
                 `shouldBe` Just "remote_compaction_v2"
+            lookup "x-openai-internal-codex-responses-lite" request.headers
+                `shouldBe` Just "true"
             case request.body of
                 Aeson.Object object ->
                     KeyMap.lookup "stream" object `shouldBe` Just (Aeson.Bool True)
                 other ->
                     expectationFailure
                         ("expected JSON request object, got " <> show other)
+
+        it "replays first-write-wins turn state across HTTP tool continuations" do
+            recorded <- newIORef []
+            responseNumber <- newIORef (0 :: Int)
+            turnState <- newCodexTurnState
+            let handler _request = do
+                    number <- atomicModifyIORef' responseNumber \current ->
+                        let next = current + 1
+                        in (next, next)
+                    pure $ case number of
+                        1 -> jsonFunctionCall
+                            [("x-codex-turn-state", "ts-1")]
+                            "call-1"
+                        2 -> jsonFunctionCall
+                            [("x-codex-turn-state", "ts-2")]
+                            "call-2"
+                        3 -> jsonCompleted "done"
+                        4 -> jsonCompleted "new turn"
+                        _ -> error "unexpected extra request"
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState
+                        (staticBearerProvider "router-key")
+                        (helloRequest "first")
+                readCodexTurnState turnState `shouldReturn` Just "ts-1"
+
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState
+                        (staticBearerProvider "router-key")
+                        (helloRequest "tool one")
+                -- A later response cannot replace the sticky-routing token.
+                readCodexTurnState turnState `shouldReturn` Just "ts-1"
+
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState
+                        (staticBearerProvider "router-key")
+                        (helloRequest "tool two")
+                readCodexTurnState turnState `shouldReturn` Nothing
+
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithTurnState
+                        baseUrl turnState
+                        (staticBearerProvider "router-key")
+                        (helloRequest "next turn")
+                pure ()
+
+            requests <- readIORef recorded
+            map (lookup "x-codex-turn-state" . (.headers)) requests
+                `shouldBe`
+                    [ Nothing
+                    , Just "ts-1"
+                    , Just "ts-1"
+                    , Nothing
+                    ]
+
+        it "preserves shared turn state after inline remote compaction" do
+            recorded <- newIORef []
+            turnState <- newCodexTurnState
+            recordCodexTurnState turnState "ts-compaction"
+            let handler _request = pure $ jsonCompleted "compacted"
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<<
+                    createCodexMessageWithProviderAtWithOptionsAndTurnState
+                        remoteCompactionV2RequestOptions
+                        baseUrl
+                        turnState
+                        (staticBearerProvider "router-key")
+                        (helloRequest "compact")
+                readCodexTurnState turnState
+                    `shouldReturn` Just "ts-compaction"
+
+            [request] <- readIORef recorded
+            lookup "x-codex-turn-state" request.headers
+                `shouldBe` Just "ts-compaction"
+
+        it "returns as soon as terminal SSE arrives without waiting for EOF" do
+            recorded <- newIORef []
+            let options = defaultCodexRequestOptions
+                    { responseIdleTimeoutMicros = 20_000 }
+                handler _request =
+                    pure $ hangingSseCompleted "from-terminal"
+            withMockResponses recorded handler \baseUrl -> do
+                response <- expectRight =<<
+                    createCodexMessageWithProviderAtWithOptions
+                        options
+                        baseUrl
+                        (staticBearerProvider "router-key")
+                        (helloRequest "hi")
+                extractAssistantText response `shouldBe` Just "from-terminal"
+
+        it "keeps HTTP 429 and Retry-After when the error body stalls" do
+            recorded <- newIORef []
+            let options = defaultCodexRequestOptions
+                    { responseIdleTimeoutMicros = 20_000 }
+                handler _request = pure stalledRateLimit
+            withMockResponses recorded handler \baseUrl -> do
+                result <- createCodexMessageWithProviderAtWithOptions
+                    options
+                    baseUrl
+                    (staticBearerProvider "router-key")
+                    (helloRequest "hi")
+                case result of
+                    Left CredentialsExhausted
+                            { exhaustionReasons =
+                                [ExhaustedByRateLimit
+                                    { exhaustionErrorType
+                                    , exhaustionStatusCode
+                                    , exhaustionRetryAfter
+                                    }]
+                            } -> do
+                        exhaustionErrorType `shouldBe` Just RateLimitError
+                        exhaustionStatusCode `shouldBe` Nothing
+                        exhaustionRetryAfter `shouldBe` Just 17
+                    other -> expectationFailure
+                        ("expected typed rate-limit exhaustion, got " <> show other)
+
+        it "preserves a base URL query while appending the responses path" do
+            recorded <- newIORef []
+            let handler _request = pure $ jsonCompleted "ok"
+            withMockResponses recorded handler \baseUrl -> do
+                _ <- expectRight =<< createCodexMessageWithProviderAt
+                    (baseUrl <> "?route=blue")
+                    (staticBearerProvider "router-key")
+                    (helloRequest "hi")
+                pure ()
+
+            [request] <- readIORef recorded
+            request.path `shouldBe` "/v1/responses"
+            request.query `shouldBe` "?route=blue"
 
         it "strips prompt cache retention from the HTTP request body" do
             recorded <- newIORef []
@@ -236,6 +406,7 @@ responseWithStatus status errorValue = decodeResponse (Aeson.object
 
 data RecordedRequest = RecordedRequest
     { path :: !Text
+    , query :: !Text
     , headers :: ![(Text, Text)]
     , body :: !Aeson.Value
     }
@@ -253,6 +424,7 @@ withMockResponses recorded handler action =
         requestBody <- Wai.strictRequestBody waiRequest
         let request = RecordedRequest
                 { path = "/" <> Text.intercalate "/" (Wai.pathInfo waiRequest)
+                , query = Text.decodeUtf8 (Wai.rawQueryString waiRequest)
                 , headers =
                     [ (Text.decodeUtf8 (CI.original name), Text.decodeUtf8 value)
                     | (name, value) <- Wai.requestHeaders waiRequest
@@ -266,14 +438,31 @@ withMockResponses recorded handler action =
         respond =<< handler request
 
 jsonCompleted :: Text -> Wai.Response
-jsonCompleted text = Wai.responseLBS HTTP.status200
-    [("Content-Type", "application/json")]
+jsonCompleted text = jsonResponse
+    []
+    [assistantMessage text]
+
+jsonFunctionCall :: HTTP.ResponseHeaders -> Text -> Wai.Response
+jsonFunctionCall headers callId = jsonResponse
+    headers
+    [ Aeson.object
+        [ "type" .= ("function_call" :: Text)
+        , "call_id" .= callId
+        , "name" .= ("shell_command" :: Text)
+        , "arguments" .= ("{}" :: Text)
+        , "status" .= ("completed" :: Text)
+        ]
+    ]
+
+jsonResponse :: HTTP.ResponseHeaders -> [Aeson.Value] -> Wai.Response
+jsonResponse headers output = Wai.responseLBS HTTP.status200
+    (("Content-Type", "application/json") : headers)
     (Aeson.encode (Aeson.object
         [ "id" .= ("resp-json" :: Text)
         , "created_at" .= (0 :: Int)
         , "model" .= ("gpt-test" :: Text)
         , "status" .= ("completed" :: Text)
-        , "output" .= [assistantMessage text]
+        , "output" .= output
         ]))
 
 sseCompleted :: Text -> Wai.Response
@@ -294,6 +483,36 @@ sseCompleted text =
     in Wai.responseLBS HTTP.status200
         [("Content-Type", "text/event-stream")]
         (LBS.fromStrict (Text.encodeUtf8 body))
+
+hangingSseCompleted :: Text -> Wai.Response
+hangingSseCompleted text =
+    let payload = Aeson.object
+            [ "type" .= ("response.completed" :: Text)
+            , "response" .= Aeson.object
+                [ "id" .= ("resp-sse" :: Text)
+                , "created_at" .= (0 :: Int)
+                , "model" .= ("gpt-test" :: Text)
+                , "status" .= ("completed" :: Text)
+                , "output" .= [assistantMessage text]
+                ]
+            ]
+        body = "event: response.completed\ndata: "
+            <> Aeson.encode payload
+            <> "\n\n"
+    in Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \send flush -> do
+            send (Builder.lazyByteString body)
+            flush
+            threadDelay 200_000
+
+stalledRateLimit :: Wai.Response
+stalledRateLimit =
+    Wai.responseStream HTTP.status429
+        [ ("Content-Type", "application/json")
+        , ("Retry-After", "17")
+        ]
+        \_send _flush -> threadDelay 200_000
 
 sseCompactionCompleted :: Wai.Response
 sseCompactionCompleted =

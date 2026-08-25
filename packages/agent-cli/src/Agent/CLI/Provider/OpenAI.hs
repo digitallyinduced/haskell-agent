@@ -13,15 +13,25 @@ import Agent.Loop
     ( Backend(..)
     , TokenUsage
     )
+import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
-    ( openAiAuxiliaryResponseSenderReconnecting
+    ( isOpenAiWebSocketTransportFailure
+    , openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWithReasoningVisibility
+    , openAiBackendWithTransportFallback
     , openAiResponseSenderReconnecting
+    , withCodexTurnStateScope
     )
-import Agent.OpenAI.WebSocketClient (CodexConn)
+import Agent.OpenAI.WebSocketClient
+    ( CodexConn
+    , codexConnTurnState
+    )
 import Agent.Provider
     ( Credential
     , TokenProvider
+    )
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackendWithRawReasoning
     )
 import Agent.Responses.Types (ResponseCreateParams)
 import Control.Concurrent.MVar
@@ -31,6 +41,7 @@ import Control.Concurrent.MVar
 import Data.IORef
     ( IORef
     , readIORef
+    , writeIORef
     )
 
 data OpenAiPersistentConnection
@@ -45,14 +56,15 @@ lockedOpenAiSession
     :: Maybe Int
     -> Bool
     -> MVar ()
+    -> IORef Bool
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
     -> IO ResponseCreateParams
     -> IORef (Maybe (Int, Int))
     -> (TokenUsage -> IO ())
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession compactThreshold showRawReasoning wsLock provider activeConnection
-        getParams contextTokens
+lockedOpenAiSession compactThreshold showRawReasoning wsLock fallbackActive
+        provider activeConnection getParams contextTokens
         recordCompactionUsage =
     let sendResponse request previousResponseId onEvent = do
             OpenAiPersistentConnection
@@ -82,14 +94,50 @@ lockedOpenAiSession compactThreshold showRawReasoning wsLock provider activeConn
                 request
                 previousResponseId
                 onEvent
+        getTurnState = do
+            OpenAiPersistentConnection _credential _connectionHealthy conn <-
+                readIORef activeConnection
+            pure (codexConnTurnState conn)
+        sendHttp request = do
+            turnState <- getTurnState
+            OpenAIClient.createCodexMessageWithProviderWithTurnState
+                turnState provider request
+        sendHttpCompaction request = do
+            turnState <- getTurnState
+            OpenAIClient.createCodexMessageWithProviderWithOptionsAndTurnState
+                OpenAIClient.remoteCompactionV2RequestOptions
+                turnState
+                provider
+                request
+        websocketBackend =
+            openAiBackendWithReasoningVisibility
+                showRawReasoning
+                sendResponse
+                getParams
+        httpFallbackBackend =
+            statelessResponsesBackendWithRawReasoning
+                showRawReasoning
+                (\request _onEvent -> sendHttp request)
+                getParams
         baseBackend =
             withConnectionRecovery $
-                openAiBackendWithReasoningVisibility
-                    showRawReasoning
-                    sendResponse
-                    getParams
-        compactSender request =
-            sendAuxiliary request Nothing (const (pure ()))
+                openAiBackendWithTransportFallback
+                    fallbackActive
+                    websocketBackend
+                    httpFallbackBackend
+        compactSender request = do
+            active <- readIORef fallbackActive
+            if active
+                then sendHttpCompaction request
+                else do
+                    result <-
+                        sendAuxiliary request Nothing (const (pure ()))
+                    case result of
+                        Left err
+                            | isOpenAiWebSocketTransportFailure err -> do
+                                writeIORef fallbackActive True
+                                sendHttpCompaction request
+                        _ -> pure result
         compactingBackend =
             autoCompactOpenAiBackendWithSender
                 compactThreshold
@@ -98,7 +146,9 @@ lockedOpenAiSession compactThreshold showRawReasoning wsLock provider activeConn
                 getParams
                 contextTokens
                 baseBackend
+        turnScopedBackend =
+            withCodexTurnStateScope getTurnState compactingBackend
         serializedBackend = Backend \state previous inputs onEvent ->
             withMVar wsLock \_ ->
-                compactingBackend.submitTurn state previous inputs onEvent
+                turnScopedBackend.submitTurn state previous inputs onEvent
     in (compactSender, serializedBackend)

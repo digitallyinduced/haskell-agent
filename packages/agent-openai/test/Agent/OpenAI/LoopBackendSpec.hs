@@ -8,6 +8,11 @@ import Agent.Error
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
+import Agent.OpenAI.WebSocketClient
+    ( newCodexTurnState
+    , readCodexTurnState
+    , recordCodexTurnState
+    )
 import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
@@ -1100,6 +1105,44 @@ spec = do
             readIORef fallbackActive `shouldReturn` True
             readIORef fallbackCalls `shouldReturn` 0
 
+        it "does not replay after a non-visible output item was received" do
+            fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let connectionFailure = ConnectionError "socket closed"
+                outputEvent = ResponseOutputItemDoneEvent
+                    { item = assistantItem "partial"
+                    , outputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendPrimary _request _previous onEvent = do
+                    modifyIORef' primaryCalls (+ 1)
+                    onEvent outputEvent
+                    pure (Left connectionFailure)
+                primary = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    sendPrimary
+                    (pure baseParams)
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "duplicate")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left
+                (replayUnsafeModelFailure connectionFailure)
+            readIORef fallbackActive `shouldReturn` False
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 0
+
         it "falls back immediately after a websocket connection-limit error" do
             fallbackActive <- newIORef False
             primaryCalls <- newIORef (0 :: Int)
@@ -1154,6 +1197,35 @@ spec = do
                 "bad request" Nothing)
             readIORef fallbackActive `shouldReturn` False
             readIORef fallbackCalls `shouldReturn` 0
+
+    describe "withCodexTurnStateScope" do
+        it "resets on a new prompt and preserves tool continuations" do
+            turnState <- newCodexTurnState
+            recordCodexTurnState turnState "stale"
+            observed <- newIORef []
+            transcript <- newIORef []
+            let rawBackend =
+                    Backend \state _previous _inputs _onEvent -> do
+                        value <- readCodexTurnState turnState
+                        modifyIORef' observed (<> [value])
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput "resp-state" [] (Just "ok")
+                            , backendState = state
+                            }
+                backend =
+                    withCodexTurnStateScope
+                        (pure turnState)
+                        rawBackend
+            _ <- submitWithState transcript backend Nothing
+                [UserMessage "new turn"] (const (pure ()))
+            recordCodexTurnState turnState "current"
+            _ <- submitWithState transcript backend (Just "resp-state")
+                [CompletedTool (functionResult "call-1" "done")]
+                (const (pure ()))
+
+            readIORef observed
+                `shouldReturn` [Nothing, Just "current"]
 
 --------------------------------------------------------------------------------
 -- Fixtures
@@ -1407,6 +1479,14 @@ replayUnsafeAuxiliaryFailure :: ApiError -> ApiError
 replayUnsafeAuxiliaryFailure failure =
     ProviderError (UnknownErrorType "replay_unsafe")
         ( "provider failed after auxiliary response output; refusing to replay: "
+            <> Text.pack (show failure)
+        )
+        Nothing
+
+replayUnsafeModelFailure :: ApiError -> ApiError
+replayUnsafeModelFailure failure =
+    ProviderError (UnknownErrorType "replay_unsafe")
+        ( "provider failed after model output; refusing to replay: "
             <> Text.pack (show failure)
         )
         Nothing

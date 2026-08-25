@@ -42,6 +42,9 @@ instance Exception UnexpectedConnectFailure
 
 spec :: Spec
 spec = describe "Agent.Transport.WebSocket" do
+    it "buffers the Codex-compatible number of inbound frames by default" do
+        defaultWebSocketSessionOptions.inboundFrameCapacity `shouldBe` 1600
+
     it "classifies websocket connection timeouts" do
         transientWsConnectFailureLabel (toException WS.ConnectionTimeout :: SomeException)
             `shouldBe` Just "WebSocket handshake timed out"
@@ -84,8 +87,6 @@ spec = describe "Agent.Transport.WebSocket" do
                 , 2000000
                 , 4000000
                 , 8000000
-                , 15000000
-                , 15000000
                 , 15000000
                 ]
 

@@ -37,6 +37,18 @@ spec = describe "Responses SSE decoder" do
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
 
+    it "skips malformed event payloads while preserving unknown events" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":3}"
+            , sseBlock "response.output_text.delta" "{not-json"
+            , sseBlock "response.future_event"
+                "{\"type\":\"response.future_event\",\"vendor_field\":true}"
+            , completedBlock
+            ]
+        eventTypes events
+            `shouldBe` [StreamEventUnknown "response.future_event", EventResponseCompleted]
+
     it "rejects invalid UTF-8 only after a complete event block arrives" do
         (decoder, events) <- expectRight $
             feedSseDecoder newSseDecoder "data: \xc3"

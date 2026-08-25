@@ -114,10 +114,101 @@ tokenProviderStatelessResponsesBackend provider send =
 -- ambiguous. Rebuild from the constructor instead.
 withRequestInput :: ResponseCreateParams -> [ResponseItem] -> ResponseCreateParams
 withRequestInput ResponseCreateParams{..} items =
+    let prefix = requestInputPrefix input
+        normalizedItems = map normalizeRequestItem items
+        requestItems
+            | any isAdditionalTools prefix =
+                map stripResponsesLiteImageDetails normalizedItems
+            | otherwise = normalizedItems
+    in
     ResponseCreateParams
-        { input = Just (ResponseInputItems (map normalizeRequestItem items))
+        { input = Just
+            (ResponseInputItems
+                (prefix <> requestItems))
         , ..
         }
+
+requestInputPrefix :: Maybe ResponseInput -> [ResponseItem]
+requestInputPrefix = \case
+    Just (ResponseInputItems (firstItem : rest))
+        | isAdditionalTools firstItem ->
+            firstItem : takeWhile isBaseInstructions rest
+    Just ResponseInputItems{} -> []
+    Just ResponseInputText{} -> []
+    Nothing -> []
+
+isAdditionalTools :: ResponseItem -> Bool
+isAdditionalTools = \case
+    UnknownResponseItem TaggedObject { tag = "additional_tools" } -> True
+    _ -> False
+
+isBaseInstructions :: ResponseItem -> Bool
+isBaseInstructions = \case
+    MessageItem ResponseMessage { role = RoleDeveloper, extraFields } ->
+        case KeyMap.lookup
+                (Key.fromText "internal_chat_message_metadata_passthrough")
+                extraFields of
+            Just (Aeson.Object metadata) ->
+                case KeyMap.lookup
+                        (Key.fromText "content_item_kinds")
+                        metadata of
+                    Just (Aeson.Array kinds) ->
+                        Aeson.String "model.base_instructions" `elem` kinds
+                    _ -> False
+            _ -> False
+    _ -> False
+
+-- Responses Lite rejects image-detail hints. Match Codex by removing them
+-- from user messages and from image content embedded in tool outputs while
+-- preserving every other item field.
+stripResponsesLiteImageDetails :: ResponseItem -> ResponseItem
+stripResponsesLiteImageDetails = \case
+    MessageItem message ->
+        MessageItem ResponseMessage
+            { messageId = message.messageId
+            , content = case message.content of
+                MessageContentText text -> MessageContentText text
+                MessageContentParts parts ->
+                    MessageContentParts (map stripContentPart parts)
+            , role = message.role
+            , status = message.status
+            , phase = message.phase
+            , extraFields = message.extraFields
+            }
+    FunctionCallOutputItem callOutput ->
+        FunctionCallOutputItem FunctionCallOutput
+            { itemId = callOutput.itemId
+            , callId = callOutput.callId
+            , output = stripInputImageDetailValue callOutput.output
+            , status = callOutput.status
+            , extraFields = callOutput.extraFields
+            }
+    CustomToolCallOutputItem callOutput ->
+        CustomToolCallOutputItem CustomToolCallOutput
+            { itemId = callOutput.itemId
+            , callId = callOutput.callId
+            , name = callOutput.name
+            , output = stripInputImageDetailValue callOutput.output
+            , status = callOutput.status
+            , extraFields = callOutput.extraFields
+            }
+    item -> item
+  where
+    stripContentPart = \case
+        InputImagePart{..} -> InputImagePart { detail = Nothing, .. }
+        part -> part
+
+stripInputImageDetailValue :: Aeson.Value -> Aeson.Value
+stripInputImageDetailValue = \case
+    Aeson.Object object ->
+        let nested = KeyMap.map stripInputImageDetailValue object
+        in Aeson.Object $ case KeyMap.lookup (Key.fromText "type") nested of
+            Just (Aeson.String "input_image") ->
+                KeyMap.delete (Key.fromText "detail") nested
+            _ -> nested
+    Aeson.Array values ->
+        Aeson.Array (fmap stripInputImageDetailValue values)
+    value -> value
 
 -- Older local compaction snapshots accidentally persisted assistant summaries
 -- as input_text. Responses input accepts assistant history, but its content
