@@ -177,9 +177,10 @@ spec = describe "Agent.CLI.AgentSessions" do
     it "closes scoped children concurrently and rejects later launches" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "stopped"
-            script <- writeFakeAgentBody root
+            script <- writeFakeAgentBodyWithSetup root
                 ("trap 'printf stopped > " <> shellQuote marker
-                    <> "; exit 0' TERM INT\nsleep 30\n")
+                    <> "; exit 0' TERM INT\n")
+                "sleep 30\n"
             withExecutableOverride script do
                 handle <- createSession (testCreateAt pool root root)
                 manager <-
@@ -461,10 +462,16 @@ writeFakeAgent root = do
     writeFakeAgentBody root "sleep 0.2\nexit 0\n"
 
 writeFakeAgentBody :: OsPath -> String -> IO FilePath
-writeFakeAgentBody root body = do
+writeFakeAgentBody root =
+    writeFakeAgentBodyWithSetup root ""
+
+writeFakeAgentBodyWithSetup :: OsPath -> String -> String -> IO FilePath
+writeFakeAgentBodyWithSetup root setup body = do
     let path = toFilePath root FilePath.</> "fake-agent-cli"
     writeFile path $
-        "#!/bin/sh\nprintf 'ready\\n' > \"$HASKELL_AGENT_MANAGED_SESSION_READY\"\n"
+        "#!/bin/sh\n"
+            <> setup
+            <> "printf 'ready\\n' > \"$HASKELL_AGENT_MANAGED_SESSION_READY\"\n"
             <> body
     permissions <- Directory.getPermissions path
     Directory.setPermissions path permissions { Directory.executable = True }
