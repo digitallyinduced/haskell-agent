@@ -1,22 +1,36 @@
 -- | Tools for creating, inspecting, and continuing persisted top-level agent
--- sessions. Turns run in managed background @agent-cli@ processes so they are
--- independent from the caller's model loop while remaining resumable.
+-- sessions. CLI callers can run turns in tracked background threads, while
+-- gateways retain the managed @agent-cli@ process runner.
 module Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
+    , SessionThreadManager
+    , SessionProcessLifetime(..)
     , SessionProcessManager
     , agentSessionTools
+    , closeSessionThreadManager
     , closeSessionProcessManager
+    , launchSessionThread
+    , launchManagedTurn
+    , launchManagedTurnBounded
     , launchSessionTurn
+    , newSessionThreadManager
     , newSessionProcessManager
+    , newSessionProcessManagerWithLifetime
     , signalManagedSessionReady
+    , sessionThreadStatus
     , sessionProcessStatus
     ) where
 
 import Agent.CLI.Options (ApprovalPolicy(..))
+import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.Error (formatException)
+import Agent.Process
+    ( terminateProcessGroupWith
+    , terminateThenKillPolicy
+    )
 import Agent.CLI.Session
     ( SessionCreate(..)
-    , SessionActivity
+    , SessionActivity(..)
     , SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
@@ -36,6 +50,7 @@ import Agent.CLI.Models
     , ModelTarget(..)
     , resolveModelOptionDialect
     )
+import Agent.Concurrent (forConcurrentlyBounded_)
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Dialect
     ( DialectId
@@ -52,23 +67,38 @@ import Agent.Tools.Types
     , jsonTool
     )
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async
+    ( Async
+    , asyncWithUnmask
+    , cancel
+    , poll
+    , waitCatch
+    )
 import Control.Concurrent.MVar
     ( MVar
     , modifyMVar
     , modifyMVar_
+    , newEmptyMVar
     , newMVar
+    , putMVar
+    , readMVar
+    , takeMVar
     )
-import Control.Exception.Safe (SomeException, try)
-import Control.Monad (forM_)
-import Data.Aeson (FromJSON(..), Value, object, (.=))
-import qualified Data.Aeson as Aeson
+import Control.Exception.Safe
+    ( SomeException
+    , finally
+    , mask
+    , try
+    , tryAny
+    )
+import Control.Monad (void)
+import Data.Aeson (FromJSON(..), encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as TextIO
 import System.Directory
     ( findExecutable
@@ -86,10 +116,13 @@ import System.Process
     , ProcessHandle
     , StdStream(..)
     , createProcess
+    , getPid
     , getProcessExitCode
     , proc
+    , terminateProcess
     , waitForProcess
     )
+import qualified System.Timeout as Timeout
 
 data AgentSessionToolsEnv = AgentSessionToolsEnv
     { toolsPool :: !StorePool
@@ -106,21 +139,196 @@ data AgentSessionToolsEnv = AgentSessionToolsEnv
     , toolsSessionStatus :: !(Text -> IO Text)
     }
 
+data ManagedSessionThread
+    = ManagedSessionThreadRunning !(Async ())
+    | ManagedSessionThreadCompleted
+    | ManagedSessionThreadFailed !Text
+
+data SessionThreadManagerState = SessionThreadManagerState
+    { threadManagerClosed :: !Bool
+    , managedThreads :: !(Map Text ManagedSessionThread)
+    }
+
+data SessionThreadManager = SessionThreadManager
+    { threadManagerRoot :: !OsPath
+    , threadManagerState :: !(MVar SessionThreadManagerState)
+    }
+
 data ManagedSessionProcess
-    = ManagedSessionStarting
+    = ManagedSessionStarting !(MVar ())
     | ManagedSessionRunning !ProcessHandle
+
+data SessionProcessState = SessionProcessState
+    { sessionManagerLifecycle :: !SessionManagerLifecycle
+    , sessionManagerProcesses :: !(Map Text ManagedSessionProcess)
+    }
+
+data SessionManagerLifecycle
+    = SessionManagerOpen
+    | SessionManagerClosing !(MVar ())
+    | SessionManagerClosed
 
 data SessionProcessManager = SessionProcessManager
     { managedRoot :: !OsPath
-    , managedProcesses :: !(MVar (Map Text ManagedSessionProcess))
+    , managedProcesses :: !(MVar SessionProcessState)
+    , managedLifetime :: !SessionProcessLifetime
     }
 
+data SessionProcessLifetime
+    = DetachedSessionProcesses
+    | ScopedSessionProcesses
+    deriving (Eq, Show)
+
+newSessionThreadManager :: OsPath -> IO SessionThreadManager
+newSessionThreadManager root = do
+    state <- newMVar SessionThreadManagerState
+        { threadManagerClosed = False
+        , managedThreads = Map.empty
+        }
+    pure SessionThreadManager
+        { threadManagerRoot = root
+        , threadManagerState = state
+        }
+
+-- | Start one in-process background turn. The task is registered before it is
+-- allowed to execute, so shutdown can always cancel and join every live turn.
+launchSessionThread
+    :: SessionThreadManager
+    -> Text
+    -> IO (Either Text ())
+    -> IO (Either Text Text)
+launchSessionThread manager sessionId action =
+    mask \_ -> do
+        launched <- modifyMVar manager.threadManagerState \state ->
+            if state.threadManagerClosed
+                then pure (state, Left "agent session manager is closed")
+                else case Map.lookup sessionId state.managedThreads of
+                    Just (ManagedSessionThreadRunning _) ->
+                        pure
+                            ( state
+                            , Left
+                                ("session " <> sessionId
+                                    <> " is already running")
+                            )
+                    _ -> do
+                        gate <- newEmptyMVar
+                        started <- tryAny $
+                            asyncWithUnmask \unmask -> do
+                                takeMVar gate
+                                result <- tryAny (unmask action)
+                                let terminal = case result of
+                                        Left err ->
+                                            ManagedSessionThreadFailed
+                                                (formatException err)
+                                        Right (Left err) ->
+                                            ManagedSessionThreadFailed err
+                                        Right (Right ()) ->
+                                            ManagedSessionThreadCompleted
+                                modifyMVar_ manager.threadManagerState \current ->
+                                    pure $
+                                        if current.threadManagerClosed
+                                            then current
+                                            else current
+                                                { managedThreads =
+                                                    Map.insert
+                                                        sessionId
+                                                        terminal
+                                                        current.managedThreads
+                                                }
+                        case started of
+                            Left err ->
+                                pure
+                                    ( state
+                                    , Left
+                                        ("failed to start agent session: "
+                                            <> formatException err)
+                                    )
+                            Right worker -> do
+                                let running = state
+                                        { managedThreads =
+                                            Map.insert
+                                                sessionId
+                                                (ManagedSessionThreadRunning worker)
+                                                state.managedThreads
+                                        }
+                                putMVar gate ()
+                                pure
+                                    ( running
+                                    , Right ("started session " <> sessionId)
+                                    )
+        pure launched
+
+sessionThreadStatus :: SessionThreadManager -> Text -> IO Text
+sessionThreadStatus manager sessionId =
+    modifyMVar manager.threadManagerState \state ->
+        case Map.lookup sessionId state.managedThreads of
+            Nothing -> do
+                locked <- lockIsActive
+                pure (state, if locked then "running" else "idle")
+            Just (ManagedSessionThreadRunning worker) ->
+                poll worker >>= \case
+                    Nothing -> pure (state, "running")
+                    Just (Right ()) ->
+                        terminalStatus state "completed"
+                    Just (Left err) ->
+                        terminalStatus
+                            state
+                            ("failed (" <> formatException err <> ")")
+            Just ManagedSessionThreadCompleted ->
+                terminalStatus state "completed"
+            Just (ManagedSessionThreadFailed err) ->
+                terminalStatus state ("failed (" <> err <> ")")
+  where
+    lockIsActive =
+        sessionLockIsActive
+            (sessionLockPath
+                (manager.threadManagerRoot
+                    </> unsafeEncodeUtf (Text.unpack sessionId)))
+    terminalStatus state terminal = do
+        locked <- lockIsActive
+        pure
+            ( state
+                { managedThreads =
+                    Map.delete sessionId state.managedThreads
+                }
+            , if locked then "running" else terminal
+            )
+
+closeSessionThreadManager :: SessionThreadManager -> IO ()
+closeSessionThreadManager manager = do
+    workers <- modifyMVar manager.threadManagerState \state ->
+        let running =
+                [ worker
+                | ManagedSessionThreadRunning worker <-
+                    Map.elems state.managedThreads
+                ]
+        in pure
+            ( state
+                { threadManagerClosed = True
+                , managedThreads = Map.empty
+                }
+            , running
+            )
+    mapM_ cancel workers
+    mapM_ (void . waitCatch) workers
+
 newSessionProcessManager :: OsPath -> IO SessionProcessManager
-newSessionProcessManager root = do
-    processes <- newMVar Map.empty
+newSessionProcessManager =
+    newSessionProcessManagerWithLifetime DetachedSessionProcesses
+
+newSessionProcessManagerWithLifetime
+    :: SessionProcessLifetime
+    -> OsPath
+    -> IO SessionProcessManager
+newSessionProcessManagerWithLifetime lifetime root = do
+    processes <- newMVar SessionProcessState
+        { sessionManagerLifecycle = SessionManagerOpen
+        , sessionManagerProcesses = Map.empty
+        }
     pure SessionProcessManager
         { managedRoot = root
         , managedProcesses = processes
+        , managedLifetime = lifetime
         }
 
 -- | Start one background turn for a persisted session. A second turn is
@@ -136,25 +344,59 @@ launchSessionTurn
     -> Text
     -> IO (Either Text Text)
 launchSessionTurn manager background policy ghciEnabled bashEnabled handle message =
+    launchSessionTurnInput
+        manager
+        background
+        policy
+        ghciEnabled
+        bashEnabled
+        Nothing
+        handle
+        (ManagedTextInput message)
+
+data ManagedTurnInput
+    = ManagedTextInput !Text
+    | ManagedRequestInput !ManagedTurnRequest
+
+launchSessionTurnInput
+    :: SessionProcessManager
+    -> Bool
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> Maybe Int
+    -> SessionHandle
+    -> ManagedTurnInput
+    -> IO (Either Text Text)
+launchSessionTurnInput
+        manager background policy ghciEnabled bashEnabled turnTimeout handle input =
     resolveAgentExecutable >>= \case
         Left err -> pure (Left err)
         Right executable -> do
             let sessionId = handle.sessionMeta.metaId
-            reserved <- modifyMVar manager.managedProcesses \processes -> do
-                busy <- case Map.lookup sessionId processes of
+            completion <- newEmptyMVar
+            reserved <- modifyMVar manager.managedProcesses \state -> do
+                busy <- case Map.lookup sessionId state.sessionManagerProcesses of
                     Nothing -> pure False
-                    Just ManagedSessionStarting -> pure True
+                    Just ManagedSessionStarting{} -> pure True
                     Just (ManagedSessionRunning managedHandle) ->
                         (== Nothing) <$> getProcessExitCode managedHandle
-                if busy
-                    then pure (processes, False)
+                if not (sessionManagerIsOpen state) || busy
+                    then pure (state, False)
                     else pure
-                        ( Map.insert sessionId ManagedSessionStarting processes
+                        ( state
+                            { sessionManagerProcesses =
+                                Map.insert
+                                    sessionId
+                                    (ManagedSessionStarting completion)
+                                    state.sessionManagerProcesses
+                            }
                         , True
                         )
             if not reserved
-                then pure (Left ("session " <> sessionId <> " is already running"))
-                else do
+                then pure (Left ("session " <> sessionId
+                    <> " is already running or its process manager is closed"))
+                else (`finally` putMVar completion ()) do
                     started <- try @_ @SomeException
                         (startManagedSession executable)
                     case started of
@@ -167,32 +409,65 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
                             forgetSession manager sessionId
                             pure (Left err)
                         Right (Right process) -> do
-                            modifyMVar_ manager.managedProcesses \processes ->
-                                pure (Map.insert sessionId
-                                    (ManagedSessionRunning process)
-                                    processes)
-                            if background
-                                then pure (Right ("started session " <> sessionId))
-                                else do
-                                    exitCode <- waitForProcess process
-                                    forgetSession manager sessionId
-                                    pure case exitCode of
-                                        ExitSuccess ->
-                                            Right ("completed session " <> sessionId)
-                                        ExitFailure code ->
-                                            Left
-                                                ("session failed with exit code "
-                                                    <> Text.pack (show code))
+                            published <-
+                                modifyMVar manager.managedProcesses \state ->
+                                    if not (sessionManagerIsOpen state)
+                                        then pure (state, False)
+                                        else pure
+                                            ( state
+                                                { sessionManagerProcesses =
+                                                    Map.insert sessionId
+                                                        (ManagedSessionRunning process)
+                                                        state.sessionManagerProcesses
+                                                }
+                                            , True
+                                            )
+                            if not published
+                                then do
+                                    terminateManagedProcess process
+                                    pure (Left
+                                        "session process manager closed during startup")
+                                else if background
+                                    then pure (Right ("started session " <> sessionId))
+                                    else do
+                                        exitResult <- case turnTimeout of
+                                            Nothing ->
+                                                Right <$> waitForProcess process
+                                            Just micros ->
+                                                Timeout.timeout micros
+                                                    (waitForManagedExit process)
+                                                        >>= \case
+                                                            Nothing -> do
+                                                                terminateManagedProcess
+                                                                    process
+                                                                pure (Left
+                                                                    "agent session timed out")
+                                                            Just exitCode ->
+                                                                pure (Right exitCode)
+                                        forgetSession manager sessionId
+                                        pure case exitResult of
+                                            Left err -> Left err
+                                            Right ExitSuccess ->
+                                                Right
+                                                    ("completed session " <> sessionId)
+                                            Right (ExitFailure code) ->
+                                                Left
+                                                    ("session failed with exit code "
+                                                        <> Text.pack (show code))
   where
     sessionId = handle.sessionMeta.metaId
 
     startManagedSession executable = do
         parentEnv <- getEnvironment
-        (promptPath, promptHandle) <- openTempFile
-            (unsafeToFilePath handle.sessionDir) ".agent-prompt-"
-        TextIO.hPutStr promptHandle message
-        hClose promptHandle
-        setFileMode promptPath 0o600
+        (inputPath, inputHandle) <- openTempFile
+            (unsafeToFilePath handle.sessionTempDir) ".agent-turn-"
+        case input of
+            ManagedTextInput message ->
+                TextIO.hPutStr inputHandle message
+            ManagedRequestInput request ->
+                LBS.hPut inputHandle (encode request)
+        hClose inputHandle
+        setFileMode inputPath 0o600
         (readyPath, readyHandle) <- openTempFile
             (unsafeToFilePath handle.sessionDir) ".agent-ready-"
         hClose readyHandle
@@ -207,13 +482,17 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
             logPath = unsafeToFilePath handle.sessionDir FilePath.</> "agent.log"
             approvalArgs = case policy of
                 ApproveAll -> ["--yolo"]
-                DenyMutating -> ["--no-yolo"]
+                DenyMutating -> ["--managed-deny-mutations"]
                 PromptMutating -> ["--no-yolo"]
+            inputArgs = case input of
+                ManagedTextInput _ -> ["--prompt-file", inputPath]
+                ManagedRequestInput _ -> ["--managed-turn-file", inputPath]
             agentArgs =
                 [ "--resume", Text.unpack sessionId
-                , "--prompt-file", promptPath
-                , "--save-session"
                 ]
+                    <> inputArgs
+                    <> [ "--save-session"
+                       ]
                     <> approvalArgs
                     <> ["--no-ghci" | not ghciEnabled]
                     <> ["--bash" | bashEnabled]
@@ -225,7 +504,7 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
             args =
                 [ "-c", cleanupScript
                 , "agent-session-runner"
-                , promptPath
+                , inputPath
                 , executable
                 ]
                     <> agentArgs
@@ -242,12 +521,19 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
                     }
         case started of
             Left err -> do
-                removePrivateFile promptPath
+                removePrivateFile inputPath
                 removePrivateFile readyPath
                 pure $ Left
                     ("failed to start agent session: " <> formatException err)
             Right (_, _, _, process) -> do
-                ready <- waitForManagedSessionReady process readyPath
+                ready <- Timeout.timeout 30_000_000
+                    (waitForManagedSessionReady process readyPath) >>= \case
+                        Nothing -> do
+                            _ <- try @_ @SomeException (terminateProcess process)
+                            _ <- try @_ @SomeException (waitForProcess process)
+                            pure (Left
+                                "agent session did not become ready within 30 seconds")
+                        Just result -> pure result
                 removePrivateFile readyPath
                 case ready of
                     Left err -> do
@@ -255,10 +541,57 @@ launchSessionTurn manager background policy ghciEnabled bashEnabled handle messa
                         pure (Left err)
                     Right () -> pure (Right process)
 
+-- | Launch a structured gateway turn through the private request-file
+-- interface, without exposing gateway credentials to the child.
+launchManagedTurn
+    :: SessionProcessManager
+    -> Bool
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> SessionHandle
+    -> ManagedTurnRequest
+    -> IO (Either Text Text)
+launchManagedTurn manager background policy ghciEnabled bashEnabled handle request =
+    launchManagedTurnBounded
+        manager
+        background
+        policy
+        ghciEnabled
+        bashEnabled
+        Nothing
+        handle
+        request
+
+launchManagedTurnBounded
+    :: SessionProcessManager
+    -> Bool
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> Maybe Int
+    -> SessionHandle
+    -> ManagedTurnRequest
+    -> IO (Either Text Text)
+launchManagedTurnBounded
+        manager background policy ghciEnabled bashEnabled turnTimeout handle request =
+    launchSessionTurnInput
+        manager
+        background
+        policy
+        ghciEnabled
+        bashEnabled
+        turnTimeout
+        handle
+        (ManagedRequestInput request)
+
 forgetSession :: SessionProcessManager -> Text -> IO ()
 forgetSession manager sessionId =
     modifyMVar_ manager.managedProcesses
-        (pure . Map.delete sessionId)
+        (\state -> pure state
+            { sessionManagerProcesses =
+                Map.delete sessionId state.sessionManagerProcesses
+            })
 
 gatewayOnlyEnv :: [String]
 gatewayOnlyEnv =
@@ -268,42 +601,102 @@ gatewayOnlyEnv =
 
 sessionProcessStatus :: SessionProcessManager -> Text -> IO Text
 sessionProcessStatus manager sessionId =
-    modifyMVar manager.managedProcesses \processes ->
-        case Map.lookup sessionId processes of
+    modifyMVar manager.managedProcesses \state ->
+        case Map.lookup sessionId state.sessionManagerProcesses of
             Nothing -> do
                 locked <- sessionLockIsActive
                     (sessionLockPath
                         (manager.managedRoot
                             </> unsafeEncodeUtf (Text.unpack sessionId)))
-                pure (processes, if locked then "running" else "idle")
-            Just ManagedSessionStarting ->
-                pure (processes, "running")
+                pure (state, if locked then "running" else "idle")
+            Just ManagedSessionStarting{} ->
+                pure (state, "running")
             Just (ManagedSessionRunning managedHandle) ->
                 getProcessExitCode managedHandle >>= \case
-                    Nothing -> pure (processes, "running")
+                    Nothing -> pure (state, "running")
                     Just ExitSuccess ->
-                        pure (Map.delete sessionId processes, "completed")
+                        pure
+                            ( state
+                                { sessionManagerProcesses =
+                                    Map.delete sessionId
+                                        state.sessionManagerProcesses
+                                }
+                            , "completed"
+                            )
                     Just (ExitFailure code) ->
                         pure
-                            ( Map.delete sessionId processes
+                            ( state
+                                { sessionManagerProcesses =
+                                    Map.delete sessionId
+                                        state.sessionManagerProcesses
+                                }
                             , "failed (" <> Text.pack (show code) <> ")"
                             )
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
-closeSessionProcessManager manager =
-    modifyMVar_ manager.managedProcesses \processes -> do
-        -- Running sessions intentionally outlive the caller. The child owns
-        -- the advisory session lock; its wrapper owns prompt cleanup.
-        forM_ (Map.elems processes) \case
-            ManagedSessionStarting -> pure ()
-            ManagedSessionRunning managedHandle ->
-                getProcessExitCode managedHandle >>= \case
-                    Just _ -> do
-                        _ <- try @_ @SomeException
-                            (waitForProcess managedHandle)
-                        pure ()
-                    Nothing -> pure ()
-        pure Map.empty
+closeSessionProcessManager manager = do
+    decision <- modifyMVar manager.managedProcesses \state ->
+        case state.sessionManagerLifecycle of
+            SessionManagerClosed -> pure (state, Left Nothing)
+            SessionManagerClosing completion ->
+                pure (state, Left (Just completion))
+            SessionManagerOpen -> do
+                completion <- newEmptyMVar
+                pure
+                    ( state
+                        { sessionManagerLifecycle =
+                            SessionManagerClosing completion
+                        , sessionManagerProcesses = Map.empty
+                        }
+                    , Right
+                        ( completion
+                        , Map.elems state.sessionManagerProcesses
+                        )
+                    )
+    case decision of
+        Left Nothing -> pure ()
+        Left (Just completion) -> readMVar completion
+        Right (completion, processes) ->
+            closeProcesses processes `finally` do
+                modifyMVar_ manager.managedProcesses \state ->
+                    pure state
+                        { sessionManagerLifecycle = SessionManagerClosed
+                        }
+                putMVar completion ()
+  where
+    closeProcesses processes = do
+        let waitStarting = \case
+                ManagedSessionStarting completion -> readMVar completion
+                ManagedSessionRunning _ -> pure ()
+            closeRunning = \case
+                ManagedSessionStarting{} -> pure ()
+                ManagedSessionRunning managedHandle ->
+                    getProcessExitCode managedHandle >>= \case
+                        Just _ ->
+                            void $ try @_ @SomeException
+                                (waitForProcess managedHandle)
+                        Nothing ->
+                            case manager.managedLifetime of
+                                DetachedSessionProcesses -> pure ()
+                                ScopedSessionProcesses ->
+                                    terminateManagedProcess managedHandle
+        forConcurrentlyBounded_ 8 waitStarting processes
+        forConcurrentlyBounded_ 8 closeRunning processes
+
+sessionManagerIsOpen :: SessionProcessState -> Bool
+sessionManagerIsOpen state =
+    case state.sessionManagerLifecycle of
+        SessionManagerOpen -> True
+        SessionManagerClosing{} -> False
+        SessionManagerClosed -> False
+
+waitForManagedExit :: ProcessHandle -> IO ExitCode
+waitForManagedExit = waitForProcess
+
+terminateManagedProcess :: ProcessHandle -> IO ()
+terminateManagedProcess process = do
+    processGroup <- getPid process
+    terminateProcessGroupWith terminateThenKillPolicy processGroup process
 
 signalManagedSessionReady :: Either Text () -> IO ()
 signalManagedSessionReady result =
@@ -383,7 +776,7 @@ instance FromJSON CreateAgentSessionArgs where
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
     "create_agent_session"
-    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id immediately."
+    "Create a persisted top-level agent session and start its first turn in the background. Returns the session id and status as readable text."
     [ PropertySchema "message" PropertyString True $ Just
         "Initial task or message for the new agent session."
     , PropertySchema "title" PropertyString False $ Just
@@ -467,7 +860,7 @@ instance FromJSON ReadAgentSessionArgs where
 readAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 readAgentSessionTool env = jsonTool
     "read_agent_session"
-    "Read metadata and recent user/assistant turns from a persisted agent session."
+    "Read metadata and recent user/assistant turns from a persisted agent session as readable labeled text."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted session id returned by create_agent_session or shown by /session."
     , PropertySchema "limit" PropertyInteger False $ Just
@@ -492,10 +885,7 @@ runReadAgentSession env args =
                     else pure Nothing
             let limit = min 100 (max 1 (fromMaybe 20 args.limit))
                 recent = drop (max 0 (length turns - limit)) turns
-            pure $ Right $ encodeJson $ object
-                [ "session" .= sessionJson meta status activity
-                , "turns" .= map turnJson recent
-                ]
+            pure $ Right $ renderAgentSession meta status activity recent
 
 data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     { sessionId :: Text
@@ -510,7 +900,7 @@ instance FromJSON SendAgentSessionMessageArgs where
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
     "send_agent_session_message"
-    "Send a message to a persisted agent session by starting a resumed background turn. Fails if that session is already running."
+    "Send a message to a persisted agent session by starting a resumed background turn. Returns the session id and status as readable text; fails if that session is already running."
     [ PropertySchema "session_id" PropertyString True $ Just
         "Persisted target session id."
     , PropertySchema "message" PropertyString True $ Just
@@ -550,10 +940,7 @@ launchToolSessionTurn env handle message =
         Right launchResult -> do
             let sessionId = handle.sessionMeta.metaId
             status <- statusAfterLaunch env sessionId launchResult
-            pure $ Right $ encodeJson $ object
-                [ "session_id" .= sessionId
-                , "status" .= status
-                ]
+            pure $ Right $ renderSessionLaunch sessionId status
 
 sessionHandle :: StorePool -> OsPath -> SessionMeta -> SessionHandle
 sessionHandle pool root meta =
@@ -577,29 +964,66 @@ statusAfterLaunch env sessionId launchResult
     | "completed session " `Text.isPrefixOf` launchResult = pure "completed"
     | otherwise = env.toolsSessionStatus sessionId
 
-sessionJson :: SessionMeta -> Text -> Maybe SessionActivity -> Value
-sessionJson meta status activity = object
-    [ "id" .= meta.metaId
-    , "status" .= status
-    , "title" .= meta.metaTitle
-    , "provider" .= providerSlug meta.metaProvider
-    , "connection" .= meta.metaConnection
-    , "model" .= meta.metaModel
-    , "dialect" .= dialectSlug meta.metaDialect
-    , "reasoning_effort" .= meta.metaEffort
-    , "cwd" .= unsafeToFilePath meta.metaCwd
-    , "created_at" .= meta.metaCreatedAt
-    , "updated_at" .= meta.metaUpdatedAt
-    , "activity" .= activity
-    ]
+renderSessionLaunch :: Text -> Text -> Text
+renderSessionLaunch sessionId status =
+    "Session: " <> sessionId <> "\nStatus: " <> status
 
-turnJson :: SessionTurn -> Value
-turnJson turn = object
-    [ "at" .= turn.turnAt
-    , "user" .= turn.turnUserText
-    , "assistant" .= turn.turnAssistantText
-    , "error" .= turn.turnError
-    ]
+renderAgentSession
+    :: SessionMeta
+    -> Text
+    -> Maybe SessionActivity
+    -> [SessionTurn]
+    -> Text
+renderAgentSession meta status activity turns =
+    Text.intercalate "\n" $
+        [ "Session"
+        , "  ID: " <> meta.metaId
+        , "  Status: " <> status
+        , "  Title: " <> meta.metaTitle
+        , "  Provider: " <> providerSlug meta.metaProvider
+        , "  Connection: " <> meta.metaConnection
+        , "  Model: " <> meta.metaModel
+        , "  Dialect: " <> dialectSlug meta.metaDialect
+        , "  Reasoning effort: " <> meta.metaEffort
+        , "  Working directory: " <> Text.pack (unsafeToFilePath meta.metaCwd)
+        , "  Created at: " <> Text.pack (show meta.metaCreatedAt)
+        , "  Updated at: " <> Text.pack (show meta.metaUpdatedAt)
+        ]
+            <> maybe [] renderActivity activity
+            <> ["", "Recent turns: " <> Text.pack (show (length turns))]
+            <> case turns of
+                [] -> ["  (none)"]
+                _ -> [""] <> intercalateBlank
+                    (zipWith renderSessionTurn [1 :: Int ..] turns)
 
-encodeJson :: Value -> Text
-encodeJson = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
+renderActivity :: SessionActivity -> [Text]
+renderActivity activity =
+    [ ""
+    , "Current activity"
+    , "  Kind: " <> activity.activityKind
+    , "  Message: " <> activity.activityMessage
+    ]
+        <> maybe []
+            (\retryAt -> ["  Retry at: " <> Text.pack (show retryAt)])
+            activity.activityRetryAt
+        <> ["  Updated at: " <> Text.pack (show activity.activityUpdatedAt)]
+
+renderSessionTurn :: Int -> SessionTurn -> [Text]
+renderSessionTurn index turn =
+    [ "Turn " <> Text.pack (show index)
+    , "At: " <> Text.pack (show turn.turnAt)
+    , "User:"
+    , indentText turn.turnUserText
+    ]
+        <> maybe [] (\text -> ["Assistant:", indentText text])
+            turn.turnAssistantText
+        <> maybe [] (\text -> ["Error:", indentText text])
+            turn.turnError
+
+intercalateBlank :: [[Text]] -> [Text]
+intercalateBlank = \case
+    [] -> []
+    first : rest -> first <> concatMap ("" :) rest
+
+indentText :: Text -> Text
+indentText = Text.intercalate "\n" . map ("  " <>) . Text.lines

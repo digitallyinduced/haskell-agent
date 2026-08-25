@@ -1,6 +1,15 @@
 module Agent.CLI.LearnedSkillsSpec (spec) where
 
+import Agent.CLI (learnAboutUserOnboardingPrompt)
+import Agent.CLI.Database (DatabaseScope(..))
 import Agent.CLI.LearnedSkills
+import Agent.Skills
+    ( Skill(..)
+    , SkillContextMode(..)
+    , SkillInvocation(..)
+    , SkillOrigin(..)
+    , SkillScope(..)
+    )
 import Agent.Store.Postgres.Scope
     ( Scope(..)
     , ScopeKind(..)
@@ -29,16 +38,18 @@ import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime)
+import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec
 
 spec :: Spec
 spec = do
     describe "learnedSkillTools" do
         it "registers read-only search/read and approved sequential mutations" do
-            let tools = learnedSkillTools testEnv
+            invocationsRef <- newIORef []
+            let tools = learnedSkillTools invocationsRef testEnv
             map (.appToolName) tools `shouldBe`
                 [ "skill_search"
-                , "skill_read"
+                , "view_skill"
                 , "skill_create"
                 , "skill_update"
                 , "skill_archive"
@@ -64,6 +75,7 @@ spec = do
         it "dispatches search and create requests to the environment" do
             searchSeen <- newIORef Nothing
             createSeen <- newIORef Nothing
+            invocationsRef <- newIORef []
             let env = testEnv
                     { learnedSkillSearch = \query limit -> do
                         writeIORef searchSeen (Just (query, limit))
@@ -73,11 +85,11 @@ spec = do
                         pure (Right (object ["status" .= ("applied" :: Text)]))
                     }
             searchResult <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools env))
+                (appToolHandlers (learnedSkillTools invocationsRef env))
                 (functionToolCall "call-1" "skill_search"
                     "{\"query\":\"postgres session\",\"limit\":4}")
             createResult <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools env))
+                (appToolHandlers (learnedSkillTools invocationsRef env))
                 (functionToolCall "call-2" "skill_create"
                     "{\"scope\":\"repository\",\
                         \\"slug\":\"postgres-session\",\
@@ -94,8 +106,37 @@ spec = do
             searchResult.output `shouldContainText` "\"matches\""
             createResult.output `shouldContainText` "\"applied\""
 
+        it "views filesystem and learned skills through one lazy-loading tool" do
+            learnedSeen <- newIORef Nothing
+            invocationsRef <- newIORef
+                [SkillInvocation "deploy" filesystemSkill True]
+            let env = testEnv
+                    { learnedSkillRead = \scope slug revision -> do
+                        writeIORef learnedSeen (Just (scope, slug, revision))
+                        pure (Right (object
+                            [ "instructions" .= ("Learned body" :: Text)
+                            ]))
+                    }
+                handlers =
+                    appToolHandlers (learnedSkillTools invocationsRef env)
+            filesystemResult <- dispatchToolCall dispatchConfig handlers
+                (functionToolCall "call-view-file" "view_skill"
+                    "{\"name\":\"$deploy\"}")
+            learnedResult <- dispatchToolCall dispatchConfig handlers
+                (functionToolCall "call-view-learned" "view_skill"
+                    "{\"name\":\"postgres-session\",\
+                    \\"scope\":\"repository\",\
+                    \\"revision\":2}")
+            filesystemResult.output `shouldContainText` "\"kind\":\"filesystem\""
+            filesystemResult.output `shouldContainText`
+                "\"instructions\":\"Deploy carefully.\""
+            readIORef learnedSeen `shouldReturn`
+                Just (DatabaseRepositoryScope, "postgres-session", Just 2)
+            learnedResult.output `shouldContainText` "\"Learned body\""
+
         it "rejects invalid mutations before calling storage" do
             called <- newIORef False
+            invocationsRef <- newIORef []
             let env = testEnv
                     { learnedSkillCreate = \_ -> do
                         writeIORef called True
@@ -105,7 +146,7 @@ spec = do
                         pure (Right (object []))
                     }
             badSlug <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools env))
+                (appToolHandlers (learnedSkillTools invocationsRef env))
                 (functionToolCall "call-3" "skill_create"
                     "{\"scope\":\"user\",\
                     \\"slug\":\"Bad Slug\",\
@@ -119,7 +160,7 @@ spec = do
             badSlug.output `shouldContainText` "lowercase ASCII"
 
             emptyEvidence <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools env))
+                (appToolHandlers (learnedSkillTools invocationsRef env))
                 (functionToolCall "call-4" "skill_create"
                     "{\"scope\":\"user\",\
                     \\"slug\":\"valid-skill\",\
@@ -133,7 +174,7 @@ spec = do
             emptyEvidence.output `shouldContainText` "evidence must not be empty"
 
             noOp <- dispatchToolCall dispatchConfig
-                (appToolHandlers (learnedSkillTools env))
+                (appToolHandlers (learnedSkillTools invocationsRef env))
                 (functionToolCall "call-5" "skill_update"
                     "{\"scope\":\"user\",\
                     \\"slug\":\"valid-skill\",\
@@ -200,6 +241,34 @@ spec = do
             rendered `shouldNotContainText` "Broad instructions"
             omitted `shouldBe` 0
 
+        it "injects an always-loaded user technical profile in startup context" do
+            let
+                profile =
+                    (skill "user-technical-profile" SkillAlways)
+                        { learnedSkillScope = testScope UserScope
+                        , learnedSkillInstructions =
+                            "Prefer Nix flakes and fast GHCi iteration."
+                        }
+                (context, omitted) =
+                    formatLearnedSkillContext 8000 [profile]
+                rendered = maybe "" id context
+            rendered `shouldContainText` "user-technical-profile"
+            rendered `shouldContainText`
+                "Prefer Nix flakes and fast GHCi iteration."
+            omitted `shouldBe` 0
+
+    describe "learnAboutUserOnboardingPrompt" do
+        it "starts the skill when no technical profile exists" do
+            learnAboutUserOnboardingPrompt []
+                `shouldSatisfy` maybe False (Text.isInfixOf "$learn-about-user")
+
+        it "does not repeat onboarding when the profile already exists" do
+            let profile =
+                    (skill "user-technical-profile" SkillAlways)
+                        { learnedSkillScope = testScope UserScope
+                        }
+            learnAboutUserOnboardingPrompt [profile] `shouldBe` Nothing
+
 testEnv :: LearnedSkillToolsEnv
 testEnv = LearnedSkillToolsEnv
     { learnedSkillSearch = \_ _ -> pure (Right (object []))
@@ -248,6 +317,33 @@ testScope kind =
 
 timestamp :: UTCTime
 timestamp = read "2026-08-24 15:00:00 UTC"
+
+filesystemSkill :: Skill
+filesystemSkill = Skill
+    { skillName = "deploy"
+    , skillDescription = "Deploy the service"
+    , skillDisplayName = Just "Deploy"
+    , skillShortDescription = Nothing
+    , skillDefaultPrompt = Nothing
+    , skillWhenToUse = Just "When releasing"
+    , skillContextMode = SkillContextOnDemand
+    , skillArgumentHint = Nothing
+    , skillUserInvocable = True
+    , skillModelInvocable = True
+    , skillAllowedTools = []
+    , skillModelOverride = Nothing
+    , skillEffortOverride = Nothing
+    , skillLicense = Nothing
+    , skillCompatibility = Nothing
+    , skillMetadata = mempty
+    , skillPath = unsafeEncodeUtf "/tmp/deploy/SKILL.md"
+    , skillDirectory = unsafeEncodeUtf "/tmp/deploy"
+    , skillBody = "Deploy carefully."
+    , skillFileText =
+        "---\nname: deploy\ndescription: Deploy the service\n---\nDeploy carefully."
+    , skillScope = UserSkill
+    , skillOrigin = AgentSkills
+    }
 
 shouldContainText :: Text -> Text -> Expectation
 shouldContainText actual expected =

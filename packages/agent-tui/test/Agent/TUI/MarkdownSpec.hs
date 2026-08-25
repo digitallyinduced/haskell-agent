@@ -2,12 +2,20 @@ module Agent.TUI.MarkdownSpec (spec) where
 
 import Agent.TUI.Markdown
 import Agent.Syntax (loadSyntaxHighlighterFrom)
-import Agent.TUI.TextWidth (displayCharCellWidth)
+import Agent.TUI.TextWidth
+    ( displayTerminalText
+    , graphemeCellWidth
+    , graphemeClusters
+    )
 import qualified Agent.TUI.Theme as Theme
 import Brick
     ( (<=>)
+    , Extent(..)
+    , Location(..)
+    , RenderState
     , ViewportType(..)
     , Widget
+    , renderFinal
     , renderWidget
     , txt
     , viewport
@@ -16,7 +24,7 @@ import Brick.AttrMap (attrMapLookup)
 import Control.Monad (forM_)
 import Data.Char (isControl)
 import Data.Foldable (toList)
-import Data.List (find, findIndex, isInfixOf)
+import Data.List (find, findIndex, isInfixOf, sortOn)
 import qualified Data.Text as Text
 import qualified Data.Text.Lazy as LazyText
 import qualified Graphics.Vty as V
@@ -54,6 +62,41 @@ spec = describe "fullscreen Markdown rendering" do
             spans = concat (renderSpanRows 100 ("PR: " <> url))
         spans `shouldSatisfy` any (hasUrl url)
 
+    it "registers application click targets for links" do
+        let url = "https://example.com/docs"
+            widget :: Widget Text.Text
+            widget = markdownWidgetWithLinks id ("Read [docs](" <> url <> ")")
+            (_, _, _, extents) =
+                renderFinal
+                    Theme.terminalDefault
+                    [widget]
+                    (40, 3)
+                    (const Nothing)
+                    emptyRenderState
+        map
+            (\extent ->
+                ( extentName extent
+                , extentUpperLeft extent
+                , extentSize extent
+                ))
+            extents
+            `shouldContain` [(url, Location (5, 0), (31, 1))]
+
+    it "registers a click target for every wrapped link fragment" do
+        let url = "https://example.com/abcdefgh"
+            widget :: Widget Text.Text
+            widget = markdownWidgetWithLinks id url
+            (_, _, _, extents) =
+                renderFinal
+                    Theme.terminalDefault
+                    [widget]
+                    (10, 4)
+                    (const Nothing)
+                    emptyRenderState
+        let ordered = sortOn extentUpperLeft extents
+        map extentName ordered `shouldBe` replicate 3 url
+        map extentSize ordered `shouldBe` [(10, 1), (10, 1), (8, 1)]
+
     it "keeps a wide inline glyph inside a one-cell render context" do
         let image =
                 V.picImage $
@@ -63,6 +106,24 @@ spec = describe "fullscreen Markdown rendering" do
                         (1, 2)
         V.imageWidth image `shouldSatisfy` (<= 1)
         V.imageHeight image `shouldSatisfy` (<= 2)
+
+    it "safely substitutes unsupported ZWJ widths without corrupting rows" do
+        let family =
+                Text.pack
+                    [ '\x1f468'
+                    , '\x200d'
+                    , '\x1f469'
+                    , '\x200d'
+                    , '\x1f467'
+                    , '\x200d'
+                    , '\x1f466'
+                    ]
+            input = "a" <> family <> "b"
+            displayed = displayTerminalText input
+            rows = renderRows 4 input
+        displayed `shouldBe` "a？b"
+        rows `shouldBe` [displayed]
+        map rowDisplayWidth rows `shouldBe` [4]
 
     it "parses links nested inside strong and emphasis spans" do
         parseInline
@@ -461,10 +522,24 @@ spec = describe "fullscreen Markdown rendering" do
                     \| combining | é |"
                 rows = renderRows 80 input
                 plain = Text.unlines rows
-            plain `shouldSatisfy` Text.isInfixOf "漢字🙂"
+            plain `shouldSatisfy`
+                Text.isInfixOf (displayTerminalText "漢字🙂")
             plain `shouldSatisfy` Text.isInfixOf "é"
             map rowDisplayWidth rows
                 `shouldSatisfy` allEqual
+
+        it "measures visible replacements when table cells contain controls" do
+            let standaloneTag = Text.singleton '\xe0067'
+                input =
+                    "| Kind | Value |\n\
+                    \| --- | --- |\n\
+                    \| control | \BEL |\n\
+                    \| format | " <> standaloneTag <> " |"
+                rows = renderRows 80 input
+                plain = Text.unlines rows
+            plain `shouldSatisfy` Text.isInfixOf "␇"
+            plain `shouldSatisfy` Text.isInfixOf "�"
+            map rowDisplayWidth rows `shouldSatisfy` allEqual
 
         it "keeps escaped and code-span pipes inside their cells" do
             let input =
@@ -653,6 +728,14 @@ renderSpanRows width input =
                     (renderWidget Nothing [widget] region)
                     region
 
+emptyRenderState :: (Ord n, Read n) => RenderState n
+emptyRenderState =
+    read
+        "RS {viewportMap = fromList [], rsScrollRequests = [], \
+        \observedNames = fromList [], renderCache = fromList [], \
+        \clickableNames = [], requestedVisibleNames_ = fromList [], \
+        \reportedExtents = fromList []}"
+
 spanRowText :: [SpanOp] -> Text.Text
 spanRowText =
     Text.dropWhileEnd (== ' ')
@@ -665,18 +748,16 @@ spanRowText =
 
 rowDisplayWidth :: Text.Text -> Int
 rowDisplayWidth =
-    Text.foldl'
-        (\width character -> width + displayCharCellWidth character)
-        0
+    sum . map graphemeCellWidth . graphemeClusters
 
 characterColumns :: Char -> Text.Text -> [Int]
-characterColumns target = go 0 . Text.unpack
+characterColumns target = go 0 . graphemeClusters
   where
     go _ [] = []
-    go column (character : rest) =
+    go column (cluster : rest) =
         let following =
-                go (column + displayCharCellWidth character) rest
-        in if character == target
+                go (column + graphemeCellWidth cluster) rest
+        in if cluster == Text.singleton target
             then column : following
             else following
 

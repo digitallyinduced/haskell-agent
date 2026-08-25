@@ -5,6 +5,7 @@ module Agent.TUI.Markdown.Inline
     , parseInline
     ) where
 
+import Control.Applicative ((<|>))
 import Data.Char
     ( isAlphaNum
     , isAscii
@@ -367,9 +368,3 @@ coalesceText = foldr step []
     step (InlineText left) (InlineText right : rest) =
         InlineText (left <> right) : rest
     step inline rest = inline : rest
-
-infixr 3 <|>
-
-(<|>) :: Maybe a -> Maybe a -> Maybe a
-Just value <|> _ = Just value
-Nothing <|> alternative = alternative

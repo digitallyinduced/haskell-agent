@@ -2,6 +2,7 @@ module Main (main) where
 
 import qualified Agent.Auth.JWTSpec as JWTSpec
 import qualified Agent.CancelSpec as CancelSpec
+import qualified Agent.ConcurrentSpec as ConcurrentSpec
 import qualified Agent.DialectSpec as DialectSpec
 import qualified Agent.ErrorSpec as ErrorSpec
 import qualified Agent.Http.HeaderSpec as HttpHeaderSpec
@@ -21,6 +22,7 @@ import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
+import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
@@ -33,6 +35,7 @@ main :: IO ()
 main = hspec do
     JWTSpec.spec
     CancelSpec.spec
+    ConcurrentSpec.spec
     DialectSpec.spec
     ErrorSpec.spec
     HttpHeaderSpec.spec
@@ -51,6 +54,7 @@ main = hspec do
     ToolArgsSpec.spec
     ToolDispatchSpec.spec
     ToolDSLSpec.spec
+    GrepSpec.spec
     GhciSpec.spec
     IOSpec.spec
     MultiAgentsSpec.spec

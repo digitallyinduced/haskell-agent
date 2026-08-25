@@ -34,10 +34,13 @@ common common-opts
 library
     import:           common-opts
     exposed-modules:  Agent.GrokBuild.Dialect.Common
+                    , Agent.GrokBuild.Dialect.Goal
+                    , Agent.GrokBuild.Dialect.Lsp
                     , Agent.GrokBuild.Dialect.Monitor
                     , Agent.GrokBuild.Dialect.Prompt
                     , Agent.GrokBuild.Dialect.ProjectInstructions
                     , Agent.GrokBuild.Dialect.Runtime
+                    , Agent.GrokBuild.Dialect.Scheduler
                     , Agent.GrokBuild.Dialect.SearchReplace
                     , Agent.GrokBuild.Dialect.Shell
                     , Agent.GrokBuild.Dialect.Subagent
@@ -46,6 +49,8 @@ library
                     , Agent.GrokBuild.Dialect.Terminal
                     , Agent.GrokBuild.Dialect.Todo
                     , Agent.GrokBuild.Dialect.Tools
+                    , Agent.GrokBuild.Dialect.WebFetch
+                    , Agent.GrokBuild.Dialect.Workflow
     hs-source-dirs:   src
     build-depends:    agent-core >= 0.1 && < 0.2
                     , aeson >= 2.0
@@ -57,8 +62,27 @@ library
                     , process
                     , safe-exceptions
                     , text
+                    , temporary
                     , time
                     , transformers
+                    , unix
+
+benchmark workflow-snapshots-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          WorkflowSnapshots.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-grok-build-dialect
+                    , agent-core
+                    , aeson
+                    , async
+                    , base >= 4.14 && < 5
+                    , containers
+                    , filepath
+                    , safe-exceptions
+                    , text
+                    , time
                     , unix
 
 test-suite agent-grok-build-dialect-test
@@ -67,9 +91,12 @@ test-suite agent-grok-build-dialect-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Agent.GrokBuild.DialectSpec
+                    , Agent.GrokBuild.RuntimeSpec
                     , Agent.GrokBuild.TaskSpec
+                    , Agent.GrokBuild.WebLspSpec
     build-depends:    agent-grok-build-dialect
                     , agent-core
+                    , async
                     , base >= 4.14 && < 5
                     , containers
                     , directory
@@ -77,5 +104,6 @@ test-suite agent-grok-build-dialect-test
                     , hspec
                     , safe-exceptions
                     , text
+                    , temporary
                     , time
                     , unix

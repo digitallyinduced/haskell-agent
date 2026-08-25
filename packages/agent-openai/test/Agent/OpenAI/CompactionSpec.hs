@@ -11,6 +11,7 @@ import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Either (isLeft)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
 
 spec :: Spec
@@ -139,6 +140,65 @@ spec = do
                 other ->
                     expectationFailure
                         ("expected rewritten tool output, got " <> show other)
+
+        it "omits function arguments above the provider string limit" do
+            let oversized = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-oversized"
+                    , name = "apply_patch"
+                    , arguments =
+                        Text.replicate
+                            (remoteCompactionMaxStringLength + 1)
+                            "x"
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        2_000_000
+                        Nothing
+                        [user "keep", oversized]
+            case trimmed of
+                [_, FunctionCallItem call] -> do
+                    call.callId `shouldBe` "call-oversized"
+                    call.name `shouldBe` "apply_patch"
+                    Text.length call.arguments
+                        `shouldSatisfy` (<= remoteCompactionMaxStringLength)
+                    Aeson.eitherDecodeStrict'
+                        (TextEncoding.encodeUtf8 call.arguments)
+                        `shouldSatisfy`
+                            (either (const False) (const True)
+                                :: Either String Aeson.Value -> Bool)
+                other ->
+                    expectationFailure
+                        ("expected sanitized function call, got " <> show other)
+
+        it "omits custom-tool input above the provider string limit" do
+            let oversized = CustomToolCallItem CustomToolCall
+                    { itemId = Nothing
+                    , callId = "call-custom"
+                    , name = "apply_patch"
+                    , input =
+                        Text.replicate
+                            (remoteCompactionMaxStringLength + 1)
+                            "x"
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        2_000_000
+                        Nothing
+                        [oversized]
+            case trimmed of
+                [CustomToolCallItem call] -> do
+                    call.callId `shouldBe` "call-custom"
+                    call.name `shouldBe` "apply_patch"
+                    Text.length call.input
+                        `shouldSatisfy` (<= remoteCompactionMaxStringLength)
+                other ->
+                    expectationFailure
+                        ("expected sanitized custom tool call, got " <> show other)
 
     describe "Codex model metadata" do
         it "derives the 90% auto-compaction limit for curated 272k models" do

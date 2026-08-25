@@ -17,6 +17,7 @@ module Agent.CLI.ModelConfig
     , connectionBuiltinProvider
     , decodeModelConfig
     , loadModelCatalog
+    , loadModelCatalogAt
     , loadModelCatalogWith
     , mergeModelConfigs
     , modelCatalogUserPath
@@ -198,17 +199,27 @@ mergeModelConfigs (defaultSource, defaultBytes) user = do
 
 loadModelCatalog :: OsPath -> IO (Either Text ModelCatalog)
 loadModelCatalog home = do
-    defaultPath <- packagedModelCatalogPath
+    cwd <- unsafeEncodeUtf <$> Directory.getCurrentDirectory
+    loadModelCatalogAt home cwd
+
+loadModelCatalogAt :: OsPath -> OsPath -> IO (Either Text ModelCatalog)
+loadModelCatalogAt home cwd = do
+    defaultPath <- packagedModelCatalogPathAt cwd
     loadModelCatalogWith defaultPath home
 
 packagedModelCatalogPath :: IO FilePath
 packagedModelCatalogPath = do
+    cwd <- unsafeEncodeUtf <$> Directory.getCurrentDirectory
+    packagedModelCatalogPathAt cwd
+
+packagedModelCatalogPathAt :: OsPath -> IO FilePath
+packagedModelCatalogPathAt cwd = do
     installed <- getDataFileName "config/models.default.json"
     executable <- Environment.getExecutablePath
-    cwd <- Directory.getCurrentDirectory
     let roots =
             take 16 (iterate FilePath.takeDirectory executable)
-                <> take 8 (iterate FilePath.takeDirectory cwd)
+                <> take 8
+                    (iterate FilePath.takeDirectory (unsafeToFilePath cwd))
         sourceCandidates =
             [ root FilePath.</> "packages/agent-cli/config/models.default.json"
             | root <- roots

@@ -41,17 +41,11 @@ formatGrokLimitStatus snapshot =
 formatOpenAiLimitStatus :: UsageSnapshot -> Maybe PromptLimitStatus
 formatOpenAiLimitStatus snapshot = do
     limits <- snapshot.rateLimit
-    case limits.secondaryWindow of
-        Just window ->
-            pure $
-                percentLimitStatus
-                    "Weekly limit left"
-                    (remainingWindowPercent window)
-        Nothing ->
-            percentLimitStatus
-                "5h limit left"
-                . remainingWindowPercent
-                <$> limits.primaryWindow
+    window <- longestUsageWindow limits
+    pure $
+        percentLimitStatus
+            (usageWindowLimitLabel window)
+            (remainingWindowPercent window)
 
 formatOpenRouterLimitStatus :: OpenRouterUsage -> Maybe PromptLimitStatus
 formatOpenRouterLimitStatus usage =
@@ -149,10 +143,10 @@ formatAccountUsage color now line =
                             , secondaryWindow
                             } ->
                             catWindows
-                                [ fmap (("5h  " <>) . formatUsageWindow color)
-                                    primaryWindow
-                                , fmap (("7d  " <>) . formatUsageWindow color)
-                                    secondaryWindow
+                                [ formatLabeledUsageWindow color
+                                    <$> primaryWindow
+                                , formatLabeledUsageWindow color
+                                    <$> secondaryWindow
                                 ]
                                 <> if limitReached
                                     then [roleWarn color "limit reached"]
@@ -185,18 +179,58 @@ formatUsageSummary now cooldownUntil result =
         Nothing -> []
         Just usageLimit ->
             catWindows
-                [ summarizeWindow "5h" <$> usageLimit.primaryWindow
-                , summarizeWindow "7d" <$> usageLimit.secondaryWindow
+                [ summarizeWindow <$> usageLimit.primaryWindow
+                , summarizeWindow <$> usageLimit.secondaryWindow
                 ]
     limit snapshot = case snapshot.rateLimit of
         Just usageLimit
             | usageLimit.limitReached -> ["limit reached"]
         _ -> []
-    summarizeWindow label window =
-        label
+    summarizeWindow window =
+        usageWindowShortLabel window
             <> " "
             <> Text.pack (show (max 0 (100 - window.usedPercent)))
             <> "% left"
+
+longestUsageWindow :: UsageLimit -> Maybe UsageWindow
+longestUsageWindow limits =
+    case (limits.primaryWindow, limits.secondaryWindow) of
+        (Nothing, Nothing) -> Nothing
+        (Just primary, Nothing) -> Just primary
+        (Nothing, Just secondary) -> Just secondary
+        (Just primary, Just secondary)
+            | primary.limitWindowSeconds >= secondary.limitWindowSeconds ->
+                Just primary
+            | otherwise -> Just secondary
+
+formatLabeledUsageWindow :: Bool -> UsageWindow -> Text
+formatLabeledUsageWindow color window =
+    usageWindowShortLabel window <> "  " <> formatUsageWindow color window
+
+usageWindowLimitLabel :: UsageWindow -> Text
+usageWindowLimitLabel window
+    | window.limitWindowSeconds == secondsPerWeek = "Weekly limit left"
+    | otherwise = usageWindowShortLabel window <> " limit left"
+
+usageWindowShortLabel :: UsageWindow -> Text
+usageWindowShortLabel window
+    | seconds == secondsPerWeek = "7d"
+    | seconds `mod` secondsPerDay == 0 =
+        packCount (seconds `div` secondsPerDay) "d"
+    | seconds `mod` secondsPerHour == 0 =
+        packCount (seconds `div` secondsPerHour) "h"
+    | seconds `mod` secondsPerMinute == 0 =
+        packCount (seconds `div` secondsPerMinute) "m"
+    | otherwise = packCount seconds "s"
+  where
+    seconds = max 0 window.limitWindowSeconds
+    packCount count suffix = Text.pack (show count) <> suffix
+
+secondsPerMinute, secondsPerHour, secondsPerDay, secondsPerWeek :: Int
+secondsPerMinute = 60
+secondsPerHour = 60 * secondsPerMinute
+secondsPerDay = 24 * secondsPerHour
+secondsPerWeek = 7 * secondsPerDay
 
 formatUsageWindow :: Bool -> UsageWindow -> Text
 formatUsageWindow color window =

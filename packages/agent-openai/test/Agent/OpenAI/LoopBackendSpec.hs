@@ -8,6 +8,11 @@ import Agent.Error
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
+import Agent.OpenAI.WebSocketClient
+    ( newCodexTurnState
+    , readCodexTurnState
+    , recordCodexTurnState
+    )
 import Agent.Responses.LoopBackend (streamOutputObserved)
 import Agent.Responses.Types
 import Agent.ToolDispatch
@@ -116,6 +121,23 @@ spec = do
                 other ->
                     expectationFailure ("expected one user message, got " <> show other)
 
+        it "encodes multimodal files as input_image plus input_file parts" do
+            let image = ImageAttachment "image/png" "png-bytes"
+                file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
+            case turnInputsToItems
+                    [UserMultimodalFiles "see this" [image] [file]] of
+                [MessageItem message] -> do
+                    message.role `shouldBe` RoleUser
+                    case message.content of
+                        MessageContentParts parts ->
+                            parts `shouldSatisfy` \ps ->
+                                any isInputFile ps && any isInputImage ps
+                        other ->
+                            expectationFailure
+                                ("expected text+image+file parts, got " <> show other)
+                other ->
+                    expectationFailure ("expected one user message, got " <> show other)
+
         it "encodes function results as function_call_output strings" do
             let items = turnInputsToItems
                     [CompletedTool (functionResult "c1" "echoed")]
@@ -191,11 +213,11 @@ spec = do
                 }
 
     describe "streamEventToLoopEvent" do
-        it "maps output_text.delta and reasoning deltas" do
+        it "maps output and summary deltas but hides raw reasoning" do
             streamEventToLoopEvent (deltaEvent EventOutputTextDelta "hello")
                 `shouldBe` Just (TextDelta "hello")
             streamEventToLoopEvent (deltaEvent EventReasoningTextDelta "think")
-                `shouldBe` Just (ReasoningDelta "think")
+                `shouldBe` Nothing
             streamEventToLoopEvent (deltaEvent EventReasoningSummaryTextDelta "sum")
                 `shouldBe` Just (ReasoningDelta "sum")
 
@@ -303,6 +325,27 @@ spec = do
                 (ResponseFailedEvent (Aeson.object []) Nothing KeyMap.empty)
                 `shouldBe` False
 
+        it "treats function-call argument events as replay-unsafe" do
+            streamOutputObserved
+                ResponseFunctionCallArgumentsDeltaEvent
+                    { delta = Just "{}"
+                    , streamItemId = Just "fc_1"
+                    , streamOutputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                `shouldBe` True
+            streamOutputObserved
+                ResponseFunctionCallArgumentsDoneEvent
+                    { arguments = Just "{}"
+                    , functionName = Just "read_file"
+                    , streamItemId = Just "fc_1"
+                    , streamOutputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                `shouldBe` True
+
     describe "statelessResponsesBackend" do
         it "replays the local transcript on tool follow-ups" do
             seen <- newIORef []
@@ -395,6 +438,28 @@ spec = do
                 ]
 
     describe "openAiBackendWith" do
+        it "shows raw reasoning only when explicitly enabled" do
+            let send _request _previous onEvent = do
+                    onEvent (deltaEvent EventReasoningTextDelta "raw")
+                    onEvent (deltaEvent EventReasoningSummaryTextDelta "summary")
+                    pure $ Right (testResponse "resp-1" [assistantItem "ok"])
+                collect showRawReasoning = do
+                    events <- newIORef []
+                    transcript <- newIORef []
+                    let backend =
+                            openAiBackendWithReasoningVisibility
+                                showRawReasoning
+                                send
+                                (pure baseParams)
+                    _ <- submitWithState transcript backend Nothing
+                        [UserMessage "hello"]
+                        (modifyIORef' events . (:))
+                    reverse <$> readIORef events
+
+            collect False `shouldReturn` [ReasoningDelta "summary"]
+            collect True `shouldReturn`
+                [ReasoningDelta "raw", ReasoningDelta "summary"]
+
         it "sends only the new items and threads previous_response_id" do
             seen <- newIORef []
             events <- newIORef []
@@ -1040,6 +1105,44 @@ spec = do
             readIORef fallbackActive `shouldReturn` True
             readIORef fallbackCalls `shouldReturn` 0
 
+        it "does not replay after a non-visible output item was received" do
+            fallbackActive <- newIORef False
+            primaryCalls <- newIORef (0 :: Int)
+            fallbackCalls <- newIORef (0 :: Int)
+            transcript <- newIORef []
+            let connectionFailure = ConnectionError "socket closed"
+                outputEvent = ResponseOutputItemDoneEvent
+                    { item = assistantItem "partial"
+                    , outputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                sendPrimary _request _previous onEvent = do
+                    modifyIORef' primaryCalls (+ 1)
+                    onEvent outputEvent
+                    pure (Left connectionFailure)
+                primary = openAiBackendWithRetryPolicy
+                    (constantDelay 0 <> limitRetries 3)
+                    sendPrimary
+                    (pure baseParams)
+                fallback = Backend \state _previous _inputs _onEvent -> do
+                    modifyIORef' fallbackCalls (+ 1)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "resp-http" [] (Just "duplicate")
+                        , backendState = state
+                        }
+                backend =
+                    openAiBackendWithTransportFallback
+                        fallbackActive primary fallback
+            result <- submitWithState transcript backend Nothing
+                [UserMessage "one"] (const (pure ()))
+            result `shouldBe` Left
+                (replayUnsafeModelFailure connectionFailure)
+            readIORef fallbackActive `shouldReturn` False
+            readIORef primaryCalls `shouldReturn` 1
+            readIORef fallbackCalls `shouldReturn` 0
+
         it "falls back immediately after a websocket connection-limit error" do
             fallbackActive <- newIORef False
             primaryCalls <- newIORef (0 :: Int)
@@ -1094,6 +1197,35 @@ spec = do
                 "bad request" Nothing)
             readIORef fallbackActive `shouldReturn` False
             readIORef fallbackCalls `shouldReturn` 0
+
+    describe "withCodexTurnStateScope" do
+        it "resets on a new prompt and preserves tool continuations" do
+            turnState <- newCodexTurnState
+            recordCodexTurnState turnState "stale"
+            observed <- newIORef []
+            transcript <- newIORef []
+            let rawBackend =
+                    Backend \state _previous _inputs _onEvent -> do
+                        value <- readCodexTurnState turnState
+                        modifyIORef' observed (<> [value])
+                        pure $ Right BackendResult
+                            { backendOutput =
+                                emptyTurnOutput "resp-state" [] (Just "ok")
+                            , backendState = state
+                            }
+                backend =
+                    withCodexTurnStateScope
+                        (pure turnState)
+                        rawBackend
+            _ <- submitWithState transcript backend Nothing
+                [UserMessage "new turn"] (const (pure ()))
+            recordCodexTurnState turnState "current"
+            _ <- submitWithState transcript backend (Just "resp-state")
+                [CompletedTool (functionResult "call-1" "done")]
+                (const (pure ()))
+
+            readIORef observed
+                `shouldReturn` [Nothing, Just "current"]
 
 --------------------------------------------------------------------------------
 -- Fixtures
@@ -1350,3 +1482,21 @@ replayUnsafeAuxiliaryFailure failure =
             <> Text.pack (show failure)
         )
         Nothing
+
+replayUnsafeModelFailure :: ApiError -> ApiError
+replayUnsafeModelFailure failure =
+    ProviderError (UnknownErrorType "replay_unsafe")
+        ( "provider failed after model output; refusing to replay: "
+            <> Text.pack (show failure)
+        )
+        Nothing
+
+isInputFile :: ResponseContentPart -> Bool
+isInputFile = \case
+    InputFilePart{} -> True
+    _ -> False
+
+isInputImage :: ResponseContentPart -> Bool
+isInputImage = \case
+    InputImagePart{} -> True
+    _ -> False

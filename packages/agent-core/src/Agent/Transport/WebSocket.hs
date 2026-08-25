@@ -8,6 +8,7 @@ module Agent.Transport.WebSocket
     , withWebSocketSession
     , closeWebSocketSession
     , withWebSocketRequest
+    , withWebSocketRequestWithTimeout
     , completeWebSocketRequest
     , invalidateWebSocketRequest
     , sendWebSocketText
@@ -33,6 +34,7 @@ import Control.Retry
     ( RetryPolicyM
     , capDelay
     , exponentialBackoff
+    , limitRetries
     )
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (isJust)
@@ -60,6 +62,8 @@ data WebSocketSession = WebSocketSession
 data WebSocketRequest = WebSocketRequest
     { requestSession :: !WebSocketSession
     , requestGeneration :: !Word64
+    , requestSendIdleTimeoutMicros :: !(Maybe Int)
+    , requestReceiveIdleTimeoutMicros :: !(Maybe Int)
     }
 
 data SessionState
@@ -79,7 +83,7 @@ data WebSocketSessionOptions = WebSocketSessionOptions
 
 defaultWebSocketSessionOptions :: WebSocketSessionOptions
 defaultWebSocketSessionOptions = WebSocketSessionOptions
-    { inboundFrameCapacity = 128
+    { inboundFrameCapacity = 1600
     , clientPingIntervalSeconds = Just 20
     }
 
@@ -141,15 +145,30 @@ withWebSocketRequest
     :: WebSocketSession
     -> (WebSocketRequest -> IO (Either ApiError value))
     -> IO (Either ApiError value)
-withWebSocketRequest session action = Safe.mask \restore -> do
+withWebSocketRequest = withWebSocketRequestWithTimeout Nothing Nothing
+
+-- | Serialize a request with an optional per-operation idle timeout. The
+-- timeout applies independently while waiting for the writer acknowledgement
+-- and while waiting for each inbound application frame.
+withWebSocketRequestWithTimeout
+    :: Maybe Int
+    -> Maybe Int
+    -> WebSocketSession
+    -> (WebSocketRequest -> IO (Either ApiError value))
+    -> IO (Either ApiError value)
+withWebSocketRequestWithTimeout sendTimeout receiveTimeout session action = Safe.mask \restore -> do
     acquired <- atomically (acquireRequest session)
     case acquired of
         Left apiError -> pure (Left apiError)
         Right request -> do
-            result <- restore (action request)
+            let request' = request
+                    { requestSendIdleTimeoutMicros = sendTimeout
+                    , requestReceiveIdleTimeoutMicros = receiveTimeout
+                    }
+            result <- restore (action request')
                 `Safe.onException`
-                    invalidateWebSocketRequest request "response consumer interrupted"
-            atomically (finishRequest request)
+                    invalidateWebSocketRequest request' "response consumer interrupted"
+            atomically (finishRequest request')
             pure result
 
 -- | Send one text frame through the request's serialized writer.
@@ -159,15 +178,14 @@ sendWebSocketText request bytes = do
     queued <- atomically (queueRequestText request bytes reply)
     case queued of
         Left apiError -> pure (Left apiError)
-        Right () -> atomically $
-            takeTMVar reply
-            `orElse`
-            requestFailure request
+        Right () -> awaitWithTimeout request.requestSendIdleTimeoutMicros request
+            (atomically $ takeTMVar reply `orElse` requestFailure request)
+            "WebSocket send idle timeout"
 
 -- | Receive the next application data frame. Control frames are handled by
 -- the session pump and are never exposed to callers.
 receiveWebSocketData :: WebSocketRequest -> IO (Either ApiError LBS.ByteString)
-receiveWebSocketData request = atomically do
+receiveWebSocketData request = awaitWithTimeout request.requestReceiveIdleTimeoutMicros request (atomically do
     let session = request.requestSession
     state <- readTVar session.sessionState
     case state of
@@ -181,6 +199,24 @@ receiveWebSocketData request = atomically do
         SessionClosed _ apiError -> pure (Left apiError)
         SessionPoisoned apiError -> pure (Left apiError)
         _ -> pure (Left inactiveRequestError)
+    ) "WebSocket receive idle timeout"
+
+awaitWithTimeout
+    :: Maybe Int
+    -> WebSocketRequest
+    -> IO (Either ApiError value)
+    -> Text
+    -> IO (Either ApiError value)
+awaitWithTimeout timeoutMicros request operation reason =
+    case timeoutMicros of
+        Just micros | micros > 0 -> do
+            result <- timeout micros operation
+            case result of
+                Just value -> pure value
+                Nothing -> do
+                    invalidateWebSocketRequest request reason
+                    pure (Left (ConnectionError reason))
+        _ -> operation
 
 queueInboundFrame :: WebSocketSession -> LBS.ByteString -> STM ()
 queueInboundFrame session bytes = do
@@ -343,7 +379,7 @@ acquireRequest session = do
             if empty
                 then do
                     writeTVar session.sessionState (SessionActive generation)
-                    pure (Right (WebSocketRequest session generation))
+                    pure (Right (WebSocketRequest session generation Nothing Nothing))
                 else do
                     let apiError = invalidatedSessionError
                             "unclaimed response frames were queued"
@@ -446,11 +482,11 @@ isAsyncException exception =
     isJust (Exception.fromException exception :: Maybe Exception.SomeAsyncException)
 
 -- | Capped exponential backoff for transient WebSocket connection / handshake
--- failures: 1s, 2s, 4s, 8s, then 15s until the connection succeeds or the
--- caller cancels the operation.
+-- failures: 1s, 2s, 4s, 8s, then 15s. The attempt count is bounded so a
+-- permanently unavailable endpoint cannot hang startup indefinitely.
 transientWsConnectRetryPolicy :: RetryPolicyM IO
 transientWsConnectRetryPolicy =
-    capDelay 15000000 (exponentialBackoff 1000000)
+    limitRetries 5 <> capDelay 15000000 (exponentialBackoff 1000000)
 
 -- | Normalize and retry WebSocket connection / handshake failures until the
 -- connection callback begins. Once the callback has started, retrying the

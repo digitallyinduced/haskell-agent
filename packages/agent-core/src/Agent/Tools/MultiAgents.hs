@@ -23,7 +23,8 @@ import Agent.Subagents
     , queueMessageFromForTurn
     , resolveAgentTarget
     , sendInputMessageForTurn
-    , spawnSubagentAtPreparedForTurn
+    , spawnSubagentAtWithCwdPreparedForTurn
+    , subagentLease
     , waitAnyLive
     , waitSubagentsFrom
     )
@@ -40,6 +41,7 @@ import Agent.InterAgentMessage
     , encryptedInterAgentContent
     , plainInterAgentContent
     )
+import Agent.OsPath (toText)
 import System.OsPath (OsPath)
 import Agent.ToolArgs
     ( objectArgs
@@ -60,6 +62,9 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , jsonTool
     )
+import Control.Concurrent.MVar (modifyMVar, newMVar)
+import Control.Exception.Safe (mask, onException)
+import Control.Monad (void)
 import Data.Aeson (FromJSON(..), Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -86,6 +91,7 @@ data CollaborationSpawnOptions = CollaborationSpawnOptions
 -- | Per-agent identity for nesting depth / parent linkage / task path.
 data MultiAgentContext = MultiAgentContext
     { multiRegistry :: !SubagentRegistry
+    , multiCwd :: !OsPath
     , multiSelfId :: !(Maybe SubagentId)
     , multiDepth :: !Int
     , multiTaskPath :: !TaskPath
@@ -93,7 +99,7 @@ data MultiAgentContext = MultiAgentContext
       -- | Optional host hook to rehydrate a closed/missing agent from disk
       -- before follow-ups. 'Nothing' means in-memory only.
     , multiResumeFromDisk :: !(Maybe (SubagentId -> IO (Either Text ())))
-      -- | Optional host hook for Grok-style isolated worktree children.
+      -- | Optional host hook for isolated worktree children.
     , multiCreateWorktree :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
       -- | Record model/effort overrides and seed the child transcript before
       -- its worker starts.
@@ -138,6 +144,7 @@ data SpawnAgentArgs = SpawnAgentArgs
     , model :: Maybe Text
     , reasoningEffort :: Maybe Text
     , forkTurns :: Maybe Text
+    , isolation :: Maybe Text
     }
 
 instance FromJSON SpawnAgentArgs where
@@ -147,6 +154,7 @@ instance FromJSON SpawnAgentArgs where
         <*> optText object_ "model"
         <*> optText object_ "reasoning_effort"
         <*> optText object_ "fork_turns"
+        <*> optText object_ "isolation"
 
 spawnAgentTool :: MultiAgentContext -> AppTool
 spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
@@ -163,6 +171,8 @@ spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
         "Reasoning effort override for the new agent. Omit to inherit the parent effort."
     , PropertySchema "fork_turns" PropertyString False $ Just
         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+    , PropertySchema "isolation" (PropertyEnum ["none", "worktree"]) False $ Just
+        "Workspace isolation for the new agent. Defaults to `none`. Use `worktree` to create a dedicated git worktree whose lifetime is tied to the agent."
     ]
     True
     TurnSequential
@@ -181,35 +191,112 @@ runSpawn ctx call args
         pure (Left "spawn_agent requires a non-empty message")
     | not (validForkTurns args.forkTurns) =
         pure (Left "fork_turns must be none, all, or a positive integer string")
-    | otherwise = do
-        rootTurnId <- ctx.multiRootTurnId
-        let spawnOptions = CollaborationSpawnOptions
-                { collaborationModel = sanitizeOverride args.model
-                , collaborationReasoningEffort =
-                    sanitizeOverride args.reasoningEffort
-                , collaborationForkTurns = normalizeForkTurns args.forkTurns
-                }
-            prepare agentId =
-                maybe (pure ()) (\hook -> hook agentId spawnOptions)
-                    ctx.multiPrepareSpawn
-                    >> pure mempty
-        result <- spawnSubagentAtPreparedForTurn
+    | not (validIsolation args.isolation) =
+        pure (Left "isolation must be none or worktree")
+    | otherwise = mask \restore ->
+        resolveSpawnWorkspace ctx args.isolation >>= \case
+            Left err -> pure (Left err)
+            Right (childCwd, worktree) ->
+                restore (spawnInWorkspace ctx call args childCwd worktree)
+
+spawnInWorkspace
+    :: MultiAgentContext
+    -> ToolCall
+    -> SpawnAgentArgs
+    -> OsPath
+    -> Maybe SubagentWorktree
+    -> IO (Either Text Text)
+spawnInWorkspace ctx call args childCwd worktree = mask \restore -> do
+    ownedWorktree <- traverse makeIdempotentWorktree worktree
+    rootTurnId <- ctx.multiRootTurnId
+    let spawnOptions = CollaborationSpawnOptions
+            { collaborationModel = sanitizeOverride args.model
+            , collaborationReasoningEffort =
+                sanitizeOverride args.reasoningEffort
+            , collaborationForkTurns = normalizeForkTurns args.forkTurns
+            }
+        prepare agentId = do
+            maybe (pure ()) (\hook -> hook agentId spawnOptions)
+                ctx.multiPrepareSpawn
+            pure $ case ownedWorktree of
+                Nothing -> mempty
+                Just lease ->
+                    subagentLease (void lease.subagentWorktreeCleanup)
+    result <- restore
+        (spawnSubagentAtWithCwdPreparedForTurn
             ctx.multiRegistry
             rootTurnId
+            childCwd
             prepare
             ctx.multiSelfId
             ctx.multiTaskPath
             ctx.multiDepth
             args.taskName
             (messageContent call args.message)
-            Nothing
-        pure $ case result of
-            Left err -> Left err
-            Right (_agentId, path) ->
-                Right $ encodeJson $ object
-                    [ "task_name" .= taskPathText path
-                    , "nickname" .= Aeson.Null
-                    ]
+            Nothing)
+        `onException` cleanupWorktreeQuietly ownedWorktree
+    case result of
+        Left err -> cleanupFailedWorktree ownedWorktree err
+        Right (_agentId, path) ->
+            pure $ Right $ encodeJson $ object $
+                [ "task_name" .= taskPathText path
+                , "nickname" .= Aeson.Null
+                ]
+                    <> maybe []
+                        (\lease -> ["worktree" .= toText lease.subagentWorktreePath])
+                        ownedWorktree
+
+resolveSpawnWorkspace
+    :: MultiAgentContext
+    -> Maybe Text
+    -> IO (Either Text (OsPath, Maybe SubagentWorktree))
+resolveSpawnWorkspace ctx isolation
+    | usesWorktree isolation =
+        case ctx.multiCreateWorktree of
+            Nothing ->
+                pure (Left "isolation=\"worktree\" is unavailable in this host.")
+            Just create ->
+                create ctx.multiCwd >>= \case
+                    Left err -> pure (Left err)
+                    Right worktree ->
+                        pure (Right (worktree.subagentWorktreePath, Just worktree))
+    | otherwise = pure (Right (ctx.multiCwd, Nothing))
+
+validIsolation :: Maybe Text -> Bool
+validIsolation = \case
+    Nothing -> True
+    Just raw -> Text.toLower (Text.strip raw) `elem` ["", "none", "worktree"]
+
+usesWorktree :: Maybe Text -> Bool
+usesWorktree =
+    maybe False ((== "worktree") . Text.toLower . Text.strip)
+
+makeIdempotentWorktree :: SubagentWorktree -> IO SubagentWorktree
+makeIdempotentWorktree worktree = do
+    resultVar <- newMVar Nothing
+    let cleanup = modifyMVar resultVar \case
+            Just result -> pure (Just result, result)
+            Nothing -> do
+                result <- worktree.subagentWorktreeCleanup
+                pure (Just result, result)
+    pure worktree { subagentWorktreeCleanup = cleanup }
+
+cleanupWorktreeQuietly :: Maybe SubagentWorktree -> IO ()
+cleanupWorktreeQuietly Nothing = pure ()
+cleanupWorktreeQuietly (Just worktree) =
+    void worktree.subagentWorktreeCleanup
+
+cleanupFailedWorktree
+    :: Maybe SubagentWorktree
+    -> Text
+    -> IO (Either Text Text)
+cleanupFailedWorktree Nothing spawnError = pure (Left spawnError)
+cleanupFailedWorktree (Just worktree) spawnError =
+    worktree.subagentWorktreeCleanup >>= \case
+        Right () -> pure (Left spawnError)
+        Left cleanupError ->
+            pure $ Left $
+                spawnError <> "\nAdditionally, worktree cleanup failed: " <> cleanupError
 
 validForkTurns :: Maybe Text -> Bool
 validForkTurns = \case
@@ -350,28 +437,18 @@ sendMessageDescription =
 
 runSendMessage :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runSendMessage ctx call args
-    | Text.null (Text.strip args.message) =
-        pure (Left "send_message requires a non-empty message")
-    | otherwise = do
-        case resolveTaskPath ctx.multiTaskPath args.target of
-            Right targetPath | targetPath == taskPathRoot ->
-                sendToRoot ctx (messageContent call args.message)
-            _ -> do
-                restored <- maybeRestore ctx args.target
-                case restored of
-                    Left err -> pure (Left err)
-                    Right () -> do
-                        resolved <-
-                            resolveAgentTarget
-                                ctx.multiRegistry ctx.multiTaskPath args.target
-                        case resolved of
-                            Left err -> pure (Left err)
-                            Right agentId -> do
-                                rootTurnId <- ctx.multiRootTurnId
-                                queueMessageFromForTurn
-                                    ctx.multiRegistry rootTurnId
-                                    ctx.multiTaskPath agentId
-                                    (messageContent call args.message)
+    = case validateMessage "send_message" args.message of
+        Left err -> pure (Left err)
+        Right () ->
+            withMessageTarget ctx args.target \target ->
+                case target of
+                    RootMessageTarget ->
+                        sendToRoot ctx (messageContent call args.message)
+                    AgentMessageTarget agentId rootTurnId ->
+                        queueMessageFromForTurn
+                            ctx.multiRegistry rootTurnId
+                            ctx.multiTaskPath agentId
+                            (messageContent call args.message)
 
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
@@ -392,28 +469,51 @@ followupDescription =
 
 runFollowup :: MultiAgentContext -> ToolCall -> MessageArgs -> IO (Either Text Text)
 runFollowup ctx call args
-    | Text.null (Text.strip args.message) =
-        pure (Left "followup_task requires a non-empty message")
-    | otherwise = do
-        case resolveTaskPath ctx.multiTaskPath args.target of
-            Right targetPath | targetPath == taskPathRoot ->
-                pure (Left "followup_task cannot target the root agent; use send_message")
-            _ -> do
-                restored <- maybeRestore ctx args.target
-                case restored of
-                    Left err -> pure (Left err)
-                    Right () -> do
-                        resolved <-
-                            resolveAgentTarget
-                                ctx.multiRegistry ctx.multiTaskPath args.target
-                        case resolved of
-                            Left err -> pure (Left err)
-                            Right agentId -> do
-                                rootTurnId <- ctx.multiRootTurnId
-                                sendInputMessageForTurn
-                                    ctx.multiRegistry rootTurnId
-                                    ctx.multiTaskPath agentId
-                                    (messageContent call args.message) False
+    = case validateMessage "followup_task" args.message of
+        Left err -> pure (Left err)
+        Right () ->
+            withMessageTarget ctx args.target \target ->
+                case target of
+                    RootMessageTarget ->
+                        pure (Left "followup_task cannot target the root agent; use send_message")
+                    AgentMessageTarget agentId rootTurnId ->
+                        sendInputMessageForTurn
+                            ctx.multiRegistry rootTurnId
+                            ctx.multiTaskPath agentId
+                            (messageContent call args.message) False
+
+validateMessage :: Text -> Text -> Either Text ()
+validateMessage toolName message
+    | Text.null (Text.strip message) =
+        Left (toolName <> " requires a non-empty message")
+    | otherwise = Right ()
+
+data MessageTarget
+    = RootMessageTarget
+    | AgentMessageTarget SubagentId (Maybe RootTurnId)
+
+withMessageTarget
+    :: MultiAgentContext
+    -> Text
+    -> (MessageTarget -> IO (Either Text Text))
+    -> IO (Either Text Text)
+withMessageTarget ctx target action =
+    case resolveTaskPath ctx.multiTaskPath target of
+        Right targetPath | targetPath == taskPathRoot ->
+            action RootMessageTarget
+        _ -> do
+            restored <- maybeRestore ctx target
+            case restored of
+                Left err -> pure (Left err)
+                Right () -> do
+                    resolved <-
+                        resolveAgentTarget
+                            ctx.multiRegistry ctx.multiTaskPath target
+                    case resolved of
+                        Left err -> pure (Left err)
+                        Right agentId -> do
+                            rootTurnId <- ctx.multiRootTurnId
+                            action (AgentMessageTarget agentId rootTurnId)
 
 sendToRoot :: MultiAgentContext -> InterAgentMessageContent -> IO (Either Text Text)
 sendToRoot ctx content =

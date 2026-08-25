@@ -13,6 +13,8 @@ category:           Development
 build-type:         Simple
 data-files:         config/models.default.json
                   , skills/add-model/SKILL.md
+                  , skills/learn-about-user/SKILL.md
+                  , skills/post-task-learning-review/SKILL.md
                   , skills/telegram-agent/SKILL.md
 
 common common-options
@@ -41,11 +43,33 @@ library
     import:           common-options
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
-    other-modules:    Agent.CLI.Auth.Grok
+    other-modules:    Agent.CLI.AccountPicker
+                    , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
+                    , Agent.CLI.McpStatus
+                    , Agent.CLI.PromptHooks
+                    , Agent.CLI.Provider.OpenAI
+                    , Agent.CLI.Provider.Switch
+                    , Agent.CLI.PrivateFileLock
+                    , Agent.CLI.Runtime
+                    , Agent.CLI.Runtime.Types
+                    , Agent.CLI.Session.Attachments
+                    , Agent.CLI.Session.Choices
+                    , Agent.CLI.Session.Interaction
+                    , Agent.CLI.Session.Lifecycle
+                    , Agent.CLI.Session.Retry
+                    , Agent.CLI.Session.Runner
+                    , Agent.CLI.Session.Selection
+                    , Agent.CLI.Session.Runtime.Types
+                    , Agent.CLI.SessionAdmin
+                    , Agent.CLI.Startup.Auth
+                    , Agent.CLI.StartupContext
+                    , Agent.CLI.Startup.Format
                     , Agent.CLI.TUI.Composer.Buffer
                     , Agent.CLI.TUI.Composer.Edit
+                    , Agent.CLI.TUI.LambdaArt
+                    , Agent.CLI.TUI.Motion
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AccountSelection
@@ -53,6 +77,7 @@ library
                     , Agent.CLI.AgentViewport
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
+                    , Agent.CLI.Afk
                     , Agent.CLI.Auth
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch
@@ -66,9 +91,13 @@ library
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Duration
+                    , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
+                    , Agent.CLI.Environment
                     , Agent.CLI.Error
+                    , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
+                    , Agent.CLI.GatewayBridge
                     , Agent.CLI.Input
                     , Agent.CLI.Input.Types
                     , Agent.CLI.Input.Display
@@ -78,8 +107,10 @@ library
                     , Agent.CLI.Input.Picker
                     , Agent.CLI.Interrupt
                     , Agent.CLI.Login
+                    , Agent.CLI.ManagedTurn
                     , Agent.CLI.LearnedSkills
                     , Agent.CLI.LearnedSkills.Store
+                    , Agent.CLI.Lsp
                     , Agent.CLI.Markdown
                     , Agent.CLI.ModelPicker
                     , Agent.CLI.McpManager
@@ -94,6 +125,7 @@ library
                     , Agent.CLI.Progress
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
+                    , Agent.CLI.Recap
                     , Agent.CLI.Request
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
@@ -102,6 +134,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
@@ -114,10 +147,6 @@ library
                     , Agent.CLI.Subagents.Runtime
                     , Agent.CLI.Style
                     , Agent.CLI.Terminal
-                    , Agent.Telegram
-                    , Agent.Telegram.Markdown
-                    , Agent.Telegram.Types
-                    , Agent.Telegram.Voice
                     , Agent.CLI.TextLayout
                     , Agent.CLI.Timestamp
                     , Agent.CLI.Tools
@@ -126,12 +155,15 @@ library
                     , Agent.CLI.TUI.Composer
                     , Agent.CLI.TUI.ImagePreview
                     , Agent.CLI.TUI.Scroll
+                    , Agent.CLI.TUI.Transcript
                     , Agent.CLI.TUI.Types
                     , Agent.CLI.Turn
                     , Agent.CLI.TurnState
                     , Agent.CLI.Usage
+                    , Agent.CLI.WebFetch
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
@@ -158,12 +190,19 @@ library
                     , haskeline >= 0.8 && < 0.9
                     , http-client
                     , http-client-tls
+                    , http-types
                     , hasql-pool >= 1.3 && < 2
                     , JuicyPixels
                     , mtl
+                    , network
+                    , network-uri
+                    , optparse-applicative >= 0.18 && < 0.19
                     , process >= 1.6.26
+                    , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
+                    , scientific
                     , stm
+                    , tagsoup
                     , text >= 2.0 && < 2.2
                     , time
                     , transformers
@@ -179,14 +218,6 @@ executable agent-cli
     -- Keep the heap ceiling without multiplying a large allocation area by
     -- every host core. Four capabilities cover the agent's concurrent I/O;
     -- leave -A at the GHC RTS default.
-    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
-    build-depends:    agent-cli
-                    , base >= 4.17 && < 5
-
-executable agent-telegram
-    import:           common-options
-    hs-source-dirs:   app
-    main-is:          Telegram.hs
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
@@ -227,6 +258,31 @@ benchmark subagent-retention-bench
                     , containers
                     , text
 
+benchmark history-retention-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          HistoryRetention.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+                    , text
+
+benchmark concurrency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          Concurrency.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , safe-exceptions
+                    , time
+
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
@@ -238,6 +294,7 @@ test-suite agent-cli-test
                     , Agent.CLI.AgentSessionsSpec
                     , Agent.CLI.ArtifactSpec
                     , Agent.CLI.AgentViewportSpec
+                    , Agent.CLI.EnvironmentSpec
                     , Agent.CLI.AuthSpec
                     , Agent.CLI.BtwSpec
                     , Agent.CLI.CancelWatchSpec
@@ -250,6 +307,8 @@ test-suite agent-cli-test
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.ErrorSpec
+                    , Agent.CLI.FileUriSpec
+                    , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
@@ -260,6 +319,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
                     , Agent.CLI.PlanSpec
@@ -269,6 +329,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PendingInputsSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
+                    , Agent.CLI.RecapSpec
                     , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
@@ -280,10 +341,10 @@ test-suite agent-cli-test
                     , Agent.CLI.StyleSpec
                     , Agent.CLI.TimestampSpec
                     , Agent.CLI.TerminalSpec
-                    , Agent.TelegramSpec
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec
@@ -293,8 +354,11 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIBridgeSpec
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIImagePreviewSpec
+                    , Agent.CLI.TUIPropertySpec
                     , Agent.CLI.TUIScrollSpec
+                    , Agent.CLI.TUITranscriptSpec
                     , Agent.CLI.UsageSpec
+                    , Agent.CLI.WebLspSpec
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
@@ -322,6 +386,7 @@ test-suite agent-cli-test
                     , hspec >= 2.11 && < 2.12
                     , JuicyPixels
                     , process
+                    , QuickCheck >= 2.14 && < 2.16
                     , safe-exceptions
                     , stm
                     , text
@@ -355,3 +420,16 @@ benchmark clipboard-latency-bench
                     , filepath
                     , safe-exceptions
                     , text
+
+benchmark transcript-scrolling-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          TranscriptScrolling.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+                    , brick >= 2.9 && < 3
+                    , deepseq
+                    , text
+                    , vty >= 6.4 && < 7

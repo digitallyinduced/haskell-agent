@@ -1,6 +1,8 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
+import Agent.CLI.Afk
+import Agent.Dialect (DialectId(..))
 import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf)
@@ -14,6 +16,8 @@ spec = do
             parseReplLine ":q" `shouldBe` ReplQuit
             parseReplLine ":quit" `shouldBe` ReplQuit
             parseReplLine "  :quit  " `shouldBe` ReplQuit
+            parseReplLine "/quit" `shouldBe` ReplQuit
+            parseReplLine "/exit" `shouldBe` ReplQuit
 
         it "treats :reload as a GHCi reload request" do
             parseReplLine ":reload" `shouldBe` ReplReload
@@ -77,6 +81,20 @@ spec = do
             parseReplLine "/session" `shouldBe` ReplShowSession
             parseReplLine "/session now"
                 `shouldBe` ReplCommandError "usage: /session"
+
+        it "shows expanded session information through compatibility aliases" do
+            parseReplLine "/session-info" `shouldBe` ReplShowSessionInfo
+            parseReplLine "/status" `shouldBe` ReplShowSessionInfo
+            parseReplLine "/info" `shouldBe` ReplShowSessionInfo
+            parseReplLine "/status now"
+                `shouldBe` ReplCommandError "usage: /session-info"
+
+        it "hands the session to local or remote tmux" do
+            parseReplLine "/afk" `shouldBe` ReplAfk Nothing
+            parseReplLine "/afk office-builder:~/haskell-agent"
+                `shouldBe` ReplAfk (Just "office-builder:~/haskell-agent")
+            parseReplLine "/afk one two"
+                `shouldBe` ReplCommandError "usage: /afk [HOST:PATH]"
 
         it "starts a fresh session in a new worktree" do
             parseReplLine "/worktree" `shouldBe` ReplWorktree
@@ -170,15 +188,32 @@ spec = do
             parseReplLine "/resume a b"
                 `shouldBe` ReplCommandError "usage: /resume [ID]"
 
+        it "searches past conversations with the full query suffix" do
+            parseReplLine "/search postgres migration"
+                `shouldBe` ReplSearch "postgres migration"
+            parseReplLine "/SEARCH   keep  spaces"
+                `shouldBe` ReplSearch "keep  spaces"
+            parseReplLine "/search"
+                `shouldBe` ReplCommandError "usage: /search <QUERY>"
+
         it "opens the agent hierarchy" do
             parseReplLine "/agents" `shouldBe` ReplAgents
             parseReplLine "/a" `shouldBe` ReplAgents
             parseReplLine "/agents now"
-                `shouldBe` ReplCommandError "usage: /agents"
+                `shouldBe` ReplCommandError "usage: /agents [limit [N]]"
+
+        it "shows or sets the concurrent agent limit" do
+            parseReplLine "/agents limit" `shouldBe` ReplShowAgentLimit
+            parseReplLine "/agents limit 64" `shouldBe` ReplSetAgentLimit 64
+            parseReplLine "/agents limit 0"
+                `shouldBe` ReplCommandError "usage: /agents [limit [N]]"
+            parseReplLine "/agents limit nope"
+                `shouldBe` ReplCommandError "usage: /agents [limit [N]]"
 
         it "opens the MCP server manager" do
             parseReplLine "/mcp" `shouldBe` ReplMcp
             parseReplLine "/MCP" `shouldBe` ReplMcp
+            parseReplLine "/mcps" `shouldBe` ReplMcp
             parseReplLine "/mcp now"
                 `shouldBe` ReplCommandError "usage: /mcp"
 
@@ -209,6 +244,12 @@ spec = do
             parseReplLine "/btw"
                 `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
 
+        it "requests a session recap" do
+            parseReplLine "/recap" `shouldBe` ReplRecap
+            parseReplLine "/summarize" `shouldBe` ReplRecap
+            parseReplLine "/recap now"
+                `shouldBe` ReplCommandError "usage: /recap"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
@@ -218,11 +259,22 @@ spec = do
                     "usage: /effort [none|low|medium|high|xhigh|max]"
             parseReplLine "/bogus"
                 `shouldBe` ReplCommandError "unknown command: /bogus (try /help)"
-            parseReplLine "/"
-                `shouldBe` ReplCommandError "unknown command: / (try /help)"
+
+    describe "parseAfkTarget" do
+        it "selects local tmux without an argument" do
+            parseAfkTarget Nothing `shouldBe` Right AfkLocal
+
+        it "parses an SSH host and remote folder" do
+            parseAfkTarget (Just "office-builder:~/haskell-agent")
+                `shouldBe` Right
+                    (AfkRemote "office-builder" "~/haskell-agent")
+
+        it "rejects incomplete remote targets" do
+            parseAfkTarget (Just "office-builder")
+                `shouldBe` Left "remote AFK target must be HOST:PATH"
 
     describe "slashCommands" do
-        it "covers every slash name the parser accepts" do
+        it "contains every static slash spec, including gated commands" do
             let names = map (.slashName) slashCommands
             names
                 `shouldBe`
@@ -231,11 +283,15 @@ spec = do
                     , "effort"
                     , "plan"
                     , "btw"
+                    , "recap"
                     , "session"
+                    , "session-info"
+                    , "afk"
                     , "worktree"
                     , "rename"
                     , "login"
                     , "resume"
+                    , "search"
                     , "compact"
                     , "clear"
                     , "new"
@@ -252,9 +308,14 @@ spec = do
                     , "terminal"
                     , "agents"
                     , "mcp"
+                    , "loop"
+                    , "goal"
+                    , "workflow"
+                    , "deep-research"
                     , "skills"
                     , "shell"
                     , "always-approve"
+                    , "quit"
                     ]
 
         it "looks up aliases" do
@@ -267,6 +328,12 @@ spec = do
                 `shouldBe` Just "agents"
             fmap (.slashName) (lookupSlashCommand "/title")
                 `shouldBe` Just "rename"
+            fmap (.slashName) (lookupSlashCommand "/mcps")
+                `shouldBe` Just "mcp"
+            fmap (.slashName) (lookupSlashCommand "/status")
+                `shouldBe` Just "session-info"
+            fmap (.slashName) (lookupSlashCommand "/exit")
+                `shouldBe` Just "quit"
 
         it "completes command names from a leading slash" do
             slashCompletionCandidates "" "/"
@@ -310,7 +377,11 @@ spec = do
             let displays text cursor =
                     maybe [] (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
                         (slashMenuFor text cursor)
-            displays "/" 1 `shouldBe` map (("/" <>) . (.slashName)) slashCommands
+            displays "/" 1
+                `shouldBe`
+                    map
+                        (("/" <>) . (.slashName))
+                        defaultSlashCatalog.slashCatalogCommands
             displays "/mo" 3 `shouldBe` ["/model"]
             displays "/ra" 3 `shouldSatisfy` ("/reload-auth" `elem`)
             displays "look at /mo" 11 `shouldBe` []
@@ -354,6 +425,168 @@ spec = do
             Text.unpack (formatSlashHelp False (Just "effort"))
                 `shouldSatisfy`
                     ("/effort [none|low|medium|high|xhigh|max]" `isInfixOf`)
+
+    describe "capability-gated slash catalog" do
+        let grokCatalog tools =
+                mkSlashCatalog GrokBuildDialect tools [] ["grok-4.6"]
+            allCoreTools =
+                [ "scheduler_create"
+                , "update_goal"
+                , "workflow"
+                ]
+            enabled = grokCatalog allCoreTools
+
+        it "fails closed when the dialect or backing tool is unavailable" do
+            parseReplLine "/loop 5m check ci"
+                `shouldBe`
+                    ReplCommandError "unknown command: /loop (try /help)"
+            parseReplLineWithCatalog
+                (mkSlashCatalog
+                    CodexDialect allCoreTools [] [])
+                "/loop 5m check ci"
+                `shouldBe`
+                    ReplCommandError "unknown command: /loop (try /help)"
+            parseReplLineWithCatalog
+                (grokCatalog [])
+                "/goal ship it"
+                `shouldBe`
+                    ReplCommandError "unknown command: /goal (try /help)"
+            parseReplLineWithCatalog
+                (grokCatalog ["scheduler_create"])
+                "/help goal"
+                `shouldBe`
+                    ReplCommandError "unknown command: goal (try /help)"
+
+        it "uses the same filtered commands for help and both completion paths" do
+            let disabled = grokCatalog []
+                enabledNames =
+                    map (.slashName) enabled.slashCatalogCommands
+                disabledHelp =
+                    Text.unpack
+                        (formatSlashHelpWithCatalog False disabled Nothing)
+                enabledHelp =
+                    Text.unpack
+                        (formatSlashHelpWithCatalog False enabled Nothing)
+            disabledHelp `shouldNotSatisfy` ("/loop" `isInfixOf`)
+            enabledHelp `shouldSatisfy` ("/loop" `isInfixOf`)
+            enabledNames `shouldSatisfy` ("goal" `elem`)
+            slashCompletionCandidatesWithCatalog disabled "" "/lo"
+                `shouldNotSatisfy` ("/loop" `elem`)
+            slashCompletionCandidatesWithCatalog enabled "" "/lo"
+                `shouldSatisfy` ("/loop" `elem`)
+            fmap
+                (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForCatalog disabled "/loo" 4)
+                `shouldBe` Nothing
+            fmap
+                (map (.slashSuggestionDisplay) . (.slashMenuSuggestions))
+                (slashMenuForCatalog enabled "/loo" 4)
+                `shouldBe` Just ["/loop"]
+
+        it "expands /loop while preserving the submitted slash text" do
+            case parseReplLineWithCatalog enabled
+                    "  /loop every 5 minutes check ci  " of
+                ReplExpandedPrompt original expanded -> do
+                    original `shouldBe` "  /loop every 5 minutes check ci  "
+                    Text.unpack expanded
+                        `shouldSatisfy` ("scheduler_create" `isInfixOf`)
+                    Text.unpack expanded
+                        `shouldSatisfy` ("fire_immediately" `isInfixOf`)
+                    Text.unpack expanded
+                        `shouldNotSatisfy` ("scheduler_delete" `isInfixOf`)
+                    Text.unpack expanded
+                        `shouldSatisfy`
+                            ("parent session or user owns cancellation"
+                                `isInfixOf`)
+                    Text.unpack expanded
+                        `shouldSatisfy` ("every 5 minutes check ci" `isInfixOf`)
+                other ->
+                    expectationFailure
+                        ("expected expanded prompt, got " <> show other)
+            parseReplLineWithCatalog enabled "/loop"
+                `shouldSatisfy` \case
+                    ReplCommandError message ->
+                        "/loop [interval] <prompt>"
+                            `Text.isInfixOf` message
+                    _ -> False
+
+        it "parses goal lifecycle and a strict trailing budget" do
+            parseReplLineWithCatalog enabled "/goal"
+                `shouldBe` ReplGoalStatus
+            parseReplLineWithCatalog enabled "/goal status"
+                `shouldBe` ReplGoalStatus
+            parseReplLineWithCatalog enabled "/goal pause"
+                `shouldBe` ReplGoalPause
+            parseReplLineWithCatalog enabled "/goal resume"
+                `shouldBe` ReplGoalResume
+            parseReplLineWithCatalog enabled "/goal clear"
+                `shouldBe` ReplGoalClear
+            case parseReplLineWithCatalog enabled
+                    "/goal ship the widget --budget 1200" of
+                ReplGoalSet original objective budget expanded -> do
+                    original
+                        `shouldBe`
+                            "/goal ship the widget --budget 1200"
+                    objective `shouldBe` "ship the widget"
+                    budget `shouldBe` Just 1200
+                    expanded `shouldSatisfy`
+                        Text.isInfixOf "advisory scope budget of 1200"
+                other ->
+                    expectationFailure
+                        ("expected budgeted goal, got " <> show other)
+            parseReplLineWithCatalog enabled
+                "/goal explain --budget nope"
+                `shouldBe`
+                    ReplCommandError
+                        "usage: /goal <objective> [--budget POSITIVE_INTEGER]"
+
+        it "parses workflow launch, management, and deep research" do
+            fmap (.slashUsage) (lookupSlashCommandIn enabled "/workflow")
+                `shouldBe` Just "/workflow runs | <name> [input]"
+            fmap (.slashSummary) (lookupSlashCommandIn enabled "/workflow")
+                `shouldBe`
+                    Just "Launch a named workflow or list workflow runs"
+            slashCompletionCandidatesWithCatalog
+                enabled
+                "wolfkrow/"
+                ""
+                `shouldBe` ["runs"]
+            parseReplLineWithCatalog enabled "/workflow"
+                `shouldBe` ReplWorkflowRuns
+            parseReplLineWithCatalog enabled "/workflow runs"
+                `shouldBe` ReplWorkflowRuns
+            parseReplLineWithCatalog enabled "/workflow pause wf_12"
+                `shouldBe` ReplWorkflowManage "pause" (Just "wf_12")
+            parseReplLineWithCatalog enabled "/workflow wf_12 stop"
+                `shouldBe` ReplWorkflowManage "stop" (Just "wf_12")
+            case parseReplLineWithCatalog enabled
+                    "/workflow deep-research rust pitfalls" of
+                ReplExpandedPrompt original expanded -> do
+                    original
+                        `shouldBe`
+                            "/workflow deep-research rust pitfalls"
+                    Text.unpack expanded
+                        `shouldSatisfy`
+                            ("name: deep-research" `isInfixOf`)
+                    Text.unpack expanded
+                        `shouldSatisfy`
+                            ("args: {\"query\":\"rust pitfalls\"}"
+                                `isInfixOf`)
+                other ->
+                    expectationFailure
+                        ("expected workflow expansion, got " <> show other)
+            case parseReplLineWithCatalog enabled
+                    "/deep-research compare schedulers" of
+                ReplExpandedPrompt _ expanded ->
+                    expanded
+                        `shouldBe`
+                            deepResearchInstruction "compare schedulers"
+                other ->
+                    expectationFailure
+                        ("expected deep-research expansion, got " <> show other)
+            parseReplLineWithCatalog enabled "/deep-research"
+                `shouldBe`
+                    ReplCommandError "usage: /deep-research <query>"
 
     describe "runtime skill commands" do
         let skills =

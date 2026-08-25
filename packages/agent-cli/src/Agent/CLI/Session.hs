@@ -5,6 +5,7 @@ module Agent.CLI.Session
     , LegacySubagentTarget(..)
     , SessionTurn(..)
     , SessionActivity(..)
+    , SessionTransfer(..)
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -23,6 +24,8 @@ module Agent.CLI.Session
     , addSessionUsage
     , deleteSession
     , loadSession
+    , loadSessions
+    , importSessionTransfer
     , loadSessionHandle
     , isValidSessionId
     , listSessions
@@ -37,6 +40,8 @@ module Agent.CLI.Session
     , setGeneratedSessionTitle
     , setManualSessionTitle
     , resetSessionTitleToAuto
+    , setSessionRecap
+    , setSessionTurnSummary
     , sessionConversationText
     , sessionLegacySubagentTarget
     , sessionTitleTurnCountFromSlot
@@ -144,7 +149,25 @@ data SessionMeta = SessionMeta
     , metaInputTokens :: !Int
     , metaOutputTokens :: !Int
     , metaCachedTokens :: !Int
+    , metaLastRecap :: !(Maybe Text)
+    , metaLastTurnSummary :: !(Maybe Text)
+    , metaLastRecapMainTurns :: !Int
     } deriving (Eq, Show)
+
+data SessionTransfer = SessionTransfer
+    { transferMeta :: !SessionMeta
+    , transferTurns :: ![SessionTurn]
+    } deriving (Eq, Show)
+
+instance ToJSON SessionTransfer where
+    toJSON transfer = object
+        [ "meta" .= transfer.transferMeta
+        , "turns" .= transfer.transferTurns
+        ]
+
+instance FromJSON SessionTransfer where
+    parseJSON = withObject "SessionTransfer" \o ->
+        SessionTransfer <$> o .: "meta" <*> o .: "turns"
 
 -- | Durable provenance for subagent transcripts written before child target
 -- metadata was persisted. Keeping this target separate from the mutable root
@@ -217,6 +240,9 @@ instance ToJSON SessionMeta where
         , "inputTokens" .= meta.metaInputTokens
         , "outputTokens" .= meta.metaOutputTokens
         , "cachedTokens" .= meta.metaCachedTokens
+        , "lastRecap" .= meta.metaLastRecap
+        , "lastTurnSummary" .= meta.metaLastTurnSummary
+        , "lastRecapMainTurns" .= meta.metaLastRecapMainTurns
         ]
 
 instance FromJSON SessionMeta where
@@ -263,6 +289,9 @@ instance FromJSON SessionMeta where
             <*> (o .:? "inputTokens" .!= 0)
             <*> (o .:? "outputTokens" .!= 0)
             <*> (o .:? "cachedTokens" .!= 0)
+            <*> o .:? "lastRecap"
+            <*> o .:? "lastTurnSummary"
+            <*> (o .:? "lastRecapMainTurns" .!= 0)
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
@@ -508,6 +537,9 @@ createReservedSession spec sessionId tempDir = do
             , metaInputTokens = 0
             , metaOutputTokens = 0
             , metaCachedTokens = 0
+            , metaLastRecap = Nothing
+            , metaLastTurnSummary = Nothing
+            , metaLastRecapMainTurns = 0
             }
         handle = SessionHandle
             { sessionPool = pool
@@ -694,6 +726,36 @@ loadSession pool root sessionId = runExceptT do
         Nothing -> throwE ("session not found: " <> sessionId)
         Just value -> decodeStoredSession sessionId value
 
+-- | Load several sessions with one batched PostgreSQL read while preserving
+-- request order. A missing database row still takes the legacy import path.
+loadSessions
+    :: StorePool
+    -> OsPath
+    -> [Text]
+    -> IO [Either Text (SessionMeta, [SessionTurn])]
+loadSessions pool root sessionIds = do
+    let validated =
+            [ sessionDirForId root sessionId
+                >> Right sessionId
+            | sessionId <- sessionIds
+            ]
+        validIds = [sessionId | Right sessionId <- validated]
+    stored <- Store.loadSessions pool validIds
+    restoreResults validated stored
+  where
+    restoreResults [] [] = pure []
+    restoreResults (Left err : rest) results =
+        (Left err :) <$> restoreResults rest results
+    restoreResults (Right sessionId : rest) (result : results) = do
+        loaded <- case result of
+            Left err -> pure (Left (renderStoreError err))
+            Right Nothing -> loadSession pool root sessionId
+            Right (Just value) ->
+                runExceptT (decodeStoredSession sessionId value)
+        (loaded :) <$> restoreResults rest results
+    restoreResults _ _ =
+        pure [Left "batched session load returned an unexpected result count"]
+
 loadSessionHandle
     :: StorePool
     -> OsPath
@@ -718,6 +780,45 @@ loadSessionHandle pool root sessionId =
                         }
                     , turns
                     )
+
+-- | Import a transferred session under its existing id and optional cwd.
+importSessionTransfer
+    :: StorePool
+    -> OsPath
+    -> Maybe OsPath
+    -> SessionTransfer
+    -> IO (Either Text Text)
+importSessionTransfer pool root cwd transfer = runExceptT do
+    let sessionId = transfer.transferMeta.metaId
+    dir <- except (sessionDirForId root sessionId)
+    exists <- lift (doesDirectoryExist dir)
+    when exists (throwE ("session already exists: " <> sessionId))
+    lift (ensurePrivateDir root)
+    lift (createDirectory dir)
+    lift (setFileMode (unsafeToFilePath dir) 0o700)
+    _ <- lift (ensureSessionTemp root sessionId) >>= except
+    let meta = transfer.transferMeta
+            { metaCwd = fromMaybe transfer.transferMeta.metaCwd cwd }
+        bytes = Aeson.encode (SessionTransfer meta transfer.transferTurns)
+        legacy = Store.LegacySession
+            { legacySourcePath = "afk:" <> transfer.transferMeta.metaId
+            , legacyContentHash = contentFingerprint bytes
+            , legacyMetadata = toStoredMetadata meta
+            , legacyTurns = map toStoredTurn transfer.transferTurns
+            }
+    lift (Store.importLegacySession pool legacy) >>= \case
+        Left err -> do
+            lift (cleanupTransfer dir sessionId)
+            throwE (renderStoreError err)
+        Right False -> do
+            lift (cleanupTransfer dir sessionId)
+            throwE ("session already exists: " <> sessionId)
+        Right True -> pure sessionId
+  where
+    cleanupTransfer dir sessionId = do
+        _ <- tryIO (removePathForcibly dir)
+        _ <- removeSessionTemp root sessionId
+        pure ()
 
 deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
 deleteSession pool root sessionId = runExceptT do
@@ -827,6 +928,21 @@ resetSessionTitleToAuto handle = do
             { metaTitleIsManual = False
             , metaTitleRefreshIndex = 0
             }
+    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
+
+setSessionRecap :: Text -> Int -> SessionHandle -> IO SessionHandle
+setSessionRecap summary mainTurns handle = do
+    let meta = handle.sessionMeta
+            { metaLastRecap = Just summary
+            , metaLastRecapMainTurns = max 0 mainTurns
+            }
+    writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
+    pure handle { sessionMeta = meta }
+
+setSessionTurnSummary :: Text -> SessionHandle -> IO SessionHandle
+setSessionTurnSummary summary handle = do
+    let meta = handle.sessionMeta { metaLastTurnSummary = Just summary }
     writeSessionMeta handle.sessionPool handle.sessionMetaPath meta
     pure handle { sessionMeta = meta }
 
@@ -997,6 +1113,10 @@ toStoredMetadata meta = Store.SessionMetadata
     , sessionMetadataInputTokens = fromIntegral meta.metaInputTokens
     , sessionMetadataOutputTokens = fromIntegral meta.metaOutputTokens
     , sessionMetadataCachedTokens = fromIntegral meta.metaCachedTokens
+    , sessionMetadataLastRecap = meta.metaLastRecap
+    , sessionMetadataLastTurnSummary = meta.metaLastTurnSummary
+    , sessionMetadataLastRecapMainTurns =
+        fromIntegral meta.metaLastRecapMainTurns
     }
 
 fromStoredMetadata :: Store.SessionMetadata -> Either Text SessionMeta
@@ -1044,6 +1164,10 @@ fromStoredMetadata stored = do
         , metaInputTokens = fromIntegral stored.sessionMetadataInputTokens
         , metaOutputTokens = fromIntegral stored.sessionMetadataOutputTokens
         , metaCachedTokens = fromIntegral stored.sessionMetadataCachedTokens
+        , metaLastRecap = stored.sessionMetadataLastRecap
+        , metaLastTurnSummary = stored.sessionMetadataLastTurnSummary
+        , metaLastRecapMainTurns =
+            fromIntegral stored.sessionMetadataLastRecapMainTurns
         }
 
 toStoredLegacyTarget

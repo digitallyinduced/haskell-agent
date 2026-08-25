@@ -241,7 +241,10 @@ instance FromJSON ResponseStreamError where
     parseJSON = withObject "ResponseStreamError" $ \o -> ResponseStreamError
         <$> o .:? "type"
         <*> o .:? "code"
-        <*> o .: "message"
+        -- Some Responses gateways emit code/type without a human-readable
+        -- message. Keep the wire shape permissive so those errors can still
+        -- be classified instead of aborting event decoding.
+        <*> o .:? "message" .!= ""
         <*> o .:? "param"
         <*> o .:? "resets_in_seconds"
         <*> pure (without ["message"] o)
@@ -293,6 +296,21 @@ data ResponseStreamEvent
         , outputIndex      :: !(Maybe Int)
         , sequenceNumber   :: !(Maybe Int)
         , eventExtraFields :: !Aeson.Object
+        }
+    | ResponseFunctionCallArgumentsDeltaEvent
+        { delta             :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Aeson.Object
+        }
+    | ResponseFunctionCallArgumentsDoneEvent
+        { arguments         :: !(Maybe Text)
+        , functionName      :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Aeson.Object
         }
     | ResponseCustomToolInputDeltaEvent
         { delta             :: !(Maybe Text)
@@ -354,6 +372,10 @@ responseStreamEventType = \case
     ResponseQueuedEvent{} -> EventResponseQueued
     ResponseOutputItemAddedEvent{} -> EventOutputItemAdded
     ResponseOutputItemDoneEvent{} -> EventOutputItemDone
+    ResponseFunctionCallArgumentsDeltaEvent{} ->
+        EventFunctionCallArgumentsDelta
+    ResponseFunctionCallArgumentsDoneEvent{} ->
+        EventFunctionCallArgumentsDone
     ResponseCustomToolInputDeltaEvent{} -> EventCustomToolInputDelta
     ResponseCustomToolInputDoneEvent{} -> EventCustomToolInputDone
     ResponseReasoningSummaryPartAddedEvent{} -> EventReasoningSummaryPartAdded
@@ -389,6 +411,16 @@ instance ToJSON ResponseStreamEvent where
             outputItemEvent "response.output_item.added" item outputIndex sequenceNumber eventExtraFields
         ResponseOutputItemDoneEvent { item, outputIndex, sequenceNumber, eventExtraFields } ->
             outputItemEvent "response.output_item.done" item outputIndex sequenceNumber eventExtraFields
+        ResponseFunctionCallArgumentsDeltaEvent { delta, streamItemId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
+            indexedItemEvent "response.function_call_arguments.delta"
+                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
+                [optionalField "delta" delta]
+        ResponseFunctionCallArgumentsDoneEvent { arguments, functionName, streamItemId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
+            indexedItemEvent "response.function_call_arguments.done"
+                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
+                [ optionalField "name" functionName
+                , optionalField "arguments" arguments
+                ]
         ResponseCustomToolInputDeltaEvent { delta, streamItemId, streamCallId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
             indexedItemEvent "response.custom_tool_call_input.delta"
                 streamItemId streamCallId streamOutputIndex sequenceNumber eventExtraFields
@@ -474,6 +506,36 @@ instance FromJSON ResponseStreamEvent where
             EventResponseQueued -> lifecycle ResponseQueuedEvent sequenceNumber o
             EventOutputItemAdded -> outputItem ResponseOutputItemAddedEvent sequenceNumber o
             EventOutputItemDone -> outputItem ResponseOutputItemDoneEvent sequenceNumber o
+            EventFunctionCallArgumentsDelta ->
+                ResponseFunctionCallArgumentsDeltaEvent
+                    <$> o .:? "delta"
+                    <*> o .:? "item_id"
+                    <*> o .:? "output_index"
+                    <*> pure sequenceNumber
+                    <*> pure
+                        ( without ["type"]
+                        $ withoutNonNull
+                            ["sequence_number", "delta", "item_id", "output_index"]
+                            o
+                        )
+            EventFunctionCallArgumentsDone ->
+                ResponseFunctionCallArgumentsDoneEvent
+                    <$> o .:? "arguments"
+                    <*> o .:? "name"
+                    <*> o .:? "item_id"
+                    <*> o .:? "output_index"
+                    <*> pure sequenceNumber
+                    <*> pure
+                        ( without ["type"]
+                        $ withoutNonNull
+                            [ "sequence_number"
+                            , "arguments"
+                            , "name"
+                            , "item_id"
+                            , "output_index"
+                            ]
+                            o
+                        )
             EventCustomToolInputDelta -> ResponseCustomToolInputDeltaEvent
                 <$> o .:? "delta"
                 <*> o .:? "item_id"
@@ -559,7 +621,7 @@ instance FromJSON ResponseStreamEvent where
                     streamError <- ResponseStreamError
                         <$> pure Nothing
                         <*> object .:? "code"
-                        <*> object .: "message"
+                        <*> object .:? "message" .!= ""
                         <*> object .:? "param"
                         <*> object .:? "resets_in_seconds"
                         <*> pure (without ["type", "sequence_number", "message"] object)

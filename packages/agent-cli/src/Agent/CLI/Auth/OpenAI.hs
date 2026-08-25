@@ -19,6 +19,8 @@ import Agent.CLI.CredentialStore
     , loadManagedCredentials
     , updateManagedCredentialSecret
     )
+import Agent.CLI.Environment (lookupNonEmpty)
+import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.Error (ApiError(..))
 import Agent.FileRetry (retryOnFileBusy)
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -37,7 +39,6 @@ import Agent.Provider
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception.Safe (bracket, bracket_)
 import Control.Monad (when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, throwE)
@@ -58,26 +59,10 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.Directory.OsPath
-    ( createDirectoryIfMissing
-    , doesFileExist
+    ( doesFileExist
     , getHomeDirectory
     )
-import System.IO (SeekMode(AbsoluteSeek))
-import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
-import qualified System.OsPath as OsPath
-import System.Posix.Files (setFileMode)
-import System.Posix.IO
-    ( LockRequest(Unlock, WriteLock)
-    , OpenFileFlags(..)
-    , OpenMode(ReadWrite)
-    , closeFd
-    , defaultFileFlags
-    , openFd
-    , setLock
-    , waitToSetLock
-    )
-import System.Posix.Types (Fd)
-import qualified System.Process.Environment.OsString as Environment
+import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
 
 -- | Pin normal checkouts to one OpenAI pool account until that credential is
 -- reported as failed. A failure for the selected credential clears the pin
@@ -399,7 +384,7 @@ withOpenAiSourceLock :: OpenAiCredentialSource -> IO a -> IO a
 withOpenAiSourceLock source action =
     openAiSourceLockPath source >>= \case
         Nothing -> action
-        Just path -> withAdvisoryFileLock path action
+        Just path -> withPrivateFileLock path action
 
 openAiSourceLockPath :: OpenAiCredentialSource -> IO (Maybe OsPath)
 openAiSourceLockPath source =
@@ -430,30 +415,6 @@ safeLockName = Text.map replace
         | otherwise = '-'
     allowed =
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-
-withAdvisoryFileLock :: OsPath -> IO a -> IO a
-withAdvisoryFileLock path action = do
-    createDirectoryIfMissing True (takeDirectory path)
-    setFileMode (unsafeToFilePath (takeDirectory path)) 0o700
-    bracket
-        (openRefreshLock path)
-        closeFd
-        (\fd -> bracket_ (lockRefreshFd fd) (unlockRefreshFd fd) action)
-
-openRefreshLock :: OsPath -> IO Fd
-openRefreshLock path =
-    openFd
-        (unsafeToFilePath path)
-        ReadWrite
-        defaultFileFlags { creat = Just 0o600, cloexec = True }
-
-lockRefreshFd :: Fd -> IO ()
-lockRefreshFd fd =
-    waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
-
-unlockRefreshFd :: Fd -> IO ()
-unlockRefreshFd fd =
-    setLock fd (Unlock, AbsoluteSeek, 0, 0)
 
 reloadOpenAiAccount
     :: OpenAiCredentialSource
@@ -550,15 +511,6 @@ openaiAccountIdForToken token = do
             <|> (fromIdToken >>= OpenAI.deriveAccountId)
             <|> OpenAI.deriveAccountId token
 
-lookupNonEmpty :: String -> IO (Maybe Text)
-lookupNonEmpty name = do
-    value <- Environment.getEnv (OsPath.unsafeEncodeUtf name)
-    pure $ case value of
-        Just raw
-            | Right text <- OsPath.decodeUtf raw
-            , not (null text) ->
-                Just (Text.pack text)
-        _ -> Nothing
 
 noAuthHint :: Text
 noAuthHint =

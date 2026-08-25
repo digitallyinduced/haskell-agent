@@ -1,6 +1,10 @@
 module Agent.TUI.ModelSpec (spec) where
 
 import Agent.TUI.Model
+import Agent.TUI.Presentation
+    ( TodoDisplayLine(..)
+    , TodoDisplayStatus(..)
+    )
 import Agent.Loop
     ( LoopEvent(..)
     , emptyTurnOutput
@@ -25,6 +29,20 @@ spec = describe "fullscreen UI reducer" do
         fmap (.permissionIndex) (moved 2).uiPermission `shouldBe` Just 2
         fmap (.permissionIndex) (moved 3).uiPermission `shouldBe` Just 3
         fmap (.permissionIndex) (moved 4).uiPermission `shouldBe` Just 0
+
+    it "reuses one recap block instead of stacking spinners" do
+        let started = reduceUi UiRecapStarted initialUiState
+            ready =
+                reduceUi
+                    (UiRecapReady "We fixed auth retries in billing/retry.rs.")
+                    started
+            blocks = Foldable.toList ready.uiBlocks
+        map (.blockKind) (Foldable.toList started.uiBlocks)
+            `shouldBe` [BlockRecap]
+        map (.blockKind) blocks `shouldBe` [BlockRecap]
+        map (.blockBody) blocks
+            `shouldBe` ["We fixed auth retries in billing/retry.rs."]
+        map (.blockState) blocks `shouldBe` [BlockComplete]
 
     it "retains user, reasoning, and assistant blocks across a turn" do
         let state =
@@ -660,6 +678,114 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldSatisfy` Text.isInfixOf "-old"
                 block.blockBody `shouldSatisfy` Text.isInfixOf "+new"
             _ -> expectationFailure "expected one running edit block"
+
+    it "keeps todo_write in a live panel instead of scrollback" do
+        let call =
+                functionToolCall
+                    "todo-1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\",\"status\":\"pending\"}]}"
+            result = ToolCallResult
+                { callId = "todo-1"
+                , output =
+                    "- [completed] 1: Find and clone repos\n\
+                    \- [in_progress] 2: Investigate Grok Build"
+                , callKind = FunctionCallKind
+                }
+            started =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            finished =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    ]
+            done =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result
+                        { output = "- [completed] 1: Find and clone repos"
+                        })
+                    ]
+        Foldable.toList started.uiBlocks `shouldBe` []
+        started.uiActivity `shouldBe` "todo_write"
+        visibleTodoList started `shouldBe` []
+        Foldable.toList finished.uiBlocks `shouldBe` []
+        map (.todoLineText) (visibleTodoList finished)
+            `shouldBe` ["Find and clone repos", "Investigate Grok Build"]
+        map (.todoLineStatus) (visibleTodoList finished)
+            `shouldBe` [TodoDisplayCompleted, TodoDisplayInProgress]
+        Foldable.toList done.uiBlocks `shouldBe` []
+        visibleTodoList done `shouldBe` []
+        done.uiTodos
+            `shouldBe` [TodoDisplayLine TodoDisplayCompleted "Find and clone repos"]
+
+    it "hides pending todos once the turn is idle" do
+        let call =
+                functionToolCall
+                    "todo-1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Inspect Model.hs\"}]}"
+            result = ToolCallResult
+                { callId = "todo-1"
+                , output =
+                    "- [completed] 1: Open the file\n\
+                    \- [pending] 2: Inspect Model.hs"
+                , callKind = FunctionCallKind
+                }
+            running =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    ]
+            idle =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop (ToolFinished result)
+                    , UiLoop (TurnFinished (emptyTurnOutput "r1" [] Nothing))
+                    ]
+        map (.todoLineText) (visibleTodoList running)
+            `shouldBe` ["Open the file", "Inspect Model.hs"]
+        visibleTodoList idle `shouldBe` []
+        map (.todoLineText) idle.uiTodos
+            `shouldBe` ["Open the file", "Inspect Model.hs"]
+
+    it "does not let ordinary tool output clobber the live todo list" do
+        let todoCall =
+                functionToolCall
+                    "todo-1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Keep this list\"}]}"
+            todoResult = ToolCallResult
+                { callId = "todo-1"
+                , output = "- [in_progress] 1: Keep this list"
+                , callKind = FunctionCallKind
+                }
+            shellCall =
+                functionToolCall "shell-1" "run_terminal_cmd" "{\"command\":\"ls\"}"
+            shellResult = ToolCallResult
+                { callId = "shell-1"
+                , output = "- [pending] 99: spoofed checklist from stdout"
+                , callKind = FunctionCallKind
+                }
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted todoCall)
+                    , UiLoop (ToolFinished todoResult)
+                    , UiLoop (ToolStarted shellCall)
+                    , UiLoop (ToolFinished shellResult)
+                    ]
+        map (.todoLineText) (visibleTodoList state)
+            `shouldBe` ["Keep this list"]
+        map (.blockKind) (Foldable.toList state.uiBlocks)
+            `shouldBe` [BlockShell]
 
     it "formats collaboration result JSON for display" do
         let call =

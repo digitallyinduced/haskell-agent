@@ -231,6 +231,10 @@ spec = describe "Agent.Subagents" do
             `shouldReturn` Right replacement
         closeSubagentRegistry registry
 
+    it "allows 32 concurrent agents by default" do
+        defaultSubagentConfig.maxConcurrent `shouldBe` defaultMaxConcurrent
+        defaultMaxConcurrent `shouldBe` 32
+
     it "allows four nested levels by default and rejects depth five" do
         defaultSubagentConfig.maxDepth `shouldBe` Just defaultMaxDepth
         defaultMaxDepth `shouldBe` 4
@@ -277,6 +281,26 @@ spec = describe "Agent.Subagents" do
         _ <- waitSubagents registry [first] 15000
         Right _ <- spawnSubagent registry Nothing 0 "c" Nothing
         pure ()
+
+    it "applies a live maxConcurrent increase to the next spawn" do
+        let config = defaultSubagentConfig { maxConcurrent = 1 }
+        registry <- newSubagentRegistry config (fromFilePath "/tmp")
+            (\_ _ _ _ -> atomically retry)
+            (\_ _ -> pure ())
+        Right _ <- spawnSubagent registry Nothing 0 "a" Nothing
+        rejected <- spawnSubagent registry Nothing 0 "b" Nothing
+        rejected `shouldSatisfy` \case
+            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
+            Right _ -> False
+        setMaxConcurrent registry 2
+        config' <- subagentConfig registry
+        config'.maxConcurrent `shouldBe` 2
+        Right _ <- spawnSubagent registry Nothing 0 "c" Nothing
+        extra <- spawnSubagent registry Nothing 0 "d" Nothing
+        extra `shouldSatisfy` \case
+            Left err -> "Concurrent subagent limit" `Text.isInfixOf` err
+            Right _ -> False
+        closeSubagentRegistry registry
 
     it "supports nested spawn when depth is unlimited" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")

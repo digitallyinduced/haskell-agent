@@ -3,6 +3,7 @@
 module Agent.Claude.LoopBackend
     ( withClaudeCodeBackend
     , claudeCodeOneShotBackend
+    , appendHostTranscript
     ) where
 
 import Agent.Claude.Options
@@ -22,6 +23,7 @@ import Agent.InterAgentMessage (renderInterAgentMessage)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
+    , FileAttachment(..)
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
@@ -56,6 +58,7 @@ import Claude.Agent.SDK.Client
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.Char as Char
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -70,6 +73,9 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.UUID.Types as UUID
+import qualified System.Directory as Directory
+import System.FilePath (takeExtension)
+import System.IO (hClose, openBinaryTempFile)
 import System.Mem.StableName
     ( StableName
     , eqStableName
@@ -91,6 +97,8 @@ import Claude.Agent.SDK.Types
     , Usage(..)
     , messageHasParentToolUseId
     )
+import Control.Exception.Safe (bracket, tryAny)
+import Control.Monad (void)
 
 data HostTranscriptCheckpoint = HostTranscriptCheckpoint
     { checkpointTranscript :: !(StableName [ResponseItem])
@@ -188,60 +196,69 @@ submitClaudeCodeTurn
     inputs
     onEvent =
     do
-        let (inputText, inputImages) = collectTurnInputs inputs
-        params <- getParams
-        let previousSession =
-                previous >>= canonicalClaudeSessionId
-        result <- withClaudeSDKTurn
-            session
-            (hostTranscriptMatches
-                checkpoint
-                transcript
-                previousSession)
-            previousSession
-            params.model
-            (params.reasoning >>= (.effort))
-            \turn -> do
-                history <- readIORef transcript
-                messages <- newIORef []
-                let prompt =
-                        buildClaudePrompt
-                            params
-                            (turnIsNewSession turn)
-                            history
-                            inputText
-                    content =
-                        claudeUserContent inputImages prompt
-                awaitResult <-
-                    queryTurnContentWithMessageValidator
-                        turn
-                        content
-                        validateSubscriptionMessage
-                        (\message ->
-                            modifyIORef' messages (message :))
-                case awaitResult of
-                    Left sdkError ->
-                        pure (Left sdkError)
-                    Right result -> do
-                        turnMessages <- reverse <$> readIORef messages
-                        case interpretClaudeTurn turnMessages result of
-                            Left message ->
-                                pure $
-                                    Left ResultError
-                                        { subtype = "authentication_error"
-                                        , apiErrorStatus = Nothing
-                                        , errors = [message]
-                                        , result = Nothing
-                                        }
-                            Right completed -> do
-                                completeTurn
-                                    turn
-                                    completed
-                                    result
-                                    inputs
-                                    onEvent
-        pure (either (Left . sdkErrorToApiError) Right result)
+        bracket
+            (collectTurnInputs inputs)
+            (cleanupCollectedTurnInputs . snd3)
+            \(inputText, inputImages, _inputFiles) -> do
+                params <- getParams
+                let previousSession =
+                        previous >>= canonicalClaudeSessionId
+                result <- withClaudeSDKTurn
+                    session
+                    (hostTranscriptMatches
+                        checkpoint
+                        transcript
+                        previousSession)
+                    previousSession
+                    params.model
+                    (params.reasoning >>= (.effort))
+                    \turn -> do
+                        history <- readIORef transcript
+                        messages <- newIORef []
+                        let prompt =
+                                buildClaudePrompt
+                                    params
+                                    (turnIsNewSession turn)
+                                    history
+                                    inputText
+                            content =
+                                claudeUserContent inputImages prompt
+                        awaitResult <-
+                            queryTurnContentWithMessageValidator
+                                turn
+                                content
+                                validateSubscriptionMessage
+                                (\message ->
+                                    modifyIORef' messages (message :))
+                        case awaitResult of
+                            Left sdkError ->
+                                pure (Left sdkError)
+                            Right result -> do
+                                turnMessages <- reverse <$> readIORef messages
+                                case interpretClaudeTurn turnMessages result of
+                                    Left message ->
+                                        pure $
+                                            Left ResultError
+                                                { subtype = "authentication_error"
+                                                , apiErrorStatus = Nothing
+                                                , errors = [message]
+                                                , result = Nothing
+                                                }
+                                    Right completed -> do
+                                        completeTurn
+                                            turn
+                                            completed
+                                            result
+                                            inputs
+                                            onEvent
+                pure (either (Left . sdkErrorToApiError) Right result)
   where
+    snd3 (_, _, c) = c
+
+    cleanupCollectedTurnInputs :: [FilePath] -> IO ()
+    cleanupCollectedTurnInputs = mapM_ \path ->
+        void (tryAny (Directory.removeFile path))
+
     completeTurn
         :: ClaudeSDKTurn
         -> CompletedClaudeTurn
@@ -272,11 +289,17 @@ submitClaudeCodeTurn
         mapM_ onEvent completed.events
         pure (Right (output, commit))
 
-collectTurnInputs :: [TurnInput] -> (Text, [ImageAttachment])
-collectTurnInputs inputs =
-    ( Text.intercalate "\n\n" (concatMap inputText inputs)
-    , concatMap inputImages inputs
-    )
+collectTurnInputs :: [TurnInput] -> IO (Text, [ImageAttachment], [FilePath])
+collectTurnInputs inputs = do
+    fileInputs <- fmap concat (mapM inputFiles inputs)
+    pure
+        ( Text.intercalate "\n\n"
+            ( concatMap inputText inputs
+                <> map fst fileInputs
+            )
+        , concatMap inputImages inputs
+        , map snd fileInputs
+        )
   where
     inputText = \case
         UserMessage text ->
@@ -284,6 +307,8 @@ collectTurnInputs inputs =
         AgentMessage message ->
             [renderInterAgentMessage message]
         UserMultimodal{userText} ->
+            [userText]
+        UserMultimodalFiles{userText} ->
             [userText]
         CompletedTool
             (ToolDispatch.ToolCallResult resultCallId resultOutput _) ->
@@ -294,7 +319,38 @@ collectTurnInputs inputs =
                     <> resultOutput
     inputImages = \case
         UserMultimodal{userImages} -> userImages
+        UserMultimodalFiles{userImages} -> userImages
         _ -> []
+    inputFiles = \case
+        UserMultimodalFiles{userFiles} -> mapM writeFallbackFile userFiles
+        _ -> pure []
+
+    writeFallbackFile :: FileAttachment -> IO (Text, FilePath)
+    writeFallbackFile FileAttachment{fileName, fileMime, fileBytes} = do
+        tmpDir <- Directory.getTemporaryDirectory
+        let prefix =
+                maybe "attachment" sanitizePrefix fileName
+                <> fromMaybe "" (fileName >>= nonEmptyExtension)
+        (path, handle) <- openBinaryTempFile tmpDir prefix
+        hClose handle
+        LazyByteString.writeFile path (LazyByteString.fromStrict fileBytes)
+        pure
+            ( Text.unlines
+                [ "[Attached file]"
+                , "name: " <> fromMaybe "unknown" fileName
+                , "mime: " <> fileMime
+                , "path: " <> Text.pack path
+                ]
+            , path
+            )
+
+    sanitizePrefix = Text.unpack . Text.filter validPrefixChar
+    nonEmptyExtension name =
+        case takeExtension (Text.unpack name) of
+            "" -> Nothing
+            extension -> Just extension
+    validPrefixChar char =
+        Char.isAlphaNum char || char == '-' || char == '_'
 
 claudeUserContent
     :: [ImageAttachment]
@@ -492,7 +548,7 @@ commitHostTranscript
     sessionId
     inputs
     assistantText = do
-    appendHostTranscript transcript inputs assistantText
+    appendHostTranscriptRef transcript inputs assistantText
     -- Read and enter the exact object installed in the IORef before taking its
     -- StableName. Otherwise the lazy append thunk can later be entered by the
     -- CLI, changing the StableName despite no host-side transcript change.
@@ -508,17 +564,23 @@ commitHostTranscript
             }
 
 appendHostTranscript
+    :: [ResponseItem]
+    -> [TurnInput]
+    -> Maybe Text
+    -> [ResponseItem]
+appendHostTranscript history inputs assistantText =
+    history
+        <> turnInputsToItems inputs
+        <> [assistantMessageItem assistantText]
+
+appendHostTranscriptRef
     :: IORef [ResponseItem]
     -> [TurnInput]
     -> Maybe Text
     -> IO ()
-appendHostTranscript transcript inputs assistantText =
+appendHostTranscriptRef transcript inputs assistantText =
     atomicModifyIORef' transcript \history ->
-        ( history
-            <> turnInputsToItems inputs
-            <> [assistantMessageItem assistantText]
-        , ()
-        )
+        (appendHostTranscript history inputs assistantText, ())
 
 assistantMessageItem :: Maybe Text -> ResponseItem
 assistantMessageItem assistantText =

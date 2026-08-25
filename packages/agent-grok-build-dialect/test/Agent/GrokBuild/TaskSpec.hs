@@ -38,7 +38,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ _ _ -> pure $ Left LoopNoResponseId)
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
             parameters = fromMaybe [] (jsonToolParameters tool)
@@ -71,7 +71,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
                 })
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -89,7 +89,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (observeSpec typesRef observed)
             (\_ _ -> pure ())
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         _ <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -119,7 +119,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         typesRef <- newIORef Map.empty
         let restore _ =
                 pure (Left "persisted subagent dialect is incompatible")
-            ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+            ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) (Just restore) Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -154,7 +154,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let childId = SubagentId "agent-child"
-            ctx = MultiAgentContext registry (Just childId) 1 taskPathRoot
+            ctx = MultiAgentContext registry (fromFilePath "/tmp") (Just childId) 1 taskPathRoot
                 (pure Nothing) Nothing Nothing Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         expectAlwaysReadOnly tool.appToolApproval
@@ -167,7 +167,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
             (\_ _ -> pure ())
         typesRef <- newIORef Map.empty
         let createIsolated = cleanupLease cleaned
-            ctx = MultiAgentContext registry Nothing 0 taskPathRoot (pure Nothing)
+            ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot (pure Nothing)
                 Nothing (Just createIsolated) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -188,7 +188,7 @@ spec = describe "Agent.GrokBuild.Dialect.Task" do
         cleaned <- newIORef False
         registry <- closedRegistry
         typesRef <- newIORef Map.empty
-        let ctx = MultiAgentContext registry Nothing 0 taskPathRoot
+        let ctx = MultiAgentContext registry (fromFilePath "/tmp") Nothing 0 taskPathRoot
                 (pure Nothing) Nothing (Just (cleanupLease cleaned)) Nothing Nothing Nothing
             tool = taskTool (fromFilePath "/tmp") ctx typesRef
         result <- dispatchToolCall defaultLoopDispatch [tool.appToolHandler]
@@ -212,6 +212,7 @@ fake name = AppTool
     , appToolHandler = noArgsTool name (pure (Right "ok"))
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
 
 raceArgs :: Text

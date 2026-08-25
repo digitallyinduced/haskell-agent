@@ -3,45 +3,66 @@ module Agent.CLI.Command
     ( ReplAction(..)
     , ShellMode(..)
     , SkillCommand(..)
+    , SlashCatalog(..)
     , SlashCommand(..)
     , SlashMenu(..)
     , SlashSuggestion(..)
     , currentEffort
     , currentModel
+    , deepResearchInstruction
+    , defaultSlashCatalog
     , formatSlashHelp
+    , formatSlashHelpWithCatalog
     , formatSlashHelpWithSkills
+    , goalInstruction
     , lookupSlashCommand
+    , lookupSlashCommandIn
+    , loopScheduleInstruction
+    , mkSlashCatalog
     , parseReplLine
+    , parseReplLineWithCatalog
     , parseReplLineWithSkills
     , setModel
     , setReasoningEffort
     , slashCommands
     , slashCompletionCandidates
+    , slashCompletionCandidatesWithCatalog
     , slashCompletionCandidatesWithModels
     , slashCompletionCandidatesWithSkills
     , slashCompletionCandidatesWithSkillsAndModels
     , slashMenuFor
+    , slashMenuForCatalog
     , slashMenuForWithModels
     , slashMenuForWithSkills
     , slashMenuForWithSkillsAndModels
+    , workflowInstruction
     ) where
 
 import Agent.CLI.Options (parseEffort, reasoningEfforts)
 import Agent.CLI.Style (roleMuted, rolePrompt)
+import Agent.Dialect (DialectId(..))
 import Agent.Responses.Types
 
+import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Char (isAlphaNum, isSpace)
+import Data.Aeson ((.=))
+import qualified Data.ByteString.Lazy as LazyByteString
+import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.List (find, isPrefixOf, sortOn)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down(..))
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Text.Encoding (decodeUtf8)
 
 data ReplAction
     = ReplQuit
     | ReplReload
     | ReplPrompt Text
+    | ReplExpandedPrompt !Text !Text
+      -- ^ Original user-visible text and the model-visible expansion.
     | ReplShowEffort
     | ReplSetEffort Text
     | ReplShowModel
@@ -51,7 +72,12 @@ data ReplAction
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
+    | ReplRecap
+    -- ^ Generate a display-only "where was I" recap of the current session.
     | ReplShowSession
+    | ReplShowSessionInfo
+    | ReplAfk (Maybe Text)
+    -- ^ Hand the active session to tmux, optionally on @host:path@.
     | ReplWorktree
     | ReplRename Text
     | ReplRenameAuto
@@ -67,7 +93,18 @@ data ReplAction
     | ReplCopySession
     | ReplShowTerminal
     | ReplAgents
+    | ReplShowAgentLimit
+    | ReplSetAgentLimit Int
     | ReplMcp
+    | ReplGoalStatus
+    | ReplGoalPause
+    | ReplGoalResume
+    | ReplGoalClear
+    | ReplGoalSet !Text !Text !(Maybe Int) !Text
+      -- ^ Original text, objective, optional token budget, and expansion.
+    | ReplWorkflowRuns
+    | ReplWorkflowManage !Text !(Maybe Text)
+      -- ^ Operation and optional run id/display name.
     | ReplSkills !Bool
     | ReplShowShell
     | ReplSetShell !ShellMode
@@ -76,6 +113,8 @@ data ReplAction
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
+    | ReplSearch !Text
+    -- ^ Search persisted conversation turns and open matching sessions.
     | ReplCompact (Maybe Text)
     -- ^ Optional focus note for what to keep while compacting history.
     | ReplClear
@@ -109,6 +148,21 @@ data SlashCommand = SlashCommand
     , slashUsage :: !Text
     , slashSummary :: !Text
     , slashTakesArguments :: !Bool
+    , slashDialects :: !(Maybe [DialectId])
+    , slashRequiredTools :: ![Text]
+    }
+    deriving (Eq, Show)
+
+-- | Session-scoped slash-command capabilities and presentation data.
+--
+-- Tool-backed commands are filtered when the catalog is built, so the same
+-- catalog must be used for parsing, help, and both completion UIs.
+data SlashCatalog = SlashCatalog
+    { slashCatalogDialect :: !DialectId
+    , slashCatalogToolNames :: !(Set Text)
+    , slashCatalogCommands :: ![SlashCommand]
+    , slashCatalogSkills :: ![SkillCommand]
+    , slashCatalogModelIds :: ![Text]
     }
     deriving (Eq, Show)
 
@@ -119,11 +173,15 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "session" [] "/session" "Print the current session id" False
+    , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
+    , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
     , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
+    , cmd "search" [] "/search <QUERY>" "Search past conversations and resume a match" True
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
@@ -138,11 +196,24 @@ slashCommands =
     , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False
     , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
     , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
-    , cmd "agents" ["a"] "/agents" "Browse the agent hierarchy and switch viewport" False
-    , cmd "mcp" [] "/mcp" "Manage local MCP servers" False
+    , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
+    , cmd "mcp" ["mcps"] "/mcp" "Manage local MCP servers" False
+    , grokToolCmd "scheduler_create"
+        "loop" [] "/loop [interval] <prompt>"
+        "Run a prompt on a recurring interval" True
+    , grokToolCmd "update_goal"
+        "goal" [] "/goal <objective> [--budget N] | status | pause | resume | clear"
+        "Set, manage, or check an autonomous goal" True
+    , grokToolCmd "workflow"
+        "workflow" [] "/workflow runs | <name> [input]"
+        "Launch a named workflow or list workflow runs" True
+    , grokToolCmd "workflow"
+        "deep-research" [] "/deep-research <query>"
+        "Run bounded background research, cross-check evidence, and write a cited report" True
     , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
     , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
     , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
+    , cmd "quit" ["exit"] "/quit" "Exit the current session" False
     ]
   where
     cmd name aliases usage summary takesArguments =
@@ -152,19 +223,74 @@ slashCommands =
             , slashUsage = usage
             , slashSummary = summary
             , slashTakesArguments = takesArguments
+            , slashDialects = Nothing
+            , slashRequiredTools = []
+            }
+    grokToolCmd requiredTool name aliases usage summary takesArguments =
+        (cmd name aliases usage summary takesArguments)
+            { slashDialects = Just [GrokBuildDialect]
+            , slashRequiredTools = [requiredTool]
             }
 
+-- | Legacy/default catalog. It intentionally contains only always-on commands;
+-- callers with a live session should use 'mkSlashCatalog'.
+defaultSlashCatalog :: SlashCatalog
+defaultSlashCatalog =
+    mkSlashCatalog CodexDialect [] [] []
+
+mkSlashCatalog
+    :: DialectId
+    -> [Text]
+    -> [SkillCommand]
+    -> [Text]
+    -> SlashCatalog
+mkSlashCatalog dialect toolNames skills modelIds =
+    let tools =
+            Set.fromList
+                (map (Text.toLower . Text.strip) toolNames)
+    in SlashCatalog
+        { slashCatalogDialect = dialect
+        , slashCatalogToolNames = tools
+        , slashCatalogCommands =
+            filter (commandAvailable dialect tools) slashCommands
+        , slashCatalogSkills = skills
+        , slashCatalogModelIds = modelIds
+        }
+
+commandAvailable :: DialectId -> Set Text -> SlashCommand -> Bool
+commandAvailable dialect tools command =
+    maybe True (dialect `elem`) command.slashDialects
+        && all
+            ((`Set.member` tools) . Text.toLower)
+            command.slashRequiredTools
+
 lookupSlashCommand :: Text -> Maybe SlashCommand
-lookupSlashCommand raw =
+lookupSlashCommand =
+    lookupSlashCommandFrom slashCommands
+
+lookupSlashCommandIn :: SlashCatalog -> Text -> Maybe SlashCommand
+lookupSlashCommandIn catalog =
+    lookupSlashCommandFrom catalog.slashCatalogCommands
+
+lookupSlashCommandFrom :: [SlashCommand] -> Text -> Maybe SlashCommand
+lookupSlashCommandFrom commands raw =
     let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
     in find (\cmd -> cmd.slashName == name || name `elem` cmd.slashAliases)
-        slashCommands
+        commands
 
 parseReplLine :: Text -> ReplAction
-parseReplLine = parseReplLineWithSkills []
+parseReplLine =
+    parseReplLineWithCatalog defaultSlashCatalog
 
 parseReplLineWithSkills :: [SkillCommand] -> Text -> ReplAction
-parseReplLineWithSkills skills raw =
+parseReplLineWithSkills skills =
+    parseReplLineWithCatalog
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            }
+
+parseReplLineWithCatalog :: SlashCatalog -> Text -> ReplAction
+parseReplLineWithCatalog catalog raw =
     let line = Text.strip raw
     in if line == ":q" || line == ":quit"
         then ReplQuit
@@ -173,7 +299,7 @@ parseReplLineWithSkills skills raw =
             else case Text.uncons line of
                 Just ('/', _)
                     | looksLikeAbsolutePath line -> ReplPrompt raw
-                    | otherwise -> parseSlash skills line
+                    | otherwise -> parseSlash catalog raw line
                 Just (':', _) -> parseColon raw
                 _ -> ReplPrompt raw
 
@@ -191,18 +317,18 @@ parseColon raw
     | isAlwaysApproveAlias (Text.drop 1 (Text.strip raw)) = ReplToggleAlwaysApprove
     | otherwise = ReplPrompt raw
 
-parseSlash :: [SkillCommand] -> Text -> ReplAction
-parseSlash skills line = case Text.words line of
+parseSlash :: SlashCatalog -> Text -> Text -> ReplAction
+parseSlash catalog raw line = case Text.words line of
     [] -> unknownCommand "/"
-    command : args -> case lookupSlashCommand command of
-        Nothing -> case lookupSkillCommand skills command of
+    command : args -> case lookupSlashCommandIn catalog command of
+        Nothing -> case lookupSkillCommand catalog.slashCatalogSkills command of
             Just skill ->
                 ReplInvokeSkill
                     skill.skillCommandName
                     (Text.strip (Text.drop (Text.length command) line))
             Nothing -> unknownCommand command
         Just spec -> case spec.slashName of
-            "help" -> parseHelpCommand skills args
+            "help" -> parseHelpCommand catalog args
             "effort" -> parseEffortCommand args
             "model" -> parseModelCommand args
             "plan" ->
@@ -216,10 +342,22 @@ parseSlash skills line = case Text.words line of
                 in if Text.null question
                     then ReplCommandError "usage: /btw <QUESTION>"
                     else ReplBtw question
+            "recap" ->
+                if null args
+                    then ReplRecap
+                    else ReplCommandError "usage: /recap"
             "session" ->
                 if null args
                     then ReplShowSession
                     else ReplCommandError "usage: /session"
+            "session-info" ->
+                if null args
+                    then ReplShowSessionInfo
+                    else ReplCommandError "usage: /session-info"
+            "afk" -> case args of
+                [] -> ReplAfk Nothing
+                [target] -> ReplAfk (Just target)
+                _ -> ReplCommandError "usage: /afk [HOST:PATH]"
             "worktree" ->
                 if null args
                     then ReplWorktree
@@ -239,6 +377,12 @@ parseSlash skills line = case Text.words line of
                     then ReplLogin
                     else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
+            "search" ->
+                let query =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null query
+                    then ReplCommandError "usage: /search <QUERY>"
+                    else ReplSearch query
             "compact" ->
                 let focus =
                         Text.strip (Text.drop (Text.length command) line)
@@ -291,14 +435,23 @@ parseSlash skills line = case Text.words line of
                 if null args
                     then ReplShowTerminal
                     else ReplCommandError "usage: /terminal"
-            "agents" ->
-                if null args
-                    then ReplAgents
-                    else ReplCommandError "usage: /agents"
+            "agents" -> parseAgentsCommand args
             "mcp" ->
                 if null args
                     then ReplMcp
                     else ReplCommandError "usage: /mcp"
+            "loop" ->
+                parseLoopCommand raw
+                    (Text.strip (Text.drop (Text.length command) line))
+            "goal" ->
+                parseGoalCommand raw
+                    (Text.strip (Text.drop (Text.length command) line))
+            "workflow" ->
+                parseWorkflowCommand raw
+                    (Text.strip (Text.drop (Text.length command) line))
+            "deep-research" ->
+                parseDeepResearchCommand raw
+                    (Text.strip (Text.drop (Text.length command) line))
             "skills" -> case args of
                 [] -> ReplSkills False
                 ["reload"] -> ReplSkills True
@@ -308,6 +461,10 @@ parseSlash skills line = case Text.words line of
                 if null args
                     then ReplToggleAlwaysApprove
                     else ReplCommandError "usage: /always-approve"
+            "quit" ->
+                if null args
+                    then ReplQuit
+                    else ReplCommandError "usage: /quit"
             other -> unknownCommand ("/" <> other)
 
 unknownCommand :: Text -> ReplAction
@@ -319,15 +476,195 @@ lookupSkillCommand skills raw =
     let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
     in find ((== name) . Text.toLower . (.skillCommandName)) skills
 
-parseHelpCommand :: [SkillCommand] -> [Text] -> ReplAction
-parseHelpCommand skills = \case
+parseHelpCommand :: SlashCatalog -> [Text] -> ReplAction
+parseHelpCommand catalog = \case
     [] -> ReplHelp Nothing
-    [name] -> case lookupSlashCommand name of
+    [name] -> case lookupSlashCommandIn catalog name of
         Just spec -> ReplHelp (Just spec.slashName)
-        Nothing -> case lookupSkillCommand skills name of
+        Nothing -> case lookupSkillCommand catalog.slashCatalogSkills name of
             Just skill -> ReplHelp (Just skill.skillCommandName)
             Nothing -> unknownCommand name
     _ -> ReplCommandError "usage: /help [NAME]"
+
+parseLoopCommand :: Text -> Text -> ReplAction
+parseLoopCommand original args
+    | Text.null args = ReplCommandError loopUsageMessage
+    | otherwise =
+        ReplExpandedPrompt original (loopScheduleInstruction args)
+
+parseGoalCommand :: Text -> Text -> ReplAction
+parseGoalCommand original args =
+    case Text.toLower args of
+        "" -> ReplGoalStatus
+        "status" -> ReplGoalStatus
+        "pause" -> ReplGoalPause
+        "resume" -> ReplGoalResume
+        "clear" -> ReplGoalClear
+        _ ->
+            case parseTrailingGoalBudget args of
+                Left err -> ReplCommandError err
+                Right (objective, budget) ->
+                    ReplGoalSet
+                        original
+                        objective
+                        budget
+                        (goalInstruction objective
+                            <> maybe
+                                ""
+                                (\tokens ->
+                                    "\nThe host records an advisory scope budget of "
+                                        <> Text.pack (show tokens)
+                                        <> " tokens, but does not hard-enforce it. Keep the work proportionate and report if the objective cannot fit.")
+                                budget)
+
+parseTrailingGoalBudget :: Text -> Either Text (Text, Maybe Int)
+parseTrailingGoalBudget input =
+    let trimmed = Text.strip input
+        flag = "--budget"
+        (throughFlag, afterFlag) = Text.breakOnEnd flag trimmed
+        beforeFlag = Text.dropEnd (Text.length flag) throughFlag
+        value = Text.strip afterFlag
+        ownToken =
+            not (Text.null throughFlag)
+                && not (Text.null beforeFlag)
+                && isSpace (Text.last beforeFlag)
+                && not (Text.null afterFlag)
+                && isSpace (Text.head afterFlag)
+                && not (Text.any isSpace value)
+        parsed = case reads (Text.unpack value) of
+            [(budget, "")]
+                | budget > 0
+                , budget <= maxBound ->
+                    Just budget
+            _ -> Nothing
+        objective = Text.stripEnd beforeFlag
+        hasBudgetToken = flag `elem` Text.words trimmed
+    in case parsed of
+        Just budget
+            | ownToken
+            , not (Text.null objective)
+            , Text.all isDigit value ->
+                Right (objective, Just budget)
+        _
+            | hasBudgetToken ->
+                Left
+                    "usage: /goal <objective> [--budget POSITIVE_INTEGER]"
+            | otherwise -> Right (trimmed, Nothing)
+
+parseWorkflowCommand :: Text -> Text -> ReplAction
+parseWorkflowCommand original args =
+    case Text.words args of
+        [] -> ReplWorkflowRuns
+        [single]
+            | Text.toLower single == "runs" ->
+                ReplWorkflowRuns
+        first : rest
+            | isWorkflowOperation first ->
+                ReplWorkflowManage
+                    (Text.toLower first)
+                    (nonEmptyText
+                        (Text.strip
+                            (Text.drop (Text.length first) args)))
+            | [operation] <- rest
+            , isWorkflowOperation operation ->
+                ReplWorkflowManage
+                    (Text.toLower operation)
+                    (Just first)
+            | otherwise ->
+                let input =
+                        Text.strip
+                            (Text.drop (Text.length first) args)
+                in ReplExpandedPrompt
+                    original
+                    (workflowInstruction first input)
+  where
+    isWorkflowOperation value =
+        Text.toLower value `elem` ["pause", "resume", "stop", "save"]
+
+parseDeepResearchCommand :: Text -> Text -> ReplAction
+parseDeepResearchCommand original query
+    | Text.null query =
+        ReplCommandError "usage: /deep-research <query>"
+    | otherwise =
+        ReplExpandedPrompt original (deepResearchInstruction query)
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText value
+    | Text.null value = Nothing
+    | otherwise = Just value
+
+loopUsageMessage :: Text
+loopUsageMessage =
+    Text.unlines
+        [ "usage: /loop [interval] <prompt>"
+        , "example: /loop 30m check deploy status"
+        , "example: /loop check deploy status every hour"
+        , ""
+        , "Tell me how often it should run (for example 30m, 1 hour, or every 2 days)."
+        ]
+
+-- | Canonical model instruction for the detached scheduler implemented by this
+-- host. Cadence parsing stays with the model so natural language remains valid.
+loopScheduleInstruction :: Text -> Text
+loopScheduleInstruction args =
+    Text.unlines
+        [ "# /loop -- schedule a recurring prompt"
+        , ""
+        , "Turn the input below into a scheduler_create call."
+        , "Each fire runs in a detached background subagent, not in this conversation, so the stored prompt must stand on its own."
+        , "Inline every path, job/PR/branch id, status command, success condition, and stop condition that a fresh fire needs."
+        , "Keep one fire bounded: it must report a short status and stop rather than polling inline."
+        , "The parent session or user owns cancellation; the detached child cannot modify the schedule. Tasks otherwise expire after seven days."
+        , ""
+        , "Convert the user's cadence, wherever phrased, into a compact <number><unit> interval using s, m, h, or d."
+        , "The minimum is 60 seconds. If no cadence is present, ask how often to run and never invent a default."
+        , ""
+        , "Call scheduler_create with the interval, the self-contained prompt, and fire_immediately: true."
+        , "Do not execute the scheduled prompt inline. Confirm the cadence, stop condition, seven-day expiry, and task_id."
+        , ""
+        , "Input:"
+        , args
+        ]
+
+-- | Model instruction used after the host has activated goal state.
+goalInstruction :: Text -> Text
+goalInstruction objective =
+    Text.unlines
+        [ "# /goal -- pursue an objective"
+        , ""
+        , "A goal has been set: " <> objective
+        , ""
+        , "Work directly on this goal and carry it as far as possible. Deliver everything requested without leaving manual steps for the user."
+        , "Break the objective into concrete tracked steps and verify changes on the real path as you go."
+        , "Call update_goal(completed: true, message: \"summary\") only when the goal is fully achieved."
+        , "Call update_goal(blocked_reason: \"reason\") only when truly stuck after at least three consecutive failed attempts at the same problem."
+        , "Call update_goal(message: \"status note\") to record useful progress. If update_goal errors, continue and report status in the reply."
+        , ""
+        , "Start now."
+        ]
+
+workflowInstruction :: Text -> Text -> Text
+workflowInstruction name input =
+    let argsJson =
+            decodeUtf8
+                (LazyByteString.toStrict
+                    (Aeson.encode
+                        (Aeson.object ["query" .= input])))
+    in Text.unlines
+        [ "# /workflow -- launch a named workflow"
+        , ""
+        , "Call the workflow tool immediately with exactly the name and args below."
+        , "The args value is a JSON object whose query field contains the verbatim input; do not omit args or flatten query into a top-level tool argument."
+        , "Do not imitate the workflow inline or inspect the workspace before launching it."
+        , "If the workflow tool rejects an unsupported option, report that error honestly rather than silently changing semantics."
+        , ""
+        , "name: " <> name
+        , "args: " <> argsJson
+        ]
+
+deepResearchInstruction :: Text -> Text
+deepResearchInstruction query =
+    workflowInstruction "deep-research" query
 
 parseResumeCommand :: [Text] -> ReplAction
 parseResumeCommand = \case
@@ -359,6 +696,15 @@ parsePasteCommand rest =
             ("-s":xs) -> (True, Text.unwords xs)
             _ -> (False, rest)
     in ReplPaste immediate (Text.strip caption)
+
+parseAgentsCommand :: [Text] -> ReplAction
+parseAgentsCommand = \case
+    [] -> ReplAgents
+    ["limit"] -> ReplShowAgentLimit
+    ["limit", raw] -> case reads (Text.unpack raw) of
+        [(n, "")] | n >= 1 -> ReplSetAgentLimit n
+        _ -> ReplCommandError "usage: /agents [limit [N]]"
+    _ -> ReplCommandError "usage: /agents [limit [N]]"
 
 parseEffortCommand :: [Text] -> ReplAction
 parseEffortCommand = \case
@@ -425,18 +771,32 @@ currentModel params =
 
 -- | Help text for @/help@ / @/help NAME@.
 formatSlashHelp :: Bool -> Maybe Text -> Text
-formatSlashHelp color = formatSlashHelpWithSkills color []
+formatSlashHelp color =
+    formatSlashHelpWithCatalog color defaultSlashCatalog
 
 formatSlashHelpWithSkills :: Bool -> [SkillCommand] -> Maybe Text -> Text
-formatSlashHelpWithSkills color skills = \case
+formatSlashHelpWithSkills color skills =
+    formatSlashHelpWithCatalog color
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            }
+
+formatSlashHelpWithCatalog
+    :: Bool
+    -> SlashCatalog
+    -> Maybe Text
+    -> Text
+formatSlashHelpWithCatalog color catalog = \case
     Nothing ->
         Text.intercalate "\n"
-            (map (formatSlashHelpRow color) slashCommands
-                <> map (formatSkillHelpRow color) skills)
+            (map (formatSlashHelpRow color) catalog.slashCatalogCommands
+                <> map
+                    (formatSkillHelpRow color)
+                    catalog.slashCatalogSkills)
     Just name ->
-        case lookupSlashCommand name of
+        case lookupSlashCommandIn catalog name of
             Just spec -> formatSlashHelpRow color spec
-            Nothing -> case lookupSkillCommand skills name of
+            Nothing -> case lookupSkillCommand catalog.slashCatalogSkills name of
                 Just skill -> formatSkillHelpRow color skill
                 Nothing -> roleMuted color ("unknown command: " <> name <> " (try /help)")
 
@@ -471,15 +831,19 @@ formatSkillHelpRow color skill =
 -- 'completeWordWithPrev' convention). Empty when the buffer is not a slash
 -- line.
 slashCompletionCandidates :: String -> String -> [String]
-slashCompletionCandidates = slashCompletionCandidatesWithSkillsAndModels [] []
+slashCompletionCandidates =
+    slashCompletionCandidatesWithCatalog defaultSlashCatalog
 
 slashCompletionCandidatesWithModels
     :: [Text]
     -> String
     -> String
     -> [String]
-slashCompletionCandidatesWithModels =
-    slashCompletionCandidatesWithSkillsAndModels []
+slashCompletionCandidatesWithModels modelIds =
+    slashCompletionCandidatesWithCatalog
+        defaultSlashCatalog
+            { slashCatalogModelIds = modelIds
+            }
 
 slashCompletionCandidatesWithSkills
     :: [SkillCommand]
@@ -487,7 +851,10 @@ slashCompletionCandidatesWithSkills
     -> String
     -> [String]
 slashCompletionCandidatesWithSkills skills =
-    slashCompletionCandidatesWithSkillsAndModels skills []
+    slashCompletionCandidatesWithCatalog
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            }
 
 slashCompletionCandidatesWithSkillsAndModels
     :: [SkillCommand]
@@ -496,48 +863,68 @@ slashCompletionCandidatesWithSkillsAndModels
     -> String
     -> [String]
 slashCompletionCandidatesWithSkillsAndModels
-        skills modelIds reversedPrev word =
+        skills modelIds =
+    slashCompletionCandidatesWithCatalog
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            , slashCatalogModelIds = modelIds
+            }
+
+slashCompletionCandidatesWithCatalog
+    :: SlashCatalog
+    -> String
+    -> String
+    -> [String]
+slashCompletionCandidatesWithCatalog catalog reversedPrev word =
     let prev = reverse reversedPrev
     in if not (isSlashLine prev word)
         then []
         else case words prev of
-            [] -> completeSlashNames skills word
-            cmd : _ -> completeSlashArgs modelIds cmd word
+            [] -> completeSlashNames catalog word
+            cmd : _ -> completeSlashArgs catalog cmd word
 
 isSlashLine :: String -> String -> Bool
 isSlashLine prev word = case dropWhile isSpace prev of
     [] -> "/" `isPrefixOf` word
     rest -> "/" `isPrefixOf` rest
 
-completeSlashNames :: [SkillCommand] -> String -> [String]
-completeSlashNames skills word =
+completeSlashNames :: SlashCatalog -> String -> [String]
+completeSlashNames catalog word =
     let needle = Text.toLower (Text.dropWhile (== '/') (Text.pack word))
         names =
             concatMap
                 (\cmd -> ("/" <> cmd.slashName) : map ("/" <>) cmd.slashAliases)
-                slashCommands
-        skillNames = map (("/" <>) . (.skillCommandName)) skills
+                catalog.slashCatalogCommands
+        skillNames =
+            map
+                (("/" <>) . (.skillCommandName))
+                catalog.slashCatalogSkills
     in filter (\name -> needle `Text.isPrefixOf` Text.drop 1 (Text.toLower (Text.pack name)))
         (map Text.unpack (names <> skillNames))
 
-completeSlashArgs :: [Text] -> String -> String -> [String]
-completeSlashArgs modelIds cmd word =
-    case lookupSlashCommand (Text.pack cmd) of
+completeSlashArgs :: SlashCatalog -> String -> String -> [String]
+completeSlashArgs catalog cmd word =
+    case lookupSlashCommandIn catalog (Text.pack cmd) of
         Nothing -> []
         Just spec ->
             let needle = Text.toLower (Text.pack word)
-                options = argCompletions modelIds spec
+                options = argCompletions catalog spec
             in map Text.unpack $
                 filter (Text.isPrefixOf needle . Text.toLower) options
 
-argCompletions :: [Text] -> SlashCommand -> [Text]
-argCompletions modelIds spec = case spec.slashName of
+argCompletions :: SlashCatalog -> SlashCommand -> [Text]
+argCompletions catalog spec = case spec.slashName of
+    "agents" -> ["limit"]
     "effort" -> reasoningEfforts
-    "model" -> modelIds
+    "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]
-    "help" -> map (.slashName) slashCommands
+    "help" ->
+        map (.slashName) catalog.slashCatalogCommands
+            <> map (.skillCommandName) catalog.slashCatalogSkills
     "rename" -> ["--auto"]
     "paste" -> ["--send"]
+    "goal" -> ["status", "pause", "resume", "clear"]
+    "workflow" -> ["runs"]
     _ -> []
 
 -- | One row in the live slash-command dropdown.
@@ -560,14 +947,22 @@ data SlashMenu = SlashMenu
 
 -- | Derive a live menu from a leading slash command at the cursor.
 slashMenuFor :: Text -> Int -> Maybe SlashMenu
-slashMenuFor = slashMenuForWithSkillsAndModels [] []
+slashMenuFor =
+    slashMenuForCatalog defaultSlashCatalog
 
 slashMenuForWithModels :: [Text] -> Text -> Int -> Maybe SlashMenu
-slashMenuForWithModels = slashMenuForWithSkillsAndModels []
+slashMenuForWithModels modelIds =
+    slashMenuForCatalog
+        defaultSlashCatalog
+            { slashCatalogModelIds = modelIds
+            }
 
 slashMenuForWithSkills :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 slashMenuForWithSkills skills =
-    slashMenuForWithSkillsAndModels skills []
+    slashMenuForCatalog
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            }
 
 slashMenuForWithSkillsAndModels
     :: [SkillCommand]
@@ -575,16 +970,28 @@ slashMenuForWithSkillsAndModels
     -> Text
     -> Int
     -> Maybe SlashMenu
-slashMenuForWithSkillsAndModels skills modelIds text cursor
+slashMenuForWithSkillsAndModels skills modelIds =
+    slashMenuForCatalog
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            , slashCatalogModelIds = modelIds
+            }
+
+slashMenuForCatalog
+    :: SlashCatalog
+    -> Text
+    -> Int
+    -> Maybe SlashMenu
+slashMenuForCatalog catalog text cursor
     | cursor < 1 = Nothing
     | Text.isPrefixOf "/" text =
         let commandToken = Text.takeWhile (not . isSpace) text
             commandEnd = Text.length commandToken
         in if cursor <= commandEnd
-            then commandMenu skills (Text.take cursor text) commandEnd
-            else argumentMenu modelIds commandToken commandEnd text cursor
+            then commandMenu catalog (Text.take cursor text) commandEnd
+            else argumentMenu catalog commandToken commandEnd text cursor
     | otherwise =
-        skillMentionMenu skills text cursor
+        skillMentionMenu catalog.slashCatalogSkills text cursor
 
 skillMentionMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 skillMentionMenu skills text cursor = do
@@ -640,10 +1047,12 @@ skillMentionMenu skills text cursor = do
     mentionNameChar char =
         not (isSpace char) && (char == '-' || char == ':' || isAlphaNum char)
 
-commandMenu :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
-commandMenu skills token replaceEnd =
+commandMenu :: SlashCatalog -> Text -> Int -> Maybe SlashMenu
+commandMenu catalog token replaceEnd =
     let query = Text.toLower (Text.drop 1 token)
-        commands = slashCommands <> map skillAsSlashCommand skills
+        commands =
+            catalog.slashCatalogCommands
+                <> map skillAsSlashCommand catalog.slashCatalogSkills
         scored = mapMaybe (scoreCommand query) (zip [0 :: Int ..] commands)
         ordered
             | Text.null query = scored
@@ -680,6 +1089,8 @@ skillAsSlashCommand skill =
         , slashSummary =
             skill.skillCommandSummary <> " · skill · " <> skill.skillCommandSource
         , slashTakesArguments = True
+        , slashDialects = Nothing
+        , slashRequiredTools = []
         }
 
 scoreCommand
@@ -696,9 +1107,9 @@ scoreCommand query (order, command)
             (score, positions) : _ ->
                 Just (score, order, command, positions)
 
-argumentMenu :: [Text] -> Text -> Int -> Text -> Int -> Maybe SlashMenu
-argumentMenu modelIds commandToken commandEnd text cursor = do
-    command <- lookupSlashCommand commandToken
+argumentMenu :: SlashCatalog -> Text -> Int -> Text -> Int -> Maybe SlashMenu
+argumentMenu catalog commandToken commandEnd text cursor = do
+    command <- lookupSlashCommandIn catalog commandToken
     let before = Text.take cursor text
         suffix = Text.takeWhileEnd (not . isSpace) before
         argStart = Text.length before - Text.length suffix
@@ -710,7 +1121,7 @@ argumentMenu modelIds commandToken commandEnd text cursor = do
             Text.words
                 (Text.take (argStart - commandEnd) (Text.drop commandEnd text))
         options
-            | null precedingArgs = argCompletions modelIds command
+            | null precedingArgs = argCompletions catalog command
             | otherwise = []
         query = Text.toLower suffix
         ordered = sortOn (\(score, option, _) -> (Down score, option))

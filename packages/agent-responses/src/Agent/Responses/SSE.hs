@@ -145,7 +145,7 @@ parseBlock :: Text -> Either ApiError (Maybe ResponseStreamEvent)
 parseBlock block
     | Text.null dataText = Right Nothing
     | Text.strip dataText == "[DONE]" = Right Nothing
-    | otherwise = Just <$> decodeEvent eventType dataText
+    | otherwise = decodeEvent eventType dataText
   where
     blockLines = Text.lines block
     eventType = Maybe.listToMaybe
@@ -161,22 +161,30 @@ parseBlock block
 
     stripOptionalSpace line = Maybe.fromMaybe line (Text.stripPrefix " " line)
 
-decodeEvent :: Maybe Text -> Text -> Either ApiError ResponseStreamEvent
-decodeEvent eventType dataText = do
-    value <- case Aeson.eitherDecodeStrict' (Text.encodeUtf8 dataText) of
-        Left err -> Left (decodeError (Text.pack err) dataText)
-        Right value -> Right value
-    let decoded = case eventType of
-            Just suppliedType ->
-                ResponsesCodec.decodeResponseStreamEventWithType suppliedType value
-            Nothing -> case ResponsesCodec.decodeResponseStreamEventValue value of
-                Aeson.Success event -> Right event
-                Aeson.Error err -> Left err
-    case decoded of
-        Left err -> Left (decodeError (Text.pack err) dataText)
-        Right event -> Right event
-  where
-    decodeError message body = JsonDecodeError message (Text.take 2000 body)
+-- A malformed JSON payload should not tear down an otherwise healthy stream.
+-- Codex skips such frames (notably partial/unparseable output_item events)
+-- and continues decoding subsequent events. Framing/UTF-8 failures remain
+-- hard errors because there is no safe way to recover their boundaries.
+decodeEvent :: Maybe Text -> Text -> Either ApiError (Maybe ResponseStreamEvent)
+decodeEvent eventType dataText =
+    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 dataText) of
+        Left _ -> Right Nothing
+        Right value ->
+            let decoded = case eventType of
+                    Just suppliedType ->
+                        ResponsesCodec.decodeResponseStreamEventWithType
+                            suppliedType
+                            value
+                    Nothing ->
+                        case ResponsesCodec.decodeResponseStreamEventValue value of
+                            Aeson.Success event -> Right event
+                            Aeson.Error err -> Left err
+            in case decoded of
+                -- A valid JSON object with an invalid/partial event payload
+                -- is also skippable. Unknown event types still decode to
+                -- OtherResponseStreamEvent and are therefore preserved.
+                Left _ -> Right Nothing
+                Right event -> Right (Just event)
 
 dropTrailingCarriageReturn :: BS.ByteString -> BS.ByteString
 dropTrailingCarriageReturn bytes = case BS.unsnoc bytes of

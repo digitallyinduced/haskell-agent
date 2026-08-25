@@ -461,7 +461,7 @@ spec = do
                                     }
                 reconnectingContinuation =
                     withConnectionRecoveryUsing
-                        (\attempt -> modifyIORef' waits (<> [attempt]))
+                        (\delay -> modifyIORef' waits (<> [delay]))
                         continuation
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -476,7 +476,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
             readIORef continuationCalls `shouldReturn` 2
-            readIORef waits `shouldReturn` [1]
+            readIORef waits `shouldReturn` [1_000_000]
             readIORef seenPrevious `shouldReturn` [Nothing, Nothing]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 

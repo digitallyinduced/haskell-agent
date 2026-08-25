@@ -2,6 +2,7 @@
 module Agent.CLI.Terminal
     ( TerminalKind(..)
     , TerminalCapabilities(..)
+    , rawAttrs
     , detectTerminalCapabilities
     , formatTerminalCapabilities
     , resolveColor
@@ -30,18 +31,38 @@ module Agent.CLI.Terminal
     , withSynchronizedOutput
     ) where
 
+import Agent.CLI.FileUri (fileUri)
 import Control.Exception.Safe (bracket_)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
-import Data.Char (isAlphaNum, isAscii, toLower)
+import Data.Char (toLower)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Text.IO as Text
-import Numeric (showHex)
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush, hIsTerminalDevice)
+import System.Posix.Terminal
+    ( TerminalAttributes
+    , TerminalMode(..)
+    , withMinInput
+    , withMode
+    , withTime
+    , withoutMode
+    )
+
+-- | Put terminal input in the raw mode used by interactive overlays and the
+-- Esc cancellation watcher.
+rawAttrs :: TerminalAttributes -> TerminalAttributes
+rawAttrs oldTerm =
+    flip withMinInput 1
+        . flip withTime 0
+        . flip withoutMode EnableEcho
+        -- Non-canonical so VMIN/VTIME expose a lone Esc.
+        . flip withoutMode ProcessInput
+        -- Keep Ctrl-C as SIGINT / UserInterrupt.
+        . flip withMode KeyboardInterrupts
+        $ oldTerm
 
 data TerminalKind
     = TerminalGhostty
@@ -154,9 +175,6 @@ osc7WorkingDirectory :: FilePath -> Text
 osc7WorkingDirectory path =
     "\ESC]7;" <> fileUri path <> "\ESC\\"
 
-fileUri :: FilePath -> Text
-fileUri path = "file://" <> percentEncodePath (Text.pack path)
-
 osc9Notification :: Text -> Text
 osc9Notification title =
     "\ESC]9;" <> sanitizeOsc title <> "\ESC\\"
@@ -267,21 +285,3 @@ sanitizeOsc =
     Text.filter (\char -> char /= '\ESC' && char /= '\BEL')
         . Text.replace "\n" " "
         . Text.replace "\r" " "
-
-percentEncodePath :: Text -> Text
-percentEncodePath = Text.concatMap encodeChar
-  where
-    encodeChar char
-        | (isAscii char && isAlphaNum char)
-            || char `elem` ("/-._~:" :: String) = Text.singleton char
-        | otherwise =
-            Text.concat
-                [ "%" <> hexByte byte
-                | byte <- BS.unpack (TextEncoding.encodeUtf8 (Text.singleton char))
-                ]
-    hexByte byte =
-        let raw = map upperHex (showHex byte "")
-        in Text.pack (if length raw == 1 then '0' : raw else raw)
-    upperHex c
-        | c >= 'a' && c <= 'f' = toEnum (fromEnum c - 32)
-        | otherwise = c

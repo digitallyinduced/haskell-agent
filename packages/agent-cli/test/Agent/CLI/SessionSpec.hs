@@ -23,6 +23,7 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
 import Control.Exception (bracket)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
@@ -42,12 +43,344 @@ import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf, (</>))
 import System.Posix.Files (fileMode, getFileStatus)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , Gen
+    , Property
+    , checkCoverage
+    , chooseInt
+    , counterexample
+    , cover
+    , elements
+    , frequency
+    , oneof
+    , resize
+    , sized
+    , vectorOf
+    , (===)
+    )
 
 fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
 
 toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
+
+newtype StoredRoundTripItem = StoredRoundTripItem ResponseItem
+    deriving (Show)
+
+newtype StoredRoundTripContentPart =
+    StoredRoundTripContentPart ResponseContentPart
+    deriving (Show)
+
+instance Arbitrary StoredRoundTripItem where
+    arbitrary = StoredRoundTripItem <$> genResponseItem
+    shrink _ = []
+
+instance Arbitrary StoredRoundTripContentPart where
+    arbitrary = StoredRoundTripContentPart <$> genContentPart
+    shrink _ = []
+
+storedResponseItemRoundTrip :: StoredRoundTripItem -> Property
+storedResponseItemRoundTrip (StoredRoundTripItem item) =
+    checkCoverage $
+        foldr
+            (\label -> cover 7 (responseItemKind item == label) label)
+            (counterexample ("failed to round-trip " <> show item) $
+            fromStoredResponseItem (toStoredResponseItem item)
+                === Right item)
+            responseItemKinds
+
+storedContentPartRoundTrip :: StoredRoundTripContentPart -> Property
+storedContentPartRoundTrip (StoredRoundTripContentPart part) =
+    checkCoverage $
+        foldr
+            (\label -> cover 7 (contentPartKind part == label) label)
+            (counterexample ("failed to round-trip " <> show part) $
+            fromStoredResponseItem (toStoredResponseItem item)
+                === Right item)
+            contentPartKinds
+  where
+    item = MessageItem ResponseMessage
+        { messageId = Just "generated-message"
+        , content = MessageContentParts [part]
+        , role = RoleAssistant
+        , status = Just ItemCompleted
+        , phase = Just "final"
+        , extraFields = KeyMap.empty
+        }
+
+genResponseItem :: Gen ResponseItem
+genResponseItem =
+    oneof
+        [ MessageItem <$> genResponseMessage
+        , FunctionCallItem <$> genFunctionCall
+        , FunctionCallOutputItem <$> genFunctionCallOutput
+        , CustomToolCallItem <$> genCustomToolCall
+        , CustomToolCallOutputItem <$> genCustomToolCallOutput
+        , ReasoningItemValue <$> genReasoningItem
+        , ItemReferenceValue <$> genItemReference
+        , do
+            tagged <- genTaggedObject "known-item-"
+            pure (KnownResponseItem (parseResponseItemType tagged.tag) tagged)
+        , UnknownResponseItem <$> genTaggedObject "unknown-item-"
+        ]
+
+genResponseMessage :: Gen ResponseMessage
+genResponseMessage =
+    ResponseMessage
+        <$> genMaybe genText
+        <*> genMessageContent
+        <*> genResponseRole
+        <*> genMaybe genItemStatus
+        <*> genMaybe genText
+        <*> genJsonObject
+
+genMessageContent :: Gen MessageContent
+genMessageContent =
+    frequency
+        [ (2, MessageContentText <$> genText)
+        , (3, MessageContentParts <$> genSmallList genContentPart)
+        ]
+
+genFunctionCall :: Gen FunctionCall
+genFunctionCall =
+    FunctionCall
+        <$> genMaybe genText
+        <*> genText
+        <*> genText
+        <*> genText
+        <*> genMaybe genItemStatus
+        <*> genJsonObject
+
+genFunctionCallOutput :: Gen FunctionCallOutput
+genFunctionCallOutput =
+    FunctionCallOutput
+        <$> genMaybe genText
+        <*> genText
+        <*> genJsonValue
+        <*> genMaybe genItemStatus
+        <*> genJsonObject
+
+genCustomToolCall :: Gen CustomToolCall
+genCustomToolCall =
+    CustomToolCall
+        <$> genMaybe genText
+        <*> genText
+        <*> genText
+        <*> genText
+        <*> genMaybe genItemStatus
+        <*> genJsonObject
+
+genCustomToolCallOutput :: Gen CustomToolCallOutput
+genCustomToolCallOutput =
+    CustomToolCallOutput
+        <$> genMaybe genText
+        <*> genText
+        <*> genMaybe genText
+        <*> genJsonValue
+        <*> genMaybe genItemStatus
+        <*> genJsonObject
+
+genReasoningItem :: Gen ReasoningItem
+genReasoningItem =
+    ReasoningItem
+        <$> genMaybe genText
+        <*> genSmallList genReasoningSummaryPart
+        <*> genMaybe (genSmallList genContentPart)
+        <*> genMaybe genText
+        <*> genMaybe genItemStatus
+        <*> genJsonObject
+
+genReasoningSummaryPart :: Gen ReasoningSummaryPart
+genReasoningSummaryPart =
+    ReasoningSummaryPart
+        <$> genText
+        <*> genMaybe genText
+        <*> genJsonObject
+
+genItemReference :: Gen ItemReference
+genItemReference =
+    ItemReference
+        <$> genText
+        <*> genJsonObject
+
+genContentPart :: Gen ResponseContentPart
+genContentPart =
+    oneof
+        [ InputTextPart
+            <$> genText
+            <*> genMaybe genJsonValue
+            <*> genJsonObject
+        , InputImagePart
+            <$> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genJsonValue
+            <*> genJsonObject
+        , InputFilePart
+            <$> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genJsonValue
+            <*> genJsonObject
+        , InputAudioPart
+            <$> genJsonValue
+            <*> genJsonObject
+        , OutputTextPart
+            <$> genText
+            <*> genMaybe (genSmallList genJsonValue)
+            <*> genMaybe (genSmallList genJsonValue)
+            <*> genJsonObject
+        , RefusalPart
+            <$> genText
+            <*> genJsonObject
+        , ReasoningTextPart
+            <$> genText
+            <*> genJsonObject
+        , SummaryTextPart
+            <$> genText
+            <*> genJsonObject
+        , UnknownContentPart <$> genTaggedObject "unknown-content-"
+        ]
+
+genResponseRole :: Gen ResponseRole
+genResponseRole =
+    frequency
+        [ (4, elements
+            [ RoleUser
+            , RoleAssistant
+            , RoleSystem
+            , RoleDeveloper
+            ])
+        , (1, RoleUnknown . ("role-" <>) <$> genText)
+        ]
+
+genItemStatus :: Gen ItemStatus
+genItemStatus =
+    frequency
+        [ (3, elements
+            [ ItemInProgress
+            , ItemCompleted
+            , ItemIncomplete
+            ])
+        , (1, ItemStatusUnknown . ("status-" <>) <$> genText)
+        ]
+
+genTaggedObject :: Text.Text -> Gen TaggedObject
+genTaggedObject prefix =
+    TaggedObject
+        <$> ((prefix <>) <$> genText)
+        <*> genJsonObject
+
+genJsonObject :: Gen Aeson.Object
+genJsonObject = sized genJsonObjectAt
+
+genJsonObjectAt :: Int -> Gen Aeson.Object
+genJsonObjectAt size = do
+    count <- chooseInt (0, min 4 (max 0 size))
+    fields <-
+        vectorOf count $
+            (,)
+                <$> (Key.fromText <$> genText)
+                <*> resize (max 0 (size - 1)) genJsonValue
+    pure (KeyMap.fromList fields)
+
+genJsonValue :: Gen Aeson.Value
+genJsonValue = sized go
+  where
+    go size
+        | size <= 0 = scalar
+        | otherwise =
+            frequency
+                [ (6, scalar)
+                , (2, do
+                    count <- chooseInt (0, min 4 size)
+                    Aeson.toJSON
+                        <$> vectorOf count
+                            (resize (size `div` 2) genJsonValue))
+                , (2, Aeson.Object
+                        <$> genJsonObjectAt (size `div` 2))
+                ]
+
+    scalar =
+        oneof
+            [ pure Aeson.Null
+            , Aeson.Bool <$> arbitrary
+            , Aeson.String <$> genText
+            , Aeson.Number . fromIntegral
+                <$> chooseInt (-100000, 100000)
+            ]
+
+genText :: Gen Text.Text
+genText = do
+    length' <- chooseInt (0, 24)
+    Text.pack <$> vectorOf length' genTextChar
+
+genTextChar :: Gen Char
+genTextChar =
+    frequency
+        [ (20, elements ['a' .. 'z'])
+        , (5, elements ['A' .. 'Z'])
+        , (5, elements ['0' .. '9'])
+        , (4, elements [' ', '\n', '\t', '"', '\\'])
+        , (3, elements ['界', '語', '漢'])
+        , (2, elements ['🙂', '🚀', '✓'])
+        , (1, elements ['\x0301', 'é', 'ß'])
+        ]
+
+genMaybe :: Gen a -> Gen (Maybe a)
+genMaybe value =
+    frequency
+        [ (1, pure Nothing)
+        , (3, Just <$> value)
+        ]
+
+genSmallList :: Gen a -> Gen [a]
+genSmallList value = do
+    count <- chooseInt (0, 4)
+    vectorOf count value
+
+responseItemKinds :: [String]
+responseItemKinds =
+    [ "message", "function call", "function output"
+    , "custom call", "custom output", "reasoning"
+    , "reference", "known tagged", "unknown tagged"
+    ]
+
+responseItemKind :: ResponseItem -> String
+responseItemKind = \case
+    MessageItem{} -> "message"
+    FunctionCallItem{} -> "function call"
+    FunctionCallOutputItem{} -> "function output"
+    CustomToolCallItem{} -> "custom call"
+    CustomToolCallOutputItem{} -> "custom output"
+    ReasoningItemValue{} -> "reasoning"
+    ItemReferenceValue{} -> "reference"
+    KnownResponseItem{} -> "known tagged"
+    UnknownResponseItem{} -> "unknown tagged"
+
+contentPartKinds :: [String]
+contentPartKinds =
+    [ "input text", "input image", "input file"
+    , "input audio", "output text", "refusal"
+    , "reasoning text", "summary text", "unknown content"
+    ]
+
+contentPartKind :: ResponseContentPart -> String
+contentPartKind = \case
+    InputTextPart{} -> "input text"
+    InputImagePart{} -> "input image"
+    InputFilePart{} -> "input file"
+    InputAudioPart{} -> "input audio"
+    OutputTextPart{} -> "output text"
+    RefusalPart{} -> "refusal"
+    ReasoningTextPart{} -> "reasoning text"
+    SummaryTextPart{} -> "summary text"
+    UnknownContentPart{} -> "unknown content"
 
 spec :: Spec
 spec = describe "Agent.CLI.Session" do
@@ -191,6 +524,14 @@ spec = describe "Agent.CLI.Session" do
             traverse fromStoredResponseItem (map toStoredResponseItem items)
                 `shouldBe` Right items
 
+        modifyMaxSuccess (const 500) $
+            prop "round-trips generated response items through storage" $
+                storedResponseItemRoundTrip
+
+        modifyMaxSuccess (const 500) $
+            prop "round-trips every generated response content part" $
+                storedContentPartRoundTrip
+
     describe "PostgreSQL session persistence" do
         it "round-trips and clears ephemeral session activity" $
             withTempStore \store root -> do
@@ -287,6 +628,17 @@ spec = describe "Agent.CLI.Session" do
                             , outputTokens = 4
                             , cachedTokens = 2
                             }
+                loadSessions pool root
+                    [final.sessionMeta.metaId, "missing", final.sessionMeta.metaId]
+                    >>= \results ->
+                        fmap (fmap (\(meta, turns) -> (meta.metaId, turns))) results
+                            `shouldBe`
+                                [ Right
+                                    (final.sessionMeta.metaId, [normalTurn, compactTurn])
+                                , Left "session not found: missing"
+                                , Right
+                                    (final.sessionMeta.metaId, [normalTurn, compactTurn])
+                                ]
 
                 listed <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
@@ -380,6 +732,15 @@ spec = describe "Agent.CLI.Session" do
                     }
             Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
 
+        it "round-trips recap metadata" do
+            let meta =
+                    (testMeta "session-1")
+                        { metaLastRecap = Just "We fixed auth retries."
+                        , metaLastTurnSummary = Just "Auth retries wired"
+                        , metaLastRecapMainTurns = 3
+                        }
+            Aeson.eitherDecode (Aeson.encode meta) `shouldBe` Right meta
+
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate
     { createPool = pool
@@ -424,6 +785,9 @@ testMeta sessionId = SessionMeta
     , metaInputTokens = 0
     , metaOutputTokens = 0
     , metaCachedTokens = 0
+    , metaLastRecap = Nothing
+    , metaLastTurnSummary = Nothing
+    , metaLastRecapMainTurns = 0
     }
 
 fixedTime :: UTCTime

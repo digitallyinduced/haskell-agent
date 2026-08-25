@@ -10,12 +10,18 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithApi
     , compactOpenAIWith
     , installCompactOutcome
+    , installLiveCompactOutcome
     , runProviderCompact
     , runProviderCompactWith
     , runResponsesCompactWith
     ) where
 
 import Agent.CLI.Error (formatApiError)
+import Agent.CLI.Session.History
+    ( LiveConversation
+    , writeLivePreviousResponseId
+    , writeLiveTranscript
+    )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
@@ -266,6 +272,29 @@ installCompactOutcome previous transcript contextTokens runCompact focus =
             Right outcome -> do
                 writeIORef previous Nothing
                 writeIORef transcript outcome.compactHistory
+                case contextTokens of
+                    Nothing -> pure ()
+                    Just ref ->
+                        writeIORef ref $ Just
+                            ( outcome.compactAfterTokens
+                            , length outcome.compactHistory
+                            )
+        pure result
+
+installLiveCompactOutcome
+    :: IORef LiveConversation
+    -> Maybe (IORef (Maybe (Int, Int)))
+    -> (Maybe Text -> IO (Either Text CompactOutcome))
+    -> Maybe Text
+    -> IO (Either Text CompactOutcome)
+installLiveCompactOutcome conversationRef contextTokens runCompact focus =
+    mask \restore -> do
+        result <- restore (runCompact focus)
+        case result of
+            Left _ -> pure ()
+            Right outcome -> do
+                writeLivePreviousResponseId conversationRef Nothing
+                writeLiveTranscript conversationRef outcome.compactHistory
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->

@@ -37,6 +37,7 @@ library
     import:           common-opts
     exposed-modules:  Agent.Store.Types
                     , Agent.Store.SessionItem
+                    , Agent.Store.PoolCache
                     , Agent.Store.Postgres
                     , Agent.Store.Postgres.Config
                     , Agent.Store.Postgres.Connection
@@ -47,11 +48,13 @@ library
                     , Agent.Store.Postgres.Session
                     , Agent.Store.Postgres.Skill
     other-modules:    Agent.Store.Custom.QueryResult
+                    , Agent.Store.Postgres.Custom.Sql
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
                     , Agent.Store.Postgres.SessionItem
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , async
                     , bytestring
                     , containers
                     , contravariant
@@ -64,9 +67,35 @@ library
                     , pqi-ffi
                     , process
                     , safe-exceptions
+                    , stm
                     , text
                     , time
                     , unix
+                    , uuid-types
+
+benchmark pool-cache-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    ghc-options:      -O2 -threaded
+    hs-source-dirs:   benchmark
+    main-is:          PoolCache.hs
+    build-depends:    agent-store
+                    , async
+                    , base >= 4.14 && < 5
+                    , containers
+                    , time
+
+benchmark custom-catalog-inspection-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          CustomCatalogInspection.hs
+    ghc-options:      -O2 -threaded -rtsopts
+    build-depends:    agent-store
+                    , base >= 4.14 && < 5
+                    , safe-exceptions
+                    , temporary
+                    , text
 
 test-suite agent-store-test
     import:           common-opts
@@ -77,10 +106,12 @@ test-suite agent-store-test
     other-modules:    Agent.Store.Postgres.ConfigSpec
                     , Agent.Store.Postgres.CustomSpec
                     , Agent.Store.Postgres.ManagedSpec
+                    , Agent.Store.PoolCacheSpec
                     , Agent.Store.Postgres.ScopeSpec
                     , Agent.Store.Postgres.SessionSpec
                     , Agent.Store.Postgres.SkillSpec
     build-depends:    agent-store
+                    , async
                     , base >= 4.14 && < 5
                     , bytestring
                     , hspec

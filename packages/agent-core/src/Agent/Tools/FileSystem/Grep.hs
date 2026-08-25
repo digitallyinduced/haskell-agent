@@ -1,23 +1,45 @@
 module Agent.Tools.FileSystem.Grep (grepTool) where
 
-import Agent.OsPath (fromText, toText, unsafeToFilePath)
+import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    )
 import Agent.Tools.IO (resolveForRead)
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , jsonTool
+    , withToolResourceClaims
     )
+import Control.Applicative ((<|>))
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.Directory (findExecutable)
+import System.Directory (canonicalizePath, findExecutable)
 import System.Exit (ExitCode(..))
-import System.Process (readProcessWithExitCode)
+import System.FilePath
+    ( addTrailingPathSeparator
+    , isRelative
+    , makeRelative
+    , splitDirectories
+    )
+import System.Process
+    ( CreateProcess(cwd)
+    , proc
+    , readCreateProcessWithExitCode
+    )
 import System.OsPath (OsPath)
 
 data GrepOutputMode = GrepContent | GrepFilesWithMatches | GrepCount
@@ -60,7 +82,8 @@ parseOutputMode = \case
     _ -> GrepContent
 
 grepTool :: ToolEnv -> AppTool
-grepTool env = jsonTool "grep" grepDescription
+grepTool env = withToolResourceClaims (grepClaims env) $
+    jsonTool "grep" grepDescription
     [ PropertySchema "pattern" PropertyString True $ Just
         "The regular expression pattern to search for in file contents (rg --regexp)"
     , PropertySchema "path" PropertyString False $ Just
@@ -86,6 +109,23 @@ grepTool env = jsonTool "grep" grepDescription
     ParallelSafe
     (typedTool "grep" (runGrep env))
 
+grepClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+grepClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text GrepArgs
+    of
+        Left err -> pure (Left err)
+        Right args -> do
+            let searchRoot = maybe env.toolCwd fromText args.path
+            resolveForRead env searchRoot
+                >>= pure . fmap
+                    (\path ->
+                        [ToolResourceClaim ToolRead (ToolPathTree path)])
+
 grepDescription :: Text
 grepDescription =
     "Search file contents with regular expressions (ripgrep).\n\
@@ -106,17 +146,36 @@ runGrep env args = do
                 "rg is not installed. Install ripgrep to use the grep tool."
             Just rgPath -> do
                 let limit = effectiveHeadLimit args
-                runRipgrep rgPath path args >>= \case
+                canonicalCwd <- canonicalizePath (unsafeToFilePath env.toolCwd)
+                runRipgrep rgPath canonicalCwd path args >>= \case
                     Left err -> pure (Left err)
-                    Right raw -> pure $ Right (formatGrepCard env.toolCwd raw limit)
+                    Right raw -> pure $ Right
+                        (formatGrepCard env.toolCwd raw limit)
 
 effectiveHeadLimit :: GrepArgs -> Int
 effectiveHeadLimit args = case args.outputMode of
     GrepContent -> min 2000 (fromMaybe 200 args.headLimit)
     _ -> min 10000 (fromMaybe 500 args.headLimit)
 
-runRipgrep :: FilePath -> OsPath -> GrepArgs -> IO (Either Text Text)
-runRipgrep rgPath path args = do
+runRipgrep
+    :: FilePath
+    -> FilePath
+    -> OsPath
+    -> GrepArgs
+    -> IO (Either Text Text)
+runRipgrep rgPath workspace path args = do
+    let absoluteSearchPath = unsafeToFilePath path
+        workspaceRelativePath = makeRelative workspace absoluteSearchPath
+        searchWithinWorkspace =
+            isRelative workspaceRelativePath
+                && case splitDirectories workspaceRelativePath of
+                    ".." : _ -> False
+                    _ -> True
+        (processCwd, searchPath)
+            | searchWithinWorkspace =
+                (Just workspace, workspaceRelativePath)
+            | otherwise =
+                (Nothing, absoluteSearchPath)
     let modeFlags = case args.outputMode of
             GrepContent -> ["--heading", "--with-filename", "--line-number"]
             GrepFilesWithMatches -> ["--files-with-matches"]
@@ -131,9 +190,10 @@ runRipgrep rgPath path args = do
             , ["-i" | args.caseInsensitive]
             , maybe [] (\t -> ["--type", Text.unpack t]) args.fileType
             , if args.multiline then ["-U", "--multiline-dotall"] else []
-            , ["--regexp", Text.unpack args.pattern, "--", unsafeToFilePath path]
+            , ["--regexp", Text.unpack args.pattern, "--", searchPath]
             ]
-    (code, stdout, stderr) <- readProcessWithExitCode rgPath rgArgs ""
+        process = (proc rgPath rgArgs) { cwd = processCwd }
+    (code, stdout, stderr) <- readCreateProcessWithExitCode process ""
     let raw = Text.pack stdout
     case code of
         ExitSuccess -> pure $ Right raw
@@ -148,7 +208,7 @@ formatGrepCard :: OsPath -> Text -> Int -> Text
 formatGrepCard cwd raw limit
     | Text.null (Text.strip raw) = "No matches found."
     | otherwise =
-        let ls = Text.lines raw
+        let ls = map (makeWorkspaceRelative cwd) (Text.lines raw)
             truncated = length ls > limit
             kept = take limit ls
             body = Text.unlines kept
@@ -157,9 +217,20 @@ formatGrepCard cwd raw limit
                     "\n[at least " <> Text.pack (show limit)
                         <> " lines; output truncated]"
                 | otherwise = ""
-        in "<workspace_result workspace_path=\""
-            <> toText cwd
-            <> "\">\n"
+        in "<workspace_result>\n"
             <> body
             <> footer
             <> "</workspace_result>"
+
+makeWorkspaceRelative :: OsPath -> Text -> Text
+makeWorkspaceRelative cwd line =
+    fromMaybe line
+        ( Text.stripPrefix workspacePrefix line
+            <|> Text.stripPrefix currentDirectoryPrefix line
+        )
+  where
+    workspacePrefix =
+        Text.pack
+            (addTrailingPathSeparator (unsafeToFilePath cwd))
+    currentDirectoryPrefix =
+        Text.pack (addTrailingPathSeparator ".")

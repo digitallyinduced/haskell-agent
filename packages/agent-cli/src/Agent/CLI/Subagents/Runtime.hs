@@ -18,7 +18,7 @@ module Agent.CLI.Subagents.Runtime
 
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction (autoCompactOpenAiBackendWithThreshold)
+import Agent.CLI.Compaction (autoCompactOpenAiBackendWithSender)
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -82,13 +82,23 @@ import Agent.Loop
     )
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
-    ( openAiBackend
+    ( openAiBackendWithRawReasoning
+    , openAiBackendWithReasoningVisibility
     , openAiBackendWithTransportFallback
-    , statelessResponsesBackend
+    , withCodexTurnStateScope
     )
-import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
+import Agent.OpenAI.WebSocketClient
+    ( CodexTurnState
+    , newCodexTurnState
+    , sendWsRequestWithEvents
+    , withCodexWsRetrying
+    , withCodexWsRetryingUsingTurnState
+    )
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
+import Agent.Responses.LoopBackend
+    ( statelessResponsesBackendWithRawReasoning
+    )
 import Agent.Responses.Types
     ( ReasoningConfig(..)
     , ResponseCreateParams(..)
@@ -131,6 +141,7 @@ import Agent.GrokBuild.Dialect.Task
 import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
+    , SubagentWorktree
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
 import Agent.Tools.Types
@@ -191,6 +202,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
     , subagentConnection :: !Text
     , subagentMapModel :: !(Text -> Text)
+    , subagentCreateWorktree
+        :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
     , subagentSpawnModelGuidance :: !(Maybe Text)
     }
 
@@ -223,7 +236,7 @@ prepareCollaborationSpawn
     -> IORef (Map SubagentId SubagentSession)
     -> SubagentStoreRoot
     -> GrokSubagentSpecs
-    -> IORef (Maybe (IORef [ResponseItem]))
+    -> IORef (Maybe (IO [ResponseItem]))
     -> SubagentId
     -> CollaborationSpawnOptions
     -> IO ()
@@ -260,7 +273,7 @@ prepareCollaborationSpawn
             childDialect
             agentId
     source <- readIORef sourceRef
-    sourceItems <- maybe (pure []) readIORef source
+    sourceItems <- maybe (pure []) id source
     writeIORef session.subSessionTranscript
         (forkSubagentTranscript spawnOptions.collaborationForkTurns sourceItems)
 
@@ -540,13 +553,43 @@ restoreAgentFromDisk
 -- | Use a disposable WebSocket for side questions so cancellation cannot
 -- leave abandoned response frames queued on the main conversation connection.
 freshOpenAiBackend
-    :: TokenProvider
+    :: Bool
+    -> TokenProvider
     -> IO ResponseCreateParams
     -> Backend
-freshOpenAiBackend provider getParams = Backend \state previous inputs onEvent ->
-    withCodexWsRetrying provider \conn _credential ->
-        let Backend submit = openAiBackend conn getParams
-        in submit state previous inputs onEvent
+freshOpenAiBackend showRawReasoning provider getParams =
+    Backend \state previous inputs onEvent ->
+        withCodexWsRetrying provider \conn _credential ->
+            let Backend submit =
+                    openAiBackendWithRawReasoning
+                        showRawReasoning
+                        conn
+                        getParams
+            in submit state previous inputs onEvent
+
+-- | Cancellation-safe Codex backend whose disposable sockets all participate
+-- in one logical turn's sticky-routing scope.
+freshOpenAiBackendWithTurnState
+    :: Bool
+    -> CodexTurnState
+    -> TokenProvider
+    -> IO ResponseCreateParams
+    -> Backend
+freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
+    Backend \state previous inputs onEvent ->
+        withCodexWsRetryingUsingTurnState provider turnState
+            \conn _credential ->
+                let Backend submit =
+                        openAiBackendWithReasoningVisibility
+                            showRawReasoning
+                            (\request previousResponseId onStreamEvent ->
+                                sendWsRequestWithEvents
+                                    conn
+                                    request
+                                    previousResponseId
+                                    onStreamEvent)
+                            getParams
+                in submit state previous inputs onEvent
 
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
@@ -623,33 +666,46 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 <> "report results clearly. Your agent id is "
                                 <> env.subId.unSubagentId
                                 <> "."
-                        childParams = requestParams model instructions
+                        childParams = requestParams OpenAIProvider model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     httpFallbackActive <- newIORef False
+                    turnState <- newCodexTurnState
                     let websocketBackend =
-                            freshOpenAiBackend tokenProvider
-                                (readIORef childParamsRef)
+                            freshOpenAiBackendWithTurnState
+                                runtime.subagentOptions.optShowRawReasoning
+                                turnState
+                                tokenProvider
+                                (pure childParams)
                         httpBackend =
-                            statelessResponsesBackend
+                            statelessResponsesBackendWithRawReasoning
+                                runtime.subagentOptions.optShowRawReasoning
                                 (\request _onEvent ->
-                                    OpenAI.createCodexMessageWithProvider
-                                        tokenProvider request)
-                                (readIORef childParamsRef)
+                                    OpenAI.createCodexMessageWithProviderWithTurnState
+                                        turnState tokenProvider request)
+                                (pure childParams)
                         baseBackend =
                             openAiBackendWithTransportFallback
                                 httpFallbackActive
                                 websocketBackend
                                 httpBackend
+                        compactSender request =
+                            OpenAI.createCodexMessageWithProviderWithOptionsAndTurnState
+                                OpenAI.remoteCompactionV2RequestOptions
+                                turnState
+                                tokenProvider
+                                request
+                        compactingBackend =
+                            autoCompactOpenAiBackendWithSender
+                                runtime.subagentOptions.optCompactThreshold
+                                compactSender
+                                (const (pure ()))
+                                (pure childParams)
+                                prepared.preparedSession.subSessionContextTokens
+                                baseBackend
                         backend =
-                            withConnectionRecovery $
-                                autoCompactOpenAiBackendWithThreshold
-                                    runtime.subagentOptions.optCompactThreshold
-                                    tokenProvider
-                                    (readIORef childParamsRef)
-                                    prepared.preparedSession.subSessionContextTokens
-                                    baseBackend
+                            withCodexTurnStateScope (pure turnState) $
+                                withConnectionRecovery compactingBackend
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent
@@ -662,7 +718,7 @@ runHttpSubagent
     -> Dialect
     -> Provider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
-    -> (IORef ResponseCreateParams -> Backend)
+    -> (ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime dialect provider sendToRoot mkBackend =
     \env previous prompt onEvent -> do
@@ -794,13 +850,12 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         genericSubagentSuffix agentType env.subId
                                     NoHostChildAgentProtocol ->
                                         ""
-                        childParams = requestParams model instructions
+                        childParams = requestParams provider model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     let backend =
                             withConnectionRecovery $
-                                mkBackend childParamsRef
+                                mkBackend childParams
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent
@@ -844,17 +899,18 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
             currentEffectiveModel
             currentDialect
             env.subId
-    nestedForkSource <- newIORef (Just session.subSessionTranscript)
+    nestedForkSource <- newIORef (Just (readIORef session.subSessionTranscript))
     let sessionDialect = dialectForId session.subSessionDialect
         childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
             { multiRegistry = runtime.subagentRegistry
+            , multiCwd = env.subCwd
             , multiSelfId = Just env.subId
             , multiDepth = env.subDepth
             , multiTaskPath = childPath
             , multiRootTurnId = pure env.subRootTurnId
             , multiResumeFromDisk = Nothing
-            , multiCreateWorktree = Nothing
+            , multiCreateWorktree = runtime.subagentCreateWorktree
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
                     provider

@@ -16,6 +16,8 @@ spec = do
             parseArgs ["-h"] `shouldBe` Right ShowHelp
             parseArgs ["--provider", "openai", "--help"] `shouldBe` Right ShowHelp
             parseArgs ["--version"] `shouldBe` Right ShowVersion
+            parseArgs ["sessions", "list", "--version"]
+                `shouldBe` Right ShowVersion
 
         it "parses one-shot flags" do
             parseArgs
@@ -25,6 +27,7 @@ spec = do
                 , "--bash"
                 , "--yolo"
                 , "--max-turns", "3"
+                , "--max-concurrent-agents", "64"
                 , "--compact-threshold", "1200"
                 , "--effort", "high"
                 , "-p", "hello"
@@ -36,6 +39,7 @@ spec = do
                     , optBash = True
                     , optYolo = True
                     , optMaxTurns = 3
+                    , optMaxConcurrentAgents = Just 64
                     , optCompactThreshold = Just 1200
                     , optEffort = Just "high"
                     , optPrompt = Just "hello"
@@ -61,6 +65,12 @@ spec = do
             parseArgs ["--effort", "HIGH"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "high" })
 
+        it "keeps raw OpenAI reasoning hidden unless explicitly requested" do
+            defaultCliOptions.optShowRawReasoning `shouldBe` False
+            parseArgs ["--show-raw-reasoning"]
+                `shouldBe` Right
+                    (RunAgent defaultCliOptions { optShowRawReasoning = True })
+
         it "rejects unknown effort levels" do
             parseArgs ["--effort", "extreme"] `shouldSatisfy` isLeft
 
@@ -84,10 +94,55 @@ spec = do
                     })
 
         it "rejects the removed openai-base-url command" do
-            parseArgs ["openai-base-url"] `shouldSatisfy` isLeft
+            parseArgs ["openai-base-url"]
+                `shouldBe`
+                    Left "openai-base-url was removed; run agent-cli --help"
+
+        it "keeps the last repeated option value" do
+            parseArgs
+                [ "--model", "first"
+                , "--effort", "low"
+                , "--model", "second"
+                , "--effort", "HIGH"
+                ]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optModel = Just "second"
+                    , optEffort = Just "high"
+                    })
+
+        it "applies approval flags in command-line order" do
+            parseArgs ["--yolo", "--no-yolo", "--yolo"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optYolo = True
+                    , optNoYolo = False
+                    })
+            parseArgs
+                [ "--managed-deny-mutations"
+                , "--yolo"
+                ]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optYolo = True
+                    , optNoYolo = False
+                    , optManagedDenyMutations = True
+                    })
 
         it "rejects using both -p and --prompt-file" do
             parseArgs ["-p", "a", "--prompt-file", "b"] `shouldSatisfy` isLeft
+            parseArgs ["-p", "a", "--managed-turn-file", "b"]
+                `shouldSatisfy` isLeft
+
+        it "parses the internal managed-turn request file" do
+            parseArgs ["--managed-turn-file", "turn.json"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json") })
+
+        it "requires a positive concurrent agent limit" do
+            parseArgs ["--max-concurrent-agents", "0"] `shouldSatisfy` isLeft
+            parseArgs ["--max-concurrent-agents", "-1"] `shouldSatisfy` isLeft
+            parseArgs ["--max-concurrent-agents", "nope"] `shouldSatisfy` isLeft
+            parseArgs ["--max-concurrent-agents", "8"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optMaxConcurrentAgents = Just 8 })
 
         it "requires a positive compaction threshold" do
             parseArgs ["--compact-threshold", "0"] `shouldSatisfy` isLeft
@@ -99,11 +154,18 @@ spec = do
             parseArgs ["login", "openai"] `shouldSatisfy` isLeft
 
 
-        it "parses sessions list and show" do
+        it "parses session administration commands" do
             parseArgs ["sessions"] `shouldBe` Right ListSessions
             parseArgs ["sessions", "list"] `shouldBe` Right ListSessions
             parseArgs ["sessions", "show", "2026-08-19-abcd1234"]
                 `shouldBe` Right (ShowSession "2026-08-19-abcd1234")
+            parseArgs ["sessions", "wait", "2026-08-19-abcd1234"]
+                `shouldBe` Right (WaitSession "2026-08-19-abcd1234")
+            parseArgs ["sessions", "import"]
+                `shouldBe` Right (ImportSession Nothing)
+            parseArgs ["sessions", "import", "--cwd", "/srv/project"]
+                `shouldBe` Right
+                    (ImportSession (Just (unsafeEncodeUtf "/srv/project")))
 
         it "parses storage administration commands" do
             parseArgs ["storage", "status"]
@@ -203,6 +265,26 @@ spec = do
             resolveApprovalPolicy defaultCliOptions { optNoYolo = True } False False
                 `shouldBe` DenyMutating
 
+        it "keeps managed non-TTY turns in remote prompt mode" do
+            resolveApprovalPolicy
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json")
+                    , optNoYolo = True
+                    }
+                False
+                False
+                `shouldBe` PromptMutating
+
+        it "keeps explicitly denied managed turns non-mutating" do
+            resolveApprovalPolicy
+                defaultCliOptions
+                    { optManagedTurnFile = Just (fromFilePath "turn.json")
+                    , optManagedDenyMutations = True
+                    }
+                False
+                False
+                `shouldBe` DenyMutating
+
         it "does not auto-approve a piped interactive REPL" do
             resolveApprovalPolicy defaultCliOptions False False
                 `shouldBe` DenyMutating
@@ -240,10 +322,13 @@ spec = do
             defaultEffortFor ClaudeCodeProvider `shouldBe` "xhigh"
 
     describe "isOneShot" do
-        it "is true for -p and --prompt-file" do
+        it "is true for text, prompt-file, and managed-turn-file input" do
             isOneShot defaultCliOptions `shouldBe` False
             isOneShot defaultCliOptions { optPrompt = Just "x" } `shouldBe` True
             isOneShot defaultCliOptions { optPromptFile = Just (fromFilePath "x.md") } `shouldBe` True
+            isOneShot defaultCliOptions
+                { optManagedTurnFile = Just (fromFilePath "turn.json") }
+                `shouldBe` True
 
 isLeft :: Either a b -> Bool
 isLeft = \case

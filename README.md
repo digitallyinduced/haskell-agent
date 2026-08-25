@@ -133,26 +133,56 @@ Setup reads the BotFather token without terminal echo, validates it against
 Telegram, and stores it separately from the non-secret gateway configuration.
 Never paste the bot token into an agent conversation.
 
-Only messages from allowlisted Telegram users are handled. Private chats work
-directly. In groups and supergroups, mention the bot, use a command addressed
-to its username (for example `/new@your_bot`), or reply to one of its messages.
-Ambient group traffic and messages from non-allowlisted members are ignored.
+Only messages from allowlisted Telegram users are handled. Repeat
+`--allowed-user` during setup, or manage the local allowlist later with
+`agent-telegram users list|add ID|remove ID`; running gateways must be restarted
+after an allowlist change. Private chats work directly. In groups and
+supergroups, mention the bot, use a command addressed to its username (for
+example `/new@your_bot`), or reply to one of its messages. Ambient group traffic
+and messages from non-allowlisted members are ignored by default. Pass
+`--all-group-messages` during setup to let the agent consider every group
+message from an allowlisted user. It replies only when it judges that doing so
+would be useful; otherwise it stays silent. Telegram must also deliver ambient
+messages to the bot: use BotFather's `/setprivacy` command to disable privacy
+mode for that bot, then remove and re-add the bot to existing groups if needed.
+
 Each private chat, group, and forum topic is mapped to its own persisted agent
-session under `~/.haskell-agent`; `/new` starts a fresh session and `/session`
-shows the current session ID. Group replies include the sender's identity in
-the agent prompt and are posted as replies to the triggering Telegram message.
-Mutating tools are denied unless setup is run with `--yolo`. Use
-`agent-telegram stop` to stop the background gateway.
+session under `~/.haskell-agent`; `/new` starts a fresh session, `/session`
+shows the current session ID, `/status` reports queued/retrying/failed work,
+and `/retry` requeues the latest failed turn. Group replies include the
+sender's identity in the agent prompt and are posted as replies to the
+triggering Telegram message.
+
+The default approval mode asks through Telegram inline buttons when a mutating
+tool is requested. `--deny-mutations` disables those tools and `--yolo`
+auto-approves them. Approval and choice callbacks are scoped to the originating
+conversation and allowlisted user.
 
 Incoming updates and pending replies are persisted before they are processed.
 Polling continues while agent turns run, conversations are processed in order,
-and separate chats can run concurrently. Pending work resumes when the gateway
-is restarted.
+and separate chats can run concurrently through a bounded worker pool. Pending
+work, callback bindings, retry schedules, delivery checkpoints, and dead
+letters resume when the gateway is restarted. Telegram 429/5xx responses and
+transient turn failures use bounded backoff; agent turns have a 20-minute
+deadline.
+
+The gateway accepts edited messages, reactions, photos, documents, audio,
+video, video notes, animations, stickers, locations, contacts, venues, polls,
+and dice. Images are sent to multimodal providers natively; other downloaded
+files are attached through Responses `input_file` content or a private local
+path fallback. The agent can send documents, photos, and voice files, react to
+messages, and ask generic inline-button questions through gateway-scoped tools.
+Bot credentials remain in the parent gateway process and are never inherited
+by the agent child.
 
 The built-in `telegram-agent` skill lets the normal agent guide this setup.
 Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
 direct secret entry to the interactive setup command, and start the configured
 gateway after setup is complete.
+
+On NixOS, use the flake's reusable multi-instance service module instead of
+maintaining the systemd and PostgreSQL runtime configuration by hand. See
+[`docs/nixos.md`](docs/nixos.md).
 
 ### Model catalog and local models
 
@@ -214,9 +244,30 @@ at this URL”, “add this OpenRouter model”, or “OpenAI released a new mod
 Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
 naturally and let the agent activate it.
 
+The built-in `learn-about-user` skill can inspect a user-confirmed public
+GitHub profile, infer technical defaults from a representative repository
+sample, show the proposed profile for correction, and save the approved result
+as an always-loaded user-scoped learned skill. Invoke it with
+`/learn-about-user`, `$learn-about-user`, or ask the agent to learn about your
+technical preferences. It does not inspect private repositories unless the
+user separately and explicitly requests that. On first-use credential
+onboarding, users can opt into this workflow or skip it and run the skill
+later. Once approved, the profile is injected into every new session through
+the existing always-loaded learned-skill startup context.
+
 ### Authentication
 
 Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
+
+### Voice dictation
+
+Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop.
+On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM directly to
+`wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
+Audio is sent while you speak, and xAI's partial transcript is displayed live.
+Dictation uses the same configured Grok OAuth subscription or managed xAI
+API-key credential as the xAI provider; it does not run an external app server. Set
+`XAI_STT_LANGUAGE` to a supported language code to override the default `en`.
 
 ### Claude Code subscription
 

@@ -15,6 +15,7 @@ import Agent.Tools.Types
 import Agent.ToolDispatch (dispatchToolCall)
 import Control.Exception.Safe (displayException)
 import Data.Aeson (object, (.=))
+import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -64,14 +65,44 @@ spec = do
             let env = testEnv
                     { databaseSearchConversations = \query limit -> do
                         writeIORef seen (Just (query, limit))
-                        pure (Right (object ["matches" .= ([] :: [Text])]))
+                        pure (Right (Aeson.toJSON
+                            [ object
+                                [ "session_id" .= ("session-1" :: Text)
+                                , "turn_index" .= (4 :: Int)
+                                , "occurred_at" .= ("2026-08-24T09:30:00Z" :: Text)
+                                , "user_text" .= ("How should we store this?" :: Text)
+                                , "assistant_text" .=
+                                    Just ("Use PostgreSQL.\nKeep scopes explicit." :: Text)
+                                , "rank" .= (0.8 :: Double)
+                                ]
+                            ]))
                     }
             result <- dispatchToolCall dispatchConfig
                 (appToolHandlers (databaseTools env))
                 (functionToolCall "call-4" "conversation_search"
                     "{\"query\":\"postgres memory\",\"limit\":5}")
             readIORef seen `shouldReturn` Just ("postgres memory", 5)
-            result.output `shouldContainText` "\"matches\""
+            result.output `shouldBe`
+                "Match 1\n\
+                \Session: session-1\n\
+                \Turn: 4\n\
+                \Occurred at: 2026-08-24T09:30:00Z\n\
+                \User:\n\
+                \  How should we store this?\n\
+                \Assistant:\n\
+                \  Use PostgreSQL.\n\
+                \  Keep scopes explicit."
+
+        it "renders an empty conversation search result as text" do
+            let env = testEnv
+                    { databaseSearchConversations = \_ _ ->
+                        pure (Right (Aeson.toJSON ([] :: [Aeson.Value])))
+                    }
+            result <- dispatchToolCall dispatchConfig
+                (appToolHandlers (databaseTools env))
+                (functionToolCall "call-5" "conversation_search"
+                    "{\"query\":\"nothing\"}")
+            result.output `shouldBe` "(no matching conversations)"
 
     describe "runStorageCommand" do
         it "dispatches each administrative command to its store action" do
@@ -112,7 +143,8 @@ testEnv = DatabaseToolsEnv
     { databaseDescribeScope = \_ -> pure (Right (object []))
     , databaseRunQuery = \_ _ -> pure (Right (object []))
     , databaseRunExecute = \_ _ _ -> pure (Right (object []))
-    , databaseSearchConversations = \_ _ -> pure (Right (object []))
+    , databaseSearchConversations = \_ _ ->
+        pure (Right (Aeson.toJSON ([] :: [Aeson.Value])))
     }
 
 dispatchConfig :: ToolDispatchConfig

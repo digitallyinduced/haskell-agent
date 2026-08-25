@@ -78,7 +78,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , collaborationForkTurns = Nothing
                     }
             Just session <- Map.lookup agentId <$> readIORef sessionsRef
-            let rootParams = requestParams "gpt-5.6-sol" "" [] "medium"
+            let rootParams =
+                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
             resolveChildModelAndEffort
                 OpenAIProvider
                 rootParams
@@ -88,7 +89,8 @@ spec = describe "Agent.CLI.SubagentStore" do
                 `shouldBe` ("gpt-5.6-luna", "medium")
 
         it "keeps an explicit child model override" do
-            let rootParams = requestParams "gpt-5.6-sol" "" [] "medium"
+            let rootParams =
+                    requestParams OpenAIProvider "gpt-5.6-sol" "" [] "medium"
             resolveChildModelAndEffort
                 OpenAIProvider
                 rootParams

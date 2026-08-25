@@ -10,7 +10,6 @@ agent_cli=$1
 credential_home=${AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME:?must point at the CI runner home containing provider credentials}
 workspace=$TMPDIR/workspace
 test_home=$TMPDIR/home
-prompt_file=$TMPDIR/prompt.txt
 status_file=$TMPDIR/agent.status
 transcript=$TMPDIR/tmux.log
 tmux_server="agent-functional-$$"
@@ -38,15 +37,15 @@ model=${AGENT_FUNCTIONAL_TEST_MODEL:-}
 case "$provider" in
   "")
     if copy_file_if_present \
-      "$credential_home/.codex/auth.json" \
-      "$test_home/.codex/auth.json"; then
-      provider=openai
-      model=${model:-gpt-5.6-luna}
-    elif copy_file_if_present \
       "$credential_home/.grok/auth.json" \
       "$test_home/.grok/auth.json"; then
       provider=xai
       model=${model:-grok-4.6}
+    elif copy_file_if_present \
+      "$credential_home/.codex/auth.json" \
+      "$test_home/.codex/auth.json"; then
+      provider=openai
+      model=${model:-gpt-5.6-luna}
     elif [[ -d "$credential_home/.haskell-agent/credentials" ]]; then
       mkdir -p "$test_home/.haskell-agent"
       cp -R \
@@ -82,7 +81,7 @@ case "$provider" in
     ;;
 esac
 
-cat >"$prompt_file" <<'EOF'
+prompt=$(cat <<'EOF'
 Create a file named Main.hs in the current workspace containing a standalone
 Haskell program that prints exactly:
 
@@ -91,6 +90,7 @@ Hello, world!
 Run the program with runghc and fix any problem you find. Do not only explain
 the solution: create and verify the file.
 EOF
+)
 
 runner=$TMPDIR/run-agent.sh
 cat >"$runner" <<EOF
@@ -98,7 +98,7 @@ cat >"$runner" <<EOF
 set +e
 args=(
   --cwd $(printf '%q' "$workspace")
-  --prompt-file $(printf '%q' "$prompt_file")
+  --prompt $(printf '%q' "$prompt")
   --yolo
   --minimal
   --motion off

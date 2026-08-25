@@ -10,6 +10,7 @@ module Claude.Agent.SDK.Types
     , emptyUsage
     , addUsage
     , ModelUsage(..)
+    , modelUsageToUsage
     , MessageOrigin(..)
     , UserContentBlock(..)
     , ContentBlock(..)
@@ -163,6 +164,17 @@ data ModelUsage = ModelUsage
     , costUSD :: !(Maybe Double)
     , raw :: !Object
     } deriving (Eq, Show)
+
+modelUsageToUsage :: ModelUsage -> Usage
+modelUsageToUsage modelUsage =
+    Usage
+        { inputTokens =
+            modelUsage.inputTokens
+                + modelUsage.cacheCreationInputTokens
+                + modelUsage.cacheReadInputTokens
+        , outputTokens = modelUsage.outputTokens
+        , cachedTokens = modelUsage.cacheReadInputTokens
+        }
 
 -- | Provenance attached to user messages and terminal results. Only @kind@
 -- has a stable meaning; the raw object is retained for forward-compatible

@@ -15,10 +15,21 @@ import qualified Agent.Responses.Codec as Codec
 import qualified Agent.Responses.Types as Responses
 import Agent.OpenAI.ToolDSL
 import Agent.OpenAI.WebSocketClient
+import Agent.Provider (Credential(..), Provider(..))
 
 spec :: Spec
 spec = do
     describe "canonical Responses request" do
+        it "omits an empty ChatGPT account header for static bearer credentials" do
+            let credential = Credential
+                    { accessToken = "token"
+                    , accountId = ""
+                    , leaseId = Nothing
+                    , provider = OpenAIProvider
+                    }
+            buildCodexWsHeaders credential
+                `shouldNotSatisfy` any (\(name, _) -> name == "chatgpt-account-id")
+
         it "round-trips API fields, structured tool output, file_url, and extensions" do
             let original = canonicalRequestJson
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseCreateParams of
@@ -27,15 +38,33 @@ spec = do
 
         it "uses the canonical request unchanged at the WebSocket boundary" do
             let payload = buildWsPayloadWithOptions
-                    CodexWsOptions { compactThreshold = Just 120_000 }
+                    CodexWsOptions
+                        { compactThreshold = Just 120_000
+                        , sendIdleTimeoutMicros = defaultCodexWsOptions.sendIdleTimeoutMicros
+                        , receiveIdleTimeoutMicros = defaultCodexWsOptions.receiveIdleTimeoutMicros
+                        }
                     sampleRequest
                     (Just "resp_previous")
             field "type" payload `shouldBe` Just (Aeson.String "response.create")
             field "previous_response_id" payload `shouldBe` Just (Aeson.String "resp_previous")
             field "model" payload `shouldBe` Just (Aeson.String "gpt-5.6")
             field "store" payload `shouldBe` Just (Aeson.Bool False)
+            field "stream" payload `shouldBe` Just (Aeson.Bool True)
             field "max_output_tokens" payload `shouldBe` Just (Aeson.Number 4096)
             field "context_management" payload `shouldSatisfy` maybe False isNonEmptyArray
+
+        it "carries sticky turn state into client metadata without dropping existing metadata" do
+            let payload = addTurnStateToPayload
+                    (Just "sticky-token")
+                    (Aeson.object
+                        [ "client_metadata" .= Aeson.object
+                            [ "session_id" .= ("session-1" :: Text) ]
+                        ])
+            field "client_metadata" payload `shouldBe`
+                Just (Aeson.object
+                    [ "session_id" .= ("session-1" :: Text)
+                    , "x-codex-turn-state" .= ("sticky-token" :: Text)
+                    ])
 
     describe "canonical Responses response" do
         it "preserves statuses, rich output text, usage, and unknown fields" do
@@ -97,6 +126,73 @@ spec = do
     describe "canonical Responses streaming events" do
         it "recognises every currently documented event discriminator" do
             mapM_ assertKnownEvent documentedStreamEventTypes
+
+        it "decodes function-call argument deltas into typed events" do
+            let original = Aeson.object
+                    [ "type" .=
+                        ("response.function_call_arguments.delta" :: Text)
+                    , "sequence_number" .= (7 :: Int)
+                    , "item_id" .= ("fc_1" :: Text)
+                    , "output_index" .= (2 :: Int)
+                    , "delta" .= ("{\"target_file\":" :: Text)
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original
+                    :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success
+                    event@Responses.ResponseFunctionCallArgumentsDeltaEvent
+                        { delta
+                        , streamItemId
+                        , streamOutputIndex
+                        , sequenceNumber
+                        } -> do
+                            delta `shouldBe` Just "{\"target_file\":"
+                            streamItemId `shouldBe` Just "fc_1"
+                            streamOutputIndex `shouldBe` Just 2
+                            sequenceNumber `shouldBe` Just 7
+                            Responses.responseStreamEventType event
+                                `shouldBe`
+                                    Responses.EventFunctionCallArgumentsDelta
+                            Aeson.toJSON event `shouldBe` original
+                Aeson.Success other ->
+                    expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes completed function-call arguments into typed events" do
+            let original = Aeson.object
+                    [ "type" .=
+                        ("response.function_call_arguments.done" :: Text)
+                    , "sequence_number" .= (8 :: Int)
+                    , "item_id" .= ("fc_1" :: Text)
+                    , "output_index" .= (2 :: Int)
+                    , "name" .= ("read_file" :: Text)
+                    , "arguments" .=
+                        ("{\"target_file\":\"README.md\"}" :: Text)
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original
+                    :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success
+                    event@Responses.ResponseFunctionCallArgumentsDoneEvent
+                        { arguments
+                        , functionName
+                        , streamItemId
+                        , streamOutputIndex
+                        , sequenceNumber
+                        } -> do
+                            arguments `shouldBe`
+                                Just "{\"target_file\":\"README.md\"}"
+                            functionName `shouldBe` Just "read_file"
+                            streamItemId `shouldBe` Just "fc_1"
+                            streamOutputIndex `shouldBe` Just 2
+                            sequenceNumber `shouldBe` Just 8
+                            Responses.responseStreamEventType event
+                                `shouldBe`
+                                    Responses.EventFunctionCallArgumentsDone
+                            Aeson.toJSON event `shouldBe` original
+                Aeson.Success other ->
+                    expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
 
         it "decodes output-item completion into a typed event constructor" do
             let original = Aeson.object
@@ -313,6 +409,8 @@ spec = do
                                 (show (eventName :: Text) <> ": " <> err))
                 [ "response.custom_tool_call_input.delta"
                 , "response.custom_tool_call_input.done"
+                , "response.function_call_arguments.delta"
+                , "response.function_call_arguments.done"
                 , "response.reasoning_summary_part.added"
                 , "response.reasoning_summary_text.done"
                 ]

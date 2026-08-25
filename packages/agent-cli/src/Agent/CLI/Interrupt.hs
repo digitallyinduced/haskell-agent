@@ -12,6 +12,7 @@ module Agent.CLI.Interrupt
     , withTurnCancel
     , noteIdleCtrlC
     , isWrappedUserInterrupt
+    , catchUserInterrupt
     , noteFullscreenCtrlC
     ) where
 
@@ -27,7 +28,10 @@ import Control.Exception.Safe
     , SyncExceptionWrapper(..)
     , bracket
     , bracket_
+    , catchAny
+    , catchAsync
     , catchIO
+    , throwIO
     )
 import Control.Monad (void)
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
@@ -194,3 +198,17 @@ isWrappedUserInterrupt e =
                 Just UserInterrupt -> True
                 _ -> False
         Nothing -> False
+
+-- | Handle both forms in which Ctrl-C can reach the CLI: asynchronously from
+-- the RTS/SIGINT handler, or synchronously wrapped by safe-exceptions.
+catchUserInterrupt :: IO a -> IO a -> IO a
+catchUserInterrupt action onInterrupt =
+    (action `catchAny` handleSyncException) `catchAsync` handleAsyncException
+  where
+    handleAsyncException (e :: AsyncException) =
+        case e of
+            UserInterrupt -> onInterrupt
+            _ -> throwIO e
+    handleSyncException (e :: SomeException)
+        | isWrappedUserInterrupt e = onInterrupt
+        | otherwise = throwIO e

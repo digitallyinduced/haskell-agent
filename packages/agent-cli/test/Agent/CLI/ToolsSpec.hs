@@ -219,7 +219,7 @@ spec = describe "schemasFromAppTools" do
             other -> expectationFailure
                 ("expected collaboration namespace, got " <> show other)
 
-    it "matches the reserved wait_agent schema with the production tool" do
+    it "matches the reserved collaboration schemas with the production tools" do
         bracket
             (newSubagentRegistry
                 defaultSubagentConfig
@@ -230,6 +230,7 @@ spec = describe "schemasFromAppTools" do
             \registry -> do
                 let context = MultiAgentContext
                         { multiRegistry = registry
+                        , multiCwd = unsafeEncodeUtf "/tmp"
                         , multiSelfId = Nothing
                         , multiDepth = 0
                         , multiTaskPath = taskPathRoot
@@ -251,6 +252,29 @@ spec = describe "schemasFromAppTools" do
                     [tagged] ->
                         case KeyMap.lookup "tools" tagged.fields of
                             Just (Aeson.Array tools) -> do
+                                let spawnTools =
+                                        mapMaybe spawnAgentObject (toList tools)
+                                case spawnTools of
+                                    [tool] -> do
+                                        Just (Aeson.Object parameters) <-
+                                            pure (KeyMap.lookup "parameters" tool)
+                                        KeyMap.lookup "required" parameters
+                                            `shouldBe` Just
+                                                (Aeson.toJSON
+                                                    (["task_name", "message"] :: [Text]))
+                                        Just (Aeson.Object properties) <-
+                                            pure (KeyMap.lookup "properties" parameters)
+                                        map Key.toText (KeyMap.keys properties)
+                                            `shouldMatchList`
+                                                [ "task_name"
+                                                , "message"
+                                                , "model"
+                                                , "reasoning_effort"
+                                                , "fork_turns"
+                                                ]
+                                    other -> expectationFailure
+                                        ("expected production spawn_agent, got "
+                                            <> show other)
                                 let waitTools =
                                         mapMaybe waitAgentObject (toList tools)
                                 case waitTools of
@@ -302,6 +326,12 @@ waitAgentObject (Aeson.Object tool)
     | KeyMap.lookup "name" tool == Just (Aeson.String "wait_agent") =
         Just tool
 waitAgentObject _ = Nothing
+
+spawnAgentObject :: Aeson.Value -> Maybe Aeson.Object
+spawnAgentObject (Aeson.Object tool)
+    | KeyMap.lookup "name" tool == Just (Aeson.String "spawn_agent") =
+        Just tool
+spawnAgentObject _ = Nothing
 
 required_ :: FunctionTool -> Maybe Aeson.Value
 required_ tool = do

@@ -142,7 +142,7 @@ learnedSkillGuidance available
     | otherwise =
         Text.unlines
             [ "Learned skills:"
-            , "- Use skill_search and skill_read when reusable guidance from earlier sessions may apply."
+            , "- Use skill_search and view_skill when reusable guidance from earlier sessions may apply."
             , "- When the user establishes a durable preference, decision, lesson, or repeatable procedure that will help future sessions, consider promoting it with skill_create or skill_update."
             , "- Store actionable reusable guidance, not ordinary facts or transient task state. Search before creating, prefer updating an existing skill, and choose the narrowest correct scope."
             ]

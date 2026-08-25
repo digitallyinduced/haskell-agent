@@ -201,6 +201,50 @@ spec = describe "Agent.MCP" do
                 updates <- readIORef progress
                 updates `shouldSatisfy` (not . null)
 
+    it "projects progressive MCP discovery through Grok search_tool and use_tool" $
+        withDelayedFakeServer \script -> do
+            fleet <- startMcpFleetProgressive
+                (const (pure ()))
+                [progressiveConfig script "0.02" "grok"]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                waitForServerReady fleet "grok"
+                let tools = mcpFleetGrokMetaTools fleet
+                    dispatch ident name arguments = dispatchToolCall
+                        defaultLoopDispatch
+                        (appToolHandlers tools)
+                        (functionToolCall ident name arguments)
+                map (.appToolName) tools
+                    `shouldBe` ["search_tool", "use_tool"]
+                searched <- dispatch "search-grok" "search_tool"
+                    "{\"query\":\"delayed\",\"limit\":5}"
+                searched.output `shouldSatisfy`
+                    Text.isInfixOf "\"tool_name\":\"grok__delayed_read\""
+                searched.output `shouldSatisfy`
+                    Text.isInfixOf "\"status\":\"ready\""
+                searched.output `shouldSatisfy`
+                    Text.isInfixOf "\"total_hidden_tools\":1"
+                searched.output `shouldSatisfy`
+                    Text.isInfixOf "\"score\":"
+                natural <- dispatch "search-natural" "search_tool"
+                    "{\"query\":\"grok delayed read\"}"
+                natural.output `shouldSatisfy`
+                    Text.isInfixOf "\"tool_name\":\"grok__delayed_read\""
+                invalidLimit <- dispatch "search-limit" "search_tool"
+                    "{\"query\":\"delayed\",\"limit\":\"many\"}"
+                invalidLimit.output `shouldSatisfy`
+                    Text.isInfixOf "limit must be an integer"
+                called <- dispatch "call-grok" "use_tool"
+                    "{\"tool_name\":\"grok__delayed_read\",\"tool_input\":{}}"
+                called.output `shouldBe` "delayed response"
+                missingInput <- dispatch "missing-input" "use_tool"
+                    "{\"tool_name\":\"grok__delayed_read\"}"
+                missingInput.output `shouldSatisfy`
+                    Text.isInfixOf "requires tool_input"
+                unqualified <- dispatch "unqualified" "use_tool"
+                    "{\"tool_name\":\"read_file\",\"tool_input\":{}}"
+                unqualified.output `shouldSatisfy`
+                    Text.isInfixOf "qualified server__tool name"
+
     it "publishes a fast server before a slow progressive peer settles" $
         withDelayedFakeServer \script -> do
             fleet <- startMcpFleetProgressive

@@ -5,6 +5,7 @@ module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
     , readReplLineWithInitial
+    , readReplLineWithCatalog
     , readReplLineWithSkills
     , readReplLineWithSkillsAndModels
     , readApprovalLine
@@ -34,11 +35,14 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
+import Agent.CLI.Dictation (dictate, insertDictation)
 import Agent.CLI.Command
     ( SkillCommand
+    , SlashCatalog(..)
     , SlashMenu(..)
     , SlashSuggestion(..)
-    , slashMenuForWithSkillsAndModels
+    , defaultSlashCatalog
+    , slashMenuForCatalog
     )
 import Agent.CLI.Input.Display
 import Agent.CLI.Input.History
@@ -59,7 +63,18 @@ import Agent.CLI.Terminal
     , kittyKeyboardPop
     , stripAnsi
     )
-import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
+import Agent.TUI.TextWidth
+    ( nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
+import Control.Exception.Safe
+    ( bracket
+    , bracket_
+    , catchIO
+    , throwIO
+    , tryAny
+    , tryIO
+    )
 import Control.Monad (unless, when)
 import Data.Char
     ( isSpace
@@ -123,12 +138,22 @@ import System.Posix.Terminal
 -- 'noteIdleCtrlC' rather than the outer signal handler.
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
-    readReplLineConfigured [] [] False interrupt prompt ""
+    readReplLineConfigured
+        defaultSlashCatalog False interrupt prompt ""
 
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
 readReplLineWithInitial =
-    readReplLineConfigured [] [] True
+    readReplLineConfigured defaultSlashCatalog True
+
+readReplLineWithCatalog
+    :: SlashCatalog
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readReplLineWithCatalog catalog =
+    readReplLineConfigured catalog True
 
 readReplLineWithSkills
     :: [SkillCommand]
@@ -137,7 +162,11 @@ readReplLineWithSkills
     -> Text
     -> IO ReplLine
 readReplLineWithSkills skills =
-    readReplLineConfigured skills [] True
+    readReplLineConfigured
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            }
+        True
 
 readReplLineWithSkillsAndModels
     :: [SkillCommand]
@@ -147,17 +176,21 @@ readReplLineWithSkillsAndModels
     -> Text
     -> IO ReplLine
 readReplLineWithSkillsAndModels skills modelIds =
-    readReplLineConfigured skills modelIds True
+    readReplLineConfigured
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            , slashCatalogModelIds = modelIds
+            }
+        True
 
 readReplLineConfigured
-    :: [SkillCommand]
-    -> [Text]
+    :: SlashCatalog
     -> Bool
     -> InterruptState
     -> Text
     -> Text
     -> IO ReplLine
-readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = do
+readReplLineConfigured catalog slashEnabled interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
@@ -166,7 +199,7 @@ readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = d
             ensureHistoryParent path
             classifyLine <$>
                 readInlineEditor
-                    skills modelIds slashEnabled interrupt path prompt initial
+                    catalog slashEnabled interrupt path prompt initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
@@ -182,8 +215,7 @@ readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = d
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: [SkillCommand]
-    -> [Text]
+    :: SlashCatalog
     -> Bool
     -> InterruptState
     -> FilePath
@@ -191,7 +223,7 @@ readInlineEditor
     -> Text
     -> IO ReplLine
 readInlineEditor
-        skills modelIds slashEnabled interrupt historyPath prompt initial = do
+        catalog slashEnabled interrupt historyPath prompt initial = do
     withBracketedPaste $
         withEditorKittyKeyboard $
             withEditorRawStdin $
@@ -211,8 +243,7 @@ readInlineEditor
                                 , editorPasted = False
                                 , editorSlashEnabled = slashEnabled
                                 , editorSlashDismissed = False
-                                , editorSkillCommands = skills
-                                , editorModelIds = modelIds
+                                , editorSlashCatalog = catalog
                                 }
                         redrawEditor prompt state
                         editorLoop history entries state
@@ -279,12 +310,18 @@ readInlineEditor
             EditorBackspace -> continue history entries (backspace state)
             EditorDelete -> continue history entries (deleteAtCursor state)
             EditorLeft -> continue history entries state
-                { editorCursor = max 0 (state.editorCursor - 1)
+                { editorCursor =
+                    previousGraphemeBoundary
+                        state.editorText
+                        state.editorCursor
                 , editorSelected = 0
                 , editorSlashDismissed = False
                 }
             EditorRight -> continue history entries state
-                { editorCursor = min (Text.length state.editorText) (state.editorCursor + 1)
+                { editorCursor =
+                    nextGraphemeBoundary
+                        state.editorText
+                        state.editorCursor
                 , editorSelected = 0
                 , editorSlashDismissed = False
                 }
@@ -303,6 +340,32 @@ readInlineEditor
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt state
                 editorLoop history entries state
+            EditorDictate -> do
+                finishEditorLine prompt state
+                result <- tryAny dictate
+                case result of
+                    Left err ->
+                        Text.putStrLn
+                            ("dictation failed: " <> Text.pack (show err))
+                    Right _ ->
+                        Text.putStrLn "Dictation inserted."
+                let state' = case result of
+                        Left _ -> state
+                        Right transcript ->
+                            let (text, cursor) =
+                                    insertDictation
+                                        state.editorText
+                                        state.editorCursor
+                                        transcript
+                            in state
+                                { editorText = text
+                                , editorCursor = cursor
+                                , editorHistoryIndex = Nothing
+                                , editorHistoryDraft = text
+                                , editorSlashDismissed = False
+                                }
+                redrawEditor prompt state'
+                editorLoop history entries state'
             EditorPaste pasted -> do
                 finishEditorLine prompt state
                 let pastedState =
@@ -344,9 +407,8 @@ currentMenu state
     | not state.editorSlashEnabled = Nothing
     | state.editorSlashDismissed = Nothing
     | otherwise =
-        slashMenuForWithSkillsAndModels
-            state.editorSkillCommands
-            state.editorModelIds
+        slashMenuForCatalog
+            state.editorSlashCatalog
             state.editorText
             state.editorCursor
 
@@ -424,9 +486,13 @@ backspace :: EditorState -> EditorState
 backspace state
     | state.editorCursor <= 0 = state
     | otherwise =
-        let start = state.editorCursor - 1
+        let start =
+                previousGraphemeBoundary
+                    state.editorText
+                    state.editorCursor
             (before, rest) = Text.splitAt start state.editorText
-            (_, after) = Text.splitAt 1 rest
+            (_, after) =
+                Text.splitAt (state.editorCursor - start) rest
             text = before <> after
         in state
             { editorText = text
@@ -442,7 +508,11 @@ deleteAtCursor state
     | state.editorCursor >= Text.length state.editorText = state
     | otherwise =
         let (before, rest) = Text.splitAt state.editorCursor state.editorText
-            (_, after) = Text.splitAt 1 rest
+            end =
+                nextGraphemeBoundary
+                    state.editorText
+                    state.editorCursor
+            (_, after) = Text.splitAt (end - state.editorCursor) rest
             text = before <> after
         in state
             { editorText = text
@@ -557,6 +627,7 @@ readEditorKey = do
                 '\ETB' -> pure EditorKillWord
                 '\EM' -> pure EditorYank
                 '\FF' -> pure EditorClearScreen
+                '\DC2' -> pure EditorDictate
                 _
                     | char >= ' ' -> pure (EditorChar char)
                     | otherwise -> pure EditorIgnore

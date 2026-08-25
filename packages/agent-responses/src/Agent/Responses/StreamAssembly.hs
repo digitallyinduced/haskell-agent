@@ -39,10 +39,13 @@ data StreamAssemblyConfig = StreamAssemblyConfig
       -- ^ Classify top-level and nested stream error events.
     , classifyFailedResponse :: !(ResponseFailure -> ApiError)
       -- ^ Classify a permissive terminal @response.failed@ payload.
+    , incompleteAsFailure :: !Bool
+      -- ^ Whether @response.incomplete@ should be returned as an error.
     }
 
 data ResponseFailure = ResponseFailure
-    { failureErrorType         :: !(Maybe Text)
+    { failureStatus            :: !(Maybe Text)
+    , failureErrorType         :: !(Maybe Text)
     , failureErrorCode         :: !(Maybe Text)
     , failureErrorMessage      :: !(Maybe Text)
     , failureIncompleteDetails :: !(Maybe IncompleteDetails)
@@ -229,10 +232,15 @@ buildStreamResponseWithModel config modelHint events =
             ResponseDoneEvent{} ->
                 finishStreamResponse modelHint nextState event
             ResponseIncompleteEvent{} ->
-                finishStreamResponse modelHint nextState event
+                if config.incompleteAsFailure
+                    then Left (config.classifyFailedResponse
+                        ((responseFailureFromState nextState)
+                            { failureStatus = Just "incomplete" }))
+                    else finishStreamResponse modelHint nextState event
             ResponseFailedEvent{} ->
                 Left (config.classifyFailedResponse
-                    (responseFailureFromState nextState))
+                    ((responseFailureFromState nextState)
+                        { failureStatus = Just "failed" }))
             ResponseErrorEvent { streamError } ->
                 Left (config.classifyStreamError streamError)
             ResponseNestedErrorEvent { streamError } ->
@@ -266,21 +274,33 @@ responseFragmentHasOutput _ = False
 
 -- | Best available text from a failed terminal response.
 failedResponseMessage :: Response -> Text
-failedResponseMessage response = case response.error of
-    Just responseError -> responseError.message
-    Nothing -> case response.incompleteDetails of
-        Just details -> "response.failed: " <> details.reason
-        Nothing -> "response.failed (no details)"
+failedResponseMessage response =
+    case response.error >>= bestErrorDetail of
+        Just detail -> detail
+        Nothing -> case response.incompleteDetails of
+            Just details -> responseLabel <> ": " <> details.reason
+            Nothing -> responseLabel <> " (no details)"
+  where
+    bestErrorDetail responseError =
+        nonEmpty (Just responseError.message)
+            <|> nonEmpty (Just responseError.code)
+
+    responseLabel = case response.status of
+        ResponseIncomplete -> "response.incomplete"
+        _ -> "response.failed"
 
 failedStreamResponseMessage :: ResponseFailure -> Text
 failedStreamResponseMessage failure =
     fromMaybe fallback (nonEmpty failure.failureErrorMessage)
   where
     fallback = case failure.failureIncompleteDetails of
-        Just details -> "response.failed: " <> details.reason
+        Just details -> responseLabel <> ": " <> details.reason
         Nothing -> case nonEmpty failure.failureErrorCode of
-            Just code -> "response.failed: " <> code
-            Nothing -> "response.failed (no details)"
+            Just code -> responseLabel <> ": " <> code
+            Nothing -> responseLabel <> " (no details)"
+    responseLabel
+        | failure.failureStatus == Just "incomplete" = "response.incomplete"
+        | otherwise = "response.failed"
 
 responseFailureFromState :: StreamAssemblyState -> ResponseFailure
 responseFailureFromState state =
@@ -295,7 +315,8 @@ responseFailureFromState state =
                 KeyMap.lookup objectName state.responseObject
             textField fieldName object
     in ResponseFailure
-        { failureErrorType = nestedText "error" "type"
+        { failureStatus = parseOptional "status"
+        , failureErrorType = nestedText "error" "type"
         , failureErrorCode = nestedText "error" "code"
         , failureErrorMessage = nestedText "error" "message"
         , failureIncompleteDetails = parseOptional "incomplete_details"

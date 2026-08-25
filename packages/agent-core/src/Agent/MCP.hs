@@ -24,6 +24,7 @@ module Agent.MCP
     , closeMcpFleet
     , mcpFleetTools
     , mcpFleetMetaTools
+    , mcpFleetGrokMetaTools
     , mcpFleetStatuses
     , normalizeMcpToolResult
     ) where
@@ -36,6 +37,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     )
 import Agent.ToolDispatch (typedTool)
+import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -98,6 +100,7 @@ import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.Char (isAlphaNum)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -107,6 +110,7 @@ import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.List (find, sortOn)
 import Data.Maybe (catMaybes, isJust)
+import Data.Ord (Down(..))
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -651,14 +655,14 @@ closeMcpSupervisor supervisor = do
                 void (tryPutTMVar entry.supervisorPendingResult
                     (Left "MCP supervisor closed")))
             pending
-    mapM_
+    forConcurrentlyBounded_ 8
         (\entry -> do
             worker <- atomically
                 (readTMVar entry.supervisorPendingWorker)
             cancel worker
             void (waitCatch worker))
         pending
-    mapM_ closeMcpFleet fleets
+    forConcurrentlyBounded_ 4 closeMcpFleet fleets
 
 resolveEffectiveCwds :: [McpServerConfig] -> IO [McpServerConfig]
 resolveEffectiveCwds configs = do
@@ -1053,6 +1057,12 @@ mcpFleetMetaTools fleet =
     , mcpCallTool fleet
     ]
 
+mcpFleetGrokMetaTools :: McpFleet -> [AppTool]
+mcpFleetGrokMetaTools fleet =
+    [ grokSearchTool fleet
+    , grokUseTool fleet
+    ]
+
 mcpSearchTool :: McpFleet -> AppTool
 mcpSearchTool fleet = AppTool
     { appToolName = "mcp_search"
@@ -1107,6 +1117,130 @@ mcpSearchTool fleet = AppTool
         pure (Right (compactJson payload))
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
+    }
+
+grokSearchTool :: McpFleet -> AppTool
+grokSearchTool fleet = AppTool
+    { appToolName = "search_tool"
+    , appToolDescription =
+        "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
+        \If status is \"partial\", some servers may still be connecting."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "query" .= object
+                [ "type" .= ("string" :: Text)
+                , "description" .=
+                    ("Keywords to match against tool names, server names, and descriptions." :: Text)
+                ]
+            , "limit" .= object
+                [ "type" .= ("integer" :: Text)
+                , "minimum" .= (1 :: Int)
+                , "maximum" .= (255 :: Int)
+                , "description" .=
+                    ("Maximum number of results to return (default 5)." :: Text)
+                ]
+            ]
+        , "required" .= (["query"] :: [Text])
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "search_tool" \arguments ->
+        case grokSearchArguments arguments of
+            Left err -> pure (Left err)
+            Right (query, limit) -> do
+                entries <- readTVarIO fleet.mcpFleetCatalog
+                statuses <- mcpFleetStatuses fleet
+                let queryTokens = searchTokens query
+                    scoreEntry :: (Text, McpCatalogEntry) -> Int
+                    scoreEntry (name, entry) =
+                        let normalizedName = normalizeSearchText name
+                            normalizedServer =
+                                normalizeSearchText
+                                    entry.catalogClient.clientConfig.mcpServerName
+                            normalizedDescription =
+                                normalizeSearchText
+                                    entry.catalogTool.discoveredDescription
+                            haystack =
+                                normalizedName
+                                    <> " "
+                                    <> normalizedServer
+                                    <> " "
+                                    <> normalizedDescription
+                            tokenScore =
+                                sum
+                                    [ if token `Text.isInfixOf` normalizedName
+                                        then 20
+                                        else if token
+                                            `Text.isInfixOf` normalizedServer
+                                            then 10
+                                            else 1
+                                    | token <- queryTokens
+                                    , token `Text.isInfixOf` haystack
+                                    ]
+                        in tokenScore
+                    matches entry =
+                        not (null queryTokens)
+                            && scoreEntry entry > 0
+                    ranked =
+                        sortOn
+                            (\entry ->
+                                (Down (scoreEntry entry), fst entry))
+                            (filter matches (Map.toAscList entries))
+                    found = take limit ranked
+                    grouped =
+                        foldl'
+                            (\current pair@(name, entry) ->
+                                let server =
+                                        entry.catalogClient.clientConfig.mcpServerName
+                                    toolJson = object
+                                        [ "tool_name" .= name
+                                        , "description" .=
+                                            truncateMcpDescription
+                                                entry.catalogTool.discoveredDescription
+                                        , "score" .= scoreEntry pair
+                                        , "input_schema" .=
+                                            entry.catalogTool.discoveredInputSchema
+                                        ]
+                                    (before, rest) =
+                                        break ((== server) . fst) current
+                                in case rest of
+                                    [] ->
+                                        current <> [(server, [toolJson])]
+                                    (matchedServer, tools) : after ->
+                                        before
+                                            <> [ ( matchedServer
+                                                 , tools <> [toolJson]
+                                                 )
+                                               ]
+                                            <> after)
+                            []
+                            found
+                    connecting = any isConnecting statuses
+                    payload = object
+                        [ "results" .=
+                            [ object
+                                [ "server" .= server
+                                , "tools" .= tools
+                                ]
+                            | (server, tools) <- grouped
+                            ]
+                        , "total_hidden_tools" .= Map.size entries
+                        , "status" .=
+                            (if connecting then ("partial" :: Text) else "ready")
+                        , "note" .=
+                            if connecting
+                                then Just
+                                    ("Some MCP servers are still connecting. Results may be incomplete." :: Text)
+                                else if Map.null entries
+                                    then Just
+                                        "No MCP tools are available in this session."
+                                    else Nothing
+                        ]
+                pure (Right (compactJson payload))
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
 
 callCatalogEntryWithReconnect
@@ -1240,6 +1374,48 @@ mcpCallTool fleet = AppTool
                                 else "Unknown MCP tool: " <> name
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
+    }
+
+grokUseTool :: McpFleet -> AppTool
+grokUseTool fleet = AppTool
+    { appToolName = "use_tool"
+    , appToolDescription =
+        "Call an MCP integration tool.\n\n\
+        \The `tool_name` must be the qualified `server__tool` name returned by \
+        \`search_tool`. The `tool_input` must conform exactly to that tool's \
+        \input schema."
+    , appToolSchema = RawJsonFunctionSchema $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object
+            [ "tool_name" .= object ["type" .= ("string" :: Text)]
+            , "tool_input" .= object
+                [ "type" .= ("object" :: Text)
+                , "additionalProperties" .= True
+                ]
+            ]
+        , "required" .= (["tool_name", "tool_input"] :: [Text])
+        , "additionalProperties" .= False
+        ]
+    , appToolHandler = typedTool "use_tool" \arguments ->
+        case grokCallArguments arguments of
+            Left err -> pure (Left err)
+            Right (name, toolArguments) -> do
+                entries <- readTVarIO fleet.mcpFleetCatalog
+                case Map.lookup name entries of
+                    Just entry ->
+                        callCatalogEntryWithReconnect
+                            fleet name entry toolArguments
+                    Nothing -> do
+                        statuses <- mcpFleetStatuses fleet
+                        pure . Left $
+                            if any isConnecting statuses
+                                then
+                                    "MCP tool is not available yet; one or more servers are still connecting"
+                                else "Unknown MCP tool: " <> name
+    , appToolApproval = AlwaysReadOnly
+    , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
 
 searchArguments :: Value -> (Maybe Text, Maybe Text, Int)
@@ -1257,6 +1433,45 @@ searchArguments (Object fields) =
         _ -> Nothing
 searchArguments _ = (Nothing, Nothing, 20)
 
+grokSearchArguments :: Value -> Either Text (Text, Int)
+grokSearchArguments (Object fields) =
+    case KeyMap.lookup "query" fields of
+        Just (String raw)
+            | not (Text.null (Text.strip raw)) -> do
+                limit <- case KeyMap.lookup "limit" fields of
+                    Nothing -> Right 5
+                    Just Null -> Right 5
+                    Just value ->
+                        case responseId value of
+                            Just parsed
+                                | parsed >= 1 && parsed <= 255 ->
+                                    Right parsed
+                            _ ->
+                                Left
+                                    "search_tool limit must be an integer from 1 through 255"
+                Right (Text.strip raw, limit)
+        _ -> Left "search_tool requires a non-empty query"
+grokSearchArguments _ =
+    Left "search_tool arguments must be an object"
+
+searchTokens :: Text -> [Text]
+searchTokens =
+    Text.words . normalizeSearchText
+
+normalizeSearchText :: Text -> Text
+normalizeSearchText =
+    Text.unwords
+        . Text.words
+        . Text.map
+            (\character ->
+                if isAlphaNum character then character else ' ')
+        . Text.toCaseFold
+
+truncateMcpDescription :: Text -> Text
+truncateMcpDescription description
+    | Text.length description <= 2048 = description
+    | otherwise = Text.take 2034 description <> "… [truncated]"
+
 callArguments :: Value -> Either Text (Text, Value)
 callArguments (Object fields) =
     case KeyMap.lookup "name" fields of
@@ -1268,6 +1483,23 @@ callArguments (Object fields) =
                     )
         _ -> Left "mcp_call requires a non-empty name"
 callArguments _ = Left "mcp_call arguments must be an object"
+
+grokCallArguments :: Value -> Either Text (Text, Value)
+grokCallArguments (Object fields) =
+    case KeyMap.lookup "tool_name" fields of
+        Just (String name)
+            | not (Text.null (Text.strip name))
+            , "__" `Text.isInfixOf` name ->
+                case KeyMap.lookup "tool_input" fields of
+                    Just value@(Object _) -> Right (Text.strip name, value)
+                    Nothing ->
+                        Left "use_tool requires tool_input"
+                    _ -> Left "use_tool tool_input must be an object"
+            | not (Text.null (Text.strip name)) ->
+                Left
+                    "use_tool tool_name must be a qualified server__tool name returned by search_tool"
+        _ -> Left "use_tool requires a non-empty tool_name"
+grokCallArguments _ = Left "use_tool arguments must be an object"
 
 statusJson :: McpServerStatus -> Value
 statusJson status = object
@@ -1296,9 +1528,9 @@ closeMcpFleet fleet =
                 activeWorkers <-
                     modifyMVar fleet.mcpFleetWorkers \workers ->
                         pure ([], workers)
-                mapM_ stopWorker activeWorkers
+                forConcurrentlyBounded_ 8 stopWorker activeWorkers
                 clients <- Map.elems <$> readTVarIO fleet.mcpFleetClients
-                mapM_ closeMcpClient clients
+                forConcurrentlyBounded_ 8 closeMcpClient clients
                 pure True
 
 startMcpClient :: McpServerConfig -> IO McpClient
@@ -1542,6 +1774,7 @@ appToolFor client tool = AppTool
             callDiscoveredTool client tool arguments
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
+    , appToolResourceClaims = Nothing
     }
   where
     qualifiedName = qualifiedMcpToolName

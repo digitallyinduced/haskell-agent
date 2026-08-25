@@ -60,7 +60,7 @@ data SubagentConfig = SubagentConfig
     } deriving (Eq, Show)
 
 defaultMaxConcurrent :: Int
-defaultMaxConcurrent = 6
+defaultMaxConcurrent = 32
 
 defaultMaxDepth :: Int
 defaultMaxDepth = 4

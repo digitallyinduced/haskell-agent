@@ -14,12 +14,13 @@ module Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , ResumeOverlay(..)
+    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry, AgentTarget)
-import Agent.CLI.Command (SkillCommand)
+import Agent.CLI.Command (SkillCommand, SlashCatalog)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
@@ -46,20 +47,30 @@ data Name
     = ConversationViewport
     | ConversationReserve
     | OverlayViewport
-    | ConversationBlock !BlockId
+    | ConversationBlock !AgentTarget !BlockId
+    | ConversationChunkCache
+        !AgentTarget
+        !BlockId
+        !BlockId
     | ConversationBlockCache
+        !AgentTarget
         !BlockId
         !Bool
         !Bool
         !(Maybe (Int, Bool))
-    | CodeBlockCache !BlockId !Int
-    | CodeCopy !BlockId !Int
+    | CodeBlockCache !AgentTarget !BlockId !Int
+    | CodeCopy !AgentTarget !BlockId !Int
+    | MarkdownLink !Text
     | ComposerArea
     | ComposerCursor
     | ComposerModel
     | ComposerEffort
     | ComposerMode
     | ComposerAccount
+    | QuickStartWorktree
+    | QuickStartResume
+    | QuickStartCommands
+    | QuickStartModel
     | ChoiceRow !Int
     | ResumeViewport
     | ResumeRow !Text
@@ -93,16 +104,23 @@ data AppEvent
         !ResumeBrowser
         !(Text -> IO (Either Text ResumeEntry))
         !(Text -> IO (Either Text ()))
+        !(Text -> IO (Either Text [ResumeEntry]))
         !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
+    | AppSetSlashCatalog !SlashCatalog
+      -- ^ Atomically replace commands, capabilities, skills, and model ids.
     | AppSetSkillCommands ![SkillCommand]
+      -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetModelIds ![Text]
+      -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
+    | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
     | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)
     | AppConversationReflow
     | AppMotionTick
+    | AppRecapPoll
     | AppStop
 
 data PendingAppEvent
@@ -132,6 +150,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
     , runtimeBtw :: !(Text -> IO ())
+    , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
     , runtimeCtrlC :: !(IO CtrlCDecision)
     , runtimeCopy :: !(Text -> IO Bool)
@@ -162,6 +181,7 @@ data FullscreenRuntime = FullscreenRuntime
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionCancel :: !(IO ())
     , sessionBtw :: !(Text -> IO ())
+    , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())
     , sessionCtrlC :: !(IO CtrlCDecision)
     , sessionAgentSnapshot :: !(IO (AgentTarget, [AgentEntry]))
@@ -179,6 +199,7 @@ data AppState = AppState
     , appResumeReply :: !(Maybe (TMVar (Maybe ResumeEntry)))
     , appResumeLoad :: !(Maybe (Text -> IO (Either Text ResumeEntry)))
     , appResumeDelete :: !(Maybe (Text -> IO (Either Text ())))
+    , appResumeSearch :: !(Maybe (Text -> IO (Either Text [ResumeEntry])))
     , appTextPrompt :: !(Maybe TextOverlay)
     , appTextReply :: !(Maybe (TMVar (Maybe Text)))
     , appSlashDismissed :: !Bool
@@ -187,8 +208,7 @@ data AppState = AppState
     , appHistoryIndex :: !(Maybe Int)
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
-    , appSkillCommands :: ![SkillCommand]
-    , appModelIds :: ![Text]
+    , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]
@@ -197,6 +217,10 @@ data AppState = AppState
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
+    , appFocusLostAt :: !(Maybe Word64)
+    , appAutoRecapShownThisAway :: !Bool
+    , appLastAutoRecapAttemptAt :: !(Maybe Word64)
+    , appLastTurnCompletedAt :: !(Maybe Word64)
     , appConversationReflowQueued :: !Bool
     , appWindowTitle :: !(Maybe Text)
     , appMotionElapsedMillis :: !Int
@@ -205,7 +229,16 @@ data AppState = AppState
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
+    , appTerminalFocus :: !TerminalFocus
     }
+
+-- | Best-effort focus state reported by the terminal. Unknown preserves the
+-- normal rendering cadence for terminals that do not support focus events.
+data TerminalFocus
+    = TerminalFocusUnknown
+    | TerminalFocused
+    | TerminalUnfocused
+    deriving (Eq, Show)
 
 data AgentHover = AgentHover
     { agentHoverTarget :: !AgentTarget

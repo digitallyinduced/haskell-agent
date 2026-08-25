@@ -2,15 +2,25 @@ module Agent.CLI.CredentialStoreSpec (spec) where
 
 import Agent.CLI.CredentialStore
 import Agent.Provider (BillingMode(..), Provider(..))
-import Control.Exception.Safe (bracket)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync, wait)
+import Control.Exception.Safe (SomeException, bracket, try)
+import Control.Monad (void)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Bits ((.&.))
 import Data.List (isInfixOf)
-import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
+import System.OsPath
+    ( OsPath
+    , decodeUtf
+    , takeDirectory
+    , unsafeEncodeUtf
+    , (</>)
+    )
 import System.Directory
     ( createDirectory
+    , doesFileExist
     , getTemporaryDirectory
     , removeFile
     , removePathForcibly
@@ -18,6 +28,8 @@ import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose, openTempFile)
 import System.Posix.Files (fileMode, getFileStatus)
+import System.Posix.Process (forkProcess, getProcessStatus)
+import System.Posix.Signals (sigKILL, signalProcess)
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -39,10 +51,49 @@ spec =
         it "writes private directories and files" $
             withTempHome \home -> do
                 upsertManagedCredential account secret `shouldReturn` Right ()
+                withCredentialRefreshFileLock (pure ())
+                let directory = takeDirectory (managedCredentialsPath home)
+                    storeLock = directory </> fromFilePath "store.lock"
+                    refreshLock = directory </> fromFilePath "refresh.lock"
+                directoryStatus <- getFileStatus (toFilePath directory)
                 metadataStatus <- getFileStatus (toFilePath (managedCredentialsPath home))
                 secretStatus <- getFileStatus (toFilePath (managedSecretsPath home))
+                storeLockStatus <- getFileStatus (toFilePath storeLock)
+                refreshLockStatus <- getFileStatus (toFilePath refreshLock)
+                fileMode directoryStatus .&. 0o777 `shouldBe` 0o700
                 fileMode metadataStatus .&. 0o777 `shouldBe` 0o600
                 fileMode secretStatus .&. 0o777 `shouldBe` 0o600
+                fileMode storeLockStatus .&. 0o777 `shouldBe` 0o600
+                fileMode refreshLockStatus .&. 0o777 `shouldBe` 0o600
+
+        it "serializes refreshes across processes" $
+            withTempHome \home -> do
+                let directory = takeDirectory (managedCredentialsPath home)
+                    locked = toFilePath (directory </> fromFilePath "child-locked")
+                    release = toFilePath (directory </> fromFilePath "release-child")
+                    acquired = toFilePath (directory </> fromFilePath "parent-acquired")
+                bracket
+                    (forkProcess $
+                        withCredentialRefreshFileLock do
+                            writeFile locked ""
+                            waitForFile release)
+                    (\pid -> do
+                        writeFile release ""
+                        void $ try @_ @SomeException (signalProcess sigKILL pid)
+                        void $ try @_ @SomeException
+                            (getProcessStatus False False pid))
+                    \pid -> do
+                        waitForFile locked
+                        withAsync
+                            (withCredentialRefreshFileLock
+                                (writeFile acquired ""))
+                            \waiting -> do
+                                threadDelay 100000
+                                doesFileExist acquired `shouldReturn` False
+                                writeFile release ""
+                                _ <- getProcessStatus True False pid
+                                wait waiting
+                                doesFileExist acquired `shouldReturn` True
 
         it "enables, disables, and deletes a managed credential" $
             withTempHome \_ -> do
@@ -222,3 +273,14 @@ withTempHome action =
         removeFile path
         createDirectory path
         pure path
+
+waitForFile :: FilePath -> IO ()
+waitForFile path = go (100 :: Int)
+  where
+    go remaining
+        | remaining <= 0 =
+            expectationFailure ("timed out waiting for " <> path)
+        | otherwise =
+            doesFileExist path >>= \case
+                True -> pure ()
+                False -> threadDelay 10000 >> go (remaining - 1)

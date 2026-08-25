@@ -56,19 +56,17 @@ spec = describe "buildStreamResponse" do
         response.output `shouldBe` []
         fmap (.totalTokens) response.usage `shouldBe` Just 10
 
-    it "normalizes a minimal incomplete lifecycle fragment" do
+    it "classifies an incomplete lifecycle fragment as a failure" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
                 "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-incomplete\"}}"
             , sseBlock "response.incomplete"
                 "{\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}"
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        response.responseId `shouldBe` "resp-incomplete"
-        response.status `shouldBe` ResponseIncomplete
-        fmap (.reason) response.incompleteDetails
-            `shouldBe` Just "max_output_tokens"
+        buildStreamResponseWithModel config (Just "request-model") events
+            `shouldBe`
+                Left (ConnectionError
+                    "failed: response.incomplete: max_output_tokens")
 
     it "replaces indexed added items with done items without duplicates" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
@@ -201,6 +199,16 @@ spec = describe "buildStreamResponse" do
         buildStreamResponse config messageFailedEvents
             `shouldBe` Left (ConnectionError "failed: exploded")
 
+    it "accepts code-only stream errors" do
+        streamEvents <- expectRight $ parseSseEvents $ sseBlock "error"
+            "{\"type\":\"error\",\"code\":\"rate_limit\"}"
+        case streamEvents of
+            [ResponseErrorEvent { streamError }] -> do
+                streamError.code `shouldBe` Just "rate_limit"
+                streamError.message `shouldBe` ""
+            other -> expectationFailure
+                ("expected one stream error event, got " <> show other)
+
     it "uses the configured missing-completion message" do
         case buildStreamResponse config [] of
             Left (JsonDecodeError message _) ->
@@ -216,6 +224,7 @@ spec = describe "buildStreamResponse" do
             \failure ->
                 ConnectionError
                     ("failed: " <> failedStreamResponseMessage failure)
+        , incompleteAsFailure = True
         }
 
 sseBlock :: Text -> Text -> Text

@@ -1,17 +1,31 @@
 module Agent.Codex.DialectSpec (spec) where
 
+import Agent.Codex.Dialect.ApplyPatch (applyPatch)
 import Agent.Codex.Dialect.ProjectInstructions (formatCodexAgentsMd)
 import Agent.Codex.Dialect.Prompt (codexSystemPrompt)
 import Agent.Codex.Dialect.Runtime
     ( CodexCodingTools(..)
     , newCodexCodingTools
     )
+import Agent.Codex.Dialect.Tools (shellCommandIsReadOnly)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
-import Agent.Tools.Types (AppTool(..), defaultToolEnv)
+import Agent.ToolDispatch (customToolCall, functionToolCall)
+import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , defaultToolEnv
+    , mkToolRegistry
+    , toolSchedulingPlanFor
+    )
 import Control.Exception.Safe (bracket)
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
+import System.Directory
+    ( doesFileExist
+    , getTemporaryDirectory
+    , removeDirectoryRecursive
+    )
 import System.FilePath ((</>))
 import System.OsPath (unsafeEncodeUtf)
 import System.Posix.Temp (mkdtemp)
@@ -59,6 +73,148 @@ spec = describe "Codex dialect" do
             `shouldBe` Just
                 "# AGENTS.md instructions for /repo\n\n<INSTRUCTIONS>\n\
                 \global\n\n--- project-doc ---\n\nproject\n</INSTRUCTIONS>"
+
+    it "classifies only strict observational shell commands as read-only" do
+        map shellCommandIsReadOnly
+            [ "rg --files"
+            , "sed -n '1,80p' src/Main.hs"
+            , "git diff -- src/Main.hs"
+            , "gh pr view 123 --json statusCheckRollup"
+            ]
+            `shouldBe` replicate 4 True
+        map shellCommandIsReadOnly
+            [ "git status --short"
+            , "git fetch origin"
+            , "cat src/Main.hs > copy"
+            , "printf x | tee output"
+            , "nix develop -c cabal test"
+            , "bash -c 'rg foo'"
+            , "find . -delete"
+            , "sed -n '/pattern/w output' src/Main.hs"
+            , "git diff --output=copy"
+            ]
+            `shouldBe` replicate 9 False
+
+    it "derives disjoint apply_patch resources from patch paths" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            coding <- newCodexCodingTools env Nothing Nothing
+            let registry =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry coding.codexAppTools
+                patch ident path =
+                    customToolCall ident "apply_patch" $
+                        "*** Begin Patch\n*** Add File: "
+                            <> path
+                            <> "\n+content\n*** End Patch"
+            first <- toolSchedulingPlanFor registry (patch "p1" "a.txt")
+            second <- toolSchedulingPlanFor registry (patch "p2" "b.txt")
+            same <- toolSchedulingPlanFor registry (patch "p3" "a.txt")
+            schedulingPlansConflict first second `shouldBe` False
+            schedulingPlansConflict first same `shouldBe` True
+            coding.codexClose
+
+    it "does not partially apply a patch when a later hunk is stale" do
+        withTempDir \dir -> do
+            let firstPath = dir </> "first.txt"
+                secondPath = dir </> "second.txt"
+            Text.writeFile firstPath "first old\n"
+            Text.writeFile secondPath "second current\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            result <- applyPatch env $
+                "*** Begin Patch\n\
+                \*** Update File: first.txt\n\
+                \@@\n\
+                \-first old\n\
+                \+first new\n\
+                \*** Update File: second.txt\n\
+                \@@\n\
+                \-second stale\n\
+                \+second new\n\
+                \*** End Patch"
+            result `shouldSatisfy` \case
+                Left message ->
+                    and
+                        [ "second.txt" `Text.isInfixOf` message
+                        , "Failed to find expected lines" `Text.isInfixOf` message
+                        , "no files were changed" `Text.isInfixOf` message
+                        ]
+                Right _ -> False
+            Text.readFile firstPath `shouldReturn` "first old\n"
+            Text.readFile secondPath `shouldReturn` "second current\n"
+
+    it "does not commit staged add, move, or delete actions after validation fails" do
+        withTempDir \dir -> do
+            let addedPath = dir </> "added.txt"
+                moveSourcePath = dir </> "move-source.txt"
+                moveDestPath = dir </> "move-dest.txt"
+                deletePath = dir </> "delete.txt"
+                stalePath = dir </> "stale.txt"
+            Text.writeFile moveSourcePath "move old\n"
+            Text.writeFile deletePath "delete me\n"
+            Text.writeFile stalePath "current\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            result <- applyPatch env $
+                "*** Begin Patch\n\
+                \*** Add File: added.txt\n\
+                \+added\n\
+                \*** Update File: move-source.txt\n\
+                \*** Move to: move-dest.txt\n\
+                \@@\n\
+                \-move old\n\
+                \+move new\n\
+                \*** Delete File: delete.txt\n\
+                \*** Update File: stale.txt\n\
+                \@@\n\
+                \-stale\n\
+                \+updated\n\
+                \*** End Patch"
+            result `shouldSatisfy` \case
+                Left _ -> True
+                Right _ -> False
+            doesFileExist addedPath `shouldReturn` False
+            Text.readFile moveSourcePath `shouldReturn` "move old\n"
+            doesFileExist moveDestPath `shouldReturn` False
+            Text.readFile deletePath `shouldReturn` "delete me\n"
+            Text.readFile stalePath `shouldReturn` "current\n"
+
+    it "validates later hunks against earlier staged changes" do
+        withTempDir \dir -> do
+            let path = dir </> "staged.txt"
+            Text.writeFile path "before\n"
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            result <- applyPatch env $
+                "*** Begin Patch\n\
+                \*** Update File: staged.txt\n\
+                \@@\n\
+                \-before\n\
+                \+middle\n\
+                \*** Update File: staged.txt\n\
+                \@@\n\
+                \-middle\n\
+                \+after\n\
+                \*** End Patch"
+            result `shouldSatisfy` \case
+                Right _ -> True
+                Left _ -> False
+            Text.readFile path `shouldReturn` "after\n"
+
+    it "serializes write_stdin only per shell session" do
+        withTempDir \dir -> do
+            env <- defaultToolEnv (unsafeEncodeUtf dir)
+            coding <- newCodexCodingTools env Nothing Nothing
+            let registry =
+                    either (error . Text.unpack) id $
+                        mkToolRegistry coding.codexAppTools
+                stdin ident sessionId =
+                    functionToolCall ident "write_stdin" $
+                        "{\"session_id\":" <> sessionId <> "}"
+            first <- toolSchedulingPlanFor registry (stdin "s1" "1")
+            second <- toolSchedulingPlanFor registry (stdin "s2" "2")
+            same <- toolSchedulingPlanFor registry (stdin "s3" "1")
+            schedulingPlansConflict first second `shouldBe` False
+            schedulingPlansConflict first same `shouldBe` True
+            coding.codexClose
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do
