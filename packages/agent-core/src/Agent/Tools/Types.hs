@@ -35,7 +35,7 @@ import Agent.ToolDispatch
     , ToolCallResult
     , ToolDispatchConfig
     , ToolHandler
-    , ToolArgumentInterpreterFactory
+    , StreamedToolFactory
     , canonicalToolName
     , dispatchToolHandler
     , handlerName
@@ -91,7 +91,7 @@ data AppTool = AppTool
     , appToolExecution :: !ToolExecutionPolicy
     , appToolResourceClaims :: !(Maybe ToolResourceResolver)
     , appToolArgumentInterpreter
-        :: !(Maybe ToolArgumentInterpreterFactory)
+        :: !(Maybe StreamedToolFactory)
     }
 
 -- | Registration order is retained for stable provider schemas while lookup is
@@ -231,7 +231,7 @@ withToolResourceClaims resolver tool =
 -- | Attach an opt-in streamed-argument interpreter to a tool. Any prepared
 -- result is consumed only after normal approval and scheduling.
 withToolArgumentInterpreter
-    :: ToolArgumentInterpreterFactory
+    :: StreamedToolFactory
     -> AppTool
     -> AppTool
 withToolArgumentInterpreter interpreter tool =

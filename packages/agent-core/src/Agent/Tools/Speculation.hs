@@ -20,13 +20,12 @@ import Agent.ResourceScope
     , releaseResource
     )
 import Agent.ToolDispatch
-    ( PreparedToolResult
-    , ToolArgumentInterpreter
+    ( StreamedTool(StreamedTool)
     , ToolArgumentStreamEvent(..)
-    , ToolArgumentStreamItem(..)
-    , ToolArgumentUpdate(..)
     , ToolCall(..)
     , ToolCallStreamRef(..)
+    , ToolInput(..)
+    , ToolResult
     , canonicalToolName
     , functionToolCall
     )
@@ -46,6 +45,11 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
+import Data.IORef
+    ( atomicModifyIORef
+    , newIORef
+    , writeIORef
+    )
 import Control.Concurrent.STM
     ( TMVar
     , TQueue
@@ -64,20 +68,21 @@ import Control.Exception.Safe
     , onException
     , tryAny
     )
-import Control.Monad (foldM, forM_, guard, unless, void)
+import Control.Monad (foldM, forM_, guard, join, void)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 
--- | Session-scoped router for tool-owned streamed-argument interpreters.
+-- | Session-scoped router for streamed tool interpreters.
 --
--- Provider adapters feed this runtime a small provider-neutral event stream.
--- It owns transport-call correlation and scoped interpreter processes; each
--- registered tool sees only a blocking stream of semantic argument updates.
+-- Provider adapters feed a small provider-neutral event stream. This runtime
+-- correlates those events onto one interpreter state per call and feeds that
+-- state accumulated argument text. Speculation is not part of this API: a tool
+-- may prefetch inside its 'streamedInterpret' implementation.
 data ToolSpeculationRuntime = ToolSpeculationRuntime
-    { interpreters :: !(Map.Map Text ToolArgumentInterpreter)
+    { interpreters :: !(Map.Map Text StreamedTool)
     , resources :: !ResourceScope
     , state :: !(MVar RuntimeState)
     }
@@ -93,13 +98,15 @@ data ActiveEntry = ActiveEntry
     { toolName :: !Text
     , entryCallId :: !(Maybe Text)
     , finalized :: !Bool
+    , accumulated :: !Text
     , argumentQueue :: !(TQueue ArgumentStreamCommand)
-    , interpreterWorker :: !(Async PreparedToolResult)
+    , interpreterWorker :: !(Async (Maybe ToolResult))
     , resourceKey :: !ResourceKey
     }
 
 data ArgumentStreamCommand
-    = DeliverArgumentItem !ToolArgumentStreamItem
+    = DeliverPrefix !Text
+    | DeliverDone !Text
     | ReachArgumentBarrier !(TMVar ())
 
 newToolSpeculationRuntime
@@ -120,22 +127,22 @@ newToolSpeculationRuntime tools = mask \restore -> do
   where
     openOne
         :: ResourceScope
-        -> Map.Map Text ToolArgumentInterpreter
+        -> Map.Map Text StreamedTool
         -> AppTool
-        -> IO (Map.Map Text ToolArgumentInterpreter)
+        -> IO (Map.Map Text StreamedTool)
     openOne resources current tool =
         case tool.appToolArgumentInterpreter of
             Nothing -> pure current
-            Just acquireInterpreter
+            Just acquireTool
                 | Map.member name current -> pure current
                 | otherwise ->
                     tryAny
                         (allocateAcquireResource
                             resources
-                            acquireInterpreter) >>= \case
+                            acquireTool) >>= \case
                         Left (_ :: SomeException) -> pure current
-                        Right (_, interpreter) ->
-                            pure (Map.insert name interpreter current)
+                        Right (_, streamed) ->
+                            pure (Map.insert name streamed current)
               where
                 name = canonicalToolName tool.appToolName
 
@@ -194,24 +201,28 @@ observeToolArgumentEvent runtime event = do
                                 argumentStreamCallId
                                 name
                                 argumentStreamArguments
-                    void $
+                    active <-
                         ensureActive
                             runtime
                             call
                             (withCallRef
                                 argumentStreamCallId
                                 argumentStreamRefs)
+                    forM_ active \(entryId, _) ->
+                        feedPrefix
+                            runtime
+                            entryId
+                            (const argumentStreamArguments)
         ToolArgumentsDelta
             { argumentStreamRefs
             , argumentStreamDelta
             } ->
                 lookupActive runtime argumentStreamRefs Nothing >>= mapM_
-                    (\(entryId, entry) ->
-                        runEntryAction runtime entryId $
-                            enqueueArgumentItem entry $
-                                ToolArgumentStreamUpdate $
-                                    ToolArgumentDeltaUpdate
-                                        argumentStreamDelta)
+                    (\(entryId, _) ->
+                        feedPrefix
+                            runtime
+                            entryId
+                            (<> argumentStreamDelta))
         ToolArgumentsDone
             { argumentStreamRefs
             , argumentStreamName
@@ -237,12 +248,11 @@ observeToolArgumentEvent runtime event = do
                                         name
                                         argumentStreamArguments)
                                     argumentStreamRefs
-                forM_ active \(entryId, entry) ->
-                    runEntryAction runtime entryId $
-                        enqueueArgumentItem entry $
-                            ToolArgumentStreamUpdate $
-                                ToolArgumentDoneUpdate
-                                    argumentStreamArguments
+                forM_ active \(entryId, _) ->
+                    feedPrefix
+                        runtime
+                        entryId
+                        (const argumentStreamArguments)
         ToolCallStreamCompleted
             { argumentStreamRefs
             , argumentStreamCall
@@ -256,12 +266,11 @@ observeToolArgumentEvent runtime event = do
                             argumentStreamRefs)
                 -- Output-item completion is useful streamed information, but
                 -- the completed response retained below remains authoritative.
-                forM_ active \(entryId, entry) ->
-                    runEntryAction runtime entryId $
-                        enqueueArgumentItem entry $
-                            ToolArgumentStreamUpdate $
-                                ToolArgumentDoneUpdate
-                                    argumentStreamCall.arguments
+                forM_ active \(entryId, _) ->
+                    feedPrefix
+                        runtime
+                        entryId
+                        (const argumentStreamCall.arguments)
 
 -- | Keep only calls present in the authoritative completed response and send
 -- each retained interpreter its terminal call. Calls omitted from the response
@@ -334,16 +343,16 @@ retainToolSpeculation runtime calls = do
                           )
                         )
     releaseEntries abandoned
-    forM_ retained \(entryId, entry, call) ->
-        runEntryAction runtime entryId $
-            enqueueArgumentItem entry (ToolArgumentStreamFinal call)
+    forM_ retained \(entryId, _entry, call) ->
+        feedPrefix runtime entryId (const call.arguments)
 
--- | Consume one prepared result after normal approval and scheduling. Any
--- synchronous interpreter or validation failure becomes an ordinary miss.
+-- | Finish one interpreter after normal approval and scheduling. Any
+-- synchronous interpreter failure becomes an ordinary miss, which falls
+-- back to the ordinary tool handler.
 takeToolSpeculation
     :: ToolSpeculationRuntime
     -> ToolCall
-    -> IO (Maybe (Either Text Text))
+    -> IO (Maybe ToolResult)
 takeToolSpeculation runtime call = do
     selected <- removeByCallId runtime call.callId
     case selected of
@@ -354,14 +363,10 @@ takeToolSpeculation runtime call = do
     consume entry
         | not (entryMatchesCall entry call) = pure Nothing
         | otherwise = do
-            unless entry.finalized $
-                enqueueArgumentItem entry (ToolArgumentStreamFinal call)
+            enqueueCommand entry (DeliverDone call.arguments)
             waitCatch entry.interpreterWorker >>= \case
                 Left _ -> pure Nothing
-                Right prepared ->
-                    tryAny (prepared call) >>= \case
-                        Left (_ :: SomeException) -> pure Nothing
-                        Right result -> pure result
+                Right result -> pure result
 
 discardToolSpeculation
     :: ToolSpeculationRuntime
@@ -488,41 +493,102 @@ ensureActive runtime call rawRefs =
 
 startInterpreter
     :: ToolSpeculationRuntime
-    -> ToolArgumentInterpreter
+    -> StreamedTool
     -> ToolCall
     -> IO ActiveEntry
-startInterpreter runtime interpreter call = mask \_ -> do
+startInterpreter runtime streamed call = mask \_ -> do
     argumentQueue <- newTQueueIO
     (resourceKey, interpreterWorker) <-
         allocateResource
             runtime.resources
             (asyncWithUnmask \unmask ->
-                unmask $
-                    interpreter
-                        call
-                        (readArgumentSource argumentQueue))
+                unmask (runStreamed streamed argumentQueue))
             stopInterpreter
     pure ActiveEntry
         { toolName = ""
         , entryCallId = Nothing
         , finalized = False
+        , accumulated = call.arguments
         , argumentQueue
         , interpreterWorker
         , resourceKey
         }
 
-readArgumentSource :: TQueue ArgumentStreamCommand -> IO ToolArgumentStreamItem
-readArgumentSource queue =
-    atomically (readTQueue queue) >>= \case
-        DeliverArgumentItem item -> pure item
-        ReachArgumentBarrier reached -> do
-            atomically (putTMVar reached ())
-            readArgumentSource queue
+runStreamed
+    :: StreamedTool
+    -> TQueue ArgumentStreamCommand
+    -> IO (Maybe ToolResult)
+runStreamed (StreamedTool start interpret close) queue =
+    mask \restore -> do
+        initial <- start
+        live <- newIORef (Just initial)
+        let
+            commit state = writeIORef live (Just state)
+            finished = writeIORef live Nothing
+            closeLive = do
+                pending <- atomicModifyIORef live \s -> (Nothing, s)
+                mapM_ close pending
+            go state = restore (step state) `onException` closeLive
+            step state =
+                atomically (readTQueue queue) >>= \case
+                    ReachArgumentBarrier reached -> do
+                        atomically (putTMVar reached ())
+                        go state
+                    DeliverPrefix text ->
+                        interpret state (ToolPrefix text) >>= \case
+                            Right next -> do
+                                commit next
+                                go next
+                            Left result -> do
+                                finished
+                                pure (Just result)
+                    DeliverDone text ->
+                        interpret state (ToolDone text) >>= \case
+                            Left result -> do
+                                finished
+                                pure (Just result)
+                            Right leftover -> do
+                                close leftover
+                                finished
+                                pure Nothing
+        go initial
 
-enqueueArgumentItem :: ActiveEntry -> ToolArgumentStreamItem -> IO ()
-enqueueArgumentItem entry item =
+feedPrefix
+    :: ToolSpeculationRuntime
+    -> Int
+    -> (Text -> Text)
+    -> IO ()
+feedPrefix runtime entryId update =
+    join $
+        modifyMVar runtime.state \current ->
+            if current.closed
+                then pure (current, pure ())
+                else case Map.lookup entryId current.activeEntries of
+                    Nothing -> pure (current, pure ())
+                    Just entry -> do
+                        let accumulated = update entry.accumulated
+                            updated = entry { accumulated }
+                        pure
+                            ( current
+                                { activeEntries =
+                                    Map.insert
+                                        entryId
+                                        updated
+                                        current.activeEntries
+                                }
+                            , if Text.null accumulated
+                                then pure ()
+                                else
+                                    runEntryAction runtime entryId $
+                                        enqueueCommand
+                                            updated
+                                            (DeliverPrefix accumulated)
+                            )
+
+enqueueCommand :: ActiveEntry -> ArgumentStreamCommand -> IO ()
+enqueueCommand entry command =
     atomically $
-        writeTQueue entry.argumentQueue (DeliverArgumentItem item)
+        writeTQueue entry.argumentQueue command
 
 lookupActive
     :: ToolSpeculationRuntime

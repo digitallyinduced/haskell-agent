@@ -6,12 +6,11 @@ module Agent.ToolDispatch
     , ToolCallResult(..)
     , ToolCallStreamRef(..)
     , ToolArgumentStreamEvent(..)
-    , ToolArgumentUpdate(..)
-    , ToolArgumentStreamItem(..)
-    , ToolArgumentSource
-    , PreparedToolResult
-    , ToolArgumentInterpreter
-    , ToolArgumentInterpreterFactory
+    , ToolInput(..)
+    , ToolResult
+    , ToolInterpreter
+    , StreamedTool(..)
+    , StreamedToolFactory
     , ToolDispatchConfig(..)
     , ToolHandler
     , typedTool
@@ -113,40 +112,39 @@ data ToolArgumentStreamEvent
         }
     deriving (Eq, Show)
 
-data ToolArgumentUpdate
-    = ToolArgumentDeltaUpdate !Text
-    | ToolArgumentDoneUpdate !Text
+-- | Finished tool output: 'Left' is a model-facing error, 'Right' is success.
+type ToolResult = Either Text Text
+
+-- | Input to a streamed tool interpreter.
+--
+-- 'ToolPrefix' is the current accumulated argument JSON. Interpreters should
+-- return 'Right' quickly; speculation is an internal detail of that state.
+-- 'ToolDone' is issued once after approval with the authoritative complete
+-- arguments and should return 'Left'.
+data ToolInput
+    = ToolPrefix !Text
+    | ToolDone !Text
     deriving (Eq, Show)
 
--- | Semantic input consumed by one tool-owned streamed-argument interpreter.
--- Resource shutdown is deliberately not represented here: abandoning the
--- interpreter cancels its owner scope instead of sending a synthetic event.
-data ToolArgumentStreamItem
-    = ToolArgumentStreamUpdate !ToolArgumentUpdate
-    | ToolArgumentStreamFinal !ToolCall
-    deriving (Eq, Show)
+-- | Streamed tool evaluation:
+--
+-- @interpret state chunk@ consumes argument text and either finishes with a
+-- result or returns an updated state. Speculation, prefetch, and the actual
+-- handler are all implementation details of this function.
+type ToolInterpreter s = s -> ToolInput -> IO (Either ToolResult s)
 
--- | Blocking source for one correlated tool call's argument stream.
-type ToolArgumentSource = IO ToolArgumentStreamItem
+-- | Session-scoped streamed tool. 'streamedStart' / 'streamedClose' run once
+-- per correlated call. Session resources live in the 'StreamedToolFactory'
+-- 'Acquire'.
+data StreamedTool = forall s. StreamedTool
+    { streamedStart :: IO s
+    , streamedInterpret :: ToolInterpreter s
+    , streamedClose :: s -> IO ()
+    }
 
--- | Validation/consumption deferred until normal approval and scheduling have
--- completed. The authoritative call is supplied again so the interpreter can
--- reject a stale or mismatched prepared value.
-type PreparedToolResult =
-    ToolCall -> IO (Maybe (Either Text Text))
-
--- | A scoped streamed-argument interpreter. The function owns all
--- tool-specific incremental parsing and speculative optimization. It returns
--- a prepared result action after receiving 'ToolArgumentStreamFinal'.
-type ToolArgumentInterpreter =
-    ToolCall
-    -> ToolArgumentSource
-    -> IO PreparedToolResult
-
--- | Session-scoped acquisition of an interpreter function. For example,
--- @read_file@ acquires its shared workspace filename index here.
-type ToolArgumentInterpreterFactory =
-    Acquire ToolArgumentInterpreter
+-- | Session-scoped acquisition of a streamed tool, e.g. @read_file@'s shared
+-- workspace index.
+type StreamedToolFactory = Acquire StreamedTool
 
 functionToolCall :: Text -> Text -> Text -> ToolCall
 functionToolCall callId name arguments = ToolCall

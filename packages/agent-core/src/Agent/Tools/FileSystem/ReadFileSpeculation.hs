@@ -11,15 +11,10 @@ module Agent.Tools.FileSystem.ReadFileSpeculation
 
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolDispatch
-    ( PreparedToolResult
-    , ToolArgumentInterpreter
-    , ToolArgumentInterpreterFactory
-    , ToolArgumentStreamItem(..)
-    , ToolArgumentUpdate(..)
-    , ToolCall(..)
-    , canonicalToolName
-    , decodeToolArguments
-    , toolArgumentsValue
+    ( StreamedTool(..)
+    , StreamedToolFactory
+    , ToolInput(..)
+    , ToolResult
     )
 import Agent.Tools.FileSystem (resolveForRead)
 import Agent.Tools.FileSystem.ReadFile.Internal
@@ -33,7 +28,6 @@ import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
     , cancel
-    , race
     , waitCatch
     )
 import Control.Concurrent.MVar
@@ -45,8 +39,7 @@ import Control.Concurrent.MVar
     )
 import Control.Exception (evaluate)
 import Control.Exception.Safe
-    ( bracket
-    , mask
+    ( mask
     , tryAny
     )
 import Control.Monad (forM_, guard, void, when)
@@ -58,10 +51,8 @@ import Data.Char (isSpace)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
-    , modifyIORef'
     , newIORef
     , readIORef
-    , writeIORef
     )
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isNothing)
@@ -194,9 +185,9 @@ closeReadFileSpeculation speculation = do
     forM_ indexTask cancelAndJoin
     cancelAndJoinAll candidateTasks
 
-readFileArgumentInterpreter :: ToolEnv -> ToolArgumentInterpreterFactory
+readFileArgumentInterpreter :: ToolEnv -> StreamedToolFactory
 readFileArgumentInterpreter environment =
-    runReadFileArgumentInterpreter
+    streamedReadFile
         <$> mkAcquire
             (newReadFileSpeculation environment)
             closeReadFileSpeculation
@@ -204,77 +195,94 @@ readFileArgumentInterpreter environment =
 -- | Attach an already-created cache, primarily for tests and benchmarks.
 readFileArgumentInterpreterWithCache
     :: ReadFileSpeculation
-    -> ToolArgumentInterpreterFactory
+    -> StreamedToolFactory
 readFileArgumentInterpreterWithCache speculation =
-    runReadFileArgumentInterpreter
+    streamedReadFile
         <$> mkAcquire
             (pure speculation)
             closeReadFileSpeculation
 
-runReadFileArgumentInterpreter
-    :: ReadFileSpeculation
-    -> ToolArgumentInterpreter
-runReadFileArgumentInterpreter speculation call source
-    | canonicalToolName call.name /= "read_file" =
-        pure (const (pure Nothing))
-    | otherwise = do
-        startWorkspaceIndex speculation
-        bracket
-            (newIORef PartialReadCall
-                { partialArguments = call.arguments
-                , partialCandidate = Nothing
-                })
-            (cleanupPartialCall speculation)
-            \partialRef -> do
-                refreshCallCandidate speculation partialRef
-                finalCall <-
-                    consumeArgumentStream
-                        speculation
-                        partialRef
-                        source
-                updatePartialArguments
-                    partialRef
-                    (ToolArgumentDoneUpdate finalCall.arguments)
-                partial <- readIORef partialRef
-                prepared <-
-                    prepareReadResult
-                        speculation
-                        finalCall
-                        partial.partialCandidate
-                writeIORef
-                    partialRef
-                    partial { partialCandidate = Nothing }
-                pure prepared
+streamedReadFile :: ReadFileSpeculation -> StreamedTool
+streamedReadFile speculation =
+    StreamedTool
+        { streamedStart = pure emptyPartialCall
+        , streamedInterpret = interpretReadFile speculation
+        , streamedClose = closePartialCall speculation
+        }
 
-consumeArgumentStream
-    :: ReadFileSpeculation
-    -> IORef PartialReadCall
-    -> IO ToolArgumentStreamItem
-    -> IO ToolCall
-consumeArgumentStream speculation partialRef source =
-    awaitArgumentStreamItem speculation partialRef source >>= \case
-        ToolArgumentStreamUpdate update -> do
-            updatePartialArguments partialRef update
-            refreshCallCandidate speculation partialRef
-            consumeArgumentStream speculation partialRef source
-        ToolArgumentStreamFinal call -> pure call
+emptyPartialCall :: PartialReadCall
+emptyPartialCall =
+    PartialReadCall
+        { partialArguments = ""
+        , partialCandidate = Nothing
+        }
 
-awaitArgumentStreamItem
+interpretReadFile
     :: ReadFileSpeculation
-    -> IORef PartialReadCall
-    -> IO ToolArgumentStreamItem
-    -> IO ToolArgumentStreamItem
-awaitArgumentStreamItem speculation partialRef source = do
-    partial <- readIORef partialRef
-    pendingIndex <- pendingWorkspaceIndex speculation partial
-    case pendingIndex of
-        Nothing -> source
-        Just indexTask ->
-            race (void (waitCatch indexTask)) source >>= \case
-                Left () -> do
-                    refreshCallCandidate speculation partialRef
-                    awaitArgumentStreamItem speculation partialRef source
-                Right item -> pure item
+    -> PartialReadCall
+    -> ToolInput
+    -> IO (Either ToolResult PartialReadCall)
+interpretReadFile speculation state = \case
+    ToolPrefix text ->
+        Right <$> refreshAfterArguments speculation state { partialArguments = text }
+    ToolDone text -> do
+        next <-
+            refreshAfterArguments speculation state { partialArguments = text }
+        finishRead speculation next
+
+refreshAfterArguments
+    :: ReadFileSpeculation
+    -> PartialReadCall
+    -> IO PartialReadCall
+refreshAfterArguments speculation partial = do
+    startWorkspaceIndex speculation
+    refreshed <- refreshCallCandidate speculation partial
+    pending <- pendingWorkspaceIndex speculation refreshed
+    case pending of
+        Nothing -> pure refreshed
+        Just indexTask -> do
+            void (waitCatch indexTask)
+            refreshCallCandidate speculation refreshed
+
+closePartialCall :: ReadFileSpeculation -> PartialReadCall -> IO ()
+closePartialCall speculation =
+    mapM_ (cancelReadCandidate speculation) . (.partialCandidate)
+
+refreshCallCandidate
+    :: ReadFileSpeculation
+    -> PartialReadCall
+    -> IO PartialReadCall
+refreshCallCandidate speculation partial = mask \_ -> do
+    current <- readMVar speculation.state
+    let progress = targetFileProgress partial.partialArguments
+        desired =
+            desiredCandidate
+                current.workspacePaths
+                partial
+                progress
+    case (partial.partialCandidate, desired) of
+        (Just existing, Just (arguments, _))
+            -- The prefetch stores complete raw file contents. Later
+            -- offset/limit fields only change formatting.
+            | existing.candidateArguments.targetFile
+                == arguments.targetFile ->
+                pure partial
+        (Just existing, Nothing)
+            | candidateStillMatches
+                progress
+                existing.candidateArguments.targetFile ->
+                pure partial
+        (existing, next) -> do
+            forM_ existing (cancelReadCandidate speculation)
+            nextCandidate <-
+                case next of
+                    Nothing -> pure Nothing
+                    Just (arguments, kind) ->
+                        startReadCandidate
+                            speculation
+                            arguments
+                            kind
+            pure partial { partialCandidate = nextCandidate }
 
 pendingWorkspaceIndex
     :: ReadFileSpeculation
@@ -290,73 +298,121 @@ pendingWorkspaceIndex speculation partial
                         <$> readMVar speculation.state
             _ -> pure Nothing
 
-updatePartialArguments
-    :: IORef PartialReadCall
-    -> ToolArgumentUpdate
-    -> IO ()
-updatePartialArguments partialRef update =
-    modifyIORef' partialRef \partial ->
-        partial
-            { partialArguments =
-                applyArgumentUpdate partial.partialArguments update
+finishRead
+    :: ReadFileSpeculation
+    -> PartialReadCall
+    -> IO (Either ToolResult PartialReadCall)
+finishRead speculation partial =
+    case decodeReadFileArgs partial.partialArguments of
+        Nothing -> do
+            recordMiss speculation
+            pure (Right partial)
+        Just args ->
+            consumeCandidate args
+  where
+    consumeCandidate
+        :: ReadFileArgs
+        -> IO (Either ToolResult PartialReadCall)
+    consumeCandidate args =
+        case partial.partialCandidate of
+            Nothing -> do
+                recordMiss speculation
+                pure (Right partial)
+            Just selected ->
+                resolveForRead
+                    speculation.environment
+                    (fromText args.targetFile) >>= \case
+                        Left _ -> miss selected
+                        Right finalPath ->
+                            waitCatch selected.candidateTask >>= \case
+                                Left _ -> do
+                                    releaseCandidate selected
+                                    recordMiss speculation
+                                    pure (Right withoutCandidate)
+                                Right Nothing -> do
+                                    releaseCandidate selected
+                                    recordMiss speculation
+                                    pure (Right withoutCandidate)
+                                Right (Just prefetched)
+                                    | equalFilePath
+                                        finalPath
+                                        prefetched.prefetchedResolvedPath ->
+                                            consumePrefetch
+                                                selected
+                                                args
+                                                prefetched
+                                    | otherwise ->
+                                        miss selected
+
+    miss
+        :: ReadCandidate
+        -> IO (Either ToolResult PartialReadCall)
+    miss selected = do
+        cancelReadCandidate speculation selected
+        recordMiss speculation
+        pure (Right withoutCandidate)
+
+    releaseCandidate :: ReadCandidate -> IO ()
+    releaseCandidate selected =
+        void $
+            releaseReadTask
+                speculation
+                selected.candidateTaskKey
+
+    consumePrefetch
+        :: ReadCandidate
+        -> ReadFileArgs
+        -> PrefetchedRead
+        -> IO (Either ToolResult PartialReadCall)
+    consumePrefetch selected args prefetched = do
+        releaseCandidate selected
+        resolveForRead
+            speculation.environment
+            (fromText args.targetFile) >>= \case
+                Left _ -> do
+                    recordMiss speculation
+                    pure (Right withoutCandidate)
+                Right finalPath
+                    | not
+                        (equalFilePath
+                            finalPath
+                            prefetched.prefetchedResolvedPath) -> do
+                        recordMiss speculation
+                        pure (Right withoutCandidate)
+                    | otherwise ->
+                        fileFingerprint finalPath >>= \case
+                            Just current
+                                | current == prefetched.prefetchedFingerprint -> do
+                                    modifyMetrics speculation \metrics ->
+                                        metrics
+                                            { speculativeReadHits =
+                                                metrics.speculativeReadHits + 1
+                                            }
+                                    pure . Left $
+                                        if prefetched.prefetchedArguments == args
+                                            then prefetched.prefetchedOutput
+                                            else
+                                                formatReadFileContent
+                                                    prefetched.prefetchedContent
+                                                    args
+                            _ -> do
+                                modifyMetrics speculation \metrics ->
+                                    metrics
+                                        { speculativeReadStale =
+                                            metrics.speculativeReadStale + 1
+                                        }
+                                recordMiss speculation
+                                pure (Right withoutCandidate)
+
+    withoutCandidate = partial { partialCandidate = Nothing }
+
+recordMiss :: ReadFileSpeculation -> IO ()
+recordMiss speculation =
+    modifyMetrics speculation \metrics ->
+        metrics
+            { speculativeReadMisses =
+                metrics.speculativeReadMisses + 1
             }
-
-applyArgumentUpdate :: Text -> ToolArgumentUpdate -> Text
-applyArgumentUpdate current = \case
-    ToolArgumentDeltaUpdate delta -> current <> delta
-    ToolArgumentDoneUpdate arguments -> arguments
-
-cleanupPartialCall
-    :: ReadFileSpeculation
-    -> IORef PartialReadCall
-    -> IO ()
-cleanupPartialCall speculation partialRef =
-    readIORef partialRef
-        >>= mapM_
-            (cancelReadCandidate speculation)
-            . (.partialCandidate)
-
-refreshCallCandidate
-    :: ReadFileSpeculation
-    -> IORef PartialReadCall
-    -> IO ()
-refreshCallCandidate speculation partialRef = mask \_ -> do
-    partial <- readIORef partialRef
-    current <- readMVar speculation.state
-    let progress = targetFileProgress partial.partialArguments
-        desired =
-            desiredCandidate
-                current.workspacePaths
-                partial
-                progress
-    case (partial.partialCandidate, desired) of
-        (Just existing, Just (arguments, _))
-            -- The prefetch stores complete raw file contents. Later
-            -- offset/limit fields only change formatting.
-            | existing.candidateArguments.targetFile
-                == arguments.targetFile ->
-                pure ()
-        (Just existing, Nothing)
-            | candidateStillMatches
-                progress
-                existing.candidateArguments.targetFile ->
-                pure ()
-        (existing, next) -> do
-            writeIORef
-                partialRef
-                partial { partialCandidate = Nothing }
-            forM_ existing (cancelReadCandidate speculation)
-            nextCandidate <-
-                case next of
-                    Nothing -> pure Nothing
-                    Just (arguments, kind) ->
-                        startReadCandidate
-                            speculation
-                            arguments
-                            kind
-            writeIORef
-                partialRef
-                partial { partialCandidate = nextCandidate }
 
 desiredCandidate
     :: Maybe (Set.Set Text)
@@ -562,128 +618,6 @@ prefetchRead environment arguments
     forceTextResult = \case
         Left err -> forceText err
         Right output -> forceText output
-
-prepareReadResult
-    :: ReadFileSpeculation
-    -> ToolCall
-    -> Maybe ReadCandidate
-    -> IO PreparedToolResult
-prepareReadResult speculation finalCall candidate
-    | canonicalToolName finalCall.name /= "read_file" = do
-        forM_ candidate (cancelReadCandidate speculation)
-        pure (missPreparedResult speculation)
-    | otherwise =
-        case candidate of
-            Nothing -> pure (missPreparedResult speculation)
-            Just selected ->
-                prepareCandidate selected
-  where
-    prepareCandidate :: ReadCandidate -> IO PreparedToolResult
-    prepareCandidate selected =
-        case decodeFinalArguments finalCall of
-            Left _ -> cancelMiss selected
-            Right finalArguments ->
-                resolveForRead
-                    speculation.environment
-                    (fromText finalArguments.targetFile) >>= \case
-                        Left _ -> cancelMiss selected
-                        Right finalPath ->
-                            waitCatch selected.candidateTask >>= \case
-                                Left _ -> do
-                                    releaseCandidate selected
-                                    pure (missPreparedResult speculation)
-                                Right Nothing -> do
-                                    releaseCandidate selected
-                                    pure (missPreparedResult speculation)
-                                Right (Just prefetched)
-                                    | equalFilePath
-                                        finalPath
-                                        prefetched.prefetchedResolvedPath -> do
-                                            releaseCandidate selected
-                                            pure $
-                                                consumePrefetchedRead
-                                                    speculation
-                                                    prefetched
-                                    | otherwise ->
-                                        cancelMiss selected
-
-    cancelMiss :: ReadCandidate -> IO PreparedToolResult
-    cancelMiss selected = do
-        cancelReadCandidate speculation selected
-        pure (missPreparedResult speculation)
-
-    releaseCandidate :: ReadCandidate -> IO ()
-    releaseCandidate selected =
-        void $
-            releaseReadTask
-                speculation
-                selected.candidateTaskKey
-
-consumePrefetchedRead
-    :: ReadFileSpeculation
-    -> PrefetchedRead
-    -> PreparedToolResult
-consumePrefetchedRead speculation prefetched call
-    | canonicalToolName call.name /= "read_file" =
-        missPreparedResult speculation call
-    | otherwise =
-        case decodeFinalArguments call of
-            Left _ -> missPreparedResult speculation call
-            Right finalArguments ->
-                resolveForRead
-                    speculation.environment
-                    (fromText finalArguments.targetFile) >>= \case
-                        Left _ -> missPreparedResult speculation call
-                        Right finalPath
-                            | not
-                                (equalFilePath
-                                    finalPath
-                                    prefetched.prefetchedResolvedPath) ->
-                                missPreparedResult speculation call
-                            | otherwise ->
-                                fileFingerprint finalPath >>= \case
-                                    Just current
-                                        | current
-                                            == prefetched.prefetchedFingerprint -> do
-                                                modifyMetrics
-                                                    speculation
-                                                    \metrics ->
-                                                        metrics
-                                                            { speculativeReadHits =
-                                                                metrics.speculativeReadHits
-                                                                    + 1
-                                                            }
-                                                pure . Just $
-                                                    if
-                                                        prefetched.prefetchedArguments
-                                                            == finalArguments
-                                                        then
-                                                            prefetched.prefetchedOutput
-                                                        else
-                                                            formatReadFileContent
-                                                                prefetched.prefetchedContent
-                                                                finalArguments
-                                    _ -> do
-                                        modifyMetrics speculation \metrics ->
-                                            metrics
-                                                { speculativeReadStale =
-                                                    metrics.speculativeReadStale
-                                                        + 1
-                                                }
-                                        missPreparedResult speculation call
-
-decodeFinalArguments :: ToolCall -> Either Text ReadFileArgs
-decodeFinalArguments call =
-    decodeToolArguments (toolArgumentsValue call.arguments)
-
-missPreparedResult :: ReadFileSpeculation -> PreparedToolResult
-missPreparedResult speculation _ = do
-    modifyMetrics speculation \metrics ->
-        metrics
-            { speculativeReadMisses =
-                metrics.speculativeReadMisses + 1
-            }
-    pure Nothing
 
 waitForReadFileSpeculation :: ReadFileSpeculation -> IO ()
 waitForReadFileSpeculation speculation = do

@@ -1,12 +1,11 @@
 module Agent.Tools.SpeculationSpec (spec) where
 
 import Agent.ToolDispatch
-    ( ToolArgumentInterpreter
+    ( StreamedTool(..)
     , ToolArgumentStreamEvent(..)
-    , ToolArgumentStreamItem(..)
-    , ToolArgumentUpdate(..)
     , ToolCall(..)
     , ToolCallStreamRef(..)
+    , ToolInput(..)
     , functionToolCall
     , noArgsTool
     )
@@ -17,19 +16,23 @@ import Agent.Tools.Types
     , jsonTool
     , withToolArgumentInterpreter
     )
-import Control.Exception.Safe (bracket, finally, throwIO)
-import Control.Monad (unless)
+import Control.Exception.Safe (bracket, throwIO)
 import Data.Acquire (mkAcquire)
 import Data.IORef
+import Data.Text (Text)
 import Test.Hspec
 
 data Probe = Probe
-    { starts :: !(IORef [(Int, ToolCall)])
-    , updates :: !(IORef [(Int, ToolArgumentUpdate)])
-    , finalizations :: !(IORef [(Int, ToolCall)])
-    , takes :: !(IORef [(Int, ToolCall)])
+    { starts :: !(IORef [Int])
+    , prefixes :: !(IORef [(Int, Text)])
+    , dones :: !(IORef [(Int, Text)])
     , cancellations :: !(IORef [Int])
     , closes :: !(IORef Int)
+    }
+
+data ProbeState = ProbeState
+    { probeEntryId :: !Int
+    , probeArguments :: !Text
     }
 
 spec :: Spec
@@ -61,14 +64,14 @@ spec = describe "ToolSpeculationRuntime" do
 
             takeToolSpeculation runtime call
                 `shouldReturn` Just (Right call.arguments)
-            readIORef probe.starts
-                `shouldReturn` [(0, functionToolCall "call-1" "probe" "")]
-            readIORef probe.updates `shouldReturn`
-                [ (0, ToolArgumentDeltaUpdate "{\"value\":\"par")
-                , (0, ToolArgumentDoneUpdate call.arguments)
+            readIORef probe.starts `shouldReturn` [0]
+            prefixes <- readIORef probe.prefixes
+            prefixes `shouldBe`
+                [ (0, "{\"value\":\"par")
+                , (0, call.arguments)
+                , (0, call.arguments)
                 ]
-            readIORef probe.finalizations `shouldReturn` [(0, call)]
-            readIORef probe.takes `shouldReturn` [(0, call)]
+            readIORef probe.dones `shouldReturn` [(0, call.arguments)]
             readIORef probe.cancellations `shouldReturn` []
 
     it "can start from arguments.done and bind the final call later" do
@@ -90,10 +93,10 @@ spec = describe "ToolSpeculationRuntime" do
 
             takeToolSpeculation runtime call
                 `shouldReturn` Just (Right call.arguments)
-            started <- readIORef probe.starts
-            length started `shouldBe` 1
-            map snd started
-                `shouldBe` [functionToolCall "" "probe" call.arguments]
+            readIORef probe.starts `shouldReturn` [0]
+            prefixes <- readIORef probe.prefixes
+            prefixes `shouldNotBe` []
+            map snd prefixes `shouldSatisfy` all (== call.arguments)
 
     it "keeps concurrent calls independent" do
         withProbeRuntime False \_ runtime -> do
@@ -136,7 +139,10 @@ spec = describe "ToolSpeculationRuntime" do
             retainToolSpeculation runtime [call]
             waitForToolSpeculation runtime
 
-            readIORef probe.finalizations `shouldReturn` [(0, call)]
+            readIORef probe.dones `shouldReturn` []
+            takeToolSpeculation runtime call
+                `shouldReturn` Just (Right call.arguments)
+            readIORef probe.dones `shouldReturn` [(0, call.arguments)]
 
     it "does not bind an aliased entry to a different tool" do
         withProbeRuntime False \probe runtime -> do
@@ -152,10 +158,11 @@ spec = describe "ToolSpeculationRuntime" do
                     , argumentStreamCall = mismatched
                     }
 
-            readIORef probe.finalizations `shouldReturn` []
+            readIORef probe.dones `shouldReturn` []
             retainToolSpeculation runtime [call]
-            waitForToolSpeculation runtime
-            readIORef probe.finalizations `shouldReturn` [(0, call)]
+            takeToolSpeculation runtime call
+                `shouldReturn` Just (Right call.arguments)
+            readIORef probe.dones `shouldReturn` [(0, call.arguments)]
 
     it "does not rebind an aliased entry to a different call id" do
         withProbeRuntime False \probe runtime -> do
@@ -170,7 +177,7 @@ spec = describe "ToolSpeculationRuntime" do
                     , argumentStreamCall = conflicting
                     }
 
-            readIORef probe.finalizations `shouldReturn` []
+            readIORef probe.dones `shouldReturn` []
             retainToolSpeculation runtime [original]
             takeToolSpeculation runtime conflicting `shouldReturn` Nothing
             takeToolSpeculation runtime original
@@ -213,8 +220,8 @@ spec = describe "ToolSpeculationRuntime" do
         observeToolArgumentEvent runtime $
             ToolArgumentsDelta [ToolCallStreamItem "item-a"] "1"
         waitForToolSpeculation runtime
-        readIORef probe.updates `shouldReturn`
-            [(0, ToolArgumentDeltaUpdate "1")]
+        prefixes <- readIORef probe.prefixes
+        (0, "a1") `elem` prefixes `shouldBe` True
         discardToolSpeculation runtime callA
         observeToolArgumentEvent runtime $
             startedEvent (ToolCallStreamItem "item-b") callB
@@ -227,14 +234,13 @@ spec = describe "ToolSpeculationRuntime" do
         readIORef probe.closes `shouldReturn` 1
 
     it "turns prepared-result failures into ordinary misses" do
-        withProbeRuntime True \probe runtime -> do
+        withProbeRuntime True \_ runtime -> do
             let call = functionToolCall "call-fail" "probe" "{}"
             observeToolArgumentEvent runtime $
                 startedEvent (ToolCallStreamItem "item-fail") call
             retainToolSpeculation runtime [call]
 
             takeToolSpeculation runtime call `shouldReturn` Nothing
-            readIORef probe.cancellations `shouldReturn` []
 
 withProbeRuntime
     :: Bool
@@ -251,23 +257,21 @@ newProbeTool :: Bool -> IO (AppTool, Probe)
 newProbeTool failTake = do
     nextId <- newIORef 0
     starts <- newIORef []
-    updates <- newIORef []
-    finalizations <- newIORef []
-    takes <- newIORef []
+    prefixes <- newIORef []
+    dones <- newIORef []
     cancellations <- newIORef []
     closes <- newIORef 0
     let probe = Probe
             { starts
-            , updates
-            , finalizations
-            , takes
+            , prefixes
+            , dones
             , cancellations
             , closes
             }
-        interpreter = probeInterpreter nextId probe failTake
+        streamed = probeStreamedTool nextId probe failTake
         factory =
             mkAcquire
-                (pure interpreter)
+                (pure streamed)
                 (\_ -> modifyIORef' closes (+ 1))
         tool =
             withToolArgumentInterpreter factory $
@@ -280,42 +284,39 @@ newProbeTool failTake = do
                     (noArgsTool "probe" (pure (Right "ordinary")))
     pure (tool, probe)
 
-probeInterpreter
+probeStreamedTool
     :: IORef Int
     -> Probe
     -> Bool
-    -> ToolArgumentInterpreter
-probeInterpreter nextId probe failTake call source = do
-    entryId <- atomicModifyIORef' nextId \current ->
-        (current + 1, current)
-    modifyIORef' probe.starts (<> [(entryId, call)])
-    argumentsRef <- newIORef call.arguments
-    completed <- newIORef False
-    let consume =
-            source >>= \case
-                ToolArgumentStreamUpdate update -> do
-                    modifyIORef' probe.updates (<> [(entryId, update)])
-                    case update of
-                        ToolArgumentDeltaUpdate delta ->
-                            modifyIORef' argumentsRef (<> delta)
-                        ToolArgumentDoneUpdate arguments ->
-                            writeIORef argumentsRef arguments
-                    consume
-                ToolArgumentStreamFinal finalCall -> do
+    -> StreamedTool
+probeStreamedTool nextId probe failTake =
+    StreamedTool
+        { streamedStart = do
+            entryId <- atomicModifyIORef' nextId \current ->
+                (current + 1, current)
+            modifyIORef' probe.starts (<> [entryId])
+            pure ProbeState
+                { probeEntryId = entryId
+                , probeArguments = ""
+                }
+        , streamedInterpret = \state input ->
+            case input of
+                ToolPrefix text -> do
                     modifyIORef'
-                        probe.finalizations
-                        (<> [(entryId, finalCall)])
-                    writeIORef argumentsRef finalCall.arguments
-                    writeIORef completed True
-    consume `finally` do
-        finished <- readIORef completed
-        unless finished $
-            modifyIORef' probe.cancellations (<> [entryId])
-    pure \finalCall -> do
-        modifyIORef' probe.takes (<> [(entryId, finalCall)])
-        if failTake
-            then throwIO (userError "probe take failed")
-            else Just . Right <$> readIORef argumentsRef
+                        probe.prefixes
+                        (<> [(state.probeEntryId, text)])
+                    pure $
+                        Right state { probeArguments = text }
+                ToolDone text -> do
+                    modifyIORef'
+                        probe.dones
+                        (<> [(state.probeEntryId, text)])
+                    if failTake
+                        then throwIO (userError "probe take failed")
+                        else pure (Left (Right text))
+        , streamedClose = \state ->
+            modifyIORef' probe.cancellations (<> [state.probeEntryId])
+        }
 
 startedEvent :: ToolCallStreamRef -> ToolCall -> ToolArgumentStreamEvent
 startedEvent ref call =

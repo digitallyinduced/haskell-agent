@@ -246,8 +246,10 @@ spec = describe "read_file speculation" do
             dispatchRead env cache runtime callId finalArguments
                 `shouldReturn` "1→right"
             metrics <- readReadFileSpeculationMetrics cache
-            metrics.speculativeReadHits `shouldBe` 0
-            metrics.speculativeReadMisses `shouldBe` 1
+            -- ToolDone re-interprets the authoritative arguments, so the
+            -- mismatched prefetch is dropped and the final file is read.
+            metrics.speculativeReadHits `shouldBe` 1
+            metrics.speculativeReadsCancelled `shouldBe` 1
 
     it "discards a prefetched snapshot when the file changes" do
         withSpeculation \dir env cache runtime -> do
