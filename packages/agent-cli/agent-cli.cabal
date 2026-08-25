@@ -161,6 +161,7 @@ library
                     , Agent.CLI.WebFetch
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
