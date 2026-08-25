@@ -134,6 +134,7 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
+import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
@@ -296,8 +297,21 @@ feedProse state input =
         (linePart, rest)
             | Text.null rest ->
                 let source = state.pending <> linePart
-                    (ready, pending', nextContext) =
+                    (parsedReady, parsedPending, parsedContext) =
                         splitMarkdownFragment state.context source
+                    (stablePrefix, graphemePending) =
+                        splitTerminalGraphemeSuffix parsedReady
+                    (ready, reparsedPending, nextContext)
+                        | Text.null graphemePending =
+                            (parsedReady, "", parsedContext)
+                        | otherwise =
+                            splitMarkdownFragment
+                                state.context
+                                stablePrefix
+                    pending' =
+                        reparsedPending
+                            <> graphemePending
+                            <> parsedPending
                 in ( state
                         { pending = pending'
                         , context = nextContext

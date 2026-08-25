@@ -554,6 +554,37 @@ spec = do
                     actual <- stripTerminalControls <$> Text.readFile path
                     actual `shouldBe` expected
 
+        it "preserves emoji graphemes split across streaming deltas" do
+            let womanTechnologist =
+                    Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                keycapOne =
+                    Text.pack ['1', '\xfe0f', '\x20e3']
+                usFlag =
+                    Text.pack ['\x1f1fa', '\x1f1f8']
+                source =
+                    "status "
+                        <> womanTechnologist
+                        <> " "
+                        <> keycapOne
+                        <> " "
+                        <> usFlag
+                expected =
+                    stripTerminalControls
+                        (renderAssistantText True source)
+            withRenderConfig False True \config handle path -> do
+                mapM_
+                    (renderEvent config . TextDelta . Text.singleton)
+                    (Text.unpack source)
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                hClose handle
+                actual <- stripTerminalControls <$> Text.readFile path
+                actual `shouldBe` expected
+
         it "does not expose fence or table markers while streaming" do
             withRenderConfig False True \config handle path -> do
                 mapM_ (renderEvent config . TextDelta)

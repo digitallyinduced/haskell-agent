@@ -55,6 +55,7 @@ data EditorState = EditorState
 data DisplayCell = DisplayCell
     { displayCellText :: !Text
     , displayCellWidth :: !Int
+    , displayCellSourceLength :: !Int
     }
 
 data EditorKey

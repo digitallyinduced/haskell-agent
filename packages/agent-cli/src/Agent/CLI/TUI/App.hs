@@ -165,6 +165,7 @@ import Agent.TUI.Markdown
     , markdownWidgetWithLinks
     , markdownWidgetWithSyntaxHighlightingAndLinks
     )
+import Agent.TUI.TextWidth (displayTerminalText)
 import Agent.Syntax
     ( SyntaxHighlighter
     , loadSyntaxHighlighter
@@ -1694,6 +1695,12 @@ drawApp state =
             <> mainLayers
     dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
 
+terminalTxt :: Text -> Widget n
+terminalTxt = txt . displayTerminalText
+
+terminalTxtWrap :: Text -> Widget n
+terminalTxtWrap = txtWrap . displayTerminalText
+
 drawMain :: AppState -> Widget Name
 drawMain state =
     fullscreenSurface $
@@ -1824,7 +1831,7 @@ drawImagePreviews native previews =
                         else renderTuiImagePreview maxWidth maxHeight preview
                 , hCenter $
                     withAttr Theme.mutedAttr $
-                        txt $
+                        terminalTxt $
                             "🖼 "
                                 <> preview.previewMime
                                 <> " · "
@@ -1947,16 +1954,16 @@ drawAgentConversation :: AppState -> AgentEntry -> Widget Name
 drawAgentConversation state entry =
     vBox
         [ withAttr Theme.headingAttr $
-            txt ("Viewing " <> entry.agentPath)
+            terminalTxt ("Viewing " <> entry.agentPath)
         , withAttr Theme.mutedAttr $
-            txt
+            terminalTxt
                 (entry.agentStatus
                     <> " · input is sent to /root")
         , padTop (Pad 1) $
             if Seq.null entry.agentConversation.uiBlocks
                 then
                     withAttr Theme.mutedAttr $
-                        txt "(no transcript yet)"
+                        terminalTxt "(no transcript yet)"
                 else
                     drawConversationBlocks
                         state
@@ -2061,7 +2068,7 @@ drawAgentPane state entryLimit selected hovered entries =
                 | otherwise =
                     agentStatusGlyph entry.agentStatus
             row = hBox
-                [ txt
+                [ terminalTxt
                     (marker
                         <> agentEntryTreeLabelWithGlyphModel
                             statusGlyph
@@ -2156,7 +2163,7 @@ drawAgentPopover state placeLeft width height entry =
                         withBorderStyle unicodeRounded $
                             borderWithLabel
                                 (withAttr Theme.headingAttr $
-                                    txt
+                                    terminalTxt
                                         (" "
                                             <> truncateDisplayText
                                                 (max 1 (width - 6))
@@ -2193,14 +2200,14 @@ drawAgentStep state width step =
                     txt (agentStepGlyph state step.agentStepState)
                 , txt " "
                 , withAttr Theme.assistantAttr $
-                    txt
+                    terminalTxt
                         (truncateDisplayText
                             (max 1 (width - 2))
                             step.agentStepTitle)
                 ]
             , padLeft (Pad 2) $
                 withAttr Theme.mutedAttr $
-                    txt
+                    terminalTxt
                         (truncateDisplayText
                             (max 1 (width - 2))
                             (fromMaybe
@@ -2269,12 +2276,13 @@ drawHeader state =
 drawRepositoryHeader :: UiState -> Widget Name
 drawRepositoryHeader state
     | Text.null state.uiBranch =
-        withAttr Theme.mutedAttr (txt state.uiCwd)
+        withAttr Theme.mutedAttr (terminalTxt state.uiCwd)
     | otherwise =
         hBox
             [ txt "\xE0A0 "
             , withAttr Theme.mutedAttr $
-                txt (repositoryHeaderText state.uiBranch state.uiCwd)
+                terminalTxt
+                    (repositoryHeaderText state.uiBranch state.uiCwd)
             ]
 
 repositoryHeaderText :: Text -> Text -> Text
@@ -2285,7 +2293,7 @@ repositoryHeaderText branch cwd =
 drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
-        txt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+        terminalTxt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
 
 drawLiveTodos :: UiState -> Widget Name
 drawLiveTodos ui =
@@ -2314,7 +2322,7 @@ drawPromptActivity state =
     padLeftRight 2 $
         hBox
             [ activityWidget
-            , withAttr Theme.mutedAttr (txt elapsed)
+            , withAttr Theme.mutedAttr (terminalTxt elapsed)
             ]
   where
     ui = state.appUi
@@ -2330,7 +2338,7 @@ drawPromptActivity state =
                 , withAttr Theme.thinkingAttr (txt " Waiting for you")
                 ]
         | otherwise =
-            withAttr activityAttr (txt activity)
+            withAttr activityAttr (terminalTxt activity)
     activityAttr
         | ui.uiRunning = Theme.thinkingAttr
         | ui.uiCompletionRemainingMillis > 0 = Theme.successAttr
@@ -2442,7 +2450,7 @@ stickyPromptLayers state =
                             withAttr Theme.userAttr $
                                 vLimit 5 $
                                     padAll 1 $
-                                        txtWrap
+                                        terminalTxtWrap
                                             (stickyPromptPreview
                                                 anchor.anchorText)
                 ]
@@ -2548,7 +2556,7 @@ drawBlock state target ui block =
                 withAttr Theme.userAttr $
                     padAll 1 $
                         timestampedMessage block.blockTimestamp
-                            (txtWrap block.blockBody)
+                            (terminalTxtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
                     padRight (Pad 1) $
@@ -2596,14 +2604,16 @@ drawBlock state target ui block =
                         <> detailSuffix block)
                     (visibleBody block)
             BlockSystem ->
-                withAttr Theme.mutedAttr (txtWrap block.blockBody)
+                withAttr Theme.mutedAttr
+                    (terminalTxtWrap block.blockBody)
             BlockRecap ->
                 accentBlock
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> "Recap")
                     (visibleBody block)
             BlockError ->
-                withAttr Theme.errorAttr (txtWrap block.blockBody)
+                withAttr Theme.errorAttr
+                    (terminalTxtWrap block.blockBody)
         framed =
             if highlighted
                 then withAttr Theme.selectedAttr content
@@ -2636,7 +2646,8 @@ timestampedMessage timestamp body
     | otherwise =
         hBox
             [ padRight Max body
-            , withAttr Theme.mutedAttr (txt ("  " <> timestamp))
+            , withAttr Theme.mutedAttr
+                (terminalTxt ("  " <> timestamp))
             ]
 
 codeBlockHeader
@@ -2650,7 +2661,7 @@ codeBlockHeader state target blockId codeIndex language =
     hBox
         [ if Text.null language
             then emptyWidget
-            else withAttr Theme.mutedAttr (txt language)
+            else withAttr Theme.mutedAttr (terminalTxt language)
         , vLimit 1 (fill ' ')
         , clickable name $
             withAttr
@@ -2716,7 +2727,7 @@ accentBlock accent title body =
     accentBlockWithSections accent title $
         if Text.null (Text.strip body)
             then []
-            else [txtWrap body]
+            else [terminalTxtWrap body]
 
 accentMarkdownBlock :: AttrName -> Text -> Text -> Widget Name
 accentMarkdownBlock accent title body =
@@ -2737,7 +2748,7 @@ accentCodeBlock syntaxHighlighter accent title code body =
         [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
         | not (Text.null (Text.strip code))
         ]
-            <> [ txtWrap body
+            <> [ terminalTxtWrap body
                | not (Text.null (Text.strip body))
                ]
 
@@ -2751,7 +2762,7 @@ accentBlockWithSections accent title sections =
         [ withAttr accent (txt "❙")
         , padLeft (Pad 2) $
             vBox $
-                [withAttr accent (txtWrap title)]
+                [withAttr accent (terminalTxtWrap title)]
                     <> map (padTop (Pad 1)) sections
         ]
 
@@ -2848,7 +2859,8 @@ drawNotice state = case state.appUi.uiNotice of
     Just notice ->
         let (attr, prefix) = noticePresentation state notice.noticeKind
         in withAttr attr $
-            padLeftRight 2 (txtWrap (prefix <> notice.noticeText))
+            padLeftRight 2
+                (terminalTxtWrap (prefix <> notice.noticeText))
 
 noticePresentation :: AppState -> NoticeKind -> (AttrName, Text)
 noticePresentation state = \case
@@ -2912,7 +2924,8 @@ drawPermission state permission =
                         (waitingOverlayLabel state "Permission") $
                         padAll 1 $
                             vBox
-                                [ txtWrap permission.permissionSummary
+                                [ terminalTxtWrap
+                                    permission.permissionSummary
                                 , padTop (Pad 1) $
                                     vBox $
                                         zipWith
@@ -2928,7 +2941,7 @@ drawPermission state permission =
 permissionRow :: Int -> Int -> Text -> Widget Name
 permissionRow selected index label =
     let prefix = if selected == index then "› " else "  "
-        widget = txt (prefix <> label)
+        widget = terminalTxt (prefix <> label)
         styled =
             if selected == index
                 then withAttr Theme.selectedAttr widget
@@ -2963,7 +2976,8 @@ resumeHeader browser =
         [ search
         , vLimit 1 (fill ' ')
         , withAttr Theme.mutedAttr $
-            txt (resumeSourceLabel browser.resumeBrowserSource <> "  f")
+            terminalTxt
+                (resumeSourceLabel browser.resumeBrowserSource <> "  f")
         ]
   where
     prefix
@@ -2978,11 +2992,12 @@ resumeHeader browser =
                     (resumeSearchCursorColumn
                         prefix
                         browser.resumeBrowserQuery, 0))
-                (txt (prefix <> browser.resumeBrowserQuery <> " "))
+                (terminalTxt
+                    (prefix <> browser.resumeBrowserQuery <> " "))
         | Text.null browser.resumeBrowserQuery =
-            withAttr Theme.mutedAttr (txt prefix)
+            withAttr Theme.mutedAttr (terminalTxt prefix)
         | otherwise =
-            txt (prefix <> browser.resumeBrowserQuery)
+            terminalTxt (prefix <> browser.resumeBrowserQuery)
 
 resumeSearchCursorColumn :: Text -> Text -> Int
 resumeSearchCursorColumn prefix query =
@@ -3015,7 +3030,7 @@ resumeGroup browser selectedId (project, entries) =
     vBox
         [ hBox
             [ withAttr Theme.mutedAttr $
-                txt (" " <> project <> " ")
+                terminalTxt (" " <> project <> " ")
             , withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
             ]
         , vBox (map (resumeRow browser selectedId) entries)
@@ -3035,7 +3050,8 @@ resumeRow browser selectedId entry =
         | otherwise = "› "
     summary =
         hBox
-            [ hLimitPercent 78 (txt (marker <> entry.resumeTitle))
+            [ hLimitPercent 78
+                (terminalTxt (marker <> entry.resumeTitle))
             , vLimit 1 (fill ' ')
             , withAttr Theme.mutedAttr $
                 txt (resumeRelativeAge browser.resumeBrowserNow entry.resumeUpdatedAt)
@@ -3099,7 +3115,7 @@ resumeDetail :: Text -> Text -> Widget Name
 resumeDetail label value =
     hBox
         [ withAttr Theme.mutedAttr (txt (Text.justifyLeft 12 ' ' label))
-        , txtWrap value
+        , terminalTxtWrap value
         ]
 
 nonEmptyResumeText :: Maybe Text -> Maybe Text
@@ -3113,7 +3129,7 @@ resumeAbsoluteTime =
 
 resumeFooter :: ResumeBrowser -> Widget Name
 resumeFooter browser =
-    withAttr attr (txt footer)
+    withAttr attr (terminalTxt footer)
   where
     hasRows = not (null (visibleResumeBrowser browser))
     (attr, footer) =
@@ -3204,8 +3220,9 @@ drawOnboardingChoice appState choice =
         | otherwise =
             vLimit 1 $
                 case sourceIndex of
-                    0 -> withAttr Theme.headingAttr (txt choice.choiceTitle)
-                    2 -> txtWrap choice.choiceBody
+                    0 -> withAttr Theme.headingAttr
+                        (terminalTxt choice.choiceTitle)
+                    2 -> terminalTxtWrap choice.choiceBody
                     3 ->
                         withAttr Theme.mutedAttr $
                             txt "Choose a sign-in option below, or add your own API key."
@@ -3239,10 +3256,10 @@ onboardingChoiceRow appState width selected index (label, detail) =
             if showDetail
                 then hBox
                     [ hLimit 36 $
-                        padRight Max (txt (prefix <> label))
-                    , withAttr Theme.mutedAttr (txt detail)
+                        padRight Max (terminalTxt (prefix <> label))
+                    , withAttr Theme.mutedAttr (terminalTxt detail)
                     ]
-                else txt (prefix <> label)
+                else terminalTxt (prefix <> label)
     styled =
         if selected == index
             then withAttr Theme.selectedAttr row
@@ -3283,7 +3300,7 @@ waitingOverlayLabel state label =
                     motionGlyphSet
                     state.appRuntime.runtimeMotionMode
                     state.appMotionElapsedMillis)
-        , txt (" " <> label <> " ")
+        , terminalTxt (" " <> label <> " ")
         ]
 
 drawTextPrompt :: AppState -> TextOverlay -> Widget Name
@@ -3321,7 +3338,7 @@ renderTextDraft prompt =
         content =
             if Text.null displayDraft
                 then withAttr Theme.mutedAttr (txt " ")
-                else txt displayDraft
+                else terminalTxt displayDraft
         (row, column) =
             Composer.draftCursorLocation displayDraft prompt.textCursor
     in showCursor OverlayCursor (Location (column, row)) content
@@ -3359,9 +3376,10 @@ choiceRow appState selected index (label, detail) =
                             detail
                 render $
                     hBox
-                        [ txt shownLabel
+                        [ terminalTxt shownLabel
                         , vLimit 1 (fill ' ')
-                        , withAttr Theme.mutedAttr (txt shownDetail)
+                        , withAttr Theme.mutedAttr
+                            (terminalTxt shownDetail)
                         ]
         styled =
             if selected == index

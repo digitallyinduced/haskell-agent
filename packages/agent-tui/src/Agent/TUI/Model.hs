@@ -45,6 +45,7 @@ import Agent.TUI.Presentation
     , toolCallInput
     , toolCallTitle
     )
+import Agent.TUI.TextWidth (clampGraphemeCursor)
 import Agent.TUI.Motion
     ( completionStatusDurationMillis
     , transientNoticeDurationMillis
@@ -333,7 +334,7 @@ reduceUi event state = case event of
     UiSetDraft text cursor ->
         state
             { uiDraft = text
-            , uiCursor = max 0 (min (Text.length text) cursor)
+            , uiCursor = clampGraphemeCursor text cursor
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
