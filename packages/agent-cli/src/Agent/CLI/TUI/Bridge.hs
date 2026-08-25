@@ -21,7 +21,7 @@ import qualified Graphics.Vty as V
 -- | Keep enough prompt recall for normal interactive use without retaining an
 -- unbounded copy of the persistent Haskeline history in the fullscreen state.
 fullscreenHistoryLimit :: Int
-fullscreenHistoryLimit = 1000
+fullscreenHistoryLimit = 100
 
 trimHistory :: [Text] -> [Text]
 trimHistory entries =
