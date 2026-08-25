@@ -192,6 +192,7 @@ library
                     , mtl
                     , network
                     , network-uri
+                    , optparse-applicative >= 0.18 && < 0.19
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
