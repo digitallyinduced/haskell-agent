@@ -60,6 +60,7 @@ module Agent.CLI.TUI.App
     , wrapFullscreenKeyboardVty
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
     , maskedSecretText
@@ -170,6 +171,7 @@ import Agent.CLI.TUI.Motion
     , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , userActionPending
     )
@@ -4353,6 +4355,7 @@ refreshNativeProgressKeepalive = do
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
+    stateBeforeEvent <- get
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
     state <- get
@@ -4374,7 +4377,13 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
-    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+    when
+        ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && not
+                (turnCompletionRequiresRedraw
+                    stateBeforeEvent.appUi
+                    stateAfterMotionSync.appUi)
+        ) $
         continueWithoutRedraw
   where
     isMotionTick = \case

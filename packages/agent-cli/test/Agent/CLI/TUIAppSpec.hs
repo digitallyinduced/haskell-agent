@@ -34,6 +34,7 @@ import Agent.CLI.TUI.App
     , resumeSearchCursorColumn
     , selectedAgentConversation
     , textOverlayDisplayText
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     )
 import Agent.CLI.TUI.Types
@@ -693,6 +694,27 @@ spec = do
                 400000
                 (MotionSlow, 500000, 4)
                 `shouldBe` (MotionSlow, 400000, 5)
+
+        it "requests one unfocused redraw when a running turn becomes idle" do
+            let running = reduceUi (UiLoop TurnStarted) initialUiState
+                finished =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput "response-1" [] Nothing)))
+                        running
+                continuing =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput
+                                    "response-1"
+                                    [functionToolCall "call-1" "read_file" "{}"]
+                                    Nothing)))
+                        running
+            turnCompletionRequiresRedraw running finished `shouldBe` True
+            turnCompletionRequiresRedraw running continuing `shouldBe` False
+            turnCompletionRequiresRedraw finished finished `shouldBe` False
 
         it "retains sub-millisecond time across clock samples" do
             elapsedMillisSince 1000000 1499999
