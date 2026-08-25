@@ -169,6 +169,17 @@
                     ];
                 };
 
+                agentTelegramSource = nix-filter.lib {
+                    root = ./packages/agent-telegram;
+                    include = [
+                        "app"
+                        "src"
+                        "test"
+                        "agent-telegram.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentXaiSource = nix-filter.lib {
                     root = ./packages/agent-xai;
                     include = [
@@ -354,6 +365,11 @@
                                 pkgs.git
                                 pkgs.postgresql_18
                             ];
+                        agent-telegram = pkgs.haskell.lib.addTestToolDepends
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-telegram/package.nix { }) {
+                                src = agentTelegramSource;
+                            })
+                            [ pkgs.postgresql_18 ];
                     }
                 );
 
@@ -372,6 +388,7 @@
                 agentTuiPackage = haskellPackages.agent-tui;
                 agentStorePackage = haskellPackages.agent-store;
                 agentCliPackage = haskellPackages.agent-cli;
+                agentTelegramPackage = haskellPackages.agent-telegram;
                 agentCliExecutable =
                     (pkgs.haskell.lib.justStaticExecutables agentCliPackage).overrideAttrs
                         (old: {
@@ -387,6 +404,30 @@
                                     wrapProgram "$out/bin/agent-cli" \
                                         --set-default AGENT_SYNTAX_DIR \
                                             "${skylightingSyntaxDirectory}" \
+                                        --prefix PATH : \
+                                            "${pkgs.lib.makeBinPath [
+                                                pkgs.postgresql_18
+                                                haskellPackages.ghc
+                                            ]}"
+                                '';
+                        });
+                agentTelegramExecutable =
+                    (pkgs.haskell.lib.justStaticExecutables agentTelegramPackage).overrideAttrs
+                        (old: {
+                            nativeBuildInputs =
+                                (old.nativeBuildInputs or [ ])
+                                ++ [ pkgs.makeWrapper ];
+                            disallowedRequisites = pkgs.lib.remove
+                                haskellPackages.ghc
+                                (old.disallowedRequisites or [ ]);
+                            postInstall =
+                                (old.postInstall or "")
+                                + ''
+                                    wrapProgram "$out/bin/agent-telegram" \
+                                        --set-default AGENT_SYNTAX_DIR \
+                                            "${skylightingSyntaxDirectory}" \
+                                        --set-default HASKELL_AGENT_EXECUTABLE \
+                                            "${agentCliExecutable}/bin/agent-cli" \
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.postgresql_18
@@ -469,7 +510,7 @@
             {
                 packages.default = agentCliExecutable;
                 packages.agent-cli = agentCliExecutable;
-                packages.agent-telegram = agentCliExecutable;
+                packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
@@ -503,6 +544,7 @@
                 devShells.default = haskellPackages.shellFor {
                     packages = packages: [
                         packages.agent-cli
+                        packages.agent-telegram
                         packages.agent-core
                         packages.agent-process
                         packages.agent-codex-dialect
@@ -542,6 +584,7 @@
 
                 checks = {
                     agent-cli = agentCliPackage;
+                    agent-telegram = agentTelegramPackage;
                     agent-core = agentCorePackage;
                     agent-process = agentProcessPackage;
                     agent-codex-dialect = agentCodexDialectPackage;

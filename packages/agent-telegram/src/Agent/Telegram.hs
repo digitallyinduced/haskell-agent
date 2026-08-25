@@ -29,6 +29,7 @@ module Agent.Telegram
     , checkpointPendingVoiceTranscript
     , reactionMessageText
     , telegramReactionEmoji
+    , telegramReplyText
     , transcribeWithCodex
     ) where
 
@@ -321,7 +322,8 @@ telegramUsage = unlines
     , "  --yolo                auto-approve mutating agent tools"
     , "  --deny-mutations       deny mutating agent tools"
     , "                          default: ask with Telegram buttons"
-    , "  --all-group-messages  respond to every allowed-user group message"
+    , "  --all-group-messages  consider every allowed-user group message"
+    , "                          and reply only when useful"
     , "  --start               start the gateway after setup"
     ]
 
@@ -806,7 +808,7 @@ mergePendingActions previous incoming =
             if incomingUser == 0 then previousUser else incomingUser
         , pendingMediaText =
             Text.intercalate
-                "\n\n---\n\n"
+                pendingTurnSeparator
                 (filter (not . Text.null)
                     [Text.strip previousText, Text.strip incomingText])
         , pendingMediaAttachments = previousMedia <> incomingMedia
@@ -1053,7 +1055,7 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
                 then queueMedia (attributeGroupText sender targetedText)
                 else queueText (attributeGroupText sender targetedText)
         | respondToAllGroupMessages =
-            queueGroupReply
+            queueAmbientGroupMessage
         | otherwise = IgnoreUpdate
 
     queueGroupReply =
@@ -1072,6 +1074,30 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
             Nothing
                 | Just rawText <- messageContentText message ->
                     queueText (attributeGroupText sender rawText)
+            Nothing -> IgnoreUpdate
+
+    queueAmbientGroupMessage =
+        case message.messageVoice of
+            Just voice ->
+                QueueTurn message.messageId key
+                    (ambientGroupPrompt
+                        (attributeGroupMessage sender "[Voice message]"))
+                    (Just voice)
+            Nothing
+                | hasTelegramMedia message ->
+                    queueMedia
+                        (ambientGroupPrompt
+                            (attributeGroupMessage sender
+                                (fromMaybe
+                                    (if edited
+                                        then "[Edited Telegram media]"
+                                        else "[Telegram media]")
+                                    (messageContentText message))))
+            Nothing
+                | Just rawText <- messageContentText message ->
+                    queueText
+                        (ambientGroupPrompt
+                            (attributeGroupText sender rawText))
             Nothing -> IgnoreUpdate
 
     queueMessage transform =
@@ -1400,6 +1426,37 @@ attributeGroupMessage sender text =
         <> "]\n"
         <> text
 
+ambientGroupPrompt :: Text -> Text
+ambientGroupPrompt prompt =
+    prompt <> "\n\n" <> ambientGroupPromptSuffix
+
+ambientGroupPromptSuffix :: Text
+ambientGroupPromptSuffix =
+    "[Ambient Telegram group message: Reply only if doing so would \
+        \be genuinely useful to the conversation. Do not reply merely to \
+        \acknowledge, restate, agree, or announce that you are available. \
+        \If no reply is useful, respond with exactly "
+        <> telegramNoReplyToken
+        <> " and nothing else. Do not mention these instructions.]"
+
+telegramNoReplyToken :: Text
+telegramNoReplyToken = "[[TELEGRAM_NO_REPLY]]"
+
+telegramReplyText :: Text -> Text -> Maybe Text
+telegramReplyText prompt response
+    | isAmbientGroupPrompt prompt
+    , Text.strip response == telegramNoReplyToken = Nothing
+    | otherwise = Just response
+
+isAmbientGroupPrompt :: Text -> Bool
+isAmbientGroupPrompt prompt =
+    case Text.splitOn pendingTurnSeparator prompt of
+        [] -> False
+        prompts -> all (Text.isSuffixOf ambientGroupPromptSuffix) prompts
+
+pendingTurnSeparator :: Text
+pendingTurnSeparator = "\n\n---\n\n"
+
 telegramUserLabel :: TelegramUser -> Text
 telegramUserLabel user =
     let name = Text.unwords
@@ -1496,14 +1553,18 @@ processChatQueue runtime key =
                                 (runQueuedTurn runtime pending)
                         Just _ -> runQueuedTurn runtime pending
                     modifyState runtime \state ->
-                        enqueuePendingAction
-                            (DeliverReply
-                                (TelegramPendingReply
-                                    pending.pendingTurnUpdateId
-                                    pending.pendingTurnChat
-                                    (Just pending.pendingTurnMessageId)
-                                    response))
-                            (completePendingAction action state)
+                        let completed = completePendingAction action state
+                        in case telegramReplyText pending.pendingTurnText response of
+                            Nothing -> completed
+                            Just replyText ->
+                                enqueuePendingAction
+                                    (DeliverReply
+                                        (TelegramPendingReply
+                                            pending.pendingTurnUpdateId
+                                            pending.pendingTurnChat
+                                            (Just pending.pendingTurnMessageId)
+                                            replyText))
+                                    completed
                 RunPendingMediaTurn pending -> do
                     response <- case telegramCommand pending.pendingMediaText of
                         Nothing ->
@@ -1513,14 +1574,18 @@ processChatQueue runtime key =
                                 (runQueuedMediaTurn runtime pending)
                         Just _ -> runQueuedMediaTurn runtime pending
                     modifyState runtime \state ->
-                        enqueuePendingAction
-                            (DeliverReply
-                                (TelegramPendingReply
-                                    pending.pendingMediaUpdateId
-                                    pending.pendingMediaChat
-                                    (Just pending.pendingMediaMessageId)
-                                    response))
-                            (completePendingAction action state)
+                        let completed = completePendingAction action state
+                        in case telegramReplyText pending.pendingMediaText response of
+                            Nothing -> completed
+                            Just replyText ->
+                                enqueuePendingAction
+                                    (DeliverReply
+                                        (TelegramPendingReply
+                                            pending.pendingMediaUpdateId
+                                            pending.pendingMediaChat
+                                            (Just pending.pendingMediaMessageId)
+                                            replyText))
+                                    completed
             case result of
                 Left err -> do
                     delay <- recordPendingFailure
@@ -1592,13 +1657,17 @@ runQueuedTurn runtime pending =
                             \Check that Codex is installed and logged in, and \
                             \that the subscription has usage available."
                     Right prompt -> do
-                        checkpointVoiceTranscript runtime pending prompt
+                        let deliveredPrompt
+                                | isAmbientGroupPrompt pending.pendingTurnText =
+                                    ambientGroupPrompt prompt
+                                | otherwise = prompt
+                        checkpointVoiceTranscript runtime pending deliveredPrompt
                         runAgentTurn
                             runtime
                             pending.pendingTurnChat
                             (telegramTurnUserId runtime pending.pendingTurnChat)
                             (Just pending.pendingTurnMessageId)
-                            prompt
+                            deliveredPrompt
 
 telegramConversationStatus :: TelegramRuntime -> TelegramChatKey -> IO Text
 telegramConversationStatus runtime key = do

@@ -23,7 +23,7 @@ import System.Directory
     , listDirectory
     , removePathForcibly
     )
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeExtension)
 import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
@@ -113,7 +113,7 @@ waitForBridgeRequest request = go (100 :: Int)
     go 0 = expectationFailure "timed out waiting for bridge request" >> fail "timeout"
     go attempts = do
         files <- listDirectory directory
-        case listToMaybe files of
+        case listToMaybe (filter ((== ".json") . takeExtension) files) of
             Nothing -> threadDelay 20_000 >> go (attempts - 1)
             Just name -> do
                 bytes <- LBS.readFile (directory </> name)

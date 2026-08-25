@@ -5,6 +5,7 @@ module Agent.CLI.Input
     ( ReplLine(..)
     , readReplLine
     , readReplLineWithInitial
+    , readReplLineWithCatalog
     , readReplLineWithSkills
     , readReplLineWithSkillsAndModels
     , readApprovalLine
@@ -36,9 +37,11 @@ import Agent.CLI.Clipboard
     )
 import Agent.CLI.Command
     ( SkillCommand
+    , SlashCatalog(..)
     , SlashMenu(..)
     , SlashSuggestion(..)
-    , slashMenuForWithSkillsAndModels
+    , defaultSlashCatalog
+    , slashMenuForCatalog
     )
 import Agent.CLI.Input.Display
 import Agent.CLI.Input.History
@@ -123,12 +126,22 @@ import System.Posix.Terminal
 -- 'noteIdleCtrlC' rather than the outer signal handler.
 readReplLine :: InterruptState -> Text -> IO ReplLine
 readReplLine interrupt prompt =
-    readReplLineConfigured [] [] False interrupt prompt ""
+    readReplLineConfigured
+        defaultSlashCatalog False interrupt prompt ""
 
 -- | Like 'readReplLine', restoring @initial@ as the in-progress draft.
 readReplLineWithInitial :: InterruptState -> Text -> Text -> IO ReplLine
 readReplLineWithInitial =
-    readReplLineConfigured [] [] True
+    readReplLineConfigured defaultSlashCatalog True
+
+readReplLineWithCatalog
+    :: SlashCatalog
+    -> InterruptState
+    -> Text
+    -> Text
+    -> IO ReplLine
+readReplLineWithCatalog catalog =
+    readReplLineConfigured catalog True
 
 readReplLineWithSkills
     :: [SkillCommand]
@@ -137,7 +150,11 @@ readReplLineWithSkills
     -> Text
     -> IO ReplLine
 readReplLineWithSkills skills =
-    readReplLineConfigured skills [] True
+    readReplLineConfigured
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            }
+        True
 
 readReplLineWithSkillsAndModels
     :: [SkillCommand]
@@ -147,17 +164,21 @@ readReplLineWithSkillsAndModels
     -> Text
     -> IO ReplLine
 readReplLineWithSkillsAndModels skills modelIds =
-    readReplLineConfigured skills modelIds True
+    readReplLineConfigured
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            , slashCatalogModelIds = modelIds
+            }
+        True
 
 readReplLineConfigured
-    :: [SkillCommand]
-    -> [Text]
+    :: SlashCatalog
     -> Bool
     -> InterruptState
     -> Text
     -> Text
     -> IO ReplLine
-readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = do
+readReplLineConfigured catalog slashEnabled interrupt prompt initial = do
     isTty <- hIsTerminalDevice stdin
     if isTty
         then do
@@ -166,7 +187,7 @@ readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = d
             ensureHistoryParent path
             classifyLine <$>
                 readInlineEditor
-                    skills modelIds slashEnabled interrupt path prompt initial
+                    catalog slashEnabled interrupt path prompt initial
         else do
             Text.hPutStr stdout prompt
             hFlush stdout
@@ -182,8 +203,7 @@ readReplLineConfigured skills modelIds slashEnabled interrupt prompt initial = d
 -- | First-party inline editor for the interactive TTY path. It owns the
 -- prompt redraw so slash suggestions can update after every keystroke.
 readInlineEditor
-    :: [SkillCommand]
-    -> [Text]
+    :: SlashCatalog
     -> Bool
     -> InterruptState
     -> FilePath
@@ -191,7 +211,7 @@ readInlineEditor
     -> Text
     -> IO ReplLine
 readInlineEditor
-        skills modelIds slashEnabled interrupt historyPath prompt initial = do
+        catalog slashEnabled interrupt historyPath prompt initial = do
     withBracketedPaste $
         withEditorKittyKeyboard $
             withEditorRawStdin $
@@ -211,8 +231,7 @@ readInlineEditor
                                 , editorPasted = False
                                 , editorSlashEnabled = slashEnabled
                                 , editorSlashDismissed = False
-                                , editorSkillCommands = skills
-                                , editorModelIds = modelIds
+                                , editorSlashCatalog = catalog
                                 }
                         redrawEditor prompt state
                         editorLoop history entries state
@@ -344,9 +363,8 @@ currentMenu state
     | not state.editorSlashEnabled = Nothing
     | state.editorSlashDismissed = Nothing
     | otherwise =
-        slashMenuForWithSkillsAndModels
-            state.editorSkillCommands
-            state.editorModelIds
+        slashMenuForCatalog
+            state.editorSlashCatalog
             state.editorText
             state.editorCursor
 

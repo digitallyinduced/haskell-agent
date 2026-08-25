@@ -10,10 +10,12 @@ module Agent.CLI.TUI.App
     , conversationScrollbarRenderer
     , choiceRowColumns
     , choiceClosesOnUiTransition
+    , drawApp
     , elapsedMillisSince
     , emitUiEvent
     , externalUrlCommand
     , hasQueuedFullscreenInput
+    , initialFullscreenAppState
     , motionDemandFor
     , lambdaArtWidget
     , nativeProgressKeepaliveDue
@@ -25,8 +27,10 @@ module Agent.CLI.TUI.App
     , loadSyntaxHighlighterForRuntime
     , queuedFullscreenInputDisplays
     , readFullscreenLine
+    , readFullscreenLineWithCatalog
     , readFullscreenLineWithModels
     , readFullscreenLineOr
+    , readFullscreenLineOrWithCatalog
     , readFullscreenLineOrWithModels
     , repositoryHeaderText
     , resumeSearchCursorColumn
@@ -82,6 +86,8 @@ import Agent.CLI.ImagePreview
     )
 import Agent.CLI.Command
     ( SkillCommand
+    , SlashCatalog(..)
+    , defaultSlashCatalog
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Resume
@@ -444,6 +450,19 @@ readFullscreenLine runtime skills prompt initial = do
         Left impossible -> pure impossible
         Right line -> pure line
 
+readFullscreenLineWithCatalog
+    :: FullscreenRuntime
+    -> SlashCatalog
+    -> PromptState
+    -> Text
+    -> IO ReplLine
+readFullscreenLineWithCatalog runtime catalog prompt initial = do
+    result <- readFullscreenLineOrWithCatalog
+        runtime catalog prompt initial retry
+    case result of
+        Left impossible -> pure impossible
+        Right line -> pure line
+
 readFullscreenLineWithModels
     :: FullscreenRuntime
     -> [SkillCommand]
@@ -482,8 +501,26 @@ readFullscreenLineOrWithModels
     -> IO (Either wake ReplLine)
 readFullscreenLineOrWithModels
         runtime skills modelIds prompt initial wake = do
-    enqueueAppEvent runtime (AppSetSkillCommands skills)
-    enqueueAppEvent runtime (AppSetModelIds modelIds)
+    readFullscreenLineOrWithCatalog
+        runtime
+        defaultSlashCatalog
+            { slashCatalogSkills = skills
+            , slashCatalogModelIds = modelIds
+            }
+        prompt
+        initial
+        wake
+
+readFullscreenLineOrWithCatalog
+    :: FullscreenRuntime
+    -> SlashCatalog
+    -> PromptState
+    -> Text
+    -> STM wake
+    -> IO (Either wake ReplLine)
+readFullscreenLineOrWithCatalog
+        runtime catalog prompt initial wake = do
+    enqueueAppEvent runtime (AppSetSlashCatalog catalog)
     emitUiEvent runtime (UiSetPrompt prompt)
     -- Keep anything the user started typing while the previous turn was
     -- running. Non-empty explicit drafts (for example after cycling mode or
@@ -646,44 +683,13 @@ runFullscreen runtime workerAction = do
             wrapNativePreviewVty runtime vty
     initialVty <- buildVty
     let
-        initialState = AppState
-            { appUi = runtime.runtimeInitial
-            , appPermissionReply = Nothing
-            , appRuntime = runtime
-            , appSlashIndex = 0
-            , appChoice = Nothing
-            , appChoiceReply = Nothing
-            , appResume = Nothing
-            , appResumeReply = Nothing
-            , appResumeLoad = Nothing
-            , appResumeDelete = Nothing
-            , appTextPrompt = Nothing
-            , appTextReply = Nothing
-            , appSlashDismissed = False
-            , appPasted = False
-            , appHistory = history
-            , appHistoryIndex = Nothing
-            , appHistoryDraft = ""
-            , appKillBuffer = ""
-            , appSkillCommands = []
-            , appModelIds = []
-            , appImagePreviews = []
-            , appAgentSelected = initialAgent
-            , appAgentEntries = initialAgents
-            , appAgentHover = Nothing
-            , appHoveredControl = Nothing
-            , appPressedControl = Nothing
-            , appWorkerStopped = False
-            , appConversationAnchor = Nothing
-            , appConversationReflowQueued = False
-            , appWindowTitle = Nothing
-            , appMotionElapsedMillis = 0
-            , appCompletionFlashes = Map.empty
-            , appMotionScheduleReset = False
-            , appClockNanos = initialClock
-            , appNativeProgressKeepaliveBucket = 0
-            , appSyntaxHighlighter = Nothing
-            }
+        initialState =
+            initialFullscreenAppState
+                runtime
+                history
+                initialAgent
+                initialAgents
+                initialClock
         (initialDemand, initialDelay) =
             appMotionTiming initialState
     atomically $
@@ -770,6 +776,55 @@ runFullscreen runtime workerAction = do
                         (uncurry AppAgentSnapshot snapshot)
                     pure snapshot
         agentTicker previous'
+
+-- | Construct the retained application state shared by the live entry point
+-- and renderer tests. Generated tests should start from the same defaults as
+-- a real fullscreen session instead of assembling an approximate state.
+initialFullscreenAppState
+    :: FullscreenRuntime
+    -> [Text]
+    -> AgentTarget
+    -> [AgentEntry]
+    -> Word64
+    -> AppState
+initialFullscreenAppState runtime history initialAgent initialAgents initialClock =
+    AppState
+        { appUi = runtime.runtimeInitial
+        , appPermissionReply = Nothing
+        , appRuntime = runtime
+        , appSlashIndex = 0
+        , appChoice = Nothing
+        , appChoiceReply = Nothing
+        , appResume = Nothing
+        , appResumeReply = Nothing
+        , appResumeLoad = Nothing
+        , appResumeDelete = Nothing
+        , appTextPrompt = Nothing
+        , appTextReply = Nothing
+        , appSlashDismissed = False
+        , appPasted = False
+        , appHistory = history
+        , appHistoryIndex = Nothing
+        , appHistoryDraft = ""
+        , appKillBuffer = ""
+        , appSlashCatalog = defaultSlashCatalog
+        , appImagePreviews = []
+        , appAgentSelected = initialAgent
+        , appAgentEntries = initialAgents
+        , appAgentHover = Nothing
+        , appHoveredControl = Nothing
+        , appPressedControl = Nothing
+        , appWorkerStopped = False
+        , appConversationAnchor = Nothing
+        , appConversationReflowQueued = False
+        , appWindowTitle = Nothing
+        , appMotionElapsedMillis = 0
+        , appCompletionFlashes = Map.empty
+        , appMotionScheduleReset = False
+        , appClockNanos = initialClock
+        , appNativeProgressKeepaliveBucket = 0
+        , appSyntaxHighlighter = Nothing
+        }
 
 wrapNativePreviewVty :: FullscreenRuntime -> V.Vty -> IO V.Vty
 wrapNativePreviewVty runtime vty
@@ -3502,24 +3557,43 @@ handleEventInner event = case event of
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
+    AppEvent (AppSetSlashCatalog catalog) -> do
+        state <- get
+        if state.appSlashCatalog == catalog
+            then pure ()
+            else modify' \current -> current
+                { appSlashCatalog = catalog
+                , appSlashIndex = 0
+                , appSlashDismissed = False
+                }
     AppEvent (AppSetSkillCommands skills) -> do
         state <- get
-        if state.appSkillCommands == skills
+        if state.appSlashCatalog.slashCatalogSkills == skills
             then pure ()
-            else modify' \current -> current
-                { appSkillCommands = skills
-                , appSlashIndex = 0
-                , appSlashDismissed = False
-                }
+            else
+                let catalog =
+                        state.appSlashCatalog
+                            { slashCatalogSkills = skills
+                            }
+                in modify' \current -> current
+                    { appSlashCatalog = catalog
+                    , appSlashIndex = 0
+                    , appSlashDismissed = False
+                    }
     AppEvent (AppSetModelIds modelIds) -> do
         state <- get
-        if state.appModelIds == modelIds
+        if state.appSlashCatalog.slashCatalogModelIds == modelIds
             then pure ()
-            else modify' \current -> current
-                { appModelIds = modelIds
-                , appSlashIndex = 0
-                , appSlashDismissed = False
-                }
+            else
+                let catalog =
+                        state.appSlashCatalog
+                            { slashCatalogModelIds = modelIds
+                            }
+                in modify' \current -> current
+                    { appSlashCatalog = catalog
+                    , appSlashIndex = 0
+                    , appSlashDismissed = False
+                    }
     AppEvent (AppSetImagePreviews prepared) ->
         do
             state <- get
@@ -3797,6 +3871,11 @@ handleEventInner event = case event of
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
+        -- A resize can leave terminal cells from the previous geometry even
+        -- when Brick's next target picture is correctly bounded. Reset Vty's
+        -- assumed display so that redraw repaints the resized surface rather
+        -- than diffing against cells that may have wrapped or moved.
+        getVtyHandle >>= liftIO . V.refresh
         queueConversationReflow
     VtyEvent vtyEvent -> do
         clearAgentHover

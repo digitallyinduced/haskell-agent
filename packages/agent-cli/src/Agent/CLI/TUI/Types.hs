@@ -19,7 +19,7 @@ module Agent.CLI.TUI.Types
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry, AgentTarget)
-import Agent.CLI.Command (SkillCommand)
+import Agent.CLI.Command (SkillCommand, SlashCatalog)
 import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
@@ -96,8 +96,12 @@ data AppEvent
         !(Text -> IO (Either Text ()))
         !(TMVar (Maybe ResumeEntry))
     | forall a. AppSuspend !(IO a) !(TMVar (Either SomeException a))
+    | AppSetSlashCatalog !SlashCatalog
+      -- ^ Atomically replace commands, capabilities, skills, and model ids.
     | AppSetSkillCommands ![SkillCommand]
+      -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetModelIds ![Text]
+      -- ^ Legacy compatibility; prefer 'AppSetSlashCatalog'.
     | AppSetImagePreviews ![(ImageAttachment, TuiImagePreview)]
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
@@ -188,8 +192,7 @@ data AppState = AppState
     , appHistoryIndex :: !(Maybe Int)
     , appHistoryDraft :: !Text
     , appKillBuffer :: !Text
-    , appSkillCommands :: ![SkillCommand]
-    , appModelIds :: ![Text]
+    , appSlashCatalog :: !SlashCatalog
     , appImagePreviews :: ![TuiImagePreview]
     , appAgentSelected :: !AgentTarget
     , appAgentEntries :: ![AgentEntry]

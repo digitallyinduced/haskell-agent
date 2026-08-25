@@ -21,6 +21,7 @@ import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
+import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
@@ -51,6 +52,7 @@ main = hspec do
     ToolArgsSpec.spec
     ToolDispatchSpec.spec
     ToolDSLSpec.spec
+    GrepSpec.spec
     GhciSpec.spec
     IOSpec.spec
     MultiAgentsSpec.spec

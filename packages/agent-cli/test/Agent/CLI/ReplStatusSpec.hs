@@ -9,6 +9,7 @@ import Agent.CLI
     , cycleReplInteraction
     , devArgs
     , formatMcpModelNotice
+    , formatMcpModelNoticeFor
     , formatMcpProgress
     , formatReplStatusLine
     , formatRepositoryPath
@@ -88,6 +89,11 @@ spec = do
                 [mcpStatus "fast" McpReady 2, mcpStatus "bad" (McpFailed "boom") 0]
                 `shouldBe`
                     "<system-reminder>MCP status changed. Ready: fast. Unavailable: bad. Use mcp_search to discover currently available MCP tools and mcp_call to invoke one by its server__tool name.</system-reminder>"
+            formatMcpModelNoticeFor
+                GrokBuildDialect
+                [mcpStatus "fast" McpReady 2]
+                `shouldBe`
+                    "<system-reminder>MCP status changed. Ready: fast. Use search_tool to discover currently available MCP tools and use_tool to invoke one by its server__tool name.</system-reminder>"
 
     describe "accountSwitchTarget" do
         it "uses the destination provider default when changing provider" do
