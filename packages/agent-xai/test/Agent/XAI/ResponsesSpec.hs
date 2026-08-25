@@ -78,6 +78,44 @@ spec = do
             input <- expectArray (KeyMap.lookup "input" object)
             length input `shouldBe` 1
 
+        it "flattens resumed OpenAI agent messages into Grok user messages" do
+            let agentMessage = KnownResponseItem ItemAgentMessage TaggedObject
+                    { tag = "agent_message"
+                    , fields = KeyMap.fromList
+                        [ ("author", Aeson.String "researcher")
+                        , ("recipient", Aeson.String "root")
+                        , ("content", Aeson.toJSON
+                            [ Aeson.object
+                                [ "type" .= ("input_text" :: Text)
+                                , "text" .= ("Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it." :: Text)
+                                ]
+                            , Aeson.object
+                                [ "type" .= ("encrypted_content" :: Text)
+                                , "encrypted_content" .= ("opaque-provider-payload" :: Text)
+                                ]
+                            ])
+                        ]
+                    }
+                request = setInstructions Nothing $
+                    setInput
+                        (Just (ResponseInputItems [agentMessage]))
+                        sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            input <- expectArray (KeyMap.lookup "input" object)
+            input `shouldBe`
+                [ Aeson.object
+                    [ "type" .= ("message" :: Text)
+                    , "role" .= ("user" :: Text)
+                    , "content" .=
+                        [ Aeson.object
+                            [ "type" .= ("input_text" :: Text)
+                            , "text" .= ("Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it." :: Text)
+                            ]
+                        ]
+                    ]
+                ]
+
         it "maps web_search, keeps function tools, and drops the computer tool" do
             let value = requestValue defaultClientOptions sampleRequest
             object <- expectObject value
@@ -319,6 +357,10 @@ setInclude newInclude ResponseCreateParams { include = _, .. } =
 setModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 setModel newModel ResponseCreateParams { model = _, .. } =
     ResponseCreateParams { model = newModel, .. }
+
+setInput :: Maybe ResponseInput -> ResponseCreateParams -> ResponseCreateParams
+setInput newInput ResponseCreateParams { input = _, .. } =
+    ResponseCreateParams { input = newInput, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

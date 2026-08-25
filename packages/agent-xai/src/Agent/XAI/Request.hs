@@ -12,7 +12,11 @@ import Agent.Responses.Request
     )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Key (fromText)
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Foldable (toList)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -94,7 +98,7 @@ xaiReasoningEffort = \case
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
 requestInputItems request = case request.input of
-    Just (ResponseInputItems items) -> items
+    Just (ResponseInputItems items) -> map normalizeInputItem items
     Just (ResponseInputText inputText) ->
         [ MessageItem ResponseMessage
             { messageId = Nothing
@@ -106,3 +110,52 @@ requestInputItems request = case request.input of
             }
         ]
     Nothing -> []
+
+-- OpenAI stores inter-agent collaboration messages as the provider-specific
+-- @agent_message@ item. Resumed transcripts can retain those items when the
+-- user switches to Grok, whose Responses union does not recognize that tag.
+-- Preserve the readable collaboration context as an ordinary user message.
+normalizeInputItem :: ResponseItem -> ResponseItem
+normalizeInputItem = \case
+    KnownResponseItem ItemAgentMessage tagged ->
+        MessageItem ResponseMessage
+            { messageId = Nothing
+            , content = MessageContentParts
+                [InputTextPart (agentMessageText tagged) Nothing KeyMap.empty]
+            , role = RoleUser
+            , status = Nothing
+            , phase = Nothing
+            , extraFields = KeyMap.empty
+            }
+    item -> item
+
+agentMessageText :: TaggedObject -> Text
+agentMessageText tagged =
+    case KeyMap.lookup (fromText "content") tagged.fields of
+        Just (Aeson.Array parts)
+            | not (null texts) -> Text.intercalate "\n" texts
+          where
+            texts = mapMaybe contentPartText (toList parts)
+        _ -> fallback
+  where
+    fallback = case
+        ( textField "author" tagged.fields
+        , textField "recipient" tagged.fields
+        ) of
+        (Just author, Just recipient) ->
+            "Agent message from " <> author <> " to " <> recipient
+        (Just author, Nothing) -> "Agent message from " <> author
+        (Nothing, Just recipient) -> "Agent message to " <> recipient
+        (Nothing, Nothing) -> "Agent message"
+
+contentPartText :: Aeson.Value -> Maybe Text
+contentPartText = \case
+    Aeson.Object object
+        | textField "type" object == Just "input_text" ->
+            textField "text" object
+    _ -> Nothing
+
+textField :: Text -> Aeson.Object -> Maybe Text
+textField name object = case KeyMap.lookup (fromText name) object of
+    Just (Aeson.String value) -> Just value
+    _ -> Nothing
