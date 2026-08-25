@@ -54,7 +54,6 @@ library
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Choices
-                    , Agent.CLI.Session.History
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
                     , Agent.CLI.SessionAdmin
@@ -125,6 +124,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
@@ -304,6 +304,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec

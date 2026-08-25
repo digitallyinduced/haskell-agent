@@ -124,7 +124,7 @@ import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , OpenAiCompactionSender
     , autoCompactOpenAiBackendWithSender
-    , installCompactOutcome
+    , installLiveCompactOutcome
     , runProviderCompactWith
     , runResponsesCompactWith
     )
@@ -342,7 +342,13 @@ import Agent.CLI.Session.History
     ( detectGitBranch
     , foldSessionItems
     , hydrateUiHistory
+    , LiveConversation(..)
+    , readLiveAttachments
+    , readLivePreviousResponseId
+    , readLiveTranscript
+    , modifyLiveAttachments
     , resetLiveConversation
+    , writeLiveTranscript
     )
 import Agent.CLI.Session.Selection
     ( currentSessionId
@@ -1934,7 +1940,7 @@ runAgentInitializedWithLock
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
-    subagentForkSource <- newIORef (Nothing :: Maybe (IORef [ResponseItem]))
+    subagentForkSource <- newIORef (Nothing :: Maybe (IO [ResponseItem]))
     pendingNotices <- newIORef ([] :: [TurnInput])
     registry <- newSubagentRegistry defaultSubagentConfig cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
@@ -2316,10 +2322,16 @@ runAgentInitializedWithLock
                         provider
                         (tokenProviderBillingMode tokenProvider)
                 }
-        transcriptRef <- newIORef initialItems
+        let conversationRef = startup.startupSessionState.sessionConversation
+        atomicModifyIORef' conversationRef \state ->
+            ( state
+                { livePreviousResponseId = initialPrevious
+                , liveTranscript = initialItems
+                }
+            , ()
+            )
         contextTokensRef <- newIORef Nothing
-        previousRef <- newIORef initialPrevious
-        writeIORef subagentForkSource (Just transcriptRef)
+        writeIORef subagentForkSource (Just (readLiveTranscript conversationRef))
         let titleHint = case resumed of
                 Just (meta, _) -> Just meta.metaTitle
                 Nothing ->
@@ -2409,9 +2421,8 @@ runAgentInitializedWithLock
                                 , unavailableProviders
                                 , startupUnavailable
                                 , paramsRef
-                                , transcriptRef
+                                , conversationRef
                                 , initialTurns
-                                , previous = previousRef
                                 , persist
                                 , projectRoot
                                 , home
@@ -2681,10 +2692,12 @@ runAgentInitializedWithLock
                                             tokenProvider
                                             (readIORef privateParams)
                                     compactRunner focus =
-                                        withMVar wsLock \_ ->
-                                            installCompactOutcome
-                                                previousRef
-                                                transcriptRef
+                                        withMVar wsLock \_ -> do
+                                            historyRef <-
+                                                newIORef =<< readLiveTranscript
+                                                    conversationRef
+                                            installLiveCompactOutcome
+                                                conversationRef
                                                 (Just contextTokensRef)
                                                 (runProviderCompactWith
                                                     (Just compactSender)
@@ -2692,7 +2705,7 @@ runAgentInitializedWithLock
                                                     provider
                                                     (Just tokenProvider)
                                                     paramsRef
-                                                    transcriptRef)
+                                                    historyRef)
                                                 focus
                                 activeBackend <-
                                     prepareTransitionBackend
@@ -2759,15 +2772,18 @@ runAgentInitializedWithLock
                             btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
                                     (readIORef privateParams)
-                            compactRunner =
-                                installCompactOutcome previousRef transcriptRef Nothing $
-                                    runProviderCompactWith
+                            compactRunner focus = do
+                                historyRef <-
+                                    newIORef =<< readLiveTranscript conversationRef
+                                installLiveCompactOutcome conversationRef Nothing
+                                    (runProviderCompactWith
                                         Nothing
                                         recordCompactionUsage
                                         provider
                                         (Just tokenProvider)
                                         paramsRef
-                                        transcriptRef
+                                        historyRef)
+                                    focus
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
@@ -2833,16 +2849,18 @@ runAgentInitializedWithLock
                                                 glyphWarn
                                                     <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
                         writeIORef activeAccountRef claudeAuth.accountLabel
+                        claudeTranscriptRef <-
+                            newIORef =<< readLiveTranscript conversationRef
                         withClaudeCodeBackend
                             claudeOptions
                             initialPrevious
                             (readIORef paramsRef)
-                            transcriptRef
+                            claudeTranscriptRef
                             \backend -> do
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist backend
-                                runSession
+                                result <- runSession
                                     (sessionRequest
                                         startupUnavailable
                                         Nothing
@@ -2853,6 +2871,9 @@ runAgentInitializedWithLock
                                         { backend = activeBackend
                                         , btwBackend
                                         }
+                                writeLiveTranscript conversationRef
+                                    =<< readIORef claudeTranscriptRef
+                                pure result
                     OpenRouterProvider -> do
                         let makeBackend params =
                                 case customGenericOptions of
@@ -2893,9 +2914,11 @@ runAgentInitializedWithLock
                             btwBackend privateParams =
                                 makeBackend
                                     (readIORef privateParams)
-                            compactRunner =
-                                installCompactOutcome previousRef transcriptRef Nothing $
-                                    case customGenericOptions of
+                            compactRunner focus = do
+                                historyRef <-
+                                    newIORef =<< readLiveTranscript conversationRef
+                                installLiveCompactOutcome conversationRef Nothing
+                                    (case customGenericOptions of
                                         Just genericOptions ->
                                             runResponsesCompactWith
                                                 (\request ->
@@ -2910,7 +2933,7 @@ runAgentInitializedWithLock
                                                         request)
                                                 recordCompactionUsage
                                                 paramsRef
-                                                transcriptRef
+                                                historyRef
                                         Nothing ->
                                             runProviderCompactWith
                                                 Nothing
@@ -2918,7 +2941,8 @@ runAgentInitializedWithLock
                                                 provider
                                                 (Just tokenProvider)
                                                 paramsRef
-                                                transcriptRef
+                                                historyRef)
+                                    focus
                         activeBackend <-
                             prepareTransitionBackend
                                 projectRoot transition persist backend
@@ -3114,7 +3138,7 @@ runSession
     -> SessionBackend
     -> IO RunResult
 runSession SessionRequest{..} SessionBackend{..} = do
-  initialPrevious <- readIORef previous
+  initialPrevious <- readLivePreviousResponseId conversationRef
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
@@ -3164,8 +3188,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
   withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
     printed <- newIORef False
-    let attachmentsRef = startup.startupSessionState.sessionAttachments
-        previewIdRef = startup.startupSessionState.sessionPreviewId
+    let previewIdRef = startup.startupSessionState.sessionPreviewId
     markdownState <- newIORef emptyMarkdownStreamState
     liveActive <- newIORef False
     thinkingVisible <- newIORef False
@@ -3204,7 +3227,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                         )
                     pure steps
         loadAgentSnapshot includeSummaries = do
-            rootItems <- readIORef transcriptRef
+            rootItems <- readLiveTranscript conversationRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
@@ -3373,7 +3396,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                                     <> " omitted from model context due to the context budget")
                         pure learnedSkills
         sessionReset = do
-            resetLiveConversation previous transcriptRef attachmentsRef planMode
+            resetLiveConversation conversationRef planMode
             writeIORef usageRef emptyTokenUsage
             writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
@@ -3557,8 +3580,8 @@ runSession SessionRequest{..} SessionBackend{..} = do
         config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
-                { readBackendState = readIORef transcriptRef
-                , commitBackendState = writeIORef transcriptRef
+                { readBackendState = readLiveTranscript conversationRef
+                , commitBackendState = writeLiveTranscript conversationRef
                 }
             , loopTools = toolRegistry
             , loopDispatch = defaultLoopDispatch
@@ -3682,11 +3705,10 @@ runSession SessionRequest{..} SessionBackend{..} = do
             , sessionDialect = dialect
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
-            , sessionPrevious = previous
+            , sessionConversation = conversationRef
             , sessionPrinted = printed
             , sessionParams = paramsRef
             , sessionPolicy = policyRef
-            , sessionTranscript = transcriptRef
             , sessionPersist = persist
             , sessionDatabasePool =
                 trustedPool startup.startupDatabaseStore
@@ -3711,7 +3733,6 @@ runSession SessionRequest{..} SessionBackend{..} = do
             , sessionSetShellMode = setShellMode
             , sessionEscPaused = escPaused
             , sessionDraft = startup.startupSessionState.sessionDraft
-            , sessionAttachments = attachmentsRef
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
             , sessionRestartEffort = restartEffortRef
@@ -3965,7 +3986,7 @@ syncFullscreenPrompt env =
         policy <- readIORef env.sessionPolicy
         account <- readIORef env.sessionAccount
         usage <- readIORef env.sessionUsage
-        attachments <- readIORef env.sessionAttachments
+        attachments <- readLiveAttachments env.sessionConversation
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
                 params
@@ -4219,6 +4240,7 @@ runBtwQuestion registerCancel env question = do
     forM_ fullscreen \runtime ->
         emitUiEvent runtime
             (UiSetNotice (Just (progressNotice "btw · asking…")))
+    btwTranscript <- newIORef =<< readLiveTranscript env.sessionConversation
     result <-
         runBtwWithCancel
             (\cancel action ->
@@ -4235,7 +4257,7 @@ runBtwQuestion registerCancel env question = do
                     else action)
             env.sessionBtwBackend
             env.sessionParams
-            env.sessionTranscript
+            btwTranscript
             question
     forM_ fullscreen \runtime ->
         emitUiEvent runtime (UiSetNotice Nothing)
@@ -4262,12 +4284,12 @@ replWithDraft :: SessionEnv -> Text -> IO RunResult
 replWithDraft env@SessionEnv
     { sessionCompact = compactRunner
     , sessionRender = render
+    , sessionConversation = conversationRef
     , sessionProvider = provider
     , sessionConnection = connectionId
     , sessionModelCatalog = catalog
     , sessionDialect = dialect
     , sessionStartupUnavailable = startupUnavailableRef
-    , sessionPrevious = previous
     , sessionPrinted = printed
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
@@ -4284,7 +4306,6 @@ replWithDraft env@SessionEnv
     , sessionActiveToolNames = readActiveToolNames
     , sessionGrokRuntime = grokRuntime
     , sessionDraft = draftRef
-    , sessionAttachments = attachmentsRef
     , sessionPreviewId = previewIdRef
     , sessionInterrupt = interrupt
     , sessionStoreRoot = storeRoot
@@ -4300,6 +4321,7 @@ replWithDraft env@SessionEnv
     , sessionAgentViewport = agentViewport
     , sessionReset = sessionReset
     } draft = do
+    let conversationRef = conversationRef
     writeIORef draftRef draft
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef
@@ -4319,7 +4341,7 @@ replWithDraft env@SessionEnv
         planPending = planState == PlanPending
     params <- readIORef paramsRef
     policy <- readIORef policyRef
-    pendingAttachments <- readIORef attachmentsRef
+    pendingAttachments <- readLiveAttachments conversationRef
     let idleMode = replModeFromState planState policy
     usage <- readIORef usageRef
     account <- readIORef accountRef
@@ -4517,7 +4539,7 @@ replWithDraft env@SessionEnv
             case clipboardPasteImages of
                 Just images@(_:_) -> do
                     message <- queueAttachedImages
-                        attachmentsRef
+                        conversationRef
                         previewIdRef
                         stdoutColor
                         (isNothing fullscreen)
@@ -4530,7 +4552,7 @@ replWithDraft env@SessionEnv
                                 (glyphOk <> message))
                 _ ->
                     queueClipboardImages
-                        attachmentsRef
+                        conversationRef
                         previewIdRef
                         stdoutColor
                         (isNothing fullscreen)
@@ -4556,7 +4578,7 @@ replWithDraft env@SessionEnv
             case imagesResult of
                 Just images -> do
                     message <- queueAttachedImages
-                        attachmentsRef
+                        conversationRef
                         previewIdRef
                         stdoutColor
                         (isNothing fullscreen)
@@ -4588,7 +4610,7 @@ replWithDraft env@SessionEnv
     submitLine
             slashCatalog skillInvocations
             continue color pasted line = do
-        attachmentCount <- length <$> readIORef attachmentsRef
+        attachmentCount <- length <$> readLiveAttachments conversationRef
         case submissionPromptText attachmentCount line of
             Nothing -> continue
             Just promptLine -> do
@@ -4609,7 +4631,7 @@ replWithDraft env@SessionEnv
                         case pastedImages of
                             Just images@(_:_) -> do
                                 message <- queueAttachedImages
-                                    attachmentsRef
+                                    conversationRef
                                     previewIdRef
                                     color
                                     (isNothing fullscreen)
@@ -4621,7 +4643,7 @@ replWithDraft env@SessionEnv
                                             (glyphOk <> message))
                                 continue
                             _ -> do
-                                pendingImages <- atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
+                                pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
                                     setFullscreenImagePreviews runtime []
                                 writeIORef printed False
@@ -4656,8 +4678,9 @@ replWithDraft env@SessionEnv
                                         (roleError color err)
                                 continue
                             Right invocation -> do
-                                pendingImages <- atomicModifyIORef'
-                                    attachmentsRef \imgs -> ([], imgs)
+                                pendingImages <-
+                                    modifyLiveAttachments conversationRef
+                                        \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
                                     setFullscreenImagePreviews runtime []
                                 let userText =
@@ -4756,7 +4779,7 @@ replWithDraft env@SessionEnv
                                         finishTurn env False result
                                     else do
                                         message <- queueAttachedImages
-                                            attachmentsRef
+                                            conversationRef
                                             previewIdRef
                                             color
                                             (isNothing fullscreen)
@@ -4768,7 +4791,7 @@ replWithDraft env@SessionEnv
                                                     (glyphOk <> message))
                                         continue
                     ReplShowAttachments -> do
-                        pending <- readIORef attachmentsRef
+                        pending <- readLiveAttachments conversationRef
                         color <- resolveColor stdout
                         let message =
                                 if null pending
@@ -4787,7 +4810,7 @@ replWithDraft env@SessionEnv
                                 (roleMuted color (glyphSession <> message))
                         continue
                     ReplClearAttachments -> do
-                        writeIORef attachmentsRef []
+                        modifyLiveAttachments conversationRef (\_ -> ([], ()))
                         forM_ fullscreen \runtime ->
                             setFullscreenImagePreviews runtime []
                         color <- resolveColor stdout
@@ -5050,7 +5073,7 @@ replWithDraft env@SessionEnv
                                     projectRoot provider connectionId name
                                     choice.modelTarget.targetWireModelId
                                     choice.modelTarget.targetDialect
-                                    paramsRef render previous persist
+                                    paramsRef render conversationRef persist
                                 displayInfo message $
                                     Text.putStrLn
                                         (roleMuted color (glyphOk <> message))
@@ -5582,7 +5605,7 @@ replWithDraft env@SessionEnv
                         continue
     submitExpandedTurn next color original expanded = do
         pendingImages <-
-            atomicModifyIORef' attachmentsRef \imgs -> ([], imgs)
+            modifyLiveAttachments conversationRef \imgs -> ([], imgs)
         forM_ fullscreen \runtime ->
             setFullscreenImagePreviews runtime []
         let turnInputs =
@@ -5615,7 +5638,7 @@ replWithDraft env@SessionEnv
         Just runtime -> emitUiEvent runtime event
     syncFullscreenImagePreviews =
         forM_ fullscreen \runtime ->
-            readIORef attachmentsRef
+            readLiveAttachments conversationRef
                 >>= setFullscreenImagePreviews runtime
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
@@ -5685,7 +5708,7 @@ replWithDraft env@SessionEnv
                         choice.modelTarget.targetModelId
                         choice.modelTarget.targetWireModelId
                         choice.modelTarget.targetDialect
-                        paramsRef render previous persist
+                        paramsRef render conversationRef persist
                     displayInfo message $
                         Text.putStrLn
                             (roleMuted color
@@ -6037,14 +6060,14 @@ setNativeProgress handle active = do
 -- | Queue clipboard / Finder-paste images and optionally draw an in-terminal
 -- thumbnail. The caller reports the returned message through the active UI.
 queueAttachedImages
-    :: IORef [ImageAttachment]
+    :: IORef LiveConversation
     -> IORef Int
     -> Bool
     -> Bool
     -> [ImageAttachment]
     -> IO Text
 queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
-    (added, pendingCount) <- atomicModifyIORef' attachmentsRef \existing ->
+    (added, pendingCount) <- modifyLiveAttachments attachmentsRef \existing ->
         let (pending, unique) =
                 appendUniqueImageAttachments existing images
         in (pending, (unique, length pending))
@@ -6080,7 +6103,7 @@ queueAttachedImages attachmentsRef previewIdRef color showPreview images = do
                 <> " queued)"
 
 queueClipboardImages
-    :: IORef [ImageAttachment]
+    :: IORef LiveConversation
     -> IORef Int
     -> Bool
     -> Bool
