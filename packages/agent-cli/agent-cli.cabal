@@ -51,11 +51,13 @@ library
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
+                    , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.Session.Interaction
+                    , Agent.CLI.Session.Lifecycle
                     , Agent.CLI.Session.Retry
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
@@ -160,6 +162,7 @@ library
                     , Agent.CLI.WebFetch
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
@@ -192,6 +195,7 @@ library
                     , mtl
                     , network
                     , network-uri
+                    , optparse-applicative >= 0.18 && < 0.19
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions

@@ -19,6 +19,10 @@ module Agent.CLI.AgentSessions
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.Error (formatException)
+import Agent.Process
+    ( terminateProcessGroupWith
+    , terminateThenKillPolicy
+    )
 import Agent.CLI.Session
     ( SessionCreate(..)
     , SessionActivity(..)
@@ -98,11 +102,6 @@ import System.Process
     , proc
     , terminateProcess
     , waitForProcess
-    )
-import System.Posix.Signals
-    ( sigKILL
-    , sigTERM
-    , signalProcessGroup
     )
 import qualified System.Timeout as Timeout
 
@@ -525,28 +524,12 @@ sessionManagerIsOpen state =
         SessionManagerClosed -> False
 
 waitForManagedExit :: ProcessHandle -> IO ExitCode
-waitForManagedExit process =
-    getProcessExitCode process >>= \case
-        Nothing -> threadDelay 10_000 >> waitForManagedExit process
-        Just exitCode -> do
-            _ <- try @_ @SomeException (waitForProcess process)
-            pure exitCode
+waitForManagedExit = waitForProcess
 
 terminateManagedProcess :: ProcessHandle -> IO ()
 terminateManagedProcess process = do
     processGroup <- getPid process
-    let signalGroup signal =
-            case processGroup of
-                Nothing -> terminateProcess process
-                Just pid -> signalProcessGroup signal pid
-    _ <- try @_ @SomeException (signalGroup sigTERM)
-    stopped <- Timeout.timeout 2_000_000 (waitForManagedExit process)
-    case stopped of
-        Just _ -> pure ()
-        Nothing -> do
-            _ <- try @_ @SomeException (signalGroup sigKILL)
-            _ <- try @_ @SomeException (waitForManagedExit process)
-            pure ()
+    terminateProcessGroupWith terminateThenKillPolicy processGroup process
 
 signalManagedSessionReady :: Either Text () -> IO ()
 signalManagedSessionReady result =

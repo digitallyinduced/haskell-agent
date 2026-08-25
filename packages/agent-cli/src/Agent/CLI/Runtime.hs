@@ -237,10 +237,6 @@ import Agent.CLI.Models
     , resolveModelOptionDialect
     , resolvePersistedDialect
     )
-import Agent.CLI.Notification
-    ( AttentionRequest(InputRequested)
-    , notifyAttention
-    )
 import Agent.CLI.Options
 import Agent.Store.Postgres
     ( ManagedPostgresConfig
@@ -279,7 +275,6 @@ import Agent.CLI.Project
     , projectAccountFor
     , projectModelProvider
     , resolveProjectRoot
-    , saveProjectAccount
     , saveProjectAutoApprove
     , saveProjectMaxConcurrentAgents
     , saveProjectModel
@@ -293,8 +288,6 @@ import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
     , fallbackCandidates
     , isProviderUnavailable
-    , ProviderRecoveryPreference(..)
-    , providerRecoveryPreference
     )
 import Agent.CLI.Provider.OpenAI
     ( OpenAiPersistentConnection(..)
@@ -325,16 +318,19 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
-    , setPendingExitAfter
     , transitionCommitsImmediately
     )
 import Agent.CLI.SessionState (SessionState(..), newSessionState)
 import Agent.CLI.Render
     ( RenderConfig(..)
+    , RenderState(..)
+    , beginRenderTurn
     , clearThinking
-    , emptyMarkdownStreamState
+    , emptyRenderState
     , putTextLn
     , renderEvent
+    , renderPrintedText
+    , resetRenderPrintedText
     )
 import Agent.CLI.Session
 import Agent.CLI.Session.Choices
@@ -360,9 +356,9 @@ import Agent.CLI.Session.Interaction
     ( buildPromptState
     , runBtwQuestion
     , setSessionEffort
-    , syncFullscreenPrompt
     )
-import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
+import Agent.CLI.Session.Lifecycle (SessionContinuation(..))
+import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle
 import Agent.CLI.Session.Selection
     ( currentSessionId
     , handleConversationSearch
@@ -470,7 +466,6 @@ import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
     , emitUiEvent
-    , hasQueuedFullscreenInput
     , newFullscreenInputBuffer
     , newFullscreenRuntime
     , queuedFullscreenInputDisplays
@@ -632,7 +627,6 @@ import Agent.GrokBuild.Dialect.Workflow
     , workflowRunSnapshots
     )
 import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
-import Agent.TextBuffer (emptyTextBuffer)
 import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
@@ -733,7 +727,7 @@ import System.Environment (getArgs, getProgName, lookupEnv)
 import System.OsPath (OsPath, decodeFS, unsafeEncodeUtf, (</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
-import System.Exit (ExitCode(..), die, exitFailure)
+import System.Exit (ExitCode(..), die)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
 import System.Mem.StableName (StableName, makeStableName)
 import System.Process (readProcessWithExitCode)
@@ -3208,16 +3202,9 @@ runSession SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
-    printed <- newIORef False
     let previewIdRef = startup.startupSessionState.sessionPreviewId
-    markdownState <- newIORef emptyMarkdownStreamState
-    liveActive <- newIORef False
-    thinkingVisible <- newIORef False
     spinnerRef <- newIORef Nothing
-    reasoningBuffer <- newIORef emptyTextBuffer
-    activityRef <- newIORef "Thinking…"
-    startedAtRef <- newIORef Nothing
-    toolCallsRef <- newIORef Map.empty
+    renderStateRef <- newIORef emptyRenderState
     allowedToolsRef <- newIORef Set.empty
     lastAssistantRef <- newIORef Nothing
     modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
@@ -3574,20 +3561,13 @@ runSession SessionRequest{..} SessionBackend{..} = do
     syncStore
     let render = RenderConfig
             { renderShowThinking = stderrTty
-            , renderThinkingVisible = thinkingVisible
             , renderThinkingSpinner = spinnerRef
-            , renderReasoningBuffer = reasoningBuffer
+            , renderState = renderStateRef
             , renderColor = useColor
-            , renderPrintedText = printed
-            , renderMarkdownState = markdownState
-            , renderLiveActive = liveActive
             , renderLock = ioLock
             , renderStdout = stdout
             , renderStderr = stderr
             , renderModelRef = modelRef
-            , renderActivityRef = activityRef
-            , renderStartedAt = startedAtRef
-            , renderToolCalls = toolCallsRef
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
             -- and redirected stderr stay clean.
@@ -3607,11 +3587,13 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     case event of
                         TurnStarted -> do
                             now <- getCurrentTime
-                            writeIORef startedAtRef (Just now)
-                            writeIORef activityRef "Thinking…"
-                        TextDelta _ -> writeIORef printed True
+                            modifyIORef' renderStateRef (beginRenderTurn now)
+                        TextDelta _ ->
+                            modifyIORef' renderStateRef
+                                (\state -> state{statePrintedText = True})
                         ToolStarted _ ->
-                            writeIORef activityRef "Running tool…"
+                            modifyIORef' renderStateRef
+                                (\state -> state{stateActivity = "Running tool…"})
                         _ -> pure ()
                     emitUiEvent runtime (UiLoop event)
         shellToolAllowed call = do
@@ -3802,7 +3784,6 @@ runSession SessionRequest{..} SessionBackend{..} = do
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionConversation = conversationRef
-            , sessionPrinted = printed
             , sessionParams = paramsRef
             , sessionPolicy = policyRef
             , sessionPersist = persist
@@ -3951,133 +3932,26 @@ runSession SessionRequest{..} SessionBackend{..} = do
     applyPendingSessionTitles env
     pure result
 
+sessionContinuation :: SessionContinuation
+sessionContinuation =
+    SessionContinuation
+        { resumeSession = repl
+        , resumeSessionWithDraft = replWithDraft
+        }
+
 runPendingTurn
     :: PendingTurnPresentation
     -> SessionEnv
     -> PendingTurn
     -> IO RunResult
-runPendingTurn presentation =
-    runPendingTurnWithCooldownRetry True presentation
-
-runPendingTurnWithCooldownRetry
-    :: Bool
-    -> PendingTurnPresentation
-    -> SessionEnv
-    -> PendingTurn
-    -> IO RunResult
-runPendingTurnWithCooldownRetry
-    allowCooldownRetry presentation env pending = do
-    writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
-    syncFullscreenPrompt env
-    case env.sessionFullscreen of
-        Nothing -> pure ()
-        Just runtime -> case presentation of
-            SubmitPendingTurn ->
-                emitUiEvent runtime
-                    (UiUserSubmitted pending.pendingPromptText)
-            RestartPendingTurn ->
-                emitUiEvent runtime UiTurnRestarted
-            ContinuePendingTurn ->
-                pure ()
-    result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
-    finishTurnWithCooldownRetry
-        allowCooldownRetry env pending.pendingExitAfter result
+runPendingTurn = SessionLifecycle.runPendingTurn sessionContinuation
 
 finishTurn
     :: SessionEnv
     -> Bool
     -> TurnResult
     -> IO RunResult
-finishTurn = finishTurnWithCooldownRetry True
-
-finishTurnWithCooldownRetry
-    :: Bool
-    -> SessionEnv
-    -> Bool
-    -> TurnResult
-    -> IO RunResult
-finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
-    TurnSucceeded -> do
-        env.sessionQueueRecap RecapTurnSummary
-        writeIORef env.sessionUnavailableProviders []
-        selectionId <- readIORef env.sessionAccountSelectionId
-        accountId <- readIORef env.sessionAccountId
-        when
-            (not (Text.null (Text.strip selectionId))
-                && not (Text.null (Text.strip accountId))) $
-            saveProjectAccount
-                env.sessionProjectRoot
-                env.sessionProvider
-                selectionId
-                accountId
-        case env.sessionFullscreen of
-            Nothing -> putTrailingNewline env.sessionPrinted
-            Just _ -> pure ()
-        if exitAfter
-            then pure RunQuit
-            else continueAfterTurn env
-    TurnCancelled -> do
-        case env.sessionFullscreen of
-            Nothing -> putTrailingNewline env.sessionPrinted
-            Just _ -> pure ()
-        if exitAfter
-            then pure RunQuit
-            else repl env
-    TurnFailed ->
-        if exitAfter
-            then exitFailure
-            else do
-                case env.sessionFullscreen of
-                    Nothing -> putTrailingNewline env.sessionPrinted
-                    Just _ -> pure ()
-                continueAfterTurn env
-    TurnRestartRequested level pending -> do
-        setSessionEffort env level
-        writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
-        case env.sessionFullscreen of
-            Just runtime ->
-                emitUiEvent runtime
-                    (UiSystemMessage
-                        ("restarting current turn with " <> level <> " effort"))
-            Nothing -> pure ()
-        result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
-        finishTurnWithCooldownRetry allowCooldownRetry env exitAfter result
-    TurnProviderUnavailable apiError pending ->
-        let pending' = setPendingExitAfter exitAfter pending
-        in do
-            now <- getCurrentTime
-            case providerRecoveryPreference
-                    allowCooldownRetry now apiError of
-                RetryCurrentProviderAfter delay ->
-                    waitAndRetryPendingTurn
-                        (replWithDraft env)
-                        (runPendingTurnWithCooldownRetry
-                            False RestartPendingTurn env)
-                        env
-                        delay
-                        pending'
-                TryProviderFallback ->
-                    requestAutomaticProviderFallback env apiError pending'
-                        >>= \case
-                        Just providerTransition ->
-                            pure (RunSwitchProvider providerTransition)
-                        Nothing -> do
-                            reportProviderUnavailable
-                                env.sessionFullscreen apiError
-                            if exitAfter
-                                then exitFailure
-                                else do
-                                    notifyAttention stderr InputRequested
-                                    replWithDraft env pending.pendingPromptText
-
-continueAfterTurn :: SessionEnv -> IO RunResult
-continueAfterTurn env = do
-    queued <- case env.sessionFullscreen of
-        Nothing -> pure False
-        Just runtime -> hasQueuedFullscreenInput runtime
-    when (not queued) $
-        notifyAttention stderr InputRequested
-    repl env
+finishTurn = SessionLifecycle.finishTurn sessionContinuation
 
 runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
 runSessionRecap registerCancel env kind = do
@@ -4232,7 +4106,6 @@ replWithDraft env@SessionEnv
     , sessionModelCatalog = catalog
     , sessionDialect = dialect
     , sessionStartupUnavailable = startupUnavailableRef
-    , sessionPrinted = printed
     , sessionParams = paramsRef
     , sessionPolicy = policyRef
     , sessionPersist = persist
@@ -4590,7 +4463,7 @@ replWithDraft env@SessionEnv
                                 pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
                                     setFullscreenImagePreviews runtime []
-                                writeIORef printed False
+                                resetRenderPrintedText render
                                 let turnInputs =
                                         if null pendingImages
                                             then [UserMessage text]
@@ -4646,7 +4519,7 @@ replWithDraft env@SessionEnv
                                                 invocation arguments)
                                         , userInput
                                         ]
-                                writeIORef printed False
+                                resetRenderPrintedText render
                                 fullscreenEvent (UiUserSubmitted line)
                                 result <- runOneTurn env line skillInputs
                                 finishTurn env False result
@@ -4710,7 +4583,7 @@ replWithDraft env@SessionEnv
                                             Text.putStrLn
                                                 (roleMuted color
                                                     (glyphOk <> "pasted " <> sizes))
-                                        writeIORef printed False
+                                        resetRenderPrintedText render
                                         fullscreenEvent
                                             (UiUserSubmitted promptText)
                                         let turnInputs =
@@ -5596,7 +5469,7 @@ replWithDraft env@SessionEnv
                     Text.hPutStrLn stderr (roleError color err)
                 next
             Right skillInputs -> do
-                writeIORef printed False
+                resetRenderPrintedText render
                 fullscreenEvent (UiUserSubmitted original)
                 result <- runOneTurn env original skillInputs
                 finishTurn env False result
@@ -6000,7 +5873,7 @@ enterPlanFromSlash :: SessionEnv -> Maybe Text -> IO (Maybe ProviderTransition)
 enterPlanFromSlash env@SessionEnv
     { sessionPlanMode = planMode
     , sessionPersist = persist
-    , sessionPrinted = printed
+    , sessionRender = render
     , sessionFullscreen = fullscreen
     } maybeDescription = do
     discardStore <- newIORef Nothing
@@ -6029,7 +5902,7 @@ enterPlanFromSlash env@SessionEnv
             path <- planFilePath planMode
             let message = "plan mode on (" <> toText path <> ")"
             report message (glyphSession <> message)
-            writeIORef printed False
+            resetRenderPrintedText render
             case fullscreen of
                 Nothing -> pure ()
                 Just runtime ->
@@ -6048,7 +5921,7 @@ enterPlanFromSlash env@SessionEnv
                                 pure (Just providerTransition)
                 _ -> do
                     when (isNothing fullscreen) $
-                        putTrailingNewline printed
+                        putTrailingNewline render
                     pure Nothing
 
 preparePromptSkillInputs
@@ -6165,8 +6038,8 @@ putImagePreview previewIdRef color images = do
             Text.putStrLn block
             hFlush stdout
 
-putTrailingNewline :: IORef Bool -> IO ()
-putTrailingNewline printed = do
-    didPrint <- readIORef printed
+putTrailingNewline :: RenderConfig -> IO ()
+putTrailingNewline render = do
+    didPrint <- renderPrintedText render
     if didPrint then putStrLn "" else pure ()
 
