@@ -338,6 +338,36 @@ spec = describe "bounded fullscreen history window" do
         map (.blockBody) blocks
             `shouldBe` ["current prompt", "current answer"]
 
+    it "keeps mid-turn steering in durable history" do
+        let projected =
+                sessionHistoryTurn
+                    (21 :: Int)
+                    (sessionTurn
+                        TranscriptAppend
+                        "inspect the repository"
+                        [ userMessage "generated skill context"
+                        , userMessage "inspect the repository"
+                        , assistantMessage "I will inspect it."
+                        , userMessage "# Skill instructions: parser\nhidden"
+                        , userMessage "focus on the parser"
+                        , assistantMessage "Done"
+                        ])
+            blocks = toList projected.historyTurnBlocks
+        map (.blockKind) blocks
+            `shouldBe`
+                [ BlockUser
+                , BlockAssistant
+                , BlockUser
+                , BlockAssistant
+                ]
+        map (.blockBody) blocks
+            `shouldBe`
+                [ "inspect the repository"
+                , "I will inspect it."
+                , "focus on the parser"
+                , "Done"
+                ]
+
     it "renders manual compaction as a single checkpoint summary" do
         let turnValue =
                 (sessionTurn TranscriptReplace "/compact" [])

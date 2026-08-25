@@ -43,6 +43,7 @@ import Agent.CLI.Recap
     , RecapRequest(..)
     )
 import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Clipboard (loadImagesFromPastedText)
 import Agent.CLI.Command
 import Agent.CLI.LearnedSkills
     ( defaultLearnedSkillContextMaxChars
@@ -766,7 +767,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 <> " is disabled by the current /shell setting."))
                     True -> approveRegisteredTool call
             , loopReadSteering =
-                map UserMessage <$> readIORef steeringRef
+                readIORef steeringRef
             , loopCommitSteering = \count ->
                 atomicModifyIORef' steeringRef \pending ->
                     (drop count pending, ())
@@ -964,9 +965,23 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
-            (\text ->
-                atomicModifyIORef' steeringRef \pending ->
-                    (pending <> [text], ()))
+            (\text -> do
+                images <- loadImagesFromPastedText text
+                let input = case images of
+                        Just attached@(_:_) ->
+                            UserMultimodal
+                                { userText = "Image attached."
+                                , userImages = attached
+                                }
+                        _ -> UserMessage text
+                callbacks.runnerPreparePromptSkillInputs
+                    env text [input] >>= \case
+                        Left err ->
+                            emitUiEvent runtime (UiErrorMessage err)
+                        Right inputs -> do
+                            atomicModifyIORef' steeringRef \pending ->
+                                (pending <> inputs, ())
+                            emitUiEvent runtime (UiInputSteered text))
             (writeChan btwRequests)
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
