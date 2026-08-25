@@ -98,7 +98,7 @@ import Agent.CLI.AccountPicker
     , accountPickerRow
     , loadAllAccountPickerOptions
     )
-import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
+import Agent.CLI.CancelWatch (withStdinPaused)
 import Agent.CLI.Clipboard
     ( formatImageSize
     , loadImagesFromPastedText
@@ -179,7 +179,6 @@ import Agent.CLI.Interrupt
     , newInterruptState
     , noteFullscreenCtrlC
     , withCtrlCHandler
-    , withTurnCancel
     )
 import Agent.CLI.Login
     ( connectProviderAccount
@@ -270,7 +269,6 @@ import Agent.CLI.Prompt
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , automaticRetryCountdownText
     , fallbackCandidates
     , isProviderUnavailable
     , ProviderRecoveryPreference(..)
@@ -341,6 +339,7 @@ import Agent.CLI.Session.Interaction
     , setSessionEffort
     , syncFullscreenPrompt
     )
+import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
 import Agent.CLI.Session.Selection
     ( currentSessionId
     , handleConversationSearch
@@ -494,7 +493,7 @@ import Agent.CLI.Worktree
     , removeWorktree
     , worktreeRoot
     )
-import Agent.Cancel (requestCancel, resetCancel, waitCancel)
+import Agent.Cancel (requestCancel)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Claude
     ( ClaudeCodeAuth(..)
@@ -689,10 +688,7 @@ import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
 import Text.Printf (printf)
 import Data.Time.Clock
-    ( NominalDiffTime
-    , addUTCTime
-    , diffUTCTime
-    , getCurrentTime
+    ( getCurrentTime
     , utctDay
     )
 import Data.Time.Format (defaultTimeLocale, formatTime)
@@ -711,7 +707,6 @@ import System.Exit (ExitCode(..), die, exitFailure)
 import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
 import System.Mem.StableName (StableName, makeStableName)
 import System.Process (readProcessWithExitCode)
-import System.Timeout (timeout)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -3905,7 +3900,13 @@ finishTurnWithCooldownRetry allowCooldownRetry env exitAfter = \case
             case providerRecoveryPreference
                     allowCooldownRetry now apiError of
                 RetryCurrentProviderAfter delay ->
-                    waitAndRetryPendingTurn env delay pending'
+                    waitAndRetryPendingTurn
+                        (replWithDraft env)
+                        (runPendingTurnWithCooldownRetry
+                            False RestartPendingTurn env)
+                        env
+                        delay
+                        pending'
                 TryProviderFallback ->
                     requestAutomaticProviderFallback env apiError pending'
                         >>= \case
@@ -3928,104 +3929,6 @@ continueAfterTurn env = do
     when (not queued) $
         notifyAttention stderr InputRequested
     repl env
-
-waitAndRetryPendingTurn
-    :: SessionEnv
-    -> NominalDiffTime
-    -> PendingTurn
-    -> IO RunResult
-waitAndRetryPendingTurn env delay pending = do
-    startedAt <- getCurrentTime
-    let retryAt = addUTCTime (max 0 delay) startedAt
-        cancel = env.sessionLoop.loopCancel
-        renderCountdown seconds =
-            let message = automaticRetryCountdownText seconds
-            in case env.sessionFullscreen of
-                Just runtime ->
-                    emitUiEvent runtime
-                        (UiSetNotice (Just (progressNotice message)))
-                Nothing ->
-                    renderEvent env.sessionRender (ActivityUpdated message)
-        waitForCancel = do
-            let poll lastShown = do
-                    now <- getCurrentTime
-                    let remaining = max 0 (diffUTCTime retryAt now)
-                        seconds = max 0 (ceiling remaining)
-                    when (lastShown /= Just seconds) (renderCountdown seconds)
-                    if remaining <= 0
-                        then do
-                            -- Give the provider reset boundary a small margin
-                            -- so the retry does not race a rounded timestamp.
-                            isJust <$> timeout 250000 (waitCancel cancel)
-                        else do
-                            let waitMicros =
-                                    max 1 $
-                                        min 1000000
-                                            (ceiling
-                                                (realToFrac remaining
-                                                    * 1_000_000
-                                                    :: Double))
-                            cancelled <-
-                                isJust <$> timeout waitMicros (waitCancel cancel)
-                            if cancelled
-                                then pure True
-                                else poll (Just seconds)
-            poll Nothing
-        waitAction = case env.sessionFullscreen of
-            Just _ -> waitForCancel
-            Nothing ->
-                withEscCancel cancel env.sessionEscPaused waitForCancel
-    setPersistenceActivity
-        env.sessionPersist
-        "provider_cooldown"
-        "Provider temporarily unavailable; waiting before automatically retrying the pending turn."
-        (Just retryAt)
-    resetCancel cancel
-    case env.sessionFullscreen of
-        Just _ -> pure ()
-        Nothing -> renderEvent env.sessionRender TurnStarted
-    cancelled <-
-        (withTurnCancel env.sessionInterrupt cancel waitAction)
-            `finally` do
-                resetCancel cancel
-                clearPersistenceActivity env.sessionPersist
-                case env.sessionFullscreen of
-                    Just _ -> pure ()
-                    Nothing -> clearThinking env.sessionRender
-    if cancelled
-        then do
-            case env.sessionFullscreen of
-                Just runtime ->
-                    emitUiEvent runtime
-                        (UiSetNotice
-                            (Just
-                                (infoNotice
-                                    "automatic retry cancelled")))
-                Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
-                        (roleMuted color "automatic retry cancelled")
-            if pending.pendingExitAfter
-                then pure RunQuit
-                else replWithDraft env pending.pendingPromptText
-        else do
-            case env.sessionFullscreen of
-                Just runtime ->
-                    emitUiEvent runtime
-                        (UiSetNotice
-                            (Just (successNotice "retrying turn")))
-                Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
-                        (roleMuted color (glyphOk <> "retrying turn"))
-            setPersistenceActivity
-                env.sessionPersist
-                "provider_retry"
-                "Retrying the pending turn after the provider cooldown."
-                Nothing
-            runPendingTurnWithCooldownRetry
-                False RestartPendingTurn env pending
-                `finally` clearPersistenceActivity env.sessionPersist
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
