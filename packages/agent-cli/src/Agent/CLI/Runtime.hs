@@ -210,10 +210,8 @@ import Agent.CLI.McpStatus
     , formatMcpProgress
     , summarizeMcpStatuses
     )
-import Agent.CLI.ModelPicker (pickModel)
 import Agent.CLI.ModelConfig
     ( ConnectionKind(..)
-    , ModelCatalog
     , ModelConnection(..)
     , ResponsesConnection(..)
     , builtinConnectionId
@@ -223,11 +221,8 @@ import Agent.CLI.ModelConfig
 import Agent.CLI.Models
     ( ModelOption(..)
     , ModelTarget(..)
-    , PickerState(..)
     , catalogModelIds
     , defaultModelFor
-    , defaultModelOptionFor
-    , initialPickerStateResolved
     , modelTargetRequiresRebuild
     , rawModelOption
     , resolveConfiguredModel
@@ -336,11 +331,26 @@ import Agent.CLI.Render
     , renderEvent
     )
 import Agent.CLI.Session
+import Agent.CLI.Session.Choices
+    ( accountUsageText
+    , atMay
+    , effortChoice
+    , modelChoice
+    , showAccountUsage
+    )
 import Agent.CLI.Session.History
     ( detectGitBranch
     , foldSessionItems
     , hydrateUiHistory
     , resetLiveConversation
+    )
+import Agent.CLI.Session.Selection
+    ( currentSessionId
+    , handleConversationSearch
+    , handleResume
+    , loadPrompt
+    , pickAgentChoice
+    , reservedSessionId
     )
 import Agent.CLI.SessionAdmin
     ( managedPostgresConfigForHome
@@ -440,7 +450,6 @@ import Agent.CLI.TUI.App
     , readFullscreenLineOrWithCatalog
     , readFullscreenLineWithCatalog
     , requestFullscreenPermission
-    , requestFullscreenChoice
     , requestFullscreenChoiceWithBody
     , requestFullscreenOnboarding
     , requestFullscreenResume
@@ -467,11 +476,9 @@ import Agent.TUI.Model
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.CLI.Usage
-    ( AccountUsageLine(..)
-    , formatGrokLimitStatus
+    ( formatGrokLimitStatus
     , formatOpenAiLimitStatus
     , formatOpenRouterLimitStatus
-    , formatUsageReport
     )
 import Agent.CLI.WebFetch
     ( closeWebFetchRuntime
@@ -659,7 +666,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson as Aeson
 import Data.IORef
-import Data.List (elemIndex, findIndex, sortOn)
+import Data.List (findIndex, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
@@ -5871,152 +5878,6 @@ replWithDraft env@SessionEnv
                             (roleError color
                                 "terminal clipboard is unavailable")
 
-modelChoice
-    :: ModelCatalog
-    -> Maybe FullscreenRuntime
-    -> Bool
-    -> Text
-    -> Provider
-    -> Text
-    -> DialectId
-    -> IO (Maybe ModelOption)
-modelChoice
-        catalog fullscreen color connectionId provider current currentDialect =
-    case fullscreen of
-    Nothing ->
-        pickModel
-            catalog color connectionId provider current currentDialect
-    Just runtime -> do
-        picker <-
-            initialPickerStateResolved
-                catalog connectionId provider current currentDialect
-        let options = picker.pickerAll
-            rows =
-                [ ( option.modelTarget.targetConnectionId
-                        <> " · "
-                        <> option.modelTarget.targetModelId
-                        <> " · "
-                        <> dialectSlug option.modelTarget.targetDialect
-                  , fromMaybe "" option.modelLabel
-                  )
-                | option <- options
-                ]
-        requestFullscreenChoice
-            runtime
-            "Model"
-            picker.pickerIndex
-            rows
-            >>= \case
-                Just index
-                    | index >= 0
-                    , index < length options ->
-                        pure (Just (options !! index))
-                _ -> pure Nothing
-
-effortChoice
-    :: Maybe FullscreenRuntime
-    -> Text
-    -> IO (Maybe Text)
-effortChoice fullscreen current = case fullscreen of
-    Nothing -> pure Nothing
-    Just runtime -> do
-        let efforts = reasoningEfforts
-            initial = fromMaybe 0 (elemIndex current efforts)
-        requestFullscreenChoice
-            runtime
-            "Reasoning effort"
-            initial
-            [(effort, "") | effort <- efforts]
-            >>= \case
-                Just index
-                    | index >= 0
-                    , index < length efforts ->
-                        pure (Just (efforts !! index))
-                _ -> pure Nothing
-
-atMay :: Int -> [a] -> Maybe a
-atMay index values
-    | index < 0 = Nothing
-    | otherwise = case drop index values of
-        value : _ -> Just value
-        [] -> Nothing
-
-showAccountUsage
-    :: Provider
-    -> Maybe TokenProvider
-    -> Maybe OpenAI.Pool
-    -> IO ()
-showAccountUsage provider tokenProvider openAiPool = do
-    color <- resolveColor stdout
-    accountUsageText color provider tokenProvider openAiPool
-        >>= Text.putStrLn
-
-accountUsageText
-    :: Bool
-    -> Provider
-    -> Maybe TokenProvider
-    -> Maybe OpenAI.Pool
-    -> IO Text
-accountUsageText color provider tokenProvider openAiPool = do
-    now <- getCurrentTime
-    case provider of
-        OpenAIProvider ->
-            case openAiPool of
-                Just pool -> do
-                    snapshots <- OpenAI.snapshotAccounts pool
-                    lines_ <- mapM fetchSnapshot snapshots
-                    pure (formatUsageReport color now lines_)
-                Nothing ->
-                    case tokenProvider of
-                        Just provider_ ->
-                            getNextToken provider_ Nothing >>= \case
-                                Left err ->
-                                    pure $
-                                        roleError color
-                                            ("usage: "
-                                                <> formatApiErrorInlineAt now err)
-                                Right credential -> do
-                                    result <- fetchUsage
-                                        credential.accessToken credential.accountId
-                                    pure $
-                                        formatUsageReport color now
-                                            [ AccountUsageLine
-                                                { usageAccountId = credential.accountId
-                                                , usageCooldownUntil = Nothing
-                                                , usageResult = result
-                                                }
-                                            ]
-                        Nothing ->
-                            pure $
-                                roleMuted color
-                                    "usage: no OpenAI credentials loaded"
-        ClaudeCodeProvider ->
-            loadClaudeCodeAuth >>= \case
-                Left err ->
-                    pure (roleError color ("usage: " <> err))
-                Right auth ->
-                    pure $
-                        roleMuted color $
-                            "usage: Claude Code "
-                                <> fromMaybe "subscription" auth.subscriptionType
-                                <> " · "
-                                <> auth.accountLabel
-                                <> " (run `claude /status` for live limits)"
-        _ ->
-            pure $
-                roleMuted color
-                    "usage: ChatGPT Codex windows only (xAI/OpenRouter have no account usage API here)"
-
-fetchSnapshot :: OpenAI.AccountSnapshot -> IO AccountUsageLine
-fetchSnapshot snapshot = do
-    result <- fetchUsage
-        snapshot.snapshotAuth.accessToken
-        snapshot.snapshotAuth.accountId
-    pure AccountUsageLine
-        { usageAccountId = snapshot.snapshotAuth.accountId
-        , usageCooldownUntil = snapshot.snapshotCooldownUntil
-        , usageResult = result
-        }
 requestReload
     :: Maybe FullscreenRuntime
     -> Persistence
@@ -6255,254 +6116,4 @@ putTrailingNewline :: IORef Bool -> IO ()
 putTrailingNewline printed = do
     didPrint <- readIORef printed
     if didPrint then putStrLn "" else pure ()
-
-loadPrompt :: CliOptions -> IO (Maybe ManagedTurnRequest)
-loadPrompt options =
-  case
-        ( options.optPrompt
-        , options.optPromptFile
-        , options.optManagedTurnFile
-        )
-    of
-    (Just text, _, _) ->
-        pure (Just (managedTurnRequestFromText (Text.strip text)))
-    (_, Just path, _) ->
-        loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
-    (_, _, Just path) ->
-        loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
-    _ -> pure Nothing
-
-handleResume
-    :: StorePool
-    -> Maybe FullscreenRuntime
-    -> Maybe Text
-    -> Persistence
-    -> IO (Maybe RunResult)
-handleResume databasePool fullscreen maybeId persist = do
-    color <- resolveColor stderr
-    home <- getHomeDirectory
-    let reportInfo message =
-            case fullscreen of
-                Nothing ->
-                    Text.hPutStrLn stderr
-                        (roleMuted color (glyphSession <> message))
-                Just runtime ->
-                    emitUiEvent runtime (UiSystemMessage message)
-        reportError message =
-            case fullscreen of
-                Nothing ->
-                    Text.hPutStrLn stderr (roleError color message)
-                Just runtime ->
-                    emitUiEvent runtime (UiErrorMessage message)
-        root = sessionsRoot home
-        resume sessionId = do
-            currentId <- currentSessionId persist
-            if Just sessionId == currentId
-                then do
-                    reportInfo ("already on session " <> sessionId)
-                    pure Nothing
-                else
-                    loadSession databasePool root sessionId >>= \case
-                        Left err -> do
-                            reportError err
-                            pure Nothing
-                        Right _ -> pure (Just (RunResumeSession sessionId))
-    case maybeId of
-        Just sessionId -> resume sessionId
-        Nothing -> do
-            sessions <- listSessions databasePool root
-            currentId <- currentSessionId persist
-            pickResumeChoice
-                databasePool fullscreen color root currentId sessions >>= \case
-                Nothing -> pure Nothing
-                Just sessionId -> resume sessionId
-
-handleConversationSearch
-    :: StorePool
-    -> Maybe FullscreenRuntime
-    -> Text
-    -> Persistence
-    -> IO (Maybe RunResult)
-handleConversationSearch databasePool fullscreen query persist = do
-    color <- resolveColor stderr
-    home <- getHomeDirectory
-    let root = sessionsRoot home
-        reportError message =
-            case fullscreen of
-                Nothing ->
-                    Text.hPutStrLn stderr (roleError color message)
-                Just runtime ->
-                    emitUiEvent runtime (UiErrorMessage message)
-        reportInfo message =
-            case fullscreen of
-                Nothing ->
-                    Text.hPutStrLn stderr
-                        (roleMuted color (glyphSession <> message))
-                Just runtime ->
-                    emitUiEvent runtime (UiSystemMessage message)
-    sessions <- listSessions databasePool root
-    searchResumeEntries databasePool sessions query >>= \case
-        Left err -> do
-            reportError err
-            pure Nothing
-        Right [] -> do
-            reportInfo ("no conversations matched “" <> Text.strip query <> "”")
-            pure Nothing
-        Right entries -> do
-            currentId <- currentSessionId persist
-            pickSearchChoice
-                databasePool
-                fullscreen
-                color
-                root
-                currentId
-                sessions
-                query
-                entries
-                >>= \case
-                    Nothing -> pure Nothing
-                    Just sessionId ->
-                        handleResume
-                            databasePool
-                            fullscreen
-                            (Just sessionId)
-                            persist
-
-searchResumeEntries
-    :: StorePool
-    -> [SessionMeta]
-    -> Text
-    -> IO (Either Text [ResumeEntry])
-searchResumeEntries databasePool sessions query
-    | Text.null (Text.strip query) =
-        pure (Right (map resumeEntryFromMeta sessions))
-    | otherwise =
-        StoreSession.searchConversationTurns
-            databasePool
-            (Text.strip query)
-            100
-            >>= \case
-                Left err -> pure (Left (renderStoreError err))
-                Right results ->
-                    pure (Right (resumeSearchEntries sessions results))
-
-pickSearchChoice
-    :: StorePool
-    -> Maybe FullscreenRuntime
-    -> Bool
-    -> OsPath
-    -> Maybe Text
-    -> [SessionMeta]
-    -> Text
-    -> [ResumeEntry]
-    -> IO (Maybe Text)
-pickSearchChoice
-    databasePool
-    fullscreen
-    color
-    root
-    currentId
-    sessions
-    query
-    entries =
-        case fullscreen of
-            Nothing -> pickResumeEntries color entries
-            Just runtime -> do
-                now <- getCurrentTime
-                let browser =
-                        applyResumeSearchResults
-                            query
-                            entries
-                            (initialResumeBrowser now entries)
-                    deleteEntry sessionId
-                        | currentId == Just sessionId =
-                            pure (Left "cannot delete the current session")
-                        | otherwise =
-                            deleteSession databasePool root sessionId
-                fmap (.resumeId)
-                    <$> requestFullscreenResume
-                        runtime
-                        browser
-                        (loadResumeEntry databasePool root)
-                        deleteEntry
-                        (searchResumeEntries databasePool sessions)
-
-pickResumeChoice
-    :: StorePool
-    -> Maybe FullscreenRuntime
-    -> Bool
-    -> OsPath
-    -> Maybe Text
-    -> [SessionMeta]
-    -> IO (Maybe Text)
-pickResumeChoice databasePool fullscreen color root currentId sessions =
-  case fullscreen of
-    Nothing -> pickResumeSession databasePool color root sessions
-    Just runtime -> do
-        now <- getCurrentTime
-        let browser =
-                initialResumeBrowser now (map resumeEntryFromMeta sessions)
-            deleteEntry sessionId
-                | currentId == Just sessionId =
-                    pure (Left "cannot delete the current session")
-                | otherwise =
-                    deleteSession databasePool root sessionId
-        fmap (.resumeId)
-            <$> requestFullscreenResume
-                runtime
-                browser
-                (loadResumeEntry databasePool root)
-                deleteEntry
-                (searchResumeEntries databasePool sessions)
-
-pickAgentChoice
-    :: Maybe FullscreenRuntime
-    -> Bool
-    -> AgentTarget
-    -> [AgentEntry]
-    -> IO (Maybe AgentTarget)
-pickAgentChoice fullscreen color selected entries = case fullscreen of
-    Nothing -> pickAgentViewport color selected entries
-    Just runtime ->
-        requestFullscreenChoice
-            runtime
-            "Agents"
-            (fromMaybe 0
-                (findIndex ((== selected) . (.agentTarget)) entries))
-            [ ( entry.agentPath
-              , entry.agentStatus
-                    <> case entry.agentTranscript of
-                        first : _
-                            | not (Text.null (Text.strip first)) ->
-                                " · " <> Text.take 80 (Text.strip first)
-                        _ -> ""
-              )
-            | entry <- entries
-            ]
-            >>= pure . (>>= (`atMay` map (.agentTarget) entries))
-
-currentSessionId
-    :: Persistence
-    -> IO (Maybe Text)
-currentSessionId = \case
-    PersistenceDisabled -> pure Nothing
-    PersistenceEnabled slotRef -> do
-        slot <- readIORef slotRef
-        pure $ case slot of
-            PersistencePending _ _ _ -> Nothing
-            PersistenceActive handle -> Just handle.sessionMeta.metaId
-
--- | Return the stable id already reserved for a pending session as well as
--- the id of an active one. Learned-skill evidence can safely record this id
--- before the successful turn creates the corresponding session row.
-reservedSessionId
-    :: Persistence
-    -> IO (Maybe Text)
-reservedSessionId = \case
-    PersistenceDisabled -> pure Nothing
-    PersistenceEnabled slotRef -> do
-        slot <- readIORef slotRef
-        pure $ case slot of
-            PersistencePending _ sessionId _ -> Just sessionId
-            PersistenceActive handle -> Just handle.sessionMeta.metaId
 
