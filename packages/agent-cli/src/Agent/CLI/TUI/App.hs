@@ -56,6 +56,7 @@ module Agent.CLI.TUI.App
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
+    , applyTextPromptEdit
     , maskedSecretText
     , normalizeTextOverlayInsertion
     , textOverlayDisplayText
@@ -165,7 +166,12 @@ import Agent.TUI.Markdown
     , markdownWidgetWithLinks
     , markdownWidgetWithSyntaxHighlightingAndLinks
     )
-import Agent.TUI.TextWidth (displayTerminalText)
+import Agent.TUI.TextWidth
+    ( clampGraphemeCursor
+    , displayTerminalText
+    , nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
 import Agent.Syntax
     ( SyntaxHighlighter
     , loadSyntaxHighlighter
@@ -1554,7 +1560,7 @@ resolveChoice confirmed = do
     resumeNativeProgressIfRunning
 
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
-handleTextPromptKey = \case
+handleTextPromptKey event = case event of
     V.EvKey V.KEsc [] -> resolveTextPrompt False
     V.EvKey (V.KChar 'c') modifiers
         | V.MCtrl `elem` modifiers -> do
@@ -1562,11 +1568,6 @@ handleTextPromptKey = \case
             _ <- handleCtrlC
             when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
-    V.EvKey V.KEnter [V.MShift] -> do
-        state <- get
-        case (.textInputMode) <$> state.appTextPrompt of
-            Just TextInputPlain -> insert "\n"
-            _ -> pure ()
     V.EvKey V.KPageUp [] ->
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
@@ -1575,67 +1576,94 @@ handleTextPromptKey = \case
         vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
     V.EvMouseDown _ _ V.BScrollDown _ ->
         vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
-    V.EvKey V.KBS [] -> edit \draft cursor ->
-        if cursor <= 0
-            then (draft, cursor)
-            else
-                ( Text.take (cursor - 1) draft <> Text.drop cursor draft
-                , cursor - 1
-                )
-    V.EvKey V.KDel [] -> edit \draft cursor ->
-        if cursor >= Text.length draft
-            then (draft, cursor)
-            else
-                ( Text.take cursor draft <> Text.drop (cursor + 1) draft
-                , cursor
-                )
-    V.EvKey V.KLeft [] -> move (-1)
-    V.EvKey V.KRight [] -> move 1
-    V.EvKey V.KHome [] -> edit \draft cursor ->
-        (draft, lineStartCursor draft cursor)
-    V.EvKey V.KEnd [] -> edit \draft cursor ->
-        (draft, lineEndCursor draft cursor)
-    V.EvKey (V.KChar 'w') modifiers
-        | V.MCtrl `elem` modifiers ->
-            edit deleteWordBefore
-    V.EvKey (V.KChar 'u') modifiers
-        | V.MCtrl `elem` modifiers ->
-            edit deleteToLineStart
-    V.EvKey (V.KChar 'k') modifiers
-        | V.MCtrl `elem` modifiers ->
-            edit deleteToLineEnd
-    V.EvKey (V.KChar character) [] ->
-        insertForMode (Text.singleton character)
-    V.EvPaste bytes ->
-        insertForMode (Composer.decodePaste bytes)
-    _ -> pure ()
-  where
-    insertForMode raw = do
-        state <- get
-        let mode =
-                maybe TextInputPlain (.textInputMode) state.appTextPrompt
-        insert (normalizeTextOverlayInsertion mode raw)
-    edit change =
+    _ ->
         modify' \state ->
             state
                 { appTextPrompt =
                     (\prompt ->
-                        let (draft, cursor) =
-                                change prompt.textDraft prompt.textCursor
-                        in prompt
-                            { textDraft = draft
-                            , textCursor =
-                                max 0 (min (Text.length draft) cursor)
-                            })
+                        fromMaybe prompt (applyTextPromptEdit event prompt))
                         <$> state.appTextPrompt
                 }
-    insert inserted =
-        edit \draft cursor ->
+
+-- | Apply one text-editing key to a fullscreen prompt overlay.
+--
+-- Cursor offsets are normalized to grapheme boundaries before and after the
+-- edit so movement, deletion, and rendering agree for multi-code-point glyphs.
+applyTextPromptEdit :: V.Event -> TextOverlay -> Maybe TextOverlay
+applyTextPromptEdit event prompt = case event of
+    V.EvKey V.KEnter [V.MShift] ->
+        Just $
+            if prompt.textInputMode == TextInputPlain
+                then insert "\n"
+                else prompt
+    V.EvKey V.KBS [] ->
+        Just $ edit \draft cursor ->
+            let previous = previousGraphemeBoundary draft cursor
+            in ( Text.take previous draft <> Text.drop cursor draft
+               , previous
+               )
+    V.EvKey V.KDel [] ->
+        Just $ edit \draft cursor ->
+            let next = nextGraphemeBoundary draft cursor
+            in ( Text.take cursor draft <> Text.drop next draft
+               , cursor
+               )
+    V.EvKey V.KLeft [] ->
+        Just $ move previousGraphemeBoundary
+    V.EvKey V.KRight [] ->
+        Just $ move nextGraphemeBoundary
+    V.EvKey V.KHome [] ->
+        Just $ edit \draft cursor ->
+            (draft, lineStartCursor draft cursor)
+    V.EvKey V.KEnd [] ->
+        Just $ edit \draft cursor ->
+            (draft, lineEndCursor draft cursor)
+    V.EvKey (V.KChar 'w') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just $ edit deleteWordBefore
+    V.EvKey (V.KChar 'u') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just $ edit deleteToLineStart
+    V.EvKey (V.KChar 'k') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just $ edit deleteToLineEnd
+    V.EvKey (V.KChar character) [] ->
+        Just $ insert (Text.singleton character)
+    V.EvPaste bytes ->
+        Just $ insert (Composer.decodePaste bytes)
+    _ -> Nothing
+  where
+    edit = editWith clampGraphemeCursor
+    editWith clampCursor change =
+        let sourceCursor =
+                clampGraphemeCursor prompt.textDraft prompt.textCursor
+            (draft, requestedCursor) =
+                change prompt.textDraft sourceCursor
+        in prompt
+            { textDraft = draft
+            , textCursor =
+                clampCursor draft requestedCursor
+            }
+    insert raw =
+        let inserted =
+                normalizeTextOverlayInsertion prompt.textInputMode raw
+        in editWith clampInsertedCursor \draft cursor ->
             ( Text.take cursor draft <> inserted <> Text.drop cursor draft
             , cursor + Text.length inserted
             )
-    move delta =
-        edit \draft cursor -> (draft, cursor + delta)
+    move boundary =
+        edit \draft cursor -> (draft, boundary draft cursor)
+    -- Inserted text can combine with the following source text. In that case
+    -- the requested post-insertion offset lies inside the new grapheme, so
+    -- keep the cursor after that grapheme rather than moving it backward.
+    clampInsertedCursor draft requestedCursor =
+        let boundedCursor =
+                max 0 (min (Text.length draft) requestedCursor)
+            previous =
+                clampGraphemeCursor draft boundedCursor
+        in if previous == boundedCursor
+            then previous
+            else nextGraphemeBoundary draft boundedCursor
 
 resolveTextPrompt :: Bool -> EventM Name AppState ()
 resolveTextPrompt confirmed = do
