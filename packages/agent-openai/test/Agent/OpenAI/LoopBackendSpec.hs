@@ -320,6 +320,27 @@ spec = do
                 (ResponseFailedEvent (Aeson.object []) Nothing KeyMap.empty)
                 `shouldBe` False
 
+        it "treats function-call argument events as replay-unsafe" do
+            streamOutputObserved
+                ResponseFunctionCallArgumentsDeltaEvent
+                    { delta = Just "{}"
+                    , streamItemId = Just "fc_1"
+                    , streamOutputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                `shouldBe` True
+            streamOutputObserved
+                ResponseFunctionCallArgumentsDoneEvent
+                    { arguments = Just "{}"
+                    , functionName = Just "read_file"
+                    , streamItemId = Just "fc_1"
+                    , streamOutputIndex = Just 0
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.empty
+                    }
+                `shouldBe` True
+
     describe "statelessResponsesBackend" do
         it "replays the local transcript on tool follow-ups" do
             seen <- newIORef []
