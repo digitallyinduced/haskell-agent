@@ -3,6 +3,7 @@ module Agent.OpenAI.Request
     ( sanitizeCodexRequest
     ) where
 
+import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -19,11 +20,24 @@ import qualified Data.Aeson.KeyMap as KeyMap
 -- client feature flag is on; the current Responses Lite endpoint rejects it as
 -- an unknown parameter, so strip it at the wire boundary and leave the
 -- in-memory request params unchanged.
+--
+-- Responses Lite also requires @parallel_tool_calls=false@. Compaction and
+-- other request rebuilds can flip that flag back to true, so restore the
+-- Lite contract here for both HTTP and WebSocket.
 sanitizeCodexRequest :: ResponseCreateParams -> ResponseCreateParams
-sanitizeCodexRequest ResponseCreateParams{promptCacheRetention = _, input, ..} =
+sanitizeCodexRequest ResponseCreateParams
+        { promptCacheRetention = _
+        , input
+        , parallelToolCalls
+        , ..
+        } =
     ResponseCreateParams
         { promptCacheRetention = Nothing
         , input = fmap stripContentItemKindsInput input
+        , parallelToolCalls =
+            if maybe False isCodexResponsesLiteModel model
+                then Just False
+                else parallelToolCalls
         , ..
         }
 

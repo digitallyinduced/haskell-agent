@@ -27,6 +27,7 @@ module Agent.OpenAI.Compaction
     , newSessionUserText
     ) where
 
+import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
@@ -64,6 +65,9 @@ compactionTriggerItem =
 
 -- | Build a normal streaming Responses request whose final input item asks the
 -- model to emit an opaque compaction checkpoint.
+--
+-- Regular Codex compaction enables parallel tool calls. Responses Lite
+-- rejects that value, so keep the flag false for sol/terra/luna.
 buildRemoteCompactionRequest
     :: ResponseCreateParams
     -> [ResponseItem]
@@ -72,7 +76,8 @@ buildRemoteCompactionRequest params history =
     case withRequestInput params (history <> [compactionTriggerItem]) of
         ResponseCreateParams{..} ->
             ResponseCreateParams
-                { parallelToolCalls = Just True
+                { parallelToolCalls =
+                    Just (not (maybe False isCodexResponsesLiteModel model))
                 , previousResponseId = Nothing
                 , store = Just False
                 , stream = Just True
