@@ -16,6 +16,7 @@ module Agent.Provider
     , seedTokenProvider
     , accountFailureFromApiError
     , accountFailureReason
+    , credentialsExhaustedForRateLimit
     ) where
 
 import Agent.Error
@@ -29,6 +30,7 @@ import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
+import Data.Time.Clock (addUTCTime, getCurrentTime)
 
 data Provider
     = OpenAIProvider
@@ -214,3 +216,20 @@ accountFailureReason err failure =
                 { exhaustionErrorType = Nothing
                 , exhaustionStatusCode = Nothing
                 }
+
+-- | Convert a rate-limited credential report into the shared cooldown error.
+-- Other failure kinds do not represent a provider-wide exhaustion window.
+credentialsExhaustedForRateLimit
+    :: FailedCredential
+    -> IO (Maybe ApiError)
+credentialsExhaustedForRateLimit FailedCredential
+    { failure = AccountRateLimited { retryAfterSeconds }
+    , failureReason
+    } = do
+    now <- getCurrentTime
+    let seconds = max 1 (fromMaybe 60 retryAfterSeconds)
+    pure $ Just $ CredentialsExhausted
+        { retryAt = addUTCTime (fromIntegral seconds) now
+        , exhaustionReasons = [failureReason]
+        }
+credentialsExhaustedForRateLimit _ = pure Nothing

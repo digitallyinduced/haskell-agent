@@ -188,6 +188,14 @@ spec = do
             parseReplLine "/resume a b"
                 `shouldBe` ReplCommandError "usage: /resume [ID]"
 
+        it "searches past conversations with the full query suffix" do
+            parseReplLine "/search postgres migration"
+                `shouldBe` ReplSearch "postgres migration"
+            parseReplLine "/SEARCH   keep  spaces"
+                `shouldBe` ReplSearch "keep  spaces"
+            parseReplLine "/search"
+                `shouldBe` ReplCommandError "usage: /search <QUERY>"
+
         it "opens the agent hierarchy" do
             parseReplLine "/agents" `shouldBe` ReplAgents
             parseReplLine "/a" `shouldBe` ReplAgents
@@ -228,6 +236,12 @@ spec = do
             parseReplLine "/btw"
                 `shouldBe` ReplCommandError "usage: /btw <QUESTION>"
 
+        it "requests a session recap" do
+            parseReplLine "/recap" `shouldBe` ReplRecap
+            parseReplLine "/summarize" `shouldBe` ReplRecap
+            parseReplLine "/recap now"
+                `shouldBe` ReplCommandError "usage: /recap"
+
         it "rejects unknown levels, extra args, and unknown commands" do
             parseReplLine "/effort bogus"
                 `shouldBe` ReplCommandError
@@ -261,6 +275,7 @@ spec = do
                     , "effort"
                     , "plan"
                     , "btw"
+                    , "recap"
                     , "session"
                     , "session-info"
                     , "afk"
@@ -268,6 +283,7 @@ spec = do
                     , "rename"
                     , "login"
                     , "resume"
+                    , "search"
                     , "compact"
                     , "clear"
                     , "new"

@@ -287,6 +287,17 @@ spec = describe "Agent.CLI.Session" do
                             , outputTokens = 4
                             , cachedTokens = 2
                             }
+                loadSessions pool root
+                    [final.sessionMeta.metaId, "missing", final.sessionMeta.metaId]
+                    >>= \results ->
+                        fmap (fmap (\(meta, turns) -> (meta.metaId, turns))) results
+                            `shouldBe`
+                                [ Right
+                                    (final.sessionMeta.metaId, [normalTurn, compactTurn])
+                                , Left "session not found: missing"
+                                , Right
+                                    (final.sessionMeta.metaId, [normalTurn, compactTurn])
+                                ]
 
                 listed <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
@@ -380,6 +391,15 @@ spec = describe "Agent.CLI.Session" do
                     }
             Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
 
+        it "round-trips recap metadata" do
+            let meta =
+                    (testMeta "session-1")
+                        { metaLastRecap = Just "We fixed auth retries."
+                        , metaLastTurnSummary = Just "Auth retries wired"
+                        , metaLastRecapMainTurns = 3
+                        }
+            Aeson.eitherDecode (Aeson.encode meta) `shouldBe` Right meta
+
 testCreate :: StorePool -> OsPath -> SessionCreate
 testCreate pool root = SessionCreate
     { createPool = pool
@@ -424,6 +444,9 @@ testMeta sessionId = SessionMeta
     , metaInputTokens = 0
     , metaOutputTokens = 0
     , metaCachedTokens = 0
+    , metaLastRecap = Nothing
+    , metaLastTurnSummary = Nothing
+    , metaLastRecapMainTurns = 0
     }
 
 fixedTime :: UTCTime

@@ -72,6 +72,8 @@ data ReplAction
     -- ^ Enter plan mode. @Just@ starts a turn with that description.
     | ReplBtw Text
     -- ^ Ask an isolated one-shot question over the current context.
+    | ReplRecap
+    -- ^ Generate a display-only "where was I" recap of the current session.
     | ReplShowSession
     | ReplShowSessionInfo
     | ReplAfk (Maybe Text)
@@ -109,6 +111,8 @@ data ReplAction
     -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
     | ReplResume (Maybe Text)
     -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
+    | ReplSearch !Text
+    -- ^ Search persisted conversation turns and open matching sessions.
     | ReplCompact (Maybe Text)
     -- ^ Optional focus note for what to keep while compacting history.
     | ReplClear
@@ -167,6 +171,7 @@ slashCommands =
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
+    , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
@@ -174,6 +179,7 @@ slashCommands =
     , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
     , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
     , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
+    , cmd "search" [] "/search <QUERY>" "Search past conversations and resume a match" True
     , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
     , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
     , cmd "new" [] "/new" "Start a fresh persisted session id" False
@@ -334,6 +340,10 @@ parseSlash catalog raw line = case Text.words line of
                 in if Text.null question
                     then ReplCommandError "usage: /btw <QUESTION>"
                     else ReplBtw question
+            "recap" ->
+                if null args
+                    then ReplRecap
+                    else ReplCommandError "usage: /recap"
             "session" ->
                 if null args
                     then ReplShowSession
@@ -365,6 +375,12 @@ parseSlash catalog raw line = case Text.words line of
                     then ReplLogin
                     else ReplCommandError "usage: /login"
             "resume" -> parseResumeCommand args
+            "search" ->
+                let query =
+                        Text.strip (Text.drop (Text.length command) line)
+                in if Text.null query
+                    then ReplCommandError "usage: /search <QUERY>"
+                    else ReplSearch query
             "compact" ->
                 let focus =
                         Text.strip (Text.drop (Text.length command) line)

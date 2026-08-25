@@ -4,8 +4,16 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
+import Agent.TUI.Model
+    ( BlockKind(..)
+    , BlockState(..)
+    , UiBlock(..)
+    , UiState(..)
+    , initialUiState
+    )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -28,9 +36,9 @@ spec = do
                     Text.intercalate "\n"
                         [ "agents"
                         , "  ▾ root  ● active"
-                        , "  ├─ alpha  ● running"
-                        , "› │  └─ gamma  ✓ done"
-                        , "  └─ beta  ● running"
+                        , "  ├─ alpha  ● running · gpt-5.6-luna"
+                        , "› │  └─ gamma  ✓ done · gpt-5.6-luna"
+                        , "  └─ beta  ● running · gpt-5.6-luna"
                         , "  viewing /root/alpha/gamma · /agents to switch"
                         ]
 
@@ -49,14 +57,19 @@ spec = do
                     Text.intercalate "\n"
                         [ "agents"
                         , "› ▾ root  ● active"
-                        , "  ├─ alpha  ● running"
-                        , "  │  ├─ one  ● running"
-                        , "  │  │  └─ deep  ✓ done"
-                        , "  │  └─ two  ✓ done"
-                        , "  └─ beta  ● running"
-                        , "     └─ leaf  ✓ done"
+                        , "  ├─ alpha  ● running · gpt-5.6-luna"
+                        , "  │  ├─ one  ● running · gpt-5.6-luna"
+                        , "  │  │  └─ deep  ✓ done · gpt-5.6-luna"
+                        , "  │  └─ two  ✓ done · gpt-5.6-luna"
+                        , "  └─ beta  ● running · gpt-5.6-luna"
+                        , "     └─ leaf  ✓ done · gpt-5.6-luna"
                         , "  viewing /root · /agents to switch"
                         ]
+
+        it "uses the model instead of redundant status text in narrow panes" do
+            let entries = [rootEntry, child "alpha" "/root/alpha" "running"]
+            agentEntryTreeLabelWithGlyphModel "●" entries 1 (entries !! 1)
+                `shouldBe` "└─ alpha  ● gpt-5.6-luna"
 
     describe "agent viewport selection" do
         let entries =
@@ -139,6 +152,59 @@ spec = do
                 , messageItem RoleAssistant "answer"
                 ]
                 `shouldBe` ["user: request"]
+
+    describe "responseItemsToUiState" do
+        it "replays child messages, reasoning, and tools into retained blocks" do
+            let ui =
+                    responseItemsToUiState False
+                        [ agentMessageItem "Investigate the renderer"
+                        , reasoningItem "Compare both paths" "private detail"
+                        , functionCallItem
+                            "call-1"
+                            "shell_command"
+                            "{\"command\":\"printf done\"}"
+                            (Just ItemCompleted)
+                        , functionOutputItem
+                            "call-1"
+                            (Just ItemCompleted)
+                        , messageItem
+                            RoleAssistant
+                            "Finished with **Markdown** intact."
+                        ]
+                blocks = toList ui.uiBlocks
+            map (.blockKind) blocks
+                `shouldBe`
+                    [ BlockUser
+                    , BlockThinking
+                    , BlockShell
+                    , BlockAssistant
+                    ]
+            map (.blockState) blocks
+                `shouldBe`
+                    [ BlockComplete
+                    , BlockComplete
+                    , BlockComplete
+                    , BlockComplete
+                    ]
+            map (.blockBody) blocks
+                `shouldBe`
+                    [ "Investigate the renderer"
+                    , "Compare both paths"
+                    , "ok"
+                    , "Finished with **Markdown** intact."
+                    ]
+
+        it "shows raw reasoning only when explicitly enabled" do
+            let items = [reasoningItem "Visible summary" "private detail"]
+                body visible =
+                    (.blockBody)
+                        <$> atMay
+                            (toList
+                                (responseItemsToUiState visible items).uiBlocks)
+                            0
+            body False `shouldBe` Just "Visible summary"
+            body True
+                `shouldBe` Just "Visible summary\nprivate detail"
 
     describe "responseItemStepPreviews" do
         it "coalesces tool calls with their outputs and returns newest first" do
@@ -255,8 +321,10 @@ rootEntry =
         { agentTarget = AgentRoot
         , agentPath = "/root"
         , agentStatus = "active"
+        , agentModel = Nothing
         , agentSteps = []
         , agentTranscript = ["user: hello", "assistant: ready"]
+        , agentConversation = initialUiState
         }
 
 child :: Text -> Text -> Text -> AgentEntry
@@ -265,8 +333,10 @@ child agentId path status =
         { agentTarget = AgentChild (SubagentId agentId)
         , agentPath = path
         , agentStatus = status
+        , agentModel = Just "gpt-5.6-luna"
         , agentSteps = []
         , agentTranscript = ["assistant: working"]
+        , agentConversation = initialUiState
         }
 
 messageItem :: ResponseRole -> Text -> ResponseItem
@@ -304,6 +374,53 @@ functionOutputItem callId status =
         , status
         , extraFields = KeyMap.empty
         }
+
+agentMessageItem :: Text -> ResponseItem
+agentMessageItem text =
+    KnownResponseItem ItemAgentMessage TaggedObject
+        { tag = "agent_message"
+        , fields = KeyMap.fromList
+            [ ( "content"
+              , Aeson.toJSON
+                    [ Aeson.object
+                        [ "type" Aeson..= ("input_text" :: Text)
+                        , "text" Aeson..= text
+                        ]
+                    ]
+              )
+            ]
+        }
+
+reasoningItem :: Text -> Text -> ResponseItem
+reasoningItem summary raw =
+    ReasoningItemValue ReasoningItem
+        { itemId = Nothing
+        , summary =
+            [ ReasoningSummaryPart
+                { partType = "summary_text"
+                , text = Just summary
+                , extraFields = KeyMap.empty
+                }
+            ]
+        , content =
+            Just
+                [ ReasoningTextPart
+                    { text = raw
+                    , extraFields = KeyMap.empty
+                    }
+                ]
+        , encryptedContent = Nothing
+        , status = Just ItemCompleted
+        , extraFields = KeyMap.empty
+        }
+
+atMay :: [a] -> Int -> Maybe a
+atMay values index
+    | index < 0 = Nothing
+    | otherwise =
+        case drop index values of
+            value : _ -> Just value
+            [] -> Nothing
 
 rightState :: Either (Maybe AgentTarget) AgentViewportState -> IO AgentViewportState
 rightState result = case result of

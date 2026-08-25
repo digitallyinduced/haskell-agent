@@ -37,6 +37,7 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
+    other-modules:    Agent.Telegram.Classify
     exposed-modules:  Agent.Telegram
                     , Agent.Telegram.Bridge
                     , Agent.Telegram.Client
@@ -87,5 +88,22 @@ test-suite agent-telegram-test
                     , base >= 4.17 && < 5
                     , bytestring
                     , containers
+                    , directory
+                    , filepath
                     , hspec >= 2.11 && < 2.12
+                    , safe-exceptions
+                    , temporary
                     , text
+
+benchmark media-downloads-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          MediaDownloads.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-telegram
+                    , base >= 4.17 && < 5
+                    , filepath
+                    , text
+                    , temporary
+                    , time

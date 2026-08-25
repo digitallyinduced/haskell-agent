@@ -16,8 +16,14 @@ import Agent.CLI.TUI.App
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
+    , mergeConversationView
+    , wrapFullscreenKeyboardVty
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , lambdaArtWidget
+    , quickStartRows
+    , quickStartVisible
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , onboardingVisibleRowIndices
@@ -32,8 +38,14 @@ import Agent.CLI.TUI.App
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , Name(..)
+    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
+    )
+import Agent.CLI.Terminal
+    ( kittyKeyboardDisambiguatePush
+    , kittyKeyboardPop
     )
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
@@ -53,10 +65,16 @@ import Agent.ToolDispatch
     )
 import Agent.TUI.Model
 import Agent.TUI.Motion
+import Control.Concurrent.STM (newTChanIO)
+import qualified Data.ByteString as ByteString
+import Data.Foldable (find)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Graphics.Vty as V
+import qualified Graphics.Vty.Output.Mock as VMock
 import Test.Hspec
 
 spec :: Spec
@@ -200,6 +218,52 @@ spec = do
                   )
                 ]
 
+    describe "fullscreen keyboard protocol lifecycle" do
+        it "pushes Cmd+V reporting and pops it before Vty shutdown" do
+            events <- newIORef
+                ([] :: [Either ByteString.ByteString ()])
+            (_, output) <- VMock.mockTerminal (80, 24)
+            vty <- mockVty
+                output
+                    { V.outputByteBuffer =
+                        \bytes ->
+                            modifyIORef' events (<> [Left bytes])
+                    }
+                (modifyIORef' events (<> [Right ()]))
+                ((Right () `elem`) <$> readIORef events)
+            let push =
+                    TextEncoding.encodeUtf8
+                        kittyKeyboardDisambiguatePush
+                pop = TextEncoding.encodeUtf8 kittyKeyboardPop
+            wrapped <- wrapFullscreenKeyboardVty True vty
+            readIORef events `shouldReturn` [Left push]
+
+            V.shutdown wrapped
+            readIORef events
+                `shouldReturn` [Left push, Left pop, Right ()]
+
+            V.shutdown wrapped
+            readIORef events
+                `shouldReturn` [Left push, Left pop, Right ()]
+
+        it "leaves unsupported terminals in legacy keyboard mode" do
+            events <- newIORef
+                ([] :: [Either ByteString.ByteString ()])
+            (_, output) <- VMock.mockTerminal (80, 24)
+            vty <- mockVty
+                output
+                    { V.outputByteBuffer =
+                        \bytes ->
+                            modifyIORef' events (<> [Left bytes])
+                    }
+                (modifyIORef' events (<> [Right ()]))
+                ((Right () `elem`) <$> readIORef events)
+            wrapped <- wrapFullscreenKeyboardVty False vty
+            readIORef events `shouldReturn` []
+
+            V.shutdown wrapped
+            readIORef events `shouldReturn` [Right ()]
+
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do
             repositoryHeaderText
@@ -219,6 +283,20 @@ spec = do
                         renderWidget Nothing [lambdaArtWidget 0] (5, 3)
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
+
+        it "shows quick-start actions only when the empty pane has room" do
+            quickStartVisible 100 30 `shouldBe` True
+            quickStartVisible 47 30 `shouldBe` False
+            quickStartVisible 100 19 `shouldBe` False
+
+        it "surfaces the existing high-value startup commands" do
+            quickStartRows
+                `shouldBe`
+                    [ (QuickStartWorktree, "New worktree", "/worktree")
+                    , (QuickStartResume, "Resume session", "/resume")
+                    , (QuickStartCommands, "Browse commands", "/")
+                    , (QuickStartModel, "Manage models", "/model")
+                    ]
 
         it "paints an exact terminal-sized backing surface" do
             let image =
@@ -341,6 +419,37 @@ spec = do
             selectedAgentConversation AgentRoot [rootEntry, child]
                 `shouldBe` Nothing
 
+        it "preserves child block selection and expansion across snapshots" do
+            let replay =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiUserSubmitted "investigate"
+                        , UiLoop TurnStarted
+                        , UiLoop (ReasoningDelta "compare paths")
+                        , UiAssistantHistory "done"
+                        ]
+            case find
+                    ((== BlockThinking) . (.blockKind))
+                    replay.uiBlocks of
+                Nothing ->
+                    expectationFailure "expected a reasoning block"
+                Just reasoning -> do
+                    let previous =
+                            reduceUi
+                                (UiActivateBlock reasoning.blockId)
+                                replay
+                        merged = mergeConversationView previous replay
+                    merged.uiSelectedBlock
+                        `shouldBe` Just reasoning.blockId
+                    fmap (.blockExpanded)
+                        (find
+                            ((== reasoning.blockId) . (.blockId))
+                            merged.uiBlocks)
+                        `shouldBe` Just True
+                    mergeConversationView previous initialUiState
+                        `shouldBe` initialUiState
+
     describe "conversation scrollbar" do
         it "uses a visible trough that repaints old thumb cells" do
             let renderCell widget =
@@ -394,6 +503,44 @@ spec = do
                 `shouldBe` MotionSlow
             motionDemandFor MotionOff False False False countdown
                 `shouldBe` MotionSlow
+
+        it "suppresses cosmetic motion and slows cadence while unfocused" do
+            let idle =
+                    reduceUi
+                        (UiUserSubmitted "done")
+                        initialUiState
+                running =
+                    reduceUi (UiLoop TurnStarted) idle
+            motionDemandForTerminalFocus
+                TerminalFocused
+                MotionFull
+                False
+                False
+                False
+                running
+                `shouldBe` MotionFast
+            motionDemandForTerminalFocus
+                TerminalUnfocused
+                MotionFull
+                False
+                True
+                True
+                idle
+                `shouldBe` MotionNone
+            motionDemandForTerminalFocus
+                TerminalUnfocused
+                MotionFull
+                False
+                False
+                False
+                running
+                `shouldBe` MotionSlow
+            motionModeForTerminalFocus TerminalFocused MotionFull
+                `shouldBe` MotionFull
+            motionModeForTerminalFocus TerminalFocusUnknown MotionReduced
+                `shouldBe` MotionReduced
+            motionModeForTerminalFocus TerminalUnfocused MotionFull
+                `shouldBe` MotionOff
 
         it "bumps the scheduler generation on demand or timer boundaries" do
             nextMotionSchedule
@@ -593,6 +740,26 @@ spec = do
             advanceCompletionFlashes 400 active
                 `shouldBe` Map.empty
 
+mockVty :: V.Output -> IO () -> IO Bool -> IO V.Vty
+mockVty output shutdownAction isShutdownAction = do
+    channel <- newTChanIO
+    let input = V.Input
+            { V.eventChannel = channel
+            , V.shutdownInput = pure ()
+            , V.restoreInputState = pure ()
+            , V.inputLogMsg = const (pure ())
+            }
+    pure V.Vty
+        { V.update = const (pure ())
+        , V.nextEvent = pure (V.EvKey V.KEsc [])
+        , V.nextEventNonblocking = pure Nothing
+        , V.inputIface = input
+        , V.outputIface = output
+        , V.refresh = pure ()
+        , V.shutdown = shutdownAction
+        , V.isShutdown = isShutdownAction
+        }
+
 choiceOverlay :: Bool -> ChoiceOverlay
 choiceOverlay closeOnTurnEnd = ChoiceOverlay
     { choicePresentation = ChoiceDialog
@@ -608,8 +775,10 @@ rootEntry = AgentEntry
     { agentTarget = AgentRoot
     , agentPath = "/root"
     , agentStatus = "active"
+    , agentModel = Nothing
     , agentSteps = []
     , agentTranscript = []
+    , agentConversation = initialUiState
     }
 
 childEntry :: Int -> AgentEntry
@@ -617,8 +786,10 @@ childEntry index = AgentEntry
     { agentTarget = AgentChild (SubagentId name)
     , agentPath = "/root/" <> name
     , agentStatus = "running"
+    , agentModel = Just "gpt-5.6-luna"
     , agentSteps = []
     , agentTranscript = []
+    , agentConversation = initialUiState
     }
   where
     name :: Text

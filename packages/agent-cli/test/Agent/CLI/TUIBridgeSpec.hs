@@ -27,6 +27,7 @@ import Control.Exception.Safe (throwString)
 import Control.Monad (replicateM_)
 import Data.Foldable (toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
+import qualified Data.Text as Text
 import System.Timeout (timeout)
 import qualified Graphics.Vty as V
 import Test.Hspec
@@ -99,6 +100,18 @@ spec = describe "fullscreen TUI bridge" do
             (UiLoop (TextDelta "answer"))
             `shouldBe` Nothing
 
+    it "bounds the in-memory prompt history while preserving newest-first order" do
+        let oversized =
+                [ "prompt-" <> Text.pack (show index)
+                | index <- [1 .. fullscreenHistoryLimit + 10]
+                ]
+            trimmed = trimHistory oversized
+            pushed = pushHistory "latest" trimmed
+        length trimmed `shouldBe` fullscreenHistoryLimit
+        trimmed `shouldBe` take fullscreenHistoryLimit oversized
+        length pushed `shouldBe` fullscreenHistoryLimit
+        take 2 pushed `shouldBe` ["latest", "prompt-1"]
+
     it "does not block producers when Brick is not draining events" do
         input <- newFullscreenInputBuffer
         runtime <- newFullscreenRuntime
@@ -145,17 +158,19 @@ spec = describe "fullscreen TUI bridge" do
             runtime
             (modifyIORef' calls (<> ["new cancel"]))
             (const (modifyIORef' calls (<> ["new btw"])))
+            (modifyIORef' calls (<> ["new recap"]))
             (const (modifyIORef' calls (<> ["new effort"])))
             (pure SoftCancel)
             (pure (AgentRoot, []))
             (const (modifyIORef' calls (<> ["new agent"])))
         runtime.runtimeCancel
         runtime.runtimeBtw "question"
+        runtime.runtimeRecap
         runtime.runtimeRestartEffort "high"
         runtime.runtimeAgentSelect AgentRoot
         decision <- runtime.runtimeCtrlC
         readIORef calls `shouldReturn`
-            ["old cancel", "new cancel", "new btw", "new effort", "new agent"]
+            ["old cancel", "new cancel", "new btw", "new recap", "new effort", "new agent"]
         decision `shouldBe` SoftCancel
 
     it "defers syntax loading until the runtime starts it" do
@@ -224,7 +239,16 @@ spec = describe "fullscreen TUI bridge" do
     it "falls back to root when the selected agent disappears" do
         let child = AgentChild (SubagentId "child")
             other = AgentChild (SubagentId "other")
-            root = AgentEntry AgentRoot "/root" "active" [] []
+            root =
+                AgentEntry
+                    { agentTarget = AgentRoot
+                    , agentPath = "/root"
+                    , agentStatus = "active"
+                    , agentModel = Nothing
+                    , agentSteps = []
+                    , agentTranscript = []
+                    , agentConversation = initialUiState
+                    }
         normalizeAgentSelection child [root] `shouldBe` AgentRoot
         normalizeAgentSelection AgentRoot [root] `shouldBe` AgentRoot
         reconcileAgentSelection [AgentRoot] child
