@@ -112,6 +112,7 @@ import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , resolveColor
     )
+import Agent.CLI.Request (setRequestInstructionsAndTools)
 import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
     ( filterBashTools
@@ -814,12 +815,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         today
                         (isOneShot options)
                 toolSchemas = schemasFromAppTools dialect enabledTools
-            modifyIORef' paramsRef \ResponseCreateParams{..} ->
-                ResponseCreateParams
-                    { instructions = Just instructionText
-                    , tools = Just toolSchemas
-                    , ..
-                    }
+            modifyIORef' paramsRef
+                (setRequestInstructionsAndTools
+                    instructionText
+                    (Just toolSchemas))
         setShellMode mode = do
             let (ghciEnabled, bashEnabled) = shellModeFlags mode
             writeIORef ghciEnabledRef ghciEnabled

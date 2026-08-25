@@ -184,6 +184,16 @@ spec = do
                     Nothing)
                 `shouldNotSatisfy` Text.isInfixOf "\ESC"
 
+        it "keeps Responses validation messages that start with [ObjectParam]" do
+            let rendered =
+                    formatApiErrorAt epoch
+                        (ProviderError InvalidRequestError
+                            "[ObjectParam] [input[1].internal_chat_message_metadata_passthrough.content_item_kinds] [unknown_parameter] Unknown parameter: 'input[1].internal_chat_message_metadata_passthrough.content_item_kinds'."
+                            Nothing)
+            rendered `shouldSatisfy` Text.isInfixOf "Unknown parameter"
+            rendered `shouldSatisfy` Text.isInfixOf "content_item_kinds"
+            rendered `shouldNotSatisfy` Text.isInfixOf "{"
+
     describe "formatApiErrorInlineAt" do
         it "flattens the shared rendering for compact command surfaces" do
             let rendered =
