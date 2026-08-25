@@ -250,14 +250,18 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Types (renderStoreError)
 import Agent.Store.Postgres.Connection (StorePool)
+import qualified Agent.Store.Postgres.Session as StoreSession
 import Agent.Store.Postgres.Skill (LearnedSkill(..))
 import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Resume
     ( ResumeEntry(..)
+    , applyResumeSearchResults
     , initialResumeBrowser
     , loadResumeEntry
+    , pickResumeEntries
     , pickResumeSession
     , resumeEntryFromMeta
+    , resumeSearchEntries
     )
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
@@ -5129,6 +5133,11 @@ replWithDraft env@SessionEnv
                         handleResume databasePool fullscreen maybeId persist >>= \case
                             Nothing -> continue
                             Just result -> pure result
+                    ReplSearch query -> do
+                        handleConversationSearch
+                            databasePool fullscreen query persist >>= \case
+                                Nothing -> continue
+                                Just result -> pure result
                     ReplClear -> do
                         sessionReset
                         fullscreenEvent UiConversationCleared
@@ -6308,6 +6317,116 @@ handleResume databasePool fullscreen maybeId persist = do
                 Nothing -> pure Nothing
                 Just sessionId -> resume sessionId
 
+handleConversationSearch
+    :: StorePool
+    -> Maybe FullscreenRuntime
+    -> Text
+    -> Persistence
+    -> IO (Maybe RunResult)
+handleConversationSearch databasePool fullscreen query persist = do
+    color <- resolveColor stderr
+    home <- getHomeDirectory
+    let root = sessionsRoot home
+        reportError message =
+            case fullscreen of
+                Nothing ->
+                    Text.hPutStrLn stderr (roleError color message)
+                Just runtime ->
+                    emitUiEvent runtime (UiErrorMessage message)
+        reportInfo message =
+            case fullscreen of
+                Nothing ->
+                    Text.hPutStrLn stderr
+                        (roleMuted color (glyphSession <> message))
+                Just runtime ->
+                    emitUiEvent runtime (UiSystemMessage message)
+    sessions <- listSessions databasePool root
+    searchResumeEntries databasePool sessions query >>= \case
+        Left err -> do
+            reportError err
+            pure Nothing
+        Right [] -> do
+            reportInfo ("no conversations matched “" <> Text.strip query <> "”")
+            pure Nothing
+        Right entries -> do
+            currentId <- currentSessionId persist
+            pickSearchChoice
+                databasePool
+                fullscreen
+                color
+                root
+                currentId
+                sessions
+                query
+                entries
+                >>= \case
+                    Nothing -> pure Nothing
+                    Just sessionId ->
+                        handleResume
+                            databasePool
+                            fullscreen
+                            (Just sessionId)
+                            persist
+
+searchResumeEntries
+    :: StorePool
+    -> [SessionMeta]
+    -> Text
+    -> IO (Either Text [ResumeEntry])
+searchResumeEntries databasePool sessions query
+    | Text.null (Text.strip query) =
+        pure (Right (map resumeEntryFromMeta sessions))
+    | otherwise =
+        StoreSession.searchConversationTurns
+            databasePool
+            (Text.strip query)
+            100
+            >>= \case
+                Left err -> pure (Left (renderStoreError err))
+                Right results ->
+                    pure (Right (resumeSearchEntries sessions results))
+
+pickSearchChoice
+    :: StorePool
+    -> Maybe FullscreenRuntime
+    -> Bool
+    -> OsPath
+    -> Maybe Text
+    -> [SessionMeta]
+    -> Text
+    -> [ResumeEntry]
+    -> IO (Maybe Text)
+pickSearchChoice
+    databasePool
+    fullscreen
+    color
+    root
+    currentId
+    sessions
+    query
+    entries =
+        case fullscreen of
+            Nothing -> pickResumeEntries color entries
+            Just runtime -> do
+                now <- getCurrentTime
+                let browser =
+                        applyResumeSearchResults
+                            query
+                            entries
+                            (initialResumeBrowser now entries)
+                    deleteEntry sessionId
+                        | currentId == Just sessionId =
+                            pure (Left "cannot delete the current session")
+                        | otherwise =
+                            deleteSession databasePool root sessionId
+                fmap (.resumeId)
+                    <$> requestFullscreenResume
+                        runtime
+                        browser
+                        (loadResumeEntry databasePool root)
+                        deleteEntry
+                        (searchResumeEntries databasePool sessions)
+
 pickResumeChoice
     :: StorePool
     -> Maybe FullscreenRuntime
@@ -6334,6 +6453,7 @@ pickResumeChoice databasePool fullscreen color root currentId sessions =
                 browser
                 (loadResumeEntry databasePool root)
                 deleteEntry
+                (searchResumeEntries databasePool sessions)
 
 pickAgentChoice
     :: Maybe FullscreenRuntime

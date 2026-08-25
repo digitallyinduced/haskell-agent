@@ -93,6 +93,7 @@ import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Resume
     ( ResumeBrowser(..)
     , ResumeEntry(..)
+    , applyResumeSearchResults
     , beginResumeSearch
     , cycleResumeSource
     , endResumeSearch
@@ -618,11 +619,12 @@ requestFullscreenResume
     -> ResumeBrowser
     -> (Text -> IO (Either Text ResumeEntry))
     -> (Text -> IO (Either Text ()))
+    -> (Text -> IO (Either Text [ResumeEntry]))
     -> IO (Maybe ResumeEntry)
-requestFullscreenResume runtime browser loadEntry deleteEntry = do
+requestFullscreenResume runtime browser loadEntry deleteEntry searchEntries = do
     reply <- newEmptyTMVarIO
     enqueueAppEvent runtime
-        (AppAskResume browser loadEntry deleteEntry reply)
+        (AppAskResume browser loadEntry deleteEntry searchEntries reply)
     atomically (readTMVar reply)
 
 requestFullscreenText
@@ -802,6 +804,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appResumeReply = Nothing
         , appResumeLoad = Nothing
         , appResumeDelete = Nothing
+        , appResumeSearch = Nothing
         , appTextPrompt = Nothing
         , appTextReply = Nothing
         , appSlashDismissed = False
@@ -1103,8 +1106,23 @@ handleResumeSearch browser event
     | otherwise = case event of
         V.EvKey V.KEsc [] ->
             setBrowser (endResumeSearch browser)
-        V.EvKey V.KEnter [] ->
-            setBrowser (endResumeSearch browser)
+        V.EvKey V.KEnter [] -> do
+            state <- get
+            case state.appResumeSearch of
+                Nothing ->
+                    setBrowser (endResumeSearch browser)
+                Just searchEntries -> do
+                    result <- liftIO (searchEntries browser.resumeBrowserQuery)
+                    case result of
+                        Left err ->
+                            setBrowser (setResumeNotice (Just err) browser)
+                        Right entries -> do
+                            setBrowser
+                                (applyResumeSearchResults
+                                    browser.resumeBrowserQuery
+                                    entries
+                                    browser)
+                            revealSelectedResume
         V.EvKey V.KBS [] ->
             setAndReveal $
                 insertResumeSearch ""
@@ -1236,6 +1254,7 @@ resolveResume confirmed = do
             , appResumeReply = Nothing
             , appResumeLoad = Nothing
             , appResumeDelete = Nothing
+            , appResumeSearch = Nothing
             }
     resumeNativeProgressIfRunning
 
@@ -2641,11 +2660,16 @@ resumeList browser =
         [] ->
             padTop (Pad 1) $
                 withAttr Theme.mutedAttr (txt "  No matches")
-        entries ->
+        _ : _ ->
             vBox $
                 intersperse (txt "") $
-                    map (resumeGroup browser selectedId) (groupResumeEntries entries)
+                    map (resumeGroup browser selectedId) groups
   where
+    entries = visibleResumeBrowser browser
+    groups
+        | isJust browser.resumeBrowserAppliedQuery =
+            [("search results", entries)]
+        | otherwise = groupResumeEntries entries
     selectedId = (.resumeId) <$> selectedResumeBrowser browser
 
 resumeGroup
@@ -2716,7 +2740,15 @@ resumeRow browser selectedId entry =
                                 else entry.resumePrompt)
                         ]
                 ]
-        | otherwise = summary
+        | otherwise =
+            case entry.resumeMatch of
+                Nothing -> summary
+                Just match ->
+                    vBox
+                        [ summary
+                        , padLeft (Pad 4) $
+                            withAttr Theme.mutedAttr (txtWrap match)
+                        ]
 
 resumeDetail :: Text -> Text -> Widget Name
 resumeDetail label value =
@@ -2741,7 +2773,7 @@ resumeFooter browser =
                 | isJust browser.resumeBrowserDeletePending ->
                     (Theme.thinkingAttr, "y confirm delete  │  n cancel")
                 | browser.resumeBrowserSearching ->
-                    (Theme.footerAttr, "type to search  │  Enter/Esc done  │  ↑↓ nav")
+                    (Theme.footerAttr, "type to search  │  Enter run  │  Esc close  │  ↑↓ nav")
                 | not hasRows ->
                     (Theme.footerAttr, "f filter  │  / search  │  Esc cancel")
                 | otherwise ->
@@ -3439,7 +3471,8 @@ handleEventInner event = case event of
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll OverlayViewport)
-    AppEvent (AppAskResume browser loadEntry deleteEntry reply) -> do
+    AppEvent
+        (AppAskResume browser loadEntry deleteEntry searchEntries reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
         modify' \state ->
@@ -3450,6 +3483,7 @@ handleEventInner event = case event of
                 , appResumeReply = Just reply
                 , appResumeLoad = Just loadEntry
                 , appResumeDelete = Just deleteEntry
+                , appResumeSearch = Just searchEntries
                 , appAgentHover = Nothing
                 }
         vScrollToBeginning (viewportScroll ResumeViewport)

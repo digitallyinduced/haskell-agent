@@ -5,6 +5,7 @@ module Agent.CLI.Resume
     , ResumeSourceFilter(..)
     , ResumeState(..)
     , applyResumeKey
+    , applyResumeSearchResults
     , beginResumeSearch
     , cycleResumeSource
     , endResumeSearch
@@ -15,6 +16,7 @@ module Agent.CLI.Resume
     , insertResumeSearch
     , loadResumeEntry
     , moveResumeBrowser
+    , pickResumeEntries
     , pickResumeSession
     , removeResumeEntry
     , renderResumeFrame
@@ -22,6 +24,7 @@ module Agent.CLI.Resume
     , replaceResumeEntry
     , resumeEntryFromMeta
     , resumeEntriesFrom
+    , resumeSearchEntries
     , resumeRelativeAge
     , resumeSourceLabel
     , selectedResumeBrowser
@@ -48,10 +51,13 @@ import Agent.OsPath (toText)
 import Agent.Provider (providerSlug)
 import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.List (nub)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -80,6 +86,7 @@ data ResumeEntry = ResumeEntry
     , resumeTurnCount :: !Int
     , resumeToolCount :: !Int
     , resumePrompt :: !Text
+    , resumeMatch :: !(Maybe Text)
     , resumeLoaded :: !Bool
     , resumeTranscript :: ![Text]
     }
@@ -88,6 +95,7 @@ data ResumeEntry = ResumeEntry
 data ResumeBrowser = ResumeBrowser
     { resumeBrowserAll :: ![ResumeEntry]
     , resumeBrowserQuery :: !Text
+    , resumeBrowserAppliedQuery :: !(Maybe Text)
     , resumeBrowserSearching :: !Bool
     , resumeBrowserIndex :: !Int
     , resumeBrowserSource :: !ResumeSourceFilter
@@ -145,6 +153,7 @@ entryFromWith loaded meta turns =
         , resumePrompt =
             fromMaybe ""
                 (firstNonEmpty (map (.turnUserText) turns))
+        , resumeMatch = Nothing
         , resumeLoaded = loaded
         , resumeTranscript = transcriptLines turns
         }
@@ -181,6 +190,7 @@ initialResumeBrowser now entries =
     ResumeBrowser
         { resumeBrowserAll = entries
         , resumeBrowserQuery = ""
+        , resumeBrowserAppliedQuery = Nothing
         , resumeBrowserSearching = False
         , resumeBrowserIndex = 0
         , resumeBrowserSource = ResumeAll
@@ -197,6 +207,8 @@ visibleResumeBrowser browser =
     needle = Text.toLower (Text.strip browser.resumeBrowserQuery)
     matchesQuery entry
         | Text.null needle = True
+        | browser.resumeBrowserAppliedQuery
+            == Just (Text.strip browser.resumeBrowserQuery) = True
         | otherwise =
             any
                 (Text.isInfixOf needle . Text.toLower)
@@ -206,7 +218,68 @@ visibleResumeBrowser browser =
                 , entry.resumeCwd
                 , entry.resumeProvider
                 , entry.resumePrompt
+                , fromMaybe "" entry.resumeMatch
                 ]
+
+applyResumeSearchResults
+    :: Text
+    -> [ResumeEntry]
+    -> ResumeBrowser
+    -> ResumeBrowser
+applyResumeSearchResults query entries browser =
+    browser
+        { resumeBrowserAll = entries
+        , resumeBrowserQuery = stripped
+        , resumeBrowserAppliedQuery =
+            if Text.null stripped then Nothing else Just stripped
+        , resumeBrowserSearching = False
+        , resumeBrowserIndex = 0
+        , resumeBrowserExpanded = Nothing
+        , resumeBrowserDeletePending = Nothing
+        , resumeBrowserNotice = Nothing
+        }
+  where
+    stripped = Text.strip query
+
+-- | Convert ranked turn matches into one resume entry per session, preserving
+-- PostgreSQL result order and attaching a compact matching excerpt.
+resumeSearchEntries
+    :: [SessionMeta]
+    -> [ConversationSearchResult]
+    -> [ResumeEntry]
+resumeSearchEntries metas results =
+    reverse entries
+  where
+    metadataById = Map.fromList [(meta.metaId, meta) | meta <- metas]
+    (_, entries) = foldl' addResult (Set.empty, []) results
+
+    addResult (seen, acc) result
+        | Set.member result.searchSessionId seen = (seen, acc)
+        | otherwise =
+            case Map.lookup result.searchSessionId metadataById of
+                Nothing -> (seen, acc)
+                Just meta ->
+                    let entry =
+                            (resumeEntryFromMeta meta)
+                                { resumePrompt = Text.strip result.searchUserText
+                                , resumeMatch = Just (searchResultSnippet result)
+                                }
+                    in (Set.insert result.searchSessionId seen, entry : acc)
+
+searchResultSnippet :: ConversationSearchResult -> Text
+searchResultSnippet result =
+    Text.take 240 $
+        Text.intercalate "  ·  " $
+            filter (not . Text.null)
+                [ labelled "user" result.searchUserText
+                , maybe "" (labelled "assistant") result.searchAssistantText
+                ]
+  where
+    labelled label value
+        | Text.null compact = ""
+        | otherwise = label <> ": " <> compact
+      where
+        compact = Text.unwords (Text.words value)
 
 sourceEntries :: ResumeBrowser -> [ResumeEntry]
 sourceEntries browser = case browser.resumeBrowserSource of
@@ -392,7 +465,10 @@ visibleResume state
             (\e ->
                 needle `Text.isInfixOf` Text.toLower e.resumeTitle
                     || needle `Text.isInfixOf` Text.toLower e.resumeId
-                    || needle `Text.isInfixOf` Text.toLower e.resumeModel)
+                    || needle `Text.isInfixOf` Text.toLower e.resumeModel
+                    || needle
+                        `Text.isInfixOf`
+                            Text.toLower (fromMaybe "" e.resumeMatch))
             state.resumeAll
   where
     needle = Text.toLower state.resumeFilter
@@ -516,6 +592,7 @@ formatOne color entry =
         <> "  "
         <> entry.resumeTitle
         <> roleMuted color ("  " <> entry.resumeModel)
+        <> maybe "" ("\n    " <>) entry.resumeMatch
 
 -- | TTY picker; non-TTY prints the list. Confirm returns the session id.
 -- Loading is capped to the latest sessions so opening the picker stays cheap.
@@ -528,7 +605,19 @@ pickResumeSession
 pickResumeSession pool color root metas = do
     isTty <- hIsTerminalDevice stdin
     loaded <- loadRecentSessions pool root metas
-    let entries = resumeEntriesFrom loaded
+    pickResumeEntriesWithTty isTty color (resumeEntriesFrom loaded)
+
+pickResumeEntries :: Bool -> [ResumeEntry] -> IO (Maybe Text)
+pickResumeEntries color entries = do
+    isTty <- hIsTerminalDevice stdin
+    pickResumeEntriesWithTty isTty color entries
+
+pickResumeEntriesWithTty
+    :: Bool
+    -> Bool
+    -> [ResumeEntry]
+    -> IO (Maybe Text)
+pickResumeEntriesWithTty isTty color entries =
     if not isTty
         then do
             Text.hPutStrLn stderr (formatResumeListing color entries)
