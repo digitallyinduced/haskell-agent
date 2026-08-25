@@ -447,16 +447,20 @@
                 functionalTestEnabled =
                     functionalTestCredentialHome != ""
                     && pkgs.stdenv.hostPlatform.isLinux;
-                agentCliHelloWorldFunctional =
-                    pkgs.runCommand "agent-cli-functional-hello-world"
+                functionalTestModel = provider: default:
+                    let
+                        configured = builtins.getEnv
+                            "AGENT_FUNCTIONAL_TEST_${provider}_MODEL";
+                    in
+                    if configured == "" then default else configured;
+                agentCliHelloWorldFunctional = provider: model:
+                    pkgs.runCommand "agent-cli-functional-${provider}-hello-world"
                         {
                             __noChroot = true;
                             AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME =
                                 functionalTestCredentialHome;
-                            AGENT_FUNCTIONAL_TEST_PROVIDER =
-                                builtins.getEnv "AGENT_FUNCTIONAL_TEST_PROVIDER";
-                            AGENT_FUNCTIONAL_TEST_MODEL =
-                                builtins.getEnv "AGENT_FUNCTIONAL_TEST_MODEL";
+                            AGENT_FUNCTIONAL_TEST_PROVIDER = provider;
+                            AGENT_FUNCTIONAL_TEST_MODEL = model;
                             LANG = "C.UTF-8";
                             LC_ALL = "C.UTF-8";
                             SSL_CERT_FILE =
@@ -643,8 +647,12 @@
                         inherit self nixpkgs pkgs system;
                     };
                 } // pkgs.lib.optionalAttrs functionalTestEnabled {
-                    agent-cli-functional-hello-world =
-                        agentCliHelloWorldFunctional;
+                    agent-cli-functional-openai-hello-world =
+                        agentCliHelloWorldFunctional "openai"
+                            (functionalTestModel "OPENAI" "gpt-5.6-terra");
+                    agent-cli-functional-xai-hello-world =
+                        agentCliHelloWorldFunctional "xai"
+                            (functionalTestModel "XAI" "grok-4.6");
                 };
 
                 formatter = pkgs.nixfmt-rfc-style;
