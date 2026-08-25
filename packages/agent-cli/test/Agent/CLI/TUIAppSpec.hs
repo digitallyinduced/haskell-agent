@@ -17,6 +17,7 @@ import Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , mergeConversationView
+    , wrapFullscreenKeyboardVty
     , motionDemandFor
     , lambdaArtWidget
     , quickStartRows
@@ -39,6 +40,10 @@ import Agent.CLI.TUI.Types
     , TextInputMode(..)
     , TextOverlay(..)
     )
+import Agent.CLI.Terminal
+    ( kittyKeyboardDisambiguatePush
+    , kittyKeyboardPop
+    )
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
     ( VScrollbarRenderer(..)
@@ -57,11 +62,16 @@ import Agent.ToolDispatch
     )
 import Agent.TUI.Model
 import Agent.TUI.Motion
+import Control.Concurrent.STM (newTChanIO)
+import qualified Data.ByteString as ByteString
 import Data.Foldable (find)
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import qualified Graphics.Vty as V
+import qualified Graphics.Vty.Output.Mock as VMock
 import Test.Hspec
 
 spec :: Spec
@@ -204,6 +214,52 @@ spec = do
                   , V.EvKey (V.KChar 'v') [V.MMeta]
                   )
                 ]
+
+    describe "fullscreen keyboard protocol lifecycle" do
+        it "pushes Cmd+V reporting and pops it before Vty shutdown" do
+            events <- newIORef
+                ([] :: [Either ByteString.ByteString ()])
+            (_, output) <- VMock.mockTerminal (80, 24)
+            vty <- mockVty
+                output
+                    { V.outputByteBuffer =
+                        \bytes ->
+                            modifyIORef' events (<> [Left bytes])
+                    }
+                (modifyIORef' events (<> [Right ()]))
+                ((Right () `elem`) <$> readIORef events)
+            let push =
+                    TextEncoding.encodeUtf8
+                        kittyKeyboardDisambiguatePush
+                pop = TextEncoding.encodeUtf8 kittyKeyboardPop
+            wrapped <- wrapFullscreenKeyboardVty True vty
+            readIORef events `shouldReturn` [Left push]
+
+            V.shutdown wrapped
+            readIORef events
+                `shouldReturn` [Left push, Left pop, Right ()]
+
+            V.shutdown wrapped
+            readIORef events
+                `shouldReturn` [Left push, Left pop, Right ()]
+
+        it "leaves unsupported terminals in legacy keyboard mode" do
+            events <- newIORef
+                ([] :: [Either ByteString.ByteString ()])
+            (_, output) <- VMock.mockTerminal (80, 24)
+            vty <- mockVty
+                output
+                    { V.outputByteBuffer =
+                        \bytes ->
+                            modifyIORef' events (<> [Left bytes])
+                    }
+                (modifyIORef' events (<> [Right ()]))
+                ((Right () `elem`) <$> readIORef events)
+            wrapped <- wrapFullscreenKeyboardVty False vty
+            readIORef events `shouldReturn` []
+
+            V.shutdown wrapped
+            readIORef events `shouldReturn` [Right ()]
 
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do
@@ -642,6 +698,26 @@ spec = do
                 `shouldBe` Map.singleton (BlockId 7) 1
             advanceCompletionFlashes 400 active
                 `shouldBe` Map.empty
+
+mockVty :: V.Output -> IO () -> IO Bool -> IO V.Vty
+mockVty output shutdownAction isShutdownAction = do
+    channel <- newTChanIO
+    let input = V.Input
+            { V.eventChannel = channel
+            , V.shutdownInput = pure ()
+            , V.restoreInputState = pure ()
+            , V.inputLogMsg = const (pure ())
+            }
+    pure V.Vty
+        { V.update = const (pure ())
+        , V.nextEvent = pure (V.EvKey V.KEsc [])
+        , V.nextEventNonblocking = pure Nothing
+        , V.inputIface = input
+        , V.outputIface = output
+        , V.refresh = pure ()
+        , V.shutdown = shutdownAction
+        , V.isShutdown = isShutdownAction
+        }
 
 choiceOverlay :: Bool -> ChoiceOverlay
 choiceOverlay closeOnTurnEnd = ChoiceOverlay
