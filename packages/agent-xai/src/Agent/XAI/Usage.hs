@@ -3,6 +3,7 @@ module Agent.XAI.Usage
     ( GrokUsageSnapshot(..)
     , decodeGrokUsage
     , fetchGrokUsage
+    , fetchGrokUsageFrom
     , weeklyLimitLeft
     ) where
 
@@ -35,8 +36,13 @@ instance Aeson.FromJSON GrokUsageSnapshot where
         Aeson.withObject "Grok billing config" parseConfig config
       where
         parseConfig config = do
+            -- The credits service uses proto3 JSON, which omits scalar fields
+            -- at their default value. A freshly reset account can therefore
+            -- omit creditUsagePercent entirely; that represents 0%, not an
+            -- unreadable response.
             creditUsagePercent <-
-                config .: "creditUsagePercent" :: Parser Scientific
+                fromMaybe 0
+                    <$> (config .:? "creditUsagePercent" :: Parser (Maybe Scientific))
             currentPeriod <- config .: "currentPeriod"
             (periodType, startsAt, resetsAt) <-
                 Aeson.withObject "Grok billing period" parsePeriod currentPeriod
@@ -71,7 +77,16 @@ weeklyLimitLeft snapshot
     | otherwise = Nothing
 
 fetchGrokUsage :: Credential -> IO (Either Text GrokUsageSnapshot)
-fetchGrokUsage credential =
+fetchGrokUsage =
+    fetchGrokUsageFrom
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+
+-- | Injectable endpoint variant used by request-contract tests.
+fetchGrokUsageFrom
+    :: String
+    -> Credential
+    -> IO (Either Text GrokUsageSnapshot)
+fetchGrokUsageFrom endpoint credential =
     tryAny requestUsage >>= \case
         Left _ ->
             pure $ Left
@@ -85,14 +100,12 @@ fetchGrokUsage credential =
                         ("Grok billing returned HTTP " <> Text.pack (show status))
   where
     requestUsage = do
-        request <-
-            parseRequest
-                "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+        request <- parseRequest endpoint
         httpLBS
             $ setRequestHeader
-                "X-Auth-Token"
+                "Authorization"
                 ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-            $ setRequestHeader "X-XAI-Token-Auth" ["true"]
+            $ setRequestHeader "X-XAI-Token-Auth" ["xai-grok-cli"]
             $ setRequestHeader
                 "x-userid"
                 [Text.encodeUtf8 credential.accountId]
