@@ -21,6 +21,12 @@ module Agent.CLI
     ) where
 
 import Agent.CLI.Artifact (fencedCodeBlock, lastDiffBlock)
+import Agent.CLI.Afk
+    ( AfkTarget(..)
+    , handoffLocal
+    , handoffRemote
+    , parseAfkTarget
+    )
 import Agent.CLI.AccountSelection
     ( SelectedAccount(..)
     , providerSupportsUsageAccountSelection
@@ -293,6 +299,7 @@ import Agent.CLI.SessionLock
     , acquireSessionLock
     , releaseSessionLock
     , sessionLockFilePath
+    , sessionLockIsActive
     , sessionLockPath
     )
 import Agent.CLI.Skills
@@ -565,6 +572,7 @@ import qualified Agent.XAI.Options as XAI
 import qualified Agent.XAI.Usage as XAIUsage
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (link, mapConcurrently, waitSTM, withAsync)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
@@ -591,6 +599,8 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, unless, void, when)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.List (elemIndex, findIndex, sortOn)
 import Data.Map.Strict (Map)
@@ -776,6 +786,8 @@ devMainResume resumeId = do
             pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
+        Right (WaitSession sessionId) -> runWaitSession sessionId >> pure DevQuit
+        Right (ImportSession cwd) -> runImportSession cwd >> pure DevQuit
         Right (Storage command) ->
             runStorageAdmin command >> pure DevQuit
         Right (RunAgent options) -> do
@@ -796,6 +808,8 @@ run = do
             runLoginManager color
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
+        Right (WaitSession sessionId) -> runWaitSession sessionId
+        Right (ImportSession cwd) -> runImportSession cwd
         Right (Storage command) -> runStorageAdmin command
         Right (RunAgent options) -> do
             result <- runAgentWithRestarts options
@@ -947,6 +961,34 @@ printTurn turn = do
             Text.putStrLn ("error> " <> err)
         _ -> pure ()
     putStrLn ""
+
+runWaitSession :: Text -> IO ()
+runWaitSession sessionId = do
+    home <- getHomeDirectory
+    dir <- either (die . Text.unpack) pure
+        (sessionDirForId (sessionsRoot home) sessionId)
+    exists <- doesDirectoryExist dir
+    unless exists (die ("session not found: " <> Text.unpack sessionId))
+    let wait = do
+            active <- sessionLockIsActive (sessionLockPath dir)
+            when active (threadDelay 100000 >> wait)
+    wait
+
+runImportSession :: Maybe OsPath -> IO ()
+runImportSession cwd = do
+    bytes <- LBS.getContents
+    transfer <- case Aeson.eitherDecode bytes of
+        Left err -> die ("invalid transferred session: " <> err)
+        Right value -> pure value
+    home <- getHomeDirectory
+    withStoreForHome home \store ->
+        importSessionTransfer
+            (trustedPool store)
+            (sessionsRoot home)
+            cwd
+            transfer >>= \case
+                Left err -> die (Text.unpack err)
+                Right sessionId -> Text.putStrLn sessionId
 
 setStartupNotice :: Maybe FullscreenRuntime -> Text -> IO ()
 setStartupNotice fullscreen message =
@@ -5484,6 +5526,57 @@ replWithDraft env@SessionEnv
                         displayInfo message $
                             Text.putStrLn (roleMuted color message)
                         continue
+                    ReplAfk rawTarget -> do
+                        let failAfk err = do
+                                color <- resolveColor stderr
+                                displayError err $
+                                    putTextLn stderr (roleError color err)
+                                continue
+                            finishAfk message = do
+                                color <- resolveColor stderr
+                                displayInfo message $
+                                    putTextLn stderr
+                                        (roleMuted color (glyphOk <> message))
+                                pure RunQuit
+                        case parseAfkTarget rawTarget of
+                            Left err -> failAfk err
+                            Right target -> case persist of
+                                PersistenceDisabled ->
+                                    failAfk "/afk requires a persisted interactive session"
+                                PersistenceEnabled slotRef ->
+                                    readIORef slotRef >>= \case
+                                        PersistencePending _ _ _ ->
+                                            failAfk
+                                                "/afk is available after the first persisted turn"
+                                        PersistenceActive handle ->
+                                            case target of
+                                                AfkLocal ->
+                                                    handoffLocal
+                                                        handle.sessionMeta.metaId
+                                                        cwd >>= \case
+                                                            Left err -> failAfk err
+                                                            Right message ->
+                                                                finishAfk message
+                                                AfkRemote host path ->
+                                                    loadSession
+                                                        databasePool
+                                                        (sessionsRoot env.sessionHome)
+                                                        handle.sessionMeta.metaId
+                                                        >>= \case
+                                                            Left err -> failAfk err
+                                                            Right (meta, turns) ->
+                                                                handoffRemote
+                                                                    host
+                                                                    path
+                                                                    handle.sessionDir
+                                                                    SessionTransfer
+                                                                        { transferMeta = meta
+                                                                        , transferTurns = turns
+                                                                        }
+                                                                    >>= \case
+                                                                        Left err -> failAfk err
+                                                                        Right message ->
+                                                                            finishAfk message
                     ReplWorktree -> do
                         result <- withReplActivity "Creating worktree…" $
                             createWorktree cwd (worktreeRoot env.sessionHome)

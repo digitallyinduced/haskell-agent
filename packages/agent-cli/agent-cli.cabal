@@ -55,6 +55,7 @@ library
                     , Agent.CLI.AgentViewport
                     , Agent.CLI.Approval
                     , Agent.CLI.Artifact
+                    , Agent.CLI.Afk
                     , Agent.CLI.Auth
                     , Agent.CLI.Btw
                     , Agent.CLI.CancelWatch

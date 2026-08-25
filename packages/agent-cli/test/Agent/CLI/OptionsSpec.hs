@@ -106,11 +106,18 @@ spec = do
             parseArgs ["login", "openai"] `shouldSatisfy` isLeft
 
 
-        it "parses sessions list and show" do
+        it "parses session administration commands" do
             parseArgs ["sessions"] `shouldBe` Right ListSessions
             parseArgs ["sessions", "list"] `shouldBe` Right ListSessions
             parseArgs ["sessions", "show", "2026-08-19-abcd1234"]
                 `shouldBe` Right (ShowSession "2026-08-19-abcd1234")
+            parseArgs ["sessions", "wait", "2026-08-19-abcd1234"]
+                `shouldBe` Right (WaitSession "2026-08-19-abcd1234")
+            parseArgs ["sessions", "import"]
+                `shouldBe` Right (ImportSession Nothing)
+            parseArgs ["sessions", "import", "--cwd", "/srv/project"]
+                `shouldBe` Right
+                    (ImportSession (Just (unsafeEncodeUtf "/srv/project")))
 
         it "parses storage administration commands" do
             parseArgs ["storage", "status"]

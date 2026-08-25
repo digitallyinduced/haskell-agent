@@ -5,6 +5,7 @@ module Agent.CLI.Session
     , LegacySubagentTarget(..)
     , SessionTurn(..)
     , SessionActivity(..)
+    , SessionTransfer(..)
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -23,6 +24,7 @@ module Agent.CLI.Session
     , addSessionUsage
     , deleteSession
     , loadSession
+    , importSessionTransfer
     , loadSessionHandle
     , isValidSessionId
     , listSessions
@@ -145,6 +147,21 @@ data SessionMeta = SessionMeta
     , metaOutputTokens :: !Int
     , metaCachedTokens :: !Int
     } deriving (Eq, Show)
+
+data SessionTransfer = SessionTransfer
+    { transferMeta :: !SessionMeta
+    , transferTurns :: ![SessionTurn]
+    } deriving (Eq, Show)
+
+instance ToJSON SessionTransfer where
+    toJSON transfer = object
+        [ "meta" .= transfer.transferMeta
+        , "turns" .= transfer.transferTurns
+        ]
+
+instance FromJSON SessionTransfer where
+    parseJSON = withObject "SessionTransfer" \o ->
+        SessionTransfer <$> o .: "meta" <*> o .: "turns"
 
 -- | Durable provenance for subagent transcripts written before child target
 -- metadata was persisted. Keeping this target separate from the mutable root
@@ -718,6 +735,45 @@ loadSessionHandle pool root sessionId =
                         }
                     , turns
                     )
+
+-- | Import a transferred session under its existing id and optional cwd.
+importSessionTransfer
+    :: StorePool
+    -> OsPath
+    -> Maybe OsPath
+    -> SessionTransfer
+    -> IO (Either Text Text)
+importSessionTransfer pool root cwd transfer = runExceptT do
+    let sessionId = transfer.transferMeta.metaId
+    dir <- except (sessionDirForId root sessionId)
+    exists <- lift (doesDirectoryExist dir)
+    when exists (throwE ("session already exists: " <> sessionId))
+    lift (ensurePrivateDir root)
+    lift (createDirectory dir)
+    lift (setFileMode (unsafeToFilePath dir) 0o700)
+    _ <- lift (ensureSessionTemp root sessionId) >>= except
+    let meta = transfer.transferMeta
+            { metaCwd = fromMaybe transfer.transferMeta.metaCwd cwd }
+        bytes = Aeson.encode (SessionTransfer meta transfer.transferTurns)
+        legacy = Store.LegacySession
+            { legacySourcePath = "afk:" <> transfer.transferMeta.metaId
+            , legacyContentHash = contentFingerprint bytes
+            , legacyMetadata = toStoredMetadata meta
+            , legacyTurns = map toStoredTurn transfer.transferTurns
+            }
+    lift (Store.importLegacySession pool legacy) >>= \case
+        Left err -> do
+            lift (cleanupTransfer dir sessionId)
+            throwE (renderStoreError err)
+        Right False -> do
+            lift (cleanupTransfer dir sessionId)
+            throwE ("session already exists: " <> sessionId)
+        Right True -> pure sessionId
+  where
+    cleanupTransfer dir sessionId = do
+        _ <- tryIO (removePathForcibly dir)
+        _ <- removeSessionTemp root sessionId
+        pure ()
 
 deleteSession :: StorePool -> OsPath -> Text -> IO (Either Text ())
 deleteSession pool root sessionId = runExceptT do
