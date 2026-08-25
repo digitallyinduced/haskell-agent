@@ -73,7 +73,12 @@ module Agent.CLI.TUI.App
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
-import Agent.CLI.Dictation (insertDictation)
+import Agent.CLI.Dictation
+    ( DictationControl(..)
+    , DictationResult(..)
+    , dictateWith
+    , insertDictation
+    )
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
@@ -368,6 +373,7 @@ newFullscreenRuntimeWithSyntaxLoader
         historyRequests <- newTQueueIO
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
+        dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
@@ -428,6 +434,7 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeHistoryRequests = historyRequests
             , runtimeHistorySource = historySource
             , runtimeHistoryGeneration = historyGeneration
+            , runtimeDictationJobs = dictationJobs
             }
 
 setFullscreenSessionActions
@@ -958,34 +965,40 @@ runFullscreen runtime workerAction = do
                             historyLoader
                             \_historyLoader ->
                             withAsync
-                                (loadSyntaxHighlighterForRuntime runtime)
-                                \_syntaxLoader ->
-                                    withAsync
-                                        (void (waitCatch worker)
-                                            >> enqueueAppEvent runtime AppStop)
-                                        \_notifier -> do
-                                            finalState <-
-                                                customMain
-                                                    initialVty
-                                                    buildVty
-                                                    (Just runtime.runtimeEvents)
-                                                    fullscreenApp
-                                                    initialState
-                                                `finally`
-                                                    runtime.runtimeNativeProgress False
-                                            when (not finalState.appWorkerStopped) $
-                                                atomically $
-                                                    Composer.appendFullscreenInput
-                                                        runtime.runtimeInput
-                                                        FullscreenInput
-                                                            { fullscreenInputLine =
-                                                                ReplEof
-                                                            , fullscreenInputQueued =
-                                                                False
-                                                            , fullscreenInputDisplay =
-                                                                Nothing
-                                                            }
-                                            wait worker
+                                dictationWorker
+                                \_dictationWorker ->
+                                withAsync
+                                    (loadSyntaxHighlighterForRuntime runtime)
+                                    \_syntaxLoader ->
+                                        withAsync
+                                            (void (waitCatch worker)
+                                                >> enqueueAppEvent runtime AppStop)
+                                            \_notifier -> do
+                                                finalState <-
+                                                    customMain
+                                                        initialVty
+                                                        buildVty
+                                                        (Just runtime.runtimeEvents)
+                                                        fullscreenApp
+                                                        initialState
+                                                    `finally`
+                                                        runtime.runtimeNativeProgress False
+                                                mapM_
+                                                    (`Composer.requestDictationStop` True)
+                                                    finalState.appDictation
+                                                when (not finalState.appWorkerStopped) $
+                                                    atomically $
+                                                        Composer.appendFullscreenInput
+                                                            runtime.runtimeInput
+                                                            FullscreenInput
+                                                                { fullscreenInputLine =
+                                                                    ReplEof
+                                                                , fullscreenInputQueued =
+                                                                    False
+                                                                , fullscreenInputDisplay =
+                                                                    Nothing
+                                                                }
+                                                wait worker
   where
     recapTicker _runtime = forever do
         threadDelay 20_000_000
@@ -1064,6 +1077,21 @@ runFullscreen runtime workerAction = do
             (AppHistoryLoaded request normalized)
         historyLoader
 
+    dictationWorker = forever do
+        job <- atomically (readTQueue runtime.runtimeDictationJobs)
+        result <-
+            dictateWith
+                DictationControl
+                    { dictationWaitForStop = job.dictationJobWaitForStop
+                    , dictationOnTranscript =
+                        enqueueAppEvent runtime . AppDictationPartial
+                    }
+        enqueueAppEvent runtime $
+            AppDictationFinished $
+                case result of
+                    DictationTranscript transcript -> Right transcript
+                    DictationFailed message -> Left message
+
 -- | Construct the retained application state shared by the live entry point
 -- and renderer tests. Generated tests should start from the same defaults as
 -- a real fullscreen session instead of assembling an approximate state.
@@ -1106,6 +1134,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appKillBuffer = ""
         , appKillChain = False
         , appUndo = []
+        , appDictation = Nothing
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
         , appSubmittedImagePreviews = Map.empty
@@ -1573,6 +1602,8 @@ appendExactAppEvent event pending =
                 rest |> PendingEvent (AppAgentSnapshot selected entries)
         (rest :> PendingEvent (AppSetWindowTitle _), AppSetWindowTitle title) ->
             rest |> PendingEvent (AppSetWindowTitle title)
+        (rest :> PendingEvent (AppDictationPartial _), AppDictationPartial text) ->
+            rest |> PendingEvent (AppDictationPartial text)
         _ ->
             pending |> PendingEvent event
 
@@ -3568,16 +3599,18 @@ drawFooter state =
         padLeftRight 2 $
             txt footer
   where
-    footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
-        (Just _, _, _) ->
+    footer = case (state.appDictation, state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
+        (Just _, _, _, _) ->
+            "Enter stop  │  Esc cancel  │  Ctrl+R stop"
+        (_, Just _, _, _) ->
             if state.appUi.uiRunning
                 then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
                 else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
-        (Nothing, Just _, _) ->
+        (_, Nothing, Just _, _) ->
             if state.appUi.uiRunning
                 then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
                 else "↑↓ select  │  Enter choose  │  Esc cancel"
-        (Nothing, Nothing, focus) ->
+        (_, Nothing, Nothing, focus) ->
                 case focus of
                     FocusPermission ->
                         "↑↓ select  │  Enter choose  │  Esc deny"
@@ -4487,7 +4520,16 @@ handleEventInner event = case event of
     AppEvent AppRecapPoll ->
         maybeRequestAutoRecap
     AppEvent AppStop -> do
-        modify' \state -> state { appWorkerStopped = True }
+        state <- get
+        liftIO $
+            mapM_
+                (`Composer.requestDictationStop` True)
+                state.appDictation
+        modify' \current ->
+            current
+                { appWorkerStopped = True
+                , appDictation = Nothing
+                }
         halt
     AppEvent (AppSetSlashCatalog catalog) -> do
         state <- get
@@ -4568,23 +4610,39 @@ handleEventInner event = case event of
                 { appImagePreviews = []
                 , appSubmittedImagePreviews = submitted
                 }
-    AppEvent (AppDictationFinished result) ->
-        case result of
-            Left message ->
-                applyLocalUiEvent $
-                    UiSetNotice $
-                        Just $
-                            warningNotice ("Dictation failed: " <> message)
-            Right transcript -> do
-                state <- get
-                let ui = state.appUi
-                    (draft, cursor) =
-                        insertDictation ui.uiDraft ui.uiCursor transcript
-                applyLocalUiEvent (UiSetDraft draft cursor)
-                applyLocalUiEvent $
-                    UiSetNotice $
-                        Just $
-                            successNotice "Dictation inserted."
+    AppEvent (AppDictationPartial text) -> do
+        state <- get
+        when (isJust state.appDictation) $
+            applyLocalUiEvent
+                (UiSetNotice (Just (Composer.dictationProgressNotice text)))
+    AppEvent (AppDictationFinished result) -> do
+        state <- get
+        aborted <-
+            case state.appDictation of
+                Just session ->
+                    liftIO (readIORef session.dictationAbort)
+                Nothing ->
+                    pure False
+        modify' \current -> current { appDictation = Nothing }
+        if aborted
+            then applyLocalUiEvent $
+                UiSetNotice $
+                    Just (infoNotice "Dictation cancelled.")
+            else case result of
+                Left message ->
+                    applyLocalUiEvent $
+                        UiSetNotice $
+                            Just $
+                                warningNotice ("Dictation failed: " <> message)
+                Right transcript -> do
+                    let ui = state.appUi
+                        (draft, cursor) =
+                            insertDictation ui.uiDraft ui.uiCursor transcript
+                    applyLocalUiEvent (UiSetDraft draft cursor)
+                    applyLocalUiEvent $
+                        UiSetNotice $
+                            Just $
+                                successNotice "Dictation inserted."
     AppEvent (AppSetWindowTitle title) -> do
         vty <- getVtyHandle
         liftIO (writeOutputWindowTitle (V.outputIface vty) title)
@@ -5027,30 +5085,34 @@ handleCtrlC = do
     pure decision
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
-handleNormalKey event
-    | Bridge.isSendNowKey event =
-        Composer.handleComposerKey
-            applyLocalUiEventWith
-            handleCtrlC
-            scrollConversationPage
-            event
-    | otherwise = do
-        case event of
-            V.EvMouseDown _ _ V.BScrollUp _ ->
-                scrollConversationBy (-mouseScrollLines)
-            V.EvMouseDown _ _ V.BScrollDown _ ->
-                scrollConversationBy mouseScrollLines
-            _ -> do
-                state <- get
-                case state.appUi.uiFocus of
-                    FocusScrollback -> handleScrollbackKey event
-                    FocusComposer ->
-                        Composer.handleComposerKey
-                            applyLocalUiEventWith
-                            handleCtrlC
-                            scrollConversationPage
-                            event
-                    FocusPermission -> pure ()
+handleNormalKey event = do
+    state <- get
+    case state.appDictation of
+        Just session ->
+            Composer.handleDictationKey handleCtrlC session event
+        Nothing
+            | Bridge.isSendNowKey event ->
+                Composer.handleComposerKey
+                    applyLocalUiEventWith
+                    handleCtrlC
+                    scrollConversationPage
+                    event
+            | otherwise ->
+                case event of
+                    V.EvMouseDown _ _ V.BScrollUp _ ->
+                        scrollConversationBy (-mouseScrollLines)
+                    V.EvMouseDown _ _ V.BScrollDown _ ->
+                        scrollConversationBy mouseScrollLines
+                    _ ->
+                        case state.appUi.uiFocus of
+                            FocusScrollback -> handleScrollbackKey event
+                            FocusComposer ->
+                                Composer.handleComposerKey
+                                    applyLocalUiEventWith
+                                    handleCtrlC
+                                    scrollConversationPage
+                                    event
+                            FocusPermission -> pure ()
 
 rememberAgentHover :: AgentTarget -> EventM Name AppState ()
 rememberAgentHover target = do

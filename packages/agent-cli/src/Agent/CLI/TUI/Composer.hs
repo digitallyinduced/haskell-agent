@@ -11,11 +11,15 @@ module Agent.CLI.TUI.Composer
     , controlAttr
     , controlInteractionAttr
     , decodePaste
+    , DictationKeyAction(..)
+    , dictationKeyAction
+    , dictationProgressNotice
     , draftCursorLocation
     , drawComposer
     , drawQueuedInputs
     , drawSlashMenu
     , handleComposerKey
+    , handleDictationKey
     , handleControlMouseDown
     , handleControlMouseUp
     , handleEffortControlClick
@@ -29,6 +33,7 @@ module Agent.CLI.TUI.Composer
     , slashMenuWindowStart
     , takeFullscreenInput
     , takeFullscreenInputOr
+    , requestDictationStop
     , verticalCursorMove
     , wrapDraft
     ) where
@@ -37,7 +42,6 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
-import Agent.CLI.Dictation (dictate)
 import Agent.CLI.Command
     ( ReplAction(..)
     , SlashMenu(..)
@@ -67,16 +71,16 @@ import Agent.TUI.TextWidth
     , terminalTextImage
     )
 import Brick
-import Brick.BChan (writeBChan)
 import qualified Brick.Types as B
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import qualified Brick.Widgets.Border.Style as BorderStyle
-import Control.Concurrent.STM (atomically)
-import Control.Exception.Safe (tryAny)
+import Control.Concurrent (newEmptyMVar, takeMVar, tryPutMVar)
+import Control.Concurrent.STM (atomically, writeTQueue)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
+import Data.IORef (newIORef, writeIORef)
 import Data.List (elemIndex, intersperse)
 import Data.Maybe (fromMaybe)
 import Data.Sequence (ViewL(..))
@@ -89,6 +93,59 @@ type ApplyLocalUiEvent =
     UiEvent
     -> (AppState -> AppState)
     -> EventM Name AppState ()
+
+data DictationKeyAction
+    = DictationCommit
+    | DictationAbort
+    deriving (Eq, Show)
+
+dictationKeyAction :: V.Event -> Maybe DictationKeyAction
+dictationKeyAction = \case
+    V.EvKey V.KEnter [] -> Just DictationCommit
+    V.EvKey V.KEsc [] -> Just DictationAbort
+    V.EvKey (V.KChar 'r') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just DictationCommit
+    V.EvKey (V.KChar '\DC2') _ ->
+        Just DictationCommit
+    V.EvKey (V.KChar 'c') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just DictationAbort
+    _ -> Nothing
+
+dictationProgressNotice :: Text -> UiNotice
+dictationProgressNotice transcript =
+    progressNotice $
+        case Text.strip transcript of
+            "" -> "Listening… Enter to stop · Esc to cancel"
+            text ->
+                "Listening… "
+                    <> Text.takeEnd 80 (Text.unwords (Text.lines text))
+
+requestDictationStop :: DictationSession -> Bool -> IO ()
+requestDictationStop session abort = do
+    when abort $ writeIORef session.dictationAbort True
+    void (tryPutMVar session.dictationStop ())
+
+handleDictationKey
+    :: EventM Name AppState CtrlCDecision
+    -> DictationSession
+    -> V.Event
+    -> EventM Name AppState ()
+handleDictationKey handleCtrlC session event =
+    case dictationKeyAction event of
+        Just DictationCommit ->
+            liftIO (requestDictationStop session False)
+        Just DictationAbort -> do
+            liftIO (requestDictationStop session True)
+            case event of
+                V.EvKey (V.KChar 'c') modifiers
+                    | V.MCtrl `elem` modifiers ->
+                        void handleCtrlC
+                _ ->
+                    pure ()
+        Nothing ->
+            pure ()
 
 composerScrollbackAvailable :: UiState -> HistoryWindow -> Bool
 composerScrollbackAvailable ui history =
@@ -723,15 +780,26 @@ handleComposerKey
   where
     startDictation = do
         current <- get
-        suspendAndResume do
-            result <- tryAny dictate
-            writeBChan
-                current.appRuntime.runtimeEvents
-                (AppDictationFinished
-                    (case result of
-                        Left err -> Left (Text.pack (show err))
-                        Right transcript -> Right transcript))
-            pure current
+        case current.appDictation of
+            Just session ->
+                liftIO (requestDictationStop session False)
+            Nothing -> do
+                stop <- liftIO newEmptyMVar
+                abort <- liftIO (newIORef False)
+                let session =
+                        DictationSession
+                            { dictationStop = stop
+                            , dictationAbort = abort
+                            }
+                applyUiEvent
+                    (UiSetNotice (Just (dictationProgressNotice "")))
+                    \state -> state { appDictation = Just session }
+                liftIO $ atomically $
+                    writeTQueue
+                        current.appRuntime.runtimeDictationJobs
+                        DictationJob
+                            { dictationJobWaitForStop = takeMVar stop
+                            }
 
     submitRaw replLine = do
         state <- get

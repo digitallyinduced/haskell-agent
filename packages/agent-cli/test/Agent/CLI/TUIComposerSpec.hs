@@ -8,7 +8,12 @@ import Agent.CLI.Input
     )
 import Agent.CLI.TUI.Composer
 import Agent.CLI.TUI.Types
-import Agent.TUI.Model (UiState(..), initialUiState)
+import Agent.TUI.Model
+    ( NoticeKind(..)
+    , UiNotice(..)
+    , UiState(..)
+    , initialUiState
+    )
 import Agent.TUI.TextWidth
     ( clampGraphemeCursor
     , graphemeCellWidth
@@ -27,6 +32,7 @@ import qualified Data.Text.Encoding as Text
 import qualified Graphics.Vty as V
 import Test.Hspec
 import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import qualified Graphics.Vty as V
 import Test.QuickCheck
     ( Arbitrary(..)
     , Gen
@@ -170,6 +176,29 @@ spec = describe "fullscreen composer" do
             `shouldBe` ("please fix this now", 15)
         insertDictation "hello" 5 ", world"
             `shouldBe` ("hello, world", 12)
+
+    it "keeps dictation stop keys inside the composer" do
+        dictationKeyAction (V.EvKey V.KEnter [])
+            `shouldBe` Just DictationCommit
+        dictationKeyAction (V.EvKey (V.KChar 'r') [V.MCtrl])
+            `shouldBe` Just DictationCommit
+        dictationKeyAction (V.EvKey (V.KChar '\DC2') [])
+            `shouldBe` Just DictationCommit
+        dictationKeyAction (V.EvKey V.KEsc [])
+            `shouldBe` Just DictationAbort
+        dictationKeyAction (V.EvKey (V.KChar 'c') [V.MCtrl])
+            `shouldBe` Just DictationAbort
+        dictationKeyAction (V.EvKey (V.KChar 'x') [])
+            `shouldBe` Nothing
+
+    it "renders a non-transient listening notice for live transcripts" do
+        let idle = dictationProgressNotice ""
+            live = dictationProgressNotice "hello from the mic"
+        idle.noticeKind `shouldBe` NoticeProgress
+        idle.noticeTransient `shouldBe` False
+        idle.noticeText
+            `shouldBe` "Listening… Enter to stop · Esc to cancel"
+        live.noticeText `shouldBe` "Listening… hello from the mic"
 
     modifyMaxSuccess (const 300) $
         prop "decodes arbitrary paste bytes into stable safe text" $
