@@ -28,9 +28,9 @@ spec = do
                     Text.intercalate "\n"
                         [ "agents"
                         , "  ▾ root  ● active"
-                        , "  ├─ alpha  ● running"
-                        , "› │  └─ gamma  ✓ done"
-                        , "  └─ beta  ● running"
+                        , "  ├─ alpha  ● running · gpt-5.6-luna"
+                        , "› │  └─ gamma  ✓ done · gpt-5.6-luna"
+                        , "  └─ beta  ● running · gpt-5.6-luna"
                         , "  viewing /root/alpha/gamma · /agents to switch"
                         ]
 
@@ -49,14 +49,19 @@ spec = do
                     Text.intercalate "\n"
                         [ "agents"
                         , "› ▾ root  ● active"
-                        , "  ├─ alpha  ● running"
-                        , "  │  ├─ one  ● running"
-                        , "  │  │  └─ deep  ✓ done"
-                        , "  │  └─ two  ✓ done"
-                        , "  └─ beta  ● running"
-                        , "     └─ leaf  ✓ done"
+                        , "  ├─ alpha  ● running · gpt-5.6-luna"
+                        , "  │  ├─ one  ● running · gpt-5.6-luna"
+                        , "  │  │  └─ deep  ✓ done · gpt-5.6-luna"
+                        , "  │  └─ two  ✓ done · gpt-5.6-luna"
+                        , "  └─ beta  ● running · gpt-5.6-luna"
+                        , "     └─ leaf  ✓ done · gpt-5.6-luna"
                         , "  viewing /root · /agents to switch"
                         ]
+
+        it "uses the model instead of redundant status text in narrow panes" do
+            let entries = [rootEntry, child "alpha" "/root/alpha" "running"]
+            agentEntryTreeLabelWithGlyphModel "●" entries 1 (entries !! 1)
+                `shouldBe` "└─ alpha  ● gpt-5.6-luna"
 
     describe "agent viewport selection" do
         let entries =
@@ -255,6 +260,7 @@ rootEntry =
         { agentTarget = AgentRoot
         , agentPath = "/root"
         , agentStatus = "active"
+        , agentModel = Nothing
         , agentSteps = []
         , agentTranscript = ["user: hello", "assistant: ready"]
         }
@@ -265,6 +271,7 @@ child agentId path status =
         { agentTarget = AgentChild (SubagentId agentId)
         , agentPath = path
         , agentStatus = status
+        , agentModel = Just "gpt-5.6-luna"
         , agentSteps = []
         , agentTranscript = ["assistant: working"]
         }

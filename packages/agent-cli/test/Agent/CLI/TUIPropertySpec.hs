@@ -434,6 +434,7 @@ rootEntry = AgentEntry
     { agentTarget = AgentRoot
     , agentPath = "/root"
     , agentStatus = "running"
+    , agentModel = Nothing
     , agentSteps = []
     , agentTranscript = []
     }
@@ -443,6 +444,7 @@ childEntry transcript index = AgentEntry
     { agentTarget = AgentChild (SubagentId ("agent-" <> Text.pack (show index)))
     , agentPath = "/root/task_" <> Text.pack (show index)
     , agentStatus = if even index then "running" else "done"
+    , agentModel = Just "gpt-5.6-luna"
     , agentSteps = []
     , agentTranscript =
         [ "user: " <> transcript

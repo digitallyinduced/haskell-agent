@@ -3246,6 +3246,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     { agentTarget = AgentRoot
                     , agentPath = "/root"
                     , agentStatus = "active"
+                    , agentModel = Nothing
                     , agentSteps = rootSteps
                     , agentTranscript =
                         transcriptLines AgentRoot rootItems
@@ -3279,6 +3280,9 @@ runSession SessionRequest{..} SessionBackend{..} = do
                     { agentTarget = target
                     , agentPath = taskPathText path
                     , agentStatus = formatAgentStatus status
+                    , agentModel =
+                        (.subSessionEffectiveModel)
+                            <$> Map.lookup agentId sessions
                     , agentSteps = steps
                     , agentTranscript = transcript
                     }

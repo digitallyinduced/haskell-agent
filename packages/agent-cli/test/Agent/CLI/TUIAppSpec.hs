@@ -608,6 +608,7 @@ rootEntry = AgentEntry
     { agentTarget = AgentRoot
     , agentPath = "/root"
     , agentStatus = "active"
+    , agentModel = Nothing
     , agentSteps = []
     , agentTranscript = []
     }
@@ -617,6 +618,7 @@ childEntry index = AgentEntry
     { agentTarget = AgentChild (SubagentId name)
     , agentPath = "/root/" <> name
     , agentStatus = "running"
+    , agentModel = Just "gpt-5.6-luna"
     , agentSteps = []
     , agentTranscript = []
     }
