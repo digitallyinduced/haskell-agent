@@ -4,7 +4,7 @@ module Agent.CLI.SessionState
     , newSessionState
     ) where
 
-import Agent.Loop (ImageAttachment)
+import Agent.CLI.Session.History (LiveConversation(..))
 import Data.IORef (IORef, newIORef)
 import Data.Text (Text)
 
@@ -14,17 +14,21 @@ import Data.Text (Text)
 -- but they must keep this state object alive.
 data SessionState = SessionState
     { sessionDraft :: !(IORef Text)
-    , sessionAttachments :: !(IORef [ImageAttachment])
+    , sessionConversation :: !(IORef LiveConversation)
     , sessionPreviewId :: !(IORef Int)
     }
 
 newSessionState :: IO SessionState
 newSessionState = do
     draft <- newIORef ""
-    attachments <- newIORef []
+    conversation <- newIORef LiveConversation
+        { livePreviousResponseId = Nothing
+        , liveTranscript = []
+        , liveAttachments = []
+        }
     previewId <- newIORef 1
     pure SessionState
         { sessionDraft = draft
-        , sessionAttachments = attachments
+        , sessionConversation = conversation
         , sessionPreviewId = previewId
         }

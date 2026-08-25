@@ -13,16 +13,17 @@ import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
+import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.SessionTitle (SessionTitleManager)
 import Agent.CLI.Terminal (TerminalCapabilities)
 import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Dialect (Dialect)
 import Agent.Error (ApiError)
 import Agent.GrokBuild.Dialect.Runtime (GrokRuntimeControl)
-import Agent.Loop (ImageAttachment, LoopConfig, TokenUsage)
+import Agent.Loop (LoopConfig, TokenUsage)
 import Agent.MCP (McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.Responses.Types (ResponseCreateParams, ResponseItem)
+import Agent.Responses.Types (ResponseCreateParams)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
 import Agent.Skills (SkillCatalog, SkillInvocation)
@@ -45,10 +46,9 @@ data SessionEnv = SessionEnv
     , sessionDialect :: !Dialect
     , sessionUnavailableProviders :: !(IORef [Provider])
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
-    , sessionPrevious :: !(IORef (Maybe Text))
+    , sessionConversation :: !(IORef LiveConversation)
     , sessionParams :: !(IORef ResponseCreateParams)
     , sessionPolicy :: !(IORef ApprovalPolicy)
-    , sessionTranscript :: !(IORef [ResponseItem])
     , sessionPersist :: !Persistence
     , sessionDatabasePool :: !StorePool
     , sessionTitleManager :: !SessionTitleManager
@@ -72,7 +72,6 @@ data SessionEnv = SessionEnv
     , sessionSetShellMode :: !(ShellMode -> IO Text)
     , sessionEscPaused :: !(IORef Bool)
     , sessionDraft :: !(IORef Text)
-    , sessionAttachments :: !(IORef [ImageAttachment])
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
     , sessionRestartEffort :: !(IORef (Maybe Text))

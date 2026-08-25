@@ -35,6 +35,10 @@ import Agent.CLI.Session
     , writeSessionMeta
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Session.History
+    ( readLiveAttachments
+    , readLiveTranscript
+    )
 import Agent.CLI.Style (roleError)
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
@@ -54,6 +58,7 @@ import Agent.TUI.Model
 import Control.Monad (forM_)
 import Data.IORef
     ( modifyIORef'
+    , newIORef
     , readIORef
     , writeIORef
     )
@@ -71,7 +76,7 @@ syncFullscreenPrompt env =
         policy <- readIORef env.sessionPolicy
         account <- readIORef env.sessionAccount
         usage <- readIORef env.sessionUsage
-        attachments <- readIORef env.sessionAttachments
+        attachments <- readLiveAttachments env.sessionConversation
         emitUiEvent runtime $ UiSetPrompt $
             buildPromptState
                 params
@@ -135,6 +140,7 @@ runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
 runBtwQuestion registerCancel env question = do
     let fullscreen = env.sessionFullscreen
     color <- resolveColor stdout
+    transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
     forM_ fullscreen \runtime ->
         emitUiEvent runtime
             (UiSetNotice (Just (progressNotice "btw · asking…")))
@@ -154,7 +160,7 @@ runBtwQuestion registerCancel env question = do
                     else action)
             env.sessionBtwBackend
             env.sessionParams
-            env.sessionTranscript
+            transcriptRef
             question
     forM_ fullscreen \runtime ->
         emitUiEvent runtime (UiSetNotice Nothing)

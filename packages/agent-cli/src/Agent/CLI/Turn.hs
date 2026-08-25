@@ -56,6 +56,12 @@ import Agent.CLI.Session
     , setGeneratedSessionTitle
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
+import Agent.CLI.Session.History
+    ( readLivePreviousResponseId
+    , readLiveTranscript
+    , writeLivePreviousResponseId
+    , writeLiveTranscript
+    )
 import Agent.CLI.SessionTitle
     ( SessionTitleResult(..)
     , requestSessionTitle
@@ -148,8 +154,7 @@ runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
 runOneTurn env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
-    , sessionPrevious = previous
-    , sessionTranscript = transcriptRef
+    , sessionConversation = conversationRef
     , sessionPersist = persist
     , sessionPlanMode = planMode
     , sessionStartupContext = startupContext
@@ -206,8 +211,8 @@ runOneTurn env@SessionEnv
                                 (glyphSession <> "session: "
                                     <> handle.sessionMeta.metaId))
         PersistenceDisabled -> pure ()
-    prev <- readIORef previous
-    beforeItems <- readIORef transcriptRef
+    prev <- readLivePreviousResponseId conversationRef
+    beforeItems <- readLiveTranscript conversationRef
     pendingStartup <- atomicModifyIORef' startupContext \pendingCtx -> (Nothing, pendingCtx)
     planActive <- isPlanModeActive planMode
     planPath <- planFilePath planMode
@@ -242,10 +247,10 @@ runOneTurn env@SessionEnv
         commitConversationPatch patch = do
             case patch.patchPreviousResponseId of
                 KeepField -> pure ()
-                SetField value -> writeIORef previous value
+                SetField value -> writeLivePreviousResponseId conversationRef value
             case patch.patchTranscript of
                 KeepField -> pure ()
-                SetField value -> writeIORef transcriptRef value
+                SetField value -> writeLiveTranscript conversationRef value
             case patch.patchStartupContext of
                 KeepStartup -> pure ()
                 RestoreStartup consumed ->
