@@ -3996,7 +3996,30 @@ choiceRowColumns width label detail
 
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
-    initial <- get
+    stored <- get
+    viewportBounds <-
+        if stored.appAgentSelected == AgentRoot
+            then
+                lookupViewport ConversationViewport >>= \case
+                    Just (VP _ top (_, height) (_, contentHeight)) ->
+                        pure (Just (top, height, contentHeight))
+                    Nothing ->
+                        pure Nothing
+            else pure Nothing
+    let reconciledFollow =
+            if stored.appAgentSelected == AgentRoot
+                then
+                    Scroll.reconcileConversationFollow
+                        stored.appUi.uiFollow
+                        viewportBounds
+                else stored.appUi.uiFollow
+        initial =
+            stored
+                { appUi =
+                    stored.appUi
+                        { uiFollow = reconciledFollow
+                        }
+                }
     timestamp <- liftIO currentShortMessageTimestamp
     renderedContentHeight <-
         if any isSubmittedPrompt uiEvents
