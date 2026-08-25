@@ -189,6 +189,7 @@ import Agent.Store.Postgres
     , openStore
     , trustedPool
     )
+import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Types (renderStoreError)
 import Agent.CLI.PendingInputs (withPendingInputs)
 import Agent.CLI.Plan (cliPlanHooks)
@@ -267,7 +268,6 @@ import Agent.CLI.Session.Choices
 import Agent.CLI.Session.History
     ( detectGitBranch
     , foldSessionItems
-    , hydrateUiHistory
     , LiveConversation(..)
     , readLiveAttachments
     , readLiveTranscript
@@ -377,6 +377,8 @@ import Agent.CLI.Dialects
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
     , FullscreenRuntime
+    , clearFullscreenHistorySource
+    , commitFullscreenHistoryTurn
     , emitUiEvent
     , newFullscreenInputBuffer
     , newFullscreenRuntime
@@ -384,16 +386,31 @@ import Agent.CLI.TUI.App
     , readFullscreenLineOrWithCatalog
     , readFullscreenLineWithCatalog
     , requestFullscreenChoiceWithBody
+    , reloadFullscreenHistorySource
     , runFullscreen
+    , setFullscreenHistorySource
     , setFullscreenSessionActions
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
+import Agent.CLI.TUI.History
+    ( HistoryCursor(..)
+    , HistoryDirection(..)
+    , HistoryGeneration(..)
+    , HistoryPage(..)
+    , HistoryRequest(..)
+    )
+import Agent.CLI.TUI.SessionHistory
+    ( sessionHistoryPage
+    , sessionHistoryTurn
+    )
+import Agent.CLI.TUI.Types (HistoryCommit(..))
 import Agent.TUI.Model
     ( UiEvent(..)
     , UiState(..)
     , infoNotice
+    , initialUiState
     , progressNotice
     , warningNotice
     , reduceUi
@@ -573,6 +590,7 @@ import Data.IORef
 import Data.List (findIndex)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
+import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
@@ -1136,7 +1154,7 @@ prepareAgentIterationTracked
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
-                    loadSession sessionPool root sessionId >>= \case
+                    loadActiveSession sessionPool root sessionId >>= \case
                         Left err -> do
                             signalReady (Left err)
                             failPreparation (Text.unpack err)
@@ -1177,8 +1195,7 @@ prepareAgentIterationTracked
     agentSelectRef <- newIORef (\_ -> pure ())
     restartEffortActionRef <- newIORef (\_ -> pure ())
     queuedInputDisplays <- queuedFullscreenInputDisplays fullscreenInputs
-    let initialTurns = maybe [] snd resumed
-        fullscreenEnabled =
+    let fullscreenEnabled =
             stdinTty
                 && stdoutTty
                 && not (isOneShot options)
@@ -1196,7 +1213,7 @@ prepareAgentIterationTracked
                         (toText (takeFileName (takeDirectory initialCwd))
                             <> "/"
                             <> toText (takeFileName initialCwd)))
-                    (hydrateUiHistory initialTurns)))
+                    initialUiState))
                         { uiQueuedInputs = queuedInputDisplays }
     firstFrameReady <-
         if isJust activeFullscreen || not fullscreenEnabled
@@ -1231,6 +1248,28 @@ prepareAgentIterationTracked
                     useColor
                     initialFullscreenState
             | otherwise -> pure Nothing
+    forM_ fullscreen \runtime ->
+        case resumed of
+            Nothing ->
+                clearFullscreenHistorySource runtime
+            Just (meta, _) ->
+                loadRecentSessionTurns
+                    sessionPool
+                    root
+                    meta.metaId
+                    sessionUiPageSize >>= \case
+                        Left err ->
+                            failPreparation (Text.unpack err)
+                        Right page ->
+                            setFullscreenHistorySource
+                                runtime
+                                meta.metaId
+                                (loadFullscreenHistoryPage
+                                    sessionPool root meta.metaId)
+                                (sessionHistoryPage
+                                    (HistoryGeneration 0)
+                                    HistoryNewer
+                                    page)
     writeIORef uiRuntimeRef fullscreen
     resumeLock <- readIORef resumeLockRef
     let action =
@@ -2103,6 +2142,20 @@ runAgentInitializedWithLock
                 inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effort promptText resumed
     writeIORef persistSlotRef persist
+    forM_ fullscreen \runtime ->
+        reservedSessionId persist >>= \case
+            Nothing ->
+                clearFullscreenHistorySource runtime
+            Just sessionId ->
+                setFullscreenHistorySource
+                    runtime
+                    sessionId
+                    (loadFullscreenHistoryPage
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        sessionId)
+                    (emptyFullscreenHistoryPage
+                        (HistoryGeneration 0))
     (sessionTmp, ephemeralSessionId) <-
         persistenceTempDir persist >>= \case
             Just tempDir -> pure (tempDir, Nothing)
@@ -3131,6 +3184,79 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
                 resolveLabel credential >>= writeIORef accountRef
                 pure (Right credential)
 
+sessionUiPageSize :: Int
+sessionUiPageSize = 80
+
+emptyFullscreenHistoryPage :: HistoryGeneration -> HistoryPage
+emptyFullscreenHistoryPage generation =
+    HistoryPage
+        { historyPageGeneration = generation
+        , historyPageDirection = HistoryNewer
+        , historyPageTurns = Seq.empty
+        , historyPageGenerationStart = HistoryCursor 0
+        , historyPageTotalTurns = 0
+        , historyPageHasOlder = False
+        , historyPageHasNewer = False
+        }
+
+loadFullscreenHistoryPage
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> HistoryRequest
+    -> IO (Either Text HistoryPage)
+loadFullscreenHistoryPage pool root sessionId request = do
+    let loadPage =
+            case ( request.historyRequestDirection
+                 , request.historyRequestCursor
+                 ) of
+                (HistoryOlder, Just (HistoryCursor cursor)) ->
+                    loadSessionTurnsBefore
+                        pool root sessionId cursor sessionUiPageSize
+                (HistoryNewer, Just (HistoryCursor cursor)) ->
+                    loadSessionTurnsAfter
+                        pool root sessionId cursor sessionUiPageSize
+                _ ->
+                    loadRecentSessionTurns
+                        pool root sessionId sessionUiPageSize
+    fmap
+        (sessionHistoryPage
+            request.historyRequestGeneration
+            request.historyRequestDirection)
+        <$> loadPage
+
+reloadFullscreenHistoryForHandle
+    :: FullscreenRuntime
+    -> SessionHandle
+    -> IO ()
+reloadFullscreenHistoryForHandle runtime handle = do
+    let root = takeDirectory handle.sessionDir
+        sessionId = handle.sessionMeta.metaId
+        loader =
+            loadFullscreenHistoryPage
+                handle.sessionPool
+                root
+                sessionId
+    loadRecentSessionTurns
+        handle.sessionPool
+        root
+        sessionId
+        sessionUiPageSize >>= \case
+            Left err ->
+                emitUiEvent runtime
+                    (UiSetNotice
+                        (Just (warningNotice
+                            ("Could not refresh session history: " <> err))))
+            Right page ->
+                reloadFullscreenHistorySource
+                    runtime
+                    sessionId
+                    loader
+                    (sessionHistoryPage
+                        (HistoryGeneration 0)
+                        HistoryNewer
+                        page)
+
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
     :: Maybe FullscreenRuntime
@@ -4083,6 +4209,7 @@ replWithDraft env@SessionEnv
                                                 , turnAssistantText = Just outcome.compactSummary
                                                 , turnError = Nothing
                                                 , turnResponseId = Nothing
+                                                , turnEffect = TranscriptReplace
                                                 , turnItems = outcome.compactHistory
                                                 -- Compaction response usage is
                                                 -- recorded immediately by
@@ -4090,13 +4217,18 @@ replWithDraft env@SessionEnv
                                                 -- response-level failures.
                                                 , turnUsage = Nothing
                                                 }
-                                        handle' <-
-                                            appendTurnWithMetaUpdate handle turn
+                                        (handle', turnIndex) <-
+                                            appendTurnWithMetaUpdateIndexed handle turn
                                                 \meta -> meta
                                                     { metaLastResponseId = Nothing
                                                     }
                                         writeIORef slotRef
                                             (PersistenceActive handle')
+                                        forM_ fullscreen \runtime ->
+                                            commitFullscreenHistoryTurn
+                                                runtime
+                                                (sessionHistoryTurn turnIndex turn)
+                                                HistoryCommitReplace
                                 continue
                     ReplPlan _
                         | provider == ClaudeCodeProvider -> do
@@ -4153,10 +4285,12 @@ replWithDraft env@SessionEnv
                                                     Just "Conversation cleared."
                                                 , turnError = Nothing
                                                 , turnResponseId = Nothing
+                                                , turnEffect = TranscriptReset
                                                 , turnItems = []
                                                 , turnUsage = Nothing
                                                 }
-                                        handle' <- appendTurnKeepTitle handle turn
+                                        (handle', turnIndex) <-
+                                            appendTurnKeepTitleIndexed handle turn
                                         let meta = handle'.sessionMeta
                                                 { metaLastResponseId = Nothing
                                                 , metaUpdatedAt = now
@@ -4173,6 +4307,11 @@ replWithDraft env@SessionEnv
                                             meta
                                         writeIORef slotRef
                                             (PersistenceActive handle'{sessionMeta = meta})
+                                        forM_ fullscreen \runtime ->
+                                            commitFullscreenHistoryTurn
+                                                runtime
+                                                (sessionHistoryTurn turnIndex turn)
+                                                HistoryCommitReset
                                         pure
                                             ("conversation cleared (session "
                                                 <> meta.metaId
@@ -4247,10 +4386,12 @@ replWithDraft env@SessionEnv
                                             Just "Started a new session."
                                         , turnError = Nothing
                                         , turnResponseId = Nothing
+                                        , turnEffect = TranscriptReset
                                         , turnItems = []
                                         , turnUsage = Nothing
                                         }
-                                handle' <- appendTurnKeepTitle handle turn
+                                (handle', _) <-
+                                    appendTurnKeepTitleIndexed handle turn
                                 let meta = handle'.sessionMeta
                                 env.sessionOnPersisted handle'
                                 env.sessionSetTempDir handle'.sessionTempDir
@@ -4260,6 +4401,10 @@ replWithDraft env@SessionEnv
                                 writeIORef planMode.planSessionDir
                                     (Just handle'.sessionDir)
                                 writeIORef storeRoot (Just handle'.sessionDir)
+                                forM_ fullscreen \runtime ->
+                                    reloadFullscreenHistoryForHandle
+                                        runtime
+                                        handle'
                                 setWindowTitle
                                     (cliWindowTitle meta.metaCwd
                                         (Just meta.metaTitle))

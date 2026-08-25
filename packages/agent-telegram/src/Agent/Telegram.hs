@@ -66,8 +66,10 @@ import Agent.CLI.Session
     , SessionHandle(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , SessionTurnPage(..)
     , createSession
     , loadSessionHandle
+    , loadRecentSessionTurns
     , sessionTitleFromPrompt
     , sessionsRoot
     )
@@ -142,6 +144,7 @@ import Data.Aeson
     , (.=)
     )
 import qualified Data.ByteString.Lazy as LBS
+import Data.Int (Int64)
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -1058,12 +1061,8 @@ runQueuedMediaTurn runtime pending = do
             }
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
-    priorTurnCount <- loadSessionHandle
-        runtime.runtimePool
-        runtime.runtimeSessionsRoot
-        handle.sessionMeta.metaId >>= \case
-            Left err -> fail (Text.unpack err)
-            Right (_, turns) -> pure (length turns)
+    priorTurnIndex <-
+        latestPersistedTurnIndex runtime handle.sessionMeta.metaId
     result <-
         (withTelegramBridge bridgeEnv $
             launchManagedTurnBounded
@@ -1084,14 +1083,20 @@ runQueuedMediaTurn runtime pending = do
                 runtime.runtimeSessionsRoot
                 handle.sessionMeta.metaId >>= \case
                     Left err -> fail (Text.unpack err)
-                    Right (_, turns)
-                        | length turns > priorTurnCount
-                        , latestTurnMatches pending.pendingMediaText turns ->
-                            pure (renderLatestTurn turns)
-                        | otherwise ->
-                            fail
-                                "agent completed without recording \
-                                \the Telegram turn")
+                    Right (_, turns) ->
+                        latestPersistedTurnIndex
+                            runtime
+                            handle.sessionMeta.metaId >>= \case
+                                Just turnIndex
+                                    | maybe True (< turnIndex) priorTurnIndex
+                                    , latestTurnMatches
+                                        pending.pendingMediaText
+                                        turns ->
+                                        pure (renderLatestTurn turns)
+                                _ ->
+                                    fail
+                                        "agent completed without recording \
+                                        \the Telegram turn")
         `finally` cleanupManagedTurnMedia request
 
 checkpointVoiceTranscript
@@ -1448,12 +1453,8 @@ runManagedAgentTurn
             }
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
-    priorTurnCount <- loadSessionHandle
-        runtime.runtimePool
-        runtime.runtimeSessionsRoot
-        handle.sessionMeta.metaId >>= \case
-            Left err -> fail (Text.unpack err)
-            Right (_, turns) -> pure (length turns)
+    priorTurnIndex <-
+        latestPersistedTurnIndex runtime handle.sessionMeta.metaId
     (withTelegramBridge bridgeEnv $
         launchManagedTurnBounded
             runtime.runtimeProcessManager
@@ -1473,14 +1474,18 @@ runManagedAgentTurn
                     runtime.runtimeSessionsRoot
                     handle.sessionMeta.metaId >>= \case
                         Left err -> fail (Text.unpack err)
-                        Right (_, turns)
-                            | length turns > priorTurnCount
-                            , latestTurnMatches expectedPrompt turns ->
-                                pure (renderLatestTurn turns)
-                            | otherwise ->
-                                fail
-                                    "agent completed without recording \
-                                    \the Telegram turn"
+                        Right (_, turns) ->
+                            latestPersistedTurnIndex
+                                runtime
+                                handle.sessionMeta.metaId >>= \case
+                                    Just turnIndex
+                                        | maybe True (< turnIndex) priorTurnIndex
+                                        , latestTurnMatches expectedPrompt turns ->
+                                            pure (renderLatestTurn turns)
+                                    _ ->
+                                        fail
+                                            "agent completed without recording \
+                                            \the Telegram turn"
 
 telegramTurnUserId :: TelegramRuntime -> TelegramChatKey -> Integer
 telegramTurnUserId runtime key
@@ -1517,6 +1522,22 @@ latestTurnMatches :: Text -> [SessionTurn] -> Bool
 latestTurnMatches prompt turns = case reverse turns of
     turn : _ -> turn.turnUserText == prompt
     [] -> False
+
+latestPersistedTurnIndex
+    :: TelegramRuntime
+    -> Text
+    -> IO (Maybe Int64)
+latestPersistedTurnIndex runtime sessionId =
+    loadRecentSessionTurns
+        runtime.runtimePool
+        runtime.runtimeSessionsRoot
+        sessionId
+        1 >>= \case
+            Left err -> fail (Text.unpack err)
+            Right page ->
+                pure $ case reverse page.pageTurns of
+                    (turnIndex, _) : _ -> Just turnIndex
+                    [] -> Nothing
 
 sessionForPrompt
     :: TelegramRuntime

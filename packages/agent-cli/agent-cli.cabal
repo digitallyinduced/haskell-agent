@@ -156,6 +156,8 @@ library
                     , Agent.CLI.TUI.App
                     , Agent.CLI.TUI.Bridge
                     , Agent.CLI.TUI.Composer
+                    , Agent.CLI.TUI.History
+                    , Agent.CLI.TUI.SessionHistory
                     , Agent.CLI.TUI.ImagePreview
                     , Agent.CLI.TUI.Scroll
                     , Agent.CLI.TUI.Transcript
@@ -358,6 +360,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TUIComposerSpec
                     , Agent.CLI.TUIImagePreviewSpec
                     , Agent.CLI.TUIPropertySpec
+                    , Agent.CLI.TUIHistorySpec
                     , Agent.CLI.TUIScrollSpec
                     , Agent.CLI.TUITranscriptSpec
                     , Agent.CLI.UsageSpec

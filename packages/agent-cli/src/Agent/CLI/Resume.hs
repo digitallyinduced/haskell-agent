@@ -39,8 +39,10 @@ import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
-    , loadSession
-    , loadSessions
+    , SessionTurnPage(..)
+    , TranscriptEffect(..)
+    , loadRecentSessionTurns
+    , loadSessionMeta
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -53,6 +55,7 @@ import Agent.Provider (providerSlug)
 import Agent.Responses.Types (ResponseItem(..))
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
+import Control.Monad (forM)
 import Data.Char (isAlphaNum)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
@@ -124,7 +127,13 @@ resumeEntryFromMeta meta = entryFromWith False meta []
 
 loadResumeEntry :: StorePool -> OsPath -> Text -> IO (Either Text ResumeEntry)
 loadResumeEntry pool root sessionId =
-    fmap (fmap (uncurry entryFrom)) (loadSession pool root sessionId)
+    loadSessionMeta pool root sessionId >>= \case
+        Left err -> pure (Left err)
+        Right meta ->
+            loadRecentSessionTurns pool root sessionId 50 >>= \case
+                Left err -> pure (Left err)
+                Right page ->
+                    pure (Right (entryFrom meta (map snd page.pageTurns)))
 
 entryFrom :: SessionMeta -> [SessionTurn] -> ResumeEntry
 entryFrom = entryFromWith True
@@ -644,24 +653,23 @@ loadRecentSessions
     -> OsPath
     -> [SessionMeta]
     -> IO [(SessionMeta, [SessionTurn])]
-loadRecentSessions pool root metas = do
-    let recent = take 20 metas
-    loaded <- loadSessions pool root (map (.metaId) recent)
-    pure (zipWith loadedOrUnavailable recent loaded)
-  where
-    loadedOrUnavailable meta = \case
-        Right session -> session
-        Left err ->
-            ( meta
-            , [ SessionTurn
-                    { turnAt = meta.metaUpdatedAt
-                    , turnUserText = ""
-                    , turnAssistantText =
-                        Just ("Transcript unavailable: " <> err)
-                    , turnError = Nothing
-                    , turnResponseId = Nothing
-                    , turnItems = []
-                    , turnUsage = Nothing
-                    }
-              ]
-            )
+loadRecentSessions pool root metas =
+    forM (take 20 metas) \meta ->
+        loadRecentSessionTurns pool root meta.metaId 4 >>= \case
+            Right page -> pure (meta, map snd page.pageTurns)
+            Left err ->
+                pure
+                    ( meta
+                    , [ SessionTurn
+                            { turnAt = meta.metaUpdatedAt
+                            , turnUserText = ""
+                            , turnAssistantText =
+                                Just ("Transcript unavailable: " <> err)
+                            , turnError = Nothing
+                            , turnResponseId = Nothing
+                            , turnEffect = TranscriptAppend
+                            , turnItems = []
+                            , turnUsage = Nothing
+                            }
+                      ]
+                    )

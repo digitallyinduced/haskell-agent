@@ -3,7 +3,9 @@ module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
     , LegacySubagentTarget(..)
+    , TranscriptEffect(..)
     , SessionTurn(..)
+    , SessionTurnPage(..)
     , SessionActivity(..)
     , SessionTransfer(..)
     , SessionCreate(..)
@@ -19,12 +21,20 @@ module Agent.CLI.Session
     , cleanupPendingPersistence
     , createSession
     , appendTurn
+    , appendTurnIndexed
     , appendTurnWithMetaUpdate
+    , appendTurnWithMetaUpdateIndexed
     , appendTurnKeepTitle
+    , appendTurnKeepTitleIndexed
     , addSessionUsage
     , deleteSession
     , loadSession
     , loadSessions
+    , loadActiveSession
+    , loadSessionMeta
+    , loadRecentSessionTurns
+    , loadSessionTurnsBefore
+    , loadSessionTurnsAfter
     , importSessionTransfer
     , loadSessionHandle
     , isValidSessionId
@@ -71,11 +81,18 @@ import Agent.Dialect
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
+import Agent.OpenAI.Compaction
+    ( hasCompactionCheckpoint
+    , isClearSessionTurn
+    , isCompactSessionTurn
+    , isNewSessionTurn
+    )
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
+import Agent.Store.Postgres.Session (TranscriptEffect(..))
 import qualified Agent.Store.Postgres.Session as Store
-import Agent.Store.Types (renderStoreError)
+import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (displayException, finally, onException, tryIO)
 import Control.Monad (unless, when)
@@ -90,6 +107,7 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits (xor)
+import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
 import Data.Maybe (catMaybes, fromMaybe)
@@ -299,8 +317,17 @@ data SessionTurn = SessionTurn
     , turnAssistantText :: !(Maybe Text)
     , turnError :: !(Maybe Text)
     , turnResponseId :: !(Maybe Text)
+    , turnEffect :: !TranscriptEffect
     , turnItems :: ![ResponseItem]
     , turnUsage :: !(Maybe TokenUsage)
+    } deriving (Eq, Show)
+
+data SessionTurnPage = SessionTurnPage
+    { pageTurns :: ![(Int64, SessionTurn)]
+    , pageGenerationStart :: !Int64
+    , pageTotalTurns :: !Int64
+    , pageHasOlder :: !Bool
+    , pageHasNewer :: !Bool
     } deriving (Eq, Show)
 
 instance ToJSON SessionTurn where
@@ -310,20 +337,56 @@ instance ToJSON SessionTurn where
         , "assistantText" .= turn.turnAssistantText
         , "error" .= turn.turnError
         , "responseId" .= turn.turnResponseId
+        , "effect" .= transcriptEffectText turn.turnEffect
         , "items" .= turn.turnItems
         , "usage" .= turn.turnUsage
         ]
 
 instance FromJSON SessionTurn where
-    parseJSON = withObject "SessionTurn" \o ->
-        SessionTurn
-            <$> o .: "at"
-            <*> o .: "userText"
-            <*> o .:? "assistantText"
-            <*> o .:? "error"
-            <*> o .:? "responseId"
-            <*> o .: "items"
-            <*> o .:? "usage"
+    parseJSON = withObject "SessionTurn" \o -> do
+        at <- o .: "at"
+        userText <- o .: "userText"
+        assistantText <- o .:? "assistantText"
+        turnErrorValue <- o .:? "error"
+        responseId <- o .:? "responseId"
+        items <- o .: "items"
+        usage <- o .:? "usage"
+        effect <- o .:? "effect" >>= \case
+            Nothing -> pure (inferTranscriptEffect userText items)
+            Just value ->
+                either (fail . Text.unpack) pure
+                    (parseTranscriptEffect value)
+        pure SessionTurn
+            { turnAt = at
+            , turnUserText = userText
+            , turnAssistantText = assistantText
+            , turnError = turnErrorValue
+            , turnResponseId = responseId
+            , turnEffect = effect
+            , turnItems = items
+            , turnUsage = usage
+            }
+
+transcriptEffectText :: TranscriptEffect -> Text
+transcriptEffectText = \case
+    TranscriptAppend -> "append"
+    TranscriptReplace -> "replace"
+    TranscriptReset -> "reset"
+
+parseTranscriptEffect :: Text -> Either Text TranscriptEffect
+parseTranscriptEffect = \case
+    "append" -> Right TranscriptAppend
+    "replace" -> Right TranscriptReplace
+    "reset" -> Right TranscriptReset
+    value -> Left ("unknown transcript effect: " <> value)
+
+inferTranscriptEffect :: Text -> [ResponseItem] -> TranscriptEffect
+inferTranscriptEffect userText items
+    | isClearSessionTurn userText || isNewSessionTurn userText =
+        TranscriptReset
+    | isCompactSessionTurn userText || hasCompactionCheckpoint items =
+        TranscriptReplace
+    | otherwise = TranscriptAppend
 
 -- | Ephemeral progress for a running persisted session. This lives in the
 -- session temp directory rather than the transcript so polling clients can
@@ -575,6 +638,10 @@ appendTurn :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurn handle turn =
     appendTurnWithMetaUpdate handle turn id
 
+appendTurnIndexed :: SessionHandle -> SessionTurn -> IO (SessionHandle, Int64)
+appendTurnIndexed handle turn =
+    appendTurnWithMetaUpdateIndexed handle turn id
+
 -- | Append one transcript turn, then apply an additional metadata transition
 -- before the append's single metadata write.
 appendTurnWithMetaUpdate
@@ -584,6 +651,15 @@ appendTurnWithMetaUpdate
     -> IO SessionHandle
 appendTurnWithMetaUpdate handle turn updateMeta =
     appendTurnWithMetaTransition handle turn
+        (updateMeta . applyTurnMetadata turn)
+
+appendTurnWithMetaUpdateIndexed
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO (SessionHandle, Int64)
+appendTurnWithMetaUpdateIndexed handle turn updateMeta =
+    appendTurnWithMetaTransitionIndexed handle turn
         (updateMeta . applyTurnMetadata turn)
 
 -- | Append a transcript turn and persist one metadata transition. Timestamp
@@ -596,6 +672,14 @@ appendTurnWithMetaTransition
     -> (SessionMeta -> SessionMeta)
     -> IO SessionHandle
 appendTurnWithMetaTransition handle turn transition = do
+    fst <$> appendTurnWithMetaTransitionIndexed handle turn transition
+
+appendTurnWithMetaTransitionIndexed
+    :: SessionHandle
+    -> SessionTurn
+    -> (SessionMeta -> SessionMeta)
+    -> IO (SessionHandle, Int64)
+appendTurnWithMetaTransitionIndexed handle turn transition = do
     let pool = handle.sessionPool
     now <- normalizePostgresTimestamp <$> getCurrentTime
     let meta0 = handle.sessionMeta
@@ -604,7 +688,7 @@ appendTurnWithMetaTransition handle turn transition = do
             , metaLastResponseId = turn.turnResponseId <|> meta0.metaLastResponseId
             }
         finalMeta = transition meta
-    Store.appendSessionTurn
+    Store.appendSessionTurnIndexed
         pool
         (toStoredTurn turn)
         (toStoredMetadata finalMeta) >>= \case
@@ -612,10 +696,10 @@ appendTurnWithMetaTransition handle turn transition = do
                 fail
                     ("could not append PostgreSQL session turn: "
                         <> Text.unpack (renderStoreError err))
-            Right False ->
+            Right Nothing ->
                 fail ("session not found: " <> Text.unpack finalMeta.metaId)
-            Right True ->
-                pure handle { sessionMeta = finalMeta }
+            Right (Just turnIndex) ->
+                pure (handle { sessionMeta = finalMeta }, turnIndex)
 
 applyTurnMetadata :: SessionTurn -> SessionMeta -> SessionMeta
 applyTurnMetadata turn meta =
@@ -704,6 +788,13 @@ appendTurnKeepTitle :: SessionHandle -> SessionTurn -> IO SessionHandle
 appendTurnKeepTitle handle turn =
     appendTurnWithMetaTransition handle turn id
 
+appendTurnKeepTitleIndexed
+    :: SessionHandle
+    -> SessionTurn
+    -> IO (SessionHandle, Int64)
+appendTurnKeepTitleIndexed handle turn =
+    appendTurnWithMetaTransitionIndexed handle turn id
+
 
 loadSession
     :: StorePool
@@ -712,7 +803,94 @@ loadSession
     -> IO (Either Text (SessionMeta, [SessionTurn]))
 loadSession pool root sessionId = runExceptT do
     _ <- except (sessionDirForId root sessionId)
-    stored <- lift (Store.loadSession pool sessionId)
+    stored <- loadWithLegacyImport root pool sessionId Store.loadSession
+    decodeStoredSession sessionId stored
+
+loadActiveSession
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text (SessionMeta, [SessionTurn]))
+loadActiveSession pool root sessionId = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- loadWithLegacyImport root pool sessionId Store.loadActiveSession
+    decodeStoredSession sessionId stored
+
+loadSessionMeta
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text SessionMeta)
+loadSessionMeta pool root sessionId = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- loadWithLegacyImport root pool sessionId Store.loadSessionMetadata
+    meta <- except (fromStoredMetadata stored)
+    validateSessionMeta sessionId meta
+    pure meta
+
+loadRecentSessionTurns
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadRecentSessionTurns pool root sessionId limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key -> Store.loadRecentSessionTurns pool' key limit)
+
+loadSessionTurnsBefore
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionTurnsBefore pool root sessionId cursor limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key -> Store.loadSessionTurnsBefore pool' key cursor limit)
+
+loadSessionTurnsAfter
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> Int64
+    -> Int
+    -> IO (Either Text SessionTurnPage)
+loadSessionTurnsAfter pool root sessionId cursor limit =
+    loadSessionTurnPage root pool sessionId
+        (\pool' key -> Store.loadSessionTurnsAfter pool' key cursor limit)
+
+loadSessionTurnPage
+    :: OsPath
+    -> StorePool
+    -> Text
+    -> (StorePool -> Text
+        -> IO (Either StoreError (Maybe Store.SessionTurnPage)))
+    -> IO (Either Text SessionTurnPage)
+loadSessionTurnPage root pool sessionId loader = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- loadWithLegacyImport root pool sessionId loader
+    turns <- except $ traverse
+        (\storedTurn -> do
+            turn <- fromStoredTurn storedTurn.storedTurn
+            pure (storedTurn.storedTurnIndex, turn))
+        stored.sessionPageTurns
+    pure SessionTurnPage
+        { pageTurns = turns
+        , pageGenerationStart = stored.sessionPageGenerationStart
+        , pageTotalTurns = stored.sessionPageTotal
+        , pageHasOlder = stored.sessionPageHasOlder
+        , pageHasNewer = stored.sessionPageHasNewer
+        }
+
+loadWithLegacyImport
+    :: OsPath
+    -> StorePool
+    -> Text
+    -> (StorePool -> Text -> IO (Either StoreError (Maybe a)))
+    -> ExceptT Text IO a
+loadWithLegacyImport root pool sessionId loader = do
+    stored <- lift (loader pool sessionId)
         >>= either (throwE . renderStoreError) pure
     stored' <- case stored of
         Just value -> pure (Just value)
@@ -720,11 +898,9 @@ loadSession pool root sessionId = runExceptT do
             _ <- importLegacySession root pool sessionId
             -- Another process may win the import race and return False from
             -- its idempotent insert. Always reload the canonical row.
-            lift (Store.loadSession pool sessionId)
+            lift (loader pool sessionId)
                 >>= either (throwE . renderStoreError) pure
-    case stored' of
-        Nothing -> throwE ("session not found: " <> sessionId)
-        Just value -> decodeStoredSession sessionId value
+    maybe (throwE ("session not found: " <> sessionId)) pure stored'
 
 -- | Load several sessions with one batched PostgreSQL read while preserving
 -- request order. A missing database row still takes the legacy import path.
@@ -762,7 +938,7 @@ loadSessionHandle
     -> Text
     -> IO (Either Text (SessionHandle, [SessionTurn]))
 loadSessionHandle pool root sessionId =
-    loadSession pool root sessionId >>= \case
+    loadActiveSession pool root sessionId >>= \case
         Left err -> pure (Left err)
         Right (meta, turns) ->
             pure do
@@ -1217,6 +1393,7 @@ toStoredTurn turn = Store.SessionTurn
     , sessionTurnAssistantText = turn.turnAssistantText
     , sessionTurnError = turn.turnError
     , sessionTurnResponseId = turn.turnResponseId
+    , sessionTurnEffect = turn.turnEffect
     , sessionTurnItems = map toStoredResponseItem turn.turnItems
     , sessionTurnUsage = toStoredUsage <$> turn.turnUsage
     }
@@ -1230,6 +1407,7 @@ fromStoredTurn stored = do
         , turnAssistantText = stored.sessionTurnAssistantText
         , turnError = stored.sessionTurnError
         , turnResponseId = stored.sessionTurnResponseId
+        , turnEffect = stored.sessionTurnEffect
         , turnItems = items
         , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
         }

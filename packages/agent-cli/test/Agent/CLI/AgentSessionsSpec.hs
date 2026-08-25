@@ -113,6 +113,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                 , turnResponseId = Nothing
                 , turnItems = []
                 , turnUsage = Nothing
+                , turnEffect = TranscriptAppend
                 }
             result <- runTool env "read_agent_session" $
                 "{\"session_id\":\"" <> handle.sessionMeta.metaId <> "\"}"

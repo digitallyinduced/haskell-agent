@@ -12,6 +12,7 @@ module Agent.CLI.TurnState
     , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
+    , turnReplacesTranscript
     ) where
 
 import Agent.Loop
@@ -158,6 +159,10 @@ turnNewItems beforeItems afterItems
     | beforeItems `isPrefixOf` afterItems =
         drop (length beforeItems) afterItems
     | otherwise = afterItems
+
+turnReplacesTranscript :: [ResponseItem] -> [ResponseItem] -> Bool
+turnReplacesTranscript beforeItems afterItems =
+    not (beforeItems `isPrefixOf` afterItems)
 
 applyField :: FieldUpdate a -> a -> a
 applyField update current = case update of

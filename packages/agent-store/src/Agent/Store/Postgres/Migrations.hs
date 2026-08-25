@@ -144,6 +144,12 @@ coreMigrations =
               \ bigint NOT NULL DEFAULT 0"
             ]
         }
+    , Migration
+        { migrationVersion = 8
+        , migrationName = "session transcript effects and paging"
+        , migrationStatements =
+            [migrateSessionTranscriptEffectsStatement]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty
@@ -175,6 +181,92 @@ prepareTypedSessionSchemaStatement =
     \     DROP TABLE IF EXISTS harness.structured_values CASCADE;\
     \     DROP FUNCTION IF EXISTS\
     \       harness.raise_normalized_value_error(text);\
+    \   END IF;\
+    \ END\
+    \ $ha$"
+
+migrateSessionTranscriptEffectsStatement :: ByteString
+migrateSessionTranscriptEffectsStatement =
+    "DO $ha$\
+    \ BEGIN\
+    \   IF to_regclass('harness.session_turns') IS NULL THEN\
+    \     RETURN;\
+    \   END IF;\
+    \   ALTER TABLE harness.session_turns\
+    \     ADD COLUMN IF NOT EXISTS transcript_effect text;\
+    \   DROP TRIGGER IF EXISTS session_turns_immutable\
+    \     ON harness.session_turns;\
+    \   UPDATE harness.session_turns\
+    \     SET transcript_effect = 'append'\
+    \     WHERE transcript_effect IS NULL;\
+    \   UPDATE harness.session_turns\
+    \     SET transcript_effect = 'replace'\
+    \     WHERE btrim(user_text) = '/compact'\
+    \       OR btrim(user_text) LIKE '/compact %';\
+    \   IF to_regclass('harness.session_response_items') IS NOT NULL THEN\
+    \     UPDATE harness.session_turns turn_row\
+    \       SET transcript_effect = 'replace'\
+    \       WHERE EXISTS (\
+    \         SELECT 1\
+    \         FROM harness.session_response_items item\
+    \         WHERE item.turn_id = turn_row.turn_id\
+    \           AND item.item_type = 'compaction'\
+    \       );\
+    \   END IF;\
+    \   IF to_regclass('harness.session_response_items') IS NOT NULL\
+    \     AND to_regclass('harness.session_messages') IS NOT NULL\
+    \     AND to_regclass('harness.session_response_content_parts')\
+    \       IS NOT NULL THEN\
+    \     UPDATE harness.session_turns turn_row\
+    \       SET transcript_effect = 'replace'\
+    \       WHERE EXISTS (\
+    \         SELECT 1\
+    \         FROM harness.session_response_items item\
+    \         JOIN harness.session_messages message\
+    \           ON message.response_item_id = item.response_item_id\
+    \         LEFT JOIN harness.session_response_content_parts part\
+    \           ON part.response_item_id = item.response_item_id\
+    \         WHERE item.turn_id = turn_row.turn_id\
+    \           AND message.role_name = 'assistant'\
+    \           AND btrim(coalesce(\
+    \             message.content_text, part.text_value, ''))\
+    \             LIKE 'Compacted conversation summary:%'\
+    \       );\
+    \   END IF;\
+    \   UPDATE harness.session_turns\
+    \     SET transcript_effect = 'reset'\
+    \     WHERE btrim(user_text) IN ('/clear', '/new');\
+    \   ALTER TABLE harness.session_turns\
+    \     ALTER COLUMN transcript_effect SET DEFAULT 'append';\
+    \   ALTER TABLE harness.session_turns\
+    \     ALTER COLUMN transcript_effect SET NOT NULL;\
+    \   IF NOT EXISTS (\
+    \     SELECT 1\
+    \     FROM pg_catalog.pg_constraint constraint_row\
+    \     JOIN pg_catalog.pg_class relation\
+    \       ON relation.oid = constraint_row.conrelid\
+    \     JOIN pg_catalog.pg_namespace schema_row\
+    \       ON schema_row.oid = relation.relnamespace\
+    \     WHERE schema_row.nspname = 'harness'\
+    \       AND relation.relname = 'session_turns'\
+    \       AND constraint_row.conname =\
+    \         'session_turns_transcript_effect_check'\
+    \   ) THEN\
+    \     ALTER TABLE harness.session_turns\
+    \       ADD CONSTRAINT session_turns_transcript_effect_check\
+    \       CHECK (transcript_effect IN ('append', 'replace', 'reset'));\
+    \   END IF;\
+    \   CREATE INDEX IF NOT EXISTS session_turns_session_index_idx\
+    \     ON harness.session_turns (session_id, turn_index);\
+    \   CREATE INDEX IF NOT EXISTS session_turns_checkpoint_idx\
+    \     ON harness.session_turns (session_id, turn_index DESC)\
+    \     WHERE transcript_effect <> 'append';\
+    \   IF to_regprocedure(\
+    \     'harness.reject_session_fact_mutation()') IS NOT NULL THEN\
+    \     CREATE TRIGGER session_turns_immutable\
+    \       BEFORE UPDATE OR DELETE ON harness.session_turns\
+    \       FOR EACH ROW EXECUTE FUNCTION\
+    \         harness.reject_session_fact_mutation();\
     \   END IF;\
     \ END\
     \ $ha$"

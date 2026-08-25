@@ -6,6 +6,7 @@ import Agent.CLI.Session
     ( LegacySubagentTarget(..)
     , SessionMeta(..)
     , SessionTurn(..)
+    , TranscriptEffect(..)
     )
 import Agent.Dialect (DialectId(..))
 import System.OsPath (unsafeEncodeUtf)
@@ -223,6 +224,7 @@ sampleTurn =
         , turnResponseId = Nothing
         , turnItems = []
         , turnUsage = Nothing
+        , turnEffect = TranscriptAppend
         }
 
 sampleMeta :: Text.Text -> Text.Text -> SessionMeta

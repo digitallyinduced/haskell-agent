@@ -37,7 +37,7 @@ import Agent.CLI.Session
     , SessionMeta(..)
     , deleteSession
     , listSessions
-    , loadSession
+    , loadSessionMeta
     , sessionsRoot
     )
 import Agent.CLI.Style
@@ -114,7 +114,7 @@ handleResume databasePool fullscreen maybeId persist = do
                     reportInfo ("already on session " <> sessionId)
                     pure Nothing
                 else
-                    loadSession databasePool root sessionId >>= \case
+                    loadSessionMeta databasePool root sessionId >>= \case
                         Left err -> do
                             reportError err
                             pure Nothing
