@@ -58,6 +58,7 @@ module Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , wrapFullscreenKeyboardVty
+    , withTrackedVtyBuilder
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , applyStoredFullscreenWindowTitle
@@ -291,7 +292,7 @@ import Agent.CLI.Recap
     )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, onException, throwIO, tryAny)
+import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -835,6 +836,25 @@ wrapFullscreenKeyboardVty enabled vty
         V.outputByteBuffer (V.outputIface vty)
             . TextEncoding.encodeUtf8
 
+-- | Run an action with a Vty builder while retaining ownership of the most
+-- recently built handle. Brick replaces its Vty during 'suspendAndResume',
+-- but its exception cleanup can still target the original handle. Shutting
+-- down the latest handle here ensures terminal modes are restored on exit.
+withTrackedVtyBuilder
+    :: IO V.Vty
+    -> (IO V.Vty -> IO a)
+    -> IO a
+withTrackedVtyBuilder build action = do
+    latestVty <- newIORef Nothing
+    let trackedBuild =
+            mask \restore -> do
+                vty <- restore build
+                writeIORef latestVty (Just vty)
+                pure vty
+        shutdownLatest =
+            readIORef latestVty >>= maybe (pure ()) V.shutdown
+    action trackedBuild `finally` shutdownLatest
+
 requestFullscreenPermission
     :: FullscreenRuntime
     -> ToolCall
@@ -936,90 +956,95 @@ runFullscreen runtime workerAction = do
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
     initialClock <- getMonotonicTimeNSec
     terminal <- detectTerminalCapabilities stdout
-    let buildVty = do
+    let makeVty = do
             vty <- Vty.mkVty fullscreenVtyConfig
-            let output = V.outputIface vty
-            -- Without this mode terminals paste image clipboard fallbacks
-            -- (paths, URLs, or other text representations) as ordinary key
-            -- events, so the composer renders them as text. Vty turns the
-            -- bracketed sequence into one EvPaste that we can classify.
-            when (V.supportsMode output V.BracketedPaste) $
-                V.setMode output V.BracketedPaste True
-            when (V.supportsMode output V.Mouse) $
-                V.setMode output V.Mouse True
-            when (V.supportsMode output V.Focus) $
-                V.setMode output V.Focus True
-            -- Vty deliberately leaves OSC 8 output disabled by default even
-            -- when rendered attributes contain URLs.
-            when (V.supportsMode output V.Hyperlink) $
-                V.setMode output V.Hyperlink True
-            when (V.supportsMode output V.Focus) $
-                V.setMode output V.Focus True
-            wrapped <-
-                wrapNativePreviewVty runtime vty
-                    >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
-            applyStoredFullscreenWindowTitle
-                runtime
-                (V.outputIface wrapped)
-            pure wrapped
-    initialVty <- buildVty
-    let
-        initialState =
-            initialFullscreenAppState
-                runtime
-                history
-                initialAgent
-                initialAgents
-                initialClock
-        (initialDemand, initialDelay) =
-            appMotionTiming initialState
-    atomically $
-        writeTVar
-            runtime.runtimeMotionSchedule
-            (initialDemand, initialDelay, 0)
-    withAsync workerAction \worker ->
-        withAsync uiTicker \_uiTicker ->
-            withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
-                withAsync (eventPump runtime) \_eventPump ->
-                    withAsync (recapTicker runtime) \_recapTicker ->
-                        withAsync
-                            historyLoader
-                            \_historyLoader ->
+            let setupVty = do
+                    let output = V.outputIface vty
+                    -- Without this mode terminals paste image clipboard
+                    -- fallbacks (paths, URLs, or other text representations)
+                    -- as ordinary key events, so the composer renders them as
+                    -- text. Vty turns the bracketed sequence into one EvPaste
+                    -- that we can classify.
+                    when (V.supportsMode output V.BracketedPaste) $
+                        V.setMode output V.BracketedPaste True
+                    when (V.supportsMode output V.Mouse) $
+                        V.setMode output V.Mouse True
+                    when (V.supportsMode output V.Focus) $
+                        V.setMode output V.Focus True
+                    -- Vty deliberately leaves OSC 8 output disabled by
+                    -- default even when rendered attributes contain URLs.
+                    when (V.supportsMode output V.Hyperlink) $
+                        V.setMode output V.Hyperlink True
+                    when (V.supportsMode output V.Focus) $
+                        V.setMode output V.Focus True
+                    wrapped <-
+                        wrapNativePreviewVty runtime vty
+                            >>= wrapFullscreenKeyboardVty
+                                terminal.terminalKittyKeyboard
+                    applyStoredFullscreenWindowTitle
+                        runtime
+                        (V.outputIface wrapped)
+                    pure wrapped
+            setupVty `onException` V.shutdown vty
+    withTrackedVtyBuilder makeVty \buildVty -> do
+        initialVty <- buildVty
+        let
+            initialState =
+                initialFullscreenAppState
+                    runtime
+                    history
+                    initialAgent
+                    initialAgents
+                    initialClock
+            (initialDemand, initialDelay) =
+                appMotionTiming initialState
+        atomically $
+            writeTVar
+                runtime.runtimeMotionSchedule
+                (initialDemand, initialDelay, 0)
+        withAsync workerAction \worker ->
+            withAsync uiTicker \_uiTicker ->
+                withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
+                    withAsync (eventPump runtime) \_eventPump ->
+                        withAsync (recapTicker runtime) \_recapTicker ->
                             withAsync
-                                dictationWorker
-                                \_dictationWorker ->
+                                historyLoader
+                                \_historyLoader ->
                                 withAsync
-                                    (loadSyntaxHighlighterForRuntime runtime)
-                                    \_syntaxLoader ->
-                                        withAsync
-                                            (void (waitCatch worker)
-                                                >> enqueueAppEvent runtime AppStop)
-                                            \_notifier -> do
-                                                finalState <-
-                                                    customMain
-                                                        initialVty
-                                                        buildVty
-                                                        (Just runtime.runtimeEvents)
-                                                        fullscreenApp
-                                                        initialState
-                                                    `finally`
-                                                        runtime.runtimeNativeProgress False
-                                                mapM_
-                                                    (`Composer.requestDictationStop` True)
-                                                    finalState.appDictation
-                                                when (not finalState.appWorkerStopped) $
-                                                    atomically $
-                                                        Composer.appendFullscreenInput
-                                                            runtime.runtimeInput
-                                                            FullscreenInput
-                                                                { fullscreenInputLine =
-                                                                    ReplEof
-                                                                , fullscreenInputQueued =
-                                                                    False
-                                                                , fullscreenInputDisplay =
-                                                                    Nothing
-                                                                }
-                                                wait worker
+                                    dictationWorker
+                                    \_dictationWorker ->
+                                    withAsync
+                                        (loadSyntaxHighlighterForRuntime runtime)
+                                        \_syntaxLoader ->
+                                            withAsync
+                                                (void (waitCatch worker)
+                                                    >> enqueueAppEvent runtime AppStop)
+                                                \_notifier -> do
+                                                    finalState <-
+                                                        customMain
+                                                            initialVty
+                                                            buildVty
+                                                            (Just runtime.runtimeEvents)
+                                                            fullscreenApp
+                                                            initialState
+                                                        `finally`
+                                                            runtime.runtimeNativeProgress False
+                                                    mapM_
+                                                        (`Composer.requestDictationStop` True)
+                                                        finalState.appDictation
+                                                    when (not finalState.appWorkerStopped) $
+                                                        atomically $
+                                                            Composer.appendFullscreenInput
+                                                                runtime.runtimeInput
+                                                                FullscreenInput
+                                                                    { fullscreenInputLine =
+                                                                        ReplEof
+                                                                    , fullscreenInputQueued =
+                                                                        False
+                                                                    , fullscreenInputDisplay =
+                                                                        Nothing
+                                                                    }
+                                                    wait worker
   where
     recapTicker _runtime = forever do
         threadDelay 20_000_000

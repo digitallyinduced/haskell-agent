@@ -22,6 +22,7 @@ import Agent.CLI.TUI.App
     , mergeConversationView
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , withTrackedVtyBuilder
     , wrapFullscreenKeyboardVty
     , motionDemandFor
     , motionDemandForTerminalFocus
@@ -80,7 +81,7 @@ import Agent.TUI.Motion
 import Control.Concurrent.STM (newTChanIO)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -391,6 +392,34 @@ spec = do
                         \title -> modifyIORef' titles (<> [title])
                     }
             readIORef titles `shouldReturn` ["New session"]
+
+    describe "fullscreen Vty ownership" do
+        it "shuts down the rebuilt Vty when exit follows suspension" do
+            shutdowns <- newIORef ([] :: [String])
+            useInitial <- newIORef True
+            (_, output) <- VMock.mockTerminal (80, 24)
+            initialVty <- mockVty
+                output
+                (modifyIORef' shutdowns (<> ["initial"]))
+                (pure False)
+            resumedVty <- mockVty
+                output
+                (modifyIORef' shutdowns (<> ["resumed"]))
+                (pure False)
+            let makeVty = do
+                    initial <- readIORef useInitial
+                    writeIORef useInitial False
+                    pure (if initial then initialVty else resumedVty)
+
+            (withTrackedVtyBuilder makeVty \buildVty -> do
+                first <- buildVty
+                V.shutdown first
+                _ <- buildVty
+                ioError (userError "forced exit"))
+                `shouldThrow` anyIOException
+
+            readIORef shutdowns
+                `shouldReturn` ["initial", "resumed"]
 
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do
