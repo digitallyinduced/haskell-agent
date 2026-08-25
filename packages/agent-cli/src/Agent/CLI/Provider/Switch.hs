@@ -31,7 +31,6 @@ import Agent.CLI.Auth
     , loadAuthForAccount
     , preferredOpenAiTokenProvider
     )
-import Agent.CLI.Command (setModel)
 import Agent.CLI.Error
     ( formatApiErrorAt
     , formatApiErrorInlineAt
@@ -56,6 +55,7 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , saveProjectModel
     )
+import Agent.CLI.Request (setRequestModel)
 import Agent.CLI.ProviderAvailability
     ( probeLoadedAutomaticAvailability
     , probeLoadedAvailability
@@ -223,7 +223,7 @@ applyModelChange
 applyModelChange
         projectRoot provider connection name transportModel dialectId
         paramsRef render previous persist = do
-    modifyIORef' paramsRef (setModel name)
+    modifyIORef' paramsRef (setRequestModel provider name)
     writeIORef render.renderModelRef name
     saveProjectModel projectRoot ModelTarget
         { targetProvider = provider

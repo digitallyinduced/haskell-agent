@@ -32,4 +32,5 @@ buildResponse = buildStreamResponse StreamAssemblyConfig
     , classifyStreamError
     , classifyFailedResponse =
         ConnectionError . failedStreamResponseMessage
+    , incompleteAsFailure = False
     }

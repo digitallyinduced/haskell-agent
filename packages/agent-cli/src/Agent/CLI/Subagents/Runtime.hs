@@ -18,7 +18,7 @@ module Agent.CLI.Subagents.Runtime
 
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction (autoCompactOpenAiBackendWithThreshold)
+import Agent.CLI.Compaction (autoCompactOpenAiBackendWithSender)
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -83,9 +83,17 @@ import Agent.Loop
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
     ( openAiBackendWithRawReasoning
+    , openAiBackendWithReasoningVisibility
     , openAiBackendWithTransportFallback
+    , withCodexTurnStateScope
     )
-import Agent.OpenAI.WebSocketClient (withCodexWsRetrying)
+import Agent.OpenAI.WebSocketClient
+    ( CodexTurnState
+    , newCodexTurnState
+    , sendWsRequestWithEvents
+    , withCodexWsRetrying
+    , withCodexWsRetryingUsingTurnState
+    )
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
 import Agent.Responses.LoopBackend
@@ -559,6 +567,30 @@ freshOpenAiBackend showRawReasoning provider getParams =
                         getParams
             in submit state previous inputs onEvent
 
+-- | Cancellation-safe Codex backend whose disposable sockets all participate
+-- in one logical turn's sticky-routing scope.
+freshOpenAiBackendWithTurnState
+    :: Bool
+    -> CodexTurnState
+    -> TokenProvider
+    -> IO ResponseCreateParams
+    -> Backend
+freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
+    Backend \state previous inputs onEvent ->
+        withCodexWsRetryingUsingTurnState provider turnState
+            \conn _credential ->
+                let Backend submit =
+                        openAiBackendWithReasoningVisibility
+                            showRawReasoning
+                            (\request previousResponseId onStreamEvent ->
+                                sendWsRequestWithEvents
+                                    conn
+                                    request
+                                    previousResponseId
+                                    onStreamEvent)
+                            getParams
+                in submit state previous inputs onEvent
+
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
 runCodexSubagent
@@ -638,31 +670,42 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
                     httpFallbackActive <- newIORef False
+                    turnState <- newCodexTurnState
                     let websocketBackend =
-                            freshOpenAiBackend
+                            freshOpenAiBackendWithTurnState
                                 runtime.subagentOptions.optShowRawReasoning
+                                turnState
                                 tokenProvider
                                 (pure childParams)
                         httpBackend =
                             statelessResponsesBackendWithRawReasoning
                                 runtime.subagentOptions.optShowRawReasoning
                                 (\request _onEvent ->
-                                    OpenAI.createCodexMessageWithProvider
-                                        tokenProvider request)
+                                    OpenAI.createCodexMessageWithProviderWithTurnState
+                                        turnState tokenProvider request)
                                 (pure childParams)
                         baseBackend =
                             openAiBackendWithTransportFallback
                                 httpFallbackActive
                                 websocketBackend
                                 httpBackend
+                        compactSender request =
+                            OpenAI.createCodexMessageWithProviderWithOptionsAndTurnState
+                                OpenAI.remoteCompactionV2RequestOptions
+                                turnState
+                                tokenProvider
+                                request
+                        compactingBackend =
+                            autoCompactOpenAiBackendWithSender
+                                runtime.subagentOptions.optCompactThreshold
+                                compactSender
+                                (const (pure ()))
+                                (pure childParams)
+                                prepared.preparedSession.subSessionContextTokens
+                                baseBackend
                         backend =
-                            withConnectionRecovery $
-                                autoCompactOpenAiBackendWithThreshold
-                                    runtime.subagentOptions.optCompactThreshold
-                                    tokenProvider
-                                    (pure childParams)
-                                    prepared.preparedSession.subSessionContextTokens
-                                    baseBackend
+                            withCodexTurnStateScope (pure turnState) $
+                                withConnectionRecovery compactingBackend
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent

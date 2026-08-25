@@ -577,6 +577,8 @@ import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
     , CodexConn
     , closeCodexConn
+    , codexConnTurnState
+    , resetCodexTurnState
     , withCodexWsCredential
     , withCodexWsWithProvider
     )
@@ -2484,6 +2486,7 @@ runAgentInitializedWithLock
                                         credential
                                         initialWsHealthy
                                         conn
+                                httpFallbackActive <- newIORef False
                                 switchRequests <-
                                     newChan :: IO (Chan AccountSwitchRequest)
                                 let selectAccount = case loaded.loadedOpenAiPool of
@@ -2683,6 +2686,7 @@ runAgentInitializedWithLock
                                             options.optCompactThreshold
                                             options.optShowRawReasoning
                                             wsLock
+                                            httpFallbackActive
                                             tokenProvider
                                             activeConnectionRef
                                             (readIORef paramsRef)
@@ -2698,20 +2702,31 @@ runAgentInitializedWithLock
                                             (pure privateParams)
                                     compactRunner focus =
                                         withMVar wsLock \_ -> do
+                                            OpenAiPersistentConnection
+                                                _credential
+                                                _connectionHealthy
+                                                activeConn <-
+                                                    readIORef activeConnectionRef
                                             historyRef <-
                                                 newIORef =<< readLiveTranscript
                                                     conversationRef
-                                            installLiveCompactOutcome
-                                                conversationRef
-                                                (Just contextTokensRef)
-                                                (runProviderCompactWith
-                                                    (Just compactSender)
-                                                    recordCompactionUsage
-                                                    provider
-                                                    (Just tokenProvider)
-                                                    paramsRef
-                                                    historyRef)
-                                                focus
+                                            let turnState =
+                                                    codexConnTurnState activeConn
+                                                runCompact =
+                                                    installLiveCompactOutcome
+                                                        conversationRef
+                                                        (Just contextTokensRef)
+                                                        (runProviderCompactWith
+                                                            (Just compactSender)
+                                                            recordCompactionUsage
+                                                            provider
+                                                            (Just tokenProvider)
+                                                            paramsRef
+                                                            historyRef)
+                                                        focus
+                                            resetCodexTurnState turnState
+                                            runCompact `finally`
+                                                resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
                                         projectRoot transition persist noticingBackend
@@ -2727,7 +2742,14 @@ runAgentInitializedWithLock
                                         SessionBackend
                                             { backend = activeBackend
                                             , btwBackend
-                                            , resetBackendState = pure ()
+                                            , resetBackendState = do
+                                                OpenAiPersistentConnection
+                                                    _credential
+                                                    _connectionHealthy
+                                                    activeConn <-
+                                                        readIORef activeConnectionRef
+                                                resetCodexTurnState
+                                                    (codexConnTurnState activeConn)
                                             })
                             >>= \case
                                 Left (CodexAuthFailed err) ->

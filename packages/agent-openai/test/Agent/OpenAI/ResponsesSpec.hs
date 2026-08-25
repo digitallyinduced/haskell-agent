@@ -15,10 +15,21 @@ import qualified Agent.Responses.Codec as Codec
 import qualified Agent.Responses.Types as Responses
 import Agent.OpenAI.ToolDSL
 import Agent.OpenAI.WebSocketClient
+import Agent.Provider (Credential(..), Provider(..))
 
 spec :: Spec
 spec = do
     describe "canonical Responses request" do
+        it "omits an empty ChatGPT account header for static bearer credentials" do
+            let credential = Credential
+                    { accessToken = "token"
+                    , accountId = ""
+                    , leaseId = Nothing
+                    , provider = OpenAIProvider
+                    }
+            buildCodexWsHeaders credential
+                `shouldNotSatisfy` any (\(name, _) -> name == "chatgpt-account-id")
+
         it "round-trips API fields, structured tool output, file_url, and extensions" do
             let original = canonicalRequestJson
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseCreateParams of
@@ -27,15 +38,33 @@ spec = do
 
         it "uses the canonical request unchanged at the WebSocket boundary" do
             let payload = buildWsPayloadWithOptions
-                    CodexWsOptions { compactThreshold = Just 120_000 }
+                    CodexWsOptions
+                        { compactThreshold = Just 120_000
+                        , sendIdleTimeoutMicros = defaultCodexWsOptions.sendIdleTimeoutMicros
+                        , receiveIdleTimeoutMicros = defaultCodexWsOptions.receiveIdleTimeoutMicros
+                        }
                     sampleRequest
                     (Just "resp_previous")
             field "type" payload `shouldBe` Just (Aeson.String "response.create")
             field "previous_response_id" payload `shouldBe` Just (Aeson.String "resp_previous")
             field "model" payload `shouldBe` Just (Aeson.String "gpt-5.6")
             field "store" payload `shouldBe` Just (Aeson.Bool False)
+            field "stream" payload `shouldBe` Just (Aeson.Bool True)
             field "max_output_tokens" payload `shouldBe` Just (Aeson.Number 4096)
             field "context_management" payload `shouldSatisfy` maybe False isNonEmptyArray
+
+        it "carries sticky turn state into client metadata without dropping existing metadata" do
+            let payload = addTurnStateToPayload
+                    (Just "sticky-token")
+                    (Aeson.object
+                        [ "client_metadata" .= Aeson.object
+                            [ "session_id" .= ("session-1" :: Text) ]
+                        ])
+            field "client_metadata" payload `shouldBe`
+                Just (Aeson.object
+                    [ "session_id" .= ("session-1" :: Text)
+                    , "x-codex-turn-state" .= ("sticky-token" :: Text)
+                    ])
 
     describe "canonical Responses response" do
         it "preserves statuses, rich output text, usage, and unknown fields" do
