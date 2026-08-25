@@ -62,10 +62,9 @@ spec = describe "Agent.CLI.SessionTitle" do
                             { reasoning = Just sessionReasoning
                             , ..
                             }
-        paramsRef <- newIORef baseParams
         let backendFactory privateParams =
                 Backend \state _ inputs _ -> do
-                    writeIORef seenParams . Just =<< readIORef privateParams
+                    writeIORef seenParams (Just privateParams)
                     writeIORef seenInputs inputs
                     pure $ Right BackendResult
                         { backendOutput =
@@ -73,7 +72,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Auth race cleanup")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory paramsRef (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure baseParams) (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3
                 "User:\nFix auth\n\nAssistant:\nI found the race"
             results <- waitForResults manager 100
@@ -98,7 +97,6 @@ spec = describe "Agent.CLI.SessionTitle" do
     it "drops a stale result after a manual rename invalidates generation" do
         started <- newEmptyMVar
         release <- newEmptyMVar
-        paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
         let backendFactory _ =
                 Backend \state _ _ _ -> do
                     putMVar started ()
@@ -109,7 +107,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Stale title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory paramsRef (\_ -> pure ()) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 1 "conversation"
             takeMVar started
             invalidateSessionTitles manager "session-1"
@@ -118,7 +116,6 @@ spec = describe "Agent.CLI.SessionTitle" do
             takeSessionTitleResults manager `shouldReturn` []
 
     it "waits for an in-flight title before shutdown" do
-        paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
         let backendFactory _ =
                 Backend \state _ _ _ -> do
                     threadDelay 20000
@@ -128,7 +125,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                                 (Just "Finished title")
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory paramsRef (\_ -> pure ()) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (\_ -> pure ()) \manager -> do
             requestSessionTitle manager "session-1" 6 "conversation"
             waitForSessionTitleResults 1000000 manager
                 `shouldReturn`
@@ -142,7 +139,6 @@ spec = describe "Agent.CLI.SessionTitle" do
 
     it "reports provider failures instead of silently dropping them" do
         notified <- newEmptyMVar
-        paramsRef <- newIORef (defaultResponseCreateParams :: ResponseCreateParams)
         let backendFactory _ =
                 Backend \state _ _ _ ->
                     pure $ Right BackendResult
@@ -150,7 +146,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                             emptyTurnOutput "title-response" [] Nothing
                         , backendState = state
                         }
-        withSessionTitleManager backendFactory paramsRef (putMVar notified) \manager -> do
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (putMVar notified) \manager -> do
             requestSessionTitle manager "session-1" 3 "conversation"
             takeMVar notified
                 `shouldReturn`

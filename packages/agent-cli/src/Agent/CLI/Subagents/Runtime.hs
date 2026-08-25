@@ -637,20 +637,19 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         childParams = requestParams OpenAIProvider model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     httpFallbackActive <- newIORef False
                     let websocketBackend =
                             freshOpenAiBackend
                                 runtime.subagentOptions.optShowRawReasoning
                                 tokenProvider
-                                (readIORef childParamsRef)
+                                (pure childParams)
                         httpBackend =
                             statelessResponsesBackendWithRawReasoning
                                 runtime.subagentOptions.optShowRawReasoning
                                 (\request _onEvent ->
                                     OpenAI.createCodexMessageWithProvider
                                         tokenProvider request)
-                                (readIORef childParamsRef)
+                                (pure childParams)
                         baseBackend =
                             openAiBackendWithTransportFallback
                                 httpFallbackActive
@@ -661,7 +660,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 autoCompactOpenAiBackendWithThreshold
                                     runtime.subagentOptions.optCompactThreshold
                                     tokenProvider
-                                    (readIORef childParamsRef)
+                                    (pure childParams)
                                     prepared.preparedSession.subSessionContextTokens
                                     baseBackend
                     runPreparedChild
@@ -676,7 +675,7 @@ runHttpSubagent
     -> Dialect
     -> Provider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
-    -> (IORef ResponseCreateParams -> Backend)
+    -> (ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime dialect provider sendToRoot mkBackend =
     \env previous prompt onEvent -> do
@@ -811,10 +810,9 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         childParams = requestParams provider model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     let backend =
                             withConnectionRecovery $
-                                mkBackend childParamsRef
+                                mkBackend childParams
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent

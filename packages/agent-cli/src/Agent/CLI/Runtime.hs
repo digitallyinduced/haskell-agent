@@ -2681,7 +2681,7 @@ runAgentInitializedWithLock
                                         freshOpenAiBackend
                                             options.optShowRawReasoning
                                             tokenProvider
-                                            (readIORef privateParams)
+                                            (pure privateParams)
                                     compactRunner focus =
                                         withMVar wsLock \_ ->
                                             installCompactOutcome
@@ -2749,9 +2749,9 @@ runAgentInitializedWithLock
                                         dialect
                                         XAIProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef ->
+                                        (\childParams ->
                                             xaiBackend xaiOptions tokenProvider
-                                                (readIORef childParamsRef))
+                                                (pure childParams))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -2760,7 +2760,7 @@ runAgentInitializedWithLock
                                             (readIORef paramsRef)
                             btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
-                                    (readIORef privateParams)
+                                    (pure privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     runProviderCompactWith
@@ -2813,7 +2813,7 @@ runAgentInitializedWithLock
                                                     { permission =
                                                         ClaudeCodeDontAsk
                                                     }
-                                                (readIORef privateParams)
+                                                (pure privateParams)
                                                 privateTranscript
                                     privateBackend.submitTurn
                                         state
@@ -2883,9 +2883,9 @@ runAgentInitializedWithLock
                                         dialect
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
-                                        (\childParamsRef ->
+                                        (\childParams ->
                                             makeBackend
-                                                (readIORef childParamsRef))
+                                                (pure childParams))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
@@ -2893,8 +2893,7 @@ runAgentInitializedWithLock
                                         makeBackend
                                             (readIORef paramsRef)
                             btwBackend privateParams =
-                                makeBackend
-                                    (readIORef privateParams)
+                                makeBackend (pure privateParams)
                             compactRunner =
                                 installCompactOutcome previousRef transcriptRef Nothing $
                                     case customGenericOptions of
@@ -3163,7 +3162,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                                               (roleWarn color
                                                   (glyphWarn <> message))
                       _ -> pure ()
-  withSessionTitleManager btwBackend paramsRef showTitleEvent \titleManager -> do
+  withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
     printed <- newIORef False
     let attachmentsRef = startup.startupSessionState.sessionAttachments
