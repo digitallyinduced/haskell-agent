@@ -109,6 +109,12 @@ spec = describe "custom PostgreSQL SQL normalization" do
                                                                         == "table"
                                                                         && object.catalogObjectName
                                                                             == "todos"))
+                                                    sequentialCatalog <-
+                                                        inspectCustomSchemaSequential
+                                                            rawScope
+                                                            database
+                                                    sequentialCatalog
+                                                        `shouldBe` catalog
                                                     result <- queryCustom
                                                         rawScope
                                                         database
