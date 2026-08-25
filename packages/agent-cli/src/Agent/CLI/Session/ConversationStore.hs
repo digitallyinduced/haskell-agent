@@ -220,6 +220,19 @@ evictConversationTranscript
                             }
                         , True
                         )
+            ResidentTranscript items (HydratedResident _ readers)
+                | state.stateGeneration == expectedGeneration ->
+                    -- Readers keep their immutable value, while their final
+                    -- release installs the newest durable checkpoint.
+                    pure
+                        ( state
+                            { stateTranscript =
+                                ResidentTranscript
+                                    items
+                                    (HydratedResident checkpoint readers)
+                            }
+                        , False
+                        )
             _ -> pure (state, False)
 
 readConversationPreviousResponseId

@@ -132,6 +132,37 @@ spec = do
             readIORef loads `shouldReturn` 1
             conversationResidency store `shouldReturn` ConversationCold
 
+        it "defers a newer checkpoint until active readers release" do
+            readerEntered <- newEmptyMVar
+            releaseReader <- newEmptyMVar
+            newerLoads <- newIORef (0 :: Int)
+            let items = [messageItem "shared"]
+                original = TranscriptCheckpoint "turn:1" (pure items)
+                newer = TranscriptCheckpoint "turn:2" do
+                    modifyIORef' newerLoads (+ 1)
+                    pure items
+                reader transcript = do
+                    putMVar readerEntered ()
+                    takeMVar releaseReader
+                    pure transcript
+            store <- newColdConversationStore Nothing original []
+            generation <- currentTranscriptGeneration store
+
+            withAsync
+                    (withConversationTranscript store reader)
+                    \readerAsync -> do
+                takeMVar readerEntered
+                evictConversationTranscript store generation newer
+                    `shouldReturn` False
+                conversationResidency store
+                    `shouldReturn` ConversationResident
+                putMVar releaseReader ()
+                wait readerAsync `shouldReturn` items
+
+            conversationResidency store `shouldReturn` ConversationCold
+            withConversationTranscript store (`shouldBe` items)
+            readIORef newerLoads `shouldReturn` 1
+
         it "keeps response id and attachments independent of hydration" do
             loads <- newIORef (0 :: Int)
             let image = ImageAttachment "image/png" "png"
