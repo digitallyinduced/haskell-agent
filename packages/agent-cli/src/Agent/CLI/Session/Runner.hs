@@ -821,7 +821,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure $
                 case dialectToolLayout dialect of
                     NoHostToolLayout -> []
-                    _ -> "web_search" : projectedNames
+                    _
+                        | dialectId dialect == GrokBuildDialect ->
+                            "web_search" : "x_search" : projectedNames
+                        | otherwise -> "web_search" : projectedNames
         shellModeFlags = \case
             ShellGhci -> (True, False)
             ShellBash -> (False, True)

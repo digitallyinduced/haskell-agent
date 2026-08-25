@@ -68,7 +68,7 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
             claudeCodeSystemPrompt cwd today
 
 -- | Render a child prompt against the final filtered application-tool set.
--- @web_search@ is server-side and remains available independently.
+-- Hosted search tools are server-side and remain available independently.
 systemPromptForTools
     :: Dialect
     -> [Text]
@@ -89,7 +89,7 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    available = "web_search" : toolNames
+    available = hostedSearchTools dialect ++ toolNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
             grokSystemPromptForTools
@@ -108,6 +108,11 @@ systemPromptForTools
                 isNonInteractive
         ClaudeCodePromptStyle ->
             claudeCodeSystemPrompt cwd today
+
+hostedSearchTools :: Dialect -> [Text]
+hostedSearchTools dialect =
+    "web_search"
+        : ["x_search" | dialectPromptStyle dialect == GrokBuildPromptStyle]
 
 -- | Tell the model about its second filesystem sandbox root without changing
 -- the project/worktree used for relative paths.

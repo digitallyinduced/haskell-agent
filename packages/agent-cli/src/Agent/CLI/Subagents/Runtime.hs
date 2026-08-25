@@ -813,7 +813,7 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                                         filter (not . Text.null)
                                             [ grokSubagentSystemPrompt
                                                 codingGrokPromptTools
-                                                ("web_search" : map (.appToolName) tools)
+                                                ("web_search" : "x_search" : map (.appToolName) tools)
                                                 env.subCwd
                                                 today
                                                 (Text.pack SystemInfo.os)

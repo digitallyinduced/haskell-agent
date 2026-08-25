@@ -659,6 +659,7 @@ mcpToolCollision existingTools = go
     existing =
         Map.fromList $
             ("web_search", "built-in web search")
+                : ("x_search", "built-in X search")
                 : [ (canonicalToolName tool.appToolName, "built-in tool")
                   | tool <- existingTools
                   ]

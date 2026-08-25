@@ -135,12 +135,17 @@ createResponseWithMaybeEventsPolicy policy options credential request onEvent
     configureRequest =
         setRequestHeader "Authorization"
             ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-            . setRequestHeader "X-XAI-Token-Auth" ["xai-grok-cli"]
+            . setRequestHeader "X-XAI-Token-Auth"
+                [Text.encodeUtf8 grokTokenAuthValue]
+            . setRequestHeader "x-authenticateresponse"
+                [Text.encodeUtf8 grokAuthenticateResponseValue]
             . setRequestHeader "x-grok-client-version"
                 [Text.encodeUtf8 options.clientVersion]
-            . setRequestHeader "x-grok-client-identifier" ["grok-shell"]
+            . setRequestHeader "x-grok-client-identifier"
+                [Text.encodeUtf8 grokClientIdentifier]
             . setRequestHeader "x-grok-client-mode" ["interactive"]
-            . setRequestHeader "User-Agent" ["codex-hs"]
+            . setRequestHeader "User-Agent"
+                [Text.encodeUtf8 (grokUserAgent options.clientVersion)]
 
 defaultTransientPolicy :: RetryPolicyM IO
 defaultTransientPolicy =

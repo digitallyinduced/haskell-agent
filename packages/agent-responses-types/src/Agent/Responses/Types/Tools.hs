@@ -17,6 +17,7 @@ data ResponseToolType
     | ToolComputer
     | ToolComputerUsePreview
     | ToolWebSearch
+    | ToolXSearch
     | ToolMcp
     | ToolCodeInterpreter
     | ToolProgrammaticToolCalling
@@ -38,6 +39,7 @@ responseToolTypeText = \case
     ToolComputer -> "computer"
     ToolComputerUsePreview -> "computer_use_preview"
     ToolWebSearch -> "web_search"
+    ToolXSearch -> "x_search"
     ToolMcp -> "mcp"
     ToolCodeInterpreter -> "code_interpreter"
     ToolProgrammaticToolCalling -> "programmatic_tool_calling"
@@ -59,6 +61,7 @@ parseResponseToolType value = case value of
     "computer_use_preview" -> ToolComputerUsePreview
     "computer_use" -> ToolComputer
     "web_search" -> ToolWebSearch
+    "x_search" -> ToolXSearch
     "mcp" -> ToolMcp
     "code_interpreter" -> ToolCodeInterpreter
     "programmatic_tool_calling" -> ToolProgrammaticToolCalling
