@@ -9,7 +9,9 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , compactOpenAIWith
+    , estimatedOccupancy
     , installCompactOutcome
+    , reportedOccupancy
     , runProviderCompact
     , runProviderCompactWith
     , runResponsesCompactWith
@@ -567,7 +569,7 @@ spec = do
         it "clears the previous response id with transcript and token state" do
             previous <- newIORef (Just "resp-old")
             transcript <- newIORef [userTextItem "old context"]
-            contextState <- newIORef (Just (100, 1))
+            contextState <- newIORef (Just (reportedOccupancy 100 1))
             actionMasking <- newIORef MaskedUninterruptible
             let compactedHistory = [userTextItem "compacted context"]
                 outcome = CompactOutcome
@@ -590,11 +592,16 @@ spec = do
             readIORef previous `shouldReturn` Nothing
             readIORef transcript `shouldReturn` compactedHistory
             readIORef contextState `shouldReturn`
-                Just (outcome.compactAfterTokens, length compactedHistory)
+                Just
+                    ( estimatedOccupancy
+                        outcome.compactAfterTokens
+                        (length compactedHistory)
+                    )
 
         it "leaves live state unchanged when compaction fails" do
             let oldHistory = [userTextItem "old context"]
-                oldContextState = Just (100, length oldHistory)
+                oldContextState =
+                    Just (reportedOccupancy 100 (length oldHistory))
             previous <- newIORef (Just "resp-old")
             transcript <- newIORef oldHistory
             contextState <- newIORef oldContextState
@@ -662,6 +669,62 @@ spec = do
                         base
             result <- backend.submitTurn history (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 1
+
+        it "does not treat estimated compact occupancy as full request usage" do
+            let history =
+                    [userTextItem (Text.replicate 12_000 "old context ")]
+                params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { tools = Just
+                        [ FunctionToolValue FunctionTool
+                            { name = "large_tool"
+                            , description =
+                                Just (Text.replicate 4_000 "schema")
+                            , parameters = Nothing
+                            , strict = Just True
+                            , extraFields = mempty
+                            }
+                        ]
+                    }
+                pending = [UserMessage "new"]
+                projectedItems = history <> [userTextItem "new"]
+                projectedWithoutTools =
+                    estimateRequestTokensWithItems
+                        defaultResponseCreateParams
+                        projectedItems
+                projectedWithTools =
+                    estimateRequestTokensWithItems params projectedItems
+                threshold =
+                    projectedWithoutTools
+                        + ((projectedWithTools - projectedWithoutTools) `div` 2)
+                estimatedTokens = 50
+            projectedWithoutTools `shouldSatisfy` (< threshold)
+            projectedWithTools `shouldSatisfy` (>= threshold)
+            estimatedTokens + 20 `shouldSatisfy` (< threshold)
+            contextState <- newIORef
+                (Just (estimatedOccupancy estimatedTokens (length history)))
+            compactCalls <- newIORef (0 :: Int)
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn history (Just "resp-old") pending
+                (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
 
@@ -777,7 +840,8 @@ spec = do
         it "runs the post-compaction hook only after a successful continuation" do
             let history = [userTextItem "old"]
                 threshold = 20
-            contextState <- newIORef (Just (threshold, length history))
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
             hookCalls <- newIORef (0 :: Int)
             let sender _request =
                     pure (Right remoteCompactionResponse)
@@ -970,7 +1034,7 @@ spec = do
                 base = Backend \_ _ _ _ ->
                     error "configured compaction threshold should run first"
             contextState <- newIORef
-                (Just (threshold, length history))
+                (Just (reportedOccupancy threshold (length history)))
             let backend =
                     autoCompactOpenAiBackendWithThreshold
                         (Just threshold)
@@ -1080,7 +1144,8 @@ spec = do
             let oldHistory = [userTextItem "old"]
                 compactedHistory = [userTextItem "compacted"]
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit, length oldHistory))
+                (Just (reportedOccupancy
+                    codexAutoCompactTokenLimit (length oldHistory)))
             compactCalls <- newIORef (0 :: Int)
             seenPrevious <- newIORef []
             events <- newIORef []
@@ -1111,14 +1176,15 @@ spec = do
             readIORef compactCalls `shouldReturn` 1
             readIORef seenPrevious `shouldReturn` [Nothing]
             readIORef contextState `shouldReturn`
-                Just (25, length compactedHistory)
+                Just (reportedOccupancy 25 (length compactedHistory))
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
 
         it "records active-session compaction usage before a failed continuation" do
             let history = [userTextItem "old"]
                 threshold = 20
-                oldContextState = Just (threshold - 2, length history)
+                oldContextState =
+                    Just (reportedOccupancy (threshold - 2) (length history))
             contextState <- newIORef oldContextState
             requests <- newIORef []
             recordedUsage <- newIORef []
@@ -1149,7 +1215,8 @@ spec = do
         it "rolls back compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
                 threshold = 20
-                oldContextState = Just (threshold, length history)
+                oldContextState =
+                    Just (reportedOccupancy threshold (length history))
             contextState <- newIORef oldContextState
             continuationMasking <- newIORef MaskedUninterruptible
             let sender _request =
@@ -1181,7 +1248,7 @@ spec = do
             let history = [userTextItem "old"]
                 threshold = 20
             contextState <- newIORef
-                (Just (threshold, length history))
+                (Just (reportedOccupancy threshold (length history)))
             compactCalls <- newIORef (0 :: Int)
             continuationCalls <- newIORef (0 :: Int)
             recordedUsage <- newIORef []
@@ -1244,7 +1311,8 @@ spec = do
                     , callKind = FunctionCallKind
                     }
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit - 10, length oldHistory))
+                (Just (reportedOccupancy
+                    (codexAutoCompactTokenLimit - 10) (length oldHistory)))
             compactCalls <- newIORef (0 :: Int)
             recordedUsage <- newIORef []
             seenPrevious <- newIORef []
@@ -1278,7 +1346,7 @@ spec = do
             readIORef seenInputs `shouldReturn` [inputs]
             fmap (.backendState) result `shouldBe` Right oldHistory
             readIORef contextState `shouldReturn`
-                Just (25, length oldHistory)
+                Just (reportedOccupancy 25 (length oldHistory))
             readIORef recordedUsage `shouldReturn` []
 
         it "truncates oversized tool output before continuing the call" do
@@ -1381,7 +1449,9 @@ spec = do
                 [UserMessage "new"] (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn`
-                Just (usage.inputTokens + usage.outputTokens, length history)
+                Just (reportedOccupancy
+                    (usage.inputTokens + usage.outputTokens)
+                    (length history))
 
         it "uses last reported occupancy instead of JSON length to decide compaction" do
             let history =
@@ -1395,7 +1465,8 @@ spec = do
                         (history <> turnInputsToItems pending)
                 threshold = occupancy + 1_000
             jsonEstimate `shouldSatisfy` (> threshold)
-            contextState <- newIORef (Just (occupancy, length history))
+            contextState <- newIORef
+                (Just (reportedOccupancy occupancy (length history)))
             compactCalls <- newIORef (0 :: Int)
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
@@ -1420,7 +1491,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 0
             readIORef contextState `shouldReturn`
-                Just (25, length history)
+                Just (reportedOccupancy 25 (length history))
 
         it "does not truncate tool output when reported occupancy still fits" do
             let params = defaultResponseCreateParams
@@ -1452,7 +1523,8 @@ spec = do
                 params
                 (oldHistory <> turnInputsToItems inputs)
                 `shouldSatisfy` (> contextWindow)
-            contextState <- newIORef (Just (occupancy, length oldHistory))
+            contextState <- newIORef
+                (Just (reportedOccupancy occupancy (length oldHistory)))
             seenInputs <- newIORef []
             let base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
@@ -1502,7 +1574,8 @@ spec = do
                 params
                 (oldHistory <> turnInputsToItems inputs)
                 `shouldSatisfy` (<= contextWindow)
-            contextState <- newIORef (Just (occupancy, length oldHistory))
+            contextState <- newIORef
+                (Just (reportedOccupancy occupancy (length oldHistory)))
             seenInputs <- newIORef []
             let base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
@@ -1539,7 +1612,8 @@ spec = do
 
         it "forgets occupancy when the provider omits usage" do
             let history = [userTextItem "old"]
-                oldContextState = Just (1_000, length history)
+                oldContextState =
+                    Just (reportedOccupancy 1_000 (length history))
             contextState <- newIORef oldContextState
             let base = Backend \state _ _ _ ->
                     pure $ successful state TurnOutput
@@ -1566,7 +1640,8 @@ spec = do
                 compactError =
                     ProviderError UsageLimitReached "quota exhausted" (Just 120)
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit, length history))
+                (Just (reportedOccupancy
+                    codexAutoCompactTokenLimit (length history)))
             let compactAction =
                     pure (Left compactError)
                 base = Backend \_ _ _ _ ->
@@ -1584,7 +1659,8 @@ spec = do
         it "rejects compacted snapshots at or above the trigger" do
             let history = [userTextItem "old"]
                 oldContextState =
-                    Just (codexAutoCompactTokenLimit, length history)
+                    Just (reportedOccupancy
+                        codexAutoCompactTokenLimit (length history))
                 compactedHistory = [userTextItem "still too large"]
                 compactAction =
                     pure $ Right CompactOutcome
