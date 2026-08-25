@@ -133,6 +133,7 @@ import Agent.CLI.Style
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
+      commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
       setFullscreenImagePreviews,
@@ -354,7 +355,7 @@ handleReplLine
                             _ -> do
                                 pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
-                                    setFullscreenImagePreviews runtime []
+                                    commitFullscreenImagePreviews runtime pendingImages
                                 resetRenderPrintedText render
                                 let turnInputs =
                                         if null pendingImages
@@ -391,7 +392,7 @@ handleReplLine
                                     modifyLiveAttachments conversationRef
                                         \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
-                                    setFullscreenImagePreviews runtime []
+                                    commitFullscreenImagePreviews runtime pendingImages
                                 let userText =
                                         if Text.null arguments
                                             then "Use the "
@@ -692,7 +693,7 @@ handleReplLine
         pendingImages <-
             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
         forM_ fullscreen \runtime ->
-            setFullscreenImagePreviews runtime []
+            commitFullscreenImagePreviews runtime pendingImages
         let turnInputs =
                 if null pendingImages
                     then [UserMessage expanded]
