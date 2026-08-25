@@ -88,6 +88,7 @@ library
                     , Agent.CLI.TUI.Composer.Edit
                     , Agent.CLI.TUI.LambdaArt
                     , Agent.CLI.TUI.Motion
+                    , Agent.CLI.TUI.Render
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AccountSelection
