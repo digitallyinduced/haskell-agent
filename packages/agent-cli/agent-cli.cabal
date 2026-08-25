@@ -92,6 +92,7 @@ library
                     , Agent.CLI.Dialects
                     , Agent.CLI.Environment
                     , Agent.CLI.Error
+                    , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
                     , Agent.CLI.Input
@@ -300,6 +301,7 @@ test-suite agent-cli-test
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.ErrorSpec
+                    , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec

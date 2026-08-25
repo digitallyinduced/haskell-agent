@@ -20,6 +20,7 @@ import qualified Agent.CLI.DialectsSpec as DialectsSpec
 import qualified Agent.CLI.DatabaseSpec as DatabaseSpec
 import qualified Agent.CLI.EnvironmentSpec as EnvironmentSpec
 import qualified Agent.CLI.ErrorSpec as ErrorSpec
+import qualified Agent.CLI.FileUriSpec as FileUriSpec
 import qualified Agent.CLI.GatewayBridgeSpec as GatewayBridgeSpec
 import qualified Agent.CLI.ImagePreviewSpec as ImagePreviewSpec
 import qualified Agent.CLI.InputSpec as InputSpec
@@ -91,6 +92,7 @@ main = hspec do
     DatabaseSpec.spec
     EnvironmentSpec.spec
     ErrorSpec.spec
+    FileUriSpec.spec
     GatewayBridgeSpec.spec
     ImagePreviewSpec.spec
     InputSpec.spec
