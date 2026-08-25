@@ -3368,7 +3368,6 @@ replWithDraft env@SessionEnv
     , sessionSetConcurrentLimit = _
     , sessionReset = sessionReset
     } draft = do
-    let conversationRef = conversationRef
     writeIORef draftRef draft
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef
