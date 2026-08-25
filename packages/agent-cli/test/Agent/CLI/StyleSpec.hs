@@ -73,3 +73,7 @@ spec = do
         it "ignores untitled placeholders" do
             cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "untitled")
                 `shouldBe` "New session"
+
+        it "prefixes busy titles with a spinner frame" do
+            busyCliWindowTitle "⠋" "fix the title"
+                `shouldBe` "⠋ fix the title"
