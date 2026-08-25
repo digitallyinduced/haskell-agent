@@ -198,6 +198,28 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "Planning the fix"
             rendered `shouldSatisfy` (not . Text.isInfixOf "**")
 
+        it "renders inline Markdown in thought blocks" do
+            let app = baseState
+                    { appUi =
+                        reduceUi
+                            (UiLoop
+                                (ReasoningDelta
+                                    "Inspect `AppState` before continuing."))
+                            baseState.appUi
+                    }
+                size = (80, 24)
+                rendered =
+                    Text.unlines $
+                        pictureRows
+                            (renderWidget
+                                (Just Theme.monochrome)
+                                (drawApp app)
+                                size)
+                            size
+            rendered `shouldSatisfy`
+                Text.isInfixOf "Inspect AppState before continuing."
+            rendered `shouldNotSatisfy` Text.isInfixOf "`AppState`"
+
 renderTraceProperty :: AppState -> RenderTrace -> Property
 renderTraceProperty baseState (RenderTrace actions) =
     conjoin $
