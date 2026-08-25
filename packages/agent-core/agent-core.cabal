@@ -191,6 +191,8 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.FileSystem.GrepSpec
+                    , Agent.Tools.FileSystem.ListDirSpec
+                    , Agent.Tools.FileSystem.ReadFileSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
