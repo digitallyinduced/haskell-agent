@@ -10,6 +10,7 @@ module Agent.Tools.FileSystem
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Exception.Safe (SomeException, try, tryIO)
@@ -63,11 +64,16 @@ resolveWithRoots
     -> [OsPath]
     -> IO (Either Text OsPath)
 resolveWithRoots env requested extraRoots = do
-    absCwd <- canonicalizePath env.toolCwd
     configuredRoots <- readIORef env.toolAllowedRoots
     sessionTmp <- readIORef env.toolSessionTmp
-    allowedRoots <- mapM canonicalizePath
-        (configuredRoots <> extraRoots <> maybe [] pure sessionTmp)
+    canonicalRoots <-
+        mapConcurrentlyBounded rootCanonicalizationConcurrency canonicalizePath
+            ( env.toolCwd
+            : configuredRoots <> extraRoots <> maybe [] pure sessionTmp
+            )
+    let (absCwd, allowedRoots) = case canonicalRoots of
+            root : roots -> (root, roots)
+            [] -> error "resolveWithRoots: cwd canonicalization omitted"
     let combined
             | isAbsolute requested = requested
             | otherwise = absCwd </> requested
@@ -148,8 +154,18 @@ renameTextFile from to = do
 listDirectoryEntries :: OsPath -> IO (Either Text [(OsPath, Bool)])
 listDirectoryEntries path = try @_ @SomeException (listDirectory path) >>= \case
     Left err -> pure $ Left $ "Failed to list directory: " <> Text.pack (show err)
-    Right names -> Right <$> mapM (classify path) names
+    Right names ->
+        Right
+            <$> mapConcurrentlyBounded directoryClassificationConcurrency
+                (classify path)
+                names
   where
     classify root name = do
         isDir <- doesDirectoryExist (root </> name)
         pure (name, isDir)
+
+rootCanonicalizationConcurrency :: Int
+rootCanonicalizationConcurrency = 8
+
+directoryClassificationConcurrency :: Int
+directoryClassificationConcurrency = 16

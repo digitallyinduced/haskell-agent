@@ -14,6 +14,7 @@ module Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , ResumeOverlay(..)
+    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
     ) where
@@ -46,14 +47,19 @@ data Name
     = ConversationViewport
     | ConversationReserve
     | OverlayViewport
-    | ConversationBlock !BlockId
+    | ConversationBlock !AgentTarget !BlockId
+    | ConversationChunkCache
+        !AgentTarget
+        !BlockId
+        !BlockId
     | ConversationBlockCache
+        !AgentTarget
         !BlockId
         !Bool
         !Bool
         !(Maybe (Int, Bool))
-    | CodeBlockCache !BlockId !Int
-    | CodeCopy !BlockId !Int
+    | CodeBlockCache !AgentTarget !BlockId !Int
+    | CodeCopy !AgentTarget !BlockId !Int
     | MarkdownLink !Text
     | ComposerArea
     | ComposerCursor
@@ -210,7 +216,6 @@ data AppState = AppState
     , appPressedControl :: !(Maybe Name)
     , appWorkerStopped :: !Bool
     , appConversationAnchor :: !(Maybe Scroll.ConversationAnchor)
-    , appTerminalFocused :: !Bool
     , appFocusLostAt :: !(Maybe Word64)
     , appAutoRecapShownThisAway :: !Bool
     , appLastAutoRecapAttemptAt :: !(Maybe Word64)
@@ -223,7 +228,16 @@ data AppState = AppState
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
+    , appTerminalFocus :: !TerminalFocus
     }
+
+-- | Best-effort focus state reported by the terminal. Unknown preserves the
+-- normal rendering cadence for terminals that do not support focus events.
+data TerminalFocus
+    = TerminalFocusUnknown
+    | TerminalFocused
+    | TerminalUnfocused
+    deriving (Eq, Show)
 
 data AgentHover = AgentHover
     { agentHoverTarget :: !AgentTarget

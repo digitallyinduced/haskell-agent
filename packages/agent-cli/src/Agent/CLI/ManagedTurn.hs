@@ -17,6 +17,7 @@ import Agent.Loop
     , ImageAttachment(..)
     , TurnInput(..)
     )
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (unsafeToFilePath)
 import Data.Aeson
@@ -161,8 +162,11 @@ managedTurnInputs _ request
     | null request.managedTurnImages && null request.managedTurnFiles =
         pure [UserMessage request.managedTurnText]
     | otherwise = do
-        images <- mapM loadImage request.managedTurnImages
-        files <- mapM loadFile request.managedTurnFiles
+        loaded <- mapConcurrentlyBounded 4 loadMedia
+            (map Left request.managedTurnImages
+                <> map Right request.managedTurnFiles)
+        let images = [image | Left image <- loaded]
+            files = [file | Right file <- loaded]
         pure
             [ UserMultimodalFiles
                 { userText = request.managedTurnText
@@ -171,6 +175,10 @@ managedTurnInputs _ request
                 }
             ]
   where
+    loadMedia = \case
+        Left media -> Left <$> loadImage media
+        Right media -> Right <$> loadFile media
+
     loadImage ManagedTurnMedia{managedTurnMediaPath = path, managedTurnMediaMime = mime} = do
         bytes <- BS.readFile path
         pure ImageAttachment

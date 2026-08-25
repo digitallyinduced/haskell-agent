@@ -38,6 +38,7 @@ module Agent.TUI.Model
 import Agent.TUI.Presentation
     ( formatSearchReplaceDiff
     , formatToolOutput
+    , todoCallPreview
     , toolCallInput
     , toolCallTitle
     )
@@ -73,6 +74,7 @@ data BlockKind
     | BlockAssistant
     | BlockThinking
     | BlockTool
+    | BlockTodo
     | BlockShell
     | BlockEdit
     | BlockSystem
@@ -670,9 +672,11 @@ reduceLoop event state = case event of
             kind = toolBlockKind call.name
             title = toolCallTitle call
             blockIndex = Seq.length state.uiBlocks
-            body = case call.name of
+            body = case canonicalToolName call.name of
                 "search_replace" ->
                     formatSearchReplaceDiff call.arguments
+                "todo_write" -> todoCallPreview call
+                "update_plan" -> todoCallPreview call
                 _ -> ""
             detail = toolCallInput call
         in appendBlock kind title body detail
@@ -1106,6 +1110,8 @@ toolBlockKind rawName
         BlockShell
     | name `elem` ["search_replace", "apply_patch"] =
         BlockEdit
+    | name `elem` ["todo_write", "update_plan"] =
+        BlockTodo
     | otherwise = BlockTool
   where
     name = canonicalToolName rawName

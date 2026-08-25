@@ -287,6 +287,17 @@ spec = describe "Agent.CLI.Session" do
                             , outputTokens = 4
                             , cachedTokens = 2
                             }
+                loadSessions pool root
+                    [final.sessionMeta.metaId, "missing", final.sessionMeta.metaId]
+                    >>= \results ->
+                        fmap (fmap (\(meta, turns) -> (meta.metaId, turns))) results
+                            `shouldBe`
+                                [ Right
+                                    (final.sessionMeta.metaId, [normalTurn, compactTurn])
+                                , Left "session not found: missing"
+                                , Right
+                                    (final.sessionMeta.metaId, [normalTurn, compactTurn])
+                                ]
 
                 listed <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
