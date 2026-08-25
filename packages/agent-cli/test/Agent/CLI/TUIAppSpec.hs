@@ -3,7 +3,8 @@ module Agent.CLI.TUIAppSpec (spec) where
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.TUI.App
-    ( advanceCompletionFlashes
+    ( applyTextPromptEdit
+    , advanceCompletionFlashes
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
@@ -121,6 +122,75 @@ spec = do
                 `shouldBe` value
             normalizeTextOverlayInsertion TextInputSecret value
                 `shouldBe` "first"
+
+    describe "text overlay grapheme editing" do
+        it "moves across a ZWJ emoji as one visible glyph" do
+            let emoji = Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                overlay = textOverlay ("a" <> emoji <> "b") 4
+                movedLeft =
+                    applyTextPromptEdit
+                        (V.EvKey V.KLeft [])
+                        overlay
+                movedRight =
+                    movedLeft >>=
+                        applyTextPromptEdit
+                            (V.EvKey V.KRight [])
+            (.textCursor) <$> movedLeft `shouldBe` Just 1
+            (.textCursor) <$> movedRight `shouldBe` Just 4
+
+        it "deletes a ZWJ emoji without exposing internal code points" do
+            let emoji = Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                beforeEmoji = textOverlay ("a" <> emoji <> "b") 1
+                afterEmoji = textOverlay ("a" <> emoji <> "b") 4
+            (fmap
+                (\overlay -> (overlay.textDraft, overlay.textCursor))
+                (applyTextPromptEdit
+                    (V.EvKey V.KDel [])
+                    beforeEmoji))
+                `shouldBe` Just ("ab", 1)
+            (fmap
+                (\overlay -> (overlay.textDraft, overlay.textCursor))
+                (applyTextPromptEdit
+                    (V.EvKey V.KBS [])
+                    afterEmoji))
+                `shouldBe` Just ("ab", 1)
+
+        it "normalizes stale interior cursors before editing" do
+            let emoji = Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                interior = textOverlay ("a" <> emoji <> "b") 3
+            (fmap
+                (\overlay -> (overlay.textDraft, overlay.textCursor))
+                (applyTextPromptEdit
+                    (V.EvKey V.KLeft [])
+                    interior))
+                `shouldBe` Just ("a" <> emoji <> "b", 0)
+            (fmap
+                (\overlay -> (overlay.textDraft, overlay.textCursor))
+                (applyTextPromptEdit
+                    (V.EvKey V.KDel [])
+                    interior))
+                `shouldBe` Just ("ab", 1)
+
+        it "keeps the cursor after insertions that merge with following text" do
+            let regionalU = '\x1f1fa'
+                regionalS = Text.singleton '\x1f1f8'
+                insertedFlag =
+                    applyTextPromptEdit
+                        (V.EvKey (V.KChar regionalU) [])
+                        (textOverlay regionalS 0)
+                typedAfter =
+                    insertedFlag >>=
+                        applyTextPromptEdit
+                            (V.EvKey (V.KChar 'x') [])
+            (fmap
+                (\overlay -> (overlay.textDraft, overlay.textCursor))
+                insertedFlag)
+                `shouldBe` Just (Text.singleton regionalU <> regionalS, 2)
+            (fmap
+                (\overlay -> (overlay.textDraft, overlay.textCursor))
+                typedAfter)
+                `shouldBe` Just
+                    (Text.singleton regionalU <> regionalS <> "x", 3)
 
     describe "choice overlay lifecycle" do
         it "closes a running-turn choice on success or cancellation" do
@@ -808,6 +878,15 @@ choiceOverlay closeOnTurnEnd = ChoiceOverlay
     , choiceIndex = 0
     , choiceRows = [("one", "")]
     , choiceCloseOnTurnEnd = closeOnTurnEnd
+    }
+
+textOverlay :: Text -> Int -> TextOverlay
+textOverlay draft cursor = TextOverlay
+    { textTitle = "prompt"
+    , textBody = ""
+    , textDraft = draft
+    , textCursor = cursor
+    , textInputMode = TextInputPlain
     }
 
 rootEntry :: AgentEntry
