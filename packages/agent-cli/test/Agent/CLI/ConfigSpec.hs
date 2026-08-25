@@ -74,6 +74,19 @@ spec = describe "Agent.CLI.Config" do
             fmap (.configMcpInitStrategy) result
                 `shouldBe` Right McpInitProgressive
 
+    it "loads the concurrent agent limit" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"maxConcurrentAgents\":48}"
+            result <- loadHarnessConfig home
+            fmap (.configMaxConcurrentAgents) result
+                `shouldBe` Right (Just 48)
+
+    it "rejects a non-positive concurrent agent limit" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home "{\"maxConcurrentAgents\":0}"
+            loadHarnessConfig home
+                `shouldReturn` Left "maxConcurrentAgents must be at least 1"
+
     it "rejects unknown MCP initialization strategies" $
         withTempDir "agent-config-" \home -> do
             writeConfig home
@@ -139,6 +152,7 @@ spec = describe "Agent.CLI.Config" do
                     }
                 config = defaultHarnessConfig
                     { configMcpServers = Map.singleton "seo-mcp" server
+                    , configMaxConcurrentAgents = Just 48
                     }
             saveHarnessConfig home config `shouldReturn` Right ()
             loadHarnessConfig home `shouldReturn` Right config
