@@ -53,7 +53,7 @@ import Agent.Responses.Types
     )
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (race)
-import Data.IORef (IORef, newIORef, readIORef)
+import Data.IORef (IORef, readIORef)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -308,9 +308,8 @@ runSideCallWithCancel
 runSideCallWithCancel withCancelScope makeBackend paramsRef transcriptRef instruction = do
     params <- clearTurnSpecificParams <$> readIORef paramsRef
     transcript <- trimDanglingToolSuffix <$> readIORef transcriptRef
-    privateParams <- newIORef params
     cancel <- newCancelFlag
-    let Backend submit = makeBackend privateParams
+    let Backend submit = makeBackend params
         request =
             submit transcript Nothing
                 [UserMessage instruction] (\_ -> pure ())
