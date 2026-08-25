@@ -2218,7 +2218,8 @@ runAgentInitializedWithLock
                 Nothing ->
                     fmap (\request -> sessionTitleFromPrompt request.managedTurnText)
                         promptRequest
-        setWindowTitle (cliWindowTitle cwd titleHint)
+            startupWindowTitle = cliWindowTitle cwd titleHint
+        setWindowTitle startupWindowTitle
         markStartupStage startup "Loading instructions…"
         startupContext <-
             loadAgentsContext
@@ -2304,6 +2305,7 @@ runAgentInitializedWithLock
                                 , conversationRef
                                 , initialTurns
                                 , persist
+                                , startupWindowTitle
                                 , projectRoot
                                 , home
                                 , cwd
