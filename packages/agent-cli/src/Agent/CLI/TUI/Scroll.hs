@@ -3,6 +3,8 @@ module Agent.CLI.TUI.Scroll
     ( ConversationAnchor(..)
     , ConversationPhase(..)
     , ConversationScroll(..)
+    , ConversationScrollGesture(..)
+    , conversationScrollGesture
     , conversationAnchorSticky
     , followConversationTail
     , reflowConversationAnchor
@@ -31,6 +33,37 @@ data ConversationScroll
     = KeepConversationPosition
     | ScrollConversationToEnd
     deriving (Eq, Show)
+
+data ConversationScrollGesture
+    = IgnoreConversationScroll
+    | PauseAndScrollConversation
+    | ResumeConversationFollow
+    deriving (Eq, Show)
+
+-- | Decide whether a requested scroll can move the conversation viewport.
+--
+-- Empty sessions intentionally render without a viewport, and a viewport at
+-- its top cannot move farther up. Neither case should pause live following.
+conversationScrollGesture
+    :: Int
+    -- ^ Signed scroll amount.
+    -> Maybe (Int, Int, Int)
+    -- ^ Viewport top, viewport height, and content height.
+    -> ConversationScrollGesture
+conversationScrollGesture amount viewport
+    | amount == 0 = IgnoreConversationScroll
+    | otherwise =
+        case viewport of
+            Nothing -> IgnoreConversationScroll
+            Just (top, height, contentHeight)
+                | amount < 0
+                , top <= 0 ->
+                    IgnoreConversationScroll
+                | amount > 0
+                , top + height + amount >= contentHeight ->
+                    ResumeConversationFollow
+                | otherwise ->
+                    PauseAndScrollConversation
 
 startConversationAnchor :: BlockId -> Text -> Int -> ConversationAnchor
 startConversationAnchor blockId text top = ConversationAnchor
