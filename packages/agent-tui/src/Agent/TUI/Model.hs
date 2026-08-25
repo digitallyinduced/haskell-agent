@@ -41,6 +41,7 @@ import Agent.TUI.Presentation
     , formatSearchReplaceDiff
     , formatToolOutput
     , todoListFromToolOutput
+    , todoListHasInProgress
     , todoListHasOpenWork
     , toolCallInput
     , toolCallTitle
@@ -269,11 +270,13 @@ initialUiState = UiState
     , uiTodos = []
     }
 
--- | Checklist shown above the prompt. Hidden once every item is done so a
--- finished list does not linger into the next turn.
+-- | Checklist shown above the prompt during a turn, or while an item is still
+-- in progress. Pending-only lists hide once the session is idle so they do
+-- not linger into the next prompt.
 visibleTodoList :: UiState -> [TodoDisplayLine]
 visibleTodoList state
-    | todoListHasOpenWork state.uiTodos = state.uiTodos
+    | todoListHasInProgress state.uiTodos = state.uiTodos
+    | state.uiRunning && todoListHasOpenWork state.uiTodos = state.uiTodos
     | otherwise = []
 
 -- | Status-only blocks can appear before the first user turn, but the

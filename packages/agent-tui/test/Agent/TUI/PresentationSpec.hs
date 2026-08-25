@@ -205,6 +205,11 @@ spec = describe "tool presentation" do
                 , TodoDisplayLine TodoDisplayPending "Investigate Codex"
                 ]
         todoListHasOpenWork todos `shouldBe` True
+        todoListHasInProgress todos `shouldBe` True
+        todoListHasOpenWork [TodoDisplayLine TodoDisplayPending "later"]
+            `shouldBe` True
+        todoListHasInProgress [TodoDisplayLine TodoDisplayPending "later"]
+            `shouldBe` False
         todoListHasOpenWork [TodoDisplayLine TodoDisplayCompleted "done"]
             `shouldBe` False
         liveTodoPanelLines 2 todos

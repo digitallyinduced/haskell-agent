@@ -40,31 +40,15 @@ import Agent.CLI.Auth
     , probeLoadedAuthCredential
     , staticCredentialProvider
     )
-import Agent.CLI.Secret
-    ( promptSecretLine
-    , sanitizeSecretPromptText
-    )
+import Agent.CLI.Secret (promptSecretLine)
 import Agent.CLI.AgentViewport
-    ( AgentEntry(..)
-    , AgentStep
-    , AgentTarget(..)
+    ( AgentTarget(..)
     , AgentViewportEnv(..)
-    , agentStepsForStatus
-    , formatAgentStatus
-    , pickAgentViewport
     , renderAgentViewportPanelFor
-    , responseItemPreviewLines
-    , responseItemStepPreviews
-    , responseItemsToUiState
     )
 import Agent.CLI.SessionTitle
-    ( SessionTitleEvent(..)
-    , SessionTitleFailure(..)
-    , SessionTitleResult(..)
-    , invalidateSessionTitles
+    ( invalidateSessionTitles
     , requestSessionTitle
-    , waitForSessionTitleResults
-    , withSessionTitleManager
     )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
@@ -76,23 +60,9 @@ import Agent.CLI.AgentSessions
     , signalManagedSessionReady
     , sessionThreadStatus
     )
-import Agent.CLI.ManagedTurn
-    ( ManagedTurnRequest(..)
-    , loadManagedTurnRequest
-    , managedTurnInputs
-    , managedTurnRequestFromText
-    )
-import Agent.CLI.GatewayBridge
-    ( managedGatewayTools
-    , publishManagedLoopEvent
-    , requestManagedApproval
-    )
-import Agent.CLI.Approval
-    ( ApprovalNotice(..)
-    , approveToolDecision
-    , approveToolDecisionWithReporterAndPersistence
-    , toggleAlwaysApprove
-    )
+import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
+import Agent.CLI.GatewayBridge (managedGatewayTools)
+import Agent.CLI.Approval (toggleAlwaysApprove)
 import Agent.CLI.AccountPicker
     ( AccountPickerOption(..)
     , accountPickerMatches
@@ -112,7 +82,7 @@ import Agent.CLI.Recap
     , runRecapWithCancel
     , runTurnSummaryWithCancel
     )
-import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
+import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Clipboard
     ( appendUniqueImageAttachments
     , formatImageSize
@@ -136,8 +106,6 @@ import Agent.CLI.Config
     )
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
-    , OpenAiCompactionSender
-    , autoCompactOpenAiBackendWithSender
     , installLiveCompactOutcome
     , runProviderCompactWith
     , runResponsesCompactWith
@@ -148,24 +116,12 @@ import Agent.CLI.Database.Store
     ( databaseToolsEnvForStore
     , deriveDatabaseScopes
     )
-import Agent.CLI.Database.Storage
-    ( postgresStorageCommandEnv
-    , runStorageCommand
-    )
-import Agent.CLI.LearnedSkills
-    ( defaultLearnedSkillContextMaxChars
-    , learnedSkillTools
-    , queueLearnedSkillContextWithOmissions
-    )
-import Agent.CLI.LearnedSkills.Store
-    ( learnedSkillToolsEnvForStore
-    , loadApplicableLearnedSkillsForStore
-    )
+import Agent.CLI.LearnedSkills (learnedSkillTools)
+import Agent.CLI.LearnedSkills.Store (learnedSkillToolsEnvForStore)
 import Agent.CLI.Error
     ( formatException
     , formatApiErrorAt
     , formatApiErrorInlineAt
-    , formatApiErrorRetryCountdownParts
     )
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -241,28 +197,14 @@ import Agent.CLI.Models
     )
 import Agent.CLI.Options
 import Agent.Store.Postgres
-    ( ManagedPostgresConfig
-    , Store
+    ( Store
     , closeStore
-    , managedPostgresConfigFromEnv
     , openStore
     , trustedPool
-    , withStore
     )
 import Agent.Store.Types (renderStoreError)
 import Agent.Store.Postgres.Connection (StorePool)
-import qualified Agent.Store.Postgres.Session as StoreSession
 import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.CLI.Resume
-    ( ResumeEntry(..)
-    , applyResumeSearchResults
-    , initialResumeBrowser
-    , loadResumeEntry
-    , pickResumeEntries
-    , pickResumeSession
-    , resumeEntryFromMeta
-    , resumeSearchEntries
-    )
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
@@ -277,8 +219,6 @@ import Agent.CLI.Project
     , projectAccountFor
     , projectModelProvider
     , resolveProjectRoot
-    , saveProjectAutoApprove
-    , saveProjectMaxConcurrentAgents
     , saveProjectModel
     )
 import Agent.CLI.Prompt
@@ -288,24 +228,19 @@ import Agent.CLI.Prompt
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , fallbackCandidates
     , isProviderUnavailable
     )
 import Agent.CLI.Provider.OpenAI
     ( OpenAiPersistentConnection(..)
     , lockedOpenAiSession
     )
-import Agent.CLI.ProviderAvailability
-    ( probeLoadedAutomaticAvailability
-    , probeLoadedAvailability
-    )
+import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
 import Agent.CLI.Provider.Switch
     ( accountSwitchTarget
     , applyModelChange
     , chooseStartupProviderTransition
     , continueAutomaticFallback
     , loadSelectedAccountAuth
-    , prepareProviderTransition
     , prepareTransitionBackend
     , reloadAuth
     , reportProviderUnavailable
@@ -320,15 +255,11 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
-    , transitionCommitsImmediately
     )
 import Agent.CLI.SessionState (SessionState(..), newSessionState)
 import Agent.CLI.Render
     ( RenderConfig(..)
-    , RenderState(..)
-    , beginRenderTurn
     , clearThinking
-    , emptyRenderState
     , putTextLn
     , renderEvent
     , renderPrintedText
@@ -348,10 +279,8 @@ import Agent.CLI.Session.History
     , hydrateUiHistory
     , LiveConversation(..)
     , readLiveAttachments
-    , readLivePreviousResponseId
     , readLiveTranscript
     , modifyLiveAttachments
-    , resetLiveConversationWith
     , writeLiveTranscript
     )
 import Agent.CLI.Session.Interaction
@@ -361,6 +290,7 @@ import Agent.CLI.Session.Interaction
     )
 import Agent.CLI.Session.Lifecycle (SessionContinuation(..))
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle
+import qualified Agent.CLI.Session.Runner as SessionRunner
 import Agent.CLI.Session.Selection
     ( currentSessionId
     , handleConversationSearch
@@ -383,15 +313,10 @@ import Agent.CLI.SessionLock
     , acquireSessionLock
     , releaseSessionLock
     , sessionLockFilePath
-    , sessionLockIsActive
     , sessionLockPath
     )
 import Agent.CLI.Skills
     ( formatSkillsListing
-    , installSkillCatalogWithOmissions
-    , installSkillToolRoots
-    , loadSkillsCatalogQuiet
-    , reservedSlashNames
     , skillInvocationCommand
     )
 import Agent.CLI.Status
@@ -416,10 +341,8 @@ import Agent.CLI.Startup.Auth
     )
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(..)
-    , SubagentSession(..)
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
-    , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
@@ -453,16 +376,12 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsForWithTypes
     , filterBashTools
     , filterGhciTools
-    , formatAgentsMdForDialect
-    , globalAgentsHomeDir
-    , isBashToolName
-    , isGhciToolName
     )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
@@ -473,31 +392,23 @@ import Agent.CLI.TUI.App
     , queuedFullscreenInputDisplays
     , readFullscreenLineOrWithCatalog
     , readFullscreenLineWithCatalog
-    , requestFullscreenPermission
     , requestFullscreenChoiceWithBody
-    , requestFullscreenResume
-    , requestFullscreenSecret
-    , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
-import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
-    ( BlockState(..)
-    , UiEvent(..)
+    ( UiEvent(..)
     , UiState(..)
     , infoNotice
     , progressNotice
-    , successNotice
     , warningNotice
-    , initialUiState
     , reduceUi
     )
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
-import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
+import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Usage
     ( formatGrokLimitStatus
     , formatOpenAiLimitStatus
@@ -515,7 +426,6 @@ import Agent.CLI.Worktree
     , worktreeRoot
     )
 import Agent.Cancel (requestCancel)
-import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Claude
     ( ClaudeCodeAuth(..)
     , ClaudeCodeOptions(..)
@@ -528,30 +438,17 @@ import Agent.Claude
 import Agent.Loop
 import qualified Agent.MCP as MCP
 import Agent.Error
-    ( ApiError(..)
-    , CredentialExhaustionReason(..)
-    )
+    ( ApiError(..) )
 import Agent.Dialect
     ( DialectId(..)
-    , ToolLayout(..)
     , dialectForId
     , dialectId
-    , dialectToolLayout
     , dialectSlug
-    , grokBuildPublicToolName
-    , providerSupportsDialect
-    )
-import Agent.ProjectInstructions
-    ( DiscoverOptions(..)
-    , defaultDiscoverOptions
-    , discoverProjectInstructions
-    , loadedInstructionFiles
     )
 import Agent.Skills
     ( Skill(..)
     , SkillCatalog(..)
     , SkillInvocation(..)
-    , SkillWarning(..)
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -559,16 +456,9 @@ import Agent.Skills
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
     , compactSessionUserText
-    , hasCompactionCheckpoint
-    , isTranscriptResetTurn
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.LoopBackend
-    ( openAiAuxiliaryResponseSenderReconnecting
-    , openAiBackendWithReasoningVisibility
-    , openAiResponseSenderReconnecting
-    )
 import Agent.Responses.Types
 import Agent.Responses.GenericBackend (genericResponsesBackendWith)
 import Agent.Responses.GenericClient (GenericClientOptions(..))
@@ -576,14 +466,12 @@ import qualified Agent.Responses.GenericClient as GenericResponses
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
-    , CodexConn
     , closeCodexConn
     , withCodexWsCredential
     , withCodexWsWithProvider
     )
 import Agent.Provider
-    ( AccountFailure(..)
-    , BillingMode(..)
+    ( BillingMode(..)
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
@@ -597,23 +485,15 @@ import qualified Agent.Provider as Provider
 import Agent.Subagents
     ( RootTurnId
     , SubagentConfig(..)
-    , SubagentStatus(..)
-    , abortRootTurn
-    , beginRootTurn
     , closeSubagentRegistry
-    , resetSubagentRegistry
     , defaultMaxConcurrent
     , defaultSubagentConfig
     , formatCompletionNotice
-    , getStatus
     , interruptActiveSubagents
-    , listAgents
     , newSubagentRegistry
-    , setMaxConcurrent
     , setSubagentOnComplete
     , setSubagentOnSettled
     , setSubagentRunner
-    , subagentConfig
     )
 import Agent.GrokBuild.Dialect.Goal
     ( activateGoal
@@ -628,12 +508,11 @@ import Agent.GrokBuild.Dialect.Workflow
     ( formatWorkflowRuns
     , workflowRunSnapshots
     )
-import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
-import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
+import Agent.Subagents.TaskPath (taskPathRoot)
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
-    , multiAgentToolNames
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -641,7 +520,6 @@ import Agent.Tools.PlanMode
     , PlanModeHooks(..)
     , PlanModeState(..)
     , activatePlanMode
-    , deactivatePlanMode
     , planFilePath
     )
 import Agent.Tools.Secret
@@ -672,7 +550,6 @@ import Control.Concurrent.Async
     , waitSTM
     , withAsync
     )
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
@@ -699,25 +576,20 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, unless, void, when)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson as Aeson
 import Data.IORef
-import Data.List (findIndex, sortOn)
-import Data.Map.Strict (Map)
+import Data.List (findIndex)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
-import Text.Printf (printf)
 import Data.Time.Clock
     ( UTCTime
     , diffUTCTime
     , getCurrentTime
     , utctDay
     )
-import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory.OsPath
     ( doesDirectoryExist
     , getCurrentDirectory
@@ -729,7 +601,7 @@ import System.Environment (getArgs, getProgName, lookupEnv)
 import System.OsPath (OsPath, decodeFS, unsafeEncodeUtf, (</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
-import System.Exit (ExitCode(..), die)
+import System.Exit (die)
 import System.IO
     ( Handle
     , IOMode(AppendMode)
@@ -740,9 +612,7 @@ import System.IO
     , stdout
     , withFile
     )
-import System.Mem.StableName (StableName, makeStableName)
 import System.Posix.Files (setFileMode)
-import System.Process (readProcessWithExitCode)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -753,12 +623,6 @@ data ActiveHttpAuth = ActiveHttpAuth
 
 data AccountSwitchRequest
     = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
-
-data AgentStepCache = AgentStepCache
-    { cachedTranscript :: !(StableName [ResponseItem])
-    , cachedVariant :: !(Maybe SubagentStatus)
-    , cachedSteps :: ![AgentStep]
-    }
 
 data AgentProcessRuntime = AgentProcessRuntime
     { processMcpSupervisor :: !MCP.McpSupervisor
@@ -787,7 +651,6 @@ backgroundRunMode output cwd = AgentRunMode
     , runInBackground = True
     , runCwdHint = Just cwd
     }
-
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
 -- session. Keeping the id in the generated GHCi command avoids a shared
 -- cross-process resume pointer when several development REPLs are open.
@@ -3402,804 +3265,23 @@ printResumeHint progName = \case
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
+sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
+sessionRunnerContinuation =
+    SessionRunner.SessionRunnerContinuation
+        { runnerRepl = repl
+        , runnerReplWithDraft = replWithDraft
+        , runnerRunPendingTurn = runPendingTurn
+        , runnerFinishTurn = finishTurn
+        , runnerFinishStartup = finishStartup
+        , runnerPreparePromptSkillInputs = preparePromptSkillInputs
+        , runnerRunSessionRecap = runSessionRecap
+        , runnerRunSessionTurnSummary = runSessionTurnSummary
+        }
 runSession
     :: SessionRequest
     -> SessionBackend
     -> IO RunResult
-runSession SessionRequest{..} SessionBackend{..} = do
-  initialPrevious <- readLivePreviousResponseId conversationRef
-  ioLock <- newMVar ()
-  let fullscreen = startup.startupFullscreen
-      terminal = startup.startupTerminal
-      stdoutHandle = startup.startupStdout
-      stderrHandle = startup.startupStderr
-      useColor = startup.startupUseColor
-      stderrTty = startup.startupStderrTty
-      stdoutTty = startup.startupStdoutTty
-      setWindowTitle title =
-          case fullscreen of
-              Just runtime -> setFullscreenWindowTitle runtime title
-              Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
-      showTitleEvent = \case
-        SessionTitleGenerated SessionTitleResult{..} ->
-          case persist of
-              PersistenceDisabled -> pure ()
-              PersistenceEnabled slotRef ->
-                  readIORef slotRef >>= \case
-                      PersistenceActive handle
-                          | handle.sessionMeta.metaId == resultSessionId
-                          , not handle.sessionMeta.metaTitleIsManual ->
-                              withMVar ioLock \_ ->
-                                  setWindowTitle
-                                      (cliWindowTitle handle.sessionMeta.metaCwd
-                                          (Just resultTitle))
-                      _ -> pure ()
-        SessionTitleFailed SessionTitleFailure{..} ->
-          case persist of
-              PersistenceDisabled -> pure ()
-              PersistenceEnabled slotRef ->
-                  readIORef slotRef >>= \case
-                      PersistenceActive handle
-                          | handle.sessionMeta.metaId == failureSessionId
-                          , not handle.sessionMeta.metaTitleIsManual ->
-                              withMVar ioLock \_ -> do
-                                  let message =
-                                          "session title generation failed: "
-                                              <> failureMessage
-                                  case fullscreen of
-                                      Just runtime ->
-                                          emitUiEvent runtime
-                                              (UiErrorMessage message)
-                                      Nothing -> do
-                                          color <- resolveColor stderrHandle
-                                          putTextLn stderrHandle
-                                              (roleWarn color
-                                                  (glyphWarn <> message))
-                      _ -> pure ()
-  withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
-    toolRegistry <- requireToolRegistry allTools
-    let previewIdRef = startup.startupSessionState.sessionPreviewId
-    spinnerRef <- newIORef Nothing
-    renderStateRef <- newIORef emptyRenderState
-    allowedToolsRef <- newIORef Set.empty
-    lastAssistantRef <- newIORef Nothing
-    modelRef <- newIORef =<< (currentModel <$> readIORef paramsRef)
-    unavailableProvidersRef <- newIORef unavailableProviders
-    startupUnavailableRef <- newIORef startupUnavailable
-    restartEffortRef <- newIORef Nothing
-    titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
-    selectedAgent <- newIORef AgentRoot
-    agentStepCache <- newIORef (Map.empty :: Map AgentTarget AgentStepCache)
-    let cachedAgentSteps target variant items build = do
-            transcriptName <- makeStableName items
-            cache <- readIORef agentStepCache
-            case Map.lookup target cache of
-                Just cached
-                    | cached.cachedTranscript == transcriptName
-                    , cached.cachedVariant == variant ->
-                        pure cached.cachedSteps
-                _ -> do
-                    let steps = build items
-                    atomicModifyIORef' agentStepCache \current ->
-                        ( Map.insert target (AgentStepCache
-                            { cachedTranscript = transcriptName
-                            , cachedVariant = variant
-                            , cachedSteps = steps
-                            })
-                            current
-                        , ()
-                        )
-                    pure steps
-        loadAgentSnapshot includeSummaries = do
-            rootItems <- readLiveTranscript conversationRef
-            agents <- case multiCtx of
-                Nothing -> pure []
-                Just ctx -> listAgents ctx.multiRegistry Nothing
-            let availableTargets =
-                    AgentRoot
-                        : [ AgentChild agentId
-                          | (_, agentId, _) <- agents
-                          ]
-            selected <-
-                atomicModifyIORef' selectedAgent \current ->
-                    let reconciled =
-                            TuiBridge.reconcileAgentSelection
-                                availableTargets
-                                current
-                    in (reconciled, reconciled)
-            sessions <- readIORef subagentSessions
-            let transcriptLines target items
-                    | null agents = []
-                    | target == selected = case target of
-                        AgentRoot ->
-                            responseItemPreviewLines 12 items
-                        AgentChild _
-                            | includeSummaries ->
-                                responseItemPreviewLines 12 items
-                            | otherwise ->
-                                []
-                    | includeSummaries =
-                        responseItemPreviewLines 0 items
-                    | otherwise = []
-                conversationFor target status items
-                    | includeSummaries = initialUiState
-                    | target /= selected = initialUiState
-                    | target == AgentRoot = initialUiState
-                    | otherwise =
-                        settleConversation items status $
-                            responseItemsToUiState
-                                options.optShowRawReasoning
-                                items
-                settleConversation items status conversation =
-                    case status of
-                        Pending -> conversation
-                        Running -> conversation
-                        Completed result ->
-                            let settled =
-                                    finalizeAll BlockComplete conversation
-                            in case result of
-                                Just text
-                                    | null items
-                                    , not (Text.null (Text.strip text)) ->
-                                        reduceUi
-                                            (UiAssistantHistory
-                                                (Text.strip text))
-                                            settled
-                                _ -> settled
-                        Errored message ->
-                            reduceUi
-                                (UiErrorMessage
-                                    (if Text.null (Text.strip message)
-                                        then "Agent failed."
-                                        else Text.strip message))
-                                (finalizeAll BlockFailed conversation)
-                        Interrupted ->
-                            finalizeAll BlockCancelled conversation
-                        Closed ->
-                            finalizeAll BlockComplete conversation
-                        NotFound ->
-                            reduceUi
-                                (UiErrorMessage
-                                    "Agent transcript is unavailable.")
-                                (finalizeAll BlockFailed conversation)
-                  where
-                    finalizeAll terminal ui =
-                        reduceUi
-                            (UiTurnEnded terminal)
-                            ui { uiTurnStartBlock = 0 }
-            rootSteps <-
-                if null agents
-                    then pure []
-                    else cachedAgentSteps
-                        AgentRoot
-                        Nothing
-                        rootItems
-                        (responseItemStepPreviews 2)
-            let rootEntry = AgentEntry
-                    { agentTarget = AgentRoot
-                    , agentPath = "/root"
-                    , agentStatus = "active"
-                    , agentModel = Nothing
-                    , agentSteps = rootSteps
-                    , agentTranscript =
-                        transcriptLines AgentRoot rootItems
-                    , agentConversation = initialUiState
-                    }
-            children <- mapConcurrentlyBounded 8
-                (materializeChild
-                    transcriptLines
-                    conversationFor
-                    sessions)
-                agents
-            pure (selected, rootEntry : children)
-          where
-            materializeChild
-                    transcriptLines
-                    conversationFor
-                    sessions
-                    (path, agentId, status) = do
-                let target = AgentChild agentId
-                items <- case Map.lookup agentId sessions of
-                    Nothing -> pure []
-                    Just session -> readIORef session.subSessionTranscript
-                steps <- cachedAgentSteps
-                    target
-                    (Just status)
-                    items
-                    (agentStepsForStatus 2 status)
-                let transcript =
-                        transcriptLines target items
-                            <> case status of
-                                Completed (Just result)
-                                    | null items
-                                    , not (Text.null (Text.strip result)) ->
-                                        ["assistant: " <> Text.strip result]
-                                Errored message ->
-                                    ["error: " <> Text.strip message]
-                                _ -> []
-                pure AgentEntry
-                    { agentTarget = target
-                    , agentPath = taskPathText path
-                    , agentStatus = formatAgentStatus status
-                    , agentModel =
-                        (.subSessionEffectiveModel)
-                            <$> Map.lookup agentId sessions
-                    , agentSteps = steps
-                    , agentTranscript = transcript
-                    , agentConversation =
-                        conversationFor target status items
-                    }
-        hydrateSelectedAgent agentId = do
-            effectiveModel <- readIORef modelRef
-            lookupOrCreateSubagentSession
-                subagentSessions
-                storeRoot
-                agentTypes
-                provider
-                connectionId
-                legacyTarget
-                effectiveModel
-                (dialectId dialect)
-                agentId
-        selectAgent target = do
-            previous <- readIORef selectedAgent
-            when (previous /= target) $
-                releaseSelectedAgent previous
-            case target of
-                AgentRoot -> pure ()
-                AgentChild agentId -> do
-                    session <-
-                        (Just <$>
-                            hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure Nothing
-                    forM_ session \selectedSession -> do
-                        withMVar selectedSession.subSessionHydrated \_ ->
-                            writeIORef selectedSession.subSessionPinned True
-                        -- If settlement won the race before the pin was set,
-                        -- refill the same stable object now that it is pinned.
-                        void
-                            (hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure ()
-            writeIORef selectedAgent target
-        releaseSelectedAgent = \case
-            AgentRoot -> pure ()
-            AgentChild agentId -> do
-                sessions <- readIORef subagentSessions
-                forM_ (Map.lookup agentId sessions) \session -> do
-                    withMVar session.subSessionHydrated \_ ->
-                        writeIORef session.subSessionPinned False
-                    case multiCtx of
-                        Nothing -> pure ()
-                        Just ctx -> do
-                            status <- getStatus ctx.multiRegistry agentId
-                            void $
-                                persistAndEvictSubagentSessionWithStatus
-                                    storeRoot ctx.multiRegistry agentTypes
-                                    agentId status session
-        agentViewport = AgentViewportEnv
-            { viewportSelected = selectedAgent
-            , viewportSelect = selectAgent
-            , viewportEntries = snd <$> loadAgentSnapshot True
-            }
-    writeIORef startup.startupAgentSnapshot
-        (loadAgentSnapshot False)
-    writeIORef startup.startupAgentSelect selectAgent
-    let installSkills context queueContext skills = do
-            before <- readIORef context
-            installSkillToolRoots toolEnv skills
-            omitted <- installSkillCatalogWithOmissions
-                reservedSlashNames queueContext context
-                skillsRef skillInvocationsRef skills
-            after <- readIORef context
-            pure
-                ( omitted
-                , max 0 (contextLength after - contextLength before)
-                )
-        installLearnedSkills context maximum =
-            loadApplicableLearnedSkillsForStore
-                startup.startupDatabaseStore
-                databaseScopes >>= \case
-                    Left err -> do
-                        reportLearnedSkillWarning
-                            ("learned skills unavailable: " <> err)
-                        pure []
-                    Right learnedSkills -> do
-                        omitted <-
-                            queueLearnedSkillContextWithOmissions
-                                maximum
-                                context
-                                learnedSkills
-                        when (omitted > 0) $
-                            reportLearnedSkillWarning
-                                ("learned skills: "
-                                    <> Text.pack (show omitted)
-                                    <> " omitted from model context due to the context budget")
-                        pure learnedSkills
-        sessionReset = do
-            resetLiveConversationWith
-                resetBackendState
-                conversationRef
-                planMode
-            writeIORef usageRef emptyTokenUsage
-            writeIORef lastAssistantRef Nothing
-            writeIORef pendingNotices []
-            writeIORef subagentSessions Map.empty
-            writeIORef selectedAgent AgentRoot
-            writeIORef agentStepCache Map.empty
-            case multiCtx of
-                Just ctx -> resetSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
-            freshAgents <-
-                loadAgentsContext
-                    stderrHandle
-                    fullscreen
-                    options
-                    dialect
-                    home
-                    cwd
-                    []
-                    Nothing
-            freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
-            (omitted, _) <-
-                installSkills freshAgents True freshSkills
-            reportSkillCatalog True freshSkills omitted
-            void $ installLearnedSkills
-                freshAgents
-                defaultLearnedSkillContextMaxChars
-            fresh <- readIORef freshAgents
-            writeIORef startupContext fresh
-        refreshSkills queueContext = do
-            refreshed <- loadSkillsCatalogQuiet
-                options home projectRoot cwd
-            (omitted, _) <-
-                installSkills startupContext queueContext refreshed
-            when queueContext $
-                reportSkillCatalog True refreshed omitted
-        contextLength = maybe 0 Text.length
-        formatSkillWarning warning =
-            "skill ignored: "
-                <> toText warning.skillWarningPath
-                <> ": "
-                <> warning.skillWarningMessage
-        formatSkillOmission omitted =
-            "skills: "
-                <> Text.pack (show omitted)
-                <> " omitted from model context due to the catalog budget"
-        reportLearnedSkillWarning message =
-            case fullscreen of
-                Nothing -> do
-                    color <- resolveColor stderrHandle
-                    putTextLn stderrHandle $
-                        roleWarn color (glyphWarn <> message)
-                Just runtime ->
-                    emitUiEvent runtime (UiSystemMessage message)
-        reportSkillCatalog includeSummary catalog omitted =
-            case fullscreen of
-                Nothing -> do
-                    color <- resolveColor stderrHandle
-                    when includeSummary do
-                        let count = length catalog.catalogSkills
-                        putTextLn stderrHandle $
-                            roleMuted color
-                                (glyphSession
-                                    <> "skills: loaded "
-                                    <> Text.pack (show count)
-                                    <> if count == 1
-                                        then " skill"
-                                        else " skills")
-                    mapM_
-                        (putTextLn stderrHandle
-                            . roleWarn color
-                            . (glyphWarn <>)
-                            . formatSkillWarning)
-                        catalog.catalogWarnings
-                    when (omitted > 0) $
-                        putTextLn stderrHandle $
-                            roleWarn color
-                                (glyphWarn <> formatSkillOmission omitted)
-                Just runtime -> do
-                    when includeSummary do
-                        let count = length catalog.catalogSkills
-                        emitUiEvent runtime $
-                            UiSystemMessage
-                                ("skills: loaded "
-                                    <> Text.pack (show count)
-                                    <> if count == 1
-                                        then " skill"
-                                        else " skills")
-                    mapM_
-                        (emitUiEvent runtime
-                            . UiSystemMessage
-                            . formatSkillWarning)
-                        catalog.catalogWarnings
-                    when (omitted > 0) $
-                        emitUiEvent runtime
-                            (UiSystemMessage (formatSkillOmission omitted))
-    policyRef <- newIORef policy
-    -- Mirror plan session dir into the subagent store root for this session.
-    let syncStore = do
-            sessionDir <- readIORef planMode.planSessionDir
-            case sessionDir of
-                Just dir -> writeIORef storeRoot (Just dir)
-                Nothing -> pure ()
-    syncStore
-    let render = RenderConfig
-            { renderShowThinking = stderrTty
-            , renderThinkingSpinner = spinnerRef
-            , renderState = renderStateRef
-            , renderColor = useColor
-            , renderLock = ioLock
-            , renderStdout = stdoutHandle
-            , renderStderr = stderrHandle
-            , renderModelRef = modelRef
-            -- OSC 9;4 is ignored by terminals that do not implement it.
-            -- Gate on the same TTY check as the in-pane spinner so pipes
-            -- and redirected stderr stay clean.
-            , renderNativeProgress =
-                stderrTty
-                    && terminal.terminalNativeProgress
-                    && nativeProgressAnimationEnabled
-                        options.optMotionMode
-            , renderMotionMode = options.optMotionMode
-            }
-        emitLoop event = do
-            forM_ promptRequest \request ->
-                publishManagedLoopEvent request event
-            case fullscreen of
-                Nothing -> renderEvent render event
-                Just runtime -> do
-                    case event of
-                        TurnStarted -> do
-                            now <- getCurrentTime
-                            modifyIORef' renderStateRef (beginRenderTurn now)
-                        TextDelta _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{statePrintedText = True})
-                        ToolStarted _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{stateActivity = "Running tool…"})
-                        _ -> pure ()
-                    emitUiEvent runtime (UiLoop event)
-        shellToolAllowed call = do
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            let toolName = canonicalToolName call.name
-            pure $
-                (not (isGhciToolName toolName) || ghciEnabled)
-                    && (not (isBashToolName toolName) || bashEnabled)
-        approveRegisteredTool call =
-            withMVar ioLock \_ ->
-                case promptRequest of
-                    Just request
-                        | isJust request.managedTurnBridgeDirectory ->
-                            approveToolDecisionWithReporterAndPersistence
-                                (requestManagedApproval request)
-                                (const (pure ()))
-                                (pure ())
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
-                    _ -> case fullscreen of
-                        Nothing ->
-                            withStdinPaused escPaused $
-                                approveToolDecision
-                                    policyRef allowedToolsRef toolRegistry planMode
-                                    projectRoot call
-                        Just runtime ->
-                            approveToolDecisionWithReporterAndPersistence
-                                (requestFullscreenPermission runtime)
-                                (\case
-                                    ApprovalWarning _ -> pure ()
-                                    ApprovalSuccess message ->
-                                        emitUiEvent runtime
-                                            (UiSetNotice
-                                                (Just
-                                                    (successNotice message))))
-                                (saveProjectAutoApprove projectRoot True)
-                                policyRef
-                                allowedToolsRef
-                                toolRegistry
-                                planMode
-                                call
-        config = LoopConfig
-            { loopBackend = backend
-            , loopBackendState = BackendStateStore
-                { readBackendState = readLiveTranscript conversationRef
-                , commitBackendState = writeLiveTranscript conversationRef
-                }
-            , loopTools = toolRegistry
-            , loopDispatch = defaultLoopDispatch
-            , loopMaxTurns = options.optMaxTurns
-            , loopOnEvent = emitLoop
-            , loopApprove = \call ->
-                shellToolAllowed call >>= \case
-                    False ->
-                        pure (Left
-                            ("Tool " <> call.name
-                                <> " is disabled by the current /shell setting."))
-                    True -> approveRegisteredTool call
-            , loopCancel = toolEnv.toolCancel
-            }
-        beginSubagentTurn = do
-            case multiCtx of
-                Nothing -> pure Nothing
-                Just ctx -> do
-                    rootTurnId <- beginRootTurn ctx.multiRegistry
-                    writeIORef rootTurnRef (Just rootTurnId)
-                    pure (Just rootTurnId)
-        finishSubagentTurn rootTurnId =
-            atomicModifyIORef' rootTurnRef \current ->
-                (if current == rootTurnId then Nothing else current, ())
-        abortSubagentTurn rootTurnId = do
-            case rootTurnId of
-                Just owned -> case multiCtx of
-                    Just ctx -> abortRootTurn ctx.multiRegistry owned
-                    Nothing -> pure ()
-                Nothing -> pure ()
-            finishSubagentTurn rootTurnId
-        activeShellTools ghciEnabled bashEnabled =
-            filterGhciTools ghciEnabled
-                (filterBashTools bashEnabled allTools)
-        currentShellMode = do
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            pure $ case (ghciEnabled, bashEnabled) of
-                (True, False) -> ShellGhci
-                (False, True) -> ShellBash
-                (True, True) -> ShellBoth
-                (False, False) -> ShellNone
-        currentActiveToolNames = do
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            let active =
-                    activeShellTools ghciEnabled bashEnabled
-                internalNames = map (.appToolName) active
-                projectedNames =
-                    case dialectToolLayout dialect of
-                        NoHostToolLayout -> []
-                        FlatToolLayout
-                            | dialectId dialect
-                                == GrokBuildDialect ->
-                                    map
-                                        grokBuildPublicToolName
-                                        internalNames
-                            | otherwise -> internalNames
-                        CollaborationNamespaceLayout ->
-                            filter
-                                (`notElem` multiAgentToolNames)
-                                internalNames
-                                <> if any
-                                    (`elem` multiAgentToolNames)
-                                    internalNames
-                                    then ["collaboration"]
-                                    else []
-            pure $
-                case dialectToolLayout dialect of
-                    NoHostToolLayout -> []
-                    _ -> "web_search" : projectedNames
-        shellModeFlags = \case
-            ShellGhci -> (True, False)
-            ShellBash -> (False, True)
-            ShellBoth -> (True, True)
-            ShellNone -> (False, False)
-        shellModeLabel = \case
-            ShellGhci -> "ghci"
-            ShellBash -> "bash"
-            ShellBoth -> "ghci + bash"
-            ShellNone -> "none"
-        refreshShellParams ghciEnabled bashEnabled = do
-            sessionTmp <- readIORef toolEnv.toolSessionTmp
-            today <- utctDay <$> getCurrentTime
-            let enabledTools = activeShellTools ghciEnabled bashEnabled
-                instructionText =
-                    systemPromptForTools
-                        dialect
-                        (map (.appToolName) enabledTools)
-                        cwd
-                        sessionTmp
-                        today
-                        (isOneShot options)
-                toolSchemas = schemasFromAppTools dialect enabledTools
-            modifyIORef' paramsRef \ResponseCreateParams{..} ->
-                ResponseCreateParams
-                    { instructions = Just instructionText
-                    , tools = Just toolSchemas
-                    , ..
-                    }
-        setShellMode mode = do
-            let (ghciEnabled, bashEnabled) = shellModeFlags mode
-            writeIORef ghciEnabledRef ghciEnabled
-            writeIORef bashEnabledRef bashEnabled
-            unless ghciEnabled suspendGhci
-            refreshShellParams ghciEnabled bashEnabled
-            pure ("shell tools: " <> shellModeLabel mode)
-        setSessionTempDir tempDir = do
-            setToolSessionTmp toolEnv (Just tempDir)
-            ghciEnabled <- readIORef ghciEnabledRef
-            bashEnabled <- readIORef bashEnabledRef
-            refreshShellParams ghciEnabled bashEnabled
-        currentConcurrentLimit = case multiCtx of
-            Nothing ->
-                pure defaultSubagentConfig.maxConcurrent
-            Just ctx ->
-                (.maxConcurrent) <$> subagentConfig ctx.multiRegistry
-        setConcurrentLimit limit = do
-            let next = max 1 limit
-            case multiCtx of
-                Just ctx -> setMaxConcurrent ctx.multiRegistry next
-                Nothing -> pure ()
-            saveProjectMaxConcurrentAgents projectRoot next
-            pure ("concurrent agent limit: " <> Text.pack (show next))
-    btwRequests <- newChan
-    recapRequests <- newChan
-    let
-        env = SessionEnv
-            { sessionLoop = config
-            , sessionBtwBackend = btwBackend
-            , sessionQueueRecap = writeChan recapRequests
-            , sessionCompact = compactRunner
-            , sessionRender = render
-            , sessionProvider = provider
-            , sessionConnection = connectionId
-            , sessionModelCatalog = catalog
-            , sessionDialect = dialect
-            , sessionUnavailableProviders = unavailableProvidersRef
-            , sessionStartupUnavailable = startupUnavailableRef
-            , sessionConversation = conversationRef
-            , sessionParams = paramsRef
-            , sessionPolicy = policyRef
-            , sessionPersist = persist
-            , sessionDatabasePool =
-                trustedPool startup.startupDatabaseStore
-            , sessionTitleManager = titleManager
-            , sessionTitleTurnCount = titleTurnCount
-            , sessionPlanMode = planMode
-            , sessionProjectRoot = projectRoot
-            , sessionCwd = cwd
-            , sessionHome = home
-            , sessionMcpRegistrations = mcpRegistrations
-            , sessionMcpWarnings = mcpWarnings
-            , sessionSetTempDir = setSessionTempDir
-            , sessionTokenProvider = tokenProvider
-            , sessionOpenAiPool = openAiPool
-            , sessionStartupContext = startupContext
-            , sessionSkills = skillsRef
-            , sessionSkillInvocations = skillInvocationsRef
-            , sessionRefreshSkills = refreshSkills
-            , sessionActiveToolNames = currentActiveToolNames
-            , sessionGrokRuntime = grokRuntime
-            , sessionShellMode = currentShellMode
-            , sessionSetShellMode = setShellMode
-            , sessionBackground = startup.startupBackground
-            , sessionEscPaused = escPaused
-            , sessionDraft = startup.startupSessionState.sessionDraft
-            , sessionPreviewId = previewIdRef
-            , sessionInterrupt = interrupt
-            , sessionRestartEffort = restartEffortRef
-            , sessionStoreRoot = storeRoot
-            , sessionUsage = usageRef
-            , sessionAccount = accountRef
-            , sessionAccountId = accountIdRef
-            , sessionAccountSelectionId = selectionRef
-            , sessionAccountLabel = accountLabel
-            , sessionSelectAccount = selectAccount
-            , sessionLastAssistant = lastAssistantRef
-            , sessionTerminal = terminal
-            , sessionFullscreen = fullscreen
-            , sessionSetWindowTitle = setWindowTitle
-            , sessionAgentViewport = Just agentViewport
-            , sessionBeginSubagentTurn = beginSubagentTurn
-            , sessionFinishSubagentTurn = finishSubagentTurn
-            , sessionAbortSubagentTurn = abortSubagentTurn
-            , sessionConcurrentLimit = currentConcurrentLimit
-            , sessionSetConcurrentLimit = setConcurrentLimit
-            , sessionOnPersisted = onPersisted
-            , sessionReset = sessionReset
-            }
-    writeIORef startup.startupRestartEffort \level -> do
-        setSessionEffort env level
-        writeIORef restartEffortRef (Just level)
-        requestCancel toolEnv.toolCancel
-    forM_ fullscreen \runtime ->
-        setFullscreenSessionActions
-            runtime
-            (requestCancel toolEnv.toolCancel)
-            (writeChan btwRequests)
-            (writeChan recapRequests (RecapSession RecapAuto))
-            (\level ->
-                readIORef startup.startupRestartEffort >>= ($ level))
-            (noteFullscreenCtrlC interrupt)
-            (readIORef startup.startupAgentSnapshot >>= id)
-            (\target ->
-                readIORef startup.startupAgentSelect >>= ($ target))
-    let initializeSkills = do
-            markStartupStage startup "Loading skills…"
-            skills <- loadSkillsCatalogQuiet
-                options home projectRoot cwd
-            let queueInitialContext =
-                    null initialTurns && not (isJust initialPrevious)
-            (omitted, _) <- installSkills startupContext
-                queueInitialContext
-                skills
-            reportSkillCatalog (isNothing fullscreen) skills omitted
-            learnedSkills <-
-                if queueInitialContext
-                    then installLearnedSkills
-                        startupContext
-                        defaultLearnedSkillContextMaxChars
-                    else pure []
-            finishStartup startup
-            pure learnedSkills
-        sessionAction = do
-            learnedSkills <- initializeSkills
-            case pendingTurn of
-                Just pending ->
-                    runPendingTurn
-                        (if startup.startupFullscreenReused
-                            then ContinuePendingTurn
-                            else SubmitPendingTurn)
-                        env
-                        pending
-                Nothing -> case promptRequest of
-                    Just request -> do
-                        inputs <- managedTurnInputs cwd request
-                        skillInputs <-
-                            preparePromptSkillInputs
-                                env
-                                request.managedTurnText
-                                inputs
-                                >>= either
-                                    (startupDie startup . Text.unpack)
-                                    pure
-                        result <- runOneTurn env request.managedTurnText skillInputs
-                        finishTurn env True result
-                    Nothing ->
-                        case learnAboutUserOnboardingPrompt learnedSkills of
-                            Just onboardingPrompt
-                                | learnAboutUserRequested
-                                , isNothing initialPrevious -> do
-                                    skillInputs <-
-                                        preparePromptSkillInputs
-                                            env
-                                            onboardingPrompt
-                                            [UserMessage onboardingPrompt]
-                                            >>= either
-                                                (startupDie startup . Text.unpack)
-                                                pure
-                                    forM_ fullscreen \runtime ->
-                                        emitUiEvent runtime
-                                            (UiUserSubmitted onboardingPrompt)
-                                    result <-
-                                        runOneTurn
-                                            env
-                                            onboardingPrompt
-                                            skillInputs
-                                    finishTurn env False result
-                            _ ->
-                                readIORef
-                                    startup.startupSessionState.sessionDraft
-                                    >>= replWithDraft env
-        btwWorker = do
-            question <- readChan btwRequests
-            runBtwQuestion False env question
-            btwWorker
-        recapWorker = do
-            request <- readChan recapRequests
-            case request of
-                RecapSession kind -> runSessionRecap False env kind
-                RecapTurnSummary -> runSessionTurnSummary env
-            recapWorker
-    result <- case fullscreen of
-        Just _ ->
-            withAsync btwWorker \_ ->
-                withAsync recapWorker (const sessionAction)
-        Nothing ->
-            withAsync recapWorker (const sessionAction)
-    _ <- waitForSessionTitleResults 5000000 titleManager
-    applyPendingSessionTitles env
-    pure result
+runSession = SessionRunner.runSession sessionRunnerContinuation
 
 sessionContinuation :: SessionContinuation
 sessionContinuation =
@@ -4411,7 +3493,6 @@ replWithDraft env@SessionEnv
     , sessionSetConcurrentLimit = _
     , sessionReset = sessionReset
     } draft = do
-    let conversationRef = conversationRef
     writeIORef draftRef draft
     refreshSkills False
     skillInvocations <- readIORef skillInvocationsRef

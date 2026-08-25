@@ -4,6 +4,7 @@ module Agent.OpenAI.Compaction
     ( summaryPrefix
     , summarizationPrompt
     , remoteCompactionRetainedTokenBudget
+    , remoteCompactionMaxStringLength
     , compactionTriggerItem
     , buildRemoteCompactionRequest
     , trimRemoteCompactionHistoryToFit
@@ -45,6 +46,10 @@ summaryPrefix = "Compacted conversation summary:"
 -- | Matches the retained-message budget used by Codex remote compaction v2.
 remoteCompactionRetainedTokenBudget :: Int
 remoteCompactionRetainedTokenBudget = 64_000
+
+-- | Maximum length accepted for an individual string in a compaction input.
+remoteCompactionMaxStringLength :: Int
+remoteCompactionMaxStringLength = 1_048_576
 
 maxRetainedAgentMessageTokens :: Int
 maxRetainedAgentMessageTokens = 10_000
@@ -88,11 +93,13 @@ trimRemoteCompactionHistoryToFit
     -> [ResponseItem]
     -> [ResponseItem]
 trimRemoteCompactionHistoryToFit contextWindow instructionText history =
-    go initialTokens (reverse history) []
+    go initialTokens (reverse sanitizedHistory) []
   where
+    sanitizedHistory = map sanitizeOversizedToolCall history
+
     initialTokens =
         maybe 0 estimateTokens instructionText
-            + estimateItemsTokens history
+            + estimateItemsTokens sanitizedHistory
 
     go _ [] rewritten = rewritten
     go tokens remaining rewritten
@@ -108,6 +115,40 @@ trimRemoteCompactionHistoryToFit contextWindow instructionText history =
                             - estimateItemsTokens [item]
                             + estimateItemsTokens [replacement]
                 in go nextTokens remaining (replacement : rewritten)
+
+oversizedToolArgumentsMessage :: Text
+oversizedToolArgumentsMessage =
+    "Tool arguments exceeded the provider string limit and were omitted during compaction."
+
+oversizedFunctionArguments :: Text
+oversizedFunctionArguments =
+    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $ Aeson.object
+        [ "compaction_notice" Aeson..= oversizedToolArgumentsMessage
+        ]
+
+sanitizeOversizedToolCall :: ResponseItem -> ResponseItem
+sanitizeOversizedToolCall = \case
+    FunctionCallItem call
+        | Text.length call.arguments > remoteCompactionMaxStringLength ->
+            FunctionCallItem FunctionCall
+                { itemId = call.itemId
+                , callId = call.callId
+                , name = call.name
+                , arguments = oversizedFunctionArguments
+                , status = call.status
+                , extraFields = call.extraFields
+                }
+    CustomToolCallItem call
+        | Text.length call.input > remoteCompactionMaxStringLength ->
+            CustomToolCallItem CustomToolCall
+                { itemId = call.itemId
+                , callId = call.callId
+                , name = call.name
+                , input = oversizedToolArgumentsMessage
+                , status = call.status
+                , extraFields = call.extraFields
+                }
+    item -> item
 
 rewriteOversizedToolOutput :: ResponseItem -> Maybe ResponseItem
 rewriteOversizedToolOutput = \case

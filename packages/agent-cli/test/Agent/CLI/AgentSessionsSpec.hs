@@ -49,7 +49,10 @@ isReadOnly :: ApprovalRule -> Bool
 isReadOnly AlwaysReadOnly = True
 isReadOnly _ = False
 
+fromFilePath :: FilePath -> OsPath
 fromFilePath = unsafeEncodeUtf
+
+toFilePath :: OsPath -> FilePath
 toFilePath path = either (error . show) id (decodeUtf path)
 
 spec :: Spec
