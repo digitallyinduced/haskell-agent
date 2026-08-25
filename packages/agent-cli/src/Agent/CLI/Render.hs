@@ -1,10 +1,22 @@
 -- | Stream renderer and mutating-tool approval prompts.
 module Agent.CLI.Render
     ( MarkdownStreamState
+    , RenderState(..)
+    , stateActivity
+    , stateLiveActive
+    , stateMarkdownState
+    , statePrintedText
+    , stateReasoningBuffer
+    , stateStartedAt
+    , stateThinkingVisible
+    , stateToolCalls
     , RenderConfig(..)
     , clearThinking
     , commitThinking
     , emptyMarkdownStreamState
+    , emptyRenderState
+    , appendRenderReasoning
+    , beginRenderTurn
     , formatActivityLine
     , formatElapsed
     , formatLoopError
@@ -20,6 +32,8 @@ module Agent.CLI.Render
     , putTextLn
     , renderAssistantText
     , renderEvent
+    , setRenderActivity
+    , streamMarkdown
     , summarizeToolCall
     , thinkingMaxWidth
     , truncateToolOutput
@@ -122,25 +136,67 @@ import System.IO (Handle, hFlush)
 
 data RenderConfig = RenderConfig
     { renderShowThinking :: !Bool
-    , renderThinkingVisible :: !(IORef Bool)
     , renderThinkingSpinner :: !(IORef (Maybe ThreadId))
-    -- | Accumulated reasoning-summary text for the current model round.
-    , renderReasoningBuffer :: !(IORef TextBuffer)
+    , renderState :: !(IORef RenderState)
     , renderColor :: !Bool
-    , renderPrintedText :: !(IORef Bool)
-    , renderMarkdownState :: !(IORef MarkdownStreamState)
-    -- | True after assistant text has been streamed for the current round.
-    , renderLiveActive :: !(IORef Bool)
     , renderLock :: !(MVar ())
     , renderStdout :: !Handle
     , renderStderr :: !Handle
     , renderModelRef :: !(IORef Text)
-    , renderActivityRef :: !(IORef Text)
-    , renderStartedAt :: !(IORef (Maybe UTCTime))
-    , renderToolCalls :: !(IORef (Map.Map Text ToolCall))
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     , renderMotionMode :: !MotionMode
     }
+
+-- | Immutable logical renderer state. IO effects (terminal output and the
+-- spinner thread) remain in 'RenderConfig'; this value is replaced atomically
+-- under 'renderLock' by the event handlers.
+data RenderState = RenderState
+    { stateThinkingVisible :: !Bool
+    , stateReasoningBuffer :: !TextBuffer
+    , statePrintedText :: !Bool
+    , stateMarkdownState :: !MarkdownStreamState
+    , stateLiveActive :: !Bool
+    , stateActivity :: !Text
+    , stateStartedAt :: !(Maybe UTCTime)
+    , stateToolCalls :: !(Map.Map Text ToolCall)
+    }
+
+stateThinkingVisible :: RenderState -> Bool
+stateThinkingVisible state = state.stateThinkingVisible
+
+stateReasoningBuffer :: RenderState -> TextBuffer
+stateReasoningBuffer state = state.stateReasoningBuffer
+
+statePrintedText :: RenderState -> Bool
+statePrintedText state = state.statePrintedText
+
+stateMarkdownState :: RenderState -> MarkdownStreamState
+stateMarkdownState state = state.stateMarkdownState
+
+stateLiveActive :: RenderState -> Bool
+stateLiveActive state = state.stateLiveActive
+
+stateActivity :: RenderState -> Text
+stateActivity state = state.stateActivity
+
+stateStartedAt :: RenderState -> Maybe UTCTime
+stateStartedAt state = state.stateStartedAt
+
+stateToolCalls :: RenderState -> Map.Map Text ToolCall
+stateToolCalls state = state.stateToolCalls
+
+emptyRenderState :: RenderState
+emptyRenderState =
+    RenderState
+        { stateThinkingVisible = False
+        , stateReasoningBuffer = emptyTextBuffer
+        , statePrintedText = False
+        , stateMarkdownState = emptyMarkdownStreamState
+        , stateLiveActive = False
+        , stateActivity = "Thinking…"
+        , stateStartedAt = Nothing
+        , stateToolCalls = Map.empty
+        }
 
 data MarkdownStreamState = MarkdownStreamState
     { pending :: !Text
@@ -461,6 +517,33 @@ isTableSeparator line =
 thinkingMaxWidth :: Int
 thinkingMaxWidth = 120
 
+modifyRenderState
+    :: RenderConfig
+    -> (RenderState -> (RenderState, a))
+    -> IO a
+modifyRenderState config transition =
+    atomicModifyIORef' config.renderState transition
+
+readRenderState :: RenderConfig -> IO RenderState
+readRenderState config = readIORef config.renderState
+
+setRenderActivity :: Text -> RenderState -> RenderState
+setRenderActivity activity state = state{stateActivity = activity}
+
+beginRenderTurn :: UTCTime -> RenderState
+beginRenderTurn now =
+    emptyRenderState{stateStartedAt = Just now}
+
+appendRenderReasoning :: Text -> RenderState -> RenderState
+appendRenderReasoning delta state =
+    state{stateReasoningBuffer = appendTextBuffer delta state.stateReasoningBuffer}
+
+streamMarkdown :: Text -> RenderState -> (RenderState, Text)
+streamMarkdown input state =
+    let (markdown', output) =
+            feedMarkdownStream state.stateMarkdownState input
+    in (state{stateMarkdownState = markdown'}, output)
+
 renderEvent :: RenderConfig -> LoopEvent -> IO ()
 renderEvent config event =
     withMVar config.renderLock \_ -> renderEventUnlocked config event
@@ -473,21 +556,23 @@ renderEventUnlocked config = \case
             then do
                 streamAssistantDelta config delta
             else do
-                writeIORef config.renderPrintedText True
+                modifyRenderState config \state ->
+                    (state{statePrintedText = True}, ())
                 Text.hPutStr config.renderStdout delta
                 hFlush config.renderStdout
     ReasoningDelta delta ->
         appendReasoningUnlocked config delta
     ActivityUpdated activity -> do
-        writeIORef config.renderActivityRef activity
-        visible <- readIORef config.renderThinkingVisible
+        modifyRenderState config \state ->
+            (setRenderActivity activity state, ())
+        visible <- (.stateThinkingVisible) <$> readRenderState config
         if visible
             then paintThinkingFrame config
             else if config.renderShowThinking
                 then startThinkingSpinnerUnlocked config
                 else putTextLn config.renderStderr (roleMuted config.renderColor activity)
     WarningRaised warning -> do
-        visible <- readIORef config.renderThinkingVisible
+        visible <- (.stateThinkingVisible) <$> readRenderState config
         when visible (stopThinkingSpinnerUnlocked config)
         putTextLn config.renderStderr
             (roleWarn config.renderColor (glyphWarn <> warning))
@@ -501,20 +586,20 @@ renderEventUnlocked config = \case
             else do
                 Text.hPutStr config.renderStdout "\n"
                 hFlush config.renderStdout
-                writeIORef config.renderMarkdownState emptyMarkdownStreamState
-                writeIORef config.renderLiveActive False
-        writeIORef config.renderActivityRef "Retrying response…"
+                modifyRenderState config \state ->
+                    (state
+                        { stateMarkdownState = emptyMarkdownStreamState
+                        , stateLiveActive = False
+                        }
+                    , ())
+        modifyRenderState config \state ->
+            (setRenderActivity "Retrying response…" state, ())
         putTextLn config.renderStderr
             (roleWarn config.renderColor (glyphWarn <> message))
         startThinkingSpinnerUnlocked config
     TurnStarted -> do
-        writeIORef config.renderMarkdownState emptyMarkdownStreamState
-        writeIORef config.renderLiveActive False
-        writeIORef config.renderReasoningBuffer emptyTextBuffer
-        writeIORef config.renderActivityRef "Thinking…"
-        writeIORef config.renderToolCalls Map.empty
         now <- getCurrentTime
-        writeIORef config.renderStartedAt (Just now)
+        modifyRenderState config (const (beginRenderTurn now, ()))
         startThinkingSpinnerUnlocked config
     -- Finalize live color output (or paint once for non-streaming backends).
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
@@ -527,14 +612,19 @@ renderEventUnlocked config = \case
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
         commitThinkingUnlocked config
-        modifyIORef' config.renderToolCalls (Map.insert call.callId call)
-        writeIORef config.renderActivityRef (summarizeToolCall call)
+        modifyRenderState config \state ->
+            ( state
+                { stateToolCalls = Map.insert call.callId call state.stateToolCalls
+                , stateActivity = summarizeToolCall call
+                }
+            , ()
+            )
         putTextLn config.renderStderr (formatToolStarted config.renderColor call)
         let extra = formatToolBody config.renderColor call
         unless (Text.null extra) do
             putTextLn config.renderStderr extra
         when config.renderShowThinking do
-            visible <- readIORef config.renderThinkingVisible
+            visible <- (.stateThinkingVisible) <$> readRenderState config
             if visible
                 then paintThinkingFrame config
                 else startThinkingSpinnerUnlocked config
@@ -544,8 +634,10 @@ renderEventUnlocked config = \case
     ToolOutputUpdated _callId _output ->
         pure ()
     ToolFinished result -> do
-        calls <- readIORef config.renderToolCalls
-        modifyIORef' config.renderToolCalls (Map.delete result.callId)
+        calls <- modifyRenderState config \state ->
+            ( state{stateToolCalls = Map.delete result.callId state.stateToolCalls}
+            , state.stateToolCalls
+            )
         let output = maybe result.output
                 (`formatToolOutput` result.output)
                 (Map.lookup result.callId calls)
@@ -573,12 +665,10 @@ streamAssistantDelta config delta
     | otherwise = do
         let safe = Text.filter (/= '\ESC') delta
         ready <-
-            atomicModifyIORef' config.renderMarkdownState \state ->
-                let (state', output) = feedMarkdownStream state safe
-                in (state', output)
+            modifyRenderState config (streamMarkdown safe)
         unless (Text.null ready) do
-            writeIORef config.renderPrintedText True
-            writeIORef config.renderLiveActive True
+            modifyRenderState config \state ->
+                (state{statePrintedText = True, stateLiveActive = True}, ())
             Text.hPutStr config.renderStdout
                 ( paintBackgroundLines True agentBackground
                     ready
@@ -591,14 +681,20 @@ streamAssistantDelta config delta
 -- Returns whether anything was written.
 finalizeAssistantBuffer :: RenderConfig -> Maybe Text -> IO Bool
 finalizeAssistantBuffer config assistantText = do
-    pendingOutput <-
-        atomicModifyIORef' config.renderMarkdownState \state ->
-            (emptyMarkdownStreamState, flushMarkdownStream state)
-    live <- readIORef config.renderLiveActive
-    writeIORef config.renderLiveActive False
+    (pendingOutput, live) <-
+        modifyRenderState config \state ->
+            ( state
+                { stateMarkdownState = emptyMarkdownStreamState
+                , stateLiveActive = False
+                }
+            , ( flushMarkdownStream state.stateMarkdownState
+              , state.stateLiveActive
+              )
+            )
     if live
         then do
-            writeIORef config.renderPrintedText True
+            modifyRenderState config \state ->
+                (state{statePrintedText = True}, ())
             unless (Text.null pendingOutput) do
                 Text.hPutStr config.renderStdout
                     ( paintBackgroundLines True agentBackground
@@ -613,7 +709,8 @@ finalizeAssistantBuffer config assistantText = do
             if Text.null raw
                 then pure False
                 else do
-                    writeIORef config.renderPrintedText True
+                    modifyRenderState config \state ->
+                        (state{statePrintedText = True}, ())
                     Text.hPutStr config.renderStdout $
                         if Text.null pendingOutput
                             then renderAssistantText True raw
@@ -639,11 +736,12 @@ startThinkingSpinnerUnlocked config
     | not config.renderShowThinking = pure ()
     | otherwise = do
         emitNativeProgress config True
-        visible <- readIORef config.renderThinkingVisible
+        visible <- (.stateThinkingVisible) <$> readRenderState config
         if visible
             then paintThinkingFrame config
             else do
-                writeIORef config.renderThinkingVisible True
+                modifyRenderState config \state ->
+                    (state{stateThinkingVisible = True}, ())
                 paintThinkingFrame config
                 started <- getMonotonicTimeNSec
                 tid <- forkIO (spinnerLoop config started 0)
@@ -657,12 +755,13 @@ stopThinkingSpinnerUnlocked config = do
     case mtid of
         Just tid -> killThread tid
         Nothing -> pure ()
-    visible <- readIORef config.renderThinkingVisible
+    visible <- (.stateThinkingVisible) <$> readRenderState config
     when visible do
         void $ tryIO do
             Text.hPutStr config.renderStderr "\r\ESC[K"
             hFlush config.renderStderr
-        writeIORef config.renderThinkingVisible False
+        modifyRenderState config \state ->
+            (state{stateThinkingVisible = False}, ())
 
 -- | Ghostty (and Windows Terminal / ConEmu) native loading indicator.
 -- Harmless no-op on terminals that do not implement OSC 9;4.
@@ -684,14 +783,14 @@ spinnerLoop :: RenderConfig -> Word64 -> Int -> IO ()
 spinnerLoop config startedAt lastKeepaliveBucket = do
     threadDelay
         (motionIntervalMicros config.renderMotionMode MotionFast)
-    visible <- readIORef config.renderThinkingVisible
+    visible <- (.stateThinkingVisible) <$> readRenderState config
     when visible do
         now <- getMonotonicTimeNSec
         let elapsedMillis =
                 fromIntegral ((now - startedAt) `div` 1000000)
             keepaliveBucket = elapsedMillis `div` 5000
         withMVar config.renderLock \_ -> do
-            still <- readIORef config.renderThinkingVisible
+            still <- (.stateThinkingVisible) <$> readRenderState config
             when still do
                 -- Ghostty hides OSC 9;4 after ~15s without an update.
                 when (keepaliveBucket > lastKeepaliveBucket) $
@@ -706,7 +805,7 @@ paintThinkingFrame config = do
 
 paintThinkingFrameAt :: RenderConfig -> Int -> IO ()
 paintThinkingFrameAt config motionMillis = do
-    activity <- readIORef config.renderActivityRef
+    activity <- (.stateActivity) <$> readRenderState config
     elapsed <- thinkingElapsed config
     let glyph =
             foregroundIndicator
@@ -729,7 +828,7 @@ monotonicMillis now =
 
 thinkingElapsed :: RenderConfig -> IO Double
 thinkingElapsed config = do
-    started <- readIORef config.renderStartedAt
+    started <- (.stateStartedAt) <$> readRenderState config
     now <- getCurrentTime
     pure $ case started of
         Nothing -> 0
@@ -742,16 +841,16 @@ appendReasoningUnlocked config delta
     | otherwise =
         -- Keep the one-line spinner while buffering. Repainting even a bounded
         -- multi-line preview can scroll old frames into terminal scrollback.
-        modifyIORef' config.renderReasoningBuffer
-            (appendTextBuffer delta)
+        modifyRenderState config \state ->
+            (appendRenderReasoning delta state, ())
 
 commitThinkingUnlocked :: RenderConfig -> IO ()
 commitThinkingUnlocked config = do
     stopThinkingSpinnerUnlocked config
     emitNativeProgress config False
-    buffered <- textBufferToText
-        <$> readIORef config.renderReasoningBuffer
-    writeIORef config.renderReasoningBuffer emptyTextBuffer
+    buffered <- modifyRenderState config \state ->
+        (state{stateReasoningBuffer = emptyTextBuffer}
+        , textBufferToText state.stateReasoningBuffer)
     if Text.null (Text.strip buffered)
         then pure ()
         else do

@@ -38,6 +38,7 @@ import Agent.CLI.Render
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
+    , stateStartedAt
     )
 import Agent.CLI.Session
     ( SessionHandle(..)
@@ -254,7 +255,7 @@ runOneTurn env@SessionEnv
             case patch.patchLastAssistant of
                 KeepField -> pure ()
                 SetField value -> writeIORef lastAssistantRef value
-    startedAt <- readIORef render.renderStartedAt
+    startedAt <- stateStartedAt <$> readIORef render.renderState
     wallStarted <- getCurrentTime
     when (isNothing fullscreen && terminal.terminalSemanticPrompts) $
         emitTerminalSequence terminal stdout osc133CommandStart
