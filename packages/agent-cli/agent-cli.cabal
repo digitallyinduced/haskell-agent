@@ -154,6 +154,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
@@ -341,6 +342,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec
