@@ -157,19 +157,8 @@ multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
         , "name" .= tool.appToolName
         , "description" .= tool.appToolDescription
         , "strict" .= False
-        , "parameters" .= namespaceParameters
-            (reservedCollaborationParameters tool)
+        , "parameters" .= namespaceParameters (appToolJsonParameters tool)
         ]
-
-    -- OpenAI reserves collaboration.spawn_agent and rejects the entire request
-    -- unless its schema exactly matches the provider-owned definition.
-    -- Worktree isolation remains available to dialects that expose app tools
-    -- directly, but cannot be added to this reserved namespace function.
-    reservedCollaborationParameters tool
-        | tool.appToolName == "spawn_agent" =
-            filter ((/= "isolation") . (.propertyName))
-                (appToolJsonParameters tool)
-        | otherwise = appToolJsonParameters tool
 
     namespaceParameters parameters = case parametersObjectLoose parameters of
         Aeson.Object schema

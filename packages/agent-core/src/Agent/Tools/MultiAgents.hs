@@ -126,8 +126,9 @@ multiAgentToolNames =
 
 multiAgentTools :: MultiAgentContext -> [AppTool]
 multiAgentTools ctx =
-    [ spawnAgentTool ctx
-    , waitAgentTool ctx
+    [spawnAgentTool ctx]
+    <> maybe [] (const [spawnAgentInWorktreeTool ctx]) ctx.multiCreateWorktree
+    <> [ waitAgentTool ctx
     , sendMessageTool ctx
     , followupTaskTool ctx
     , listAgentsTool ctx
@@ -144,24 +145,48 @@ data SpawnAgentArgs = SpawnAgentArgs
     , model :: Maybe Text
     , reasoningEffort :: Maybe Text
     , forkTurns :: Maybe Text
-    , isolation :: Maybe Text
     }
 
 instance FromJSON SpawnAgentArgs where
-    parseJSON = objectArgs \object_ -> SpawnAgentArgs
-        <$> reqText object_ "task_name"
-        <*> reqText object_ "message"
-        <*> optText object_ "model"
-        <*> optText object_ "reasoning_effort"
-        <*> optText object_ "fork_turns"
-        <*> optText object_ "isolation"
+    parseJSON = objectArgs \object_ ->
+        if KeyMap.member (Key.fromText "isolation") object_
+            then fail
+                "isolation is no longer supported; use spawn_agent_in_worktree"
+            else SpawnAgentArgs
+                <$> reqText object_ "task_name"
+                <*> reqText object_ "message"
+                <*> optText object_ "model"
+                <*> optText object_ "reasoning_effort"
+                <*> optText object_ "fork_turns"
 
 spawnAgentTool :: MultiAgentContext -> AppTool
 spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
+    (spawnAgentParameters ctx True)
+    True
+    TurnSequential
+    (typedToolWithCall "spawn_agent" (runSpawn ctx SharedWorkspace))
+
+spawnAgentInWorktreeTool :: MultiAgentContext -> AppTool
+spawnAgentInWorktreeTool ctx =
+    jsonTool "spawn_agent_in_worktree" spawnAgentInWorktreeDescription
+        (spawnAgentParameters ctx False)
+        True
+        TurnSequential
+        (typedToolWithCall
+            "spawn_agent_in_worktree"
+            (runSpawn ctx IsolatedWorktree))
+
+spawnAgentParameters :: MultiAgentContext -> Bool -> [PropertySchema]
+spawnAgentParameters ctx encryptMessage =
     [ PropertySchema "task_name" PropertyString True $ Just
         "Task name for the new agent. Use lowercase letters, digits, and underscores."
-    , PropertySchema "message"
-        (encryptedString "Initial plain-text task for the new agent.") True Nothing
+    , if encryptMessage
+        then PropertySchema "message"
+            (encryptedString "Initial plain-text task for the new agent.")
+            True
+            Nothing
+        else PropertySchema "message" PropertyString True $ Just
+            "Initial plain-text task for the new agent."
     , PropertySchema "model" PropertyString False $ Just
         (Text.intercalate " " $
             [ "Model override for the new agent. Omit unless an explicit override is needed."
@@ -171,12 +196,7 @@ spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
         "Reasoning effort override for the new agent. Omit to inherit the parent effort."
     , PropertySchema "fork_turns" PropertyString False $ Just
         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
-    , PropertySchema "isolation" (PropertyEnum ["none", "worktree"]) False $ Just
-        "Workspace isolation for the new agent. Defaults to `none`. Use `worktree` to create a dedicated git worktree whose lifetime is tied to the agent."
     ]
-    True
-    TurnSequential
-    (typedToolWithCall "spawn_agent" (runSpawn ctx))
 
 spawnAgentDescription :: Text
 spawnAgentDescription =
@@ -185,19 +205,37 @@ spawnAgentDescription =
     \have canonical task name /root/task1/task_3. You may refer to this agent \
     \as task_3 or /root/task1/task_3. Returns the canonical task_name."
 
-runSpawn :: MultiAgentContext -> ToolCall -> SpawnAgentArgs -> IO (Either Text Text)
-runSpawn ctx call args
+spawnAgentInWorktreeDescription :: Text
+spawnAgentInWorktreeDescription =
+    "Creates a dedicated git worktree and spawns an agent inside it. The \
+    \worktree is owned by the child agent and removed when that agent is \
+    \closed. Returns the canonical task_name and worktree path."
+
+data SpawnWorkspace
+    = SharedWorkspace
+    | IsolatedWorktree
+
+runSpawn
+    :: MultiAgentContext
+    -> SpawnWorkspace
+    -> ToolCall
+    -> SpawnAgentArgs
+    -> IO (Either Text Text)
+runSpawn ctx workspace call args
     | Text.null (Text.strip args.message) =
-        pure (Left "spawn_agent requires a non-empty message")
+        pure (Left (spawnToolName workspace <> " requires a non-empty message"))
     | not (validForkTurns args.forkTurns) =
         pure (Left "fork_turns must be none, all, or a positive integer string")
-    | not (validIsolation args.isolation) =
-        pure (Left "isolation must be none or worktree")
     | otherwise = mask \restore ->
-        resolveSpawnWorkspace ctx args.isolation >>= \case
+        resolveSpawnWorkspace ctx workspace >>= \case
             Left err -> pure (Left err)
             Right (childCwd, worktree) ->
                 restore (spawnInWorkspace ctx call args childCwd worktree)
+
+spawnToolName :: SpawnWorkspace -> Text
+spawnToolName = \case
+    SharedWorkspace -> "spawn_agent"
+    IsolatedWorktree -> "spawn_agent_in_worktree"
 
 spawnInWorkspace
     :: MultiAgentContext
@@ -248,28 +286,19 @@ spawnInWorkspace ctx call args childCwd worktree = mask \restore -> do
 
 resolveSpawnWorkspace
     :: MultiAgentContext
-    -> Maybe Text
+    -> SpawnWorkspace
     -> IO (Either Text (OsPath, Maybe SubagentWorktree))
-resolveSpawnWorkspace ctx isolation
-    | usesWorktree isolation =
+resolveSpawnWorkspace ctx = \case
+    SharedWorkspace -> pure (Right (ctx.multiCwd, Nothing))
+    IsolatedWorktree ->
         case ctx.multiCreateWorktree of
             Nothing ->
-                pure (Left "isolation=\"worktree\" is unavailable in this host.")
+                pure (Left "spawn_agent_in_worktree is unavailable in this host.")
             Just create ->
                 create ctx.multiCwd >>= \case
                     Left err -> pure (Left err)
                     Right worktree ->
                         pure (Right (worktree.subagentWorktreePath, Just worktree))
-    | otherwise = pure (Right (ctx.multiCwd, Nothing))
-
-validIsolation :: Maybe Text -> Bool
-validIsolation = \case
-    Nothing -> True
-    Just raw -> Text.toLower (Text.strip raw) `elem` ["", "none", "worktree"]
-
-usesWorktree :: Maybe Text -> Bool
-usesWorktree =
-    maybe False ((== "worktree") . Text.toLower . Text.strip)
 
 makeIdempotentWorktree :: SubagentWorktree -> IO SubagentWorktree
 makeIdempotentWorktree worktree = do
@@ -422,7 +451,7 @@ instance FromJSON MessageArgs where
 sendMessageTool :: MultiAgentContext -> AppTool
 sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
     [ PropertySchema "target" PropertyString True $ Just
-        "Relative or canonical task name to message (from spawn_agent)."
+        "Relative or canonical task name to message (from a spawn tool)."
     , PropertySchema "message"
         (encryptedString "Message text to queue on the target agent.") True Nothing
     ]
@@ -453,7 +482,7 @@ runSendMessage ctx call args
 followupTaskTool :: MultiAgentContext -> AppTool
 followupTaskTool ctx = jsonTool "followup_task" followupDescription
     [ PropertySchema "target" PropertyString True $ Just
-        "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+        "Agent id or canonical task name to follow up with (from a spawn tool)."
     , PropertySchema "message"
         (encryptedString "Message text to send to the target agent.") True Nothing
     ]
