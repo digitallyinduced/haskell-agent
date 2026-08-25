@@ -13,6 +13,7 @@ module Agent.Responses.Types.Items
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
     , ItemReference(..)
+    , ResponseAgentMessage(..)
     ) where
 
 import Agent.Responses.Types.Common
@@ -359,6 +360,30 @@ instance FromJSON ItemReference where
         <$> o .: "id"
         <*> pure (without ["type", "id"] o)
 
+data ResponseAgentMessage = ResponseAgentMessage
+    { author      :: !(Maybe Text)
+    , recipient   :: !(Maybe Text)
+    , content     :: ![ResponseContentPart]
+    , extraFields :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ResponseAgentMessage where
+    toJSON ResponseAgentMessage { author, recipient, content, extraFields } =
+        objectWith extraFields
+            [ Just (field "type" ("agent_message" :: Text))
+            , optionalField "author" author
+            , optionalField "recipient" recipient
+            , Just (field "content" content)
+            ]
+
+instance FromJSON ResponseAgentMessage where
+    parseJSON = withObject "ResponseAgentMessage" $ \o ->
+        ResponseAgentMessage
+            <$> o .:? "author"
+            <*> o .:? "recipient"
+            <*> o .:? "content" .!= []
+            <*> pure (without ["type", "author", "recipient", "content"] o)
+
 data ResponseItem
     = MessageItem !ResponseMessage
     | FunctionCallItem !FunctionCall
@@ -367,6 +392,7 @@ data ResponseItem
     | CustomToolCallOutputItem !CustomToolCallOutput
     | ReasoningItemValue !ReasoningItem
     | ItemReferenceValue !ItemReference
+    | AgentMessageItem !ResponseAgentMessage
     | KnownResponseItem !ResponseItemType !TaggedObject
     | UnknownResponseItem !TaggedObject
     deriving stock (Eq, Show)
@@ -380,6 +406,7 @@ instance ToJSON ResponseItem where
         CustomToolCallOutputItem value -> toJSON value
         ReasoningItemValue value -> toJSON value
         ItemReferenceValue value -> toJSON value
+        AgentMessageItem value -> toJSON value
         KnownResponseItem _ value -> toJSON value
         UnknownResponseItem value -> toJSON value
 
@@ -396,6 +423,7 @@ instance FromJSON ResponseItem where
                 CustomToolCallOutputItem <$> parseJSON value
             ItemReasoning -> ReasoningItemValue <$> parseJSON value
             ItemReferenceType -> ItemReferenceValue <$> parseJSON value
+            ItemAgentMessage -> AgentMessageItem <$> parseJSON value
             ItemUnknownType{} -> UnknownResponseItem <$> parseJSON value
             itemType -> KnownResponseItem itemType <$> parseJSON value) value
 

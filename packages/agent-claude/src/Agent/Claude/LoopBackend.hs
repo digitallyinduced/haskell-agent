@@ -39,6 +39,7 @@ import Agent.Responses.Types
     , ItemStatus(..)
     , MessageContent(..)
     , ReasoningConfig(..)
+    , ResponseAgentMessage(..)
     , ResponseContentPart(..)
     , ResponseCreateParams(..)
     , ResponseItem(..)
@@ -446,6 +447,8 @@ renderResponseItem = \case
         Nothing
     ItemReferenceValue{} ->
         Nothing
+    AgentMessageItem message ->
+        labelled "Agent message" (agentMessagePlainText message)
     KnownResponseItem _ tagged ->
         labelled "Context item" (renderTaggedObject tagged)
     UnknownResponseItem tagged ->
@@ -482,7 +485,12 @@ contentPartText = \case
     InputAudioPart{} -> ["[audio omitted]"]
     -- Do not render reasoning text into another model's prompt.
     ReasoningTextPart{} -> []
+    EncryptedContentPart{} -> []
     UnknownContentPart{} -> []
+
+agentMessagePlainText :: ResponseAgentMessage -> Text
+agentMessagePlainText message =
+    Text.intercalate "\n" (concatMap contentPartText message.content)
 
 renderTaggedObject :: TaggedObject -> Text
 renderTaggedObject =

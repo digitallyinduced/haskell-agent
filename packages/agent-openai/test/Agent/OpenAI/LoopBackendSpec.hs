@@ -72,26 +72,41 @@ spec = do
                     , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
                     }
             case turnInputsToItems [AgentMessage message] of
-                [item] -> Aeson.toJSON item `shouldBe` Aeson.object
-                    [ "type" Aeson..= ("agent_message" :: Text)
-                    , "author" Aeson..= ("/root" :: Text)
-                    , "recipient" Aeson..= ("/root/worker" :: Text)
-                    , "content" Aeson..=
-                        [ Aeson.object
-                            [ "type" Aeson..= ("input_text" :: Text)
-                            , "text" Aeson..=
-                                ("Message Type: NEW_TASK\n\
-                                \Task name: /root/worker\n\
-                                \Sender: /root\n\
-                                \Payload:\n" :: Text)
-                            ]
-                        , Aeson.object
-                            [ "type" Aeson..= ("encrypted_content" :: Text)
-                            , "encrypted_content" Aeson..=
-                                ("gAAAAA-ciphertext" :: Text)
+                [item@(AgentMessageItem encoded)] -> do
+                    encoded.author `shouldBe` Just "/root"
+                    encoded.recipient `shouldBe` Just "/root/worker"
+                    encoded.content `shouldBe`
+                        [ InputTextPart
+                            "Message Type: NEW_TASK\n\
+                            \Task name: /root/worker\n\
+                            \Sender: /root\n\
+                            \Payload:\n"
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart "gAAAAA-ciphertext" KeyMap.empty
+                        ]
+                    Aeson.fromJSON (Aeson.toJSON item)
+                        `shouldBe` Aeson.Success item
+                    Aeson.toJSON item `shouldBe` Aeson.object
+                        [ "type" Aeson..= ("agent_message" :: Text)
+                        , "author" Aeson..= ("/root" :: Text)
+                        , "recipient" Aeson..= ("/root/worker" :: Text)
+                        , "content" Aeson..=
+                            [ Aeson.object
+                                [ "type" Aeson..= ("input_text" :: Text)
+                                , "text" Aeson..=
+                                    ("Message Type: NEW_TASK\n\
+                                    \Task name: /root/worker\n\
+                                    \Sender: /root\n\
+                                    \Payload:\n" :: Text)
+                                ]
+                            , Aeson.object
+                                [ "type" Aeson..= ("encrypted_content" :: Text)
+                                , "encrypted_content" Aeson..=
+                                    ("gAAAAA-ciphertext" :: Text)
+                                ]
                             ]
                         ]
-                    ]
                 other ->
                     expectationFailure ("expected one agent_message, got " <> show other)
 

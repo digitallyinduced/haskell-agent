@@ -423,18 +423,11 @@ functionOutputItem callId status =
 
 agentMessageItem :: Text -> ResponseItem
 agentMessageItem text =
-    KnownResponseItem ItemAgentMessage TaggedObject
-        { tag = "agent_message"
-        , fields = KeyMap.fromList
-            [ ( "content"
-              , Aeson.toJSON
-                    [ Aeson.object
-                        [ "type" Aeson..= ("input_text" :: Text)
-                        , "text" Aeson..= text
-                        ]
-                    ]
-              )
-            ]
+    AgentMessageItem ResponseAgentMessage
+        { author = Nothing
+        , recipient = Nothing
+        , content = [InputTextPart text Nothing KeyMap.empty]
+        , extraFields = KeyMap.empty
         }
 
 reasoningItem :: Text -> Text -> ResponseItem

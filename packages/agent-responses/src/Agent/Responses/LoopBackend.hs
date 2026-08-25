@@ -281,30 +281,23 @@ multimodalFilesItem text images files = MessageItem ResponseMessage
     }
 
 agentMessageItem :: InterAgentMessage -> ResponseItem
-agentMessageItem message = KnownResponseItem ItemAgentMessage TaggedObject
-    { tag = "agent_message"
-    , fields = KeyMap.fromList
-        [ (Key.fromText "author", Aeson.String message.messageAuthor)
-        , (Key.fromText "recipient", Aeson.String message.messageRecipient)
-        , (Key.fromText "content", Aeson.toJSON (agentMessageContent message))
-        ]
+agentMessageItem message = AgentMessageItem ResponseAgentMessage
+    { author = Just message.messageAuthor
+    , recipient = Just message.messageRecipient
+    , content = agentMessageContent message
+    , extraFields = KeyMap.empty
     }
 
-agentMessageContent :: InterAgentMessage -> [Aeson.Value]
+agentMessageContent :: InterAgentMessage -> [ResponseContentPart]
 agentMessageContent message = case message.messageContent of
     PlainInterAgentContent _ ->
-        [inputTextValue (renderInterAgentMessage message)]
+        [InputTextPart (renderInterAgentMessage message) Nothing KeyMap.empty]
     EncryptedInterAgentContent encrypted ->
-        [ inputTextValue (renderInterAgentMessageHeader message)
-        , Aeson.object
-            [ "type" Aeson..= ("encrypted_content" :: Text)
-            , "encrypted_content" Aeson..= encrypted
-            ]
-        ]
-  where
-    inputTextValue text = Aeson.object
-        [ "type" Aeson..= ("input_text" :: Text)
-        , "text" Aeson..= text
+        [ InputTextPart
+            (renderInterAgentMessageHeader message)
+            Nothing
+            KeyMap.empty
+        , EncryptedContentPart encrypted KeyMap.empty
         ]
 
 multimodalUserItem :: Text -> [ImageAttachment] -> ResponseItem

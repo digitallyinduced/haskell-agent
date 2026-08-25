@@ -9,6 +9,7 @@ module Agent.CLI.Session.StoreCodec
     ) where
 
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,8 +25,10 @@ import Agent.Responses.Types
     , MessageContent(..)
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
+    , ResponseAgentMessage(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
+    , ResponseItemType(..)
     , ResponseMessage(..)
     , ResponseRole(..)
     , TaggedObject(..)
@@ -106,6 +109,13 @@ toStoredResponseItem = \case
             { storedItemReferenceProviderItemId = reference.itemId
             , storedItemReferenceExtraFields =
                 encodeObject reference.extraFields
+            }
+    AgentMessageItem message ->
+        StoredTaggedResponseItem StoredTaggedItem
+            { storedTaggedItemRepresentation = StoredKnownRepresentation
+            , storedTaggedItemWireTag = "agent_message"
+            , storedTaggedItemFields =
+                encodeObject (objectWithoutType (Aeson.toJSON message))
             }
     KnownResponseItem _ tagged ->
         StoredTaggedResponseItem StoredTaggedItem
@@ -235,10 +245,15 @@ fromStoredResponseItem = \case
                 }
         case tagged.storedTaggedItemRepresentation of
             StoredKnownRepresentation ->
-                Right $
-                    KnownResponseItem
-                        (parseResponseItemType tagged.storedTaggedItemWireTag)
-                        value
+                case parseResponseItemType tagged.storedTaggedItemWireTag of
+                    ItemAgentMessage ->
+                        case Aeson.fromJSON (Aeson.toJSON value) of
+                            Aeson.Success (message :: ResponseAgentMessage) ->
+                                Right (AgentMessageItem message)
+                            Aeson.Error err ->
+                                Left ("stored agent_message: " <> Text.pack err)
+                    itemType ->
+                        Right (KnownResponseItem itemType value)
             StoredUnknownRepresentation ->
                 Right (UnknownResponseItem value)
             StoredCoreRepresentation ->
@@ -335,6 +350,10 @@ toStoredContentPart = \case
         (emptyStoredContentPart "summary_text" extraFields)
             { storedContentPartText = Just text
             }
+    EncryptedContentPart{encryptedContent, extraFields} ->
+        (emptyStoredContentPart "encrypted_content" extraFields)
+            { storedContentPartText = Just encryptedContent
+            }
     UnknownContentPart tagged ->
         emptyStoredContentPart tagged.tag tagged.fields
 
@@ -410,6 +429,12 @@ fromStoredContentPart part = do
                     "stored summary_text text"
                     part.storedContentPartText
                 <*> pure extraFields
+        "encrypted_content" ->
+            EncryptedContentPart
+                <$> required
+                    "stored encrypted_content text"
+                    part.storedContentPartText
+                <*> pure extraFields
         tag ->
             Right $ UnknownContentPart TaggedObject
                 { tag
@@ -458,6 +483,11 @@ fromStoredToolOutput label output =
             Right (Aeson.String output.storedToolOutputText)
         StoredToolOutputEncoded ->
             decodeAeson label output.storedToolOutputText
+
+objectWithoutType :: Aeson.Value -> Aeson.Object
+objectWithoutType = \case
+    Aeson.Object object -> KeyMap.delete "type" object
+    _ -> KeyMap.empty
 
 encodeObject :: Aeson.Object -> StoredOpaqueObject
 encodeObject =

@@ -79,22 +79,19 @@ spec = do
             length input `shouldBe` 1
 
         it "flattens resumed OpenAI agent messages into Grok user messages" do
-            let agentMessage = KnownResponseItem ItemAgentMessage TaggedObject
-                    { tag = "agent_message"
-                    , fields = KeyMap.fromList
-                        [ ("author", Aeson.String "researcher")
-                        , ("recipient", Aeson.String "root")
-                        , ("content", Aeson.toJSON
-                            [ Aeson.object
-                                [ "type" .= ("input_text" :: Text)
-                                , "text" .= ("Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it." :: Text)
-                                ]
-                            , Aeson.object
-                                [ "type" .= ("encrypted_content" :: Text)
-                                , "encrypted_content" .= ("opaque-provider-payload" :: Text)
-                                ]
-                            ])
+            let agentMessage = AgentMessageItem ResponseAgentMessage
+                    { author = Just "researcher"
+                    , recipient = Just "root"
+                    , content =
+                        [ InputTextPart
+                            "Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it."
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart
+                            "opaque-provider-payload"
+                            KeyMap.empty
                         ]
+                    , extraFields = KeyMap.empty
                     }
                 request = setInstructions Nothing $
                     setInput

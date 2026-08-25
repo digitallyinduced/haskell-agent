@@ -342,18 +342,11 @@ spec = do
             Aeson.Error err -> error err
     agentMessage :: Text.Text -> Text.Text -> Text.Text -> ResponseItem
     agentMessage author recipient text =
-        KnownResponseItem ItemAgentMessage TaggedObject
-            { tag = "agent_message"
-            , fields = KeyMap.fromList
-                [ ("author", Aeson.String author)
-                , ("recipient", Aeson.String recipient)
-                , ("content", Aeson.toJSON
-                    [ Aeson.object
-                        [ "type" .= ("input_text" :: Text.Text)
-                        , "text" .= text
-                        ]
-                    ])
-                ]
+        AgentMessageItem ResponseAgentMessage
+            { author = Just author
+            , recipient = Just recipient
+            , content = [InputTextPart text Nothing KeyMap.empty]
+            , extraFields = KeyMap.empty
             }
     checkpoint name = KnownResponseItem ItemCompaction TaggedObject
         { tag = "compaction"

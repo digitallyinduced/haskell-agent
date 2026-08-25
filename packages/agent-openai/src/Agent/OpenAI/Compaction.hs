@@ -32,7 +32,7 @@ import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Maybe (mapMaybe)
+import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -263,44 +263,30 @@ isRemoteRetainedItem = \case
             && maybe True
                 (not . isGeneratedContextUserText)
                 (messageText message)
-    KnownResponseItem ItemAgentMessage tagged ->
-        not (isDiscardedAgentMessage tagged)
-            && itemTokenCount (KnownResponseItem ItemAgentMessage tagged)
+    AgentMessageItem message ->
+        not (isDiscardedAgentMessage message)
+            && itemTokenCount (AgentMessageItem message)
                 <= maxRetainedAgentMessageTokens
     _ -> False
 
-isDiscardedAgentMessage :: TaggedObject -> Bool
-isDiscardedAgentMessage tagged =
-    let author = taggedTextField "author" tagged
-        recipient = taggedTextField "recipient" tagged
-        firstText = taggedFirstContentText tagged
+isDiscardedAgentMessage :: ResponseAgentMessage -> Bool
+isDiscardedAgentMessage message =
+    let firstText =
+            listToMaybe
+                [ text
+                | InputTextPart { text } <- message.content
+                ]
         descendantProgress =
-            case (author, recipient, firstText) of
-                (Just author_, Just recipient_, Just text_) ->
-                    Text.isPrefixOf (recipient_ <> "/") author_
-                        && Text.isPrefixOf "Message Type: MESSAGE\n" text_
+            case (message.author, message.recipient, firstText) of
+                (Just author, Just recipient, Just text) ->
+                    Text.isPrefixOf (recipient <> "/") author
+                        && Text.isPrefixOf "Message Type: MESSAGE\n" text
                 _ -> False
         completion =
             maybe False
                 (Text.isPrefixOf "Message Type: FINAL_ANSWER\n")
                 firstText
     in descendantProgress || completion
-
-taggedTextField :: Text -> TaggedObject -> Maybe Text
-taggedTextField name tagged =
-    case KeyMap.lookup (Key.fromText name) tagged.fields of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
-
-taggedFirstContentText :: TaggedObject -> Maybe Text
-taggedFirstContentText tagged = do
-    Aeson.Array content <-
-        KeyMap.lookup (Key.fromText "content") tagged.fields
-    first <- content Vector.!? 0
-    Aeson.Object object <- pure first
-    Aeson.String text <-
-        KeyMap.lookup (Key.fromText "text") object
-    pure text
 
 truncateRetainedGroups :: Int -> [RetainedGroup] -> [ResponseItem]
 truncateRetainedGroups maxTokens groups =

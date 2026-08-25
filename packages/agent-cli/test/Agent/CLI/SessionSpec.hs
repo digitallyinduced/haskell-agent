@@ -57,6 +57,7 @@ import Test.QuickCheck
     , oneof
     , resize
     , sized
+    , suchThatMap
     , vectorOf
     , (===)
     )
@@ -121,6 +122,7 @@ genResponseItem =
         , CustomToolCallOutputItem <$> genCustomToolCallOutput
         , ReasoningItemValue <$> genReasoningItem
         , ItemReferenceValue <$> genItemReference
+        , AgentMessageItem <$> genResponseAgentMessage
         , do
             tagged <- genTaggedObject "known-item-"
             pure (KnownResponseItem (parseResponseItemType tagged.tag) tagged)
@@ -136,6 +138,33 @@ genResponseMessage =
         <*> genMaybe genItemStatus
         <*> genMaybe genText
         <*> genJsonObject
+
+genResponseAgentMessage :: Gen ResponseAgentMessage
+genResponseAgentMessage =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        ResponseAgentMessage
+            <$> genMaybe genText
+            <*> genMaybe genText
+            <*> genSmallList genContentPart
+            <*> fmap
+                (withoutReservedKeys
+                    ["type", "author", "recipient", "content"])
+                genJsonObject
+
+jsonRoundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a) => a -> Maybe a
+jsonRoundTrip value =
+    case Aeson.fromJSON (Aeson.toJSON value) of
+        Aeson.Success decoded -> Just decoded
+        Aeson.Error _ -> Nothing
+
+withoutReservedKeys :: [Text.Text] -> Aeson.Object -> Aeson.Object
+withoutReservedKeys names object =
+    foldl
+        (flip (KeyMap.delete . Key.fromText))
+        object
+        names
 
 genMessageContent :: Gen MessageContent
 genMessageContent =
@@ -244,6 +273,9 @@ genContentPart =
         , SummaryTextPart
             <$> genText
             <*> genJsonObject
+        , EncryptedContentPart
+            <$> genText
+            <*> genJsonObject
         , UnknownContentPart <$> genTaggedObject "unknown-content-"
         ]
 
@@ -348,7 +380,7 @@ responseItemKinds :: [String]
 responseItemKinds =
     [ "message", "function call", "function output"
     , "custom call", "custom output", "reasoning"
-    , "reference", "known tagged", "unknown tagged"
+    , "reference", "agent message", "known tagged", "unknown tagged"
     ]
 
 responseItemKind :: ResponseItem -> String
@@ -360,6 +392,7 @@ responseItemKind = \case
     CustomToolCallOutputItem{} -> "custom output"
     ReasoningItemValue{} -> "reasoning"
     ItemReferenceValue{} -> "reference"
+    AgentMessageItem{} -> "agent message"
     KnownResponseItem{} -> "known tagged"
     UnknownResponseItem{} -> "unknown tagged"
 
@@ -367,7 +400,8 @@ contentPartKinds :: [String]
 contentPartKinds =
     [ "input text", "input image", "input file"
     , "input audio", "output text", "refusal"
-    , "reasoning text", "summary text", "unknown content"
+    , "reasoning text", "summary text", "encrypted content"
+    , "unknown content"
     ]
 
 contentPartKind :: ResponseContentPart -> String
@@ -380,6 +414,7 @@ contentPartKind = \case
     RefusalPart{} -> "refusal"
     ReasoningTextPart{} -> "reasoning text"
     SummaryTextPart{} -> "summary text"
+    EncryptedContentPart{} -> "encrypted content"
     UnknownContentPart{} -> "unknown content"
 
 spec :: Spec
@@ -509,6 +544,22 @@ spec = describe "Agent.CLI.Session" do
                         }
                     , ItemReferenceValue ItemReference
                         { itemId = "call-item"
+                        , extraFields = KeyMap.empty
+                        }
+                    , AgentMessageItem ResponseAgentMessage
+                        { author = Just "researcher"
+                        , recipient = Just "root"
+                        , content =
+                            [ InputTextPart
+                                { text = "Found it."
+                                , promptCacheBreakpoint = Nothing
+                                , extraFields = KeyMap.empty
+                                }
+                            , EncryptedContentPart
+                                { encryptedContent = "opaque-provider-payload"
+                                , extraFields = KeyMap.empty
+                                }
+                            ]
                         , extraFields = KeyMap.empty
                         }
                     , KnownResponseItem ItemCompactionTrigger TaggedObject

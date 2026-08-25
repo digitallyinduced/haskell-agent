@@ -22,6 +22,7 @@ module Agent.Responses.Types
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , ResponseAgentMessage(..)
     , ResponseRole(..)
     , MessageContent(..)
     , ResponseContentPart(..)
