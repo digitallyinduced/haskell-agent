@@ -577,7 +577,7 @@ formatSkillCatalogContext maxChars catalog
                 , "Always-active skills are included in full below and must be followed for every matching turn."
                 , "Use a skill when the user names it or the task clearly matches its description."
                 , "Users can explicitly invoke a skill with `$skill-name`."
-                , "After choosing a skill, read its SKILL.md from the listed path and follow it."
+                , "For on-demand skills, call `view_skill` with the listed name to load the full instructions."
                 , "Resolve relative scripts, references, and assets from the skill directory."
                 , "Load only the resources needed for the task; do not carry skills across turns unless relevant again."
                 , "Briefly state which skill(s) you are using. If a skill cannot be read, say so and continue with the best fallback."
@@ -607,9 +607,6 @@ renderSkillLine skill =
                 <> Text.replace "\n" " " skill.skillDescription
                 <> maybe "" (\trigger -> " Trigger: " <> Text.replace "\n" " " trigger)
                     skill.skillWhenToUse
-                <> " (file: "
-                <> toText skill.skillPath
-                <> ")"
 
 fitSkillLines :: Int -> [Skill] -> ([Text], Int)
 fitSkillLines budget = go budget []
@@ -633,8 +630,7 @@ renderShortenedSkillLine remaining skill =
         SkillContextAlways -> Nothing
         SkillContextOnDemand ->
             let prefix = "- $" <> skill.skillName <> ": "
-                suffix = " (file: " <> toText skill.skillPath <> ")"
-                available = remaining - Text.length prefix - Text.length suffix - 2
+                available = remaining - Text.length prefix - 2
             in if available < 12
                 then Nothing
                 else Just $
@@ -642,7 +638,6 @@ renderShortenedSkillLine remaining skill =
                         <> Text.take available
                             (Text.replace "\n" " " skill.skillDescription)
                         <> "…"
-                        <> suffix
 
 formatSkillActivation :: SkillInvocation -> Text -> Text
 formatSkillActivation invocation arguments =

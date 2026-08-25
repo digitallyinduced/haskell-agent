@@ -6,11 +6,18 @@ module Agent.CLI.LearnedSkills
     , LearnedSkillArchiveRequest(..)
     , LearnedSkillRollbackRequest(..)
     , learnedSkillTools
+    , defaultLearnedSkillContextMaxChars
     , formatLearnedSkillContext
     , queueLearnedSkillContextWithOmissions
     ) where
 
 import Agent.CLI.Database (DatabaseScope(..))
+import Agent.OsPath (toText)
+import Agent.Skills
+    ( Skill(..)
+    , SkillInvocation(..)
+    , resolveSkillInvocation
+    )
 import Agent.Store.Postgres.Scope
     ( Scope(..)
     , ScopeKind(..)
@@ -40,7 +47,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
-import Data.IORef (IORef, modifyIORef')
+import Data.IORef (IORef, modifyIORef', readIORef)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -120,13 +127,13 @@ instance FromJSON SearchArgs where
             <$> object .: "query"
             <*> (object .:? "limit" >>= pure . fromMaybe 10)
 
-data ReadArgs = ReadArgs !DatabaseScope !Text !(Maybe Integer)
+data ViewArgs = ViewArgs !Text !(Maybe DatabaseScope) !(Maybe Integer)
 
-instance FromJSON ReadArgs where
-    parseJSON = withObject "ReadArgs" \object ->
-        ReadArgs
-            <$> object .: "scope"
-            <*> object .: "slug"
+instance FromJSON ViewArgs where
+    parseJSON = withObject "ViewArgs" \object ->
+        ViewArgs
+            <$> object .: "name"
+            <*> object .:? "scope"
             <*> object .:? "revision"
 
 instance FromJSON LearnedSkillCreateRequest where
@@ -178,10 +185,10 @@ instance FromJSON LearnedSkillRollbackRequest where
             <*> object .: "change_summary"
             <*> object .: "evidence"
 
-learnedSkillTools :: LearnedSkillToolsEnv -> [AppTool]
-learnedSkillTools env =
+learnedSkillTools :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> [AppTool]
+learnedSkillTools invocationsRef env =
     [ searchTool env
-    , readTool env
+    , viewTool invocationsRef env
     , createTool env
     , updateTool env
     , archiveTool env
@@ -194,7 +201,7 @@ searchTool env = jsonTool
     ( "Search active reusable skills learned from earlier sessions across the "
         <> "current user, repository, and checkout scopes. Search before "
         <> "creating a skill so you update an existing lesson instead of "
-        <> "creating a duplicate. Results are summaries; use skill_read for "
+        <> "creating a duplicate. Results are summaries; use view_skill for "
         <> "the complete instructions and revision history."
     )
     [ PropertySchema "query" PropertyString True $ Just
@@ -209,30 +216,75 @@ searchTool env = jsonTool
             Left err -> pure (Left err)
             Right () -> encodeResult <$> env.learnedSkillSearch query limit)
 
-readTool :: LearnedSkillToolsEnv -> AppTool
-readTool env = jsonTool
-    "skill_read"
-    ( "Read one learned skill's complete current instructions, evidence, and "
-        <> "revision summaries. Pass an earlier revision to inspect its full "
-        <> "body and evidence before a rollback. Use this before applying a "
-        <> "relevant or manual skill listed in startup context or returned by "
-        <> "skill_search."
+viewTool :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> AppTool
+viewTool invocationsRef env = jsonTool
+    "view_skill"
+    ( "Load one skill's complete instructions on demand. For filesystem skills, "
+        <> "pass its catalog name without a scope. For learned skills, pass the "
+        <> "slug as name and its user, repository, or checkout scope. Pass an "
+        <> "earlier revision to inspect learned-skill history before rollback."
     )
-    [ scopeProperty
-    , slugProperty
+    [ PropertySchema "name" PropertyString True $ Just
+        "Filesystem skill name or learned-skill slug."
+    , PropertySchema
+        "scope"
+        (PropertyEnum ["user", "repository", "checkout"])
+        False
+        (Just "Required for learned skills; omit for filesystem skills.")
     , PropertySchema "revision" PropertyInteger False $ Just
-        "Revision body to inspect; omit for the current revision."
+        "Learned-skill revision to inspect; omit for current."
     ]
     True
     ParallelSafe
-    (typedTool "skill_read" \(ReadArgs scope slug revision) ->
-        case do
-            validateSlug slug
-            maybe (Right ()) (validatePositiveRevision "revision") revision
-        of
-            Left err -> pure (Left err)
-            Right () ->
-                encodeResult <$> env.learnedSkillRead scope slug revision)
+    (typedTool "view_skill" \(ViewArgs name scope revision) ->
+        case scope of
+            Nothing ->
+                case revision of
+                    Just _ ->
+                        pure
+                            (Left
+                                "revision requires a learned-skill scope")
+                    Nothing -> do
+                        invocations <- readIORef invocationsRef
+                        pure $
+                            encodeResult $
+                                filesystemSkillValue
+                                    <$> resolveSkillInvocation
+                                        invocations
+                                        (normalizeFilesystemSkillName name)
+            Just selected ->
+                case do
+                    validateSlug name
+                    maybe
+                        (Right ())
+                        (validatePositiveRevision "revision")
+                        revision
+                of
+                    Left err -> pure (Left err)
+                    Right () ->
+                        encodeResult
+                            <$> env.learnedSkillRead selected name revision)
+
+filesystemSkillValue :: SkillInvocation -> Value
+filesystemSkillValue invocation =
+    let skill = invocation.invocationSkill
+    in Aeson.object
+        [ "kind" Aeson..= ("filesystem" :: Text)
+        , "name" Aeson..= invocation.invocationName
+        , "title" Aeson..= skill.skillDisplayName
+        , "description" Aeson..= skill.skillDescription
+        , "when_to_use" Aeson..= skill.skillWhenToUse
+        , "instructions" Aeson..= skill.skillBody
+        , "skill_file" Aeson..= toText skill.skillPath
+        , "skill_directory" Aeson..= toText skill.skillDirectory
+        ]
+
+normalizeFilesystemSkillName :: Text -> Text
+normalizeFilesystemSkillName raw =
+    case Text.uncons (Text.strip raw) of
+        Just (prefix, name)
+            | prefix == '$' || prefix == '/' -> name
+        _ -> Text.strip raw
 
 createTool :: LearnedSkillToolsEnv -> AppTool
 createTool env = jsonTool
@@ -270,7 +322,7 @@ createTool env = jsonTool
 updateTool :: LearnedSkillToolsEnv -> AppTool
 updateTool env = jsonTool
     "skill_update"
-    ( "Create a new immutable revision of an existing learned skill. Read the "
+    ( "Create a new immutable revision of an existing learned skill. View the "
         <> "skill first and pass its current revision for optimistic "
         <> "concurrency. Supply only fields that should change, plus evidence "
         <> "and a change summary. Use skill_archive instead of rewriting a "
@@ -324,7 +376,7 @@ rollbackTool :: LearnedSkillToolsEnv -> AppTool
 rollbackTool env = jsonTool
     "skill_rollback"
     ( "Restore the contents and status of an earlier learned-skill revision "
-        <> "as a new immutable revision. Read the skill history first and pass "
+        <> "as a new immutable revision. View the skill history first and pass "
         <> "the current revision for optimistic concurrency. This mutating "
         <> "tool requires approval."
     )
@@ -384,7 +436,7 @@ expectedRevisionProperty = PropertySchema
     "expected_revision"
     PropertyInteger
     True
-    (Just "Current revision returned by skill_read; prevents lost updates.")
+    (Just "Current revision returned by view_skill; prevents lost updates.")
 
 changeSummaryProperty :: PropertySchema
 changeSummaryProperty = PropertySchema
@@ -568,6 +620,9 @@ encodeResult :: Either Text Value -> Either Text Text
 encodeResult =
     fmap (Text.decodeUtf8 . LBS.toStrict . Aeson.encode)
 
+defaultLearnedSkillContextMaxChars :: Int
+defaultLearnedSkillContextMaxChars = 8000
+
 formatLearnedSkillContext
     :: Int
     -> [LearnedSkill]
@@ -624,11 +679,11 @@ contextHeader :: Text
 contextHeader =
     "<learned-skills>\n\
     \These are durable, reusable instructions learned from earlier sessions. \
-    \Apply every skill marked `always`. For `relevant` skills, call skill_read \
-    \when its applicability matches the task. Apply `manual` skills only when \
-    \explicitly requested or intentionally selected. When instructions \
-    \conflict, checkout scope overrides repository scope, which overrides user \
-    \scope.\n\n"
+    \Apply every skill marked `always`. For `relevant` skills, call view_skill \
+    \with its name and scope when its applicability matches the task. Apply \
+    \`manual` skills only when explicitly requested or intentionally selected. \
+    \When instructions conflict, checkout scope overrides repository scope, \
+    \which overrides user scope.\n\n"
 
 contextFooter :: Text
 contextFooter = "\n</learned-skills>"

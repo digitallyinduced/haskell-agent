@@ -136,7 +136,8 @@ import Agent.CLI.Database.Storage
     , runStorageCommand
     )
 import Agent.CLI.LearnedSkills
-    ( learnedSkillTools
+    ( defaultLearnedSkillContextMaxChars
+    , learnedSkillTools
     , queueLearnedSkillContextWithOmissions
     )
 import Agent.CLI.LearnedSkills.Store
@@ -530,7 +531,6 @@ import Agent.Skills
     , SkillCatalog(..)
     , SkillInvocation(..)
     , SkillWarning(..)
-    , defaultSkillCatalogMaxChars
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -2129,6 +2129,8 @@ runAgentInitializedWithLock
         Nothing -> pure ()
     ghciEnabledRef <- newIORef options.optGhci
     bashEnabledRef <- newIORef options.optBash
+    skillsRef <- newIORef (SkillCatalog [] [])
+    skillInvocationsRef <- newIORef []
     let claimCurrentSession handle = do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
@@ -2184,7 +2186,8 @@ runAgentInitializedWithLock
         sessionTools = agentSessionTools sessionToolsEnv
         gatewayTools = maybe [] managedGatewayTools promptRequest
         databaseAppTools = databaseTools databaseToolsEnv
-        learnedSkillAppTools = learnedSkillTools learnedSkillToolsEnv
+        learnedSkillAppTools =
+            learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -2312,9 +2315,6 @@ runAgentInitializedWithLock
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
         -- before their first prompt/turn below.
-        skillsRef <- newIORef (SkillCatalog [] [])
-        skillInvocationsRef <- newIORef []
-
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
@@ -3358,12 +3358,12 @@ runSession SessionRequest{..} SessionBackend{..} = do
             freshAgents <-
                 loadAgentsContext fullscreen options dialect home cwd [] Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
-            (omitted, skillContextChars) <-
+            (omitted, _) <-
                 installSkills freshAgents True freshSkills
             reportSkillCatalog True freshSkills omitted
             void $ installLearnedSkills
                 freshAgents
-                (defaultSkillCatalogMaxChars - skillContextChars)
+                defaultLearnedSkillContextMaxChars
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
         refreshSkills queueContext = do
@@ -3727,7 +3727,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                 options home projectRoot cwd
             let queueInitialContext =
                     null initialTurns && not (isJust initialPrevious)
-            (omitted, skillContextChars) <- installSkills startupContext
+            (omitted, _) <- installSkills startupContext
                 queueInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
@@ -3735,7 +3735,7 @@ runSession SessionRequest{..} SessionBackend{..} = do
                 if queueInitialContext
                     then installLearnedSkills
                         startupContext
-                        (defaultSkillCatalogMaxChars - skillContextChars)
+                        defaultLearnedSkillContextMaxChars
                     else pure []
             finishStartup startup
             pure learnedSkills

@@ -167,7 +167,7 @@ spec = describe "systemPrompt" do
                     genericResponsesDialect
                     [ "read_file"
                     , "skill_search"
-                    , "skill_read"
+                    , "view_skill"
                     , "skill_create"
                     , "skill_update"
                     ]

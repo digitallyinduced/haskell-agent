@@ -184,7 +184,7 @@ toolVerb name = case canonicalToolName name of
     "ask_user_question" -> "Asked"
     "ask_secret" -> "Requested secret"
     "skill_search" -> "Searched skills"
-    "skill_read" -> "Read skill"
+    "view_skill" -> "Viewed skill"
     "skill_create" -> "Learned"
     "skill_update" -> "Updated skill"
     "skill_archive" -> "Archived skill"
@@ -227,7 +227,7 @@ toolDetail call = case canonicalToolName call.name of
     "list_agents" ->
         maybe "" ("under " <>) (nonEmptyJsonText "path_prefix" call.arguments)
     "skill_search" -> firstLine (jsonTextFieldDefault "query" call.arguments)
-    "skill_read" -> skillIdentity call.arguments
+    "view_skill" -> viewSkillIdentity call.arguments
     "skill_create" -> skillIdentity call.arguments
     "skill_update" -> skillIdentity call.arguments
     "skill_archive" -> skillIdentity call.arguments
@@ -245,6 +245,17 @@ skillIdentity arguments =
     of
         (Just scope, Just slug) -> scope <> "/" <> slug
         (Nothing, Just slug) -> slug
+        _ -> "the selected skill"
+
+viewSkillIdentity :: Text -> Text
+viewSkillIdentity arguments =
+    case
+        ( nonEmptyJsonText "scope" arguments
+        , nonEmptyJsonText "name" arguments
+        )
+    of
+        (Just scope, Just name) -> scope <> "/" <> name
+        (Nothing, Just name) -> name
         _ -> "the selected skill"
 
 formatSkillMutation :: Text -> Maybe Text

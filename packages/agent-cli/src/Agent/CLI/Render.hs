@@ -939,7 +939,7 @@ toolChrome name = case canonicalToolName name of
     "exit_plan_mode" -> ToolChrome "Exited" ToolDetailMuted
     "ask_user_question" -> ToolChrome "Asked" ToolDetailMuted
     "skill_search" -> ToolChrome "Searched skills" ToolDetailMuted
-    "skill_read" -> ToolChrome "Read skill" ToolDetailMuted
+    "view_skill" -> ToolChrome "Viewed skill" ToolDetailMuted
     "skill_create" -> ToolChrome "Learned" ToolDetailMuted
     "skill_update" -> ToolChrome "Updated skill" ToolDetailMuted
     "skill_archive" -> ToolChrome "Archived skill" ToolDetailMuted

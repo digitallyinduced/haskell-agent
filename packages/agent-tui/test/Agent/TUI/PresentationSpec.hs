@@ -90,6 +90,12 @@ spec = describe "tool presentation" do
             `shouldBe` "Enter API token"
 
     it "renders learned-skill mutations with scope, slug, and approval intent" do
+        summarizeToolCall
+            (functionToolCall
+                "view"
+                "view_skill"
+                "{\"scope\":\"repository\",\"name\":\"postgres-sessions\"}")
+            `shouldBe` "Viewed skill repository/postgres-sessions"
         let create = functionToolCall
                 "skill"
                 "skill_create"
