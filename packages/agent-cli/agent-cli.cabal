@@ -60,7 +60,11 @@ library
                     , Agent.CLI.Runtime.Persistence
                     , Agent.CLI.Runtime.Recap
                     , Agent.CLI.Runtime.Repl
+                    , Agent.CLI.Runtime.Repl.Attachments
                     , Agent.CLI.Runtime.Repl.Commands
+                    , Agent.CLI.Runtime.Repl.Selection
+                    , Agent.CLI.Runtime.Repl.Session
+                    , Agent.CLI.Runtime.Repl.Workflow
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
