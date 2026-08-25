@@ -262,6 +262,21 @@ spec = describe "Agent.Telegram" do
                     dispatch
             readIORef decoded `shouldReturn` ["bad.json"]
 
+        it "propagates bridge polling failures to the managed turn" do
+            started <- newEmptyMVar
+            Bridge.withTelegramBridgeUsing
+                (do
+                    putMVar started ()
+                    fail "bridge listing failed")
+                (takeMVar started >> threadDelay 2_000_000)
+                `shouldThrow` anyException
+
+        it "keeps the managed turn running while the bridge polls" do
+            Bridge.withTelegramBridgeUsing
+                (threadDelay 10_000_000)
+                (pure (41 + 1 :: Int))
+                `shouldReturn` 42
+
     describe "splitTelegramText" do
         it "keeps messages within the requested limit" do
             splitTelegramText 4 "abcdefghij"

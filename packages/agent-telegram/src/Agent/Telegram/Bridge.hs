@@ -2,6 +2,7 @@
 module Agent.Telegram.Bridge
     ( TelegramBridgeEnv(..)
     , withTelegramBridge
+    , withTelegramBridgeUsing
     , processTelegramCallbacks
     , processBridgeRequestBatch
     , telegramActivityDraftHtml
@@ -24,7 +25,7 @@ import qualified Agent.Telegram.Client as Client
 import Agent.Telegram.Types
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync)
+import Control.Concurrent.Async (race, wait, withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
 import Control.Monad (forM_, void, when)
 import Data.Aeson
@@ -111,8 +112,20 @@ instance FromJSON ApprovalRequest where
         ApprovalRequest <$> o .: "tool_name" <*> o .: "arguments"
 
 withTelegramBridge :: TelegramBridgeEnv -> IO a -> IO a
-withTelegramBridge env action =
-    withAsync (bridgeLoop env) (const action)
+withTelegramBridge env =
+    withTelegramBridgeUsing (bridgeLoop env)
+
+-- | Run a managed turn against a bridge worker. If the worker dies, the
+-- exception is raised in the owning action instead of leaving gateway
+-- requests waiting until they time out.
+withTelegramBridgeUsing :: IO () -> IO a -> IO a
+withTelegramBridgeUsing loop action =
+    withAsync loop \worker ->
+        race (wait worker) action >>= \case
+            Left () ->
+                fail "Telegram gateway bridge polling stopped"
+            Right value ->
+                pure value
 
 bridgeLoop :: TelegramBridgeEnv -> IO ()
 bridgeLoop env = go Set.empty Nothing (0 :: Int)
@@ -140,7 +153,7 @@ processBridgeRequests env seen = do
                 Left err -> do
                     respondDecodeError env name err
                     pure Nothing
-    files <- tryIOError (listDirectory directory) >>= \case
+    files <- tryIOError (retryOnFileBusy (listDirectory directory)) >>= \case
         Left err
             | isDoesNotExistError err ->
                 pure []
