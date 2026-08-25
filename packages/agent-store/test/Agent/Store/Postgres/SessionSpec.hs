@@ -281,6 +281,16 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected empty after page: " <> show other)
+                            loadSessionResumeStats pool "session-1" >>= \case
+                                Right (Just stats) -> do
+                                    stats.sessionResumeTurnCount `shouldBe` 6
+                                    stats.sessionResumeMessageCount `shouldBe` 12
+                                    stats.sessionResumeToolCount `shouldBe` 12
+                                    stats.sessionResumeFirstPrompt
+                                        `shouldBe` Just "/question--1"
+                                other ->
+                                    expectationFailure
+                                        ("unexpected resume stats: " <> show other)
                         )
                         (closeStore store)
                 ) `finally` cleanup

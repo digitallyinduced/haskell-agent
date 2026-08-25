@@ -6,6 +6,7 @@ module Agent.CLI.Session
     , TranscriptEffect(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
+    , SessionResumeStats(..)
     , SessionActivity(..)
     , SessionTransfer(..)
     , SessionCreate(..)
@@ -35,6 +36,7 @@ module Agent.CLI.Session
     , loadRecentSessionTurns
     , loadSessionTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionResumeStats
     , importSessionTransfer
     , loadSessionHandle
     , isValidSessionId
@@ -328,6 +330,13 @@ data SessionTurnPage = SessionTurnPage
     , pageTotalTurns :: !Int64
     , pageHasOlder :: !Bool
     , pageHasNewer :: !Bool
+    } deriving (Eq, Show)
+
+data SessionResumeStats = SessionResumeStats
+    { resumeStatsTurnCount :: !Int
+    , resumeStatsMessageCount :: !Int
+    , resumeStatsToolCount :: !Int
+    , resumeStatsFirstPrompt :: !(Maybe Text)
     } deriving (Eq, Show)
 
 instance ToJSON SessionTurn where
@@ -859,6 +868,22 @@ loadSessionTurnsAfter
 loadSessionTurnsAfter pool root sessionId cursor limit =
     loadSessionTurnPage root pool sessionId
         (\pool' key -> Store.loadSessionTurnsAfter pool' key cursor limit)
+
+loadSessionResumeStats
+    :: StorePool
+    -> OsPath
+    -> Text
+    -> IO (Either Text SessionResumeStats)
+loadSessionResumeStats pool root sessionId = runExceptT do
+    _ <- except (sessionDirForId root sessionId)
+    stored <- loadWithLegacyImport root pool sessionId Store.loadSessionResumeStats
+    pure SessionResumeStats
+        { resumeStatsTurnCount = fromIntegral stored.sessionResumeTurnCount
+        , resumeStatsMessageCount = fromIntegral stored.sessionResumeMessageCount
+        , resumeStatsToolCount = fromIntegral stored.sessionResumeToolCount
+        , resumeStatsFirstPrompt =
+            fmap Text.strip stored.sessionResumeFirstPrompt
+        }
 
 loadSessionTurnPage
     :: OsPath

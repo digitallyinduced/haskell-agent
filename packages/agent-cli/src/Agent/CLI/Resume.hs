@@ -15,6 +15,7 @@ module Agent.CLI.Resume
     , initialResumeState
     , insertResumeSearch
     , loadResumeEntry
+    , resumeEntryFromPage
     , moveResumeBrowser
     , pickResumeEntries
     , pickResumeSession
@@ -40,9 +41,11 @@ import Agent.CLI.Session
     ( SessionMeta(..)
     , SessionTurn(..)
     , SessionTurnPage(..)
+    , SessionResumeStats(..)
     , TranscriptEffect(..)
     , loadRecentSessionTurns
     , loadSessionMeta
+    , loadSessionResumeStats
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -133,7 +136,30 @@ loadResumeEntry pool root sessionId =
             loadRecentSessionTurns pool root sessionId 50 >>= \case
                 Left err -> pure (Left err)
                 Right page ->
-                    pure (Right (entryFrom meta (map snd page.pageTurns)))
+                    loadSessionResumeStats pool root sessionId >>= \case
+                        Left err -> pure (Left err)
+                        Right stats ->
+                            pure $ Right $
+                                resumeEntryFromPage
+                                    meta
+                                    stats
+                                    (map snd page.pageTurns)
+
+-- | Build a loaded resume entry from a bounded transcript page plus
+-- full-session aggregates. Counts and the first prompt describe the whole
+-- conversation; @turns@ is only the preview window.
+resumeEntryFromPage
+    :: SessionMeta
+    -> SessionResumeStats
+    -> [SessionTurn]
+    -> ResumeEntry
+resumeEntryFromPage meta stats turns =
+    (entryFromWith True meta turns)
+        { resumeMessageCount = stats.resumeStatsMessageCount
+        , resumeTurnCount = stats.resumeStatsTurnCount
+        , resumeToolCount = stats.resumeStatsToolCount
+        , resumePrompt = fromMaybe "" stats.resumeStatsFirstPrompt
+        }
 
 entryFrom :: SessionMeta -> [SessionTurn] -> ResumeEntry
 entryFrom = entryFromWith True

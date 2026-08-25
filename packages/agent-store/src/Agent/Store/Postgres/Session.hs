@@ -30,9 +30,11 @@ module Agent.Store.Postgres.Session
     , loadSessionMetadata
     , loadActiveSession
     , SessionTurnPage(..)
+    , SessionResumeStats(..)
     , loadRecentSessionTurns
     , loadSessionTurnsBefore
     , loadSessionTurnsAfter
+    , loadSessionResumeStats
     , loadSessionEvents
     , listSessionMetadata
     , searchConversationTurns
@@ -82,6 +84,16 @@ data SessionTurnPage = SessionTurnPage
     , sessionPageTotal :: !Int64
     , sessionPageHasOlder :: !Bool
     , sessionPageHasNewer :: !Bool
+    }
+    deriving (Eq, Show)
+
+-- | Full-session aggregates for resume UI. The transcript preview stays
+-- paged; these fields describe the whole stored conversation.
+data SessionResumeStats = SessionResumeStats
+    { sessionResumeTurnCount :: !Int64
+    , sessionResumeMessageCount :: !Int64
+    , sessionResumeToolCount :: !Int64
+    , sessionResumeFirstPrompt :: !(Maybe Text)
     }
     deriving (Eq, Show)
 
@@ -543,6 +555,15 @@ loadSessionTurnsAfter pool sessionKey cursor limit =
             loadTurnsAfterStatement)
         (max 1 limit)
         PageAfter
+
+loadSessionResumeStats
+    :: StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe SessionResumeStats))
+loadSessionResumeStats pool sessionKey =
+    withSession pool $
+        Transactions.transaction Transactions.RepeatableRead Transactions.Read $
+            Transaction.statement sessionKey loadResumeStatsStatement
 
 data PageMode = PageRecent | PageBefore | PageAfter
     deriving (Eq, Show)
@@ -1134,6 +1155,45 @@ currentGenerationStatement = mkStatement
         (,)
             <$> Decoders.column (Decoders.nonNullable Decoders.int8)
             <*> Decoders.column (Decoders.nonNullable Decoders.int8))
+    True
+
+loadResumeStatsStatement :: Statement Text (Maybe SessionResumeStats)
+loadResumeStatsStatement = mkStatement
+    "WITH target AS (\
+    \ SELECT session_id\
+    \ FROM harness.sessions\
+    \ WHERE session_key = $1 AND deleted_at IS NULL\
+    \ )\
+    \ SELECT\
+    \   (SELECT count(*)::bigint\
+    \    FROM harness.session_turns t\
+    \    JOIN target ON target.session_id = t.session_id),\
+    \   (SELECT COALESCE(sum(\
+    \      (CASE WHEN btrim(t.user_text) <> '' THEN 1 ELSE 0 END)\
+    \      + (CASE WHEN t.assistant_text IS NOT NULL\
+    \               AND btrim(t.assistant_text) <> '' THEN 1 ELSE 0 END)\
+    \    ), 0)::bigint\
+    \    FROM harness.session_turns t\
+    \    JOIN target ON target.session_id = t.session_id),\
+    \   (SELECT count(*)::bigint\
+    \    FROM harness.session_response_items i\
+    \    JOIN harness.session_turns t ON t.turn_id = i.turn_id\
+    \    JOIN target ON target.session_id = t.session_id\
+    \    WHERE i.storage_kind IN ('function_call', 'custom_tool_call')),\
+    \   (SELECT t.user_text\
+    \    FROM harness.session_turns t\
+    \    JOIN target ON target.session_id = t.session_id\
+    \    WHERE btrim(t.user_text) <> ''\
+    \    ORDER BY t.turn_index ASC\
+    \    LIMIT 1)\
+    \ FROM target"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe $
+        SessionResumeStats
+            <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+            <*> Decoders.column (Decoders.nullable Decoders.text))
     True
 
 turnSelectSql :: Text
