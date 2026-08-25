@@ -1556,17 +1556,20 @@ sessionForPrompt
     -> IO SessionHandle
 sessionForPrompt runtime key prompt = do
     state <- readMVar runtime.runtimeStateVar
-    existing <- case lookupBinding key state of
-        Nothing -> pure Nothing
+    case lookupBinding key state of
         Just sessionId ->
             loadSessionHandle
                 runtime.runtimePool
                 runtime.runtimeSessionsRoot
                 sessionId >>= \case
-                Left _ -> pure Nothing
-                Right (handle, _) -> pure (Just handle)
-    case existing of
-        Just handle -> pure handle
+                Left err ->
+                    fail . Text.unpack $
+                        "could not load Telegram session "
+                            <> sessionId
+                            <> ": "
+                            <> err
+                Right (handle, _) ->
+                    pure handle
         Nothing -> do
             handle <- createSession SessionCreate
                 { createPool = runtime.runtimePool

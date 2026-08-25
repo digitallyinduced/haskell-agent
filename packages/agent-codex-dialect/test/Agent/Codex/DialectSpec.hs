@@ -68,6 +68,7 @@ spec = describe "Codex dialect" do
                         (unsafeEncodeUtf "/repo/AGENTS.md")
                         "project"
                     ]
+                , loadedWarnings = []
                 }
         formatCodexAgentsMd (unsafeEncodeUtf "/repo") loaded
             `shouldBe` Just

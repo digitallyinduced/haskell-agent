@@ -43,6 +43,7 @@ import Agent.Provider
     )
 import Control.Exception
     ( AsyncException(..)
+    , ErrorCall(..)
     , MaskingState(..)
     , getMaskingState
     , throwIO
@@ -773,6 +774,41 @@ spec = do
             readIORef compactCalls `shouldReturn` 0
             readIORef continuationCalls `shouldReturn` 0
             readIORef contextState `shouldReturn` Nothing
+
+        it "reports a throwing post-compaction hook instead of swallowing it" do
+            let history = [userTextItem "old"]
+                threshold = 20
+            contextState <- newIORef (Just (threshold, length history))
+            events <- newIORef []
+            let sender _request =
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSenderAndHook
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        (throwIO (ErrorCall "reload failed"))
+                        contextState
+                        base
+            result <- backend.submitTurn history Nothing
+                [UserMessage "new"]
+                (\event -> modifyIORef' events (<> [event]))
+            result `shouldSatisfy` either (const False) (const True)
+            events' <- readIORef events
+            events' `shouldSatisfy` any \case
+                WarningRaised message ->
+                    "failed to reload generated context after compaction"
+                        `Text.isInfixOf` message
+                    && "reload failed" `Text.isInfixOf` message
+                _ -> False
 
         it "runs the post-compaction hook only after a successful continuation" do
             let history = [userTextItem "old"]

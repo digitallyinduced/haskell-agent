@@ -112,7 +112,7 @@ import Data.Bits (xor)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -1072,14 +1072,35 @@ sessionTempDirForId root sessionId
                 </> unsafeEncodeUtf (Text.unpack sessionId))
     | otherwise = Left "invalid session id"
 
-listSessions :: StorePool -> OsPath -> IO [SessionMeta]
+listSessions :: StorePool -> OsPath -> IO ([SessionMeta], [Text])
 listSessions pool _root = do
     Store.listSessionMetadata pool >>= \case
         Left err ->
             fail
                 ("could not list PostgreSQL sessions: "
                     <> Text.unpack (renderStoreError err))
-        Right values -> pure (catMaybes (map decodeMetaQuiet values))
+        Right values ->
+            let decoded = map decodeListedSessionMeta values
+            in pure
+                ( [meta | Right meta <- decoded]
+                , [err | Left err <- decoded]
+                )
+
+-- | Decode one persisted session for listing. Corrupt or incompatible
+-- metadata becomes an error string instead of disappearing from the picker.
+decodeListedSessionMeta :: Store.SessionMetadata -> Either Text SessionMeta
+decodeListedSessionMeta value = do
+    meta <- fromStoredMetadata value
+    unless (meta.metaVersion == sessionSchemaVersion) $
+        Left $
+            "unsupported session schema version "
+                <> Text.pack (show meta.metaVersion)
+                <> " for session "
+                <> meta.metaId
+                <> " (expected "
+                <> Text.pack (show sessionSchemaVersion)
+                <> ")"
+    pure meta
 
 writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
 writeSessionMeta pool _path meta = do
@@ -1450,12 +1471,6 @@ fromStoredUsage usage = TokenUsage
     , outputTokens = fromIntegral usage.sessionUsageOutputTokens
     , cachedTokens = fromIntegral usage.sessionUsageCachedTokens
     }
-
-decodeMetaQuiet :: Store.SessionMetadata -> Maybe SessionMeta
-decodeMetaQuiet value =
-    case fromStoredMetadata value of
-        Right meta | meta.metaVersion == sessionSchemaVersion -> Just meta
-        _ -> Nothing
 
 validateSessionMeta :: Text -> SessionMeta -> ExceptT Text IO ()
 validateSessionMeta sessionId meta = do

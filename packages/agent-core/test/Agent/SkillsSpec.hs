@@ -2,13 +2,18 @@ module Agent.SkillsSpec (spec) where
 
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Skills
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectoryIfMissing
     , createDirectoryLink
+    , emptyPermissions
     , getTemporaryDirectory
     , removeDirectoryRecursive
+    , setOwnerReadable
+    , setOwnerSearchable
+    , setOwnerWritable
+    , setPermissions
     )
 import System.FilePath ((</>))
 import System.Posix.Temp (mkdtemp)
@@ -119,6 +124,31 @@ spec = describe "Agent.Skills" do
             catalog.catalogSkills `shouldBe` []
             length catalog.catalogWarnings `shouldBe` 1
 
+    it "warns when a skill directory cannot be listed" do
+        withTempDir \dir -> do
+            let home = dir </> "home"
+                repo = dir </> "repo"
+                blocked = repo </> ".agents" </> "skills" </> "blocked"
+            writeSkill blocked "blocked" "blocked skill" []
+            catalog <-
+                withUnreadableDirectory blocked $
+                    discoverSkills (options home repo repo)
+            catalog.catalogSkills `shouldBe` []
+            catalog.catalogWarnings `shouldNotBe` []
+
+    it "warns when agents/openai.yaml exists but cannot be parsed" do
+        withTempDir \dir -> do
+            let home = dir </> "home"
+                repo = dir </> "repo"
+                skillDir = repo </> ".agents" </> "skills" </> "deploy"
+            writeSkill skillDir "deploy" "Deploy the service" []
+            createDirectoryIfMissing True (skillDir </> "agents")
+            writeFile (skillDir </> "agents" </> "openai.yaml") "not: [valid"
+            catalog <- discoverSkills (options home repo repo)
+            catalog.catalogSkills `shouldBe` []
+            map (.skillWarningMessage) catalog.catalogWarnings
+                `shouldSatisfy` any (Text.isInfixOf "openai.yaml")
+
     it "follows symlinked skill directories" do
         withTempDir \dir -> do
             let home = dir </> "home"
@@ -223,6 +253,14 @@ options home repo cwd = SkillDiscoverOptions
     , skillsMaxDepth = 6
     , skillsBuiltinRoots = []
     }
+
+withUnreadableDirectory :: FilePath -> IO a -> IO a
+withUnreadableDirectory path action = do
+    setPermissions path emptyPermissions
+    action `finally`
+        setPermissions path
+            (setOwnerSearchable True
+                (setOwnerWritable True (setOwnerReadable True emptyPermissions)))
 
 writeSkill :: FilePath -> String -> String -> [String] -> IO ()
 writeSkill dir name description extras = do

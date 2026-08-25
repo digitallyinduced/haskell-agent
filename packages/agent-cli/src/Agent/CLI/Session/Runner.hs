@@ -127,6 +127,7 @@ import Agent.CLI.Tools
     , requireToolRegistry
     , schemasFromAppTools
     )
+import Agent.CLI.Error (formatException)
 import Agent.CLI.Dialects
     ( filterBashTools
     , filterGhciTools
@@ -251,6 +252,14 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       withIoLock action = withMVar ioLock (const action)
+      reportSessionError message =
+          case fullscreen of
+              Just runtime ->
+                  emitUiEvent runtime (UiErrorMessage message)
+              Nothing -> do
+                  color <- resolveColor stderrHandle
+                  putTextLn stderrHandle
+                      (roleWarn color (glyphWarn <> message))
   windowTitle <- newWindowTitleController
       options.optMotionMode
       startupWindowTitle
@@ -491,7 +500,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     session <-
                         (Just <$>
                             hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure Nothing
+                            `catchAny` \err -> do
+                                reportSessionError
+                                    ("failed to load selected agent: "
+                                        <> formatException err)
+                                pure Nothing
                     forM_ session \selectedSession -> do
                         withMVar selectedSession.subSessionHydrated \_ ->
                             writeIORef selectedSession.subSessionPinned True
@@ -499,7 +512,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         -- refill the same stable object now that it is pinned.
                         void
                             (hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure ()
+                            `catchAny` \err ->
+                                reportSessionError
+                                    ("failed to pin selected agent: "
+                                        <> formatException err)
             writeIORef selectedAgent target
         releaseSelectedAgent = \case
             AgentRoot -> pure ()
@@ -884,12 +900,16 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     btwRequests <- newChan
     recapRequests <- newChan
     let
+        reloadGeneratedContextSafely =
+            reloadGeneratedContext `catchAny` \err ->
+                reportSessionError
+                    ("failed to reload generated context: "
+                        <> formatException err)
         compactRunnerWithContext focus = do
             result <- compactRunner focus
             case result of
                 Left _ -> pure ()
-                Right _ ->
-                    reloadGeneratedContext `catchAny` \_ -> pure ()
+                Right _ -> reloadGeneratedContextSafely
             pure result
         env = SessionEnv
             { sessionLoop = config
@@ -956,7 +976,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    writeIORef generatedContextReloadRef reloadGeneratedContext
+    writeIORef generatedContextReloadRef reloadGeneratedContextSafely
     writeIORef startup.startupRestartEffort \level -> do
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)

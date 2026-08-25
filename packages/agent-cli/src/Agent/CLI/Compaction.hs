@@ -19,7 +19,7 @@ module Agent.CLI.Compaction
     , runResponsesCompactWithContextWindow
     ) where
 
-import Agent.CLI.Error (formatApiError)
+import Agent.CLI.Error (formatApiError, formatException)
 import Agent.CLI.Session.History
     ( LiveConversation
     , writeLivePreviousResponseId
@@ -1059,7 +1059,11 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
             Right backendResult -> do
                 writeIORef contextTokensRef $
                     occupancySnapshot backendResult <|> compactSnapshot
-                onCompacted `catchAny` const (pure ())
+                onCompacted `catchAny` \err ->
+                    onEvent $
+                        WarningRaised
+                            ("failed to reload generated context after compaction: "
+                                <> formatException err)
         pure result
 
     submitAndTrack oldTokens history previous inputs onEvent = do

@@ -54,6 +54,7 @@ import System.Directory.OsPath
     , getHomeDirectory
     )
 import System.Exit (die)
+import System.IO (stderr)
 import System.OsPath
     ( OsPath
     , decodeFS
@@ -79,7 +80,8 @@ runListSessions :: IO ()
 runListSessions = do
     home <- getHomeDirectory
     withStoreForHome home \store -> do
-        sessions <- listSessions (trustedPool store) (sessionsRoot home)
+        (sessions, warnings) <- listSessions (trustedPool store) (sessionsRoot home)
+        mapM_ (\warning -> Text.hPutStrLn stderr ("warning: " <> warning)) warnings
         if null sessions
             then putStrLn "No sessions in ~/.haskell-agent/sessions"
             else mapM_ printSessionSummary sessions

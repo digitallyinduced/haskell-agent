@@ -41,6 +41,7 @@ spec = describe "Agent.CLI.Dialects" do
                 { loadedGlobal = Nothing
                 , loadedProject =
                     [InstructionFile (unsafeEncodeUtf "/repo/AGENTS.md") "rules"]
+                , loadedWarnings = []
                 }
         formatAgentsMdForDialect codexDialect cwd loaded
             `shouldSatisfy`
