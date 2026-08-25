@@ -266,7 +266,7 @@ spec = do
             length (filter (Text.isInfixOf "Investigate a very long") rows)
                 `shouldBe` 1
             rendered `shouldSatisfy` Text.isInfixOf "Thinking"
-            rendered `shouldSatisfy` Text.isInfixOf "Type a follow-up"
+            rendered `shouldSatisfy` Text.isInfixOf "Type guidance"
             visibleTodoList ui
                 `shouldSatisfy` (not . null)
 

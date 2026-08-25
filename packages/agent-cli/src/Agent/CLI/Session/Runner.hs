@@ -296,6 +296,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
+    steeringRef <- newIORef []
     let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
@@ -764,6 +765,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             ("Tool " <> call.name
                                 <> " is disabled by the current /shell setting."))
                     True -> approveRegisteredTool call
+            , loopReadSteering =
+                map UserMessage <$> readIORef steeringRef
+            , loopCommitSteering = \count ->
+                atomicModifyIORef' steeringRef \pending ->
+                    (drop count pending, ())
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -958,6 +964,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
+            (\text ->
+                atomicModifyIORef' steeringRef \pending ->
+                    (pending <> [text], ()))
             (writeChan btwRequests)
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->

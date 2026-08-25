@@ -200,6 +200,7 @@ data UiEvent
     = UiLoop !LoopEvent
     | UiUserSubmitted !Text
     | UiDraftSubmitted
+    | UiInputSteered !Text
     | UiInputQueued !Text
     | UiInputPromoted !Text
     | UiQueuedInputStarted
@@ -311,6 +312,16 @@ reduceUi event state = case event of
             , uiNotice = Nothing
             , uiNoticeElapsedMillis = 0
             }
+    UiInputSteered text ->
+        appendBlock BlockUser "You" text "" BlockComplete Nothing
+            state
+                { uiDraft = ""
+                , uiCursor = 0
+                , uiFollow = True
+                , uiNotice =
+                    Just (progressNotice "Steering the current turn…")
+                , uiNoticeElapsedMillis = 0
+                }
     UiInputQueued text ->
         state
             { uiDraft = ""

@@ -190,6 +190,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
+    , runtimeSteer :: !(Text -> IO ())
     , runtimeBtw :: !(Text -> IO ())
     , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
@@ -239,6 +240,7 @@ data DictationSession = DictationSession
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionCancel :: !(IO ())
+    , sessionSteer :: !(Text -> IO ())
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())

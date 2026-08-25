@@ -916,6 +916,21 @@ spec = describe "fullscreen UI reducer" do
         map (.blockBody) (Foldable.toList afterSecondStarted.uiBlocks)
             `shouldBe` ["first follow-up", "second follow-up"]
 
+    it "shows steering as part of the active turn and clears the draft" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiSetDraft "keep the schema" 15
+                    , UiInputSteered "keep the schema"
+                    ]
+        state.uiRunning `shouldBe` True
+        state.uiDraft `shouldBe` ""
+        Foldable.toList state.uiQueuedInputs `shouldBe` []
+        map (.blockBody) (Foldable.toList state.uiBlocks)
+            `shouldBe` ["keep the schema"]
+        (.noticeText) <$> state.uiNotice
+            `shouldBe` Just "Steering the current turn…"
+
     it "promotes a send-now draft ahead of existing queued inputs" do
         let state =
                 apply
