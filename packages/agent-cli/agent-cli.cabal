@@ -51,6 +51,7 @@ library
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
+                    , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
