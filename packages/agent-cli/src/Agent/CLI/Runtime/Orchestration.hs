@@ -94,8 +94,6 @@ import Agent.CLI.Options
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
 import Agent.CLI.Plan ( cliPlanHooks )
-import Agent.CLI.Progress
-    ( osc9ProgressIndeterminate, osc9ProgressRemove, wrapOscForTmux )
 import Agent.CLI.Project
     ( ProjectAccount(..),
       ProjectModel(..),
@@ -206,10 +204,6 @@ import Agent.CLI.Startup.Auth
       recordStartupTiming,
       setStartupNotice,
       startupDie )
-import Agent.CLI.Startup.Format
-    ( formatRepositoryPath,
-      formatStartupDuration,
-      formatStartupTimings )
 import Agent.CLI.StartupContext ( loadAgentsContext )
 import Agent.CLI.Style
     ( cliWindowTitle,
@@ -251,7 +245,7 @@ import Agent.CLI.Terminal
       reportTerminalCwd,
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
-import Agent.CLI.Tools ( hostedSearchToolCollisions, schemasFromAppTools )
+import Agent.CLI.Tools ( schemasFromAppTools )
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
@@ -332,7 +326,6 @@ import Agent.TUI.Model
       UiEvent(UiSystemMessage, UiSetRepository, UiSetNotice),
       UiState(uiQueuedInputs) )
 import Agent.TUI.Motion ( nativeProgressAnimationEnabled )
-import Agent.ToolDispatch ( canonicalToolName )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
@@ -347,12 +340,9 @@ import Agent.Tools.Types
 import Agent.XAI.LoopBackend ( xaiBackend )
 import Control.Applicative ( (<|>) )
 import Control.Concurrent.Async
-    ( cancel,
-      concurrently,
+    ( concurrently,
       concurrently_,
       link,
-      waitCatch,
-      waitEitherCatch,
       waitSTM,
       withAsync )
 import Control.Concurrent.Chan
@@ -372,7 +362,6 @@ import Control.Exception.Safe
     ( SomeException,
       catchAny,
       finally,
-      mask,
       mask_,
       onException,
       throwIO,
@@ -400,9 +389,7 @@ import System.Directory.OsPath
 import System.Environment ( getProgName, lookupEnv )
 import System.Exit ( die )
 import System.IO
-    ( Handle,
-      hFlush,
-      hIsTerminalDevice,
+    ( hIsTerminalDevice,
       stderr,
       stdin )
 import System.OsPath
@@ -428,10 +415,9 @@ import qualified Agent.MCP as MCP
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
                       mcpServerName, mcpServerCommand, mcpServerArgs, mcpServerCwd,
-                      mcpServerEnv, mcpServerStartupTimeoutSeconds),
-      McpToolRegistration(mcpRegistrationTool, mcpRegistrationServer) )
+                      mcpServerEnv, mcpServerStartupTimeoutSeconds) )
 import qualified Data.Map.Strict as Map
-    ( toAscList, fromList, empty, lookup )
+    ( toAscList, empty, lookup )
 import qualified Agent.OpenAI.Auth as OpenAI
     ( discoverAccounts, getAccessTokenForAccount )
 import qualified Agent.OpenRouter as OpenRouter
@@ -457,7 +443,15 @@ import Agent.CLI.Runtime.Orchestration.Restart
     ( RestartCallbacks(..), runFullscreenRestartLoop )
 import Agent.CLI.Runtime.Orchestration.Background
     ( runInProcessSessionTurn )
-
+import Agent.CLI.Runtime.Orchestration.Concurrent ( concurrentlyAcquire )
+import Agent.CLI.Runtime.Orchestration.Startup
+    ( clearNativeProgress
+    , finishStartup
+    , mcpToolCollision
+    , reportStartupWarning
+    , setNativeProgress
+    , setStartupRepository
+    )
 runAgentWithRuntime
     :: AgentProcessRuntime
     -> AgentRunMode
@@ -556,79 +550,6 @@ withRestoredCurrentDirectory :: IO a -> IO a
 withRestoredCurrentDirectory action = do
     originalCwd <- getCurrentDirectory
     action `finally` setCurrentDirectory originalCwd
-
-finishStartup :: StartupRuntime -> IO ()
-finishStartup startup = do
-    writeIORef startup.startupFinished True
-    recordStartupTiming startup.startupStartedAt startup.startupTimings "ready"
-    case startup.startupFullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime (UiSetNotice Nothing)
-    lookupEnv "HASKELL_AGENT_STARTUP_TIMING" >>= \case
-        Just "1" -> do
-            timings <- readIORef startup.startupTimings
-            syntaxLoadDuration <-
-                readIORef startup.startupSyntaxLoadDuration
-            let message =
-                    formatStartupTimings timings
-                        <> maybe
-                            ""
-                            (\duration ->
-                                " · syntax highlighting "
-                                    <> formatStartupDuration duration)
-                            syntaxLoadDuration
-            case startup.startupFullscreen of
-                Nothing -> putTextLn startup.startupStderr message
-                Just runtime -> emitUiEvent runtime (UiSystemMessage message)
-        _ -> pure ()
-
-reportStartupWarning :: StartupRuntime -> Text -> IO ()
-reportStartupWarning startup message =
-    case startup.startupFullscreen of
-        Nothing -> putTextLn startup.startupStderr ("warning: " <> message)
-        Just runtime ->
-            emitUiEvent runtime (UiSystemMessage ("warning: " <> message))
-
-mcpToolCollision :: [AppTool] -> [MCP.McpToolRegistration] -> Maybe Text
-mcpToolCollision existingTools = go
-  where
-    existing =
-        Map.fromList $
-            hostedSearchToolCollisions
-                ++ [ (canonicalToolName tool.appToolName, "built-in tool")
-                   | tool <- existingTools
-                   ]
-
-    go [] = Nothing
-    go (registration : rest) =
-        let tool = registration.mcpRegistrationTool
-            name = canonicalToolName tool.appToolName
-        in case Map.lookup name existing of
-            Nothing -> go rest
-            Just source ->
-                Just $
-                    "MCP tool "
-                        <> tool.appToolName
-                        <> " from server "
-                        <> registration.mcpRegistrationServer
-                        <> " conflicts with "
-                        <> source
-
-setStartupRepository
-    :: Maybe FullscreenRuntime
-    -> OsPath
-    -> Text
-    -> OsPath
-    -> IO ()
-setStartupRepository fullscreen home branch cwd =
-    case fullscreen of
-        Nothing -> pure ()
-        Just runtime ->
-            emitUiEvent runtime $
-                UiSetRepository
-                    branch
-                    (formatRepositoryPath home cwd)
 
 runAgent
     :: AgentProcessRuntime
@@ -2859,73 +2780,3 @@ restartSessionOptions options sessionId =
         , optManagedTurnFile = Nothing
         , optResume = Just sessionId
         }
-
-concurrentlyAcquire
-    :: IO a
-    -> (a -> IO ())
-    -> IO b
-    -> (b -> IO ())
-    -> IO (a, b)
-concurrentlyAcquire acquireLeft releaseLeft acquireRight releaseRight =
-    mask \restore ->
-        withAsync (restore acquireLeft) \leftWorker ->
-            withAsync (restore acquireRight) \rightWorker -> do
-                let cleanupResult release = \case
-                        Left _ -> pure ()
-                        Right value -> release value
-                    cancelAndCleanup = do
-                        cancel leftWorker
-                        cancel rightWorker
-                        leftResult <- waitCatch leftWorker
-                        rightResult <- waitCatch rightWorker
-                        cleanupResult releaseLeft leftResult
-                        cleanupResult releaseRight rightResult
-                first <-
-                    restore (waitEitherCatch leftWorker rightWorker)
-                        `onException` cancelAndCleanup
-                case first of
-                    Left (Left exception) -> do
-                        cancel rightWorker
-                        waitCatch rightWorker >>= cleanupResult releaseRight
-                        throwIO exception
-                    Right (Left exception) -> do
-                        cancel leftWorker
-                        waitCatch leftWorker >>= cleanupResult releaseLeft
-                        throwIO exception
-                    Left (Right leftValue) -> do
-                        rightResult <-
-                            restore (waitCatch rightWorker)
-                                `onException` releaseLeft leftValue
-                        case rightResult of
-                            Left exception -> do
-                                releaseLeft leftValue
-                                throwIO exception
-                            Right rightValue ->
-                                pure (leftValue, rightValue)
-                    Right (Right rightValue) -> do
-                        leftResult <-
-                            restore (waitCatch leftWorker)
-                                `onException` releaseRight rightValue
-                        case leftResult of
-                            Left exception -> do
-                                releaseRight rightValue
-                                throwIO exception
-                            Right leftValue ->
-                                pure (leftValue, rightValue)
-
--- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
--- Safe when the bar was never shown; unknown terminals ignore the sequence.
-clearNativeProgress :: Handle -> IO ()
-clearNativeProgress handle =
-    setNativeProgress handle False
-
-setNativeProgress :: Handle -> Bool -> IO ()
-setNativeProgress handle active = do
-    tty <- hIsTerminalDevice handle
-    when tty do
-        inTmux <- isJust <$> lookupEnv "TMUX"
-        let sequence_
-                | active = osc9ProgressIndeterminate
-                | otherwise = osc9ProgressRemove
-        Text.hPutStr handle (wrapOscForTmux inTmux sequence_)
-        hFlush handle
