@@ -402,6 +402,7 @@ newFullscreenRuntimeWithSyntaxLoader
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        colorFgBg <- lookupEnv "COLORFGBG"
         windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
@@ -449,6 +450,7 @@ newFullscreenRuntimeWithSyntaxLoader
                 imagePreviewProtocol == PreviewKitty
                     && not imagePreviewInTmux
             , runtimeColor = color
+            , runtimeWaveTrough = Theme.waveTroughFromColorFgBg colorFgBg
             , runtimeLoadSyntaxHighlighter = syntaxLoader
             , runtimeSyntaxLoadFinished = syntaxLoadFinished
             , runtimeInitial = initial

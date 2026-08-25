@@ -73,7 +73,9 @@ import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
 import Agent.CLI.TUI.Motion
     ( userActionPending,
       hasBackgroundActivity,
-      isBackgroundAgentActive )
+      isBackgroundAgentActive,
+      motionModeForTerminalFocus )
+import Agent.TUI.Accent ( accentRail, waveHeader )
 import Agent.CLI.TUI.Types
     ( TextInputMode(..),
       TextOverlay(textBody, textCursor, textInputMode, textDraft,
@@ -89,13 +91,15 @@ import Agent.CLI.TUI.Types
                appDictation, appTextPrompt, appChoice,
                appMotionElapsedMillis, appCompletionFlashes, appHoveredControl,
                appPressedControl, appAgentSelected, appConversationAnchor,
-               appAgentEntries, appUi, appHistoryWindow, appAgentHover),
-      FullscreenRuntime(runtimeMotionMode, runtimeNativeImagePreviews),
+               appAgentEntries, appUi, appHistoryWindow, appAgentHover,
+               appTerminalFocus),
+      FullscreenRuntime(runtimeMotionMode, runtimeNativeImagePreviews,
+                       runtimeColor, runtimeWaveTrough),
       Name(ChoiceRow, ConversationViewport, AgentRow, AgentPane,
            AgentPopover, ConversationChunkCache, ConversationReserve,
            QuickStartWorktree, QuickStartResume, QuickStartCommands,
            QuickStartModel, CodeBlockCache, ConversationBlock,
-           ConversationBlockCache, CodeCopy, PermissionRow, ResumeViewport,
+           ConversationBlockCache, ConversationBodyCache, CodeCopy, PermissionRow, ResumeViewport,
            ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
            OverlayCursor) )
 import Agent.CLI.Terminal ()
@@ -132,6 +136,7 @@ import Agent.TUI.Model
 import Agent.TUI.Motion
     ( backgroundIndicator,
       foregroundIndicator,
+      nativeProgressAnimationEnabled,
       quietIndicator,
       waitingIndicator,
       MotionMode(MotionOff, MotionFull, MotionReduced) )
@@ -148,6 +153,7 @@ import Brick
       cached,
       clickable,
       emptyWidget,
+      raw,
       fill,
       forceAttr,
       hBox,
@@ -250,6 +256,7 @@ import qualified Data.Text as Text
       replicate,
       strip,
       takeWhile,
+      uncons,
       unlines,
       pack )
 import qualified Data.Text.Encoding as TextEncoding ()
@@ -271,6 +278,7 @@ import qualified Agent.TUI.Theme as Theme
       strongAttr,
       successAttr,
       thinkingAttr,
+      thinkingBodyAttr,
       todoCancelledAttr,
       todoCompletedAttr,
       todoInProgressAttr,
@@ -278,8 +286,7 @@ import qualified Agent.TUI.Theme as Theme
       toolAttr,
       userAttr,
       userMutedAttr,
-      waitingDimAttr,
-      waitingMidAttr )
+      waitingPulseAttr )
 import qualified Agent.CLI.TUI.Transcript as Transcript
     ( transcriptChunks, transcriptChunkCacheKey )
 import qualified Graphics.Vty as V
@@ -287,6 +294,7 @@ import qualified Graphics.Vty as V
       Image,
       imageHeight,
       imageWidth,
+      char,
       charFill,
       crop,
       horizCat,
@@ -955,62 +963,76 @@ todoLineStatusFromText line
     | otherwise = TodoDisplayPending
 
 drawPromptActivity :: AppState -> Widget Name
-drawPromptActivity state =
-    padLeftRight 2 $
-        hBox
-            [ activityWidget
-            , withAttr Theme.mutedAttr (terminalTxt elapsed)
-            ]
+drawPromptActivity state
+    | not busy = emptyWidget
+    | otherwise =
+        padLeftRight 2 $
+            hBox
+                [ left
+                , vLimit 1 (fill ' ')
+                , withAttr Theme.mutedAttr (terminalTxt right)
+                ]
   where
     ui = state.appUi
     waiting = userActionPending state
     background = hasBackgroundActivity state.appAgentEntries
     mode = state.appRuntime.runtimeMotionMode
     motionMillis = state.appMotionElapsedMillis
-    activityWidget
+    colorEnabled = state.appRuntime.runtimeColor
+    trough = state.appRuntime.runtimeWaveTrough
+    effectiveMode =
+        motionModeForTerminalFocus state.appTerminalFocus mode
+    busy =
+        ui.uiRunning
+            || waiting
+            || background
+            || ui.uiCompletionRemainingMillis > 0
+    diamond =
+        raw
+            ( V.char
+                (Theme.waitingPulseAttr
+                    colorEnabled
+                    effectiveMode
+                    trough
+                    motionMillis)
+                ( case Text.uncons
+                    (waitingIndicator motionGlyphSet mode motionMillis) of
+                    Just (character, _) -> character
+                    Nothing -> '◆'
+                )
+            )
+    left
         | waiting =
             hBox
-                [ withAttr (waitingIndicatorAttr state) $
-                    txt (waitingIndicator motionGlyphSet mode motionMillis)
-                , withAttr Theme.thinkingAttr (txt " Waiting for you")
+                [ diamond
+                , withAttr Theme.mutedAttr (txt " Waiting for you")
                 ]
-        | otherwise =
-            withAttr activityAttr (terminalTxt activity)
-    activityAttr
-        | ui.uiRunning = Theme.thinkingAttr
-        | ui.uiCompletionRemainingMillis > 0 = Theme.successAttr
-        | background = Theme.toolAttr
-        | otherwise = Theme.mutedAttr
-    activity
         | ui.uiRunning =
-            foregroundIndicator motionGlyphSet mode motionMillis
-                <> " "
-                <> ui.uiActivity
+            hBox
+                [ withAttr Theme.thinkingAttr $
+                    txt
+                        (foregroundIndicator
+                            motionGlyphSet
+                            mode
+                            motionMillis)
+                , withAttr Theme.mutedAttr
+                    (txt (" " <> ui.uiActivity <> elapsed))
+                ]
         | ui.uiCompletionRemainingMillis > 0 =
-            ui.uiActivity
+            withAttr Theme.successAttr (terminalTxt ui.uiActivity)
         | background =
-            backgroundIndicator motionGlyphSet mode motionMillis
-                <> " Background work"
-        | otherwise =
-            ui.uiActivity
+            withAttr Theme.mutedAttr $
+                terminalTxt
+                    (backgroundIndicator motionGlyphSet mode motionMillis
+                        <> " Background work")
+        | otherwise = emptyWidget
     elapsed =
+        " · "
+            <> formatElapsed (fromIntegral ui.uiElapsedMillis / 1000)
+    right =
         if ui.uiRunning
-            then " · "
-                <> formatElapsed
-                    (fromIntegral ui.uiElapsedMillis / 1000)
+            then formatTokenUsage ui.uiPrompt.promptUsage
             else ""
-
-waitingIndicatorAttr :: AppState -> AttrName
-waitingIndicatorAttr state =
-    case waitingIndicator
-        motionGlyphSet
-        state.appRuntime.runtimeMotionMode
-        state.appMotionElapsedMillis of
-        "◇" -> Theme.waitingDimAttr
-        "." -> Theme.waitingDimAttr
-        "◈" -> Theme.waitingMidAttr
-        "*" -> Theme.waitingMidAttr
-        _ -> Theme.thinkingAttr
 
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =
@@ -1229,17 +1251,21 @@ drawEmptyConversation state =
                         vBox
                             [ vLimit
                                 (max 8 (height - quickStartReservedRows))
-                                (hCenter (lambdaArtWidget frame))
+                                (hCenter (lambdaArtWidget colorEnabled frame))
                             , hCenter (drawQuickStartPanel state)
                             ]
-                else center (lambdaArtWidget frame)
+                else center (lambdaArtWidget colorEnabled frame)
   where
+    colorEnabled = state.appRuntime.runtimeColor
     frame
         | userActionPending state = 0
-        | otherwise = case state.appRuntime.runtimeMotionMode of
-            MotionFull -> state.appMotionElapsedMillis `div` 160
-            MotionReduced -> 0
-            MotionOff -> 0
+        | otherwise =
+            case motionModeForTerminalFocus
+                state.appTerminalFocus
+                state.appRuntime.runtimeMotionMode of
+                MotionFull -> state.appMotionElapsedMillis
+                MotionReduced -> 0
+                MotionOff -> 0
 
 quickStartReservedRows :: Int
 quickStartReservedRows = 9
@@ -1293,6 +1319,7 @@ drawBlock state target ui block =
             selected
                 && state.appUi.uiFocus == FocusScrollback
                 && state.appAgentSelected == target
+        waveElapsed = accentWaveElapsed state target block
         marker =
             txt (if highlighted then "❯ " else "  ")
         content = case block.blockKind of
@@ -1330,28 +1357,57 @@ drawBlock state target ui block =
                                         block.blockId)
                                     block.blockBody)
             BlockThinking ->
-                accentMarkdownBlock (thinkingBlockAttr state target block)
+                accentMarkdownBlock
+                    state
+                    target
+                    ui
+                    block
+                    waveElapsed
+                    (thinkingBlockAttr state target block)
                     (blockStateGlyph state target block <> block.blockTitle)
                     (visibleBody block)
             BlockTool ->
-                accentBlock (statusAttr state target block)
+                accentBlock
+                    state
+                    target
+                    ui
+                    block
+                    waveElapsed
+                    (statusAttr state target block)
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
                     (visibleBody block)
             BlockTodo ->
-                accentBlockWithSections (statusAttr state target block)
+                accentBlockWithSections
+                    state
+                    target
+                    ui
+                    block
+                    waveElapsed
+                    (statusAttr state target block)
                     (blockStateGlyph state target block <> block.blockTitle)
                     (todoBodyWidgets block)
             BlockShell ->
                 accentCodeBlock
+                    state
+                    target
+                    ui
+                    block
                     state.appSyntaxHighlighter
+                    waveElapsed
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> block.blockTitle)
                     block.blockDetail
                     (visibleShellBody block)
             BlockEdit ->
-                accentBlock (statusAttr state target block)
+                accentBlock
+                    state
+                    target
+                    ui
+                    block
+                    waveElapsed
+                    (statusAttr state target block)
                     (blockStateGlyph state target block
                         <> block.blockTitle
                         <> detailSuffix block)
@@ -1361,6 +1417,11 @@ drawBlock state target ui block =
                     (terminalTxtWrap block.blockBody)
             BlockRecap ->
                 accentMarkdownBlock
+                    state
+                    target
+                    ui
+                    block
+                    waveElapsed
                     (statusAttr state target block)
                     (blockStateGlyph state target block <> "Recap")
                     (visibleBody block)
@@ -1511,29 +1572,65 @@ blockStateGlyph state target block = case block.blockState of
                 state.appMotionElapsedMillis
                 <> " "
 
-accentBlock :: AttrName -> Text -> Text -> Widget Name
-accentBlock accent title body =
-    accentBlockWithSections accent title $
+accentBlock
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
+    -> Text
+    -> Text
+    -> Widget Name
+accentBlock state target ui block waveElapsed accent title body =
+    accentBlockWithSections state target ui block waveElapsed accent title $
         if Text.null (Text.strip body)
             then []
             else [terminalTxtWrap body]
 
-accentMarkdownBlock :: AttrName -> Text -> Text -> Widget Name
-accentMarkdownBlock accent title body =
-    accentBlockWithSections accent title $
+accentMarkdownBlock
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
+    -> Text
+    -> Text
+    -> Widget Name
+accentMarkdownBlock state target ui block waveElapsed accent title body =
+    accentBlockWithSections state target ui block waveElapsed accent title $
         if Text.null (Text.strip body)
             then []
-            else [markdownWidgetWithLinks MarkdownLink body]
+            else
+                [ withAttr Theme.thinkingBodyAttr $
+                    markdownWidgetWithLinks MarkdownLink body
+                ]
 
 accentCodeBlock
-    :: Maybe SyntaxHighlighter
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe SyntaxHighlighter
+    -> Maybe Int
     -> AttrName
     -> Text
     -> Text
     -> Text
     -> Widget Name
-accentCodeBlock syntaxHighlighter accent title code body =
-    accentBlockWithSections accent title $
+accentCodeBlock
+    state
+    target
+    ui
+    block
+    syntaxHighlighter
+    waveElapsed
+    accent
+    title
+    code
+    body =
+    accentBlockWithSections state target ui block waveElapsed accent title $
         [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
         | not (Text.null (Text.strip code))
         ]
@@ -1542,18 +1639,80 @@ accentCodeBlock syntaxHighlighter accent title code body =
                ]
 
 accentBlockWithSections
-    :: AttrName
+    :: AppState
+    -> AgentTarget
+    -> UiState
+    -> UiBlock
+    -> Maybe Int
+    -> AttrName
     -> Text
     -> [Widget Name]
     -> Widget Name
-accentBlockWithSections accent title sections =
-    hBox
-        [ withAttr accent (txt "❙")
-        , padLeft (Pad 2) $
-            vBox $
-                [withAttr accent (terminalTxtWrap title)]
-                    <> map (padTop (Pad 1)) sections
-        ]
+accentBlockWithSections
+    state
+    target
+    ui
+    block
+    waveElapsed
+    accent
+    title
+    sections =
+    accentRail
+        motionGlyphSet
+        accent
+        state.appRuntime.runtimeColor
+        state.appRuntime.runtimeWaveTrough
+        waveElapsed $
+        padLeft (Pad 2) $
+            vBox (titleWidget : bodyWidgets)
+  where
+    titleWidget = case waveElapsed of
+        Nothing ->
+            withAttr accent (terminalTxtWrap title)
+        Just elapsedMillis ->
+            waveHeader
+                accent
+                state.appRuntime.runtimeColor
+                state.appRuntime.runtimeWaveTrough
+                elapsedMillis
+                title
+    paddedBody = map (padTop (Pad 1)) sections
+    bodyWidgets
+        | cacheableRunningBody state target ui block
+        , not (null paddedBody) =
+            [ cached
+                (ConversationBodyCache
+                    target
+                    block.blockId
+                    block.blockExpanded)
+                (vBox paddedBody)
+            ]
+        | otherwise = paddedBody
+
+-- Skip non-empty running bodies: live tool output changes without a new
+-- block id, and Brick cache keys must stay stable.
+cacheableRunningBody :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
+cacheableRunningBody state target ui block =
+    block.blockState == BlockRunning
+        && Text.null (Text.strip block.blockBody)
+        && maybe
+            True
+            ((/= block.blockId) . (.retryCountdownBlockId))
+            ui.uiRetryCountdown
+        && not (blockFlashing state target block)
+
+accentWaveElapsed :: AppState -> AgentTarget -> UiBlock -> Maybe Int
+accentWaveElapsed state target block
+    | not (nativeProgressAnimationEnabled effectiveMode) = Nothing
+    | target == AgentRoot && userActionPending state = Nothing
+    | block.blockState `elem` [BlockRunning, BlockStreaming] =
+        Just state.appMotionElapsedMillis
+    | otherwise = Nothing
+  where
+    effectiveMode =
+        motionModeForTerminalFocus
+            state.appTerminalFocus
+            state.appRuntime.runtimeMotionMode
 
 visibleBody :: UiBlock -> Text
 visibleBody block
@@ -2085,12 +2244,24 @@ waitingOverlayLabel :: AppState -> Text -> Widget Name
 waitingOverlayLabel state label =
     hBox
         [ txt " "
-        , withAttr (waitingIndicatorAttr state) $
-            txt
-                (waitingIndicator
-                    motionGlyphSet
-                    state.appRuntime.runtimeMotionMode
+        , raw
+            ( V.char
+                (Theme.waitingPulseAttr
+                    state.appRuntime.runtimeColor
+                    (motionModeForTerminalFocus
+                        state.appTerminalFocus
+                        state.appRuntime.runtimeMotionMode)
+                    state.appRuntime.runtimeWaveTrough
                     state.appMotionElapsedMillis)
+                ( case Text.uncons
+                    (waitingIndicator
+                        motionGlyphSet
+                        state.appRuntime.runtimeMotionMode
+                        state.appMotionElapsedMillis) of
+                    Just (character, _) -> character
+                    Nothing -> '◆'
+                )
+            )
         , terminalTxt (" " <> label <> " ")
         ]
 

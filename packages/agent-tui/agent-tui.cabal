@@ -35,7 +35,8 @@ common common-options
 library
     import:           common-options
     hs-source-dirs:   src
-    exposed-modules:  Agent.TUI.FencedCode
+    exposed-modules:  Agent.TUI.Accent
+                    , Agent.TUI.FencedCode
                     , Agent.TUI.Markdown
                     , Agent.TUI.Markdown.Block
                     , Agent.TUI.Markdown.Inline
@@ -58,7 +59,8 @@ test-suite agent-tui-test
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
-    other-modules:    Agent.TUI.FencedCodeSpec
+    other-modules:    Agent.TUI.AccentSpec
+                    , Agent.TUI.FencedCodeSpec
                     , Agent.TUI.Markdown.BlockSpec
                     , Agent.TUI.Markdown.InlineSpec
                     , Agent.TUI.MarkdownSpec

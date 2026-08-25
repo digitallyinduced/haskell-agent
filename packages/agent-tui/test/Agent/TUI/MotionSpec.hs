@@ -56,14 +56,15 @@ spec = describe "terminal motion vocabulary" do
                     glyphs
                     320
                     (backgroundPulseFrames glyphs)
-                cyclesThrough
-                    waitingIndicator
-                    glyphs
-                    320
-                    (waitingPulseFrames glyphs))
+                waitingIndicator glyphs MotionFull 0
+                    `shouldBe` waitingIndicator glyphs MotionFull 10000)
             [MotionUnicode, MotionAscii]
 
     it "uses fast cadence only when full motion is enabled" do
+        motionIntervalMicros MotionFull MotionFast
+            `shouldBe` 33000
+        motionIntervalMicros MotionFull MotionSlow
+            `shouldBe` 80000
         motionIntervalMicros MotionFull MotionFast
             `shouldSatisfy`
                 (< motionIntervalMicros MotionFull MotionSlow)
@@ -84,6 +85,44 @@ spec = describe "terminal motion vocabulary" do
         nativeProgressAnimationEnabled MotionFull `shouldBe` True
         nativeProgressAnimationEnabled MotionReduced `shouldBe` False
         nativeProgressAnimationEnabled MotionOff `shouldBe` False
+
+    it "keeps the accent rail one terminal cell wide" do
+        mapM_
+            (\glyphs -> do
+                let frame = accentBarGlyph glyphs
+                V.safeWcswidth (Text.unpack frame) `shouldBe` 1
+                V.imageWidth (V.text' V.defAttr frame) `shouldBe` 1)
+            [MotionUnicode, MotionAscii]
+
+    it "tightens the wave period on short rails" do
+        waveRowsFor 4 `shouldSatisfy` (< waveRows)
+        waveRowsFor 4 `shouldSatisfy` (>= 8)
+        waveRowsFor 40 `shouldBe` waveRows
+
+    it "keeps traveling-wave brightness in unit range and spatially offset" do
+        let samples =
+                [ waveBrightness elapsed row waveRows
+                | elapsed <- [0, 80, 400, 1000]
+                , row <- [0 .. 15]
+                ]
+        samples `shouldSatisfy` all (\value -> value >= 0 && value <= 1)
+        waveBrightness 0 0 waveRows
+            `shouldNotBe` waveBrightness 0 8 waveRows
+
+    it "sweeps the logo sheen along the diagonal then rests dim" do
+        let brightest secs =
+                snd $
+                    maximum
+                        [ (shineOpacity (fromIntegral i / 100) secs, fromIntegral i / 100)
+                        | i <- [0 .. 100 :: Int]
+                        ]
+            early = brightest 0.1 :: Double
+            mid = brightest 0.4
+            late = brightest 0.7
+        early < mid `shouldBe` True
+        mid < late `shouldBe` True
+        shineOpacity 0.5 6.0 `shouldSatisfy` (< 0.2)
+        shineOpacity 0.5 0.4 `shouldSatisfy` (\value -> value >= 0 && value <= 1)
 
 allEqual :: Eq a => [a] -> Bool
 allEqual [] = True

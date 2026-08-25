@@ -39,6 +39,7 @@ module Agent.TUI.Theme
     , syntaxWarningAttr
     , syntaxClassAttr
     , thinkingAttr
+    , thinkingBodyAttr
     , todoCancelledAttr
     , todoCompletedAttr
     , todoInProgressAttr
@@ -48,18 +49,35 @@ module Agent.TUI.Theme
     , userMutedAttr
     , waitingDimAttr
     , waitingMidAttr
+    , waitingPulseAttr
     , completionFlashAttr
     , monochrome
     , terminalDefault
+    , interpolateForeground
+    , runningWavePeak
+    , thinkingWavePeak
+    , waitingAccentPeak
+    , waveCell
+    , waveForeground
+    , waveForegroundFrom
+    , wavePeakFor
+    , waveTrough
+    , waveTroughFromColorFgBg
     ) where
 
 import Agent.Syntax (SyntaxClass(..))
+import Agent.TUI.Motion (MotionMode(..), pulseBrightness)
 import Brick (AttrMap, AttrName, attrMap, attrName)
+import Control.Applicative ((<|>))
 import Data.Bits ((.|.))
+import Data.Maybe (fromMaybe)
+import Data.Word (Word8)
+import Text.Read (readMaybe)
 import qualified Graphics.Vty as V
+import Graphics.Vty.Attributes.Color (Color(..))
 
 baseAttr, headerAttr, footerAttr, mutedAttr :: AttrName
-userAttr, userMutedAttr, assistantAttr, thinkingAttr, toolAttr :: AttrName
+userAttr, userMutedAttr, assistantAttr, thinkingAttr, thinkingBodyAttr, toolAttr :: AttrName
 todoPendingAttr, todoInProgressAttr, todoCompletedAttr, todoCancelledAttr :: AttrName
 errorAttr, successAttr, selectedAttr, borderAttr, borderActiveAttr :: AttrName
 headingAttr, codeAttr, dimAttr, emphasisAttr, inlineCodeAttr, linkAttr, strongAttr :: AttrName
@@ -78,6 +96,7 @@ userAttr = attrName "user"
 userMutedAttr = attrName "user-muted"
 assistantAttr = attrName "assistant"
 thinkingAttr = attrName "thinking"
+thinkingBodyAttr = attrName "thinking-body"
 toolAttr = attrName "tool"
 todoPendingAttr = attrName "todo-pending"
 todoInProgressAttr = attrName "todo-in-progress"
@@ -149,6 +168,7 @@ terminalDefault =
         , (userMutedAttr, userPanelAttr `V.withStyle` V.dim)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, palette V.yellow)
+        , (thinkingBodyAttr, palette V.brightBlack `V.withStyle` (V.dim .|. V.italic))
         , (waitingDimAttr, palette V.brightBlack)
         , (waitingMidAttr, palette V.yellow)
         , (toolAttr, palette V.cyan)
@@ -207,6 +227,7 @@ monochrome =
         , (userMutedAttr, V.defAttr `V.withStyle` V.dim)
         , (assistantAttr, V.defAttr)
         , (thinkingAttr, V.defAttr)
+        , (thinkingBodyAttr, V.defAttr `V.withStyle` (V.dim .|. V.italic))
         , (waitingDimAttr, V.defAttr)
         , (waitingMidAttr, V.defAttr)
         , (toolAttr, V.defAttr)
@@ -255,8 +276,203 @@ monochrome =
 palette :: V.Color -> V.Attr
 palette = V.withForeColor V.defAttr
 
--- | Grok-style user-prompt panel: a full-width wash one step off the page
--- background. Bright black is the ANSI gray slot, so Ghostty light/dark
--- palettes keep the card readable without fixing an RGB background.
+-- | User-prompt panel: a full-width wash one step off the page background.
+-- Bright black is the ANSI gray slot, so Ghostty light/dark palettes keep
+-- the card readable without fixing an RGB background.
 userPanelAttr :: V.Attr
 userPanelAttr = V.withBackColor V.defAttr V.brightBlack
+
+-- | Default dark-page trough (#24283b). Live rails blend toward this so the
+-- bar nearly vanishes when @COLORFGBG@ is unavailable.
+waveTrough :: V.Color
+waveTrough = RGBColor 36 40 59
+
+-- | Magenta peak (#bb9af7) for live tool rails, distinct from static chrome.
+runningWavePeak :: V.Color
+runningWavePeak = RGBColor 187 154 247
+
+-- | Quiet gray-blue peak (#3b4261) so reasoning rails sit behind tool rails.
+thinkingWavePeak :: V.Color
+thinkingWavePeak = RGBColor 59 66 97
+
+-- | Blue peak (#7aa2f7) for "waiting on you" diamonds.
+waitingAccentPeak :: V.Color
+waitingAccentPeak = RGBColor 122 162 247
+
+-- | Resolve the rail trough from @COLORFGBG@ (@fg;bg@ ANSI indexes). Missing
+-- or unparsable values keep the default dark trough.
+waveTroughFromColorFgBg :: Maybe String -> V.Color
+waveTroughFromColorFgBg env =
+    maybe waveTrough ansiIndexRgb (env >>= colorFgBgBackground)
+
+colorFgBgBackground :: String -> Maybe Word8
+colorFgBgBackground spec =
+    case break (== ';') spec of
+        (_, ';' : background) ->
+            readMaybe (takeWhile (/= ';') background)
+        _ ->
+            Nothing
+
+ansiIndexRgb :: Word8 -> V.Color
+ansiIndexRgb index =
+    let (red, green, blue)
+            | index <= 15 = ansiRgb index
+            | otherwise = color240Rgb index
+    in RGBColor red green blue
+
+waitingPulseAttr :: Bool -> MotionMode -> V.Color -> Int -> V.Attr
+waitingPulseAttr False _ _ _ =
+    V.defAttr
+waitingPulseAttr True mode trough elapsedMillis
+    | mode /= MotionFull =
+        V.defAttr `V.withForeColor` waitingAccentPeak
+    | otherwise =
+        waveForegroundFrom
+            True
+            trough
+            waitingAccentPeak
+            (0.3 + 0.7 * pulseBrightness elapsedMillis)
+
+-- | Paint a rail cell. Near-zero brightness uses a default-attr space so the
+-- bar disappears into the real page even when the trough RGB is approximate.
+-- Without color, keep the glyph on the default attribute so NO_COLOR is honored.
+waveCell :: Bool -> V.Color -> V.Color -> Double -> Char -> V.Image
+waveCell False _ _ _ glyph =
+    V.char V.defAttr glyph
+waveCell True trough peak brightness glyph
+    | brightness <= 0.04 =
+        V.char V.defAttr ' '
+    | otherwise =
+        V.char (waveForegroundFrom True trough peak brightness) glyph
+
+wavePeakFor :: AttrName -> V.Color
+wavePeakFor attr
+    | attr == thinkingAttr = thinkingWavePeak
+    | otherwise = runningWavePeak
+
+-- | Paint a live accent cell at the given traveling-wave brightness.
+--
+-- When color is enabled, blends peak toward trough as 24-bit sRGB
+-- (@RGBColor@, not Vty's linear conversion). Brightness 0 is the trough,
+-- 1 is the peak. When color is disabled, keep the default attribute so
+-- @NO_COLOR@ / monochrome maps are not bypassed by raw RGB.
+waveForegroundFrom :: Bool -> V.Color -> V.Color -> Double -> V.Attr
+waveForegroundFrom False _ _ _ =
+    V.defAttr
+waveForegroundFrom True trough peak brightness =
+    case blendRgb trough peak (max 0.0 (min 1.0 brightness)) of
+        Just blended -> V.defAttr `V.withForeColor` blended
+        Nothing -> V.defAttr `V.withForeColor` peak
+
+-- | Semantic-attribute variant used by tests and sheen helpers.
+waveForeground :: V.Attr -> V.Attr -> Double -> V.Attr
+waveForeground bgAttr fgAttr brightness =
+    case attrColor (V.attrForeColor fgAttr) of
+        Just fg ->
+            let
+                peak = brightenColor fg
+                trough = fromMaybe waveTrough (backgroundColor bgAttr)
+            in waveForegroundFrom True trough peak brightness
+        Nothing ->
+            styleSteps fgAttr (max 0.0 (min 1.0 brightness))
+
+-- | Blend @from@'s foreground toward @to@'s foreground. Used for the empty
+-- conversation sheen so the highlight sweeps instead of jumping between
+-- four named attributes.
+interpolateForeground :: Bool -> V.Attr -> V.Attr -> Double -> V.Attr
+interpolateForeground False fromAttr toAttr opacity =
+    if opacity >= 0.5 then toAttr else fromAttr
+interpolateForeground True fromAttr toAttr opacity =
+    case (attrColor (V.attrForeColor fromAttr), attrColor (V.attrForeColor toAttr)) of
+        (Just from, Just to) ->
+            case blendRgb from to opacity of
+                Just blended -> withRgb toAttr blended
+                Nothing ->
+                    if opacity >= 0.5 then toAttr else fromAttr
+        _ ->
+            if opacity >= 0.5 then toAttr else fromAttr
+
+backgroundColor :: V.Attr -> Maybe V.Color
+backgroundColor attr =
+    attrColor (V.attrBackColor attr) <|> attrColor (V.attrForeColor attr)
+
+attrColor :: V.MaybeDefault V.Color -> Maybe V.Color
+attrColor = \case
+    V.SetTo color -> Just color
+    _ -> Nothing
+
+styleSteps :: V.Attr -> Double -> V.Attr
+styleSteps attr brightness
+    | brightness < 0.33 = attr `V.withStyle` V.dim
+    | brightness > 0.66 = attr `V.withStyle` V.bold
+    | otherwise = attr
+
+brightenColor :: V.Color -> V.Color
+brightenColor = \case
+    ISOColor n | n < 8 -> ISOColor (n + 8)
+    color -> color
+
+withRgb :: V.Attr -> V.Color -> V.Attr
+withRgb attr color =
+    case attrColor (V.attrBackColor attr) of
+        Just background ->
+            V.defAttr
+                `V.withForeColor` color
+                `V.withBackColor` background
+        Nothing ->
+            V.defAttr `V.withForeColor` color
+
+blendRgb :: V.Color -> V.Color -> Double -> Maybe V.Color
+blendRgb base original opacity = do
+    (baseR, baseG, baseB) <- colorRgb base
+    (origR, origG, origB) <- colorRgb original
+    let
+        mix :: Word8 -> Word8 -> Word8
+        mix from to =
+            round
+                (fromIntegral from
+                    + (fromIntegral to - fromIntegral from) * clamped :: Double)
+        clamped = max 0.0 (min 1.0 opacity)
+    -- Emit sRGB bytes so truecolor terminals get a continuous gradient.
+    pure (RGBColor (mix baseR origR) (mix baseG origG) (mix baseB origB))
+
+colorRgb :: V.Color -> Maybe (Word8, Word8, Word8)
+colorRgb = \case
+    RGBColor red green blue -> Just (red, green, blue)
+    ISOColor n -> Just (ansiRgb n)
+    Color240 n -> Just (color240Rgb n)
+
+-- | xterm defaults for ISO 0–15. Only used when blending truecolor cells;
+-- palette-painted chrome stays on the named ANSI slots.
+ansiRgb :: Word8 -> (Word8, Word8, Word8)
+ansiRgb = \case
+    0 -> (0, 0, 0)
+    1 -> (128, 0, 0)
+    2 -> (0, 128, 0)
+    3 -> (128, 128, 0)
+    4 -> (0, 0, 128)
+    5 -> (128, 0, 128)
+    6 -> (0, 128, 128)
+    7 -> (192, 192, 192)
+    8 -> (128, 128, 128)
+    9 -> (255, 0, 0)
+    10 -> (0, 255, 0)
+    11 -> (255, 255, 0)
+    12 -> (0, 0, 255)
+    13 -> (255, 0, 255)
+    14 -> (0, 255, 255)
+    _ -> (255, 255, 255)
+
+-- | 256-color cube + grayscale ramp.
+color240Rgb :: Word8 -> (Word8, Word8, Word8)
+color240Rgb index
+    | index < 16 = ansiRgb index
+    | index <= 231 =
+        let
+            n = index - 16
+            cube = [0, 95, 135, 175, 215, 255] :: [Word8]
+            at offset = cube !! fromIntegral offset
+        in (at (n `div` 36), at ((n `mod` 36) `div` 6), at (n `mod` 6))
+    | otherwise =
+        let value = 8 + (index - 232) * 10
+        in (value, value, value)

@@ -55,6 +55,7 @@ import Data.Sequence (Seq)
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime)
 import Data.Word (Word64)
+import qualified Graphics.Vty as V
 
 data Name
     = ConversationViewport
@@ -71,6 +72,10 @@ data Name
         !Bool
         !Bool
         !(Maybe (Int, Bool))
+    | ConversationBodyCache
+        !AgentTarget
+        !BlockId
+        !Bool
     | CodeBlockCache !AgentTarget !BlockId !Int
     | CodeCopy !AgentTarget !BlockId !Int
     | MarkdownLink !Text
@@ -204,6 +209,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeImagePreviewIdBase :: !Int
     , runtimeNativeImagePreviews :: !Bool
     , runtimeColor :: !Bool
+    , runtimeWaveTrough :: !V.Color
     , runtimeLoadSyntaxHighlighter
         :: !(IO (Either Text SyntaxHighlighter))
     , runtimeSyntaxLoadFinished :: !(NominalDiffTime -> IO ())
