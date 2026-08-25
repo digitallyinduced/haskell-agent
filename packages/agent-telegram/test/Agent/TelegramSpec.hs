@@ -270,6 +270,30 @@ spec = describe "Agent.Telegram" do
                 `shouldBe`
                     "before<br><pre>x &lt; y &amp;&amp; **raw**\n</pre><br>after"
 
+        it "renders ATX headings with native bold entities" do
+            markdownToTelegramHtml
+                "# Summary\n#### Details with *emphasis*\nnot# a heading"
+                `shouldBe`
+                    "<b>Summary</b><br>\
+                    \<b>Details with <i>emphasis</i></b><br>\
+                    \not# a heading"
+
+        it "renders Markdown tables as aligned preformatted text" do
+            markdownToTelegramHtml
+                "| Metric | Before | Current | Change |\n\
+                \|:---|---:|---:|:---:|\n\
+                \| Clicks | 2,026 | 3,487 | **+72%** |\n\
+                \| Views & visits | 77 | 169 | +119% |"
+                `shouldBe`
+                    "<pre>Metric         | Before | Current | Change\n\
+                    \---------------+--------+---------+-------\n\
+                    \Clicks         |  2,026 |   3,487 |  +72% \n\
+                    \Views &amp; visits |     77 |     169 | +119% </pre>"
+
+        it "does not mistake ordinary pipe-separated text for a table" do
+            markdownToTelegramHtml "one | two\nstill | text"
+                `shouldBe` "one | two<br>still | text"
+
         it "leaves unmatched delimiters literal" do
             markdownToTelegramHtml "unfinished **bold and `code"
                 `shouldBe` "unfinished **bold and `code"

@@ -16,7 +16,7 @@ markdownToTelegramHtml input =
         | odd index =
             "<pre>" <> escapeTelegramHtml (stripLanguage segment) <> "</pre>"
         | otherwise =
-            Text.replace "\n" "<br>" (renderInline segment)
+            renderBlocks segment
 
     stripLanguage segment =
         case Text.breakOn "\n" segment of
@@ -31,6 +31,113 @@ markdownToTelegramHtml input =
             || ('A' <= char && char <= 'Z')
             || ('0' <= char && char <= '9')
             || char `elem` ("-+#_" :: String)
+
+data ColumnAlignment
+    = AlignLeft
+    | AlignCenter
+    | AlignRight
+
+renderBlocks :: Text -> Text
+renderBlocks = Text.intercalate "<br>" . go . Text.splitOn "\n"
+  where
+    go [] = []
+    go (header : separator : rest)
+        | Just alignments <- parseTableSeparator separator
+        , let headerCells = parseTableRow header
+        , length headerCells == length alignments
+        , length headerCells > 1 =
+            let (bodyLines, remaining) =
+                    span (isTableRow (length headerCells)) rest
+                rows = headerCells : map parseTableRow bodyLines
+            in renderTable alignments rows : go remaining
+    go (line : rest)
+        | Just heading <- parseHeading line =
+            ("<b>" <> renderInline heading <> "</b>") : go rest
+        | otherwise =
+            renderInline line : go rest
+
+    isTableRow columnCount line =
+        Text.isInfixOf "|" line
+            && length (parseTableRow line) == columnCount
+
+parseHeading :: Text -> Maybe Text
+parseHeading line =
+    let (hashes, rest) = Text.span (== '#') line
+        level = Text.length hashes
+    in if level >= 1 && level <= 6
+        then Text.stripPrefix " " rest
+        else Nothing
+
+parseTableRow :: Text -> [Text]
+parseTableRow =
+    map (renderInlinePlain . Text.strip)
+        . Text.splitOn "|"
+        . stripOptionalBoundary "|"
+        . Text.strip
+
+parseTableSeparator :: Text -> Maybe [ColumnAlignment]
+parseTableSeparator line =
+    traverse parseCell rawCells
+  where
+    rawCells =
+        map Text.strip
+            . Text.splitOn "|"
+            . stripOptionalBoundary "|"
+            $ Text.strip line
+
+    parseCell cell =
+        let leftAligned = Text.isPrefixOf ":" cell
+            rightAligned = Text.isSuffixOf ":" cell
+            rule = Text.dropAround (== ':') cell
+        in if Text.length rule >= 3 && Text.all (== '-') rule
+            then Just case (leftAligned, rightAligned) of
+                (True, True) -> AlignCenter
+                (False, True) -> AlignRight
+                _ -> AlignLeft
+            else Nothing
+
+stripOptionalBoundary :: Text -> Text -> Text
+stripOptionalBoundary boundary =
+    stripSuffix . stripPrefix
+  where
+    stripPrefix value =
+        maybe value id (Text.stripPrefix boundary value)
+    stripSuffix value =
+        maybe value id (Text.stripSuffix boundary value)
+
+renderTable :: [ColumnAlignment] -> [[Text]] -> Text
+renderTable _ [] = ""
+renderTable alignments (headerRow : bodyRows) =
+    "<pre>"
+        <> escapeTelegramHtml
+            (Text.intercalate "\n" (header : divider : body))
+        <> "</pre>"
+  where
+    widths =
+        foldl
+            (zipWith max)
+            (map Text.length headerRow)
+            (map (map Text.length) bodyRows)
+    renderRow row =
+        Text.intercalate " | "
+            (zipWith3 renderCell alignments widths row)
+    header = renderRow headerRow
+    divider =
+        Text.intercalate "-+-"
+            (map (`Text.replicate` "-") widths)
+    body = map renderRow bodyRows
+
+    renderCell alignment width cell =
+        let missing = width - Text.length cell
+            leftPadding =
+                case alignment of
+                    AlignRight -> missing
+                    AlignCenter -> missing `div` 2
+                    AlignLeft -> 0
+            rightPadding = missing - leftPadding
+        in Text.replicate leftPadding " "
+            <> cell
+            <> Text.replicate rightPadding " "
 
 telegramRenderedLength :: Text -> Int
 telegramRenderedLength = go 0 . markdownToTelegramHtml
@@ -87,6 +194,44 @@ renderInline text
                     <> escapeTelegramHtml inside
                     <> closing
                     <> renderInline (Text.drop (Text.length delimiter) after)
+
+    isMarkdownStarter char =
+        char == '`' || char == '*' || char == '~' || char == '['
+
+renderInlinePlain :: Text -> Text
+renderInlinePlain text
+    | Text.null text = ""
+    | Just rest <- Text.stripPrefix "`" text =
+        renderDelimited "`" rest
+    | Just rest <- Text.stripPrefix "**" text =
+        renderDelimited "**" rest
+    | Just rest <- Text.stripPrefix "~~" text =
+        renderDelimited "~~" rest
+    | Just rest <- Text.stripPrefix "*" text =
+        renderDelimited "*" rest
+    | Just rest <- Text.stripPrefix "[" text =
+        case parseMarkdownLink rest of
+            Just (label, url, remaining) ->
+                renderInlinePlain label
+                    <> " ("
+                    <> url
+                    <> ")"
+                    <> renderInlinePlain remaining
+            Nothing -> "[" <> renderInlinePlain rest
+    | otherwise =
+        let (plain, rest) = Text.break isMarkdownStarter text
+        in if Text.null plain
+            then Text.take 1 text <> renderInlinePlain (Text.drop 1 text)
+            else plain <> renderInlinePlain rest
+  where
+    renderDelimited delimiter rest =
+        case Text.breakOn delimiter rest of
+            (_, after) | Text.null after ->
+                delimiter <> renderInlinePlain rest
+            (inside, after) ->
+                renderInlinePlain inside
+                    <> renderInlinePlain
+                        (Text.drop (Text.length delimiter) after)
 
     isMarkdownStarter char =
         char == '`' || char == '*' || char == '~' || char == '['
