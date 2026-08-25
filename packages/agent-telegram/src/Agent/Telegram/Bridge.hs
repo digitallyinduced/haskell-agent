@@ -36,12 +36,6 @@ import Data.Aeson
     , (.:?)
     )
 import qualified Data.ByteString.Lazy as LBS
-import Data.IORef
-    ( IORef
-    , atomicModifyIORef'
-    , newIORef
-    , readIORef
-    )
 import Data.List (isPrefixOf, sort)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -116,18 +110,19 @@ withTelegramBridge env action =
     withAsync (bridgeLoop env) (const action)
 
 bridgeLoop :: TelegramBridgeEnv -> IO ()
-bridgeLoop env = do
-    seen <- newIORef Set.empty
-    go seen (0 :: Int)
+bridgeLoop env = go Set.empty (0 :: Int)
   where
     go seen tick = do
-        processBridgeRequests env seen
+        seen' <- processBridgeRequests env seen
         when (tick `mod` 40 == 0) (publishActivity env)
         threadDelay 100_000
-        go seen (tick + 1)
+        go seen' (tick + 1)
 
-processBridgeRequests :: TelegramBridgeEnv -> IORef (Set.Set FilePath) -> IO ()
-processBridgeRequests env seenRef = do
+processBridgeRequests
+    :: TelegramBridgeEnv
+    -> Set.Set FilePath
+    -> IO (Set.Set FilePath)
+processBridgeRequests env seen = do
     let directory =
             unsafeToFilePath
                 (managedBridgeRequestsDirectory env.telegramBridgeRequest)
@@ -135,7 +130,7 @@ processBridgeRequests env seenRef = do
         Left _ -> pure []
         Right values -> pure values
     processBridgeRequestBatch
-        seenRef
+        seen
         files
         (decodeBridgeRequest . (directory </>))
         (processBridgeRequest env)
@@ -143,13 +138,12 @@ processBridgeRequests env seenRef = do
 -- | Decode and dispatch one deterministic bridge polling batch. Successfully
 -- decoded names are admitted exactly once before concurrent dispatch begins.
 processBridgeRequestBatch
-    :: IORef (Set.Set FilePath)
+    :: Set.Set FilePath
     -> [FilePath]
     -> (FilePath -> IO (Maybe request))
     -> (request -> IO ())
-    -> IO ()
-processBridgeRequestBatch seenRef files decode dispatch = do
-    seen <- readIORef seenRef
+    -> IO (Set.Set FilePath)
+processBridgeRequestBatch seen files decode dispatch = do
     let published =
             sort $
                 filter
@@ -162,14 +156,11 @@ processBridgeRequestBatch seenRef files decode dispatch = do
             (\name -> fmap ((,) name) <$> decode name)
             published
     let admitted = catMaybes decoded
-    atomicModifyIORef' seenRef \current ->
-        ( foldr (Set.insert . fst) current admitted
-        , ()
-        )
     void $
         mapConcurrentlyBounded telegramBridgeConcurrency
             (dispatch . snd)
             admitted
+    pure (foldr (Set.insert . fst) seen admitted)
 
 telegramBridgeConcurrency :: Int
 telegramBridgeConcurrency = 4

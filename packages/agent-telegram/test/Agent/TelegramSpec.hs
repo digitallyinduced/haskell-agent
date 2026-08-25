@@ -188,7 +188,6 @@ spec = describe "Agent.Telegram" do
 
     describe "Telegram bridge request batches" do
         it "admits JSON requests once and dispatches them with a bound" do
-            seen <- newIORef Set.empty
             dispatched <- newIORef []
             active <- newIORef (0 :: Int)
             maximumActive <- newIORef (0 :: Int)
@@ -212,8 +211,9 @@ spec = describe "Agent.Telegram" do
                         `finally`
                             atomicModifyIORef' active
                                 (\count -> (count - 1, ()))
-            Bridge.processBridgeRequestBatch seen files decode dispatch
-            Bridge.processBridgeRequestBatch seen files decode dispatch
+            seen <-
+                Bridge.processBridgeRequestBatch Set.empty files decode dispatch
+            _ <- Bridge.processBridgeRequestBatch seen files decode dispatch
             completed <- readIORef dispatched
             sort completed `shouldBe`
                 sort (filter (Text.isSuffixOf ".json" . Text.pack) files)
