@@ -70,13 +70,8 @@ import Data.Time
     , addUTCTime
     , fromGregorian
     )
-import System.Directory
-    ( getTemporaryDirectory
-    , removeDirectoryRecursive
-    )
-import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
-import System.Posix.Temp (mkdtemp)
 import System.Timeout (timeout)
 import Test.Hspec
 
@@ -563,9 +558,4 @@ fake name = AppTool
     }
 
 withTempDir :: (FilePath -> IO a) -> IO a
-withTempDir action = do
-    tmp <- getTemporaryDirectory
-    bracket
-        (mkdtemp (tmp </> "agent-grok-runtime-XXXXXX"))
-        removeDirectoryRecursive
-        action
+withTempDir = withSystemTempDirectory "agent-grok-runtime"

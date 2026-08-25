@@ -12,15 +12,12 @@ import Agent.GrokBuild.Dialect.Runtime
 import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.Tools.Types (AppTool(..), defaultToolEnv)
-import Control.Exception.Safe (bracket)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
-import System.Directory (getTemporaryDirectory, removeDirectoryRecursive)
-import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
-import System.Posix.Temp (mkdtemp)
 import Test.Hspec
 
 spec :: Spec
@@ -81,9 +78,4 @@ spec = describe "Grok Build dialect" do
             Nothing -> expectationFailure "expected rendered instructions"
 
 withTempDir :: (FilePath -> IO a) -> IO a
-withTempDir action = do
-    tmp <- getTemporaryDirectory
-    bracket
-        (mkdtemp (tmp </> "agent-grok-build-dialect-XXXXXX"))
-        removeDirectoryRecursive
-        action
+withTempDir = withSystemTempDirectory "agent-grok-build-dialect"
