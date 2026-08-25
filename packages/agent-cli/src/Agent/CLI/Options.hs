@@ -21,6 +21,7 @@ module Agent.CLI.Options
 
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Dialect (DialectId(..))
+import Agent.Loop (defaultLoopMaxTurns)
 import Agent.Provider (Provider(..), parseProvider)
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Foldable (asum)
@@ -130,7 +131,7 @@ defaultCliOptions = CliOptions
     , optYolo = False
     , optNoYolo = False
     , optManagedDenyMutations = False
-    , optMaxTurns = 500
+    , optMaxTurns = defaultLoopMaxTurns
     , optMaxConcurrentAgents = Nothing
     , optCompactThreshold = Nothing
     , optEffort = Nothing
@@ -524,7 +525,8 @@ usage = unlines
     , "      --motion MODE       Animation policy: full, reduced, or off"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
-    , "      --max-turns N       Stop after N model turns (default: 500)"
+    , "      --max-turns N       Stop after N model turns (default: "
+        <> show defaultLoopMaxTurns <> ")"
     , "      --max-concurrent-agents N"
     , "                          Concurrent subagent cap (default: 32;"
     , "                          project settings, then ~/.haskell-agent/config.json)"

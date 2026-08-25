@@ -804,6 +804,9 @@ spec = describe "runLoop" do
                 denied.output `shouldBe` "Tool call rejected by user."
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
+    it "defaults to a 2000-turn budget" do
+        defaultLoopMaxTurns `shouldBe` 2000
+
     it "returns LoopMaxTurns when the model keeps calling tools" do
         backend <- endlessToolsBackend
         config0 <- testConfig backend
