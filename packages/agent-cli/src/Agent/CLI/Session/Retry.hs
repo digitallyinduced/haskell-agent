@@ -9,7 +9,8 @@ import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.ProviderFallback (automaticRetryCountdownText)
 import Agent.CLI.ProviderTransition (PendingTurn(..))
 import Agent.CLI.Render
-    ( clearThinking
+    ( RenderConfig(..)
+    , clearThinking
     , putTextLn
     , renderEvent
     )
@@ -42,7 +43,6 @@ import Data.Time.Clock
     , diffUTCTime
     , getCurrentTime
     )
-import System.IO (stderr)
 import System.Timeout (timeout)
 
 waitAndRetryPendingTurn
@@ -91,8 +91,10 @@ waitAndRetryPendingTurn resumeDraft retryPending env delay pending = do
             poll Nothing
         waitAction = case env.sessionFullscreen of
             Just _ -> waitForCancel
-            Nothing ->
-                withEscCancel cancel env.sessionEscPaused waitForCancel
+            Nothing
+                | env.sessionBackground -> waitForCancel
+                | otherwise ->
+                    withEscCancel cancel env.sessionEscPaused waitForCancel
     setPersistenceActivity
         env.sessionPersist
         "provider_cooldown"
@@ -120,8 +122,9 @@ waitAndRetryPendingTurn resumeDraft retryPending env delay pending = do
                                 (infoNotice
                                     "automatic retry cancelled")))
                 Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
+                    let output = env.sessionRender.renderStderr
+                    color <- resolveColor output
+                    putTextLn output
                         (roleMuted color "automatic retry cancelled")
             if pending.pendingExitAfter
                 then pure RunQuit
@@ -133,8 +136,9 @@ waitAndRetryPendingTurn resumeDraft retryPending env delay pending = do
                         (UiSetNotice
                             (Just (successNotice "retrying turn")))
                 Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
+                    let output = env.sessionRender.renderStderr
+                    color <- resolveColor output
+                    putTextLn output
                         (roleMuted color (glyphOk <> "retrying turn"))
             setPersistenceActivity
                 env.sessionPersist

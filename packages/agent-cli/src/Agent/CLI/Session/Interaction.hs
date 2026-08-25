@@ -19,7 +19,8 @@ import Agent.CLI.Command
 import Agent.CLI.Interrupt (withTurnCancel)
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render
-    ( putTextLn
+    ( RenderConfig(..)
+    , putTextLn
     , renderAssistantText
     )
 import Agent.CLI.ReplMode
@@ -64,7 +65,6 @@ import Data.IORef
     )
 import Data.Maybe (isJust)
 import Data.Text (Text)
-import System.IO (stderr, stdout)
 
 -- | Publish the current session prompt metadata to a retained fullscreen
 -- runtime before replaying a pending turn after a provider rebuild.
@@ -139,7 +139,9 @@ setSessionEffort env level = do
 runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
 runBtwQuestion registerCancel env question = do
     let fullscreen = env.sessionFullscreen
-    color <- resolveColor stdout
+        stdoutHandle = env.sessionRender.renderStdout
+        stderrHandle = env.sessionRender.renderStderr
+    color <- resolveColor stdoutHandle
     transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
     forM_ fullscreen \runtime ->
         emitUiEvent runtime
@@ -151,11 +153,13 @@ runBtwQuestion registerCancel env question = do
                     then
                         withTurnCancel env.sessionInterrupt cancel $
                             case fullscreen of
-                                Nothing ->
-                                    withEscCancel
-                                        cancel
-                                        env.sessionEscPaused
-                                        action
+                                Nothing
+                                    | env.sessionBackground -> action
+                                    | otherwise ->
+                                        withEscCancel
+                                            cancel
+                                            env.sessionEscPaused
+                                            action
                                 Just _ -> action
                     else action)
             env.sessionBtwBackend
@@ -166,16 +170,16 @@ runBtwQuestion registerCancel env question = do
         emitUiEvent runtime (UiSetNotice Nothing)
     case result of
         Left err -> do
-            errorColor <- resolveColor stderr
+            errorColor <- resolveColor stderrHandle
             let message = formatBtwError err
             case fullscreen of
                 Just runtime ->
                     emitUiEvent runtime (UiErrorMessage message)
                 Nothing ->
-                    putTextLn stderr (roleError errorColor message)
+                    putTextLn stderrHandle (roleError errorColor message)
         Right answer ->
             case fullscreen of
                 Just runtime ->
                     emitUiEvent runtime (UiAssistantHistory answer)
                 Nothing ->
-                    putTextLn stdout (renderAssistantText color answer)
+                    putTextLn stdoutHandle (renderAssistantText color answer)

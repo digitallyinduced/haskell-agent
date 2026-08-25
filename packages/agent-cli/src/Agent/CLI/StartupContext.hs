@@ -34,13 +34,14 @@ import Data.IORef
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.IO (stderr)
+import System.IO (Handle)
 import System.OsPath (OsPath)
 
 -- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
 -- whatever instructions were already in history.
 loadAgentsContext
-    :: Maybe FullscreenRuntime
+    :: Handle
+    -> Maybe FullscreenRuntime
     -> CliOptions
     -> Dialect
     -> OsPath
@@ -48,7 +49,8 @@ loadAgentsContext
     -> [ResponseItem]
     -> Maybe Text
     -> IO (IORef (Maybe Text))
-loadAgentsContext fullscreen options dialect home cwd initialItems initialPrevious
+loadAgentsContext
+        stderrHandle fullscreen options dialect home cwd initialItems initialPrevious
     | not options.optAgentsMd = newIORef Nothing
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
     | otherwise = do
@@ -68,8 +70,8 @@ loadAgentsContext fullscreen options dialect home cwd initialItems initialPrevio
                             <> if length files == 1 then " file" else " files"
                 case fullscreen of
                     Nothing -> do
-                        color <- resolveColor stderr
-                        putTextLn stderr
+                        color <- resolveColor stderrHandle
+                        putTextLn stderrHandle
                             (roleMuted color (glyphSession <> message))
                     Just runtime ->
                         emitUiEvent runtime (UiSystemMessage message)

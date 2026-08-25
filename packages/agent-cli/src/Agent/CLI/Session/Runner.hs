@@ -97,7 +97,11 @@ import Agent.CLI.Skills
     , loadSkillsCatalogQuiet, reservedSlashNames
     )
 import Agent.CLI.StartupContext (loadAgentsContext)
-import Agent.CLI.Startup.Auth (learnAboutUserOnboardingPrompt, markStartupStage)
+import Agent.CLI.Startup.Auth
+    ( learnAboutUserOnboardingPrompt
+    , markStartupStage
+    , startupDie
+    )
 import Agent.CLI.Subagents.Runtime
     ( SubagentSession(..)
     , lookupOrCreateSubagentSession
@@ -190,8 +194,6 @@ import Data.Time.Clock
     ( getCurrentTime
     , utctDay
     )
-import System.Exit (die)
-import System.IO (stderr, stdout)
 import System.Mem.StableName (StableName, makeStableName)
 
 data AgentStepCache = AgentStepCache
@@ -221,13 +223,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
   ioLock <- newMVar ()
   let fullscreen = startup.startupFullscreen
       terminal = startup.startupTerminal
+      stdoutHandle = startup.startupStdout
+      stderrHandle = startup.startupStderr
       useColor = startup.startupUseColor
       stderrTty = startup.startupStderrTty
       stdoutTty = startup.startupStdoutTty
       setWindowTitle title =
           case fullscreen of
               Just runtime -> setFullscreenWindowTitle runtime title
-              Nothing -> setCliWindowTitle stdoutTty stdout title
+              Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       showTitleEvent = \case
         SessionTitleGenerated SessionTitleResult{..} ->
           case persist of
@@ -259,8 +263,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                           emitUiEvent runtime
                                               (UiErrorMessage message)
                                       Nothing -> do
-                                          color <- resolveColor stderr
-                                          putTextLn stderr
+                                          color <- resolveColor stderrHandle
+                                          putTextLn stderrHandle
                                               (roleWarn color
                                                   (glyphWarn <> message))
                       _ -> pure ()
@@ -538,7 +542,15 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
             freshAgents <-
-                loadAgentsContext fullscreen options dialect home cwd [] Nothing
+                loadAgentsContext
+                    stderrHandle
+                    fullscreen
+                    options
+                    dialect
+                    home
+                    cwd
+                    []
+                    Nothing
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
             (omitted, _) <-
                 installSkills freshAgents True freshSkills
@@ -568,18 +580,18 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         reportLearnedSkillWarning message =
             case fullscreen of
                 Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr $
+                    color <- resolveColor stderrHandle
+                    putTextLn stderrHandle $
                         roleWarn color (glyphWarn <> message)
                 Just runtime ->
                     emitUiEvent runtime (UiSystemMessage message)
         reportSkillCatalog includeSummary catalog omitted =
             case fullscreen of
                 Nothing -> do
-                    color <- resolveColor stderr
+                    color <- resolveColor stderrHandle
                     when includeSummary do
                         let count = length catalog.catalogSkills
-                        putTextLn stderr $
+                        putTextLn stderrHandle $
                             roleMuted color
                                 (glyphSession
                                     <> "skills: loaded "
@@ -588,13 +600,13 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                         then " skill"
                                         else " skills")
                     mapM_
-                        (putTextLn stderr
+                        (putTextLn stderrHandle
                             . roleWarn color
                             . (glyphWarn <>)
                             . formatSkillWarning)
                         catalog.catalogWarnings
                     when (omitted > 0) $
-                        putTextLn stderr $
+                        putTextLn stderrHandle $
                             roleWarn color
                                 (glyphWarn <> formatSkillOmission omitted)
                 Just runtime -> do
@@ -629,8 +641,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderState = renderStateRef
             , renderColor = useColor
             , renderLock = ioLock
-            , renderStdout = stdout
-            , renderStderr = stderr
+            , renderStdout = stdoutHandle
+            , renderStderr = stderrHandle
             , renderModelRef = modelRef
             -- OSC 9;4 is ignored by terminals that do not implement it.
             -- Gate on the same TTY check as the in-pane spinner so pipes
@@ -872,6 +884,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionGrokRuntime = grokRuntime
             , sessionShellMode = currentShellMode
             , sessionSetShellMode = setShellMode
+            , sessionBackground = startup.startupBackground
             , sessionEscPaused = escPaused
             , sessionDraft = startup.startupSessionState.sessionDraft
             , sessionPreviewId = previewIdRef
@@ -949,7 +962,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 env
                                 request.managedTurnText
                                 inputs
-                                >>= either (die . Text.unpack) pure
+                                >>= either
+                                    (startupDie startup . Text.unpack)
+                                    pure
                         result <- runOneTurn env request.managedTurnText skillInputs
                         callbacks.runnerFinishTurn env True result
                     Nothing ->
@@ -962,7 +977,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                             env
                                             onboardingPrompt
                                             [UserMessage onboardingPrompt]
-                                            >>= either (die . Text.unpack) pure
+                                            >>= either
+                                                (startupDie startup . Text.unpack)
+                                                pure
                                     forM_ fullscreen \runtime ->
                                         emitUiEvent runtime
                                             (UiUserSubmitted onboardingPrompt)

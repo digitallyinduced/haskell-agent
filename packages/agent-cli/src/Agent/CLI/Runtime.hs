@@ -40,58 +40,29 @@ import Agent.CLI.Auth
     , probeLoadedAuthCredential
     , staticCredentialProvider
     )
-import Agent.CLI.Secret
-    ( promptSecretLine
-    , sanitizeSecretPromptText
-    )
+import Agent.CLI.Secret (promptSecretLine)
 import Agent.CLI.AgentViewport
-    ( AgentEntry(..)
-    , AgentStep
-    , AgentTarget(..)
+    ( AgentTarget(..)
     , AgentViewportEnv(..)
-    , agentStepsForStatus
-    , formatAgentStatus
-    , pickAgentViewport
     , renderAgentViewportPanelFor
-    , responseItemPreviewLines
-    , responseItemStepPreviews
-    , responseItemsToUiState
     )
 import Agent.CLI.SessionTitle
-    ( SessionTitleEvent(..)
-    , SessionTitleFailure(..)
-    , SessionTitleResult(..)
-    , invalidateSessionTitles
+    ( invalidateSessionTitles
     , requestSessionTitle
-    , waitForSessionTitleResults
-    , withSessionTitleManager
     )
 import Agent.CLI.AgentSessions
     ( AgentSessionToolsEnv(..)
+    , SessionThreadManager
     , agentSessionTools
-    , closeSessionProcessManager
-    , launchSessionTurn
-    , newSessionProcessManager
+    , closeSessionThreadManager
+    , launchSessionThread
+    , newSessionThreadManager
     , signalManagedSessionReady
-    , sessionProcessStatus
+    , sessionThreadStatus
     )
-import Agent.CLI.ManagedTurn
-    ( ManagedTurnRequest(..)
-    , loadManagedTurnRequest
-    , managedTurnInputs
-    , managedTurnRequestFromText
-    )
-import Agent.CLI.GatewayBridge
-    ( managedGatewayTools
-    , publishManagedLoopEvent
-    , requestManagedApproval
-    )
-import Agent.CLI.Approval
-    ( ApprovalNotice(..)
-    , approveToolDecision
-    , approveToolDecisionWithReporterAndPersistence
-    , toggleAlwaysApprove
-    )
+import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
+import Agent.CLI.GatewayBridge (managedGatewayTools)
+import Agent.CLI.Approval (toggleAlwaysApprove)
 import Agent.CLI.AccountPicker
     ( AccountPickerOption(..)
     , accountPickerMatches
@@ -111,7 +82,7 @@ import Agent.CLI.Recap
     , runRecapWithCancel
     , runTurnSummaryWithCancel
     )
-import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
+import Agent.CLI.CancelWatch (withEscCancel)
 import Agent.CLI.Clipboard
     ( appendUniqueImageAttachments
     , formatImageSize
@@ -135,8 +106,6 @@ import Agent.CLI.Config
     )
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
-    , OpenAiCompactionSender
-    , autoCompactOpenAiBackendWithSender
     , installLiveCompactOutcome
     , runProviderCompactWith
     , runResponsesCompactWith
@@ -147,23 +116,12 @@ import Agent.CLI.Database.Store
     ( databaseToolsEnvForStore
     , deriveDatabaseScopes
     )
-import Agent.CLI.Database.Storage
-    ( postgresStorageCommandEnv
-    , runStorageCommand
-    )
-import Agent.CLI.LearnedSkills
-    ( defaultLearnedSkillContextMaxChars
-    , learnedSkillTools
-    , queueLearnedSkillContextWithOmissions
-    )
-import Agent.CLI.LearnedSkills.Store
-    ( learnedSkillToolsEnvForStore
-    , loadApplicableLearnedSkillsForStore
-    )
+import Agent.CLI.LearnedSkills (learnedSkillTools)
+import Agent.CLI.LearnedSkills.Store (learnedSkillToolsEnvForStore)
 import Agent.CLI.Error
-    ( formatApiErrorAt
+    ( formatException
+    , formatApiErrorAt
     , formatApiErrorInlineAt
-    , formatApiErrorRetryCountdownParts
     )
 import Agent.CLI.Input
     ( ReplLine(..)
@@ -224,7 +182,7 @@ import Agent.CLI.ModelConfig
     , ResponsesConnection(..)
     , builtinConnectionId
     , catalogConnection
-    , loadModelCatalog
+    , loadModelCatalogAt
     )
 import Agent.CLI.Models
     ( ModelOption(..)
@@ -239,28 +197,14 @@ import Agent.CLI.Models
     )
 import Agent.CLI.Options
 import Agent.Store.Postgres
-    ( ManagedPostgresConfig
-    , Store
+    ( Store
     , closeStore
-    , managedPostgresConfigFromEnv
     , openStore
     , trustedPool
-    , withStore
     )
 import Agent.Store.Types (renderStoreError)
 import Agent.Store.Postgres.Connection (StorePool)
-import qualified Agent.Store.Postgres.Session as StoreSession
 import Agent.CLI.PendingInputs (withPendingInputs)
-import Agent.CLI.Resume
-    ( ResumeEntry(..)
-    , applyResumeSearchResults
-    , initialResumeBrowser
-    , loadResumeEntry
-    , pickResumeEntries
-    , pickResumeSession
-    , resumeEntryFromMeta
-    , resumeSearchEntries
-    )
 import Agent.CLI.Plan (cliPlanHooks)
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
@@ -275,8 +219,6 @@ import Agent.CLI.Project
     , projectAccountFor
     , projectModelProvider
     , resolveProjectRoot
-    , saveProjectAutoApprove
-    , saveProjectMaxConcurrentAgents
     , saveProjectModel
     )
 import Agent.CLI.Prompt
@@ -286,24 +228,19 @@ import Agent.CLI.Prompt
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback
-    , fallbackCandidates
     , isProviderUnavailable
     )
 import Agent.CLI.Provider.OpenAI
     ( OpenAiPersistentConnection(..)
     , lockedOpenAiSession
     )
-import Agent.CLI.ProviderAvailability
-    ( probeLoadedAutomaticAvailability
-    , probeLoadedAvailability
-    )
+import Agent.CLI.ProviderAvailability (probeLoadedAvailability)
 import Agent.CLI.Provider.Switch
     ( accountSwitchTarget
     , applyModelChange
     , chooseStartupProviderTransition
     , continueAutomaticFallback
     , loadSelectedAccountAuth
-    , prepareProviderTransition
     , prepareTransitionBackend
     , reloadAuth
     , reportProviderUnavailable
@@ -318,15 +255,11 @@ import Agent.CLI.ProviderTransition
     , TransitionCause(..)
     , TurnResult(..)
     , applyProviderTransition
-    , transitionCommitsImmediately
     )
 import Agent.CLI.SessionState (SessionState(..), newSessionState)
 import Agent.CLI.Render
     ( RenderConfig(..)
-    , RenderState(..)
-    , beginRenderTurn
     , clearThinking
-    , emptyRenderState
     , putTextLn
     , renderEvent
     , renderPrintedText
@@ -346,10 +279,8 @@ import Agent.CLI.Session.History
     , hydrateUiHistory
     , LiveConversation(..)
     , readLiveAttachments
-    , readLivePreviousResponseId
     , readLiveTranscript
     , modifyLiveAttachments
-    , resetLiveConversationWith
     , writeLiveTranscript
     )
 import Agent.CLI.Session.Interaction
@@ -382,15 +313,10 @@ import Agent.CLI.SessionLock
     , acquireSessionLock
     , releaseSessionLock
     , sessionLockFilePath
-    , sessionLockIsActive
     , sessionLockPath
     )
 import Agent.CLI.Skills
     ( formatSkillsListing
-    , installSkillCatalogWithOmissions
-    , installSkillToolRoots
-    , loadSkillsCatalogQuiet
-    , reservedSlashNames
     , skillInvocationCommand
     )
 import Agent.CLI.Status
@@ -415,10 +341,8 @@ import Agent.CLI.Startup.Auth
     )
 import Agent.CLI.Subagents.Runtime
     ( SubagentRuntime(..)
-    , SubagentSession(..)
     , flushAllSubagentSnapshots
     , freshOpenAiBackend
-    , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
     , restoreAgentFromDisk
@@ -452,16 +376,12 @@ import Agent.CLI.Terminal
     , resolveColor
     , withSynchronizedOutput
     )
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools (schemasFromAppTools)
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsForWithTypes
     , filterBashTools
     , filterGhciTools
-    , formatAgentsMdForDialect
-    , globalAgentsHomeDir
-    , isBashToolName
-    , isGhciToolName
     )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer
@@ -472,31 +392,23 @@ import Agent.CLI.TUI.App
     , queuedFullscreenInputDisplays
     , readFullscreenLineOrWithCatalog
     , readFullscreenLineWithCatalog
-    , requestFullscreenPermission
     , requestFullscreenChoiceWithBody
-    , requestFullscreenResume
-    , requestFullscreenSecret
-    , requestFullscreenText
     , runFullscreen
     , setFullscreenSessionActions
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , withFullscreenSuspended
     )
-import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
-    ( BlockState(..)
-    , UiEvent(..)
+    ( UiEvent(..)
     , UiState(..)
     , infoNotice
     , progressNotice
-    , successNotice
     , warningNotice
-    , initialUiState
     , reduceUi
     )
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
-import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
+import Agent.CLI.Turn (runOneTurn)
 import Agent.CLI.Usage
     ( formatGrokLimitStatus
     , formatOpenAiLimitStatus
@@ -514,7 +426,6 @@ import Agent.CLI.Worktree
     , worktreeRoot
     )
 import Agent.Cancel (requestCancel)
-import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.Claude
     ( ClaudeCodeAuth(..)
     , ClaudeCodeOptions(..)
@@ -527,30 +438,17 @@ import Agent.Claude
 import Agent.Loop
 import qualified Agent.MCP as MCP
 import Agent.Error
-    ( ApiError(..)
-    , CredentialExhaustionReason(..)
-    )
+    ( ApiError(..) )
 import Agent.Dialect
     ( DialectId(..)
-    , ToolLayout(..)
     , dialectForId
     , dialectId
-    , dialectToolLayout
     , dialectSlug
-    , grokBuildPublicToolName
-    , providerSupportsDialect
-    )
-import Agent.ProjectInstructions
-    ( DiscoverOptions(..)
-    , defaultDiscoverOptions
-    , discoverProjectInstructions
-    , loadedInstructionFiles
     )
 import Agent.Skills
     ( Skill(..)
     , SkillCatalog(..)
     , SkillInvocation(..)
-    , SkillWarning(..)
     , formatSkillActivation
     , resolveSkillInvocation
     , resolveSkillMentions
@@ -558,16 +456,9 @@ import Agent.Skills
 import Agent.OpenAI.Compaction
     ( clearSessionUserText
     , compactSessionUserText
-    , hasCompactionCheckpoint
-    , isTranscriptResetTurn
     , newSessionUserText
     )
 import qualified Agent.OpenAI.Auth as OpenAI
-import Agent.OpenAI.LoopBackend
-    ( openAiAuxiliaryResponseSenderReconnecting
-    , openAiBackendWithReasoningVisibility
-    , openAiResponseSenderReconnecting
-    )
 import Agent.Responses.Types
 import Agent.Responses.GenericBackend (genericResponsesBackendWith)
 import Agent.Responses.GenericClient (GenericClientOptions(..))
@@ -575,7 +466,6 @@ import qualified Agent.Responses.GenericClient as GenericResponses
 import Agent.OpenAI.Usage (fetchUsage)
 import Agent.OpenAI.WebSocketClient
     ( CodexAuthFailed(..)
-    , CodexConn
     , closeCodexConn
     , codexConnTurnState
     , resetCodexTurnState
@@ -583,8 +473,7 @@ import Agent.OpenAI.WebSocketClient
     , withCodexWsWithProvider
     )
 import Agent.Provider
-    ( AccountFailure(..)
-    , BillingMode(..)
+    ( BillingMode(..)
     , Credential(..)
     , FailedCredential(..)
     , Provider(..)
@@ -598,23 +487,15 @@ import qualified Agent.Provider as Provider
 import Agent.Subagents
     ( RootTurnId
     , SubagentConfig(..)
-    , SubagentStatus(..)
-    , abortRootTurn
-    , beginRootTurn
     , closeSubagentRegistry
-    , resetSubagentRegistry
     , defaultMaxConcurrent
     , defaultSubagentConfig
     , formatCompletionNotice
-    , getStatus
     , interruptActiveSubagents
-    , listAgents
     , newSubagentRegistry
-    , setMaxConcurrent
     , setSubagentOnComplete
     , setSubagentOnSettled
     , setSubagentRunner
-    , subagentConfig
     )
 import Agent.GrokBuild.Dialect.Goal
     ( activateGoal
@@ -629,12 +510,11 @@ import Agent.GrokBuild.Dialect.Workflow
     ( formatWorkflowRuns
     , workflowRunSnapshots
     )
-import Agent.Subagents.TaskPath (taskPathRoot, taskPathText)
-import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
+import Agent.Subagents.TaskPath (taskPathRoot)
+import Agent.ToolDispatch (canonicalToolName)
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , SubagentWorktree(..)
-    , multiAgentToolNames
     )
 import Agent.Tools.PlanMode
     ( PlanDecision(..)
@@ -642,7 +522,6 @@ import Agent.Tools.PlanMode
     , PlanModeHooks(..)
     , PlanModeState(..)
     , activatePlanMode
-    , deactivatePlanMode
     , planFilePath
     )
 import Agent.Tools.Secret
@@ -673,7 +552,6 @@ import Control.Concurrent.Async
     , waitSTM
     , withAsync
     )
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import Control.Concurrent.MVar
     ( MVar
@@ -700,25 +578,20 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, unless, void, when)
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson as Aeson
 import Data.IORef
-import Data.List (findIndex, sortOn)
-import Data.Map.Strict (Map)
+import Data.List (findIndex)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified Data.Set as Set
-import Text.Printf (printf)
 import Data.Time.Clock
     ( UTCTime
     , diffUTCTime
     , getCurrentTime
     , utctDay
     )
-import Data.Time.Format (defaultTimeLocale, formatTime)
 import System.Directory.OsPath
     ( doesDirectoryExist
     , getCurrentDirectory
@@ -730,10 +603,18 @@ import System.Environment (getArgs, getProgName, lookupEnv)
 import System.OsPath (OsPath, decodeFS, unsafeEncodeUtf, (</>), takeDirectory, takeFileName)
 import System.Console.ANSI (getTerminalSize)
 import System.Console.ANSI.Codes (clearFromCursorToLineEndCode)
-import System.Exit (ExitCode(..), die)
-import System.IO (Handle, hFlush, hIsTerminalDevice, stderr, stdin, stdout)
-import System.Mem.StableName (StableName, makeStableName)
-import System.Process (readProcessWithExitCode)
+import System.Exit (die)
+import System.IO
+    ( Handle
+    , IOMode(AppendMode)
+    , hFlush
+    , hIsTerminalDevice
+    , stderr
+    , stdin
+    , stdout
+    , withFile
+    )
+import System.Posix.Files (setFileMode)
 
 data ActiveHttpAuth = ActiveHttpAuth
     { activeHttpGeneration :: !Int
@@ -745,6 +626,33 @@ data ActiveHttpAuth = ActiveHttpAuth
 data AccountSwitchRequest
     = AccountSwitchRequest !Credential !(MVar (Either ApiError Text))
 
+data AgentProcessRuntime = AgentProcessRuntime
+    { processMcpSupervisor :: !MCP.McpSupervisor
+    , processSessionThreads :: !SessionThreadManager
+    }
+
+data AgentRunMode = AgentRunMode
+    { runStdout :: !Handle
+    , runStderr :: !Handle
+    , runInBackground :: !Bool
+    , runCwdHint :: !(Maybe OsPath)
+    }
+
+foregroundRunMode :: AgentRunMode
+foregroundRunMode = AgentRunMode
+    { runStdout = stdout
+    , runStderr = stderr
+    , runInBackground = False
+    , runCwdHint = Nothing
+    }
+
+backgroundRunMode :: Handle -> OsPath -> AgentRunMode
+backgroundRunMode output cwd = AgentRunMode
+    { runStdout = output
+    , runStderr = output
+    , runInBackground = True
+    , runCwdHint = Just cwd
+    }
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
 -- session. Keeping the id in the generated GHCi command avoids a shared
 -- cross-process resume pointer when several development REPLs are open.
@@ -842,19 +750,44 @@ runAgentWithRestarts :: CliOptions -> IO DevResult
 runAgentWithRestarts options =
     catchUserInterrupt
         (do
-            fullscreenInputs <- newFullscreenInputBuffer
-            sessionState <- newSessionState
+            home <- getHomeDirectory
+            let root = sessionsRoot home
             mcpSupervisor <- MCP.newMcpSupervisor
+            sessionThreads <-
+                newSessionThreadManager root
+                    `onException` MCP.closeMcpSupervisor mcpSupervisor
+            let processRuntime = AgentProcessRuntime
+                    { processMcpSupervisor = mcpSupervisor
+                    , processSessionThreads = sessionThreads
+                    }
             withRestoredCurrentDirectory
-                (go mcpSupervisor fullscreenInputs sessionState options Nothing)
-                `finally` MCP.closeMcpSupervisor mcpSupervisor)
+                (runAgentWithRuntime processRuntime foregroundRunMode options)
+                `finally`
+                    (closeSessionThreadManager sessionThreads
+                        `finally` MCP.closeMcpSupervisor mcpSupervisor))
         (pure DevQuit)
+
+runAgentWithRuntime
+    :: AgentProcessRuntime
+    -> AgentRunMode
+    -> CliOptions
+    -> IO DevResult
+runAgentWithRuntime processRuntime runMode options = do
+    fullscreenInputs <- newFullscreenInputBuffer
+    sessionState <- newSessionState
+    go fullscreenInputs sessionState options Nothing
   where
-    go mcpSupervisor fullscreenInputs sessionState current transition =
-        runAgent mcpSupervisor fullscreenInputs sessionState current transition >>= \case
+    go fullscreenInputs sessionState current transition =
+        runAgent
+            processRuntime
+            runMode
+            fullscreenInputs
+            sessionState
+            current
+            transition >>= \case
             RunResumeSession sessionId ->
                 newSessionState >>= \nextState ->
-                    go mcpSupervisor fullscreenInputs nextState
+                    go fullscreenInputs nextState
                         current
                             { optProvider = Nothing
                             , optModel = Nothing
@@ -868,7 +801,7 @@ runAgentWithRestarts options =
                         Nothing
             RunSwitchWorktree path provider model effort ->
                 newSessionState >>= \nextState ->
-                    go mcpSupervisor fullscreenInputs nextState
+                    go fullscreenInputs nextState
                         current
                             { optProvider = Just provider
                             , optModel = Just model
@@ -881,11 +814,11 @@ runAgentWithRestarts options =
                             }
                         Nothing
             RunSwitchProvider next ->
-                go mcpSupervisor fullscreenInputs sessionState
+                go fullscreenInputs sessionState
                     (applyProviderTransition current next)
                     (Just next)
             RunRestart sessionId ->
-                go mcpSupervisor fullscreenInputs sessionState
+                go fullscreenInputs sessionState
                     (restartSessionOptions current sessionId)
                     Nothing
             RunProviderStartFailed apiError ->
@@ -893,17 +826,104 @@ runAgentWithRestarts options =
                     Just failed
                         | failed.transitionCause == AutomaticFallback ->
                             continueAutomaticFallback
-                                Nothing failed apiError >>= \case
+                                runMode.runCwdHint
+                                runMode.runStderr
+                                Nothing
+                                failed
+                                apiError >>= \case
                                 Just next ->
-                                    go mcpSupervisor fullscreenInputs sessionState
+                                    go fullscreenInputs sessionState
                                         (applyProviderTransition current next)
                                         (Just next)
-                                Nothing -> do
-                                    reportProviderUnavailable Nothing apiError
-                                    pure DevQuit
-                    _ -> pure DevQuit
+                                Nothing
+                                    | runMode.runInBackground -> do
+                                        now <- getCurrentTime
+                                        throwIO $
+                                            StartupFailure
+                                                (Text.unpack
+                                                    (formatApiErrorAt
+                                                        now
+                                                        apiError))
+                                    | otherwise -> do
+                                        reportProviderUnavailable Nothing apiError
+                                        pure DevQuit
+                    _
+                        | runMode.runInBackground -> do
+                            now <- getCurrentTime
+                            throwIO $
+                                StartupFailure
+                                    (Text.unpack
+                                        (formatApiErrorAt now apiError))
+                        | otherwise -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
+
+runInProcessSessionTurn
+    :: AgentProcessRuntime
+    -> CliOptions
+    -> ApprovalPolicy
+    -> Bool
+    -> Bool
+    -> SessionHandle
+    -> Text
+    -> IO (Either Text ())
+runInProcessSessionTurn
+        processRuntime parentOptions policy ghciEnabled bashEnabled handle message =
+    withFile logPath AppendMode \logHandle -> do
+        setFileMode logPath 0o600
+        runAgentWithRuntime
+            processRuntime
+            (backgroundRunMode logHandle handle.sessionMeta.metaCwd)
+            childOptions >>= \case
+                DevQuit -> pure (Right ())
+                DevReload _ ->
+                    pure (Left "background agent session requested a reload")
+  where
+    logPath =
+        unsafeToFilePath
+            (handle.sessionDir </> unsafeEncodeUtf "agent.log")
+    childOptions =
+        applyBackgroundApproval policy $
+            parentOptions
+                { optProvider = Nothing
+                , optModel = Nothing
+                , optCwd = Nothing
+                , optWorktree = False
+                , optEffort = Nothing
+                , optPrompt = Just message
+                , optPromptFile = Nothing
+                , optManagedTurnFile = Nothing
+                , optResume = Just handle.sessionMeta.metaId
+                , optSaveSession = True
+                , optGhci = ghciEnabled
+                , optBash = bashEnabled
+                , optScreenMode = ScreenMinimal
+                }
+
+applyBackgroundApproval :: ApprovalPolicy -> CliOptions -> CliOptions
+applyBackgroundApproval policy options =
+    case policy of
+        ApproveAll ->
+            options
+                { optYolo = True
+                , optNoYolo = False
+                , optManagedDenyMutations = False
+                }
+        DenyMutating ->
+            options
+                { optYolo = False
+                , optNoYolo = True
+                , optManagedDenyMutations = True
+                }
+        PromptMutating ->
+            -- Background sessions cannot safely borrow the caller's stdin.
+            -- Keep the prompt policy marker; non-TTY one-shot resolution
+            -- conservatively denies mutating calls.
+            options
+                { optYolo = False
+                , optNoYolo = True
+                , optManagedDenyMutations = False
+                }
 
 -- | Restore the process cwd after an action succeeds or throws. Cabal gives
 -- GHCi relative source paths, so returning from an agent session in its cwd
@@ -935,14 +955,14 @@ finishStartup startup = do
                                     <> formatStartupDuration duration)
                             syntaxLoadDuration
             case startup.startupFullscreen of
-                Nothing -> putTextLn stderr message
+                Nothing -> putTextLn startup.startupStderr message
                 Just runtime -> emitUiEvent runtime (UiSystemMessage message)
         _ -> pure ()
 
 reportStartupWarning :: StartupRuntime -> Text -> IO ()
 reportStartupWarning startup message =
     case startup.startupFullscreen of
-        Nothing -> putTextLn stderr ("warning: " <> message)
+        Nothing -> putTextLn startup.startupStderr ("warning: " <> message)
         Just runtime ->
             emitUiEvent runtime (UiSystemMessage ("warning: " <> message))
 
@@ -987,22 +1007,31 @@ setStartupRepository fullscreen home branch cwd =
                     (formatRepositoryPath home cwd)
 
 runAgent
-    :: MCP.McpSupervisor
+    :: AgentProcessRuntime
+    -> AgentRunMode
     -> FullscreenInputBuffer
     -> SessionState
     -> CliOptions
     -> Maybe ProviderTransition
     -> IO RunResult
-runAgent mcpSupervisor fullscreenInputs sessionState options transition = do
+runAgent
+        processRuntime runMode fullscreenInputs sessionState options transition = do
     prepared <-
         prepareAgentIteration
-            mcpSupervisor fullscreenInputs sessionState Nothing options transition
+            processRuntime
+            runMode
+            fullscreenInputs
+            sessionState
+            Nothing
+            options
+            transition
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
                 runFullscreen runtime $
                     runFullscreenRestartLoop
-                        mcpSupervisor
+                        processRuntime
+                        runMode
                         fullscreenInputs
                         sessionState
                         runtime
@@ -1013,7 +1042,13 @@ runAgent mcpSupervisor fullscreenInputs sessionState options transition = do
     result <- case outcome of
         Left StartupCancelled -> pure RunQuit
         Right startupOutcome ->
-            either (\(StartupFailure message) -> die message) pure startupOutcome
+            either
+                (\failure@(StartupFailure message) ->
+                    if runMode.runInBackground
+                        then throwIO failure
+                        else die message)
+                pure
+                startupOutcome
     case (prepared.preparedFullscreen, result) of
         -- The retained screen has been restored before this persistent final
         -- diagnostic is printed.
@@ -1027,7 +1062,8 @@ runAgent mcpSupervisor fullscreenInputs sessionState options transition = do
 -- alternate screen until the whole provider-restart chain finishes. Session
 -- resumes still return to 'runAgentWithRestarts' and start a fresh UI.
 prepareAgentIteration
-    :: MCP.McpSupervisor
+    :: AgentProcessRuntime
+    -> AgentRunMode
     -> FullscreenInputBuffer
     -> SessionState
     -> Maybe FullscreenRuntime
@@ -1035,16 +1071,50 @@ prepareAgentIteration
     -> Maybe ProviderTransition
     -> IO PreparedAgent
 prepareAgentIteration
-        mcpSupervisor
+        processRuntime runMode
         fullscreenInputs sessionState activeFullscreen options transition = do
-    forM_ activeFullscreen resetFullscreenSessionActions
     resumeLockRef <- newIORef (Nothing :: Maybe SessionLock)
     databaseStoreRef <- newIORef (Nothing :: Maybe Store)
-    let failPreparation message =
-            readIORef resumeLockRef >>= mapM_ releaseSessionLock >>
-            readIORef databaseStoreRef >>= mapM_ closeStore >>
+    prepareAgentIterationTracked
+        resumeLockRef
+        databaseStoreRef
+        processRuntime
+        runMode
+        fullscreenInputs
+        sessionState
+        activeFullscreen
+        options
+        transition
+        `onException`
+            releasePreparationResources resumeLockRef databaseStoreRef
+
+prepareAgentIterationTracked
+    :: IORef (Maybe SessionLock)
+    -> IORef (Maybe Store)
+    -> AgentProcessRuntime
+    -> AgentRunMode
+    -> FullscreenInputBuffer
+    -> SessionState
+    -> Maybe FullscreenRuntime
+    -> CliOptions
+    -> Maybe ProviderTransition
+    -> IO PreparedAgent
+prepareAgentIterationTracked
+        resumeLockRef databaseStoreRef
+        processRuntime runMode
+        fullscreenInputs sessionState activeFullscreen options transition = do
+    forM_ activeFullscreen resetFullscreenSessionActions
+    let stdoutHandle = runMode.runStdout
+        stderrHandle = runMode.runStderr
+        background = runMode.runInBackground
+        signalReady result =
+            unless background (signalManagedSessionReady result)
+        failPreparation message =
+            releasePreparationResources resumeLockRef databaseStoreRef >>
                 case activeFullscreen of
-                    Nothing -> die message
+                    Nothing
+                        | background -> throwIO (StartupFailure message)
+                        | otherwise -> die message
                     Just _ -> throwIO (StartupFailure message)
     startedAt <- getCurrentTime
     startupTimingsRef <- newIORef []
@@ -1062,35 +1132,36 @@ prepareAgentIteration
         Just sessionId -> do
             dir <- either
                 (\err -> do
-                    signalManagedSessionReady (Left err)
+                    signalReady (Left err)
                     failPreparation (Text.unpack err))
                 pure
                 (sessionDirForId root sessionId)
             exists <- doesDirectoryExist dir
             when (not exists) do
                 let err = "session not found: " <> sessionId
-                signalManagedSessionReady (Left err)
+                signalReady (Left err)
                 failPreparation (Text.unpack err)
             acquireSessionLock dir sessionId >>= \case
                 Left err -> do
-                    signalManagedSessionReady (Left err)
+                    signalReady (Left err)
                     failPreparation (Text.unpack err)
                 Right lock -> do
                     writeIORef resumeLockRef (Just lock)
                     loadSession sessionPool root sessionId >>= \case
                         Left err -> do
-                            signalManagedSessionReady (Left err)
+                            signalReady (Left err)
                             failPreparation (Text.unpack err)
                         Right loaded -> do
-                            signalManagedSessionReady (Right ())
+                            signalReady (Right ())
                             pure (Just loaded)
 
-    source <- maybe getCurrentDirectory makeAbsolute options.optCwd
-    initialCwd <- case resumed of
-        Just (meta, _)
-            | isJustCwd options -> pure source
-            | otherwise -> makeAbsolute meta.metaCwd
-        Nothing -> pure source
+    source <- case options.optCwd of
+        Just requestedCwd -> makeAbsolute requestedCwd
+        Nothing -> case resumed of
+            Just (meta, _) -> makeAbsolute meta.metaCwd
+            Nothing ->
+                maybe getCurrentDirectory makeAbsolute runMode.runCwdHint
+    let initialCwd = source
     uiRuntimeRef <- newIORef Nothing
     cancelToolRef <- newIORef (pure ())
     interrupt <- newInterruptState \msg -> do
@@ -1100,17 +1171,19 @@ prepareAgentIteration
                     (UiSetNotice (Just (warningNotice msg)))
             Nothing -> do
                 -- Drop an in-place "Thinking…" status so the hint is its own line.
-                Text.hPutStr stderr "\r\ESC[K"
-                clearNativeProgress stderr
-                color <- resolveColor stderr
-                putTextLn stderr (roleMuted color msg)
+                Text.hPutStr stderrHandle "\r\ESC[K"
+                clearNativeProgress stderrHandle
+                color <- resolveColor stderrHandle
+                putTextLn stderrHandle (roleMuted color msg)
     -- Shared with Esc cancel and plan prompts so arrow-key pickers own stdin.
     escPaused <- newIORef False
-    stderrTty <- hIsTerminalDevice stderr
-    stdinTty <- hIsTerminalDevice stdin
-    stdoutTty <- hIsTerminalDevice stdout
-    terminal <- detectTerminalCapabilities stdout
-    useColor <- resolveColor stdout
+    stderrTty <-
+        if background then pure False else hIsTerminalDevice stderrHandle
+    stdinTty <- if background then pure False else hIsTerminalDevice stdin
+    stdoutTty <-
+        if background then pure False else hIsTerminalDevice stdoutHandle
+    terminal <- detectTerminalCapabilities stdoutHandle
+    useColor <- if background then pure False else resolveColor stdoutHandle
     agentSnapshotRef <- newIORef (pure (AgentRoot, []))
     agentSelectRef <- newIORef (\_ -> pure ())
     restartEffortActionRef <- newIORef (\_ -> pure ())
@@ -1150,14 +1223,14 @@ prepareAgentIteration
                     (\level ->
                         readIORef restartEffortActionRef >>= ($ level))
                     (noteFullscreenCtrlC interrupt)
-                    (copyTerminalClipboard terminal stdout)
-                    (setCliWindowTitle stdoutTty stdout)
+                    (copyTerminalClipboard terminal stdoutHandle)
+                    (setCliWindowTitle stdoutTty stdoutHandle)
                     (\active ->
                         when
                             (terminal.terminalNativeProgress
                                 && nativeProgressAnimationEnabled
                                     options.optMotionMode) $
-                            setNativeProgress stderr active)
+                            setNativeProgress stderrHandle active)
                     (readIORef agentSnapshotRef >>= id)
                     (\target -> readIORef agentSelectRef >>= ($ target))
                     (do
@@ -1181,7 +1254,7 @@ prepareAgentIteration
                             case fullscreen of
                                 Just _ -> pure ()
                                 Nothing ->
-                                    putTextLn stderr "Creating worktree…"
+                                    putTextLn stderrHandle "Creating worktree…"
                             createWorktree source (worktreeRoot home)
                                 >>= either
                                     (\err -> do
@@ -1193,10 +1266,10 @@ prepareAgentIteration
                                                     (StartupFailure
                                                         (Text.unpack err)))
                                     (\path -> do
-                                        color <- resolveColor stderr
+                                        color <- resolveColor stderrHandle
                                         case fullscreen of
                                             Nothing ->
-                                                putTextLn stderr
+                                                putTextLn stderrHandle
                                                     (roleMuted color
                                                         (glyphSession
                                                             <> "worktree: "
@@ -1211,9 +1284,9 @@ prepareAgentIteration
                                             "Loading project…"
                                         pure path)
                         | otherwise -> pure initialCwd
-                setCurrentDirectory cwd
+                unless background (setCurrentDirectory cwd)
                 terminalCwd <- decodeFS cwd
-                reportTerminalCwd terminal stdout terminalCwd
+                reportTerminalCwd terminal stdoutHandle terminalCwd
                 toolEnv <- defaultToolEnv cwd
                 writeIORef cancelToolRef (requestCancel toolEnv.toolCancel)
                 forM_ fullscreen \runtime ->
@@ -1235,6 +1308,9 @@ prepareAgentIteration
                         , startupUiRuntimeRef = uiRuntimeRef
                         , startupFullscreen = fullscreen
                         , startupTerminal = terminal
+                        , startupStdout = stdoutHandle
+                        , startupStderr = stderrHandle
+                        , startupBackground = background
                         , startupUseColor = useColor
                         , startupStderrTty = stderrTty
                         , startupStdinTty = stdinTty
@@ -1250,7 +1326,7 @@ prepareAgentIteration
                         , startupSessionState = sessionState
                         }
                 runAgentInitialized
-                    mcpSupervisor
+                    processRuntime
                     options
                     transition
                     home
@@ -1269,6 +1345,16 @@ prepareAgentIteration
         , preparedRun = action `finally` cleanup
         }
 
+releasePreparationResources
+    :: IORef (Maybe SessionLock)
+    -> IORef (Maybe Store)
+    -> IO ()
+releasePreparationResources resumeLockRef databaseStoreRef = do
+    atomicModifyIORef' resumeLockRef (\current -> (Nothing, current))
+        >>= mapM_ releaseSessionLock
+    atomicModifyIORef' databaseStoreRef (\current -> (Nothing, current))
+        >>= mapM_ closeStore
+
 resetFullscreenSessionActions :: FullscreenRuntime -> IO ()
 resetFullscreenSessionActions runtime =
     setFullscreenSessionActions
@@ -1284,7 +1370,8 @@ resetFullscreenSessionActions runtime =
         (const (pure ()))
 
 runFullscreenRestartLoop
-    :: MCP.McpSupervisor
+    :: AgentProcessRuntime
+    -> AgentRunMode
     -> FullscreenInputBuffer
     -> SessionState
     -> FullscreenRuntime
@@ -1293,7 +1380,8 @@ runFullscreenRestartLoop
     -> IO RunResult
     -> IO RunResult
 runFullscreenRestartLoop
-    mcpSupervisor
+    processRuntime
+    runMode
     fullscreenInputs
     sessionState
     runtime =
@@ -1317,7 +1405,11 @@ runFullscreenRestartLoop
                         Just failed
                             | failed.transitionCause == AutomaticFallback ->
                                 continueAutomaticFallback
-                                    (Just runtime) failed apiError >>= \case
+                                    runMode.runCwdHint
+                                    runMode.runStderr
+                                    (Just runtime)
+                                    failed
+                                    apiError >>= \case
                                     Just next -> do
                                         let nextOptions =
                                                 applyProviderTransition
@@ -1342,7 +1434,8 @@ runFullscreenRestartLoop
             UiSetNotice (Just (progressNotice "Retrying startup…"))
         try @_ @StartupFailure
             (prepareAgentIteration
-                mcpSupervisor
+                processRuntime
+                runMode
                 fullscreenInputs
                 sessionState
                 (Just runtime)
@@ -1378,7 +1471,7 @@ runFullscreenRestartLoop
                 _ -> pure RunQuit
 
 runAgentInitialized
-    :: MCP.McpSupervisor
+    :: AgentProcessRuntime
     -> CliOptions
     -> Maybe ProviderTransition
     -> OsPath
@@ -1389,13 +1482,13 @@ runAgentInitialized
     -> StartupRuntime
     -> IO RunResult
 runAgentInitialized
-        mcpSupervisor options transition home root resumed resumeLock cwd startup =
+        processRuntime options transition home root resumed resumeLock cwd startup =
     runAgentInitializedWithLock
-        mcpSupervisor options transition home root resumed resumeLock cwd startup
+        processRuntime options transition home root resumed resumeLock cwd startup
         `onException` mapM_ releaseSessionLock resumeLock
 
 runAgentInitializedWithLock
-    :: MCP.McpSupervisor
+    :: AgentProcessRuntime
     -> CliOptions
     -> Maybe ProviderTransition
     -> OsPath
@@ -1406,19 +1499,22 @@ runAgentInitializedWithLock
     -> StartupRuntime
     -> IO RunResult
 runAgentInitializedWithLock
-        mcpSupervisor
+        processRuntime
         options transition home root resumed resumeLock cwd startup = do
     let baseToolEnv = startup.startupToolEnv
+        mcpSupervisor = processRuntime.processMcpSupervisor
         interrupt = startup.startupInterrupt
         escPaused = startup.startupEscPaused
         uiRuntimeRef = startup.startupUiRuntimeRef
         fullscreen = startup.startupFullscreen
         isTty = startup.startupStdinTty
         stdoutTty = startup.startupStdoutTty
+        stdoutHandle = startup.startupStdout
+        stderrHandle = startup.startupStderr
         setWindowTitle title =
             case fullscreen of
                 Just runtime -> setFullscreenWindowTitle runtime title
-                Nothing -> setCliWindowTitle stdoutTty stdout title
+                Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
     projectRoot <- resolveProjectRoot cwd
     stateDirectory <- decodeFS (home </> unsafeEncodeUtf ".haskell-agent")
     projectRootPath <- decodeFS projectRoot
@@ -1430,7 +1526,7 @@ runAgentInitializedWithLock
         concurrently
             (loadProjectSettings projectRoot)
             (concurrently
-                (loadModelCatalog home)
+                (loadModelCatalogAt home cwd)
                 (detectGitBranch cwd))
     catalog <- either
         (startupDie startup . Text.unpack)
@@ -1808,8 +1904,15 @@ runAgentInitializedWithLock
         loadHarnessConfig home >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right config -> pure config
-    let basePlanHooks =
-            cliPlanHooks interrupt escPaused (resolveColor stderr)
+    let basePlanHooks
+            | startup.startupBackground =
+                PlanModeHooks
+                    { planConfirmEnter = \_ -> pure False
+                    , planDecideExit = \_ -> pure PlanCancel
+                    , planAskQuestion = \_ _ -> pure Nothing
+                    }
+            | otherwise =
+                cliPlanHooks interrupt escPaused (resolveColor stderrHandle)
         planHooks = fullscreenAwarePlanHooks uiRuntimeRef basePlanHooks
         baseSecretHooks = SecretPromptHooks \request ->
             Right <$> promptSecretLine
@@ -1933,7 +2036,6 @@ runAgentInitializedWithLock
     when (isNothing transition) $
         saveProjectModel projectRoot
             inferredTarget { targetDialect = dialectId }
-    sessionProcessManager <- newSessionProcessManager root
     activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
@@ -2008,7 +2110,7 @@ runAgentInitializedWithLock
     persist <-
         preparePersistence
             (trustedPool startup.startupDatabaseStore)
-            fullscreen options root
+            startup options root
                 inferredTarget { targetDialect = dialectId }
                 (isNothing transition) cwd effort promptText resumed
     writeIORef persistSlotRef persist
@@ -2199,11 +2301,32 @@ runAgentInitializedWithLock
             , toolsLaunchTurn = \handle message -> do
                 ghciEnabled <- readIORef ghciEnabledRef
                 bashEnabled <- readIORef bashEnabledRef
-                launchSessionTurn sessionProcessManager
-                    (not (isOneShot options)) policy
-                    ghciEnabled bashEnabled handle message
+                let action =
+                        runInProcessSessionTurn
+                            processRuntime
+                            options
+                            policy
+                            ghciEnabled
+                            bashEnabled
+                            handle
+                            message
+                if isOneShot options
+                    then
+                        try @_ @SomeException action >>= \case
+                            Left err -> pure (Left (formatException err))
+                            Right (Left err) -> pure (Left err)
+                            Right (Right ()) ->
+                                pure
+                                    (Right
+                                        ("completed session "
+                                            <> handle.sessionMeta.metaId))
+                    else
+                        launchSessionThread
+                            processRuntime.processSessionThreads
+                            handle.sessionMeta.metaId
+                            action
             , toolsSessionStatus =
-                sessionProcessStatus sessionProcessManager
+                sessionThreadStatus processRuntime.processSessionThreads
             }
         mcpTools =
             if null mcpServerConfigs
@@ -2261,18 +2384,16 @@ runAgentInitializedWithLock
         closeAll =
             closeAgents
                 `finally`
-                    (closeSessionProcessManager sessionProcessManager
+                    ((readIORef activeSessionLock
+                        >>= mapM_ releaseSessionLock)
                         `finally`
-                            ((readIORef activeSessionLock
-                                >>= mapM_ releaseSessionLock)
+                            (closeExtraTools
                                 `finally`
-                                    (closeExtraTools
+                                    (MCP.releaseMcpFleetLease mcpLease
                                         `finally`
-                                            (MCP.releaseMcpFleetLease mcpLease
+                                            (coding.codingClose
                                                 `finally`
-                                                    (coding.codingClose
-                                                        `finally`
-                                                            cleanupScratch)))))
+                                                    cleanupScratch))))
     flip finally closeAll do
         case
                 mcpToolCollision
@@ -2351,6 +2472,7 @@ runAgentInitializedWithLock
         markStartupStage startup "Loading instructions…"
         startupContext <-
             loadAgentsContext
+                stderrHandle
                 fullscreen
                 options
                 dialect
@@ -2387,8 +2509,13 @@ runAgentInitializedWithLock
             PersistenceDisabled -> pure ()
         progName <- getProgName
         markStartupStage startup "Connecting to provider…"
-        withCtrlCHandler interrupt $
-            withInterruptResume fullscreen progName persist RunQuit do
+        let runWithInterruptHandling action
+                | startup.startupBackground = action
+                | otherwise =
+                    withCtrlCHandler interrupt $
+                        withInterruptResume
+                            fullscreen progName persist RunQuit action
+        runWithInterruptHandling do
                 let shouldProbeAtStartup =
                         isJust fullscreen
                             && isNothing transition
@@ -2762,6 +2889,7 @@ runAgentInitializedWithLock
                                             , isProviderUnavailable err ->
                                                 chooseStartupProviderTransition
                                                     catalog
+                                                    cwd
                                                     fullscreen
                                                     (tokenProviderBillingMode
                                                         tokenProvider)
@@ -2872,8 +3000,8 @@ runAgentInitializedWithLock
                                             (UiSystemMessage
                                                 "Claude Code is in non-blocking restricted mode; restart with --yolo to bypass Claude Code permission checks.")
                                     Nothing -> do
-                                        color <- resolveColor stderr
-                                        putTextLn stderr $
+                                        color <- resolveColor stderrHandle
+                                        putTextLn stderrHandle $
                                             roleWarn color $
                                                 glyphWarn
                                                     <> "Claude Code is restricted; restart with --yolo to bypass Claude Code permission checks."
@@ -3016,7 +3144,7 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
 
 preparePersistence
     :: StorePool
-    -> Maybe FullscreenRuntime
+    -> StartupRuntime
     -> CliOptions
     -> OsPath
     -> ModelTarget
@@ -3027,7 +3155,7 @@ preparePersistence
     -> Maybe (SessionMeta, [SessionTurn])
     -> IO Persistence
 preparePersistence
-        sessionPool fullscreen options root target
+        sessionPool startup options root target
         retargetResumed cwd effort prompt resumed =
     case resumed of
         Just (meta, _) -> do
@@ -3092,10 +3220,10 @@ preparePersistence
                     handle.sessionMetaPath
                     activeMeta
             let message = "session: " <> activeMeta.metaId <> " (resumed)"
-            case fullscreen of
+            case startup.startupFullscreen of
                 Nothing -> do
-                    color <- resolveColor stderr
-                    putTextLn stderr
+                    color <- resolveColor startup.startupStderr
+                    putTextLn startup.startupStderr
                         (roleMuted color (glyphSession <> message))
                 Just runtime ->
                     emitUiEvent runtime (UiSystemMessage message)
@@ -3159,12 +3287,6 @@ printResumeHint progName = \case
 shouldPersist :: CliOptions -> Bool
 shouldPersist options = not (isOneShot options) || options.optSaveSession
 
-isJustCwd :: CliOptions -> Bool
-isJustCwd options = case options.optCwd of
-    Just _ -> True
-    Nothing -> False
-
-
 sessionRunnerContinuation :: SessionRunner.SessionRunnerContinuation
 sessionRunnerContinuation =
     SessionRunner.SessionRunnerContinuation
@@ -3177,7 +3299,6 @@ sessionRunnerContinuation =
         , runnerRunSessionRecap = runSessionRecap
         , runnerRunSessionTurnSummary = runSessionTurnSummary
         }
-
 runSession
     :: SessionRequest
     -> SessionBackend
@@ -3208,8 +3329,9 @@ finishTurn = SessionLifecycle.finishTurn sessionContinuation
 runSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
 runSessionRecap registerCancel env kind = do
     let fullscreen = env.sessionFullscreen
+        stdoutHandle = env.sessionRender.renderStdout
     transcriptRef <- newIORef =<< readLiveTranscript env.sessionConversation
-    color <- resolveColor stdout
+    color <- resolveColor stdoutHandle
     transcript <- readIORef transcriptRef
     let mainTurns = mainTurnCount transcript
         hasMessages = mainTurns > 0
@@ -3237,11 +3359,13 @@ runSessionRecap registerCancel env kind = do
                             then
                                 withTurnCancel env.sessionInterrupt cancel $
                                     case fullscreen of
-                                        Nothing ->
-                                            withEscCancel
-                                                cancel
-                                                env.sessionEscPaused
-                                                action
+                                        Nothing
+                                            | env.sessionBackground -> action
+                                            | otherwise ->
+                                                withEscCancel
+                                                    cancel
+                                                    env.sessionEscPaused
+                                                    action
                                         Just _ -> action
                             else action)
                     env.sessionBtwBackend
@@ -3309,7 +3433,7 @@ displayRecap env color summary =
         Just runtime ->
             emitUiEvent runtime (UiRecapReady summary)
         Nothing ->
-            putTextLn stdout (roleMuted color message)
+            putTextLn env.sessionRender.renderStdout (roleMuted color message)
 
 recapUnavailable :: SessionEnv -> Bool -> IO ()
 recapUnavailable env hasMessages =
@@ -3317,12 +3441,13 @@ recapUnavailable env hasMessages =
 
 recapFailed :: SessionEnv -> Text -> IO ()
 recapFailed env message = do
-    color <- resolveColor stderr
+    let stderrHandle = env.sessionRender.renderStderr
+    color <- resolveColor stderrHandle
     case env.sessionFullscreen of
         Just runtime ->
             emitUiEvent runtime (UiRecapUnavailable message)
         Nothing ->
-            putTextLn stderr (roleMuted color message)
+            putTextLn stderrHandle (roleMuted color message)
 
 runSessionTurnSummary :: SessionEnv -> IO ()
 runSessionTurnSummary env = do
@@ -5292,5 +5417,5 @@ putImagePreview previewIdRef color images = do
 putTrailingNewline :: RenderConfig -> IO ()
 putTrailingNewline render = do
     didPrint <- renderPrintedText render
-    if didPrint then putStrLn "" else pure ()
+    when didPrint (putTextLn render.renderStdout "")
 
