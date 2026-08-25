@@ -51,13 +51,12 @@ import qualified Data.Text.IO as Text
 import System.Directory.OsPath
     ( doesDirectoryExist
     , doesFileExist
-    , getTemporaryDirectory
     , removeFile
     )
 import System.IO (hClose)
-import System.OsPath (OsPath, unsafeEncodeUtf, (<.>), (</>))
+import System.IO.Temp (getCanonicalTemporaryDirectory, openTempFile)
+import System.OsPath (OsPath, unsafeEncodeUtf, (<.>))
 import System.Posix.Files (ownerReadMode, ownerWriteMode, setFileMode, unionFileModes)
-import System.Posix.Temp (mkstemp)
 
 data PersistentShell = PersistentShell
     { shellCwd :: !OsPath
@@ -107,9 +106,9 @@ newGrokSession env = do
   where
     acquireEnvFile =
         mask \restore -> do
-            tmp <- getTemporaryDirectory
+            tmp <- getCanonicalTemporaryDirectory
             (envFileRaw, handle) <- restore $
-                mkstemp (unsafeToFilePath (tmp </> unsafeEncodeUtf "agent-grok-env"))
+                openTempFile tmp "agent-grok-env"
             let envFile = unsafeEncodeUtf envFileRaw
             let rollback = do
                     void $ tryAny (hClose handle)
