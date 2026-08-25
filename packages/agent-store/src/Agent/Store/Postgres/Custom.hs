@@ -30,7 +30,7 @@ module Agent.Store.Postgres.Custom
 import Control.Monad (forM_, unless)
 import qualified Data.ByteString as ByteString
 import Data.Functor.Contravariant ((>$<))
-import Data.Int (Int32, Int64)
+import Data.Int (Int32)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -61,77 +61,7 @@ import Agent.Store.Postgres.Custom.Sql
     ( normalizeCustomExecution
     , normalizeCustomQuery
     )
-
-data QueryLimits = QueryLimits
-    { queryMaxRows :: !Int64
-    , queryMaxOutputBytes :: !Int
-    , queryStatementTimeoutMs :: !Int
-    , queryLockTimeoutMs :: !Int
-    }
-    deriving (Eq, Show)
-
-defaultQueryLimits :: QueryLimits
-defaultQueryLimits = QueryLimits
-    { queryMaxRows = 500
-    , queryMaxOutputBytes = 100000
-    , queryStatementTimeoutMs = 30000
-    , queryLockTimeoutMs = 5000
-    }
-
-data CatalogObject = CatalogObject
-    { catalogObjectKind :: !Text
-    , catalogObjectName :: !Text
-    , catalogObjectDefinition :: !CatalogDefinition
-    }
-    deriving (Eq, Show)
-
-data CatalogDefinition = CatalogDefinition
-    { definitionOwner :: !(Maybe Text)
-    , definitionComment :: !(Maybe Text)
-    , definitionView :: !(Maybe Text)
-    , definitionColumns :: ![CatalogColumn]
-    , definitionConstraints :: ![CatalogConstraint]
-    , definitionIndexes :: ![CatalogIndex]
-    }
-    deriving (Eq, Show)
-
-data CatalogColumn = CatalogColumn
-    { columnName :: !Text
-    , columnType :: !Text
-    , columnNullable :: !Bool
-    , columnDefault :: !(Maybe Text)
-    , columnIdentity :: !(Maybe Text)
-    , columnGenerated :: !(Maybe Text)
-    , columnComment :: !(Maybe Text)
-    }
-    deriving (Eq, Show)
-
-data CatalogConstraint = CatalogConstraint
-    { constraintName :: !Text
-    , constraintType :: !Text
-    , constraintDefinition :: !Text
-    }
-    deriving (Eq, Show)
-
-data CatalogIndex = CatalogIndex
-    { indexName :: !Text
-    , indexDefinition :: !Text
-    }
-    deriving (Eq, Show)
-
-data CustomAuditContext = CustomAuditContext
-    { customAuditSessionId :: !(Maybe Text)
-    , customAuditAgentId :: !(Maybe Text)
-    }
-    deriving (Eq, Show)
-
-data CustomExecutionResult = CustomExecutionResult
-    { customExecutionAuditId :: !Text
-    , customExecutionCatalogBefore :: ![CatalogObject]
-    , customExecutionCatalogAfter :: ![CatalogObject]
-    , customExecutionWarning :: !(Maybe Text)
-    }
-    deriving (Eq, Show)
+import Agent.Store.Postgres.Custom.Types
 
 inspectCustomSchema
     :: Pool
