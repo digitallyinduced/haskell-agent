@@ -48,6 +48,7 @@ module Agent.CLI.TUI.App
     , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
+    , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
@@ -566,26 +567,48 @@ setFullscreenImagePreviews runtime images = do
     prepared <-
         if map fst previous == images
             then pure previous
-            else do
-                let next =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
-                -- ANSI previews force the sampled image during Brick drawing.
-                -- Build that sample here on the model worker instead of
-                -- stalling the Brick event/render thread.
-                unless runtime.runtimeNativeImagePreviews $
-                    mapM_
-                        (\(_, preview) ->
-                            void $
-                                pure $!
-                                    pixelAt preview.previewSample 0 0)
-                        next
-                pure next
+            else prepareFullscreenImagePreviews runtime images
     enqueueAppEvent runtime (AppSetImagePreviews prepared)
+
+-- | Move pending composer previews into the next submitted user message.
+commitFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+commitFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else prepareFullscreenImagePreviews runtime images
+    -- Submitted images use the ANSI renderer even when the transient overlay
+    -- used Kitty placement, so finish sampling before the Brick render thread.
+    mapM_
+        (\(_, preview) ->
+            void $ pure $! pixelAt preview.previewSample 0 0)
+        prepared
+    enqueueAppEvent runtime (AppCommitImagePreviews prepared)
+
+prepareFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO [(ImageAttachment, TuiImagePreview)]
+prepareFullscreenImagePreviews runtime images = do
+    let prepared =
+            mapMaybe
+                (\image ->
+                    case prepareTuiImagePreview image of
+                        Left _ -> Nothing
+                        Right preview -> Just (image, preview))
+                images
+    -- ANSI previews force the sampled image during Brick drawing. Build that
+    -- sample here on the model worker instead of stalling the render thread.
+    unless runtime.runtimeNativeImagePreviews $
+        mapM_
+            (\(_, preview) ->
+                void $ pure $! pixelAt preview.previewSample 0 0)
+            prepared
+    pure prepared
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -1046,6 +1069,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appKillBuffer = ""
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
+        , appSubmittedImagePreviews = Map.empty
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
         , appAgentHover = Nothing
@@ -3131,7 +3155,7 @@ drawBlock state target ui block =
                             , timestampedMessage
                                 Theme.userMutedAttr
                                 block.blockTimestamp
-                                (terminalTxtWrap block.blockBody)
+                                (submittedUserMessage state target block)
                             ]
             BlockAssistant ->
                 padLeft (Pad 3) $
@@ -3218,6 +3242,39 @@ drawBlock state target ui block =
                 (codeCopyCacheState state target block.blockId))
             rendered
         else rendered
+
+submittedUserMessage
+    :: AppState
+    -> AgentTarget
+    -> UiBlock
+    -> Widget Name
+submittedUserMessage state target block =
+    vBox $
+        [terminalTxtWrap block.blockBody]
+            <> case target of
+                AgentChild _ -> []
+                AgentRoot ->
+                    map submittedImage $
+                        Map.findWithDefault
+                            []
+                            block.blockId
+                            state.appSubmittedImagePreviews
+  where
+    submittedImage preview =
+        padTop (Pad 1) $
+            vBox
+                [ hLimit 36 (renderTuiImagePreview 36 12 preview)
+                , withAttr Theme.userMutedAttr $
+                    terminalTxt $
+                        "🖼 "
+                            <> preview.previewMime
+                            <> " · "
+                            <> Text.pack (show preview.previewSourceWidth)
+                            <> "×"
+                            <> Text.pack (show preview.previewSourceHeight)
+                            <> " · "
+                            <> formatImageSize preview.previewBytes
+                ]
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body
@@ -4089,6 +4146,7 @@ applyConversationUiEvent renderedContentHeight uiEvent state =
                 , appHistorySelectedBlock = Nothing
                 , appHistoryLiveStart = Nothing
                 , appNextHistoryBlockId = -1
+                , appSubmittedImagePreviews = Map.empty
                 }
         _ -> state
 
@@ -4418,6 +4476,29 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
+    AppEvent (AppCommitImagePreviews prepared) -> do
+        state <- get
+        let previews = map snd prepared
+            nextBlockId = BlockId state.appUi.uiNextBlockId
+            submitted =
+                if null previews
+                    then Map.delete
+                        nextBlockId
+                        state.appSubmittedImagePreviews
+                    else Map.insert
+                        nextBlockId
+                        previews
+                        state.appSubmittedImagePreviews
+        liftIO do
+            writeIORef state.appRuntime.runtimeImagePreviews []
+            modifyIORef'
+                state.appRuntime.runtimeImagePreviewRevision
+                (+ 1)
+        modify' \current ->
+            current
+                { appImagePreviews = []
+                , appSubmittedImagePreviews = submitted
+                }
     AppEvent (AppDictationFinished result) ->
         case result of
             Left message ->
