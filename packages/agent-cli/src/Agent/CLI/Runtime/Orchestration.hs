@@ -76,6 +76,7 @@ import Agent.CLI.ModelConfig
       loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelFor,
+      defaultModelOptionFor,
       rawModelOption,
       resolveConfiguredModel,
       resolvePersistedDialect,
@@ -120,11 +121,12 @@ import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback, isProviderUnavailable )
 import Agent.CLI.ProviderTransition
     ( applyProviderTransition,
-      ProviderTransition(transitionCause, transitionUnavailableProviders,
+      ProviderTransition(ProviderTransition, transitionCause,
+                         transitionUnavailableProviders,
                          transitionPendingTurn, transitionTarget,
                          transitionAccountSelectionId, transitionAccountId,
-                         transitionAutomaticBilling),
-      TransitionCause(AutomaticFallback) )
+                         transitionAutomaticBilling, transitionSessionId),
+      TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Recap ()
 import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Render ( putTextLn )
@@ -165,7 +167,7 @@ import Agent.CLI.Session
                   metaProvider),
       SessionTurn )
 import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
+import Agent.CLI.Session.Choices ( modelChoice )
 import Agent.CLI.Runtime.HistorySource
     ( emptyFullscreenHistoryPage
     , loadFullscreenHistoryPage
@@ -573,7 +575,77 @@ runAgent
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
-                let callbacks = RestartCallbacks
+                let chooseRecoveryModel nextOptions nextTransition = do
+                        home <- getHomeDirectory
+                        cwd <- case nextOptions.optCwd <|> runMode.runCwdHint of
+                            Nothing -> getCurrentDirectory
+                            Just path -> makeAbsolute path
+                        loadModelCatalogAt home cwd >>= \case
+                            Left err -> pure (Left err)
+                            Right catalog -> do
+                                color <- resolveColor runMode.runStderr
+                                let currentTarget =
+                                        ((.transitionTarget) <$> nextTransition)
+                                            <|> ( (.modelTarget)
+                                                    <$> (nextOptions.optModel
+                                                        >>= resolveConfiguredModel
+                                                            catalog)
+                                                )
+                                            <|> ( (.modelTarget)
+                                                    <$> (nextOptions.optProvider
+                                                        >>= defaultModelOptionFor
+                                                            catalog)
+                                                )
+                                            <|> ( (.modelTarget)
+                                                    <$> defaultModelOptionFor
+                                                        catalog
+                                                        OpenAIProvider
+                                                )
+                                case currentTarget of
+                                    Nothing ->
+                                        pure
+                                            (Left
+                                                "No configured models are available.")
+                                    Just current ->
+                                        modelChoice
+                                            catalog
+                                            (Just runtime)
+                                            color
+                                            current.targetConnectionId
+                                            current.targetProvider
+                                            current.targetModelId
+                                            current.targetDialect >>= \case
+                                                Nothing ->
+                                                    pure (Right Nothing)
+                                                Just choice ->
+                                                    pure $ Right $ Just $
+                                                        recoveryModelTransition
+                                                            nextOptions
+                                                            nextTransition
+                                                            choice.modelTarget
+                    recoveryModelTransition nextOptions nextTransition target =
+                        case nextTransition of
+                            Just active ->
+                                active
+                                    { transitionTarget = target
+                                    , transitionAccountSelectionId = Nothing
+                                    , transitionAccountId = Nothing
+                                    , transitionUnavailableProviders = []
+                                    , transitionCause = ManualTransition
+                                    , transitionAutomaticBilling = Nothing
+                                    }
+                            Nothing ->
+                                ProviderTransition
+                                    { transitionTarget = target
+                                    , transitionAccountSelectionId = Nothing
+                                    , transitionAccountId = Nothing
+                                    , transitionSessionId = nextOptions.optResume
+                                    , transitionPendingTurn = Nothing
+                                    , transitionUnavailableProviders = []
+                                    , transitionCause = ManualTransition
+                                    , transitionAutomaticBilling = Nothing
+                                    }
+                    callbacks = RestartCallbacks
                         { restartPrepare =
                             \nextOptions nextTransition ->
                                 prepareAgentIteration
@@ -600,6 +672,7 @@ runAgent
                         , restartManageAccounts = do
                             color <- resolveColor stderr
                             runLoginManager color
+                        , restartChooseModel = chooseRecoveryModel
                         }
                 in
                 runFullscreen runtime $

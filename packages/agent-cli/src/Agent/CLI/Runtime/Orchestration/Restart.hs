@@ -34,6 +34,10 @@ data RestartCallbacks = RestartCallbacks
     , restartApplyTransition
         :: CliOptions -> ProviderTransition -> CliOptions
     , restartManageAccounts :: IO ()
+    , restartChooseModel
+        :: CliOptions
+        -> Maybe ProviderTransition
+        -> IO (Either Text (Maybe ProviderTransition))
     }
 
 runFullscreenRestartLoop
@@ -102,13 +106,26 @@ runFullscreenRestartLoop callbacks runtime =
             [ ( "Retry"
               , "Try loading credentials and account usage again"
               )
+            , ( "Choose model"
+              , "Pick a different model or provider"
+              )
             , ( "Manage"
               , "Connect, refresh, enable, or remove provider accounts"
               )
             , ("Exit", "Close the agent")
             ] >>= \case
                 Just 0 -> retryStartup options transition
-                Just 1 -> do
+                Just 1 ->
+                    callbacks.restartChooseModel options transition >>= \case
+                        Left err ->
+                            recoverStartup options transition err
+                        Right Nothing ->
+                            recoverStartup options transition message
+                        Right (Just next) ->
+                            retryStartup
+                                (callbacks.restartApplyTransition options next)
+                                (Just next)
+                Just 2 -> do
                     withFullscreenSuspended runtime
                         callbacks.restartManageAccounts
                     retryStartup options transition
