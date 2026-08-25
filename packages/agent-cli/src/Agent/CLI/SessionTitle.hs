@@ -31,7 +31,6 @@ import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (forever, void)
-import Data.IORef (IORef, newIORef, readIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -72,12 +71,12 @@ data SessionTitleManager = SessionTitleManager
     , titleRequested :: !(TVar (Set (Text, Int, Int)))
     , titleGenerations :: !(TVar (Map Text Int))
     , titleBackendFactory :: !BtwBackendFactory
-    , titleParams :: !(IORef ResponseCreateParams)
+    , titleParams :: !(IO ResponseCreateParams)
     }
 
 withSessionTitleManager
     :: BtwBackendFactory
-    -> IORef ResponseCreateParams
+    -> IO ResponseCreateParams
     -> (SessionTitleEvent -> IO ())
     -> (SessionTitleManager -> IO a)
     -> IO a
@@ -210,11 +209,10 @@ titleWorker onEvent manager = forever do
 
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
-    baseParams <- readIORef manager.titleParams
+    baseParams <- manager.titleParams
     let params = titleRequestParams baseParams
-    privateParams <- newIORef params
     let Backend submit =
-            manager.titleBackendFactory privateParams
+            manager.titleBackendFactory params
     timeout 45000000
         (submit [] Nothing
             [UserMessage (titlePrompt job.jobSource)] (\_ -> pure ()))

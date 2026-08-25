@@ -35,6 +35,7 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
+import Agent.CLI.Dictation (dictate, insertDictation)
 import Agent.CLI.Command
     ( SkillCommand
     , SlashCatalog(..)
@@ -62,7 +63,18 @@ import Agent.CLI.Terminal
     , kittyKeyboardPop
     , stripAnsi
     )
-import Control.Exception.Safe (bracket, bracket_, catchIO, throwIO, tryIO)
+import Agent.TUI.TextWidth
+    ( nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
+import Control.Exception.Safe
+    ( bracket
+    , bracket_
+    , catchIO
+    , throwIO
+    , tryAny
+    , tryIO
+    )
 import Control.Monad (unless, when)
 import Data.Char
     ( isSpace
@@ -298,12 +310,18 @@ readInlineEditor
             EditorBackspace -> continue history entries (backspace state)
             EditorDelete -> continue history entries (deleteAtCursor state)
             EditorLeft -> continue history entries state
-                { editorCursor = max 0 (state.editorCursor - 1)
+                { editorCursor =
+                    previousGraphemeBoundary
+                        state.editorText
+                        state.editorCursor
                 , editorSelected = 0
                 , editorSlashDismissed = False
                 }
             EditorRight -> continue history entries state
-                { editorCursor = min (Text.length state.editorText) (state.editorCursor + 1)
+                { editorCursor =
+                    nextGraphemeBoundary
+                        state.editorText
+                        state.editorCursor
                 , editorSelected = 0
                 , editorSlashDismissed = False
                 }
@@ -322,6 +340,32 @@ readInlineEditor
                 Text.hPutStr stdout "\ESC[2J\ESC[H"
                 redrawEditor prompt state
                 editorLoop history entries state
+            EditorDictate -> do
+                finishEditorLine prompt state
+                result <- tryAny dictate
+                case result of
+                    Left err ->
+                        Text.putStrLn
+                            ("dictation failed: " <> Text.pack (show err))
+                    Right _ ->
+                        Text.putStrLn "Dictation inserted."
+                let state' = case result of
+                        Left _ -> state
+                        Right transcript ->
+                            let (text, cursor) =
+                                    insertDictation
+                                        state.editorText
+                                        state.editorCursor
+                                        transcript
+                            in state
+                                { editorText = text
+                                , editorCursor = cursor
+                                , editorHistoryIndex = Nothing
+                                , editorHistoryDraft = text
+                                , editorSlashDismissed = False
+                                }
+                redrawEditor prompt state'
+                editorLoop history entries state'
             EditorPaste pasted -> do
                 finishEditorLine prompt state
                 let pastedState =
@@ -442,9 +486,13 @@ backspace :: EditorState -> EditorState
 backspace state
     | state.editorCursor <= 0 = state
     | otherwise =
-        let start = state.editorCursor - 1
+        let start =
+                previousGraphemeBoundary
+                    state.editorText
+                    state.editorCursor
             (before, rest) = Text.splitAt start state.editorText
-            (_, after) = Text.splitAt 1 rest
+            (_, after) =
+                Text.splitAt (state.editorCursor - start) rest
             text = before <> after
         in state
             { editorText = text
@@ -460,7 +508,11 @@ deleteAtCursor state
     | state.editorCursor >= Text.length state.editorText = state
     | otherwise =
         let (before, rest) = Text.splitAt state.editorCursor state.editorText
-            (_, after) = Text.splitAt 1 rest
+            end =
+                nextGraphemeBoundary
+                    state.editorText
+                    state.editorCursor
+            (_, after) = Text.splitAt (end - state.editorCursor) rest
             text = before <> after
         in state
             { editorText = text
@@ -575,6 +627,7 @@ readEditorKey = do
                 '\ETB' -> pure EditorKillWord
                 '\EM' -> pure EditorYank
                 '\FF' -> pure EditorClearScreen
+                '\DC2' -> pure EditorDictate
                 _
                     | char >= ' ' -> pure (EditorChar char)
                     | otherwise -> pure EditorIgnore

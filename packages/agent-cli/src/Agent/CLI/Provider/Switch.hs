@@ -20,6 +20,11 @@ import Agent.CLI.AccountSelection
     , providerSupportsUsageAccountSelection
     , selectProviderAccount
     )
+import Agent.CLI.Session.History
+    ( LiveConversation
+    , readLivePreviousResponseId
+    , writeLivePreviousResponseId
+    )
 import Agent.CLI.Auth
     ( LoadedAuth(..)
     , loadAuth
@@ -212,7 +217,7 @@ applyModelChange
     -> DialectId
     -> IORef ResponseCreateParams
     -> RenderConfig
-    -> IORef (Maybe Text)
+    -> IORef LiveConversation
     -> Persistence
     -> IO Text
 applyModelChange
@@ -229,8 +234,10 @@ applyModelChange
         }
     clearedChain <- case provider of
         OpenAIProvider ->
-            atomicModifyIORef' previous \prev ->
-                (Nothing, isJust prev)
+            do
+                prev <- readLivePreviousResponseId previous
+                writeLivePreviousResponseId previous Nothing
+                pure (isJust prev)
         _ -> pure False
     case persist of
         PersistenceDisabled -> pure ()

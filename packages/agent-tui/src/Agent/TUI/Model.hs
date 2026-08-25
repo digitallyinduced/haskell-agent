@@ -29,6 +29,7 @@ module Agent.TUI.Model
     , timestampNewMessageBlocks
     , progressNotice
     , successNotice
+    , visibleTodoList
     , uiNextDeadlineMillis
     , uiNeedsTick
     , warningNotice
@@ -36,12 +37,16 @@ module Agent.TUI.Model
     ) where
 
 import Agent.TUI.Presentation
-    ( formatSearchReplaceDiff
+    ( TodoDisplayLine
+    , formatSearchReplaceDiff
     , formatToolOutput
-    , todoCallPreview
+    , todoListFromToolOutput
+    , todoListHasInProgress
+    , todoListHasOpenWork
     , toolCallInput
     , toolCallTitle
     )
+import Agent.TUI.TextWidth (clampGraphemeCursor)
 import Agent.TUI.Motion
     ( completionStatusDurationMillis
     , transientNoticeDurationMillis
@@ -57,12 +62,15 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , canonicalToolName
     )
+import qualified Data.Foldable as Foldable
 import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 import Data.Sequence (Seq)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Char (isSpace)
+import Data.Maybe (fromMaybe)
 
 newtype BlockId = BlockId Int
     deriving (Eq, Ord, Show)
@@ -76,6 +84,7 @@ data BlockKind
     | BlockShell
     | BlockEdit
     | BlockSystem
+    | BlockRecap
     | BlockError
     deriving (Eq, Show)
 
@@ -181,6 +190,7 @@ data UiState = UiState
     , uiTurnStartBlock :: !Int
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
+    , uiTodos :: ![TodoDisplayLine]
     }
     deriving (Eq, Show)
 
@@ -209,6 +219,9 @@ data UiEvent
     | UiHistory !Text
     | UiAssistantHistory !Text
     | UiSystemMessage !Text
+    | UiRecapStarted
+    | UiRecapReady !Text
+    | UiRecapUnavailable !Text
     | UiErrorMessage !Text
     -- | Append an error whose retry guidance counts down in place.
     | UiRetryCountdown !Text !Int !Text
@@ -254,7 +267,17 @@ initialUiState = UiState
     , uiTurnStartBlock = 0
     , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
+    , uiTodos = []
     }
+
+-- | Checklist shown above the prompt during a turn, or while an item is still
+-- in progress. Pending-only lists hide once the session is idle so they do
+-- not linger into the next prompt.
+visibleTodoList :: UiState -> [TodoDisplayLine]
+visibleTodoList state
+    | todoListHasInProgress state.uiTodos = state.uiTodos
+    | state.uiRunning && todoListHasOpenWork state.uiTodos = state.uiTodos
+    | otherwise = []
 
 -- | Status-only blocks can appear before the first user turn, but the
 -- conversation is still empty from the user's perspective.
@@ -314,7 +337,7 @@ reduceUi event state = case event of
     UiSetDraft text cursor ->
         state
             { uiDraft = text
-            , uiCursor = max 0 (min (Text.length text) cursor)
+            , uiCursor = clampGraphemeCursor text cursor
             }
     UiSetPrompt prompt ->
         state { uiPrompt = prompt }
@@ -382,6 +405,22 @@ reduceUi event state = case event of
                 BlockComplete Nothing state
     UiSystemMessage message ->
         appendBlock BlockSystem "System" message "" BlockComplete Nothing state
+    UiRecapStarted ->
+        replaceOrAppendRecap "Generating recap…" BlockRunning state
+    UiRecapReady summary ->
+        replaceOrAppendRecap summary BlockComplete state
+    UiRecapUnavailable message ->
+        case latestRecapIndex state of
+            Just index ->
+                (removeBlockAt index state)
+                    { uiNotice = Just (warningNotice message)
+                    , uiNoticeElapsedMillis = 0
+                    }
+            Nothing ->
+                state
+                    { uiNotice = Just (warningNotice message)
+                    , uiNoticeElapsedMillis = 0
+                    }
     UiErrorMessage message ->
         (appendBlock BlockError "Error" message "" BlockFailed Nothing state)
             { uiRetryCountdown = Nothing }
@@ -420,6 +459,7 @@ reduceUi event state = case event of
             , uiAttemptStartBlock = 0
             , uiToolCalls = Map.empty
             , uiRetryCountdown = Nothing
+            , uiTodos = []
             }
     UiSetFollow follow ->
         state
@@ -645,30 +685,40 @@ reduceLoop event state = case event of
             , uiNoticeElapsedMillis = 0
             , uiAttemptStartBlock = Seq.length finalized.uiBlocks
             }
-    ToolStarted call ->
-        let
-            kind = toolBlockKind call.name
-            title = toolCallTitle call
-            blockIndex = Seq.length state.uiBlocks
-            body = case canonicalToolName call.name of
-                "search_replace" ->
-                    formatSearchReplaceDiff call.arguments
-                "todo_write" -> todoCallPreview call
-                "update_plan" -> todoCallPreview call
-                _ -> ""
-            detail = toolCallInput call
-        in appendBlock kind title body detail
-            BlockRunning (Just call.callId)
+    ToolStarted call
+        | isTodoTool call.name ->
             state
                 { uiRunning = True
                 , uiAwaitingInput = False
-                , uiActivity = title
+                , uiActivity = toolCallTitle call
                 , uiToolCalls =
                     Map.insert
                         call.callId
-                        (blockIndex, call)
+                        (Seq.length state.uiBlocks, call)
                         state.uiToolCalls
                 }
+        | otherwise ->
+            let
+                kind = toolBlockKind call.name
+                title = toolCallTitle call
+                blockIndex = Seq.length state.uiBlocks
+                body = case canonicalToolName call.name of
+                    "search_replace" ->
+                        formatSearchReplaceDiff call.arguments
+                    _ -> ""
+                detail = toolCallInput call
+            in appendBlock kind title body detail
+                BlockRunning (Just call.callId)
+                state
+                    { uiRunning = True
+                    , uiAwaitingInput = False
+                    , uiActivity = title
+                    , uiToolCalls =
+                        Map.insert
+                            call.callId
+                            (blockIndex, call)
+                            state.uiToolCalls
+                    }
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
@@ -678,6 +728,13 @@ reduceLoop event state = case event of
                 Just (_, call) ->
                     result
                         { output = formatToolOutput call result.output }
+            todos =
+                case activeCall of
+                    Just (_, call)
+                        | isTodoTool call.name ->
+                            fromMaybe state.uiTodos
+                                (todoListFromToolOutput result.output)
+                    _ -> state.uiTodos
             next =
                 state
                     { uiRunning = True
@@ -685,11 +742,14 @@ reduceLoop event state = case event of
                     , uiActivity = "Thinking…"
                     , uiToolCalls =
                         Map.delete result.callId state.uiToolCalls
+                    , uiTodos = todos
                     }
         in case activeCall of
             Nothing -> next
-            Just (blockIndex, _) ->
-                completeTool blockIndex displayed next
+            Just (blockIndex, _)
+                | blockIndex < Seq.length state.uiBlocks ->
+                    completeTool blockIndex displayed next
+            Just _ -> next
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
@@ -733,6 +793,56 @@ appendOrExtend kind title delta streamState state =
         _ ->
             appendBlock kind title delta "" streamState Nothing state
 
+replaceOrAppendRecap :: Text -> BlockState -> UiState -> UiState
+replaceOrAppendRecap body blockState state =
+    case latestRecapIndex state of
+        Just index ->
+            state
+                { uiBlocks =
+                    Seq.adjust
+                        (\block ->
+                            block
+                                { blockBody = body
+                                , blockState
+                                })
+                        index
+                        state.uiBlocks
+                }
+        Nothing ->
+            appendBlock BlockRecap "Recap" body "" blockState Nothing state
+
+latestRecapIndex :: UiState -> Maybe Int
+latestRecapIndex state =
+    case Seq.findIndexR ((== BlockRecap) . (.blockKind)) state.uiBlocks of
+        Just index -> Just index
+        Nothing -> Nothing
+
+selectedIndexFor :: Maybe BlockId -> Seq UiBlock -> Maybe Int
+selectedIndexFor selected remaining =
+    selected >>= \ident -> Seq.findIndexL ((== ident) . (.blockId)) remaining
+
+removeBlockAt :: Int -> UiState -> UiState
+removeBlockAt index state =
+    let remaining = Seq.deleteAt index state.uiBlocks
+        selected =
+            listToMaybe
+                [ block.blockId
+                | idx <- [min index (max 0 (Seq.length remaining - 1))]
+                , idx >= 0
+                , idx < Seq.length remaining
+                , let block = Seq.index remaining idx
+                ]
+    in state
+        { uiBlocks = remaining
+        , uiSelectedBlock = selected
+        , uiSelectedBlockIndex = selectedIndexFor selected remaining
+        , uiBlockIndices =
+            Map.fromList
+                [ (block.blockId, idx)
+                | (idx, block) <- zip [0 ..] (Foldable.toList remaining)
+                ]
+        }
+
 appendBlock
     :: BlockKind
     -> Text
@@ -754,7 +864,7 @@ appendBlock kind title body detail blockState callId state =
             , blockDetail = detail
             , blockState
             , blockExpanded =
-                kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockError]
+                kind `elem` [BlockUser, BlockAssistant, BlockSystem, BlockRecap, BlockError]
             , blockCallId = callId
             }
     in state
@@ -1031,6 +1141,10 @@ selectionAfterTruncate blocks selected =
         _ ->
             let index = Seq.length blocks - 1
             in (\block -> (index, block)) <$> Seq.lookup index blocks
+
+isTodoTool :: Text -> Bool
+isTodoTool name =
+    canonicalToolName name `elem` ["todo_write", "update_plan"]
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName

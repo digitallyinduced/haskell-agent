@@ -11,6 +11,7 @@ import Agent.CLI.AgentViewport
     ( AgentEntry
     , AgentTarget
     )
+import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Database.Store (DatabaseScopes)
@@ -51,10 +52,7 @@ import Agent.Provider
     , Provider
     , TokenProvider
     )
-import Agent.Responses.Types
-    ( ResponseCreateParams
-    , ResponseItem
-    )
+import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Skills
     ( SkillCatalog
     , SkillInvocation
@@ -84,6 +82,7 @@ import System.OsPath (OsPath)
 data SessionBackend = SessionBackend
     { backend :: !Backend
     , btwBackend :: !BtwBackendFactory
+    , resetBackendState :: !(IO ())
     }
 
 data SessionRequest = SessionRequest
@@ -110,9 +109,8 @@ data SessionRequest = SessionRequest
     , unavailableProviders :: ![Provider]
     , startupUnavailable :: !(Maybe (STM ApiError))
     , paramsRef :: !(IORef ResponseCreateParams)
-    , transcriptRef :: !(IORef [ResponseItem])
+    , conversationRef :: !(IORef LiveConversation)
     , initialTurns :: ![SessionTurn]
-    , previous :: !(IORef (Maybe Text))
     , persist :: !Persistence
     , projectRoot :: !OsPath
     , home :: !OsPath

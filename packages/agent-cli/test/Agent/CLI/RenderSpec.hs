@@ -30,6 +30,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "RenderState transitions" do
+        it "starts a fresh turn while retaining immutable defaults" do
+            let started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        emptyRenderState
+            stateStartedAt started `shouldSatisfy` (/= Nothing)
+            stateActivity started `shouldBe` "Thinking…"
+            stateToolCalls started `shouldBe` mempty
+
+        it "preserves an already-running thinking spinner across tool rounds" do
+            let visible =
+                    emptyRenderState
+                        { stateThinkingVisible = True
+                        , statePrintedText = True
+                        }
+                started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        visible
+            stateThinkingVisible started `shouldBe` True
+            statePrintedText started `shouldBe` False
+
+        it "streams markdown through a pure state transition" do
+            let (state1, first) = streamMarkdown "hello\n" emptyRenderState
+                (state2, second) = streamMarkdown "world\n" state1
+            statePrintedText state2 `shouldBe` False
+            first <> second `shouldSatisfy` Text.isInfixOf "hello"
+            first <> second `shouldSatisfy` Text.isInfixOf "world"
+
     describe "summarizeToolCall" do
         it "uses English verbs and argument highlights" do
             summarizeToolCall (functionToolCall "c1" "read_file" "{\"target_file\":\"src/A.hs\"}")
@@ -185,14 +215,14 @@ spec = do
                 `shouldSatisfy` Text.isInfixOf "delete src/Old.hs"
 
     describe "formatToolBody" do
-        it "previews the first todo_write item while the call is running" do
+        it "does not dump todo_write arguments into linear chrome" do
             formatToolBody False
                 (functionToolCall
                     "c1"
                     "todo_write"
                     "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\"},\
                     \{\"id\":\"2\",\"content\":\"Investigate Codex\"}]}")
-                `shouldBe` "❙ ┊ □ Find and clone repos"
+                `shouldBe` ""
 
     describe "formatLoopError" do
         it "explains a max-turn stop" do
@@ -310,17 +340,25 @@ spec = do
         it "keeps a live thinking status after the first tool" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted
-                visible <- readIORef config.renderThinkingVisible
+                visible <- stateThinkingVisible <$> readIORef config.renderState
                 visible `shouldBe` True
                 renderEvent config (ToolStarted (functionToolCall "c1" "list_dir" "{\"target_directory\":\".\"}"))
-                visibleAfter <- readIORef config.renderThinkingVisible
+                visibleAfter <- stateThinkingVisible <$> readIORef config.renderState
                 visibleAfter `shouldBe` True
-                activity <- readIORef config.renderActivityRef
+                activity <- stateActivity <$> readIORef config.renderState
                 activity `shouldBe` "Listed ."
                 hClose handle
                 body <- Text.readFile path
                 body `shouldSatisfy` (Text.isInfixOf "Thinking…")
                 body `shouldSatisfy` ("◆ Listed ." `Text.isInfixOf`)
+
+        it "reuses the live spinner when a tool round starts another turn" do
+            withRenderConfig True False \config _handle _path -> do
+                renderEvent config TurnStarted
+                first <- readIORef config.renderThinkingSpinner
+                renderEvent config TurnStarted
+                second <- readIORef config.renderThinkingSpinner
+                second `shouldBe` first
 
         it "shows retry activity on the live thinking status" do
             withRenderConfig True False \config handle path -> do
@@ -328,7 +366,7 @@ spec = do
                 renderEvent config
                     (ActivityUpdated
                         "Codex server error; retrying in 5s (attempt 1)…")
-                activity <- readIORef config.renderActivityRef
+                activity <- stateActivity <$> readIORef config.renderState
                 activity `shouldBe`
                     "Codex server error; retrying in 5s (attempt 1)…"
                 hClose handle
@@ -343,7 +381,7 @@ spec = do
                 renderEvent config
                     (WarningRaised
                         "Codex usage is low: primary 8% left.")
-                activity <- readIORef config.renderActivityRef
+                activity <- stateActivity <$> readIORef config.renderState
                 activity `shouldBe` "Thinking…"
                 hClose handle
                 body <- Text.readFile path
@@ -366,7 +404,7 @@ spec = do
                     , assistantText = Just "Complete"
                     , tokenUsage = emptyTokenUsage
                     })
-                activity <- readIORef config.renderActivityRef
+                activity <- stateActivity <$> readIORef config.renderState
                 activity `shouldBe` "Retrying response…"
                 hClose handle
                 body <- stripTerminalControls <$> Text.readFile path
@@ -405,7 +443,7 @@ spec = do
             withRenderConfig True False \config handle path -> do
                 let chunks = replicate 5000 "x"
                 mapM_ (renderEvent config . ReasoningDelta) chunks
-                buffered <- readIORef config.renderReasoningBuffer
+                buffered <- stateReasoningBuffer <$> readIORef config.renderState
                 textBufferToText buffered
                     `shouldBe` Text.replicate 5000 "x"
                 renderEvent config (TurnFinished TurnOutput
@@ -414,7 +452,7 @@ spec = do
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
                     })
-                readIORef config.renderReasoningBuffer
+                (stateReasoningBuffer <$> readIORef config.renderState)
                     `shouldReturn` emptyTextBuffer
                 hClose handle
                 body <- Text.readFile path
@@ -453,9 +491,9 @@ spec = do
                 renderEvent config (TextDelta "say **")
                 renderEvent config (TextDelta "hello")
                 renderEvent config (TextDelta "** there")
-                live <- readIORef config.renderLiveActive
+                live <- stateLiveActive <$> readIORef config.renderState
                 live `shouldBe` True
-                printed <- readIORef config.renderPrintedText
+                printed <- statePrintedText <$> readIORef config.renderState
                 printed `shouldBe` True
                 renderEvent config (TurnFinished TurnOutput
                     { responseId = "r1"
@@ -469,7 +507,8 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` (not . Text.isInfixOf "48;")
                 body `shouldSatisfy` (not . Text.isInfixOf "**")
-                readIORef config.renderLiveActive `shouldReturn` False
+                (stateLiveActive <$> readIORef config.renderState)
+                    `shouldReturn` False
 
         it "does not repaint earlier content across deltas" do
             withRenderConfig False True \config handle path -> do
@@ -522,6 +561,37 @@ spec = do
                     hClose handle
                     actual <- stripTerminalControls <$> Text.readFile path
                     actual `shouldBe` expected
+
+        it "preserves emoji graphemes split across streaming deltas" do
+            let womanTechnologist =
+                    Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                keycapOne =
+                    Text.pack ['1', '\xfe0f', '\x20e3']
+                usFlag =
+                    Text.pack ['\x1f1fa', '\x1f1f8']
+                source =
+                    "status "
+                        <> womanTechnologist
+                        <> " "
+                        <> keycapOne
+                        <> " "
+                        <> usFlag
+                expected =
+                    stripTerminalControls
+                        (renderAssistantText True source)
+            withRenderConfig False True \config handle path -> do
+                mapM_
+                    (renderEvent config . TextDelta . Text.singleton)
+                    (Text.unpack source)
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                hClose handle
+                actual <- stripTerminalControls <$> Text.readFile path
+                actual `shouldBe` expected
 
         it "does not expose fence or table markers while streaming" do
             withRenderConfig False True \config handle path -> do
@@ -589,7 +659,7 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "ok"
 
-        it "renders completed todo_write checklists with truncation" do
+        it "suppresses todo_write from linear scrollback" do
             withRenderConfig False False \config handle path -> do
                 let call =
                         functionToolCall
@@ -601,16 +671,13 @@ spec = do
                     { callId = "c1"
                     , output =
                         "- [completed] 1: Find and clone Grok Build and Codex repos\n\
-                        \- [completed] 2: Investigate how Grok Build summarizes completed sessions in TUI\n\
-                        \- [completed] 3: Investigate how Codex summarizes completed sessions in TUI\n\
-                        \- [pending] 4: Implement matching chrome"
+                        \- [pending] 2: Investigate Codex"
                     , callKind = FunctionCallKind
                     })
                 hClose handle
                 body <- Text.readFile path
-                body `shouldSatisfy` Text.isInfixOf "◆ todo_write"
-                body `shouldSatisfy` Text.isInfixOf "✓ Find and clone Grok Build and Codex repos"
-                body `shouldSatisfy` Text.isInfixOf "… +1 lines"
+                body `shouldNotSatisfy` Text.isInfixOf "todo_write"
+                body `shouldNotSatisfy` Text.isInfixOf "Find and clone"
                 body `shouldNotSatisfy` Text.isInfixOf "[completed]"
 
         it "keeps thinking plain when color is off" do
@@ -711,16 +778,9 @@ withRenderConfigNativeMode
     -> (RenderConfig -> Handle -> FilePath -> IO ())
     -> IO ()
 withRenderConfigNativeMode showThinking color native motionMode action = do
-    printed <- newIORef False
-    thinking <- newIORef False
     spinner <- newIORef Nothing
-    reasoningBuffer <- newIORef emptyTextBuffer
     modelRef <- newIORef "test-model"
-    activityRef <- newIORef "Thinking…"
-    startedAt <- newIORef Nothing
-    markdownState <- newIORef emptyMarkdownStreamState
-    liveActive <- newIORef False
-    toolCalls <- newIORef mempty
+    renderStateRef <- newIORef emptyRenderState
     lock <- newMVar ()
     tmp <- getTemporaryDirectory
     (path, handle) <- openTempFile tmp "agent-render-spec"
@@ -728,20 +788,13 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
         hSetBuffering handle NoBuffering
         let config = RenderConfig
                 { renderShowThinking = showThinking
-                , renderThinkingVisible = thinking
                 , renderThinkingSpinner = spinner
-                , renderReasoningBuffer = reasoningBuffer
+                , renderState = renderStateRef
                 , renderColor = color
-                , renderPrintedText = printed
-                , renderMarkdownState = markdownState
-                , renderLiveActive = liveActive
                 , renderLock = lock
                 , renderStdout = handle
                 , renderStderr = handle
                 , renderModelRef = modelRef
-                , renderActivityRef = activityRef
-                , renderStartedAt = startedAt
-                , renderToolCalls = toolCalls
                 , renderNativeProgress = native
                 , renderMotionMode = motionMode
                 }

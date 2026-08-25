@@ -55,6 +55,7 @@ data EditorState = EditorState
 data DisplayCell = DisplayCell
     { displayCellText :: !Text
     , displayCellWidth :: !Int
+    , displayCellSourceLength :: !Int
     }
 
 data EditorKey
@@ -77,6 +78,7 @@ data EditorKey
     | EditorKillWord
     | EditorYank
     | EditorClearScreen
+    | EditorDictate
     | EditorCycleMode
     | EditorClipboardPaste !(Maybe [ImageAttachment])
     | EditorPaste !Text

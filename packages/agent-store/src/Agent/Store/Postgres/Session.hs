@@ -89,6 +89,9 @@ data SessionMetadata = SessionMetadata
     , sessionMetadataInputTokens :: !Int64
     , sessionMetadataOutputTokens :: !Int64
     , sessionMetadataCachedTokens :: !Int64
+    , sessionMetadataLastRecap :: !(Maybe Text)
+    , sessionMetadataLastTurnSummary :: !(Maybe Text)
+    , sessionMetadataLastRecapMainTurns :: !Int64
     }
     deriving (Eq, Show)
 
@@ -176,6 +179,9 @@ sessionSchemaStatements =
       \ input_tokens bigint NOT NULL CHECK (input_tokens >= 0),\
       \ output_tokens bigint NOT NULL CHECK (output_tokens >= 0),\
       \ cached_tokens bigint NOT NULL CHECK (cached_tokens >= 0),\
+      \ last_recap text,\
+      \ last_turn_summary text,\
+      \ last_recap_main_turns bigint NOT NULL DEFAULT 0 CHECK (last_recap_main_turns >= 0),\
       \ next_event_sequence bigint NOT NULL DEFAULT 1,\
       \ next_turn_index bigint NOT NULL DEFAULT 0,\
       \ deleted_at timestamptz,\
@@ -653,10 +659,10 @@ insertSessionStatement = mkStatement
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
-    \ cached_tokens\
+    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns\
     \ ) VALUES (\
     \ $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,\
-    \ $14, $15, $16, $17, $18, $19, $20, $21, $22, $23\
+    \ $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26\
     \ ) RETURNING session_id::text"
     metadataParams
     (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
@@ -704,7 +710,8 @@ metadataUpdateSql =
     \ cwd = $14, effort = $15, title = $16, title_is_manual = $17,\
     \ title_refresh_index = $18, title_user_turns = $19,\
     \ last_response_id = $20, input_tokens = $21, output_tokens = $22,\
-    \ cached_tokens = $23"
+    \ cached_tokens = $23, last_recap = $24, last_turn_summary = $25,\
+    \ last_recap_main_turns = $26"
 
 insertEventStatement :: Statement EventInsert Text
 insertEventStatement = mkStatement
@@ -790,7 +797,8 @@ metadataSelectSql =
     \ legacy_target_effective_model, legacy_target_dialect,\
     \ cwd, effort, title, title_is_manual, title_refresh_index,\
     \ title_user_turns, last_response_id, input_tokens, output_tokens,\
-    \ cached_tokens FROM harness.sessions"
+    \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns\
+    \ FROM harness.sessions"
 
 loadTurnsManyStatement :: Statement [Text] [(Text, TurnRow)]
 loadTurnsManyStatement = mkStatement
@@ -947,6 +955,9 @@ metadataParams =
     <> ((.sessionMetadataInputTokens) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     <> ((.sessionMetadataOutputTokens) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     <> ((.sessionMetadataCachedTokens) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
+    <> ((.sessionMetadataLastRecap) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((.sessionMetadataLastTurnSummary) >$< Encoders.param (Encoders.nullable Encoders.text))
+    <> ((.sessionMetadataLastRecapMainTurns) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
   where
     legacyField
         :: (SessionLegacyTarget -> Text)
@@ -981,6 +992,9 @@ metadataRow =
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.int8)
         <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nonNullable Decoders.int8)
 
 decodeLegacyTarget

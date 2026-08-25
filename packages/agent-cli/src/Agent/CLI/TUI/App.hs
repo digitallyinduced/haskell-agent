@@ -56,6 +56,7 @@ module Agent.CLI.TUI.App
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
     , uiEventRestartsMotionSchedule
+    , applyTextPromptEdit
     , maskedSecretText
     , normalizeTextOverlayInsertion
     , textOverlayDisplayText
@@ -65,6 +66,7 @@ module Agent.CLI.TUI.App
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
+import Agent.CLI.Dictation (insertDictation)
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
@@ -164,6 +166,12 @@ import Agent.TUI.Markdown
     , markdownWidgetWithLinks
     , markdownWidgetWithSyntaxHighlightingAndLinks
     )
+import Agent.TUI.TextWidth
+    ( clampGraphemeCursor
+    , displayTerminalText
+    , nextGraphemeBoundary
+    , previousGraphemeBoundary
+    )
 import Agent.Syntax
     ( SyntaxHighlighter
     , loadSyntaxHighlighter
@@ -184,6 +192,7 @@ import Agent.TUI.Motion
 import Agent.TUI.Presentation
     ( TodoDisplayLine(..)
     , TodoDisplayStatus(..)
+    , liveTodoPanelLines
     , parseTodoList
     , permissionToolCallPrompt
     , todoStatusGlyph
@@ -203,6 +212,7 @@ import Brick.Widgets.Center (center, centerLayer, hCenter)
 import Codec.Picture (pixelAt)
 import Control.Concurrent.Async (wait, waitCatch, withAsync)
 import Control.Concurrent (threadDelay)
+import Control.Monad (forever, unless, void, when, (>=>))
 import Control.Concurrent.STM
     ( STM
     , atomically
@@ -218,7 +228,11 @@ import Control.Concurrent.STM
     , takeTMVar
     , writeTVar
     )
-import Control.Monad (unless, void, when)
+import Agent.CLI.Recap
+    ( autoRecapAwayThreshold
+    , autoRecapIdleThreshold
+    , autoRecapRetryInterval
+    )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
 import Control.Exception.Safe (finally, onException, throwIO, tryAny)
@@ -321,6 +335,7 @@ newFullscreenRuntimeWithSyntaxLoader
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = const (pure ())
+            , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -335,6 +350,8 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
+            , runtimeRecap =
+                readIORef sessionActions >>= (.sessionRecap)
             , runtimeRestartEffort = \level ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionRestartEffort level
@@ -370,6 +387,7 @@ setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
     -> (Text -> IO ())
+    -> IO ()
     -> (Text -> IO ())
     -> IO CtrlCDecision
     -> IO (AgentTarget, [AgentEntry])
@@ -379,6 +397,7 @@ setFullscreenSessionActions
     runtime
     cancelAction
     btwAction
+    recapAction
     restartEffortAction
     ctrlCAction
     agentSnapshot
@@ -386,6 +405,7 @@ setFullscreenSessionActions
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
             { sessionCancel = cancelAction
             , sessionBtw = btwAction
+            , sessionRecap = recapAction
             , sessionRestartEffort = restartEffortAction
             , sessionCtrlC = ctrlCAction
             , sessionAgentSnapshot = agentSnapshot
@@ -728,6 +748,8 @@ runFullscreen runtime workerAction = do
             -- when rendered attributes contain URLs.
             when (V.supportsMode output V.Hyperlink) $
                 V.setMode output V.Hyperlink True
+            when (V.supportsMode output V.Focus) $
+                V.setMode output V.Focus True
             wrapNativePreviewVty runtime vty
                 >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
     initialVty <- buildVty
@@ -749,9 +771,10 @@ runFullscreen runtime workerAction = do
         withAsync uiTicker \_uiTicker ->
             withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
                 withAsync (eventPump runtime) \_eventPump ->
-                    withAsync
-                        (loadSyntaxHighlighterForRuntime runtime)
-                        \_syntaxLoader ->
+                    withAsync (recapTicker runtime) \_recapTicker ->
+                        withAsync
+                            (loadSyntaxHighlighterForRuntime runtime)
+                            \_syntaxLoader ->
                             withAsync
                                 (void (waitCatch worker)
                                     >> enqueueAppEvent runtime AppStop)
@@ -779,6 +802,10 @@ runFullscreen runtime workerAction = do
                                                     }
                                     wait worker
   where
+    recapTicker _runtime = forever do
+        threadDelay 20_000_000
+        enqueueAppEvent runtime AppRecapPoll
+
     uiTicker = waitForDemand
       where
         waitForDemand = do
@@ -866,6 +893,10 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appPressedControl = Nothing
         , appWorkerStopped = False
         , appConversationAnchor = Nothing
+        , appFocusLostAt = Nothing
+        , appAutoRecapShownThisAway = False
+        , appLastAutoRecapAttemptAt = Nothing
+        , appLastTurnCompletedAt = Nothing
         , appConversationReflowQueued = False
         , appWindowTitle = Nothing
         , appMotionElapsedMillis = 0
@@ -1529,7 +1560,7 @@ resolveChoice confirmed = do
     resumeNativeProgressIfRunning
 
 handleTextPromptKey :: V.Event -> EventM Name AppState ()
-handleTextPromptKey = \case
+handleTextPromptKey event = case event of
     V.EvKey V.KEsc [] -> resolveTextPrompt False
     V.EvKey (V.KChar 'c') modifiers
         | V.MCtrl `elem` modifiers -> do
@@ -1537,11 +1568,6 @@ handleTextPromptKey = \case
             _ <- handleCtrlC
             when state.appUi.uiRunning (resolveTextPrompt False)
     V.EvKey V.KEnter [] -> resolveTextPrompt True
-    V.EvKey V.KEnter [V.MShift] -> do
-        state <- get
-        case (.textInputMode) <$> state.appTextPrompt of
-            Just TextInputPlain -> insert "\n"
-            _ -> pure ()
     V.EvKey V.KPageUp [] ->
         vScrollPage (viewportScroll OverlayViewport) Up
     V.EvKey V.KPageDown [] ->
@@ -1550,67 +1576,94 @@ handleTextPromptKey = \case
         vScrollBy (viewportScroll OverlayViewport) (-mouseScrollLines)
     V.EvMouseDown _ _ V.BScrollDown _ ->
         vScrollBy (viewportScroll OverlayViewport) mouseScrollLines
-    V.EvKey V.KBS [] -> edit \draft cursor ->
-        if cursor <= 0
-            then (draft, cursor)
-            else
-                ( Text.take (cursor - 1) draft <> Text.drop cursor draft
-                , cursor - 1
-                )
-    V.EvKey V.KDel [] -> edit \draft cursor ->
-        if cursor >= Text.length draft
-            then (draft, cursor)
-            else
-                ( Text.take cursor draft <> Text.drop (cursor + 1) draft
-                , cursor
-                )
-    V.EvKey V.KLeft [] -> move (-1)
-    V.EvKey V.KRight [] -> move 1
-    V.EvKey V.KHome [] -> edit \draft cursor ->
-        (draft, lineStartCursor draft cursor)
-    V.EvKey V.KEnd [] -> edit \draft cursor ->
-        (draft, lineEndCursor draft cursor)
-    V.EvKey (V.KChar 'w') modifiers
-        | V.MCtrl `elem` modifiers ->
-            edit deleteWordBefore
-    V.EvKey (V.KChar 'u') modifiers
-        | V.MCtrl `elem` modifiers ->
-            edit deleteToLineStart
-    V.EvKey (V.KChar 'k') modifiers
-        | V.MCtrl `elem` modifiers ->
-            edit deleteToLineEnd
-    V.EvKey (V.KChar character) [] ->
-        insertForMode (Text.singleton character)
-    V.EvPaste bytes ->
-        insertForMode (Composer.decodePaste bytes)
-    _ -> pure ()
-  where
-    insertForMode raw = do
-        state <- get
-        let mode =
-                maybe TextInputPlain (.textInputMode) state.appTextPrompt
-        insert (normalizeTextOverlayInsertion mode raw)
-    edit change =
+    _ ->
         modify' \state ->
             state
                 { appTextPrompt =
                     (\prompt ->
-                        let (draft, cursor) =
-                                change prompt.textDraft prompt.textCursor
-                        in prompt
-                            { textDraft = draft
-                            , textCursor =
-                                max 0 (min (Text.length draft) cursor)
-                            })
+                        fromMaybe prompt (applyTextPromptEdit event prompt))
                         <$> state.appTextPrompt
                 }
-    insert inserted =
-        edit \draft cursor ->
+
+-- | Apply one text-editing key to a fullscreen prompt overlay.
+--
+-- Cursor offsets are normalized to grapheme boundaries before and after the
+-- edit so movement, deletion, and rendering agree for multi-code-point glyphs.
+applyTextPromptEdit :: V.Event -> TextOverlay -> Maybe TextOverlay
+applyTextPromptEdit event prompt = case event of
+    V.EvKey V.KEnter [V.MShift] ->
+        Just $
+            if prompt.textInputMode == TextInputPlain
+                then insert "\n"
+                else prompt
+    V.EvKey V.KBS [] ->
+        Just $ edit \draft cursor ->
+            let previous = previousGraphemeBoundary draft cursor
+            in ( Text.take previous draft <> Text.drop cursor draft
+               , previous
+               )
+    V.EvKey V.KDel [] ->
+        Just $ edit \draft cursor ->
+            let next = nextGraphemeBoundary draft cursor
+            in ( Text.take cursor draft <> Text.drop next draft
+               , cursor
+               )
+    V.EvKey V.KLeft [] ->
+        Just $ move previousGraphemeBoundary
+    V.EvKey V.KRight [] ->
+        Just $ move nextGraphemeBoundary
+    V.EvKey V.KHome [] ->
+        Just $ edit \draft cursor ->
+            (draft, lineStartCursor draft cursor)
+    V.EvKey V.KEnd [] ->
+        Just $ edit \draft cursor ->
+            (draft, lineEndCursor draft cursor)
+    V.EvKey (V.KChar 'w') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just $ edit deleteWordBefore
+    V.EvKey (V.KChar 'u') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just $ edit deleteToLineStart
+    V.EvKey (V.KChar 'k') modifiers
+        | V.MCtrl `elem` modifiers ->
+            Just $ edit deleteToLineEnd
+    V.EvKey (V.KChar character) [] ->
+        Just $ insert (Text.singleton character)
+    V.EvPaste bytes ->
+        Just $ insert (Composer.decodePaste bytes)
+    _ -> Nothing
+  where
+    edit = editWith clampGraphemeCursor
+    editWith clampCursor change =
+        let sourceCursor =
+                clampGraphemeCursor prompt.textDraft prompt.textCursor
+            (draft, requestedCursor) =
+                change prompt.textDraft sourceCursor
+        in prompt
+            { textDraft = draft
+            , textCursor =
+                clampCursor draft requestedCursor
+            }
+    insert raw =
+        let inserted =
+                normalizeTextOverlayInsertion prompt.textInputMode raw
+        in editWith clampInsertedCursor \draft cursor ->
             ( Text.take cursor draft <> inserted <> Text.drop cursor draft
             , cursor + Text.length inserted
             )
-    move delta =
-        edit \draft cursor -> (draft, cursor + delta)
+    move boundary =
+        edit \draft cursor -> (draft, boundary draft cursor)
+    -- Inserted text can combine with the following source text. In that case
+    -- the requested post-insertion offset lies inside the new grapheme, so
+    -- keep the cursor after that grapheme rather than moving it backward.
+    clampInsertedCursor draft requestedCursor =
+        let boundedCursor =
+                max 0 (min (Text.length draft) requestedCursor)
+            previous =
+                clampGraphemeCursor draft boundedCursor
+        in if previous == boundedCursor
+            then previous
+            else nextGraphemeBoundary draft boundedCursor
 
 resolveTextPrompt :: Bool -> EventM Name AppState ()
 resolveTextPrompt confirmed = do
@@ -1670,6 +1723,12 @@ drawApp state =
             <> mainLayers
     dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
 
+terminalTxt :: Text -> Widget n
+terminalTxt = txt . displayTerminalText
+
+terminalTxtWrap :: Text -> Widget n
+terminalTxtWrap = txtWrap . displayTerminalText
+
 drawMain :: AppState -> Widget Name
 drawMain state =
     fullscreenSurface $
@@ -1681,6 +1740,7 @@ drawMain state =
                 , Composer.drawQueuedInputs state.appUi
                 , Composer.drawSlashMenu state
                 , drawFollowStatus state.appUi
+                , drawLiveTodos (activeConversationUi state)
                 , drawPromptActivity state
                 , Composer.drawComposer state
                 , drawFooter state
@@ -1799,7 +1859,7 @@ drawImagePreviews native previews =
                         else renderTuiImagePreview maxWidth maxHeight preview
                 , hCenter $
                     withAttr Theme.mutedAttr $
-                        txt $
+                        terminalTxt $
                             "🖼 "
                                 <> preview.previewMime
                                 <> " · "
@@ -1922,16 +1982,16 @@ drawAgentConversation :: AppState -> AgentEntry -> Widget Name
 drawAgentConversation state entry =
     vBox
         [ withAttr Theme.headingAttr $
-            txt ("Viewing " <> entry.agentPath)
+            terminalTxt ("Viewing " <> entry.agentPath)
         , withAttr Theme.mutedAttr $
-            txt
+            terminalTxt
                 (entry.agentStatus
                     <> " · input is sent to /root")
         , padTop (Pad 1) $
             if Seq.null entry.agentConversation.uiBlocks
                 then
                     withAttr Theme.mutedAttr $
-                        txt "(no transcript yet)"
+                        terminalTxt "(no transcript yet)"
                 else
                     drawConversationBlocks
                         state
@@ -2036,7 +2096,7 @@ drawAgentPane state entryLimit selected hovered entries =
                 | otherwise =
                     agentStatusGlyph entry.agentStatus
             row = hBox
-                [ txt
+                [ terminalTxt
                     (marker
                         <> agentEntryTreeLabelWithGlyphModel
                             statusGlyph
@@ -2131,7 +2191,7 @@ drawAgentPopover state placeLeft width height entry =
                         withBorderStyle unicodeRounded $
                             borderWithLabel
                                 (withAttr Theme.headingAttr $
-                                    txt
+                                    terminalTxt
                                         (" "
                                             <> truncateDisplayText
                                                 (max 1 (width - 6))
@@ -2168,14 +2228,14 @@ drawAgentStep state width step =
                     txt (agentStepGlyph state step.agentStepState)
                 , txt " "
                 , withAttr Theme.assistantAttr $
-                    txt
+                    terminalTxt
                         (truncateDisplayText
                             (max 1 (width - 2))
                             step.agentStepTitle)
                 ]
             , padLeft (Pad 2) $
                 withAttr Theme.mutedAttr $
-                    txt
+                    terminalTxt
                         (truncateDisplayText
                             (max 1 (width - 2))
                             (fromMaybe
@@ -2244,12 +2304,13 @@ drawHeader state =
 drawRepositoryHeader :: UiState -> Widget Name
 drawRepositoryHeader state
     | Text.null state.uiBranch =
-        withAttr Theme.mutedAttr (txt state.uiCwd)
+        withAttr Theme.mutedAttr (terminalTxt state.uiCwd)
     | otherwise =
         hBox
             [ txt "\xE0A0 "
             , withAttr Theme.mutedAttr $
-                txt (repositoryHeaderText state.uiBranch state.uiCwd)
+                terminalTxt
+                    (repositoryHeaderText state.uiBranch state.uiCwd)
             ]
 
 repositoryHeaderText :: Text -> Text -> Text
@@ -2260,14 +2321,43 @@ repositoryHeaderText branch cwd =
 drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
-        txt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+        terminalTxt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+
+drawLiveTodos :: UiState -> Widget Name
+drawLiveTodos ui =
+    case liveTodoPanelLines 8 (visibleTodoList ui) of
+        [] -> emptyWidget
+        lines_ ->
+            padLeftRight 2 $
+                vBox (map (vLimit 1 . drawLiveTodoLine) lines_)
+
+drawLiveTodoLine :: Text -> Widget Name
+drawLiveTodoLine line =
+    Widget Fixed Fixed do
+        context <- getContext
+        let truncated = truncateDisplayText context.availWidth line
+            painted
+                | "… +" `Text.isPrefixOf` line =
+                    withAttr Theme.mutedAttr (terminalTxt truncated)
+                | otherwise =
+                    withAttr
+                        (todoStatusAttr (todoLineStatusFromText line))
+                        (terminalTxt truncated)
+        render painted
+
+todoLineStatusFromText :: Text -> TodoDisplayStatus
+todoLineStatusFromText line
+    | "▶" `Text.isPrefixOf` line = TodoDisplayInProgress
+    | "✓" `Text.isPrefixOf` line = TodoDisplayCompleted
+    | "✗" `Text.isPrefixOf` line = TodoDisplayCancelled
+    | otherwise = TodoDisplayPending
 
 drawPromptActivity :: AppState -> Widget Name
 drawPromptActivity state =
     padLeftRight 2 $
         hBox
             [ activityWidget
-            , withAttr Theme.mutedAttr (txt elapsed)
+            , withAttr Theme.mutedAttr (terminalTxt elapsed)
             ]
   where
     ui = state.appUi
@@ -2283,7 +2373,7 @@ drawPromptActivity state =
                 , withAttr Theme.thinkingAttr (txt " Waiting for you")
                 ]
         | otherwise =
-            withAttr activityAttr (txt activity)
+            withAttr activityAttr (terminalTxt activity)
     activityAttr
         | ui.uiRunning = Theme.thinkingAttr
         | ui.uiCompletionRemainingMillis > 0 = Theme.successAttr
@@ -2395,7 +2485,7 @@ stickyPromptLayers state =
                             withAttr Theme.userAttr $
                                 vLimit 5 $
                                     padAll 1 $
-                                        txtWrap
+                                        terminalTxtWrap
                                             (stickyPromptPreview
                                                 anchor.anchorText)
                 ]
@@ -2501,7 +2591,7 @@ drawBlock state target ui block =
                 withAttr Theme.userAttr $
                     padAll 1 $
                         timestampedMessage block.blockTimestamp
-                            (txtWrap block.blockBody)
+                            (terminalTxtWrap block.blockBody)
             BlockAssistant ->
                 padLeft (Pad 3) $
                     padRight (Pad 1) $
@@ -2532,8 +2622,8 @@ drawBlock state target ui block =
                         <> detailSuffix block)
                     (visibleBody block)
             BlockTodo ->
-                accentBlockWithSections (statusAttr state block)
-                    (blockStateGlyph state block <> block.blockTitle)
+                accentBlockWithSections (statusAttr state target block)
+                    (blockStateGlyph state target block <> block.blockTitle)
                     (todoBodyWidgets block)
             BlockShell ->
                 accentCodeBlock
@@ -2549,9 +2639,16 @@ drawBlock state target ui block =
                         <> detailSuffix block)
                     (visibleBody block)
             BlockSystem ->
-                withAttr Theme.mutedAttr (txtWrap block.blockBody)
+                withAttr Theme.mutedAttr
+                    (terminalTxtWrap block.blockBody)
+            BlockRecap ->
+                accentBlock
+                    (statusAttr state target block)
+                    (blockStateGlyph state target block <> "Recap")
+                    (visibleBody block)
             BlockError ->
-                withAttr Theme.errorAttr (txtWrap block.blockBody)
+                withAttr Theme.errorAttr
+                    (terminalTxtWrap block.blockBody)
         framed =
             if highlighted
                 then withAttr Theme.selectedAttr content
@@ -2584,7 +2681,8 @@ timestampedMessage timestamp body
     | otherwise =
         hBox
             [ padRight Max body
-            , withAttr Theme.mutedAttr (txt ("  " <> timestamp))
+            , withAttr Theme.mutedAttr
+                (terminalTxt ("  " <> timestamp))
             ]
 
 codeBlockHeader
@@ -2598,7 +2696,7 @@ codeBlockHeader state target blockId codeIndex language =
     hBox
         [ if Text.null language
             then emptyWidget
-            else withAttr Theme.mutedAttr (txt language)
+            else withAttr Theme.mutedAttr (terminalTxt language)
         , vLimit 1 (fill ' ')
         , clickable name $
             withAttr
@@ -2664,7 +2762,7 @@ accentBlock accent title body =
     accentBlockWithSections accent title $
         if Text.null (Text.strip body)
             then []
-            else [txtWrap body]
+            else [terminalTxtWrap body]
 
 accentMarkdownBlock :: AttrName -> Text -> Text -> Widget Name
 accentMarkdownBlock accent title body =
@@ -2685,7 +2783,7 @@ accentCodeBlock syntaxHighlighter accent title code body =
         [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
         | not (Text.null (Text.strip code))
         ]
-            <> [ txtWrap body
+            <> [ terminalTxtWrap body
                | not (Text.null (Text.strip body))
                ]
 
@@ -2699,7 +2797,7 @@ accentBlockWithSections accent title sections =
         [ withAttr accent (txt "❙")
         , padLeft (Pad 2) $
             vBox $
-                [withAttr accent (txtWrap title)]
+                [withAttr accent (terminalTxtWrap title)]
                     <> map (padTop (Pad 1)) sections
         ]
 
@@ -2796,7 +2894,8 @@ drawNotice state = case state.appUi.uiNotice of
     Just notice ->
         let (attr, prefix) = noticePresentation state notice.noticeKind
         in withAttr attr $
-            padLeftRight 2 (txtWrap (prefix <> notice.noticeText))
+            padLeftRight 2
+                (terminalTxtWrap (prefix <> notice.noticeText))
 
 noticePresentation :: AppState -> NoticeKind -> (AttrName, Text)
 noticePresentation state = \case
@@ -2846,9 +2945,9 @@ drawFooter state =
                         "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
                     FocusComposer
                         | not state.appUi.uiAwaitingInput ->
-                            "Enter queue  │  Ctrl+Enter/Ctrl+O send now  │  Shift+Enter newline  │  Esc/Ctrl+C cancel  │  Tab scrollback"
+                            "Enter queue  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback"
                         | otherwise ->
-                            "Enter send  │  Shift+Enter newline  │  PgUp/PgDn or wheel scroll  │  Tab scrollback"
+                            "Enter send  │  Ctrl+R dictate  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Tab scrollback"
 
 drawPermission :: AppState -> PermissionOverlay -> Widget Name
 drawPermission state permission =
@@ -2860,7 +2959,8 @@ drawPermission state permission =
                         (waitingOverlayLabel state "Permission") $
                         padAll 1 $
                             vBox
-                                [ txtWrap permission.permissionSummary
+                                [ terminalTxtWrap
+                                    permission.permissionSummary
                                 , padTop (Pad 1) $
                                     vBox $
                                         zipWith
@@ -2876,7 +2976,7 @@ drawPermission state permission =
 permissionRow :: Int -> Int -> Text -> Widget Name
 permissionRow selected index label =
     let prefix = if selected == index then "› " else "  "
-        widget = txt (prefix <> label)
+        widget = terminalTxt (prefix <> label)
         styled =
             if selected == index
                 then withAttr Theme.selectedAttr widget
@@ -2911,7 +3011,8 @@ resumeHeader browser =
         [ search
         , vLimit 1 (fill ' ')
         , withAttr Theme.mutedAttr $
-            txt (resumeSourceLabel browser.resumeBrowserSource <> "  f")
+            terminalTxt
+                (resumeSourceLabel browser.resumeBrowserSource <> "  f")
         ]
   where
     prefix
@@ -2926,11 +3027,12 @@ resumeHeader browser =
                     (resumeSearchCursorColumn
                         prefix
                         browser.resumeBrowserQuery, 0))
-                (txt (prefix <> browser.resumeBrowserQuery <> " "))
+                (terminalTxt
+                    (prefix <> browser.resumeBrowserQuery <> " "))
         | Text.null browser.resumeBrowserQuery =
-            withAttr Theme.mutedAttr (txt prefix)
+            withAttr Theme.mutedAttr (terminalTxt prefix)
         | otherwise =
-            txt (prefix <> browser.resumeBrowserQuery)
+            terminalTxt (prefix <> browser.resumeBrowserQuery)
 
 resumeSearchCursorColumn :: Text -> Text -> Int
 resumeSearchCursorColumn prefix query =
@@ -2963,7 +3065,7 @@ resumeGroup browser selectedId (project, entries) =
     vBox
         [ hBox
             [ withAttr Theme.mutedAttr $
-                txt (" " <> project <> " ")
+                terminalTxt (" " <> project <> " ")
             , withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
             ]
         , vBox (map (resumeRow browser selectedId) entries)
@@ -2983,7 +3085,8 @@ resumeRow browser selectedId entry =
         | otherwise = "› "
     summary =
         hBox
-            [ hLimitPercent 78 (txt (marker <> entry.resumeTitle))
+            [ hLimitPercent 78
+                (terminalTxt (marker <> entry.resumeTitle))
             , vLimit 1 (fill ' ')
             , withAttr Theme.mutedAttr $
                 txt (resumeRelativeAge browser.resumeBrowserNow entry.resumeUpdatedAt)
@@ -2993,7 +3096,7 @@ resumeRow browser selectedId entry =
             vBox
                 [ summary
                 , padLeft (Pad 4) $
-                    vBox
+                    vBox $
                         [ resumeDetail "ID" entry.resumeId
                         , resumeDetail "CWD" entry.resumeCwd
                         , resumeDetail "Model" entry.resumeModel
@@ -3015,7 +3118,18 @@ resumeRow browser selectedId entry =
                                 <> "    Tools  "
                                 <> Text.pack (show entry.resumeToolCount)
                             )
-                        , resumeDetail
+                        ]
+                            <> maybe
+                                []
+                                (\recap -> [resumeDetail "Recap" recap])
+                                (nonEmptyResumeText entry.resumeRecap)
+                            <> maybe
+                                []
+                                (\summaryLine ->
+                                    [resumeDetail "Last turn" summaryLine])
+                                (nonEmptyResumeText entry.resumeLastTurnSummary)
+                            <>
+                        [ resumeDetail
                             "Prompt"
                             (if Text.null entry.resumePrompt
                                 then "(none)"
@@ -3036,8 +3150,13 @@ resumeDetail :: Text -> Text -> Widget Name
 resumeDetail label value =
     hBox
         [ withAttr Theme.mutedAttr (txt (Text.justifyLeft 12 ' ' label))
-        , txtWrap value
+        , terminalTxtWrap value
         ]
+
+nonEmptyResumeText :: Maybe Text -> Maybe Text
+nonEmptyResumeText =
+    fmap Text.strip >=> \text ->
+        if Text.null text then Nothing else Just text
 
 resumeAbsoluteTime :: UTCTime -> Text
 resumeAbsoluteTime =
@@ -3045,7 +3164,7 @@ resumeAbsoluteTime =
 
 resumeFooter :: ResumeBrowser -> Widget Name
 resumeFooter browser =
-    withAttr attr (txt footer)
+    withAttr attr (terminalTxt footer)
   where
     hasRows = not (null (visibleResumeBrowser browser))
     (attr, footer) =
@@ -3136,8 +3255,9 @@ drawOnboardingChoice appState choice =
         | otherwise =
             vLimit 1 $
                 case sourceIndex of
-                    0 -> withAttr Theme.headingAttr (txt choice.choiceTitle)
-                    2 -> txtWrap choice.choiceBody
+                    0 -> withAttr Theme.headingAttr
+                        (terminalTxt choice.choiceTitle)
+                    2 -> terminalTxtWrap choice.choiceBody
                     3 ->
                         withAttr Theme.mutedAttr $
                             txt "Choose a sign-in option below, or add your own API key."
@@ -3171,10 +3291,10 @@ onboardingChoiceRow appState width selected index (label, detail) =
             if showDetail
                 then hBox
                     [ hLimit 36 $
-                        padRight Max (txt (prefix <> label))
-                    , withAttr Theme.mutedAttr (txt detail)
+                        padRight Max (terminalTxt (prefix <> label))
+                    , withAttr Theme.mutedAttr (terminalTxt detail)
                     ]
-                else txt (prefix <> label)
+                else terminalTxt (prefix <> label)
     styled =
         if selected == index
             then withAttr Theme.selectedAttr row
@@ -3215,7 +3335,7 @@ waitingOverlayLabel state label =
                     motionGlyphSet
                     state.appRuntime.runtimeMotionMode
                     state.appMotionElapsedMillis)
-        , txt (" " <> label <> " ")
+        , terminalTxt (" " <> label <> " ")
         ]
 
 drawTextPrompt :: AppState -> TextOverlay -> Widget Name
@@ -3253,7 +3373,7 @@ renderTextDraft prompt =
         content =
             if Text.null displayDraft
                 then withAttr Theme.mutedAttr (txt " ")
-                else txt displayDraft
+                else terminalTxt displayDraft
         (row, column) =
             Composer.draftCursorLocation displayDraft prompt.textCursor
     in showCursor OverlayCursor (Location (column, row)) content
@@ -3291,9 +3411,10 @@ choiceRow appState selected index (label, detail) =
                             detail
                 render $
                     hBox
-                        [ txt shownLabel
+                        [ terminalTxt shownLabel
                         , vLimit 1 (fill ' ')
-                        , withAttr Theme.mutedAttr (txt shownDetail)
+                        , withAttr Theme.mutedAttr
+                            (terminalTxt shownDetail)
                         ]
         styled =
             if selected == index
@@ -3450,6 +3571,15 @@ applyUiEvent uiEvent state =
         nextState0 =
             state
                 { appUi = nextUi
+                , appAutoRecapShownThisAway =
+                    case uiEvent of
+                        UiRecapReady _ -> True
+                        _ -> state.appAutoRecapShownThisAway
+                , appLastTurnCompletedAt =
+                    case uiEvent of
+                        UiLoop (TurnFinished _) -> Just state.appClockNanos
+                        UiTurnEnded BlockComplete -> Just state.appClockNanos
+                        _ -> state.appLastTurnCompletedAt
                 , appCompletionFlashes =
                     Map.union newFlashes retainedFlashes
                 , appMotionScheduleReset =
@@ -3525,6 +3655,60 @@ advanceAppClockNow :: EventM Name AppState ()
 advanceAppClockNow = do
     now <- liftIO getMonotonicTimeNSec
     modify' (advanceAppTime now)
+
+noteTerminalFocusLost :: EventM Name AppState ()
+noteTerminalFocusLost = do
+    now <- liftIO getMonotonicTimeNSec
+    modify' \state ->
+        state
+            { appTerminalFocus = TerminalUnfocused
+            , appFocusLostAt = Just now
+            , appAutoRecapShownThisAway = False
+            , appLastAutoRecapAttemptAt = Nothing
+            }
+
+noteTerminalFocusGained :: EventM Name AppState ()
+noteTerminalFocusGained = do
+    maybeRequestAutoRecap
+    modify' \state ->
+        state
+            { appTerminalFocus = TerminalFocused
+            , appFocusLostAt = Nothing
+            , appMotionScheduleReset = True
+            }
+    invalidateCache
+    getVtyHandle >>= liftIO . V.refresh
+
+maybeRequestAutoRecap :: EventM Name AppState ()
+maybeRequestAutoRecap = do
+    now <- liftIO getMonotonicTimeNSec
+    state <- get
+    when (shouldRequestAutoRecap now state) do
+        modify' \current ->
+            current { appLastAutoRecapAttemptAt = Just now }
+        liftIO state.appRuntime.runtimeRecap
+
+shouldRequestAutoRecap :: Word64 -> AppState -> Bool
+shouldRequestAutoRecap now state =
+    state.appTerminalFocus == TerminalUnfocused
+        && not state.appAutoRecapShownThisAway
+        && not (userActionPending state)
+        && not state.appUi.uiRunning
+        && not (hasBackgroundActivity state.appAgentEntries)
+        && elapsedSeconds now state.appFocusLostAt >= autoRecapAwayThreshold
+        && elapsedSeconds now state.appLastTurnCompletedAt
+            >= autoRecapIdleThreshold
+        && ( case state.appLastAutoRecapAttemptAt of
+                Nothing -> True
+                Just attempted ->
+                    elapsedSeconds now (Just attempted)
+                        >= autoRecapRetryInterval
+           )
+
+elapsedSeconds :: Word64 -> Maybe Word64 -> NominalDiffTime
+elapsedSeconds _ Nothing = 0
+elapsedSeconds now (Just started) =
+    realToFrac (now - started) / 1_000_000_000
 
 applyLocalUiEvent :: UiEvent -> EventM Name AppState ()
 applyLocalUiEvent event =
@@ -3616,6 +3800,8 @@ handleEventInner event = case event of
                 writeTVar
                     state.appRuntime.runtimeMotionTickQueued
                     False
+    AppEvent AppRecapPoll ->
+        maybeRequestAutoRecap
     AppEvent AppStop -> do
         modify' \state -> state { appWorkerStopped = True }
         halt
@@ -3675,6 +3861,23 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
+    AppEvent (AppDictationFinished result) ->
+        case result of
+            Left message ->
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            warningNotice ("Dictation failed: " <> message)
+            Right transcript -> do
+                state <- get
+                let ui = state.appUi
+                    (draft, cursor) =
+                        insertDictation ui.uiDraft ui.uiCursor transcript
+                applyLocalUiEvent (UiSetDraft draft cursor)
+                applyLocalUiEvent $
+                    UiSetNotice $
+                        Just $
+                            successNotice "Dictation inserted."
     AppEvent (AppSetWindowTitle title) -> do
         state <- get
         liftIO (state.appRuntime.runtimeSetWindowTitle title)
@@ -3962,6 +4165,10 @@ handleEventInner event = case event of
                 , appPressedControl = Nothing
                 , appAgentHover = Nothing
                 }
+    VtyEvent V.EvLostFocus ->
+        noteTerminalFocusLost
+    VtyEvent V.EvGainedFocus ->
+        noteTerminalFocusGained
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
@@ -3971,17 +4178,6 @@ handleEventInner event = case event of
         when (state.appTerminalFocus /= TerminalUnfocused) $
             getVtyHandle >>= liftIO . V.refresh
         queueConversationReflow
-    VtyEvent V.EvLostFocus ->
-        modify' \state ->
-            state { appTerminalFocus = TerminalUnfocused }
-    VtyEvent V.EvGainedFocus -> do
-        modify' \state ->
-            state
-                { appTerminalFocus = TerminalFocused
-                , appMotionScheduleReset = True
-                }
-        invalidateCache
-        getVtyHandle >>= liftIO . V.refresh
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get
@@ -4193,13 +4389,23 @@ preserveAgentConversationView selected previous =
 
 mergeConversationView :: UiState -> UiState -> UiState
 mergeConversationView previous incoming
-    | Seq.null incoming.uiBlocks = incoming
+    | Seq.null incoming.uiBlocks =
+        incoming
+            { uiTodos =
+                if null incoming.uiTodos
+                    then previous.uiTodos
+                    else incoming.uiTodos
+            }
     | otherwise =
         incoming
             { uiBlocks = mergedBlocks
             , uiSelectedBlock = selected
             , uiSelectedBlockIndex =
                 selected >>= (`Map.lookup` incoming.uiBlockIndices)
+            , uiTodos =
+                if null incoming.uiTodos
+                    then previous.uiTodos
+                    else incoming.uiTodos
             }
   where
     previousBlocks =
@@ -4380,23 +4586,24 @@ conversationViewportHeight =
         Nothing -> pure 1
 
 scrollConversationBy :: Int -> EventM Name AppState ()
-scrollConversationBy amount
-    | amount == 0 = pure ()
-    | amount < 0 = do
-        setConversationFollow False
-        vScrollBy scroll amount
-        queueConversationReflow
-    | otherwise =
+scrollConversationBy amount = do
+    viewportBounds <-
         lookupViewport ConversationViewport >>= \case
-            Just (VP _ top (_, height) (_, contentHeight))
-                | top + height + amount >= contentHeight -> do
-                    setConversationFollow True
-                    vScrollToEnd scroll
-                    queueConversationReflow
-            _ -> do
-                setConversationFollow False
-                vScrollBy scroll amount
-                queueConversationReflow
+            Just (VP _ top (_, height) (_, contentHeight)) ->
+                pure (Just (top, height, contentHeight))
+            Nothing ->
+                pure Nothing
+    case Scroll.conversationScrollGesture amount viewportBounds of
+        Scroll.IgnoreConversationScroll ->
+            pure ()
+        Scroll.PauseAndScrollConversation -> do
+            setConversationFollow False
+            vScrollBy scroll amount
+            queueConversationReflow
+        Scroll.ResumeConversationFollow -> do
+            setConversationFollow True
+            vScrollToEnd scroll
+            queueConversationReflow
   where
     scroll = viewportScroll ConversationViewport
 

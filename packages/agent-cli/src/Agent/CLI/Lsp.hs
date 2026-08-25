@@ -13,6 +13,10 @@ import Agent.CLI.Config
     ( LspConfig(..)
     , LspServerConfig(..)
     )
+import Agent.CLI.FileUri
+    ( fileUri
+    , fileUriPath
+    )
 import Agent.GrokBuild.Dialect.Lsp
     ( LspOperation(..)
     , LspRequest(..)
@@ -105,14 +109,6 @@ import System.Process
     )
 import System.Timeout (timeout)
 import System.Posix.Types (ProcessID)
-import Network.URI
-    ( escapeURIString
-    , isUnreserved
-    , parseURI
-    , unEscapeString
-    , uriPath
-    , uriScheme
-    )
 
 data LspStartup = LspStartup
     { lspStartupRuntime :: !(Maybe LspRuntime)
@@ -1175,21 +1171,6 @@ pathWithin root candidate =
                     `isPrefixOfString` relative
                 ))
 
-fileUri :: FilePath -> Text
-fileUri path =
-    Text.pack
-        ("file://" <> escapeURIString uriPathCharacter path)
-  where
-    uriPathCharacter character =
-        character == '/' || isUnreserved character
-
-uriFilePath :: Text -> Maybe FilePath
-uriFilePath raw = do
-    uri <- parseURI (Text.unpack raw)
-    if uriScheme uri /= "file:"
-        then Nothing
-        else Just (unEscapeString (uriPath uri))
-
 formatLspResult :: LspOperation -> Aeson.Value -> Text
 formatLspResult operation value =
     case operation of
@@ -1227,7 +1208,7 @@ locationFromObject object = do
                 <|> KeyMap.lookup "targetRange" object
         (line, character) =
             fromMaybe (0, 0) (range >>= startPosition)
-        path = maybe uri Text.pack (uriFilePath uri)
+        path = maybe uri Text.pack (fileUriPath uri)
     pure $
         path
             <> ":"

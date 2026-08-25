@@ -3,7 +3,16 @@ module Agent.CLI.Session.History
     ( detectGitBranch
     , foldSessionItems
     , hydrateUiHistory
+    , LiveConversation(..)
+    , readLiveAttachments
+    , readLivePreviousResponseId
+    , readLiveTranscript
+    , modifyLiveAttachments
+    , resetLiveConversationState
     , resetLiveConversation
+    , resetLiveConversationWith
+    , writeLivePreviousResponseId
+    , writeLiveTranscript
     ) where
 
 import Agent.CLI.Session (SessionTurn(..))
@@ -30,7 +39,8 @@ import Control.Exception.Safe
     )
 import Data.IORef
     ( IORef
-    , writeIORef
+    , atomicModifyIORef'
+    , readIORef
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -38,17 +48,78 @@ import System.Exit (ExitCode(..))
 import System.OsPath (OsPath)
 import System.Process (readProcessWithExitCode)
 
+-- | The pieces of conversation state that must change together when a live
+-- session is reset.
+--
+-- Keeping them in one value makes resets and multi-field updates atomic and
+-- prevents callers from observing mismatched response IDs, transcripts, and
+-- attachments.
+data LiveConversation = LiveConversation
+    { livePreviousResponseId :: !(Maybe Text)
+    , liveTranscript :: ![ResponseItem]
+    , liveAttachments :: ![ImageAttachment]
+    } deriving (Eq, Show)
+
+-- | Pure reset transition for live conversation state.
+resetLiveConversationState :: LiveConversation -> LiveConversation
+resetLiveConversationState state =
+    state
+        { livePreviousResponseId = Nothing
+        , liveTranscript = []
+        , liveAttachments = []
+        }
+
+readLivePreviousResponseId :: IORef LiveConversation -> IO (Maybe Text)
+readLivePreviousResponseId = fmap (\state -> state.livePreviousResponseId) . readIORef
+
+readLiveTranscript :: IORef LiveConversation -> IO [ResponseItem]
+readLiveTranscript = fmap (\state -> state.liveTranscript) . readIORef
+
+readLiveAttachments :: IORef LiveConversation -> IO [ImageAttachment]
+readLiveAttachments = fmap (\state -> state.liveAttachments) . readIORef
+
+modifyLiveAttachments
+    :: IORef LiveConversation
+    -> ([ImageAttachment] -> ([ImageAttachment], a))
+    -> IO a
+modifyLiveAttachments ref update =
+    atomicModifyIORef' ref \state ->
+        let (attachments, result) = update state.liveAttachments
+        in (state { liveAttachments = attachments }, result)
+
+writeLivePreviousResponseId
+    :: IORef LiveConversation
+    -> Maybe Text
+    -> IO ()
+writeLivePreviousResponseId ref value =
+    atomicModifyIORef' ref \state ->
+        (state { livePreviousResponseId = value }, ())
+
+writeLiveTranscript
+    :: IORef LiveConversation
+    -> [ResponseItem]
+    -> IO ()
+writeLiveTranscript ref value =
+    atomicModifyIORef' ref \state ->
+        (state { liveTranscript = value }, ())
+
 -- | Drop live conversation state without touching persisted session files.
 resetLiveConversation
-    :: IORef (Maybe Text)
-    -> IORef [ResponseItem]
-    -> IORef [ImageAttachment]
+    :: IORef LiveConversation
     -> PlanModeEnv
     -> IO ()
-resetLiveConversation previous transcriptRef attachmentsRef planMode = do
-    writeIORef previous Nothing
-    writeIORef transcriptRef []
-    writeIORef attachmentsRef []
+resetLiveConversation =
+    resetLiveConversationWith (pure ())
+
+resetLiveConversationWith
+    :: IO ()
+    -> IORef LiveConversation
+    -> PlanModeEnv
+    -> IO ()
+resetLiveConversationWith resetBackend conversationRef planMode = do
+    resetBackend
+    atomicModifyIORef' conversationRef \state ->
+        (resetLiveConversationState state, ())
     deactivatePlanMode planMode
 
 detectGitBranch :: OsPath -> IO Text

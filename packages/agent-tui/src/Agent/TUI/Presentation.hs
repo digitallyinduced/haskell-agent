@@ -8,11 +8,15 @@ module Agent.TUI.Presentation
     , formatSearchReplaceDiff
     , formatTodoList
     , formatToolOutput
+    , liveTodoPanelLines
     , parseSearchReplaceDiff
     , parseTodoList
     , permissionToolCallPrompt
+    , todoListFromToolOutput
     , summarizeToolCall
     , todoCallPreview
+    , todoListHasInProgress
+    , todoListHasOpenWork
     , todoStatusGlyph
     , toolCallInput
     , toolCallTitle
@@ -188,6 +192,42 @@ todoCallPreview call = case canonicalToolName call.name of
 formatTodoList :: Text -> Text
 formatTodoList output =
     Text.intercalate "\n" (map formatTodoDisplayLine (parseTodoList output))
+
+liveTodoPanelLines :: Int -> [TodoDisplayLine] -> [Text]
+liveTodoPanelLines maxRows todos
+    | maxRows <= 0 || null todos = []
+    | length todos <= maxRows =
+        map formatTodoDisplayLine todos
+    | otherwise =
+        let shownCount = max 0 (maxRows - 1)
+            shown = take shownCount todos
+            hidden = length todos - length shown
+        in map formatTodoDisplayLine shown
+            <> ["… +" <> Text.pack (show hidden) <> " more"]
+
+todoListHasOpenWork :: [TodoDisplayLine] -> Bool
+todoListHasOpenWork =
+    any \line ->
+        line.todoLineStatus `elem` [TodoDisplayPending, TodoDisplayInProgress]
+
+todoListHasInProgress :: [TodoDisplayLine] -> Bool
+todoListHasInProgress =
+    any \line -> line.todoLineStatus == TodoDisplayInProgress
+
+-- | Replace the live list only when tool output is an actual checklist.
+-- Unrecognized output is ignored so ordinary tools cannot clobber it.
+todoListFromToolOutput :: Text -> Maybe [TodoDisplayLine]
+todoListFromToolOutput output =
+    let stripped = Text.strip output
+        rows =
+            [ Text.strip line
+            | line <- Text.lines stripped
+            , not (Text.null (Text.strip line))
+            ]
+        parsed = mapMaybe parseTodoDisplayLine rows
+    in if stripped == "No tasks currently tracked."
+        then Just []
+        else if null parsed then Nothing else Just parsed
 
 parseTodoList :: Text -> [TodoDisplayLine]
 parseTodoList output =

@@ -4,6 +4,7 @@ import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentTarget(..)
     )
+import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
     ( drawApp
@@ -38,6 +39,7 @@ import Agent.TUI.Model
     , UiState(..)
     , initialUiState
     , reduceUi
+    , visibleTodoList
     , timestampNewMessageBlocks
     , warningNotice
     )
@@ -49,6 +51,7 @@ import Data.Foldable (toList)
 import Data.IORef (readIORef)
 import Data.List (find, nub)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (mapMaybe)
 import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -225,6 +228,48 @@ spec = do
                 Text.isInfixOf "Inspect AppState before continuing."
             rendered `shouldNotSatisfy` Text.isInfixOf "`AppState`"
 
+        it "keeps live todos to one row each so the prompt stays visible" do
+            let todoCall =
+                    functionToolCall
+                        "todo-1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"Keep this list\"}]}"
+                longItem =
+                    "Investigate a very long remaining task that would wrap \
+                    \across many columns if the panel used wrapping text"
+                todoResult = ToolCallResult
+                    { callId = "todo-1"
+                    , output =
+                        "- [completed] 1: Find and clone repos\n\
+                        \- [in_progress] 2: "
+                            <> longItem
+                    , callKind = FunctionCallKind
+                    }
+                ui =
+                    reduceUi
+                        (UiLoop (ToolFinished todoResult))
+                        (reduceUi
+                            (UiLoop (ToolStarted todoCall))
+                            (reduceUi (UiLoop TurnStarted) baseState.appUi))
+                app = baseState { appUi = ui }
+                size = (40, 16)
+                rows =
+                    pictureRows
+                        (renderWidget
+                            (Just Theme.monochrome)
+                            (drawApp app)
+                            size)
+                        size
+                rendered = Text.unlines rows
+            length (filter (Text.isInfixOf "Find and clone repos") rows)
+                `shouldBe` 1
+            length (filter (Text.isInfixOf "Investigate a very long") rows)
+                `shouldBe` 1
+            rendered `shouldSatisfy` Text.isInfixOf "Thinking"
+            rendered `shouldSatisfy` Text.isInfixOf "Type a follow-up"
+            visibleTodoList ui
+                `shouldSatisfy` (not . null)
+
         it "renders a selected child with the retained conversation renderer" do
             let target = AgentChild (SubagentId "renderer")
                 call =
@@ -284,6 +329,69 @@ spec = do
             frame `shouldSatisfy` Text.isInfixOf "tool output"
             frame `shouldSatisfy` Text.isInfixOf "Markdown kept."
 
+        it "keeps variation selectors from crossing adjacent choice widgets" do
+            let label = Text.replicate 33 "a" <> "✓"
+                detail = Text.singleton '\xfe0f' <> "detail"
+                harness =
+                    applyAction
+                        (ShowChoice
+                            ChoiceOnboarding
+                            "Sign in"
+                            ""
+                            [(label, detail)]
+                            0)
+                        (RenderHarness baseState (80, 24))
+            assertFrame harness
+
+        it "shows a selected child's live todo list above its transcript" do
+            let target = AgentChild (SubagentId "reviewer")
+                todoCall =
+                    functionToolCall
+                        "todo-1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"Review Model.hs\"}]}"
+                todoResult = ToolCallResult
+                    { callId = "todo-1"
+                    , output = "- [in_progress] 1: Review Model.hs"
+                    , callKind = FunctionCallKind
+                    }
+                conversation =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted todoCall)
+                        , UiLoop (ToolFinished todoResult)
+                        ]
+                child =
+                    AgentEntry
+                        { agentTarget = target
+                        , agentPath = "/root/reviewer"
+                        , agentStatus = "running"
+                        , agentModel = Just "gpt-5.6-luna"
+                        , agentSteps = []
+                        , agentTranscript = []
+                        , agentConversation = conversation
+                        }
+                app =
+                    baseState
+                        { appAgentSelected = target
+                        , appAgentEntries = [rootEntry, child]
+                        }
+                size = (120, 32)
+                frame =
+                    Text.unlines $
+                        pictureRows
+                            (renderWidget
+                                (Just Theme.monochrome)
+                                (drawApp app)
+                                size)
+                            size
+            frame `shouldSatisfy` Text.isInfixOf "Viewing /root/reviewer"
+            length (filter (Text.isInfixOf "Review Model.hs") (Text.lines frame))
+                `shouldBe` 1
+            frame `shouldNotSatisfy` Text.isInfixOf "todo_write"
+
 renderTraceProperty :: AppState -> RenderTrace -> Property
 renderTraceProperty baseState (RenderTrace actions) =
     conjoin $
@@ -341,6 +449,10 @@ frameProperties label harness =
             (V.imageHeight composed === height)
         , counterexample (label <> ": top-level layer bounds")
             (all layerFits layers === True)
+        , counterexample
+            (label <> ": Vty text spans match terminal widths: "
+                <> show spanMismatches)
+            (null spanMismatches === True)
         , counterexample (label <> ": cursor bounds")
             (cursorFits width height picture.picCursor === True)
         , counterexample (label <> ": deterministic clean redraw")
@@ -359,9 +471,25 @@ frameProperties label harness =
             renderWidget (Just Theme.monochrome) [widget] size
         | widget <- widgets
         ]
+    spanMismatches =
+        concatMap (spanWidthMismatches . toList)
+            (toList (displayOpsForPic picture size))
     layerFits image =
         V.imageWidth image <= width
             && V.imageHeight image <= height
+
+spanWidthMismatches :: [SpanOp] -> [(Int, Int, Text)]
+spanWidthMismatches =
+    mapMaybe \case
+        TextSpan{textSpanOutputWidth, textSpanText} ->
+            let text = LazyText.toStrict textSpanText
+                terminalWidth = terminalTextWidth text
+            in if textSpanOutputWidth == terminalWidth
+                then Nothing
+                else Just
+                    (textSpanOutputWidth, terminalWidth, text)
+        Skip _ -> Nothing
+        RowEnd _ -> Nothing
 
 uiStateProperties :: UiState -> Property
 uiStateProperties state =
@@ -717,6 +845,9 @@ assertFrame harness = do
             V.imageWidth image `shouldSatisfy` (<= width)
             V.imageHeight image `shouldSatisfy` (<= height))
         layers
+    concatMap (spanWidthMismatches . toList)
+        (toList (displayOpsForPic picture size))
+        `shouldBe` []
     cursorFits width height picture.picCursor `shouldBe` True
   where
     app = harness.harnessApp

@@ -16,6 +16,7 @@ module Agent.CLI.CredentialStore
     ) where
 
 import Agent.CLI.Error (formatException)
+import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider
@@ -25,7 +26,7 @@ import Agent.Provider
     , providerSlug
     )
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception.Safe (bracket, bracket_, tryIO)
+import Control.Exception.Safe (tryIO)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?), (.=))
 import qualified Data.ByteString.Lazy as LBS
@@ -39,18 +40,7 @@ import System.Directory.OsPath
     , getHomeDirectory
     )
 import System.OsPath (OsPath, takeDirectory, unsafeEncodeUtf, (</>))
-import System.IO (SeekMode(AbsoluteSeek))
 import System.Posix.Files (setFileMode)
-import System.Posix.IO
-    ( LockRequest(Unlock, WriteLock)
-    , OpenFileFlags(..)
-    , OpenMode(ReadWrite)
-    , closeFd
-    , defaultFileFlags
-    , openFd
-    , setLock
-    , waitToSetLock
-    )
 import System.IO.Unsafe (unsafePerformIO)
 
 data ManagedAuthKind
@@ -192,8 +182,7 @@ managedSecretsPath home =
         </> unsafeEncodeUtf "credentials"
         </> unsafeEncodeUtf "secrets.json"
 
--- | Serialize OAuth rotation across threads and harness processes. POSIX
--- record locks are released automatically if a process exits.
+-- | Serialize OAuth rotation across threads and harness processes.
 withCredentialRefreshFileLock :: IO value -> IO value
 withCredentialRefreshFileLock action =
     withMVar credentialRefreshThreadLock
@@ -202,22 +191,10 @@ withCredentialRefreshFileLock action =
 withCredentialRefreshFileLockUnlocked :: IO value -> IO value
 withCredentialRefreshFileLockUnlocked action = do
     home <- getHomeDirectory
-    let directory = takeDirectory (managedSecretsPath home)
-        lockPath = directory </> unsafeEncodeUtf "refresh.lock"
-    createDirectoryIfMissing True directory
-    setFileMode (unsafeToFilePath directory) 0o700
-    bracket
-        (openFd (unsafeToFilePath lockPath) ReadWrite lockFlags)
-        closeFd
-        \fd -> do
-            setFileMode (unsafeToFilePath lockPath) 0o600
-            waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
-            action
-  where
-    lockFlags = defaultFileFlags
-        { creat = Just 0o600
-        , cloexec = True
-        }
+    let lockPath =
+            takeDirectory (managedSecretsPath home)
+                </> unsafeEncodeUtf "refresh.lock"
+    withPrivateFileLock lockPath action
 
 credentialRefreshThreadLock :: MVar ()
 credentialRefreshThreadLock = unsafePerformIO (newMVar ())
@@ -389,25 +366,8 @@ withCredentialStoreLock home action =
         withCredentialStoreFileLock home action
 
 withCredentialStoreFileLock :: OsPath -> IO a -> IO a
-withCredentialStoreFileLock home action = do
-    let path = managedCredentialsLockPath home
-        directoryPath = takeDirectory path
-        lock = (WriteLock, AbsoluteSeek, 0, 0)
-        unlock = (Unlock, AbsoluteSeek, 0, 0)
-        flags = defaultFileFlags
-            { creat = Just 0o600
-            , cloexec = True
-            }
-    createDirectoryIfMissing True directoryPath
-    setFileMode (unsafeToFilePath directoryPath) 0o700
-    bracket
-        (openFd (unsafeToFilePath path) ReadWrite flags)
-        closeFd
-        (\fd ->
-            bracket_
-                (waitToSetLock fd lock)
-                (setLock fd unlock)
-                action)
+withCredentialStoreFileLock home =
+    withPrivateFileLock (managedCredentialsLockPath home)
 
 credentialStoreProcessLock :: MVar ()
 credentialStoreProcessLock = unsafePerformIO (newMVar ())

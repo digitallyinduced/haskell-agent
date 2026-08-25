@@ -3,14 +3,38 @@ module Agent.Responses.SSESpec (spec) where
 import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
 import Agent.Responses.Types
+import Control.Monad (foldM)
+import qualified Data.Aeson as Aeson
+import Data.Aeson ((.=))
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , Gen
+    , Property
+    , chooseInt
+    , conjoin
+    , counterexample
+    , elements
+    , frequency
+    , listOf
+    , oneof
+    , vectorOf
+    , (===)
+    )
 
 spec :: Spec
 spec = describe "Responses SSE decoder" do
+    modifyMaxSuccess (const 500) $
+        prop "is invariant under generated HTTP chunk boundaries" $
+            chunkingInvariant
+
     it "decodes arbitrary HTTP chunk boundaries, including split UTF-8" do
         mapM_ checkSplit [0 .. BS.length splitBytes]
 
@@ -67,15 +91,216 @@ checkSplit offset = do
         `shouldBe` [EventOutputItemDone, EventResponseCompleted]
 
 decodeChunks :: [BS.ByteString] -> IO [ResponseStreamEvent]
-decodeChunks chunks = do
-    (decoder, reversedEvents) <- foldl step (pure (newSseDecoder, [])) chunks
-    trailing <- expectRight (finishSseDecoder decoder)
+decodeChunks chunks =
+    expectRight (decodeChunksEither chunks)
+
+decodeChunksEither
+    :: [BS.ByteString]
+    -> Either ApiError [ResponseStreamEvent]
+decodeChunksEither chunks = do
+    (decoder, reversedEvents) <-
+        foldM step (newSseDecoder, []) chunks
+    trailing <- finishSseDecoder decoder
     pure (reverse reversedEvents <> trailing)
   where
-    step accumulated chunk = do
-        (decoder, reversedEvents) <- accumulated
-        (nextDecoder, events) <- expectRight (feedSseDecoder decoder chunk)
+    step (decoder, reversedEvents) chunk = do
+        (nextDecoder, events) <- feedSseDecoder decoder chunk
         pure (nextDecoder, reverse events <> reversedEvents)
+
+data GeneratedChunkedStream = GeneratedChunkedStream
+    { generatedBody :: !Text
+    , generatedChunks :: ![BS.ByteString]
+    }
+
+instance Show GeneratedChunkedStream where
+    show stream =
+        "GeneratedChunkedStream { body = "
+            <> show stream.generatedBody
+            <> ", chunkSizes = "
+            <> show (map BS.length stream.generatedChunks)
+            <> " }"
+
+instance Arbitrary GeneratedChunkedStream where
+    arbitrary = do
+        body <- genSseBody
+        chunks <- genChunks (Text.encodeUtf8 body)
+        pure GeneratedChunkedStream
+            { generatedBody = body
+            , generatedChunks = chunks
+            }
+
+    shrink _ = []
+
+chunkingInvariant :: GeneratedChunkedStream -> Property
+chunkingInvariant stream =
+    conjoin
+        [ counterexample
+            ("chunks do not reconstruct body: " <> show stream)
+            (BS.concat stream.generatedChunks
+                === Text.encodeUtf8 stream.generatedBody)
+        , counterexample
+            ("chunked decoder differs from one-shot decoder: " <> show stream)
+            (decodeChunksEither stream.generatedChunks
+                === parseSseEvents stream.generatedBody)
+        ]
+
+genSseBody :: Gen Text
+genSseBody = do
+    lineEnding <- elements ["\n", "\r\n"]
+    eventCount <- chooseInt (1, 8)
+    events <- mapM genEvent [0 .. eventCount - 1]
+    includeEventLines <- vectorOf eventCount (frequency [(3, pure True), (1, pure False)])
+    includeComments <- vectorOf eventCount (frequency [(1, pure True), (3, pure False)])
+    includeDone <- frequency [(1, pure True), (3, pure False)]
+    unterminated <- frequency [(1, pure True), (3, pure False)]
+    let blocks =
+            concat
+                [ [ if comment
+                        then ": generated keepalive" <> lineEnding <> lineEnding
+                        else ""
+                  , eventBlock lineEnding withEvent event
+                  ]
+                | (event, withEvent, comment) <-
+                    zip3 events includeEventLines includeComments
+                ]
+        withDone =
+            if includeDone
+                then blocks
+                    <> ["data: [DONE]" <> lineEnding <> lineEnding]
+                else blocks
+        body = Text.concat withDone
+    pure $
+        if unterminated
+            then dropFinalBlankLine lineEnding body
+            else body
+
+genEvent :: Int -> Gen ResponseStreamEvent
+genEvent index =
+    oneof
+        [ genLifecycleEvent index
+        , genOutputItemEvent index
+        , genCustomToolDelta index
+        ]
+
+genLifecycleEvent :: Int -> Gen ResponseStreamEvent
+genLifecycleEvent index = do
+    model <- genText
+    status <-
+        elements ["completed", "incomplete", "failed"]
+            :: Gen Text
+    let response =
+            Aeson.object
+                [ "id" .= ("resp-" <> Text.pack (show index))
+                , "created_at" .= index
+                , "model" .= model
+                , "status" .= status
+                ]
+    elements
+        [ ResponseCreatedEvent response (Just index) KeyMap.empty
+        , ResponseInProgressEvent response (Just index) KeyMap.empty
+        , ResponseCompletedEvent response (Just index) KeyMap.empty
+        , ResponseDoneEvent response (Just index) KeyMap.empty
+        , ResponseFailedEvent response (Just index) KeyMap.empty
+        , ResponseIncompleteEvent response (Just index) KeyMap.empty
+        , ResponseQueuedEvent response (Just index) KeyMap.empty
+        ]
+
+genOutputItemEvent :: Int -> Gen ResponseStreamEvent
+genOutputItemEvent index = do
+    body <- genText
+    let item =
+            MessageItem ResponseMessage
+                { messageId = Just ("msg-" <> Text.pack (show index))
+                , content =
+                    MessageContentParts
+                        [ OutputTextPart
+                            { text = body
+                            , annotations = Nothing
+                            , logprobs = Nothing
+                            , extraFields = KeyMap.empty
+                            }
+                        ]
+                , role = RoleAssistant
+                , status = Just ItemCompleted
+                , phase = Nothing
+                , extraFields = KeyMap.empty
+                }
+    elements
+        [ ResponseOutputItemAddedEvent
+            item (Just index) (Just index) KeyMap.empty
+        , ResponseOutputItemDoneEvent
+            item (Just index) (Just index) KeyMap.empty
+        ]
+
+genCustomToolDelta :: Int -> Gen ResponseStreamEvent
+genCustomToolDelta index = do
+    delta <- genText
+    let itemId = Just ("item-" <> Text.pack (show index))
+        callId = Just ("call-" <> Text.pack (show index))
+    elements
+        [ ResponseCustomToolInputDeltaEvent
+            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+        , ResponseCustomToolInputDoneEvent
+            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+        ]
+
+genText :: Gen Text
+genText = do
+    count <- chooseInt (0, 80)
+    Text.pack <$> vectorOf count genTextChar
+
+genTextChar :: Gen Char
+genTextChar =
+    frequency
+        [ (20, elements ['a' .. 'z'])
+        , (5, elements ['0' .. '9'])
+        , (4, elements [' ', '\n', '\t', '"', '\\'])
+        , (3, elements ['é', '界', '🙂', '\x0301'])
+        ]
+
+eventBlock :: Text -> Bool -> ResponseStreamEvent -> Text
+eventBlock lineEnding includeEventLine event =
+    eventLine
+        <> "data: "
+        <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode event))
+        <> lineEnding
+        <> lineEnding
+  where
+    eventLine
+        | includeEventLine =
+            "event: "
+                <> streamEventTypeText (responseStreamEventType event)
+                <> lineEnding
+        | otherwise = ""
+
+dropFinalBlankLine :: Text -> Text -> Text
+dropFinalBlankLine lineEnding body =
+    case Text.stripSuffix (lineEnding <> lineEnding) body of
+        Just prefix -> prefix
+        Nothing -> body
+
+genChunks :: BS.ByteString -> Gen [BS.ByteString]
+genChunks bytes = do
+    sizes <- listOf (chooseInt (1, max 1 (min 64 (BS.length bytes))))
+    includeEmpty <- frequency [(1, pure True), (3, pure False)]
+    let chunks = splitBySizes sizes bytes
+    pure $
+        if includeEmpty
+            then BS.empty : intersperseEmpty chunks <> [BS.empty]
+            else chunks
+
+splitBySizes :: [Int] -> BS.ByteString -> [BS.ByteString]
+splitBySizes _ bytes | BS.null bytes = []
+splitBySizes [] bytes = [bytes]
+splitBySizes (size : sizes) bytes =
+    let (chunk, rest) = BS.splitAt size bytes
+    in chunk : splitBySizes sizes rest
+
+intersperseEmpty :: [BS.ByteString] -> [BS.ByteString]
+intersperseEmpty [] = []
+intersperseEmpty [chunk] = [chunk]
+intersperseEmpty (chunk : chunks) =
+    chunk : BS.empty : intersperseEmpty chunks
 
 eventTypes :: [ResponseStreamEvent] -> [StreamEventType]
 eventTypes = map responseStreamEventType

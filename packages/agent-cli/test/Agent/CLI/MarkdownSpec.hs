@@ -1,5 +1,6 @@
 module Agent.CLI.MarkdownSpec (spec) where
 
+import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Markdown
     ( renderMarkdown
     , renderMarkdownFragment
@@ -167,6 +168,18 @@ spec = do
                     expectationFailure
                         ("expected exactly two table rows, got " <> show body)
 
+        it "keeps table borders aligned around multi-codepoint graphemes" do
+            let womanTechnologist =
+                    Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                mdTable =
+                    "| kind | value |\n\
+                    \| --- | --- |\n\
+                    \| emoji | " <> womanTechnologist <> " |"
+                rows =
+                    filter (not . Text.null . Text.strip)
+                        (map stripAnsi (Text.lines (renderMarkdown True mdTable)))
+            map terminalTextWidth rows `shouldSatisfy` allEqual
+
         it "preserves identifiers and styled links in table cells" do
             let sample =
                     "| key | value |\n\
@@ -247,3 +260,7 @@ spec = do
             renderMarkdownFragment True Nothing ready1
                 <> renderMarkdownFragment True context1 ready2
                 `shouldBe` "snake_case_name"
+
+allEqual :: Eq a => [a] -> Bool
+allEqual [] = True
+allEqual (first : rest) = all (== first) rest

@@ -55,7 +55,9 @@ import Agent.TUI.Model
     , UiState(..)
     , initialUiState
     , reduceUi
+    , visibleTodoList
     )
+import Agent.TUI.Presentation (liveTodoPanelLines)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
@@ -297,7 +299,7 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
         , splitPaneItems = rows
         , splitPaneSelectedIndex = state.viewportIndex
         , splitPaneLeftLabel = \_ -> agentTreeRowLabel
-        , splitPaneTranscript = (.treeRowEntry.agentTranscript)
+        , splitPaneTranscript = agentViewportTranscript
         , splitPaneEmptyTranscript = "(no agents)"
         , splitPaneFooter = footerText
         , splitPanePromptStyle = rolePrompt color
@@ -306,6 +308,11 @@ renderAgentViewportFor color bodyRows terminalCols footerText state =
         }
   where
     rows = agentTreeRows state.viewportAll
+
+agentViewportTranscript :: AgentTreeRow -> [Text]
+agentViewportTranscript row =
+    row.treeRowEntry.agentTranscript
+        <> liveTodoPanelLines 3 (visibleTodoList row.treeRowEntry.agentConversation)
 
 pickAgentViewport
     :: Bool

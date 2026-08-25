@@ -20,9 +20,12 @@ module Agent.CLI.Options
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Provider (Provider(..), parseProvider)
 import Agent.TUI.Motion (MotionMode(..))
+import Data.Foldable (asum)
+import qualified Data.List as List
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Options.Applicative as Options
 
 data Command
     = ShowHelp
@@ -89,6 +92,9 @@ data CliOptions = CliOptions
     , optNoYolo :: !Bool
     , optManagedDenyMutations :: !Bool
     , optMaxTurns :: !Int
+    , optMaxConcurrentAgents :: !(Maybe Int)
+      -- ^ Concurrent subagent cap. 'Nothing' uses project, then harness, then
+      -- 'defaultMaxConcurrent'.
     , optCompactThreshold :: !(Maybe Int)
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
     , optEffort :: !(Maybe Text)
@@ -122,6 +128,7 @@ defaultCliOptions = CliOptions
     , optNoYolo = False
     , optManagedDenyMutations = False
     , optMaxTurns = 500
+    , optMaxConcurrentAgents = Nothing
     , optCompactThreshold = Nothing
     , optEffort = Nothing
     , optShowRawReasoning = False
@@ -172,127 +179,258 @@ parseArgs :: [String] -> Either String Command
 parseArgs args
     | any (`elem` ["--help", "-h"]) args = Right ShowHelp
     | "--version" `elem` args = Right ShowVersion
-    | take 1 args == ["login"] =
-        if length args == 1
-            then Right Login
-            else Left "usage: agent-cli login"
-    | take 1 args == ["sessions"] = parseSessionsCommand (drop 1 args)
-    | take 1 args == ["storage"] = parseStorageCommand (drop 1 args)
-    | otherwise = RunAgent <$> parseOptions defaultCliOptions args
+    | isRunInvocation args
+    , "openai-base-url" `elem` args =
+        Left "openai-base-url was removed; run agent-cli --help"
+    | otherwise =
+        case Options.execParserPure parserPreferences commandParserInfo args of
+            Options.Success command -> validateCommand command
+            Options.Failure failure ->
+                Left (fst (Options.renderFailure failure "agent-cli"))
+            Options.CompletionInvoked _ -> Right ShowHelp
 
-parseSessionsCommand :: [String] -> Either String Command
-parseSessionsCommand = \case
-    [] -> Right ListSessions
-    ["list"] -> Right ListSessions
-    ["show", sessionId] -> Right (ShowSession (Text.pack sessionId))
-    ["wait", sessionId] -> Right (WaitSession (Text.pack sessionId))
-    ["import"] -> Right (ImportSession Nothing)
-    ["import", "--cwd", cwd] ->
-        Right (ImportSession (Just (unsafeEncodeUtf cwd)))
-    ["show"] -> Left "usage: agent-cli sessions show <session-id>"
-    other ->
-        Left ("unknown sessions command: " <> unwords other
-            <> "\nusage: agent-cli sessions [list|show <id>]")
+isRunInvocation :: [String] -> Bool
+isRunInvocation = \case
+    command : _ -> command `notElem` ["login", "sessions", "storage"]
+    [] -> True
 
-parseStorageCommand :: [String] -> Either String Command
-parseStorageCommand = \case
-    ["status"] -> Right (Storage StorageStatus)
-    ["start"] -> Right (Storage StorageStart)
-    ["stop"] -> Right (Storage StorageStop)
-    ["migrate"] -> Right (Storage StorageMigrate)
-    ["doctor"] -> Right (Storage StorageDoctor)
-    [] -> Left storageUsage
-    other ->
-        Left ("unknown storage command: " <> unwords other
-            <> "\n" <> storageUsage)
+parserPreferences :: Options.ParserPrefs
+parserPreferences =
+    Options.prefs Options.showHelpOnError
 
-storageUsage :: String
-storageUsage =
-    "usage: agent-cli storage <status|start|stop|migrate|doctor>"
+commandParserInfo :: Options.ParserInfo Command
+commandParserInfo =
+    Options.info commandParser
+        ( Options.fullDesc
+            <> Options.progDesc
+                "Run an agent or administer persisted sessions and storage"
+        )
 
-parseOptions :: CliOptions -> [String] -> Either String CliOptions
-parseOptions options = \case
-    [] -> validate options
-    "-h" : _ -> Left usage
-    "--help" : _ -> Left usage
-    "--version" : _ -> Left "agent-cli 0.1.0.0"
-    "--provider" : value : rest -> do
-        provider <- case parseProvider (Text.pack value) of
-            Just parsed -> Right parsed
-            Nothing -> Left
-                ("unknown provider: " <> value
-                    <> " (use openai, xai, openrouter, or claude-code)")
-        parseOptions options { optProvider = Just provider } rest
-    "--model" : value : rest ->
-        parseOptions options { optModel = Just (Text.pack value) } rest
-    "--cwd" : value : rest ->
-        parseOptions options { optCwd = Just (unsafeEncodeUtf value) } rest
-    "--worktree" : rest ->
-        parseOptions options { optWorktree = True } rest
-    "--yolo" : rest ->
-        parseOptions options { optYolo = True, optNoYolo = False } rest
-    "--no-yolo" : rest ->
-        parseOptions options { optNoYolo = True, optYolo = False } rest
-    "--managed-deny-mutations" : rest ->
-        parseOptions options
+commandParser :: Options.Parser Command
+commandParser =
+    Options.hsubparser
+        ( Options.command "login"
+            (Options.info (pure Login)
+                (Options.progDesc "Manage provider credentials"))
+            <> Options.command "sessions"
+                (Options.info sessionsParser
+                    (Options.progDesc "Administer persisted sessions"))
+            <> Options.command "storage"
+                (Options.info storageParser
+                    (Options.progDesc "Administer managed PostgreSQL storage"))
+        )
+        Options.<|> (RunAgent <$> runOptionsParser)
+
+sessionsParser :: Options.Parser Command
+sessionsParser =
+    maybe ListSessions id
+        <$> Options.optional
+            (Options.hsubparser
+                ( Options.command "list"
+                    (Options.info (pure ListSessions)
+                        (Options.progDesc "List persisted sessions"))
+                    <> Options.command "show"
+                        (Options.info
+                            (ShowSession . Text.pack
+                                <$> Options.argument Options.str
+                                    (Options.metavar "SESSION_ID"))
+                            (Options.progDesc "Show a persisted session"))
+                    <> Options.command "wait"
+                        (Options.info
+                            (WaitSession . Text.pack
+                                <$> Options.argument Options.str
+                                    (Options.metavar "SESSION_ID"))
+                            (Options.progDesc "Wait for a managed session"))
+                    <> Options.command "import"
+                        (Options.info importSessionParser
+                            (Options.progDesc
+                                "Import a session from the current process"))
+                )
+            )
+
+importSessionParser :: Options.Parser Command
+importSessionParser =
+    ImportSession
+        <$> Options.optional
+            (unsafeEncodeUtf
+                <$> Options.strOption
+                    ( Options.long "cwd"
+                        <> Options.metavar "DIR"
+                        <> Options.help "Working directory recorded for the import"
+                    ))
+
+storageParser :: Options.Parser Command
+storageParser =
+    Options.hsubparser
+        ( storageCommand "status" StorageStatus "Show storage status"
+            <> storageCommand "start" StorageStart "Start managed PostgreSQL"
+            <> storageCommand "stop" StorageStop "Stop managed PostgreSQL"
+            <> storageCommand "migrate" StorageMigrate "Apply storage migrations"
+            <> storageCommand "doctor" StorageDoctor "Check storage health"
+        )
+  where
+    storageCommand name command description =
+        Options.command name
+            (Options.info (pure (Storage command))
+                (Options.progDesc description))
+
+type OptionUpdate = CliOptions -> CliOptions
+
+runOptionsParser :: Options.Parser CliOptions
+runOptionsParser =
+    List.foldl' (\options update -> update options) defaultCliOptions
+        <$> Options.many optionUpdateParser
+
+optionUpdateParser :: Options.Parser OptionUpdate
+optionUpdateParser = asum
+    [ optionUpdate "provider" "NAME"
+        "Provider: openai, xai, openrouter, or claude-code"
+        providerReader (\value options -> options { optProvider = Just value })
+    , optionUpdate "model" "NAME" "Override the saved/default model"
+        textReader (\value options -> options { optModel = Just value })
+    , optionUpdate "cwd" "DIR" "Working directory for tools"
+        pathReader (\value options -> options { optCwd = Just value })
+    , flagUpdate "worktree" "Create a new git worktree"
+        (\options -> options { optWorktree = True })
+    , flagUpdate "yolo" "Auto-approve every tool"
+        (\options -> options { optYolo = True, optNoYolo = False })
+    , flagUpdate "no-yolo" "Deny mutating tools without a TTY"
+        (\options -> options { optNoYolo = True, optYolo = False })
+    , flagUpdate "managed-deny-mutations" "Deny mutations in a managed turn"
+        (\options -> options
             { optManagedDenyMutations = True
             , optNoYolo = True
             , optYolo = False
-            }
-            rest
-    "--max-turns" : value : rest -> do
-        turns <- parseInt "--max-turns" value
-        parseOptions options { optMaxTurns = turns } rest
-    "--compact-threshold" : value : rest -> do
-        threshold <- parseInt "--compact-threshold" value
-        parseOptions options { optCompactThreshold = Just threshold } rest
-    "--effort" : value : rest -> do
-        effort <- parseEffort (Text.pack value)
-        parseOptions options { optEffort = Just effort } rest
-    "--show-raw-reasoning" : rest ->
-        parseOptions options { optShowRawReasoning = True } rest
-    "-p" : value : rest ->
-        parseOptions options { optPrompt = Just (Text.pack value) } rest
-    "--prompt" : value : rest ->
-        parseOptions options { optPrompt = Just (Text.pack value) } rest
-    "--prompt-file" : value : rest ->
-        parseOptions options { optPromptFile = Just (unsafeEncodeUtf value) } rest
-    "--managed-turn-file" : value : rest ->
-        parseOptions options { optManagedTurnFile = Just (unsafeEncodeUtf value) } rest
-    "--resume" : value : rest ->
-        parseOptions options { optResume = Just (Text.pack value) } rest
-    "--save-session" : rest ->
-        parseOptions options { optSaveSession = True } rest
-    "--agents-md" : rest ->
-        parseOptions options { optAgentsMd = True } rest
-    "--no-agents-md" : rest ->
-        parseOptions options { optAgentsMd = False } rest
-    "--skills" : rest ->
-        parseOptions options { optSkills = True } rest
-    "--no-skills" : rest ->
-        parseOptions options { optSkills = False } rest
-    "--ghci" : rest ->
-        parseOptions options { optGhci = True } rest
-    "--no-ghci" : rest ->
-        parseOptions options { optGhci = False } rest
-    "--bash" : rest ->
-        parseOptions options { optBash = True } rest
-    "--no-bash" : rest ->
-        parseOptions options { optBash = False } rest
-    "--fullscreen" : rest ->
-        parseOptions options { optScreenMode = ScreenFullscreen } rest
-    "--minimal" : rest ->
-        parseOptions options { optScreenMode = ScreenMinimal } rest
-    "--motion" : value : rest -> do
-        motion <- parseMotionMode value
-        parseOptions options { optMotionMode = motion } rest
-    flag : _
-        | flag == "openai-base-url" ->
-            Left "openai-base-url was removed; run agent-cli --help"
-        | "-" `Text.isPrefixOf` Text.pack flag ->
-            Left ("unknown flag: " <> flag <> "\n" <> usage)
-        | otherwise ->
-            Left ("unexpected argument: " <> flag <> "\n" <> usage)
+            })
+    , optionUpdate "max-turns" "N" "Stop after N model turns"
+        (positiveIntReader "--max-turns")
+        (\value options -> options { optMaxTurns = value })
+    , optionUpdate "max-concurrent-agents" "N"
+        "Concurrent subagent cap"
+        (positiveIntReader "--max-concurrent-agents")
+        (\value options -> options { optMaxConcurrentAgents = Just value })
+    , optionUpdate "compact-threshold" "N"
+        "OpenAI auto-compaction threshold in tokens"
+        (positiveIntReader "--compact-threshold")
+        (\value options -> options { optCompactThreshold = Just value })
+    , optionUpdate "effort" "LEVEL" "Reasoning effort"
+        effortReader (\value options -> options { optEffort = Just value })
+    , flagUpdate "show-raw-reasoning" "Show raw OpenAI reasoning"
+        (\options -> options { optShowRawReasoning = True })
+    , (\value options -> options { optPrompt = Just value })
+        <$> Options.option textReader
+            ( Options.short 'p'
+                <> Options.long "prompt"
+                <> Options.metavar "TEXT"
+                <> Options.help "Run one prompt and exit"
+            )
+    , optionUpdate "prompt-file" "FILE"
+        "Read the one-shot prompt from a file"
+        pathReader (\value options -> options { optPromptFile = Just value })
+    , optionUpdate "managed-turn-file" "FILE"
+        "Read an internal managed-turn request"
+        pathReader
+        (\value options -> options { optManagedTurnFile = Just value })
+    , optionUpdate "resume" "ID" "Resume a persisted session"
+        textReader (\value options -> options { optResume = Just value })
+    , flagUpdate "save-session" "Persist a one-shot run as a session"
+        (\options -> options { optSaveSession = True })
+    , boolFlagUpdate "agents-md" True "Discover and inject AGENTS.md"
+        (\value options -> options { optAgentsMd = value })
+    , boolFlagUpdate "no-agents-md" False "Skip AGENTS.md discovery"
+        (\value options -> options { optAgentsMd = value })
+    , boolFlagUpdate "skills" True "Discover filesystem skills"
+        (\value options -> options { optSkills = value })
+    , boolFlagUpdate "no-skills" False "Disable skill discovery"
+        (\value options -> options { optSkills = value })
+    , boolFlagUpdate "ghci" True "Enable the persistent GHCi tool"
+        (\value options -> options { optGhci = value })
+    , boolFlagUpdate "no-ghci" False "Disable the persistent GHCi tool"
+        (\value options -> options { optGhci = value })
+    , boolFlagUpdate "bash" True "Enable shell execution tools"
+        (\value options -> options { optBash = value })
+    , boolFlagUpdate "no-bash" False "Disable shell execution tools"
+        (\value options -> options { optBash = value })
+    , screenFlagUpdate "fullscreen" ScreenFullscreen
+        "Use the retained full-screen TUI"
+    , screenFlagUpdate "minimal" ScreenMinimal
+        "Use terminal-native append-only rendering"
+    , optionUpdate "motion" "MODE" "Animation policy: full, reduced, or off"
+        motionReader (\value options -> options { optMotionMode = value })
+    ]
+
+optionUpdate
+    :: String
+    -> String
+    -> String
+    -> Options.ReadM value
+    -> (value -> OptionUpdate)
+    -> Options.Parser OptionUpdate
+optionUpdate name metavar description reader update =
+    update
+        <$> Options.option reader
+            ( Options.long name
+                <> Options.metavar metavar
+                <> Options.help description
+            )
+
+flagUpdate
+    :: String
+    -> String
+    -> OptionUpdate
+    -> Options.Parser OptionUpdate
+flagUpdate name description update =
+    Options.flag' update
+        (Options.long name <> Options.help description)
+
+boolFlagUpdate
+    :: String
+    -> Bool
+    -> String
+    -> (Bool -> OptionUpdate)
+    -> Options.Parser OptionUpdate
+boolFlagUpdate name value description update =
+    flagUpdate name description (update value)
+
+screenFlagUpdate
+    :: String
+    -> ScreenMode
+    -> String
+    -> Options.Parser OptionUpdate
+screenFlagUpdate name value description =
+    flagUpdate name description
+        (\options -> options { optScreenMode = value })
+
+textReader :: Options.ReadM Text
+textReader = Text.pack <$> Options.str
+
+pathReader :: Options.ReadM OsPath
+pathReader = unsafeEncodeUtf <$> Options.str
+
+providerReader :: Options.ReadM Provider
+providerReader = Options.eitherReader \value ->
+    case parseProvider (Text.pack value) of
+        Just provider -> Right provider
+        Nothing -> Left
+            ("unknown provider: " <> value
+                <> " (use openai, xai, openrouter, or claude-code)")
+
+positiveIntReader :: String -> Options.ReadM Int
+positiveIntReader flag =
+    Options.eitherReader (parseInt flag)
+
+effortReader :: Options.ReadM Text
+effortReader =
+    Options.eitherReader (parseEffort . Text.pack)
+
+motionReader :: Options.ReadM MotionMode
+motionReader =
+    Options.eitherReader parseMotionMode
+
+validateCommand :: Command -> Either String Command
+validateCommand = \case
+    RunAgent options -> RunAgent <$> validate options
+    command -> Right command
 
 validate :: CliOptions -> Either String CliOptions
 validate options
@@ -305,6 +443,8 @@ validate options
         Left "use only one of -p/--prompt, --prompt-file, or --managed-turn-file"
     | options.optMaxTurns < 1 =
         Left "--max-turns must be at least 1"
+    | maybe False (< 1) options.optMaxConcurrentAgents =
+        Left "--max-concurrent-agents must be at least 1"
     | isJust options.optResume && options.optWorktree =
         Left "use either --resume or --worktree, not both"
     | otherwise = Right options
@@ -366,6 +506,9 @@ usage = unlines
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"
+    , "      --max-concurrent-agents N"
+    , "                          Concurrent subagent cap (default: 32;"
+    , "                          project settings, then ~/.haskell-agent/config.json)"
     , "      --compact-threshold N"
     , "                          OpenAI auto-compaction threshold in tokens"
     , "                          (default: model-specific, currently 244800)"
@@ -395,6 +538,8 @@ usage = unlines
     , "persisting the main conversation."
     , "/skills lists discovered SKILL.md workflows; /skills reload rescans."
     , "Invoke one with /NAME [ARGS] or mention it as $NAME in a prompt."
+    , "/agents opens the agent viewport; /agents limit [N] shows or sets"
+    , "the live concurrent subagent cap and saves it to project settings."
     , "/shell shows the active shell tools; /shell ghci or /shell bash switches"
     , "the current session. /shell both and /shell none are also available."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"

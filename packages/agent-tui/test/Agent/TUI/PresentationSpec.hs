@@ -197,3 +197,26 @@ spec = describe "tool presentation" do
             `shouldBe`
                 "✓ Clone the repo\n\
                 \□ Open a PR"
+
+    it "keeps a live todo panel while work remains and truncates overflow" do
+        let todos =
+                [ TodoDisplayLine TodoDisplayCompleted "Find repos"
+                , TodoDisplayLine TodoDisplayInProgress "Investigate Grok"
+                , TodoDisplayLine TodoDisplayPending "Investigate Codex"
+                ]
+        todoListHasOpenWork todos `shouldBe` True
+        todoListHasInProgress todos `shouldBe` True
+        todoListHasOpenWork [TodoDisplayLine TodoDisplayPending "later"]
+            `shouldBe` True
+        todoListHasInProgress [TodoDisplayLine TodoDisplayPending "later"]
+            `shouldBe` False
+        todoListHasOpenWork [TodoDisplayLine TodoDisplayCompleted "done"]
+            `shouldBe` False
+        liveTodoPanelLines 2 todos
+            `shouldBe`
+                [ "✓ Find repos"
+                , "… +2 more"
+                ]
+        todoListFromToolOutput "ok" `shouldBe` Nothing
+        todoListFromToolOutput "No tasks currently tracked."
+            `shouldBe` Just []

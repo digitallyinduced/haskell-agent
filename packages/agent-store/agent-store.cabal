@@ -71,6 +71,7 @@ library
                     , text
                     , time
                     , unix
+                    , uuid-types
 
 benchmark pool-cache-bench
     import:           common-opts
@@ -83,6 +84,18 @@ benchmark pool-cache-bench
                     , base >= 4.14 && < 5
                     , containers
                     , time
+
+benchmark custom-catalog-inspection-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          CustomCatalogInspection.hs
+    ghc-options:      -O2 -threaded -rtsopts
+    build-depends:    agent-store
+                    , base >= 4.14 && < 5
+                    , safe-exceptions
+                    , temporary
+                    , text
 
 test-suite agent-store-test
     import:           common-opts

@@ -48,6 +48,9 @@ eventFollows = \case
     UiUserSubmitted _ -> True
     UiAssistantHistory _ -> True
     UiSystemMessage _ -> True
+    UiRecapStarted -> True
+    UiRecapReady _ -> True
+    UiRecapUnavailable _ -> True
     UiErrorMessage _ -> True
     UiRetryCountdown{} -> True
     UiConversationCleared -> True

@@ -31,6 +31,7 @@ import Agent.CLI.Clipboard
     ( nonEmptyClipboardText
     , readClipboardText
     )
+import Agent.CLI.Dictation (dictate)
 import Agent.CLI.Command
     ( ReplAction(..)
     , SlashMenu(..)
@@ -43,6 +44,7 @@ import Agent.CLI.Input
     , appendReplHistory
     , displayEditorText
     , submissionPromptText
+    , truncateDisplayText
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Options (reasoningEfforts)
@@ -52,11 +54,19 @@ import Agent.CLI.TUI.Composer.Edit
 import Agent.CLI.TUI.Types
 import qualified Agent.TUI.Theme as Theme
 import Agent.TUI.Model
+import Agent.TUI.TextWidth
+    ( nextGraphemeBoundary
+    , previousGraphemeBoundary
+    , terminalTextImage
+    )
 import Brick
+import Brick.BChan (writeBChan)
+import qualified Brick.Types as B
 import qualified Brick.Widgets.Border as Border
 import Brick.Widgets.Border.Style (unicodeRounded)
 import qualified Brick.Widgets.Border.Style as BorderStyle
 import Control.Concurrent.STM (atomically)
+import Control.Exception.Safe (tryAny)
 import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
@@ -107,10 +117,11 @@ drawSlashRow selected index suggestion =
     let prefix = if selected == index then "❯ " else "  "
         row =
             hBox
-                [ txt (prefix <> suggestion.slashSuggestionDisplay)
+                [ terminalTxt
+                    (prefix <> suggestion.slashSuggestionDisplay)
                 , vLimit 1 (fill ' ')
                 , withAttr Theme.mutedAttr
-                    (txt suggestion.slashSuggestionSummary)
+                    (terminalTxt suggestion.slashSuggestionSummary)
                 ]
         styled =
             if selected == index
@@ -133,15 +144,13 @@ drawQueuedInputs state =
                                     <> Text.pack
                                         (show (Seq.length state.uiQueuedInputs))
                                     <> " · "))
-                        , withAttr Theme.mutedAttr (txt (queuePreview next))
+                        , withAttr Theme.mutedAttr
+                            (terminalTxt (queuePreview next))
                         ]
 
 queuePreview :: Text -> Text
 queuePreview text =
-    let oneLine = Text.unwords (Text.words text)
-    in if Text.length oneLine > 100
-        then Text.take 99 oneLine <> "…"
-        else oneLine
+    truncateDisplayText 100 (Text.unwords (Text.words text))
 
 drawComposer :: AppState -> Widget Name
 drawComposer appState =
@@ -291,7 +300,16 @@ renderDraft focused height state =
     -- and can place the insertion cursor on them.
     renderRow row
         | Text.null row = txt " "
-        | otherwise = txt (displayEditorText row)
+        | otherwise = terminalTxt (displayEditorText row)
+
+terminalTxt :: Text -> Widget n
+terminalTxt text =
+    B.Widget B.Fixed B.Fixed do
+        context <- B.getContext
+        attr <- B.lookupAttrName (B.ctxAttrName context)
+        pure B.emptyResult
+            { B.image = terminalTextImage attr text
+            }
 
 drawComposerStatus :: AppState -> Widget Name
 drawComposerStatus state =
@@ -304,7 +322,7 @@ drawComposerStatus state =
                    ]
                 <> [ if prompt.promptAccountSelectable
                         then accountControl
-                        else withAttr Theme.mutedAttr (txt account)
+                        else withAttr Theme.mutedAttr (terminalTxt account)
                    | not (Text.null account)
                    ]
   where
@@ -316,19 +334,19 @@ drawComposerStatus state =
             (if limitStatus.promptLimitWarning
                 then Theme.syntaxWarningAttr
                 else Theme.successAttr)
-            (txt limitStatus.promptLimitText)
+            (terminalTxt limitStatus.promptLimitText)
         | limitStatus <- maybeToList prompt.promptLimitStatus
         ]
     modelControl =
         clickable ComposerModel $
             forceAttr
                 (controlAttr state ComposerModel Theme.controlLinkAttr)
-                (txt prompt.promptModel)
+                (terminalTxt prompt.promptModel)
     effortControl =
         clickable ComposerEffort $
             forceAttr
                 (controlAttr state ComposerEffort Theme.controlLinkAttr)
-                (txt ("(" <> prompt.promptEffort <> ")"))
+                (terminalTxt ("(" <> prompt.promptEffort <> ")"))
     modelAndEffort
         | Text.null prompt.promptModel = []
         | Text.null prompt.promptEffort = [modelControl]
@@ -337,12 +355,12 @@ drawComposerStatus state =
         clickable ComposerMode $
             forceAttr
                 (controlAttr state ComposerMode Theme.controlLinkAttr)
-                (txt mode)
+                (terminalTxt mode)
     accountControl =
         clickable ComposerAccount $
             forceAttr
                 (controlAttr state ComposerAccount Theme.controlLinkAttr)
-                (txt account)
+                (terminalTxt account)
 
     maybeToList = \case
         Nothing -> []
@@ -561,6 +579,17 @@ handleComposerKey
         V.EvKey (V.KChar 'l') modifiers
             | V.MCtrl `elem` modifiers ->
                 invalidateCache
+        V.EvKey (V.KChar 'r') modifiers
+            | V.MCtrl `elem` modifiers ->
+                suspendAndResume do
+                    result <- tryAny dictate
+                    writeBChan
+                        state.appRuntime.runtimeEvents
+                        (AppDictationFinished
+                            (case result of
+                                Left err -> Left (Text.pack (show err))
+                                Right transcript -> Right transcript))
+                    pure state
         V.EvKey (V.KChar 'a') modifiers
             | V.MCtrl `elem` modifiers ->
                 setCursor (lineStartCursor ui.uiDraft ui.uiCursor)
@@ -758,17 +787,24 @@ handleComposerKey
         state <- get
         let ui = state.appUi
         when (ui.uiCursor > 0) do
-            let before = Text.take (ui.uiCursor - 1) ui.uiDraft
+            let start =
+                    previousGraphemeBoundary
+                        ui.uiDraft
+                        ui.uiCursor
+                before = Text.take start ui.uiDraft
                 after = Text.drop ui.uiCursor ui.uiDraft
             modifyUiResetSlash
-                (UiSetDraft (before <> after) (ui.uiCursor - 1))
+                (UiSetDraft (before <> after) start)
 
     deleteAfter = do
         state <- get
         let ui = state.appUi
         when (ui.uiCursor < Text.length ui.uiDraft) do
             let before = Text.take ui.uiCursor ui.uiDraft
-                after = Text.drop (ui.uiCursor + 1) ui.uiDraft
+                after =
+                    Text.drop
+                        (nextGraphemeBoundary ui.uiDraft ui.uiCursor)
+                        ui.uiDraft
             modifyUiResetSlash
                 (UiSetDraft (before <> after) ui.uiCursor)
 
@@ -807,9 +843,17 @@ handleComposerKey
         when (not (Text.null state.appKillBuffer)) $
             insertText state.appKillBuffer
 
+    moveCursor :: Int -> EventM Name AppState ()
     moveCursor delta = do
         state <- get
-        setCursor (state.appUi.uiCursor + delta)
+        let ui = state.appUi
+            cursor
+                | delta < 0 =
+                    previousGraphemeBoundary ui.uiDraft ui.uiCursor
+                | delta > 0 =
+                    nextGraphemeBoundary ui.uiDraft ui.uiCursor
+                | otherwise = ui.uiCursor
+        setCursor cursor
 
     setCursor cursor =
         get >>= \current ->

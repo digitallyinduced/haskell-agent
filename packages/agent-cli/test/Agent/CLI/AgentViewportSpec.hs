@@ -8,8 +8,16 @@ import Agent.TUI.Model
     ( BlockKind(..)
     , BlockState(..)
     , UiBlock(..)
+    , UiEvent(..)
     , UiState(..)
     , initialUiState
+    , reduceUi
+    )
+import Agent.Loop (LoopEvent(..))
+import Agent.ToolDispatch
+    ( ToolCallKind(..)
+    , ToolCallResult(..)
+    , functionToolCall
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -121,6 +129,44 @@ spec = do
             panel `shouldSatisfy` Text.isInfixOf "transcript · /root/alpha"
             panel `shouldSatisfy` Text.isInfixOf "assistant: working"
             panel `shouldSatisfy` Text.isInfixOf "input routes to /root"
+
+        it "shows a selected child's live todos in the transcript pane" do
+            let todoCall =
+                    functionToolCall
+                        "todo-1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"Review Model.hs\"}]}"
+                conversation =
+                    foldl
+                        (flip reduceUi)
+                        initialUiState
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted todoCall)
+                        , UiLoop
+                            (ToolFinished ToolCallResult
+                                { callId = "todo-1"
+                                , output = "- [in_progress] 1: Review Model.hs"
+                                , callKind = FunctionCallKind
+                                })
+                        ]
+                selected = AgentChild (SubagentId "alpha")
+                withTodos =
+                    map
+                        (\entry ->
+                            if entry.agentTarget == selected
+                                then
+                                    entry
+                                        { agentConversation = conversation
+                                        , agentTranscript =
+                                            replicate 8 "assistant: filler"
+                                                <> ["assistant: working"]
+                                        }
+                                else entry)
+                        entries
+                panel = renderAgentViewportPanelFor False 70 selected withTodos
+            panel `shouldSatisfy` Text.isInfixOf "Review Model.hs"
+            panel `shouldSatisfy` Text.isInfixOf "transcript · /root/alpha"
+            panel `shouldSatisfy` Text.isInfixOf "assistant: working"
 
     describe "formatAgentStatus" do
         it "uses compact status labels" do

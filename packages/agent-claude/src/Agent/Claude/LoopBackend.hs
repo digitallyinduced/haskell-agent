@@ -3,6 +3,7 @@
 module Agent.Claude.LoopBackend
     ( withClaudeCodeBackend
     , claudeCodeOneShotBackend
+    , appendHostTranscript
     ) where
 
 import Agent.Claude.Options
@@ -547,7 +548,7 @@ commitHostTranscript
     sessionId
     inputs
     assistantText = do
-    appendHostTranscript transcript inputs assistantText
+    appendHostTranscriptRef transcript inputs assistantText
     -- Read and enter the exact object installed in the IORef before taking its
     -- StableName. Otherwise the lazy append thunk can later be entered by the
     -- CLI, changing the StableName despite no host-side transcript change.
@@ -563,17 +564,23 @@ commitHostTranscript
             }
 
 appendHostTranscript
+    :: [ResponseItem]
+    -> [TurnInput]
+    -> Maybe Text
+    -> [ResponseItem]
+appendHostTranscript history inputs assistantText =
+    history
+        <> turnInputsToItems inputs
+        <> [assistantMessageItem assistantText]
+
+appendHostTranscriptRef
     :: IORef [ResponseItem]
     -> [TurnInput]
     -> Maybe Text
     -> IO ()
-appendHostTranscript transcript inputs assistantText =
+appendHostTranscriptRef transcript inputs assistantText =
     atomicModifyIORef' transcript \history ->
-        ( history
-            <> turnInputsToItems inputs
-            <> [assistantMessageItem assistantText]
-        , ()
-        )
+        (appendHostTranscript history inputs assistantText, ())
 
 assistantMessageItem :: Maybe Text -> ResponseItem
 assistantMessageItem assistantText =

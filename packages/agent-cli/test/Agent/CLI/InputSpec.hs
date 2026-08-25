@@ -18,10 +18,27 @@ import Agent.CLI.Input
     , truncateDisplayText
     , visibleEditorText
     )
+import Data.Char (isControl)
 import Data.Either (isLeft)
 import qualified Data.Text as Text
+import qualified Graphics.Vty as V
 import System.FilePath ((</>))
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , Gen
+    , Property
+    , chooseInt
+    , conjoin
+    , counterexample
+    , elements
+    , vectorOf
+    , (===)
+    )
+
+data EditorViewportCase = EditorViewportCase !Int !Text.Text !Int
+    deriving (Show)
 
 spec :: Spec
 spec = do
@@ -121,14 +138,59 @@ spec = do
             displayEditorText "\ESC]0;owned\BEL"
                 `shouldBe` "␛]0;owned␇"
 
+        it "does not leak a newline joined to a variation selector" do
+            let input = Text.pack ['\n', '\xfe0f']
+                displayed = displayEditorText input
+            displayed `shouldBe` Text.singleton '\x21b5'
+            displayed `shouldSatisfy` not . Text.any (== '\n')
+            V.safeWctwidth displayed `shouldBe` terminalTextWidth input
+
         it "measures wide and combining Unicode in terminal columns" do
             terminalTextWidth "a界🙂e\x0301" `shouldBe` 6
             visibleEditorText 3 "a界b" 2 `shouldBe` ("界b", 2)
+
+        it "keeps a wide cursor glyph visible in a narrow viewport" do
+            visibleEditorText 2 "a界" 2 `shouldBe` ("界", 2)
+            visibleEditorText 1 "界" 1 `shouldBe` ("…", 1)
+
+        it "does not detach combining marks from a hidden wide glyph" do
+            visibleEditorText 1 "界\x0301" 2 `shouldBe` ("…", 1)
+            visibleEditorText 2 "a界\x0301" 3 `shouldBe` ("界\x0301", 2)
+
+        it "preserves supported emoji and safely substitutes width mismatches" do
+            let womanTechnologist =
+                    Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                usFlag =
+                    Text.pack ['\x1f1fa', '\x1f1f8']
+                thumbsUpMedium =
+                    Text.pack ['\x1f44d', '\x1f3fd']
+                keycapOne =
+                    Text.pack ['1', '\xfe0f', '\x20e3']
+                text =
+                    womanTechnologist
+                        <> usFlag
+                        <> thumbsUpMedium
+                        <> keycapOne
+                displayed =
+                    womanTechnologist
+                        <> usFlag
+                        <> thumbsUpMedium
+                        <> "１"
+            displayEditorText text `shouldBe` displayed
+            terminalTextWidth text `shouldBe` 8
+            visibleEditorText 2 womanTechnologist 3
+                `shouldBe` (womanTechnologist, 2)
+            visibleEditorText 1 womanTechnologist 3
+                `shouldBe` ("…", 1)
 
         it "truncates the complete row without exceeding its column budget" do
             let truncated = truncateDisplayText 5 "/always-approve"
             truncated `shouldBe` "/alw…"
             terminalTextWidth truncated `shouldBe` 5
+
+        modifyMaxSuccess (const 1000) $
+            prop "keeps generated editor viewports visible and in bounds" $
+                editorViewportProperty
 
     describe "clipboard image paste key" do
         it "recognizes legacy Ctrl+V without treating ordinary v as paste" do
@@ -152,3 +214,44 @@ spec = do
             isShiftEnterCsiBody "27;2;13~" `shouldBe` True
             isShiftEnterCsiBody "13;2u" `shouldBe` True
             isShiftEnterCsiBody "13u" `shouldBe` False
+
+editorViewportProperty :: EditorViewportCase -> Property
+editorViewportProperty (EditorViewportCase available raw requestedCursor) =
+    conjoin
+        [ counterexample "visible text exceeds available columns"
+            ((terminalTextWidth shown <= available) === True)
+        , counterexample "visible cursor is outside rendered text"
+            ((column >= 0 && column <= terminalTextWidth shown) === True)
+        , counterexample "nonempty editor text disappeared"
+            ((not (Text.null shown)) === True)
+        , counterexample "visible text contains terminal controls"
+            (Text.all (not . isControl) shown === True)
+        , counterexample "Vty and editor width models disagree"
+            (V.safeWctwidth shown === terminalTextWidth shown)
+        ]
+  where
+    cursor = max 0 (min (Text.length raw) requestedCursor)
+    (shown, column) = visibleEditorText available raw cursor
+
+instance Arbitrary EditorViewportCase where
+    arbitrary = do
+        available <- chooseInt (1, 80)
+        atomCount <- chooseInt (1, 90)
+        raw <- Text.concat <$> vectorOf atomCount genEditorAtom
+        cursor <- chooseInt (-20, Text.length raw + 20)
+        pure $
+            EditorViewportCase
+                available
+                raw
+                cursor
+
+genEditorAtom :: Gen Text.Text
+genEditorAtom =
+    elements
+        [ "a", "z", "0", " ", "\t", "\r", "\n"
+        , "界", "語", "🙂", "🚀", "é", "ø", "e\x0301"
+        , Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+        , Text.pack ['\x1f1fa', '\x1f1f8']
+        , Text.pack ['\x1f44d', '\x1f3fd']
+        , Text.pack ['1', '\xfe0f', '\x20e3']
+        ]

@@ -51,13 +51,15 @@ library
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
+                    , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
-                    , Agent.CLI.Session.History
                     , Agent.CLI.Session.Interaction
+                    , Agent.CLI.Session.Lifecycle
                     , Agent.CLI.Session.Retry
+                    , Agent.CLI.Session.Runner
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
                     , Agent.CLI.SessionAdmin
@@ -89,9 +91,11 @@ library
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Duration
+                    , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
                     , Agent.CLI.Environment
                     , Agent.CLI.Error
+                    , Agent.CLI.FileUri
                     , Agent.CLI.ImagePreview
                     , Agent.CLI.GatewayBridge
                     , Agent.CLI.Input
@@ -121,6 +125,7 @@ library
                     , Agent.CLI.Progress
                     , Agent.CLI.Project
                     , Agent.CLI.Prompt
+                    , Agent.CLI.Recap
                     , Agent.CLI.Request
                     , Agent.CLI.ProviderFallback
                     , Agent.CLI.ProviderAvailability
@@ -129,6 +134,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
                     , Agent.CLI.SessionState
@@ -157,6 +163,7 @@ library
                     , Agent.CLI.WebFetch
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
@@ -189,6 +196,7 @@ library
                     , mtl
                     , network
                     , network-uri
+                    , optparse-applicative >= 0.18 && < 0.19
                     , process >= 1.6.26
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
@@ -299,6 +307,7 @@ test-suite agent-cli-test
                     , Agent.CLI.DialectsSpec
                     , Agent.CLI.DatabaseSpec
                     , Agent.CLI.ErrorSpec
+                    , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
                     , Agent.CLI.InputSpec
@@ -320,6 +329,7 @@ test-suite agent-cli-test
                     , Agent.CLI.PendingInputsSpec
                     , Agent.CLI.ProgressSpec
                     , Agent.CLI.PromptSpec
+                    , Agent.CLI.RecapSpec
                     , Agent.CLI.ProviderFallbackSpec
                     , Agent.CLI.ProviderAvailabilitySpec
                     , Agent.CLI.ProviderTransitionSpec
@@ -334,6 +344,7 @@ test-suite agent-cli-test
                     , Agent.CLI.TextLayoutSpec
                     , Agent.CLI.TurnSpec
                     , Agent.CLI.SessionSpec
+                    , Agent.CLI.SessionHistorySpec
                     , Agent.CLI.SessionStateSpec
                     , Agent.CLI.SessionTitleSpec
                     , Agent.CLI.SkillsSpec

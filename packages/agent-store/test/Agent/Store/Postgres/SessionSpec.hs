@@ -196,6 +196,9 @@ testMetadata now = SessionMetadata
     , sessionMetadataInputTokens = 10
     , sessionMetadataOutputTokens = 5
     , sessionMetadataCachedTokens = 2
+    , sessionMetadataLastRecap = Nothing
+    , sessionMetadataLastTurnSummary = Nothing
+    , sessionMetadataLastRecapMainTurns = 0
     }
 
 testTurn :: UTCTime -> SessionTurn

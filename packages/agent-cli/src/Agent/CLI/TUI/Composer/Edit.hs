@@ -5,7 +5,10 @@ module Agent.CLI.TUI.Composer.Edit
     , wrapDraft
     ) where
 
-import Agent.CLI.Input (terminalCharWidth, terminalTextWidth)
+import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Input.Display (displayCells)
+import Agent.CLI.Input.Types (DisplayCell(..))
+import Agent.TUI.TextWidth (clampGraphemeCursor)
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
 import Data.Maybe (fromMaybe)
@@ -14,21 +17,24 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Text.Encoding.Error (lenientDecode)
 
--- | Visually wrap a draft without changing its underlying text. The cursor
--- offset is measured in the original text and returned in wrapped row/column
--- coordinates. Long unbroken text is split at terminal cell boundaries.
+-- | Visually wrap a draft without changing its underlying editor state. The
+-- cursor offset is measured in the original text and returned in wrapped
+-- row/column coordinates. Long unbroken text is split at terminal cell
+-- boundaries; a glyph wider than the entire viewport is shown as an ellipsis.
 wrapDraft :: Int -> Text -> Int -> ([Text], (Int, Int))
 wrapDraft requestedWidth text requestedCursor =
     let width = max 1 requestedWidth
-        cursor = max 0 (min (Text.length text) requestedCursor)
+        cursor = clampGraphemeCursor text requestedCursor
         (rowsRev, currentRev, currentWidth, currentRow, cursorLocation) =
-            go width cursor 0 [] [] 0 0 Nothing (Text.unpack text)
+            go width cursor 0 [] [] 0 0 Nothing (draftTokens text)
         (finalRowsRev, finalCurrentRev, finalRow, finalColumn)
             | cursor == Text.length text && currentWidth >= width =
                 (finishRow rowsRev currentRev, [], currentRow + 1, 0)
             | otherwise =
                 (rowsRev, currentRev, currentRow, currentWidth)
-        rows = reverse (Text.pack (reverse finalCurrentRev) : finalRowsRev)
+        rows =
+            reverse
+                (Text.concat (reverse finalCurrentRev) : finalRowsRev)
         location =
             fromMaybe
                 (finalRow, finalColumn)
@@ -40,17 +46,16 @@ wrapDraft requestedWidth text requestedCursor =
         -> Int
         -> Int
         -> [Text]
-        -> [Char]
+        -> [Text]
         -> Int
         -> Int
         -> Maybe (Int, Int)
-        -> [Char]
-        -> ([Text], [Char], Int, Int, Maybe (Int, Int))
+        -> [DraftToken]
+        -> ([Text], [Text], Int, Int, Maybe (Int, Int))
     go _ _ _ rowsRev currentRev currentWidth currentRow location [] =
         (rowsRev, currentRev, currentWidth, currentRow, location)
     go width cursor index rowsRev currentRev currentWidth currentRow location
-        (character : rest)
-        | character == '\n' =
+        (DraftLineBreak : rest) =
             let atVisualBoundary = currentWidth >= width
                 rowsAfterBoundary
                     | atVisualBoundary = finishRow rowsRev currentRev
@@ -58,14 +63,11 @@ wrapDraft requestedWidth text requestedCursor =
                 rowAfterBoundary
                     | atVisualBoundary = currentRow + 1
                     | otherwise = currentRow
-                columnAfterBoundary
-                    | atVisualBoundary = 0
-                    | otherwise = currentWidth
                 location' =
                     recordCursor
                         cursor
                         index
-                        (rowAfterBoundary, columnAfterBoundary)
+                        (currentRow, currentWidth)
                         location
                 (nextRows, nextRow)
                     | atVisualBoundary =
@@ -74,40 +76,46 @@ wrapDraft requestedWidth text requestedCursor =
                         (finishRow rowsAfterBoundary currentRev, currentRow + 1)
             in go
                 width cursor (index + 1) nextRows [] 0 nextRow location' rest
-        | otherwise =
-            let characterWidth = terminalCharWidth character
-                shouldWrap =
-                    characterWidth > 0
-                        && ( currentWidth >= width
-                            || (currentWidth > 0
-                                && currentWidth + characterWidth > width)
-                           )
-                rows' =
-                    if shouldWrap
-                        then finishRow rowsRev currentRev
-                        else rowsRev
-                currentRev' = if shouldWrap then [] else currentRev
-                currentWidth' = if shouldWrap then 0 else currentWidth
-                currentRow' = if shouldWrap then currentRow + 1 else currentRow
-                location' =
-                    recordCursor
-                        cursor
-                        index
-                        (currentRow', currentWidth')
-                        location
-            in go
-                width
-                cursor
-                (index + 1)
-                rows'
-                (character : currentRev')
-                (currentWidth' + characterWidth)
-                currentRow'
-                location'
-                rest
+    go width cursor index rowsRev currentRev currentWidth currentRow location
+        (DraftCell cell : rest) =
+        let displayText
+                | cell.displayCellWidth > width = "…"
+                | otherwise = cell.displayCellText
+            displayWidth
+                | cell.displayCellWidth > width = 1
+                | otherwise = cell.displayCellWidth
+            shouldWrap =
+                displayWidth > 0
+                    && ( currentWidth >= width
+                        || (currentWidth > 0
+                            && currentWidth + displayWidth > width)
+                       )
+            rows' =
+                if shouldWrap
+                    then finishRow rowsRev currentRev
+                    else rowsRev
+            currentRev' = if shouldWrap then [] else currentRev
+            currentWidth' = if shouldWrap then 0 else currentWidth
+            currentRow' = if shouldWrap then currentRow + 1 else currentRow
+            location' =
+                recordCursor
+                    cursor
+                    index
+                    (currentRow', currentWidth')
+                    location
+        in go
+            width
+            cursor
+            (index + cell.displayCellSourceLength)
+            rows'
+            (displayText : currentRev')
+            (currentWidth' + displayWidth)
+            currentRow'
+            location'
+            rest
 
     finishRow rowsRev currentRev =
-        Text.pack (reverse currentRev) : rowsRev
+        Text.concat (reverse currentRev) : rowsRev
 
     recordCursor cursor index location = \case
         Nothing
@@ -115,8 +123,9 @@ wrapDraft requestedWidth text requestedCursor =
         previous -> previous
 
 draftCursorLocation :: Text -> Int -> (Int, Int)
-draftCursorLocation text cursor =
-    let before = Text.take cursor text
+draftCursorLocation text requestedCursor =
+    let cursor = clampGraphemeCursor text requestedCursor
+        before = Text.take cursor text
         rows = Text.splitOn "\n" before
     in case reverse rows of
         [] -> (0, 0)
@@ -130,3 +139,18 @@ decodePaste =
                 || character == '\t'
                 || not (isControl character))
         . Text.decodeUtf8With lenientDecode
+
+data DraftToken
+    = DraftLineBreak
+    | DraftCell !DisplayCell
+
+draftTokens :: Text -> [DraftToken]
+draftTokens raw
+    | Text.null raw = []
+    | otherwise =
+        let (line, rest) = Text.break (== '\n') raw
+            lineTokens = map DraftCell (displayCells line)
+        in if Text.null rest
+            then lineTokens
+            else lineTokens
+                <> (DraftLineBreak : draftTokens (Text.drop 1 rest))

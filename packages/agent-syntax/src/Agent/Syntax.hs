@@ -13,10 +13,10 @@ module Agent.Syntax
     , resolveFenceLanguage
     ) where
 
-import Data.Char (ord)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Unsafe as TextUnsafe
 import Skylighting.Core
     ( SyntaxMap
     , TokenType(..)
@@ -264,13 +264,4 @@ sourceLineCount source
     | otherwise = Text.count "\n" source + 1
 
 utf8Length :: Text -> Int
-utf8Length = Text.foldl' (\total character -> total + utf8CharLength character) 0
-
-utf8CharLength :: Char -> Int
-utf8CharLength character
-    | code <= 0x7f = 1
-    | code <= 0x7ff = 2
-    | code <= 0xffff = 3
-    | otherwise = 4
-  where
-    code = ord character
+utf8Length = TextUnsafe.lengthWord8
