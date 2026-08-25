@@ -57,6 +57,7 @@ library
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.Session.History
                     , Agent.CLI.Session.Interaction
+                    , Agent.CLI.Session.Lifecycle
                     , Agent.CLI.Session.Retry
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
