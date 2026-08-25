@@ -35,6 +35,7 @@ import Control.Exception.Safe
     , displayException
     , finally
     , fromException
+    , isSyncException
     , throwIO
     , tryAny
     )
@@ -141,10 +142,14 @@ transcribePcmWithXAI provider produceAudio onTranscript =
             else do
                 result <- tryAny
                     (transcribe credential produceAudio onTranscript)
-                pure $ case result of
-                    Left err -> Left (transcriptionException err)
+                case result of
+                    Left err
+                        | isSyncException err ->
+                            pure (Left (transcriptionException err))
+                        | otherwise ->
+                            throwIO err
                     Right transcript ->
-                        Right transcript
+                        pure (Right transcript)
 
 transcriptionException :: SomeException -> ApiError
 transcriptionException err =
