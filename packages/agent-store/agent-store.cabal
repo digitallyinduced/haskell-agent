@@ -71,6 +71,7 @@ library
                     , text
                     , time
                     , unix
+                    , uuid-types
 
 benchmark pool-cache-bench
     import:           common-opts
