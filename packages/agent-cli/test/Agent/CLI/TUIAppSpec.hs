@@ -283,6 +283,14 @@ spec = do
                   , V.EvKey (V.KChar 'v') [V.MCtrl]
                   )
                 , ( Nothing
+                  , "\ESC[99;5u"
+                  , V.EvKey (V.KChar 'c') [V.MCtrl]
+                  )
+                , ( Nothing
+                  , "\ESC[99:67:67;5:1u"
+                  , V.EvKey (V.KChar 'c') [V.MCtrl]
+                  )
+                , ( Nothing
                   , "\ESC[118;9u"
                   , V.EvKey (V.KChar 'v') [V.MMeta]
                   )
