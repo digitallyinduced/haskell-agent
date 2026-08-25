@@ -17,6 +17,7 @@ module Agent.CLI.Terminal
     , synchronizedOutputBegin
     , synchronizedOutputEnd
     , stripAnsi
+    , kittyCtrlCsiBodies
     , kittyCtrlVCsiBodies
     , kittySuperVCsiBodies
     , shiftEnterCsiBodies
@@ -34,7 +35,7 @@ module Agent.CLI.Terminal
 import Agent.CLI.FileUri (fileUri)
 import Control.Exception.Safe (bracket_)
 import qualified Data.ByteString.Base64 as Base64
-import Data.Char (toLower)
+import Data.Char (ord, toLower, toUpper)
 import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -212,18 +213,29 @@ shiftEnterCsiBodies =
     , "13;2u"
     ]
 
--- | CSI bodies emitted by Kitty's keyboard protocol for Ctrl+V and Cmd+V.
+-- | CSI bodies emitted by Kitty's keyboard protocol for Ctrl+letter chords.
 --
 -- The longer key-code form includes the shifted and base-layout codepoints.
 -- Event type 1 is an explicit key press; terminals may omit it.
-kittyCtrlVCsiBodies, kittySuperVCsiBodies :: [String]
-kittyCtrlVCsiBodies = kittyModifiedVCsiBodies 5
-kittySuperVCsiBodies = kittyModifiedVCsiBodies 9
+kittyCtrlCsiBodies :: Char -> [String]
+kittyCtrlCsiBodies character = kittyModifiedCsiBodies character 5
 
-kittyModifiedVCsiBodies :: Int -> [String]
-kittyModifiedVCsiBodies encodedModifier =
+-- | Paste chords retained as named lists for inline and fullscreen input.
+kittyCtrlVCsiBodies, kittySuperVCsiBodies :: [String]
+kittyCtrlVCsiBodies = kittyCtrlCsiBodies 'v'
+kittySuperVCsiBodies = kittyModifiedCsiBodies 'v' 9
+
+kittyModifiedCsiBodies :: Char -> Int -> [String]
+kittyModifiedCsiBodies character encodedModifier =
     [ keyCode <> ";" <> show encodedModifier <> event <> "u"
-    | keyCode <- ["118", "118:86:86"]
+    | keyCode <-
+        [ show (ord character)
+        , show (ord character)
+            <> ":"
+            <> show (ord (toUpper character))
+            <> ":"
+            <> show (ord (toUpper character))
+        ]
     , event <- ["", ":1"]
     ]
 

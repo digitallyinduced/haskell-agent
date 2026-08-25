@@ -129,7 +129,7 @@ import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
-    , kittyCtrlVCsiBodies
+    , kittyCtrlCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -718,13 +718,16 @@ fullscreenVtyConfig =
             ]
             <> [ ( Nothing
                  , "\ESC[" <> body
-                 , V.EvKey (V.KChar 'v') [modifier]
+                 , V.EvKey (V.KChar character) [V.MCtrl]
                  )
-               | (modifier, bodies) <-
-                    [ (V.MCtrl, kittyCtrlVCsiBodies)
-                    , (V.MMeta, kittySuperVCsiBodies)
-                    ]
-               , body <- bodies
+               | character <- ['a'..'z']
+               , body <- kittyCtrlCsiBodies character
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'v') [V.MMeta]
+                 )
+               | body <- kittySuperVCsiBodies
                ]
         }
 
