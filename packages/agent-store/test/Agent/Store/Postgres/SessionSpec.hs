@@ -63,6 +63,9 @@ spec = describe "PostgreSQL session schema" do
         ddl `shouldNotContainBytes` "::json"
         ddl `shouldContainBytes` "search_vector tsvector GENERATED ALWAYS"
         ddl `shouldContainBytes` "USING gin (search_vector)"
+        ddl `shouldContainBytes` "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+        ddl `shouldContainBytes` "USING gin (user_text gin_trgm_ops)"
+        ddl `shouldContainBytes` "USING gin (assistant_text gin_trgm_ops)"
         ddl `shouldContainBytes` "session_events_immutable"
         ddl `shouldContainBytes` "session_turns_immutable"
 

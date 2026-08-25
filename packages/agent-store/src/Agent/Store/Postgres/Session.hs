@@ -21,6 +21,7 @@ module Agent.Store.Postgres.Session
     , LegacySession(..)
     , ConversationSearchResult(..)
     , sessionSchemaStatements
+    , sessionSearchIndexStatements
     , createSession
     , replaceSessionMetadata
     , appendSessionTurn
@@ -300,6 +301,7 @@ sessionSchemaStatements =
       \ ON harness.session_turns (session_id, turn_index DESC)\
       \ WHERE transcript_effect <> 'append'"
     ]
+    <> sessionSearchIndexStatements
     <> sessionItemSchemaStatements
     <> [ "CREATE TABLE IF NOT EXISTS harness.legacy_session_imports (\
        \ import_id uuid PRIMARY KEY DEFAULT pg_catalog.uuidv7(),\
@@ -327,6 +329,42 @@ sessionSchemaStatements =
        \ BEFORE UPDATE OR DELETE ON harness.session_turns\
        \ FOR EACH ROW EXECUTE FUNCTION harness.reject_session_fact_mutation()"
        ]
+
+-- | Trigram indexes that make the substring branches of conversation search
+-- indexable. Without them the @ILIKE@ fallbacks in 'searchTurnsStatement'
+-- force a sequential scan of @session_turns@ even though the tsvector branch
+-- has a GIN index: an @OR@ can only use a bitmap scan when every branch is
+-- indexable. With @pg_trgm@ indexes on the raw text columns the planner can
+-- combine all three branches with a BitmapOr.
+-- The column-existence guards keep the shared statements safe as a
+-- catch-up migration on partially-shaped legacy stores; on freshly created
+-- schemas they are trivially true.
+sessionSearchIndexStatements :: [ByteString]
+sessionSearchIndexStatements =
+    [ "CREATE EXTENSION IF NOT EXISTS pg_trgm"
+    , "DO $ha$\
+      \ BEGIN\
+      \   IF EXISTS (\
+      \     SELECT 1 FROM information_schema.columns\
+      \     WHERE table_schema = 'harness'\
+      \       AND table_name = 'session_turns'\
+      \       AND column_name = 'user_text'\
+      \   ) THEN\
+      \     CREATE INDEX IF NOT EXISTS session_turns_user_text_trgm_idx\
+      \       ON harness.session_turns USING gin (user_text gin_trgm_ops);\
+      \   END IF;\
+      \   IF EXISTS (\
+      \     SELECT 1 FROM information_schema.columns\
+      \     WHERE table_schema = 'harness'\
+      \       AND table_name = 'session_turns'\
+      \       AND column_name = 'assistant_text'\
+      \   ) THEN\
+      \     CREATE INDEX IF NOT EXISTS session_turns_assistant_text_trgm_idx\
+      \       ON harness.session_turns USING gin (assistant_text gin_trgm_ops);\
+      \   END IF;\
+      \ END\
+      \ $ha$"
+    ]
 
 createSession
     :: StorePool
@@ -1285,7 +1323,7 @@ searchTurnsStatement = mkStatement
     \ WHERE s.deleted_at IS NULL AND (\
     \   t.search_vector @@ query.value\
     \   OR t.user_text ILIKE '%' || $1 || '%'\
-    \   OR coalesce(t.assistant_text, '') ILIKE '%' || $1 || '%'\
+    \   OR t.assistant_text ILIKE '%' || $1 || '%'\
     \ )\
     \ ORDER BY ts_rank_cd(t.search_vector, query.value) DESC,\
     \   t.occurred_at DESC\
