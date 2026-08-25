@@ -1,4 +1,9 @@
-module Agent.Tools.FileSystem.ListDir (listDirTool) where
+module Agent.Tools.FileSystem.ListDir
+    ( listDirTool
+    , DirNode(..)
+    , capNodes
+    , renderTree
+    ) where
 
 import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
@@ -126,19 +131,44 @@ toNode cwd parent (name, isDir) = do
                         children <- collectDir cwd full
                         pure [summarizeDir name children]
 
+-- | Keep as many nodes as @budget@ allows. A directory that does not fit in
+-- full is included as a stub (and maybe a truncated child list) rather than
+-- dropped. Later siblings keep a reserved slot so a large subdirectory cannot
+-- hide the rest of the listing.
 capNodes :: Int -> [DirNode] -> ([DirNode], Bool)
 capNodes budget nodes =
-    let (kept, remaining) = go budget nodes
-    in (kept, remaining <= 0 && countNodes nodes > budget)
-  where
-    go remaining [] = ([], remaining)
-    go remaining _ | remaining <= 0 = ([], remaining)
-    go remaining (node : rest) =
-        let size = countNodes [node]
-            (more, left) = go (remaining - min size remaining) rest
-        in if size > remaining
-            then ([], 0)
-            else (node : more, left)
+    fill (max 0 budget) (length nodes) nodes
+
+-- | @fill remaining restCount nodes@ spends at most @remaining@ slots. @restCount@
+-- is the length of @nodes@, carried so later-sibling reservation stays linear.
+fill :: Int -> Int -> [DirNode] -> ([DirNode], Bool)
+fill _ _ [] = ([], False)
+fill remaining _ _ | remaining <= 0 = ([], True)
+fill remaining restCount (node : rest) =
+    let reserved = min (remaining - 1) (restCount - 1)
+        available = remaining - reserved
+        (keptNode, used, nodeTruncated) = takeNode available node
+        (more, restTruncated) =
+            fill (remaining - used) (restCount - 1) rest
+    in (keptNode : more, nodeTruncated || restTruncated)
+
+takeNode :: Int -> DirNode -> (DirNode, Int, Bool)
+takeNode budget node = case node of
+    FileNode name -> (FileNode name, 1, False)
+    DirectoryNode name children
+        | budget <= 1 ->
+            ( DirectoryNode name []
+            , 1
+            , not (null children)
+            )
+        | otherwise ->
+            let (keptChildren, truncated) =
+                    fill (budget - 1) (length children) children
+            in
+                ( DirectoryNode name keptChildren
+                , 1 + countNodes keptChildren
+                , truncated
+                )
 
 countNodes :: [DirNode] -> Int
 countNodes = sum . map \case
@@ -171,18 +201,20 @@ extensionSummary files =
         <> Text.intercalate ", " (take 4 rendered) <> ")"
 
 renderTree :: Int -> [DirNode] -> Text
-renderTree depth = Text.unlines . map (renderNode depth)
+renderTree depth = Text.unlines . concatMap (renderNodeLines depth)
 
-renderNode :: Int -> DirNode -> Text
-renderNode depth = \case
-    FileNode name -> indent <> "- " <> toText name
+renderNodeLines :: Int -> DirNode -> [Text]
+renderNodeLines depth = \case
+    FileNode name -> [indent <> "- " <> toText name]
     DirectoryNode name children ->
-        let header = indent <> "- " <> toText name
-                <> if "/" `Text.isSuffixOf` toText name || "(" `Text.isInfixOf` toText name
-                    then ""
-                    else "/"
-        in if null children
-            then header
-            else header <> "\n" <> renderTree (depth + 1) children
+        (indent <> "- " <> directoryLabel name)
+            : concatMap (renderNodeLines (depth + 1)) children
   where
     indent = Text.replicate depth "  "
+
+directoryLabel :: OsPath -> Text
+directoryLabel name =
+    let label = toText name
+    in if "/" `Text.isSuffixOf` label || "(" `Text.isInfixOf` label
+        then label
+        else label <> "/"
