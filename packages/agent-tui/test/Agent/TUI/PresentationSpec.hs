@@ -139,3 +139,28 @@ spec = describe "tool presentation" do
         formatToolOutput call
             "{\"agents\":[{\"agent_status\":\"running\"},null]}"
             `shouldBe` "(no live agents)"
+
+    it "summarizes conversation search calls while preserving text output" do
+        let call = functionToolCall
+                "search"
+                "conversation_search"
+                "{\"query\":\"postgres memory\",\"limit\":5}"
+        summarizeToolCall call
+            `shouldBe` "Searched conversations postgres memory"
+        formatToolOutput call "Match 1\nUser:\n  A question"
+            `shouldBe` "Match 1\nUser:\n  A question"
+
+    it "summarizes persisted agent-session conversation tools" do
+        let create = functionToolCall
+                "create" "create_agent_session"
+                "{\"message\":\"work\",\"title\":\"research\"}"
+            readSession = functionToolCall
+                "read" "read_agent_session"
+                "{\"session_id\":\"session-1\",\"limit\":20}"
+            message = functionToolCall
+                "message" "send_agent_session_message"
+                "{\"session_id\":\"session-1\",\"message\":\"continue\"}"
+        summarizeToolCall create `shouldBe` "Created agent session research"
+        summarizeToolCall readSession `shouldBe` "Read agent session session-1"
+        summarizeToolCall message `shouldBe`
+            "Messaged agent session session-1"
