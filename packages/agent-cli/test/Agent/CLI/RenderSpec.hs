@@ -103,6 +103,15 @@ spec = do
             let call = functionToolCall "c1" "collaboration.spawn_agent" "{}"
             formatToolOutput call "not json" `shouldBe` "not json"
 
+        it "renders todo_write output as a glyph checklist" do
+            formatToolOutput
+                (functionToolCall "c1" "todo_write" "{}")
+                "- [completed] 1: Find and clone repos\n\
+                \- [pending] 2: Investigate Codex"
+                `shouldBe`
+                    "✓ Find and clone repos\n\
+                    \□ Investigate Codex"
+
     describe "formatElapsed" do
         it "formats seconds and minutes" do
             formatElapsed 0.4 `shouldBe` "0.4s"
@@ -132,6 +141,17 @@ spec = do
         it "keeps unknown tool names" do
             formatToolStarted False (functionToolCall "c5" "custom_tool" "{\"x\":1}")
                 `shouldBe` "◆ custom_tool"
+
+        it "keeps todo_write and update_plan on their wire names" do
+            formatToolStarted False
+                (functionToolCall
+                    "c8"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Find repos\"}]}")
+                `shouldBe` "◆ todo_write"
+            formatToolStarted False
+                (functionToolCall "c9" "update_plan" "{\"plan\":[]}")
+                `shouldBe` "◆ update_plan"
 
         it "renders learned-skill mutations as visible learning activity" do
             formatToolStarted False
@@ -163,6 +183,16 @@ spec = do
             formatSearchReplaceDiff False
                 "{\"file_path\":\"src/Old.hs\",\"old_string\":\"bye\",\"new_string\":\"\"}"
                 `shouldSatisfy` Text.isInfixOf "delete src/Old.hs"
+
+    describe "formatToolBody" do
+        it "does not dump todo_write arguments into linear chrome" do
+            formatToolBody False
+                (functionToolCall
+                    "c1"
+                    "todo_write"
+                    "{\"todos\":[{\"id\":\"1\",\"content\":\"Find and clone repos\"},\
+                    \{\"id\":\"2\",\"content\":\"Investigate Codex\"}]}")
+                `shouldBe` ""
 
     describe "formatLoopError" do
         it "explains a max-turn stop" do
@@ -493,6 +523,37 @@ spec = do
                     actual <- stripTerminalControls <$> Text.readFile path
                     actual `shouldBe` expected
 
+        it "preserves emoji graphemes split across streaming deltas" do
+            let womanTechnologist =
+                    Text.pack ['\x1f469', '\x200d', '\x1f4bb']
+                keycapOne =
+                    Text.pack ['1', '\xfe0f', '\x20e3']
+                usFlag =
+                    Text.pack ['\x1f1fa', '\x1f1f8']
+                source =
+                    "status "
+                        <> womanTechnologist
+                        <> " "
+                        <> keycapOne
+                        <> " "
+                        <> usFlag
+                expected =
+                    stripTerminalControls
+                        (renderAssistantText True source)
+            withRenderConfig False True \config handle path -> do
+                mapM_
+                    (renderEvent config . TextDelta . Text.singleton)
+                    (Text.unpack source)
+                renderEvent config (TurnFinished TurnOutput
+                    { responseId = "r1"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                    })
+                hClose handle
+                actual <- stripTerminalControls <$> Text.readFile path
+                actual `shouldBe` expected
+
         it "does not expose fence or table markers while streaming" do
             withRenderConfig False True \config handle path -> do
                 mapM_ (renderEvent config . TextDelta)
@@ -558,6 +619,27 @@ spec = do
                 body `shouldSatisfy` Text.isInfixOf "Listed"
                 body `shouldSatisfy` Text.isInfixOf "\ESC["
                 body `shouldSatisfy` Text.isInfixOf "ok"
+
+        it "suppresses todo_write from linear scrollback" do
+            withRenderConfig False False \config handle path -> do
+                let call =
+                        functionToolCall
+                            "c1"
+                            "todo_write"
+                            "{\"todos\":[{\"id\":\"1\",\"content\":\"Find repos\"}]}"
+                renderEvent config (ToolStarted call)
+                renderEvent config (ToolFinished ToolCallResult
+                    { callId = "c1"
+                    , output =
+                        "- [completed] 1: Find and clone Grok Build and Codex repos\n\
+                        \- [pending] 2: Investigate Codex"
+                    , callKind = FunctionCallKind
+                    })
+                hClose handle
+                body <- Text.readFile path
+                body `shouldNotSatisfy` Text.isInfixOf "todo_write"
+                body `shouldNotSatisfy` Text.isInfixOf "Find and clone"
+                body `shouldNotSatisfy` Text.isInfixOf "[completed]"
 
         it "keeps thinking plain when color is off" do
             withRenderConfig True False \config handle path -> do

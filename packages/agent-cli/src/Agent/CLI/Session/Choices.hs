@@ -16,6 +16,7 @@ import Agent.CLI.Models
     , PickerState(..)
     , initialPickerStateResolved
     )
+import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.CLI.Options (reasoningEfforts)
 import Agent.CLI.Style
     ( roleError
@@ -146,7 +147,7 @@ accountUsageText color provider tokenProvider openAiPool = do
             case openAiPool of
                 Just pool -> do
                     snapshots <- OpenAI.snapshotAccounts pool
-                    lines_ <- mapM fetchSnapshot snapshots
+                    lines_ <- mapConcurrentlyBounded 4 fetchSnapshot snapshots
                     pure (formatUsageReport color now lines_)
                 Nothing ->
                     case tokenProvider of

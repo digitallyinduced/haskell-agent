@@ -1,12 +1,15 @@
 -- | Pure fullscreen bridge decisions used by the Brick runtime.
 module Agent.CLI.TUI.Bridge
     ( eventFollows
+    , fullscreenHistoryLimit
     , historyMove
     , isSendNowKey
     , mergeUiEvents
     , nativeProgressSignal
     , normalizeAgentSelection
+    , pushHistory
     , reconcileAgentSelection
+    , trimHistory
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
@@ -15,12 +18,39 @@ import Agent.Loop (LoopEvent(..))
 import Data.Text (Text)
 import qualified Graphics.Vty as V
 
+-- | Keep enough prompt recall for normal interactive use without retaining an
+-- unbounded copy of the persistent Haskeline history in the fullscreen state.
+fullscreenHistoryLimit :: Int
+fullscreenHistoryLimit = 100
+
+trimHistory :: [Text] -> [Text]
+trimHistory entries =
+    maybe entries id (overflowPrefix fullscreenHistoryLimit entries)
+  where
+    -- Preserve the original list when it already fits. On overflow, force the
+    -- bounded spine now: a lazy 'take' would leave the retained prefix pointing
+    -- into the complete on-disk history until the user walked far enough.
+    overflowPrefix 0 [] = Nothing
+    overflowPrefix 0 _ = Just []
+    overflowPrefix _ [] = Nothing
+    overflowPrefix remaining (entry : rest) =
+        case overflowPrefix (remaining - 1) rest of
+            Nothing -> Nothing
+            Just boundedRest ->
+                boundedRest `seq` Just (entry : boundedRest)
+
+pushHistory :: Text -> [Text] -> [Text]
+pushHistory text = trimHistory . (text :)
+
 eventFollows :: UiEvent -> Bool
 eventFollows = \case
     UiLoop _ -> True
     UiUserSubmitted _ -> True
     UiAssistantHistory _ -> True
     UiSystemMessage _ -> True
+    UiRecapStarted -> True
+    UiRecapReady _ -> True
+    UiRecapUnavailable _ -> True
     UiErrorMessage _ -> True
     UiRetryCountdown{} -> True
     UiConversationCleared -> True

@@ -89,6 +89,9 @@ data CliOptions = CliOptions
     , optNoYolo :: !Bool
     , optManagedDenyMutations :: !Bool
     , optMaxTurns :: !Int
+    , optMaxConcurrentAgents :: !(Maybe Int)
+      -- ^ Concurrent subagent cap. 'Nothing' uses project, then harness, then
+      -- 'defaultMaxConcurrent'.
     , optCompactThreshold :: !(Maybe Int)
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
     , optEffort :: !(Maybe Text)
@@ -122,6 +125,7 @@ defaultCliOptions = CliOptions
     , optNoYolo = False
     , optManagedDenyMutations = False
     , optMaxTurns = 500
+    , optMaxConcurrentAgents = Nothing
     , optCompactThreshold = Nothing
     , optEffort = Nothing
     , optShowRawReasoning = False
@@ -243,6 +247,9 @@ parseOptions options = \case
     "--max-turns" : value : rest -> do
         turns <- parseInt "--max-turns" value
         parseOptions options { optMaxTurns = turns } rest
+    "--max-concurrent-agents" : value : rest -> do
+        limit <- parseInt "--max-concurrent-agents" value
+        parseOptions options { optMaxConcurrentAgents = Just limit } rest
     "--compact-threshold" : value : rest -> do
         threshold <- parseInt "--compact-threshold" value
         parseOptions options { optCompactThreshold = Just threshold } rest
@@ -305,6 +312,8 @@ validate options
         Left "use only one of -p/--prompt, --prompt-file, or --managed-turn-file"
     | options.optMaxTurns < 1 =
         Left "--max-turns must be at least 1"
+    | maybe False (< 1) options.optMaxConcurrentAgents =
+        Left "--max-concurrent-agents must be at least 1"
     | isJust options.optResume && options.optWorktree =
         Left "use either --resume or --worktree, not both"
     | otherwise = Right options
@@ -366,6 +375,9 @@ usage = unlines
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
     , "      --max-turns N       Stop after N model turns (default: 500)"
+    , "      --max-concurrent-agents N"
+    , "                          Concurrent subagent cap (default: 32;"
+    , "                          project settings, then ~/.haskell-agent/config.json)"
     , "      --compact-threshold N"
     , "                          OpenAI auto-compaction threshold in tokens"
     , "                          (default: model-specific, currently 244800)"
@@ -395,6 +407,8 @@ usage = unlines
     , "persisting the main conversation."
     , "/skills lists discovered SKILL.md workflows; /skills reload rescans."
     , "Invoke one with /NAME [ARGS] or mention it as $NAME in a prompt."
+    , "/agents opens the agent viewport; /agents limit [N] shows or sets"
+    , "the live concurrent subagent cap and saves it to project settings."
     , "/shell shows the active shell tools; /shell ghci or /shell bash switches"
     , "the current session. /shell both and /shell none are also available."
     , "/always-approve (or :yolo) toggles auto-approve and saves it under"

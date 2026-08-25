@@ -82,6 +82,7 @@ import System.OsPath (OsPath)
 data SessionBackend = SessionBackend
     { backend :: !Backend
     , btwBackend :: !BtwBackendFactory
+    , resetBackendState :: !(IO ())
     }
 
 data SessionRequest = SessionRequest

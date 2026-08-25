@@ -10,6 +10,7 @@ module Agent.CLI.Session.History
     , modifyLiveAttachments
     , resetLiveConversationState
     , resetLiveConversation
+    , resetLiveConversationWith
     , writeLivePreviousResponseId
     , writeLiveTranscript
     ) where
@@ -107,7 +108,16 @@ resetLiveConversation
     :: IORef LiveConversation
     -> PlanModeEnv
     -> IO ()
-resetLiveConversation conversationRef planMode = do
+resetLiveConversation =
+    resetLiveConversationWith (pure ())
+
+resetLiveConversationWith
+    :: IO ()
+    -> IORef LiveConversation
+    -> PlanModeEnv
+    -> IO ()
+resetLiveConversationWith resetBackend conversationRef planMode = do
+    resetBackend
     atomicModifyIORef' conversationRef \state ->
         (resetLiveConversationState state, ())
     deactivatePlanMode planMode

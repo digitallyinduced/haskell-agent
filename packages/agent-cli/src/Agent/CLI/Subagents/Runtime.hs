@@ -133,6 +133,7 @@ import Agent.GrokBuild.Dialect.Task
 import Agent.Tools.MultiAgents
     ( CollaborationSpawnOptions(..)
     , MultiAgentContext(..)
+    , SubagentWorktree
     )
 import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
 import Agent.Tools.Types
@@ -193,6 +194,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
     , subagentConnection :: !Text
     , subagentMapModel :: !(Text -> Text)
+    , subagentCreateWorktree
+        :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
     , subagentSpawnModelGuidance :: !(Maybe Text)
     }
 
@@ -634,20 +637,19 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                         childParams = requestParams OpenAIProvider model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     httpFallbackActive <- newIORef False
                     let websocketBackend =
                             freshOpenAiBackend
                                 runtime.subagentOptions.optShowRawReasoning
                                 tokenProvider
-                                (readIORef childParamsRef)
+                                (pure childParams)
                         httpBackend =
                             statelessResponsesBackendWithRawReasoning
                                 runtime.subagentOptions.optShowRawReasoning
                                 (\request _onEvent ->
                                     OpenAI.createCodexMessageWithProvider
                                         tokenProvider request)
-                                (readIORef childParamsRef)
+                                (pure childParams)
                         baseBackend =
                             openAiBackendWithTransportFallback
                                 httpFallbackActive
@@ -658,7 +660,7 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                                 autoCompactOpenAiBackendWithThreshold
                                     runtime.subagentOptions.optCompactThreshold
                                     tokenProvider
-                                    (readIORef childParamsRef)
+                                    (pure childParams)
                                     prepared.preparedSession.subSessionContextTokens
                                     baseBackend
                     runPreparedChild
@@ -673,7 +675,7 @@ runHttpSubagent
     -> Dialect
     -> Provider
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
-    -> (IORef ResponseCreateParams -> Backend)
+    -> (ResponseCreateParams -> Backend)
     -> RunSubagent
 runHttpSubagent runtime dialect provider sendToRoot mkBackend =
     \env previous prompt onEvent -> do
@@ -808,10 +810,9 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                         childParams = requestParams provider model instructions
                             (schemasFromAppTools childDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
-                    childParamsRef <- newIORef childParams
                     let backend =
                             withConnectionRecovery $
-                                mkBackend childParamsRef
+                                mkBackend childParams
                     runPreparedChild
                         runtime env prepared.preparedSession toolRegistry
                         backend onEvent
@@ -860,12 +861,13 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
         childToolEnv = childEnv { toolCancel = env.subCancel }
         childCtx = MultiAgentContext
             { multiRegistry = runtime.subagentRegistry
+            , multiCwd = env.subCwd
             , multiSelfId = Just env.subId
             , multiDepth = env.subDepth
             , multiTaskPath = childPath
             , multiRootTurnId = pure env.subRootTurnId
             , multiResumeFromDisk = Nothing
-            , multiCreateWorktree = Nothing
+            , multiCreateWorktree = runtime.subagentCreateWorktree
             , multiPrepareSpawn = Just
                 (prepareCollaborationSpawn
                     provider

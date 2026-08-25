@@ -23,6 +23,8 @@ let
   managedInstances = filterAttrs (_: instance: instance.createUser) enabledInstances;
   instanceHomes = mapAttrsToList (_: instance: instance.homeDirectory) enabledInstances;
   instanceUsers = mapAttrsToList (_: instance: instance.user) enabledInstances;
+  isAbsoluteEnvironmentFile =
+    path: hasPrefix "/" path || (hasPrefix "-/" path && builtins.stringLength path > 2);
 
   instanceType = types.submodule (
     { name, config, ... }:
@@ -177,6 +179,8 @@ let
           description = ''
             Environment files read by systemd at service start. Use these for
             provider API keys instead of putting secret values in Nix options.
+            Prefix an absolute path with <literal>-</literal> to ignore a
+            missing file.
           '';
         };
       };
@@ -230,6 +234,10 @@ in
           message = "services.haskell-agent.telegram.instances.${name}.homeDirectory must be absolute";
         }
         {
+          assertion = hasPrefix "/" instance.codexHome;
+          message = "services.haskell-agent.telegram.instances.${name}.codexHome must be absolute";
+        }
+        {
           assertion = builtins.stringLength "${instance.homeDirectory}/.haskell-agent/postgres/run" <= 90;
           message = "services.haskell-agent.telegram.instances.${name}.homeDirectory is too long for the private PostgreSQL socket";
         }
@@ -246,12 +254,17 @@ in
           message = "services.haskell-agent.telegram.instances.${name}.allowedUsers must contain only positive IDs";
         }
         {
+          assertion =
+            builtins.length instance.allowedUsers == builtins.length (lib.unique instance.allowedUsers);
+          message = "services.haskell-agent.telegram.instances.${name}.allowedUsers must not contain duplicates";
+        }
+        {
           assertion = hasPrefix "/" instance.tokenFile;
           message = "services.haskell-agent.telegram.instances.${name}.tokenFile must be an absolute runtime path";
         }
         {
-          assertion = builtins.all (hasPrefix "/") instance.environmentFiles;
-          message = "services.haskell-agent.telegram.instances.${name}.environmentFiles must contain only absolute paths";
+          assertion = builtins.all isAbsoluteEnvironmentFile instance.environmentFiles;
+          message = "services.haskell-agent.telegram.instances.${name}.environmentFiles must contain only absolute paths, optionally prefixed with -";
         }
       ]) enabledInstances
     );
@@ -300,6 +313,10 @@ in
         wantedBy = [ "multi-user.target" ];
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
+        unitConfig.RequiresMountsFor = [
+          instance.homeDirectory
+          instance.workingDirectory
+        ];
 
         environment = instance.environment // {
           HOME = instance.homeDirectory;

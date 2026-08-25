@@ -28,11 +28,12 @@ module Agent.Store.Postgres.Scope
 
 import Control.Monad (forM_)
 import qualified Data.ByteString as ByteString
-import Data.Char (isHexDigit)
+import Control.Applicative ((<|>))
 import Data.Functor.Contravariant ((>$<))
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Data.UUID.Types as UUID
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import Hasql.Pool (Pool)
@@ -79,10 +80,27 @@ data ScopeDatabase = ScopeDatabase
 -- safe without accepting caller-controlled SQL syntax.
 mkScopeId :: Text -> Either Text ScopeId
 mkScopeId raw =
-    let compact = Text.toLower (Text.filter (/= '-') (Text.strip raw))
-    in if Text.length compact == 32 && Text.all isHexDigit compact
-        then Right (ScopeId compact)
-        else Left "scope id must be a UUID (32 hex digits, with optional hyphens)"
+    case UUID.fromText stripped <|> parseCompact stripped of
+        Just uuid ->
+            Right
+                (ScopeId
+                    (Text.filter (/= '-') (Text.toLower (UUID.toText uuid))))
+        Nothing ->
+            Left "scope id must be a UUID (32 hex digits, with optional hyphens)"
+  where
+    stripped = Text.strip raw
+    parseCompact compact
+        | Text.length compact == 32
+        , Text.all (/= '-') compact =
+            UUID.fromText $
+                Text.intercalate "-"
+                    [ Text.take 8 compact
+                    , Text.take 4 (Text.drop 8 compact)
+                    , Text.take 4 (Text.drop 12 compact)
+                    , Text.take 4 (Text.drop 16 compact)
+                    , Text.drop 20 compact
+                    ]
+        | otherwise = Nothing
 
 -- | Derive a stable 128-bit scope identifier from a caller-resolved logical
 -- key.  The digest is computed by PostgreSQL's pgcrypto extension so CLI

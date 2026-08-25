@@ -8,6 +8,8 @@ module Agent.CLI.TUI.Motion
     , hasBackgroundActivity
     , isBackgroundAgentActive
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , uiEventRestartsMotionSchedule
@@ -21,6 +23,7 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.TUI.Types
     ( AppState(..)
     , FullscreenRuntime(..)
+    , TerminalFocus(..)
     )
 import Agent.Loop (LoopEvent(..))
 import Agent.TUI.Model
@@ -92,9 +95,44 @@ motionDemandFor mode waitingForUser backgroundActive completionFlashing ui =
     semanticDemand =
         if uiNeedsTick ui then MotionSlow else MotionNone
 
+-- | Suppress cosmetic motion while the terminal is unfocused, while retaining
+-- semantic ticks used for elapsed time, notice expiry, and progress keepalive.
+motionDemandForTerminalFocus
+    :: TerminalFocus
+    -> MotionMode
+    -> Bool
+    -> Bool
+    -> Bool
+    -> UiState
+    -> MotionDemand
+motionDemandForTerminalFocus
+    focus
+    mode
+    waitingForUser
+    backgroundActive
+    completionFlashing
+    ui
+    | focus == TerminalUnfocused =
+        if uiNeedsTick ui then MotionSlow else MotionNone
+    | otherwise =
+        motionDemandFor
+            mode
+            waitingForUser
+            backgroundActive
+            completionFlashing
+            ui
+
+-- | Unfocused terminals retain only the one-second off-mode cadence, bounded
+-- by any earlier semantic deadline.
+motionModeForTerminalFocus :: TerminalFocus -> MotionMode -> MotionMode
+motionModeForTerminalFocus focus mode
+    | focus == TerminalUnfocused = MotionOff
+    | otherwise = mode
+
 appMotionDemand :: AppState -> MotionDemand
 appMotionDemand state =
-    motionDemandFor
+    motionDemandForTerminalFocus
+        state.appTerminalFocus
         state.appRuntime.runtimeMotionMode
         (userActionPending state)
         (hasBackgroundActivity state.appAgentEntries)
@@ -105,12 +143,16 @@ appMotionTiming :: AppState -> (MotionDemand, Int)
 appMotionTiming state =
     ( demand
     , motionDelayMicros
-        state.appRuntime.runtimeMotionMode
+        effectiveMode
         demand
         (appNextDeadlineMillis state)
     )
   where
     demand = appMotionDemand state
+    effectiveMode =
+        motionModeForTerminalFocus
+            state.appTerminalFocus
+            state.appRuntime.runtimeMotionMode
 
 appNextDeadlineMillis :: AppState -> Maybe Int
 appNextDeadlineMillis state =
@@ -150,7 +192,7 @@ completionFlashTransitions previous next =
     , blockWasLive oldBlock.blockState
     , block.blockState == BlockComplete
     , block.blockKind
-        `elem` [BlockThinking, BlockTool, BlockShell, BlockEdit]
+        `elem` [BlockThinking, BlockTool, BlockTodo, BlockShell, BlockEdit]
     ]
   where
     previousById =
