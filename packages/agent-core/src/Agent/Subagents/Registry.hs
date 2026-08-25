@@ -50,6 +50,8 @@ module Agent.Subagents.Registry
     , getTaskPath
     , resolveAgentTarget
     , listAgents
+    , subagentConfig
+    , setMaxConcurrent
     ) where
 
 import Agent.Cancel
@@ -198,7 +200,7 @@ data SubagentRegistry = SubagentRegistry
     , registryNextUpdateSeq :: !(TVar Int)
     , registryWaitCursors :: !(TVar (Map (Maybe SubagentId) Int))
     , registryActiveWaits :: !(TVar (Map (Maybe SubagentId) [SubagentId]))
-    , registryConfig :: !SubagentConfig
+    , registryConfig :: !(TVar SubagentConfig)
     , registryRunRef :: !(IORef RunSubagent)
     , registryOnEvent :: !(SubagentId -> LoopEvent -> IO ())
     , registryOnCompleteRef :: !(IORef (SubagentId -> SubagentStatus -> IO ()))
@@ -228,6 +230,9 @@ newSubagentRegistry config cwd run onEvent = do
     nextSubagentId <- newTVarIO 0
     nextRootTurnId <- newTVarIO 0
     abortedRootTurns <- newTVarIO Set.empty
+    configVar <- newTVarIO config
+        { maxConcurrent = max 1 config.maxConcurrent
+        }
     lifecycle <- newMVar ()
     runRef <- newIORef run
     onCompleteRef <- newIORef (\_ _ -> pure ())
@@ -239,9 +244,7 @@ newSubagentRegistry config cwd run onEvent = do
         , registryNextUpdateSeq = nextUpdateSeq
         , registryWaitCursors = waitCursors
         , registryActiveWaits = activeWaits
-        , registryConfig = config
-            { maxConcurrent = max 1 config.maxConcurrent
-            }
+        , registryConfig = configVar
         , registryRunRef = runRef
         , registryOnEvent = onEvent
         , registryOnCompleteRef = onCompleteRef
@@ -256,6 +259,18 @@ newSubagentRegistry config cwd run onEvent = do
 
 setSubagentRunner :: SubagentRegistry -> RunSubagent -> IO ()
 setSubagentRunner registry = writeIORef registry.registryRunRef
+
+-- | Snapshot of the registry's current admission limits.
+subagentConfig :: SubagentRegistry -> IO SubagentConfig
+subagentConfig registry = readTVarIO registry.registryConfig
+
+-- | Raise or lower the live concurrent-agent cap. Already-running agents
+-- keep their slots; the new limit applies to the next spawn or follow-up.
+setMaxConcurrent :: SubagentRegistry -> Int -> IO ()
+setMaxConcurrent registry limit =
+    atomically $
+        modifyTVar' registry.registryConfig \config ->
+            config { maxConcurrent = max 1 limit }
 
 -- | Invoked when a child reaches a final status (completed / errored /
 -- interrupted). Used to deliver parent-facing completion notices.
@@ -488,8 +503,9 @@ spawnSubagentAtWithIdPreparedForTurn
                         agents parentId requestedParentPath requestedParentDepth
                     case parent of
                         Left err -> pure (Left err)
-                        Right (parentPath, nextDepth) ->
-                            case registry.registryConfig.maxDepth of
+                        Right (parentPath, nextDepth) -> do
+                            config <- readTVar registry.registryConfig
+                            case config.maxDepth of
                                 Just limit | nextDepth > limit ->
                                     pure $ Left
                                         ("Agent depth limit reached (maximum depth "
@@ -505,11 +521,11 @@ spawnSubagentAtWithIdPreparedForTurn
                                                     <> taskPathText childPath
                                             else do
                                                 live <- readTVar registry.registryLiveCount
-                                                if live >= registry.registryConfig.maxConcurrent
+                                                if live >= config.maxConcurrent
                                                     then pure $ Left $
                                                         "Concurrent subagent limit reached: "
                                                             <> Text.pack
-                                                                (show registry.registryConfig.maxConcurrent)
+                                                                (show config.maxConcurrent)
                                                             <> " agents are already active."
                                                     else do
                                                         let work = SubagentWork
@@ -941,10 +957,11 @@ scheduleIdleWork registry record work = do
             case phase of
                 AgentIdle{} -> do
                     live <- readTVar registry.registryLiveCount
-                    if live >= registry.registryConfig.maxConcurrent
+                    config <- readTVar registry.registryConfig
+                    if live >= config.maxConcurrent
                         then pure $ Left $
                             "Concurrent subagent limit reached: "
-                                <> Text.pack (show registry.registryConfig.maxConcurrent)
+                                <> Text.pack (show config.maxConcurrent)
                                 <> " agents are already active."
                         else do
                             modifyTVar' registry.registryLiveCount (+ 1)

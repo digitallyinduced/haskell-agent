@@ -72,6 +72,18 @@ spec = describe "Agent.CLI.Project" do
                 settings' <- loadProjectSettings root
                 settings'.settingsAutoApprove `shouldBe` False
 
+        it "round-trips the concurrent agent limit without resetting approval" $
+            withTempDir "agent-project-" \root -> do
+                saveProjectAutoApprove root True
+                saveProjectMaxConcurrentAgents root 48
+                settings <- loadProjectSettings root
+                settings.settingsAutoApprove `shouldBe` True
+                settings.settingsMaxConcurrentAgents `shouldBe` Just 48
+                saveProjectAutoApprove root False
+                updated <- loadProjectSettings root
+                updated.settingsAutoApprove `shouldBe` False
+                updated.settingsMaxConcurrentAgents `shouldBe` Just 48
+
         it "round-trips the last provider/model/dialect and preserves other settings" $
             withTempDir "agent-project-" \root -> do
                 saveProjectAutoApprove root True

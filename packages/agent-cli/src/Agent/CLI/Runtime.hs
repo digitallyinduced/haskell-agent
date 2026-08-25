@@ -274,6 +274,7 @@ import Agent.CLI.Project
     , resolveProjectRoot
     , saveProjectAccount
     , saveProjectAutoApprove
+    , saveProjectMaxConcurrentAgents
     , saveProjectModel
     )
 import Agent.CLI.Prompt
@@ -573,20 +574,24 @@ import Agent.Provider
 import qualified Agent.Provider as Provider
 import Agent.Subagents
     ( RootTurnId
+    , SubagentConfig(..)
     , SubagentStatus(..)
     , abortRootTurn
     , beginRootTurn
     , closeSubagentRegistry
     , resetSubagentRegistry
+    , defaultMaxConcurrent
     , defaultSubagentConfig
     , formatCompletionNotice
     , getStatus
     , interruptActiveSubagents
     , listAgents
     , newSubagentRegistry
+    , setMaxConcurrent
     , setSubagentOnComplete
     , setSubagentOnSettled
     , setSubagentRunner
+    , subagentConfig
     )
 import Agent.GrokBuild.Dialect.Goal
     ( activateGoal
@@ -1936,7 +1941,14 @@ runAgentInitializedWithLock
     subagentStoreRoot <- newIORef Nothing
     subagentForkSource <- newIORef (Nothing :: Maybe (IORef [ResponseItem]))
     pendingNotices <- newIORef ([] :: [TurnInput])
-    registry <- newSubagentRegistry defaultSubagentConfig cwd
+    let maxConcurrentAgents =
+            fromMaybe defaultMaxConcurrent $
+                options.optMaxConcurrentAgents
+                    <|> projectSettings.settingsMaxConcurrentAgents
+                    <|> harnessConfig.configMaxConcurrentAgents
+    registry <- newSubagentRegistry
+        defaultSubagentConfig { maxConcurrent = maxConcurrentAgents }
+        cwd
         (\_ _ _ _ -> pure $ Left LoopNoResponseId)
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
@@ -3671,6 +3683,18 @@ runSession SessionRequest{..} SessionBackend{..} = do
             ghciEnabled <- readIORef ghciEnabledRef
             bashEnabled <- readIORef bashEnabledRef
             refreshShellParams ghciEnabled bashEnabled
+        currentConcurrentLimit = case multiCtx of
+            Nothing ->
+                pure defaultSubagentConfig.maxConcurrent
+            Just ctx ->
+                (.maxConcurrent) <$> subagentConfig ctx.multiRegistry
+        setConcurrentLimit limit = do
+            let next = max 1 limit
+            case multiCtx of
+                Just ctx -> setMaxConcurrent ctx.multiRegistry next
+                Nothing -> pure ()
+            saveProjectMaxConcurrentAgents projectRoot next
+            pure ("concurrent agent limit: " <> Text.pack (show next))
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
@@ -3730,6 +3754,8 @@ runSession SessionRequest{..} SessionBackend{..} = do
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
             , sessionAbortSubagentTurn = abortSubagentTurn
+            , sessionConcurrentLimit = currentConcurrentLimit
+            , sessionSetConcurrentLimit = setConcurrentLimit
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
@@ -4298,6 +4324,8 @@ replWithDraft env@SessionEnv
     , sessionFullscreen = fullscreen
     , sessionSetWindowTitle = setWindowTitle
     , sessionAgentViewport = agentViewport
+    , sessionConcurrentLimit = _
+    , sessionSetConcurrentLimit = _
     , sessionReset = sessionReset
     } draft = do
     writeIORef draftRef draft
@@ -4795,6 +4823,23 @@ replWithDraft env@SessionEnv
                             Text.putStrLn
                                 (roleMuted color
                                     (glyphOk <> "attachments cleared"))
+                        continue
+                    ReplShowAgentLimit -> do
+                        limit <- env.sessionConcurrentLimit
+                        let message =
+                                "concurrent agent limit: "
+                                    <> Text.pack (show limit)
+                        color <- resolveColor stdout
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphSession <> message))
+                        continue
+                    ReplSetAgentLimit limit -> do
+                        message <- env.sessionSetConcurrentLimit limit
+                        color <- resolveColor stdout
+                        displayInfo message $
+                            Text.putStrLn
+                                (roleMuted color (glyphOk <> message))
                         continue
                     ReplAgents -> do
                         case agentViewport of

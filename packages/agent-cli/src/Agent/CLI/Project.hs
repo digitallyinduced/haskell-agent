@@ -12,6 +12,7 @@ module Agent.CLI.Project
     , projectSettingsPath
     , resolveProjectRoot
     , saveProjectAutoApprove
+    , saveProjectMaxConcurrentAgents
     , saveProjectAccount
     , saveProjectModel
     ) where
@@ -84,6 +85,7 @@ data ProjectSettings = ProjectSettings
     , settingsAutoApprove :: !Bool
     , settingsLastModel :: !(Maybe ProjectModel)
     , settingsLastAccounts :: ![ProjectAccount]
+    , settingsMaxConcurrentAgents :: !(Maybe Int)
     } deriving (Eq, Show)
 
 defaultProjectSettings :: ProjectSettings
@@ -92,6 +94,7 @@ defaultProjectSettings = ProjectSettings
     , settingsAutoApprove = False
     , settingsLastModel = Nothing
     , settingsLastAccounts = []
+    , settingsMaxConcurrentAgents = Nothing
     }
 
 instance ToJSON ProjectAccount where
@@ -170,6 +173,7 @@ instance ToJSON ProjectSettings where
         , "autoApprove" .= settings.settingsAutoApprove
         , "lastModel" .= settings.settingsLastModel
         , "lastAccounts" .= settings.settingsLastAccounts
+        , "maxConcurrentAgents" .= settings.settingsMaxConcurrentAgents
         ]
 
 instance FromJSON ProjectSettings where
@@ -178,6 +182,7 @@ instance FromJSON ProjectSettings where
         autoApprove <- fromMaybe False <$> o .:? "autoApprove"
         lastModelValue <- o .:? "lastModel"
         lastAccountsValue <- o .:? "lastAccounts"
+        maxConcurrentAgents <- o .:? "maxConcurrentAgents"
         pure ProjectSettings
             { settingsVersion = version
             , settingsAutoApprove = autoApprove
@@ -187,6 +192,7 @@ instance FromJSON ProjectSettings where
                 lastModelValue >>= parseMaybe parseJSON
             , settingsLastAccounts =
                 maybe [] (mapMaybe (parseMaybe parseJSON)) lastAccountsValue
+            , settingsMaxConcurrentAgents = maxConcurrentAgents
             }
 
 -- | Settings root for the checkout that contains @cwd@.
@@ -221,6 +227,12 @@ saveProjectAutoApprove :: OsPath -> Bool -> IO ()
 saveProjectAutoApprove projectRoot autoApprove =
     updateProjectSettings projectRoot \settings ->
         settings { settingsAutoApprove = autoApprove }
+
+-- | Persist the project's concurrent subagent cap.
+saveProjectMaxConcurrentAgents :: OsPath -> Int -> IO ()
+saveProjectMaxConcurrentAgents projectRoot limit =
+    updateProjectSettings projectRoot \settings ->
+        settings { settingsMaxConcurrentAgents = Just (max 1 limit) }
 
 -- | Remember the last successfully used account for a provider.
 saveProjectAccount
