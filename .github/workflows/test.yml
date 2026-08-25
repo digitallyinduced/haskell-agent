@@ -42,20 +42,22 @@ jobs:
             exit 1
           fi
 
+          account_home=/var/lib/github-runner-haskell-agent
           credential_home="$(mktemp -d \
-            "/tmp/agent-functional-credentials.XXXXXX")"
+            "$account_home/.agent-functional-credentials.XXXXXX")"
           chmod 700 "$credential_home"
+          chmod 701 "$account_home"
           export AGENT_FUNCTIONAL_TEST_CREDENTIAL_HOME="$credential_home"
 
           cleanup() {
             set +e
             find "$credential_home" -type f -exec shred -u {} +
             rm -r "$credential_home"
+            chmod 700 "$account_home"
           }
           trap cleanup EXIT
 
           credential_source_home="$HOME"
-          account_home=/var/lib/github-runner-haskell-agent
           if [[ ! -f "$credential_source_home/.codex/auth.json" \
             && ! -f "$credential_source_home/.grok/auth.json" \
             && ! -d "$credential_source_home/.haskell-agent/credentials" \
