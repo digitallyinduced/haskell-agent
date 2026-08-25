@@ -48,6 +48,15 @@ library
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
                     , Agent.CLI.McpStatus
+                    , Agent.CLI.PromptHooks
+                    , Agent.CLI.Provider.OpenAI
+                    , Agent.CLI.Provider.Switch
+                    , Agent.CLI.Runtime
+                    , Agent.CLI.Runtime.Types
+                    , Agent.CLI.Session.History
+                    , Agent.CLI.SessionAdmin
+                    , Agent.CLI.StartupContext
+                    , Agent.CLI.Startup.Format
                     , Agent.CLI.TUI.Composer.Buffer
                     , Agent.CLI.TUI.Composer.Edit
                     , Agent.CLI.TUI.LambdaArt
