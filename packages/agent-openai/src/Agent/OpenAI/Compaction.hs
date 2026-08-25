@@ -291,7 +291,7 @@ taggedProtocolIds :: TaggedObject -> [Text]
 taggedProtocolIds tagged =
     mapMaybe
         (\name -> taggedTextField name tagged)
-        ["call_id", "id"]
+        ["call_id", "approval_request_id", "id"]
 
 identifiersMatch :: [Text] -> [Text] -> Bool
 identifiersMatch expected actual =

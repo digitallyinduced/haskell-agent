@@ -12,6 +12,7 @@ import Agent.CLI.Compaction
     , installCompactOutcome
     , runProviderCompact
     , runProviderCompactWith
+    , runResponsesCompactWith
     )
 import Agent.CLI.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -30,6 +31,7 @@ import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
     )
+import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -208,6 +210,107 @@ spec = do
                     , stream = Just True
                     }
                 ]
+
+        it "does not replay OpenAI checkpoints to portable summarizers" do
+            let remoteCheckpoint =
+                    KnownResponseItem ItemCompaction TaggedObject
+                        { tag = "compaction"
+                        , fields = mempty
+                        }
+                remoteTrigger =
+                    UnknownResponseItem TaggedObject
+                        { tag = "COMPACTION_TRIGGER"
+                        , fields = mempty
+                        }
+                paramsValue = defaultResponseCreateParams
+                history =
+                    [ userTextItem "old context"
+                    , remoteCheckpoint
+                    , remoteTrigger
+                    ]
+            params <- newIORef paramsValue
+            transcript <- newIORef history
+            requests <- newIORef []
+            result <-
+                runResponsesCompactWith
+                    (\request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    (Just "focus")
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef requests >>= \case
+                [request] ->
+                    requestItems request `shouldSatisfy`
+                        all \case
+                            KnownResponseItem ItemCompaction _ -> False
+                            KnownResponseItem ItemCompactionTrigger _ -> False
+                            UnknownResponseItem tagged ->
+                                Text.toLower (Text.strip tagged.tag)
+                                    `notElem`
+                                        [ "compaction"
+                                        , "compaction_summary"
+                                        , "compaction_trigger"
+                                        ]
+                            _ -> True
+                seen ->
+                    expectationFailure
+                        ("expected one portable summary request, got "
+                            <> show (length seen))
+
+        it "preserves OpenAI checkpoints for focused OpenAI summaries" do
+            let remoteCheckpoint =
+                    KnownResponseItem ItemCompaction TaggedObject
+                        { tag = "compaction"
+                        , fields = mempty
+                        }
+                history = [userTextItem "old context", remoteCheckpoint]
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef history
+            requests <- newIORef []
+            result <-
+                runProviderCompactWith
+                    (Just \request -> do
+                        modifyIORef' requests (<> [request])
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    OpenAIProvider
+                    Nothing
+                    params
+                    transcript
+                    (Just "focus")
+            result `shouldSatisfy` either (const False) (const True)
+            map requestItems <$> readIORef requests
+                `shouldReturn`
+                    [ history
+                        <> [userTextItem (summarizationPrompt (Just "focus"))]
+                    ]
+
+        it "rejects portable summaries with only opaque checkpoints" do
+            let remoteCheckpoint =
+                    KnownResponseItem ItemCompaction TaggedObject
+                        { tag = "compaction"
+                        , fields = mempty
+                        }
+            params <- newIORef defaultResponseCreateParams
+            transcript <- newIORef [remoteCheckpoint]
+            requests <- newIORef (0 :: Int)
+            result <-
+                runResponsesCompactWith
+                    (\_ -> do
+                        modifyIORef' requests (+ 1)
+                        pure (Right (summaryResponse "summary")))
+                    (const (pure ()))
+                    params
+                    transcript
+                    Nothing
+            result `shouldSatisfy` \case
+                Left message ->
+                    "nothing compatible to compact" `Text.isInfixOf` message
+                Right _ -> False
+            readIORef requests `shouldReturn` 0
 
         it "bounds oversized local-summary requests before sending them" do
             params <- newIORef defaultResponseCreateParams
@@ -651,6 +754,35 @@ spec = do
             map (.parallelToolCalls) <$> readIORef requests
                 `shouldReturn` [Just False]
 
+        it "rejects remote checkpoints that cannot fit the installed snapshot" do
+            let provider = tokenProvider SubscriptionBilled \_ ->
+                    error "remote compaction unexpectedly requested credentials"
+                contextWindow =
+                    codexEffectiveContextWindowFor
+                        defaultResponseCreateParams.model
+                oversizedResponse =
+                    responseWithOutput
+                        [ Aeson.object
+                            [ "type" .= ("compaction" :: Text)
+                            , "encrypted_content" .=
+                                Text.replicate (contextWindow * 4 + 10_000) "x"
+                            ]
+                        ]
+                send _ _ = pure (Right oversizedResponse)
+                history = [userTextItem "old context"]
+            result <- runExceptT $
+                compactOpenAIWith send
+                    (Just provider)
+                    defaultResponseCreateParams
+                    history
+                    100
+                    Nothing
+            result `shouldSatisfy` \case
+                Left message ->
+                    "remote compacted snapshot request cannot fit"
+                        `Text.isInfixOf` message
+                Right _ -> False
+
         it "keeps focused manual compaction on local summarization" do
             requests <- newIORef []
             let provider = tokenProvider SubscriptionBilled \_ ->
@@ -733,6 +865,98 @@ spec = do
                 `shouldReturn`
                     Left (ConnectionError
                         "automatic compaction failed: configured threshold fired")
+
+        it "caps configured thresholds at the effective context window" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                history =
+                    [ userTextItem
+                        (Text.replicate ((contextWindow + 1_000) * 4) "x")
+                    ]
+                pendingText = "new"
+                projectedTokens =
+                    estimateRequestTokensWithItems
+                        params
+                        (history <> [userTextItem pendingText])
+                threshold = projectedTokens + 1_000
+            projectedTokens `shouldSatisfy` (> contextWindow)
+            projectedTokens `shouldSatisfy` (< threshold)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            seenHistory <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' seenHistory (<> [state])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn history Nothing
+                [UserMessage pendingText] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 1
+            readIORef seenHistory >>= \case
+                [compacted] -> hasCompactionCheckpoint compacted
+                    `shouldBe` True
+                seen ->
+                    expectationFailure
+                        ("expected one compacted continuation, got "
+                            <> show (length seen))
+
+        it "rejects an oversized first turn before provider submission" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                prompt =
+                    Text.replicate ((contextWindow + 1_000) * 4) "x"
+                projectedTokens =
+                    estimateRequestTokensWithItems
+                        params
+                        [userTextItem prompt]
+            projectedTokens `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            submitCalls <- newIORef (0 :: Int)
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' submitCalls (+ 1)
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just (projectedTokens + 1_000))
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn [] Nothing
+                [UserMessage prompt] (const (pure ()))
+            result `shouldSatisfy` \case
+                Left (ProviderError InvalidRequestError message _) ->
+                    "initial request cannot fit" `Text.isInfixOf` message
+                _ -> False
+            readIORef compactCalls `shouldReturn` 0
+            readIORef submitCalls `shouldReturn` 0
 
         it "compacts before the next request at the Codex token limit" do
             let oldHistory = [userTextItem "old"]
@@ -937,6 +1161,81 @@ spec = do
             readIORef contextState `shouldReturn` Nothing
             readIORef recordedUsage `shouldReturn` []
 
+        it "truncates oversized tool output before continuing the call" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-oversized"
+                    , name = "shell_command"
+                    , arguments = "{}"
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory = [userTextItem "run it", danglingCall]
+                originalOutput =
+                    Text.replicate ((contextWindow + 10_000) * 4) "x"
+                toolResult = ToolCallResult
+                    { callId = "call-oversized"
+                    , output = originalOutput
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            seenPrevious <- newIORef []
+            seenInputs <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state previous submitted _ -> do
+                    modifyIORef' seenPrevious (<> [previous])
+                    modifyIORef' seenInputs (<> [submitted])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
+            readIORef seenInputs >>= \case
+                [[CompletedTool bounded]] -> do
+                    bounded.callId `shouldBe` toolResult.callId
+                    bounded.callKind `shouldBe` toolResult.callKind
+                    Text.length bounded.output
+                        `shouldSatisfy` (< Text.length originalOutput)
+                    bounded.output
+                        `shouldSatisfy`
+                            Text.isSuffixOf
+                                "[tool output truncated to fit the model context]"
+                    estimateRequestTokensWithItems
+                        params
+                        ( oldHistory
+                            <> turnInputsToItems [CompletedTool bounded]
+                        )
+                        `shouldSatisfy` (<= contextWindow)
+                submitted ->
+                    expectationFailure
+                        ("expected one bounded tool result, got "
+                            <> show submitted)
+
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]
                 compactError =
@@ -956,6 +1255,40 @@ spec = do
                     Left (ProviderError UsageLimitReached
                         "automatic compaction failed: quota exhausted"
                         (Just 120))
+
+        it "rejects compacted snapshots at or above the trigger" do
+            let history = [userTextItem "old"]
+                oldContextState =
+                    Just (codexAutoCompactTokenLimit, length history)
+                compactedHistory = [userTextItem "still too large"]
+                compactAction =
+                    pure $ Right CompactOutcome
+                        { compactBeforeTokens = codexAutoCompactTokenLimit
+                        , compactAfterTokens = codexAutoCompactTokenLimit
+                        , compactHistory = compactedHistory
+                        , compactSummary = "checkpoint"
+                        }
+            contextState <- newIORef oldContextState
+            continuationCalls <- newIORef (0 :: Int)
+            let base = Backend \state _ _ _ -> do
+                    modifyIORef' continuationCalls (+ 1)
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        }
+                backend =
+                    autoCompactOpenAiBackendWith
+                        compactAction contextState base
+            result <- backend.submitTurn history Nothing
+                [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` \case
+                Left (ProviderError InvalidRequestError message _) ->
+                    "increase --compact-threshold" `Text.isInfixOf` message
+                _ -> False
+            readIORef continuationCalls `shouldReturn` 0
+            readIORef contextState `shouldReturn` oldContextState
 
         it "estimates resumed history when no provider token snapshot exists" do
             let history =

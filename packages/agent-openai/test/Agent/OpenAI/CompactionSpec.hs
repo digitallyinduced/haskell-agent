@@ -632,6 +632,31 @@ spec = do
                 `shouldSatisfy` (<= 100)
             trimmed `shouldBe` [recent]
 
+        it "drops MCP approval responses with their oversized requests" do
+            let request = KnownResponseItem ItemMcpApprovalRequest TaggedObject
+                    { tag = "mcp_approval_request"
+                    , fields = KeyMap.fromList
+                        [ ("id", Aeson.String "approval-1")
+                        , ("reason", Aeson.String (Text.replicate 20_000 "x"))
+                        ]
+                    }
+                response = KnownResponseItem ItemMcpApprovalResponse TaggedObject
+                    { tag = "mcp_approval_response"
+                    , fields = KeyMap.fromList
+                        [ ("approval_request_id", Aeson.String "approval-1")
+                        , ("approved", Aeson.Bool True)
+                        ]
+                    }
+                recent = user "recent"
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        100
+                        Nothing
+                        [request, response, recent]
+            estimateItemsTokens (trimmed <> [compactionTriggerItem])
+                `shouldSatisfy` (<= 100)
+            trimmed `shouldBe` [recent]
+
         it "rewrites large tagged output items when they expose a payload field" do
             let output = KnownResponseItem ItemShellCallOutput TaggedObject
                     { tag = "shell_call_output"
