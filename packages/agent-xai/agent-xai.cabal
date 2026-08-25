@@ -45,6 +45,7 @@ library
                     , Agent.XAI.Options
                     , Agent.XAI.Request
                     , Agent.XAI.Stream
+                    , Agent.XAI.Transcription
                     , Agent.XAI.Usage
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
@@ -54,13 +55,17 @@ library
                     , text
                     , bytestring
                     , aeson                 >= 2.0
+                    , async
                     , http-client
                     , http-client-tls
                     , http-conduit
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
                     , scientific
+                    , process
                     , time
+                    , websockets
+                    , wuss
 
 test-suite agent-xai-test
     import:           common-opts
@@ -71,6 +76,7 @@ test-suite agent-xai-test
                     , Agent.XAI.ClientSpec
                     , Agent.XAI.FunctionalSpec
                     , Agent.XAI.ResponsesSpec
+                    , Agent.XAI.TranscriptionSpec
                     , Agent.XAI.UsageSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5

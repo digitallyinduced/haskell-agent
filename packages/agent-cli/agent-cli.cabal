@@ -89,6 +89,7 @@ library
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
                     , Agent.CLI.Duration
+                    , Agent.CLI.Dictation
                     , Agent.CLI.Dialects
                     , Agent.CLI.Environment
                     , Agent.CLI.Error
