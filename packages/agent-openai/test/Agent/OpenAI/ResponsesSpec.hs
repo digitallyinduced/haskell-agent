@@ -98,6 +98,73 @@ spec = do
         it "recognises every currently documented event discriminator" do
             mapM_ assertKnownEvent documentedStreamEventTypes
 
+        it "decodes function-call argument deltas into typed events" do
+            let original = Aeson.object
+                    [ "type" .=
+                        ("response.function_call_arguments.delta" :: Text)
+                    , "sequence_number" .= (7 :: Int)
+                    , "item_id" .= ("fc_1" :: Text)
+                    , "output_index" .= (2 :: Int)
+                    , "delta" .= ("{\"target_file\":" :: Text)
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original
+                    :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success
+                    event@Responses.ResponseFunctionCallArgumentsDeltaEvent
+                        { delta
+                        , streamItemId
+                        , streamOutputIndex
+                        , sequenceNumber
+                        } -> do
+                            delta `shouldBe` Just "{\"target_file\":"
+                            streamItemId `shouldBe` Just "fc_1"
+                            streamOutputIndex `shouldBe` Just 2
+                            sequenceNumber `shouldBe` Just 7
+                            Responses.responseStreamEventType event
+                                `shouldBe`
+                                    Responses.EventFunctionCallArgumentsDelta
+                            Aeson.toJSON event `shouldBe` original
+                Aeson.Success other ->
+                    expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
+        it "decodes completed function-call arguments into typed events" do
+            let original = Aeson.object
+                    [ "type" .=
+                        ("response.function_call_arguments.done" :: Text)
+                    , "sequence_number" .= (8 :: Int)
+                    , "item_id" .= ("fc_1" :: Text)
+                    , "output_index" .= (2 :: Int)
+                    , "name" .= ("read_file" :: Text)
+                    , "arguments" .=
+                        ("{\"target_file\":\"README.md\"}" :: Text)
+                    , "future_event_field" .= True
+                    ]
+            case Aeson.fromJSON original
+                    :: Aeson.Result Responses.ResponseStreamEvent of
+                Aeson.Success
+                    event@Responses.ResponseFunctionCallArgumentsDoneEvent
+                        { arguments
+                        , functionName
+                        , streamItemId
+                        , streamOutputIndex
+                        , sequenceNumber
+                        } -> do
+                            arguments `shouldBe`
+                                Just "{\"target_file\":\"README.md\"}"
+                            functionName `shouldBe` Just "read_file"
+                            streamItemId `shouldBe` Just "fc_1"
+                            streamOutputIndex `shouldBe` Just 2
+                            sequenceNumber `shouldBe` Just 8
+                            Responses.responseStreamEventType event
+                                `shouldBe`
+                                    Responses.EventFunctionCallArgumentsDone
+                            Aeson.toJSON event `shouldBe` original
+                Aeson.Success other ->
+                    expectationFailure ("unexpected event: " <> show other)
+                Aeson.Error err -> expectationFailure err
+
         it "decodes output-item completion into a typed event constructor" do
             let original = Aeson.object
                     [ "type" .= ("response.output_item.done" :: Text)
@@ -313,6 +380,8 @@ spec = do
                                 (show (eventName :: Text) <> ": " <> err))
                 [ "response.custom_tool_call_input.delta"
                 , "response.custom_tool_call_input.done"
+                , "response.function_call_arguments.delta"
+                , "response.function_call_arguments.done"
                 , "response.reasoning_summary_part.added"
                 , "response.reasoning_summary_text.done"
                 ]
