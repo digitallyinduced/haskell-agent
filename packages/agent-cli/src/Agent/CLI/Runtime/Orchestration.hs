@@ -85,11 +85,10 @@ import Agent.CLI.Options
     ( defaultEffortFor,
       isOneShot,
       resolveApprovalPolicy,
-      ApprovalPolicy(..),
-      CliOptions(optMotionMode, optManagedDenyMutations, optNoYolo,
+      CliOptions(optMotionMode, optNoYolo,
                  optYolo, optMaxConcurrentAgents, optCompactThreshold,
                  optShowRawReasoning, optProvider, optModel, optWorktree, optEffort,
-                 optPrompt, optPromptFile, optManagedTurnFile, optSaveSession,
+                 optPrompt, optPromptFile, optManagedTurnFile,
                  optScreenMode, optGhci, optBash, optResume, optCwd),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
@@ -234,7 +233,6 @@ import Agent.CLI.TUI.App
       newFullscreenInputBuffer,
       newFullscreenRuntime,
       queuedFullscreenInputDisplays,
-      requestFullscreenChoiceWithBody,
       runFullscreen,
       setFullscreenHistorySource,
       setFullscreenSessionActions,
@@ -400,12 +398,10 @@ import System.Environment ( getProgName, lookupEnv )
 import System.Exit ( die )
 import System.IO
     ( Handle,
-      IOMode(AppendMode),
       hFlush,
       hIsTerminalDevice,
       stderr,
-      stdin,
-      withFile )
+      stdin )
 import System.OsPath
     ( OsPath,
       decodeFS,
@@ -413,7 +409,6 @@ import System.OsPath
       (</>),
       takeDirectory,
       takeFileName )
-import System.Posix.Files ( setFileMode )
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ( GenericClientOptions(model),
@@ -452,7 +447,11 @@ import qualified Agent.XAI.Usage as XAIUsage ()
 
 import Agent.CLI.Runtime.Orchestration.Types
     ( ActiveHttpAuth(..), AccountSwitchRequest(..), AgentProcessRuntime(..),
-      AgentRunMode(..), backgroundRunMode )
+      AgentRunMode(..) )
+import Agent.CLI.Runtime.Orchestration.Restart
+    ( RestartCallbacks(..), runFullscreenRestartLoop )
+import Agent.CLI.Runtime.Orchestration.Background
+    ( runInProcessSessionTurn )
 
 runAgentWithRuntime
     :: AgentProcessRuntime
@@ -544,73 +543,6 @@ runAgentWithRuntime processRuntime runMode options = do
                         | otherwise -> pure DevQuit
             RunQuit -> pure DevQuit
             RunReload sessionId -> pure (DevReload sessionId)
-
-runInProcessSessionTurn
-    :: AgentProcessRuntime
-    -> CliOptions
-    -> ApprovalPolicy
-    -> Bool
-    -> Bool
-    -> SessionHandle
-    -> Text
-    -> IO (Either Text ())
-runInProcessSessionTurn
-        processRuntime parentOptions policy ghciEnabled bashEnabled handle message =
-    withFile logPath AppendMode \logHandle -> do
-        setFileMode logPath 0o600
-        runAgentWithRuntime
-            processRuntime
-            (backgroundRunMode logHandle handle.sessionMeta.metaCwd)
-            childOptions >>= \case
-                DevQuit -> pure (Right ())
-                DevReload _ ->
-                    pure (Left "background agent session requested a reload")
-  where
-    logPath =
-        unsafeToFilePath
-            (handle.sessionDir </> unsafeEncodeUtf "agent.log")
-    childOptions =
-        applyBackgroundApproval policy $
-            parentOptions
-                { optProvider = Nothing
-                , optModel = Nothing
-                , optCwd = Nothing
-                , optWorktree = False
-                , optEffort = Nothing
-                , optPrompt = Just message
-                , optPromptFile = Nothing
-                , optManagedTurnFile = Nothing
-                , optResume = Just handle.sessionMeta.metaId
-                , optSaveSession = True
-                , optGhci = ghciEnabled
-                , optBash = bashEnabled
-                , optScreenMode = ScreenMinimal
-                }
-
-applyBackgroundApproval :: ApprovalPolicy -> CliOptions -> CliOptions
-applyBackgroundApproval policy options =
-    case policy of
-        ApproveAll ->
-            options
-                { optYolo = True
-                , optNoYolo = False
-                , optManagedDenyMutations = False
-                }
-        DenyMutating ->
-            options
-                { optYolo = False
-                , optNoYolo = True
-                , optManagedDenyMutations = True
-                }
-        PromptMutating ->
-            -- Background sessions cannot safely borrow the caller's stdin.
-            -- Keep the prompt policy marker; non-TTY one-shot resolution
-            -- conservatively denies mutating calls.
-            options
-                { optYolo = False
-                , optNoYolo = True
-                , optManagedDenyMutations = False
-                }
 
 -- | Restore the process cwd after an action succeeds or throws. Cabal gives
 -- GHCi relative source paths, so returning from an agent session in its cwd
@@ -715,12 +647,38 @@ runAgent
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
+                let callbacks = RestartCallbacks
+                        { restartPrepare =
+                            \nextOptions nextTransition ->
+                                prepareAgentIteration
+                                    processRuntime
+                                    runMode
+                                    fullscreenInputs
+                                    sessionState
+                                    (Just runtime)
+                                    nextOptions
+                                    nextTransition
+                        , restartFallback =
+                            \failed apiError ->
+                                continueAutomaticFallback
+                                    runMode.runCwdHint
+                                    runMode.runStderr
+                                    (Just runtime)
+                                    failed
+                                    apiError
+                        , restartFormatFailure = \apiError -> do
+                            now <- getCurrentTime
+                            pure (formatApiErrorAt now apiError)
+                        , restartOptions = restartSessionOptions
+                        , restartApplyTransition = applyProviderTransition
+                        , restartManageAccounts = do
+                            color <- resolveColor stderr
+                            runLoginManager color
+                        }
+                in
                 runFullscreen runtime $
                     runFullscreenRestartLoop
-                        processRuntime
-                        runMode
-                        fullscreenInputs
-                        sessionState
+                        callbacks
                         runtime
                         options
                         transition
@@ -1076,107 +1034,6 @@ resetFullscreenSessionActions runtime =
         (pure ForceExit)
         (pure (AgentRoot, []))
         (const (pure ()))
-
-runFullscreenRestartLoop
-    :: AgentProcessRuntime
-    -> AgentRunMode
-    -> FullscreenInputBuffer
-    -> SessionState
-    -> FullscreenRuntime
-    -> CliOptions
-    -> Maybe ProviderTransition
-    -> IO RunResult
-    -> IO RunResult
-runFullscreenRestartLoop
-    processRuntime
-    runMode
-    fullscreenInputs
-    sessionState
-    runtime =
-        loop
-  where
-    loop options transition action =
-        -- The notifier in 'runFullscreen' watches this whole tail-recursive
-        -- chain, rather than stopping Brick after the first provider exits.
-        try @_ @StartupFailure action >>= \case
-            Left (StartupFailure message) ->
-                recoverStartup options transition (Text.pack message)
-            Right result -> case result of
-                RunRestart sessionId -> do
-                    let nextOptions = restartSessionOptions options sessionId
-                    retryStartup nextOptions Nothing
-                RunSwitchProvider next -> do
-                    let nextOptions = applyProviderTransition options next
-                    retryStartup nextOptions (Just next)
-                RunProviderStartFailed apiError ->
-                    case transition of
-                        Just failed
-                            | failed.transitionCause == AutomaticFallback ->
-                                continueAutomaticFallback
-                                    runMode.runCwdHint
-                                    runMode.runStderr
-                                    (Just runtime)
-                                    failed
-                                    apiError >>= \case
-                                    Just next -> do
-                                        let nextOptions =
-                                                applyProviderTransition
-                                                    options next
-                                        retryStartup nextOptions (Just next)
-                                    Nothing ->
-                                        recoverProviderStart
-                                            options transition apiError
-                        _ ->
-                            recoverProviderStart options transition apiError
-                other -> pure other
-
-    recoverProviderStart options transition apiError = do
-        now <- getCurrentTime
-        recoverStartup
-            options
-            transition
-            (formatApiErrorAt now apiError)
-
-    retryStartup options transition = do
-        emitUiEvent runtime $
-            UiSetNotice (Just (progressNotice "Retrying startup…"))
-        try @_ @StartupFailure
-            (prepareAgentIteration
-                processRuntime
-                runMode
-                fullscreenInputs
-                sessionState
-                (Just runtime)
-                options
-                transition) >>= \case
-                    Left (StartupFailure message) ->
-                        recoverStartup
-                            options transition (Text.pack message)
-                    Right prepared ->
-                        loop options transition prepared.preparedRun
-
-    recoverStartup options transition message = do
-        emitUiEvent runtime (UiSetNotice Nothing)
-        requestFullscreenChoiceWithBody
-            runtime
-            "Couldn’t start the agent"
-            message
-            0
-            [ ( "Retry"
-              , "Try loading credentials and account usage again"
-              )
-            , ( "Manage"
-              , "Connect, refresh, enable, or remove provider accounts"
-              )
-            , ("Exit", "Close the agent")
-            ] >>= \case
-                Just 0 ->
-                    retryStartup options transition
-                Just 1 -> do
-                    color <- resolveColor stderr
-                    withFullscreenSuspended runtime (runLoginManager color)
-                    retryStartup options transition
-                _ -> pure RunQuit
 
 runAgentInitialized
     :: AgentProcessRuntime
@@ -2053,7 +1910,7 @@ runAgentInitializedWithLock
                 bashEnabled <- readIORef bashEnabledRef
                 let action =
                         runInProcessSessionTurn
-                            processRuntime
+                            (runAgentWithRuntime processRuntime)
                             options
                             policy
                             ghciEnabled

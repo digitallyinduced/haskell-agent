@@ -57,6 +57,8 @@ library
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
                     , Agent.CLI.Runtime.Orchestration
+                    , Agent.CLI.Runtime.Orchestration.Background
+                    , Agent.CLI.Runtime.Orchestration.Restart
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
