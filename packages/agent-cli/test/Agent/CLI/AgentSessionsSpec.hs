@@ -255,9 +255,12 @@ spec = describe "Agent.CLI.AgentSessions" do
     it "closes scoped children concurrently and rejects later launches" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
             let marker = toFilePath root FilePath.</> "stopped"
+                started = toFilePath root FilePath.</> "started"
             script <- writeFakeAgentBody root
                 ("trap 'printf stopped > " <> shellQuote marker
-                    <> "; exit 0' TERM INT\nsleep 30\n")
+                    <> "; exit 0' TERM INT\nprintf started > "
+                    <> shellQuote started
+                    <> "\nsleep 30\n")
             withExecutableOverride script do
                 handle <- createSession (testCreateAt pool root root)
                 manager <-
@@ -268,6 +271,7 @@ spec = describe "Agent.CLI.AgentSessions" do
                     manager True ApproveAll True False handle "one"
                     `shouldReturn`
                         Right ("started session " <> handle.sessionMeta.metaId)
+                waitForFile started
                 closeSessionProcessManager manager
                 waitForFile marker
                 launchSessionTurn
