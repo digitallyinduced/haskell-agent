@@ -441,6 +441,16 @@ benchmark clipboard-latency-bench
                     , safe-exceptions
                     , text
 
+benchmark composer-paste-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ComposerPasteLatency.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+                    , text
+
 benchmark transcript-scrolling-bench
     import:           common-options
     type:             exitcode-stdio-1.0

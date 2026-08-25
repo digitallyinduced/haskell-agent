@@ -23,6 +23,7 @@ module Agent.CLI.TUI.Composer
     , immediateBtwQuestion
     , isKillKey
     , newFullscreenInputBuffer
+    , prepareBracketedPaste
     , promoteFullscreenInput
     , queuedFullscreenInputDisplays
     , readFullscreenInputs
@@ -31,6 +32,7 @@ module Agent.CLI.TUI.Composer
     , takeFullscreenInputOr
     , verticalCursorMove
     , wrapDraft
+    , wrapDraftWindow
     ) where
 
 import Agent.CLI.Clipboard
@@ -184,10 +186,13 @@ drawComposer appState =
         let focused = state.uiFocus == FocusComposer
             attr = if focused then Theme.borderActiveAttr else Theme.borderAttr
             draftWidth = max 1 (context.availWidth - composerDraftChromeWidth)
-            (draftRows, cursorLocation) =
-                wrapDraft draftWidth state.uiDraft state.uiCursor
-            totalRows = length draftRows
-            bodyHeight = min maxComposerRows totalRows
+            draftLayout@(draftRows, _) =
+                wrapDraftWindow
+                    maxComposerRows
+                    draftWidth
+                    state.uiDraft
+                    state.uiCursor
+            bodyHeight = min maxComposerRows (length draftRows)
             leading =
                 filter (not . Text.null)
                     [ if state.uiPrompt.promptAttachments > 0
@@ -203,12 +208,6 @@ drawComposer appState =
                         else "queued "
                             <> Text.pack
                                 (show (Seq.length state.uiQueuedInputs))
-                    , if totalRows > maxComposerRows
-                        then "line "
-                            <> Text.pack (show (fst cursorLocation + 1))
-                            <> "/"
-                            <> Text.pack (show totalRows)
-                        else ""
                     ]
             label =
                 if null leading
@@ -228,9 +227,8 @@ drawComposer appState =
                                 (renderDraft
                                     focused
                                     bodyHeight
-                                    draftRows
-                                    cursorLocation
-                                    state)
+                                    state
+                                    draftLayout)
                             ]
             composer =
                 withBorderStyle unicodeRounded $
@@ -311,38 +309,38 @@ controlInteractionAttr state name
     | otherwise =
         Nothing
 
--- | Render precomputed wrapped rows. Wrapping happens once in 'drawComposer'
--- so the visible height and the cursor row can never disagree.
+-- | Render the precomputed bounded draft layout. Wrapping happens once in
+-- 'drawComposer', so the visible height and cursor row agree without scanning
+-- the complete draft.
 renderDraft
     :: Bool
     -> Int
-    -> [Text]
-    -> (Int, Int)
     -> UiState
+    -> ([Text], (Int, Int))
     -> Widget Name
-renderDraft focused height rows (row, column) state =
-    Widget Greedy Fixed do
-        let firstVisibleRow = max 0 (row - height + 1)
-            visibleRows = take height (drop firstVisibleRow rows)
-            visibleCursorRow = row - firstVisibleRow
-            content
-                | Text.null state.uiDraft =
-                    withAttr Theme.mutedAttr $
-                        txt
-                            (if not state.uiAwaitingInput
-                                then "Type a follow-up…"
-                                else " ")
-                | otherwise =
-                    vBox (map renderRow visibleRows)
-            cursorContent
-                | focused =
-                    showCursor
-                        ComposerCursor
-                        (Location (column, visibleCursorRow))
-                        content
-                | otherwise = content
-        render (padRight Max cursorContent)
+renderDraft focused height state (rows, (row, column)) =
+    padRight Max cursorContent
   where
+    firstVisibleRow = max 0 (row - height + 1)
+    visibleRows = take height (drop firstVisibleRow rows)
+    visibleCursorRow = row - firstVisibleRow
+    content
+        | Text.null state.uiDraft =
+            withAttr Theme.mutedAttr $
+                txt
+                    (if not state.uiAwaitingInput
+                        then "Type a follow-up…"
+                        else " ")
+        | otherwise =
+            vBox (map renderRow visibleRows)
+    cursorContent
+        | focused =
+            showCursor
+                ComposerCursor
+                (Location (column, visibleCursorRow))
+                content
+        | otherwise = content
+
     -- Empty visual rows still need one cell so Brick preserves their height
     -- and can place the insertion cursor on them.
     renderRow row
@@ -536,6 +534,36 @@ activateSlashAt
                     (V.EvKey V.KEnter [])
         _ -> pure ()
 
+-- | An idle composer can hand bracketed paste classification to the main REPL,
+-- which is already waiting for input. During a running turn that consumer is
+-- blocked, so insert terminal text locally rather than leaving the draft behind
+-- a persistent "Reading clipboard…" notice.
+prepareBracketedPaste
+    :: Bool
+    -> Text
+    -> Int
+    -> Text
+    -> (Text, Int, Maybe ReplLine)
+prepareBracketedPaste awaitingInput draft cursor pasted =
+    let boundedCursor = max 0 (min (Text.length draft) cursor)
+        before = Text.take boundedCursor draft
+        after = Text.drop boundedCursor draft
+        pastedDraft = before <> pasted <> after
+        pastedCursor = boundedCursor + Text.length pasted
+    in if Text.null pasted
+        then
+            ( draft
+            , boundedCursor
+            , Just (ReplClipboardPaste draft Nothing)
+            )
+        else if awaitingInput
+        then
+            ( draft
+            , boundedCursor
+            , Just (ReplClipboardPasteOrText draft pasted pastedDraft)
+            )
+        else (pastedDraft, pastedCursor, Nothing)
+
 -- | Handle one composer key. The host supplies Ctrl-C policy and conversation
 -- page scrolling because those actions also affect non-composer UI state.
 handleComposerKey
@@ -702,20 +730,23 @@ handleComposerKey
             insertText (Text.singleton character)
         V.EvPaste bytes -> do
             let pasted = decodePaste bytes
-                before = Text.take ui.uiCursor ui.uiDraft
-                after = Text.drop ui.uiCursor ui.uiDraft
-                pastedDraft = before <> pasted <> after
-            if Text.null pasted
-                then submitRaw (ReplClipboardPaste ui.uiDraft Nothing)
-                else do
-                    modifyUi
-                        (UiSetNotice
-                            (Just (progressNotice "Reading clipboard…")))
-                    submitRaw
-                        (ReplClipboardPasteOrText
-                            ui.uiDraft
-                            pasted
-                            pastedDraft)
+                (pastedDraft, pastedCursor, clipboardInput) =
+                    prepareBracketedPaste
+                        ui.uiAwaitingInput
+                        ui.uiDraft
+                        ui.uiCursor
+                        pasted
+            case clipboardInput of
+                Nothing -> do
+                    modifyUiResetSlash
+                        (UiSetDraft pastedDraft pastedCursor)
+                    modify' \current -> current { appPasted = True }
+                Just replLine -> do
+                    when (not (Text.null pasted)) $
+                        modifyUi
+                            (UiSetNotice
+                                (Just (progressNotice "Reading clipboard…")))
+                    submitRaw replLine
         _ -> pure ()
     -- Only a kill directly followed by another kill accumulates into the
     -- kill buffer; any other key breaks the chain.

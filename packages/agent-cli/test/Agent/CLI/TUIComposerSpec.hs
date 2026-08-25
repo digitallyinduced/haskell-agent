@@ -88,6 +88,25 @@ spec = describe "fullscreen composer" do
         wrapDraft 5 "abc\ndefghi" 10
             `shouldBe` (["abc", "defgh", "i"], (2, 1))
 
+    it "bounds composer layout to logical lines around the cursor" do
+        let draft =
+                Text.intercalate
+                    "\n"
+                    (map (Text.pack . show) [1 :: Int .. 100])
+            cursor = Text.length draft
+            (rows, location) = wrapDraftWindow 8 10 draft cursor
+        rows `shouldBe` map (Text.pack . show) [93 :: Int .. 100]
+        location `shouldBe` (7, 3)
+
+    it "keeps enough following rows when the cursor is near the start" do
+        let draft =
+                Text.intercalate
+                    "\n"
+                    (map (Text.pack . show) [1 :: Int .. 100])
+            (rows, location) = wrapDraftWindow 8 10 draft 0
+        take 8 rows `shouldBe` map (Text.pack . show) [1 :: Int .. 8]
+        location `shouldBe` (0, 0)
+
     it "distinguishes the cursor positions before and after a full-row newline" do
         wrapDraft 2 "ab\nc" 2
             `shouldBe` (["ab", "c"], (0, 2))
@@ -164,6 +183,30 @@ spec = describe "fullscreen composer" do
     it "filters control characters from bracketed paste text" do
         decodePaste (ByteString.pack [97, 0, 10, 9, 27, 98])
             `shouldBe` "a\n\tb"
+
+    it "inserts bracketed paste immediately while a turn is running" do
+        prepareBracketedPaste False "next message" 4 " pasted"
+            `shouldBe` ("next pasted message", 11, Nothing)
+
+    it "defers clipboard classification only while the REPL is awaiting input" do
+        prepareBracketedPaste True "next message" 4 " pasted"
+            `shouldBe`
+                ( "next message"
+                , 4
+                , Just
+                    (ReplClipboardPasteOrText
+                        "next message"
+                        " pasted"
+                        "next pasted message")
+                )
+
+    it "keeps empty paste events available for native clipboard images" do
+        prepareBracketedPaste False "next message" 4 ""
+            `shouldBe`
+                ( "next message"
+                , 4
+                , Just (ReplClipboardPaste "next message" Nothing)
+                )
 
     it "inserts dictation at the cursor with word-safe spacing" do
         insertDictation "please now" 6 "fix this"
