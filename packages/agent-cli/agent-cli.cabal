@@ -53,6 +53,7 @@ library
                     , Agent.CLI.Provider.Switch
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Types
+                    , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.Session.History
                     , Agent.CLI.Session.Selection
