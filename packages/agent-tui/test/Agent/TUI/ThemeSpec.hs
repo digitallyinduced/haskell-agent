@@ -20,6 +20,7 @@ spec = do
                 , Theme.lambdaTrailAttr
                 , Theme.lambdaGlowAttr
                 , Theme.lambdaSparkAttr
+                , Theme.todoPendingAttr
                 ]
                 `shouldBe`
                     [ V.Default
@@ -30,6 +31,7 @@ spec = do
                     , V.SetTo V.brightBlack
                     , V.Default
                     , V.SetTo V.brightWhite
+                    , V.Default
                     ]
 
     describe "syntax theme attributes" do

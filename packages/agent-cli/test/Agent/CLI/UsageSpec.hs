@@ -108,6 +108,27 @@ spec = do
                         , promptLimitWarning = False
                         }
 
+        it "recognizes a weekly window returned in the primary slot" do
+            let snapshot = UsageSnapshot
+                    { planType = sampleSnapshot.planType
+                    , rateLimit =
+                        Just UsageLimit
+                            { allowed = True
+                            , limitReached = False
+                            , primaryWindow = Just weeklyWindow
+                            , secondaryWindow = Nothing
+                            }
+                    , additionalRateLimits = []
+                    }
+            formatOpenAiLimitStatus snapshot
+                `shouldBe`
+                    Just PromptLimitStatus
+                        { promptLimitText = "Weekly limit left: 28%"
+                        , promptLimitWarning = False
+                        }
+            formatUsageSummary epoch Nothing (Right snapshot)
+                `shouldBe` "plus · 7d 28% left"
+
         it "formats Grok's weekly reserve" do
             formatGrokLimitStatus XAI.GrokUsageSnapshot
                 { XAI.usedPercent = 96
@@ -155,14 +176,17 @@ sampleSnapshot = UsageSnapshot
         { allowed = True
         , limitReached = False
         , primaryWindow = Just sampleWindow
-        , secondaryWindow = Just UsageWindow
-            { usedPercent = 72
-            , limitWindowSeconds = 604800
-            , resetAfterSeconds = 400000
-            , resetAt = 1784280000
-            }
+        , secondaryWindow = Just weeklyWindow
         }
     , additionalRateLimits = []
+    }
+
+weeklyWindow :: UsageWindow
+weeklyWindow = UsageWindow
+    { usedPercent = 72
+    , limitWindowSeconds = 604800
+    , resetAfterSeconds = 400000
+    , resetAt = 1784280000
     }
 
 sampleOpenRouterUsage :: OpenRouter.OpenRouterUsage

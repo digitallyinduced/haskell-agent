@@ -11,7 +11,11 @@ mkDerivation {
     safe-exceptions text time transformers unix
   ];
   testHaskellDepends = [
-    agent-core base containers directory filepath hspec safe-exceptions
+    agent-core async base containers directory filepath hspec
+    safe-exceptions text time unix
+  ];
+  benchmarkHaskellDepends = [
+    aeson agent-core async base containers filepath safe-exceptions
     text time unix
   ];
   description = "Grok Build model-facing dialect for the universal agent harness";
