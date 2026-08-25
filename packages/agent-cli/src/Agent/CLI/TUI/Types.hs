@@ -14,6 +14,7 @@ module Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , ResumeOverlay(..)
+    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
     ) where
@@ -220,7 +221,16 @@ data AppState = AppState
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
+    , appTerminalFocus :: !TerminalFocus
     }
+
+-- | Best-effort focus state reported by the terminal. Unknown preserves the
+-- normal rendering cadence for terminals that do not support focus events.
+data TerminalFocus
+    = TerminalFocusUnknown
+    | TerminalFocused
+    | TerminalUnfocused
+    deriving (Eq, Show)
 
 data AgentHover = AgentHover
     { agentHoverTarget :: !AgentTarget

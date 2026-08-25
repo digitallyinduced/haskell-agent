@@ -18,6 +18,8 @@ module Agent.CLI.TUI.App
     , initialFullscreenAppState
     , mergeConversationView
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , lambdaArtWidget
     , quickStartRows
     , quickStartVisible
@@ -141,6 +143,8 @@ import Agent.CLI.TUI.Motion
     , hasBackgroundActivity
     , isBackgroundAgentActive
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
     , uiEventRestartsMotionSchedule
@@ -718,6 +722,8 @@ runFullscreen runtime workerAction = do
                 V.setMode output V.BracketedPaste True
             when (V.supportsMode output V.Mouse) $
                 V.setMode output V.Mouse True
+            when (V.supportsMode output V.Focus) $
+                V.setMode output V.Focus True
             -- Vty deliberately leaves OSC 8 output disabled by default even
             -- when rendered attributes contain URLs.
             when (V.supportsMode output V.Hyperlink) $
@@ -868,6 +874,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appClockNanos = initialClock
         , appNativeProgressKeepaliveBucket = 0
         , appSyntaxHighlighter = Nothing
+        , appTerminalFocus = TerminalFocusUnknown
         }
 
 wrapNativePreviewVty :: FullscreenRuntime -> V.Vty -> IO V.Vty
@@ -3567,6 +3574,9 @@ handleEvent event = do
                 state.appRuntime.runtimeImagePreviewRevision
                 (+ 1)
     syncMotionDemand
+    stateAfterMotionSync <- get
+    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+        continueWithoutRedraw
   where
     isMotionTick = \case
         AppEvent AppMotionTick -> True
@@ -3815,7 +3825,11 @@ handleEventInner event = case event of
                 (setFullscreenWindowTitle state.appRuntime)
                 state.appWindowTitle
             atomically (putTMVar reply result)
-            pure state { appAgentHover = Nothing }
+            pure state
+                { appAgentHover = Nothing
+                , appTerminalFocus = TerminalFocusUnknown
+                , appMotionScheduleReset = True
+                }
     MouseDown name button _ _ -> do
         unless (isAgentHoverSurface name) clearAgentHover
         state <- get
@@ -3951,12 +3965,23 @@ handleEventInner event = case event of
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
-        -- A resize can leave terminal cells from the previous geometry even
-        -- when Brick's next target picture is correctly bounded. Reset Vty's
-        -- assumed display so that redraw repaints the resized surface rather
-        -- than diffing against cells that may have wrapped or moved.
-        getVtyHandle >>= liftIO . V.refresh
+        -- A focused resize can leave cells from the previous geometry. Hidden
+        -- terminals defer the reset until their focus-gained refresh.
+        state <- get
+        when (state.appTerminalFocus /= TerminalUnfocused) $
+            getVtyHandle >>= liftIO . V.refresh
         queueConversationReflow
+    VtyEvent V.EvLostFocus ->
+        modify' \state ->
+            state { appTerminalFocus = TerminalUnfocused }
+    VtyEvent V.EvGainedFocus -> do
+        modify' \state ->
+            state
+                { appTerminalFocus = TerminalFocused
+                , appMotionScheduleReset = True
+                }
+        invalidateCache
+        getVtyHandle >>= liftIO . V.refresh
     VtyEvent vtyEvent -> do
         clearAgentHover
         state <- get

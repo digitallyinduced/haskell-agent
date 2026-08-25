@@ -19,6 +19,8 @@ import Agent.CLI.TUI.App
     , mergeConversationView
     , wrapFullscreenKeyboardVty
     , motionDemandFor
+    , motionDemandForTerminalFocus
+    , motionModeForTerminalFocus
     , lambdaArtWidget
     , quickStartRows
     , quickStartVisible
@@ -37,6 +39,7 @@ import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
     , Name(..)
+    , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
     )
@@ -500,6 +503,44 @@ spec = do
                 `shouldBe` MotionSlow
             motionDemandFor MotionOff False False False countdown
                 `shouldBe` MotionSlow
+
+        it "suppresses cosmetic motion and slows cadence while unfocused" do
+            let idle =
+                    reduceUi
+                        (UiUserSubmitted "done")
+                        initialUiState
+                running =
+                    reduceUi (UiLoop TurnStarted) idle
+            motionDemandForTerminalFocus
+                TerminalFocused
+                MotionFull
+                False
+                False
+                False
+                running
+                `shouldBe` MotionFast
+            motionDemandForTerminalFocus
+                TerminalUnfocused
+                MotionFull
+                False
+                True
+                True
+                idle
+                `shouldBe` MotionNone
+            motionDemandForTerminalFocus
+                TerminalUnfocused
+                MotionFull
+                False
+                False
+                False
+                running
+                `shouldBe` MotionSlow
+            motionModeForTerminalFocus TerminalFocused MotionFull
+                `shouldBe` MotionFull
+            motionModeForTerminalFocus TerminalFocusUnknown MotionReduced
+                `shouldBe` MotionReduced
+            motionModeForTerminalFocus TerminalUnfocused MotionFull
+                `shouldBe` MotionOff
 
         it "bumps the scheduler generation on demand or timer boundaries" do
             nextMotionSchedule
