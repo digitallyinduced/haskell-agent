@@ -16,7 +16,7 @@ spec = describe "terminal character width" do
 
     it "keeps raw controls zero-width but display placeholders one cell wide" do
         charCellWidth '\BEL' `shouldBe` 0
-        charCellWidth '\x200d' `shouldBe` 1
+        charCellWidth '\x200d' `shouldBe` 0
         displayCharCellWidth '\BEL' `shouldBe` 1
         displayCharCellWidth '\t' `shouldBe` 1
         displayCharCellWidth '\x200d' `shouldBe` 1
