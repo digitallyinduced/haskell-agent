@@ -392,6 +392,7 @@ messageItem role text = MessageItem ResponseMessage
     , role
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -406,7 +407,9 @@ functionCallItem callId name arguments status =
         { itemId = Nothing
         , callId
         , name
+        , namespace = Nothing
         , arguments
+        , encryptedFunctionArgs = Nothing
         , status
         , extraFields = KeyMap.empty
         }
@@ -416,6 +419,8 @@ functionOutputItem callId status =
     FunctionCallOutputItem FunctionCallOutput
         { itemId = Nothing
         , callId
+        , name = Nothing
+        , namespace = Nothing
         , output = Aeson.String "ok"
         , status
         , extraFields = KeyMap.empty
@@ -424,9 +429,11 @@ functionOutputItem callId status =
 agentMessageItem :: Text -> ResponseItem
 agentMessageItem text =
     AgentMessageItem ResponseAgentMessage
-        { author = Nothing
+        { messageId = Nothing
+        , author = Nothing
         , recipient = Nothing
         , content = [InputTextPart text Nothing KeyMap.empty]
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 

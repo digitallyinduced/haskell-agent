@@ -17,7 +17,9 @@ spec = describe "mergeCompletedResponseOutput" do
                     { Responses.itemId = Just "fc_1"
                     , Responses.callId = "call_1"
                     , Responses.name = "echo_text"
+                    , Responses.namespace = Nothing
                     , Responses.arguments = "{\"text\":\"ok\"}"
+                    , Responses.encryptedFunctionArgs = Nothing
                     , Responses.status = Nothing
                     , Responses.extraFields = mempty
                     }
@@ -40,6 +42,7 @@ spec = describe "mergeCompletedResponseOutput" do
                         ]
                     , Responses.status = Nothing
                     , Responses.phase = Nothing
+                    , Responses.passthrough = Nothing
                     , Responses.extraFields = mempty
                     }
                 , Responses.FunctionCallItem
@@ -47,7 +50,9 @@ spec = describe "mergeCompletedResponseOutput" do
                     { Responses.itemId = Just "fc_1"
                     , Responses.callId = "call_1"
                     , Responses.name = "echo_text"
+                    , Responses.namespace = Nothing
                     , Responses.arguments = "{\"text\":\"ok\"}"
+                    , Responses.encryptedFunctionArgs = Nothing
                     , Responses.status = Nothing
                     , Responses.extraFields = mempty
                     }
@@ -61,7 +66,9 @@ spec = describe "mergeCompletedResponseOutput" do
                     { Responses.itemId = Just "fc_1"
                     , Responses.callId = "call_1"
                     , Responses.name = "echo_text"
+                    , Responses.namespace = Nothing
                     , Responses.arguments = "{\"text\":\"ok\"}"
+                    , Responses.encryptedFunctionArgs = Nothing
                     , Responses.status = Nothing
                     , Responses.extraFields = mempty
                     }

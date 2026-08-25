@@ -485,7 +485,9 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-1"
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
                     , status = Nothing
                     , extraFields = mempty
                     }

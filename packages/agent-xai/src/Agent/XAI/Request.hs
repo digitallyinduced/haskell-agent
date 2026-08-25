@@ -66,6 +66,7 @@ buildRequest options request =
                     , role = RoleSystem
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -102,6 +103,7 @@ requestInputItems request = case request.input of
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
         ]
@@ -121,6 +123,7 @@ normalizeInputItem = \case
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
     item -> item

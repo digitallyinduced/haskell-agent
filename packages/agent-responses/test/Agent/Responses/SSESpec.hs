@@ -223,6 +223,7 @@ genOutputItemEvent index = do
                 , role = RoleAssistant
                 , status = Just ItemCompleted
                 , phase = Nothing
+                , passthrough = Nothing
                 , extraFields = KeyMap.empty
                 }
     elements

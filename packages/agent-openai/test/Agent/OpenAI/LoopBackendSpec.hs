@@ -36,6 +36,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 request = withRequestInput baseParams [legacySummary]
@@ -51,6 +52,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -1349,7 +1351,9 @@ functionCallItemWithExtras callId name arguments extraFields =
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , arguments
+    , encryptedFunctionArgs = Nothing
     , status = Just ItemCompleted
     , extraFields
     }
@@ -1359,6 +1363,7 @@ customCallItem callId name input = CustomToolCallItem CustomToolCall
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , input
     , status = Just ItemCompleted
     , extraFields = KeyMap.empty
@@ -1371,13 +1376,15 @@ assistantItem text = MessageItem ResponseMessage
     , role = RoleAssistant
     , status = Just ItemCompleted
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
 compactionItem :: Text -> ResponseItem
-compactionItem _ = KnownResponseItem ItemCompaction TaggedObject
-    { tag = "compaction"
-    , fields = KeyMap.empty
+compactionItem _ = CompactionItemValue CompactionItem
+    { itemId = Nothing
+    , encryptedContent = Nothing
+    , extraFields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent

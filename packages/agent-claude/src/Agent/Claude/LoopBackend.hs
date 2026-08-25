@@ -448,6 +448,24 @@ renderResponseItem = \case
         Nothing
     AgentMessageItem message ->
         labelled "Context item" (renderJsonValue (Aeson.toJSON message))
+    AdditionalToolsItemValue item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    LocalShellCallItem item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    ToolSearchCallItem item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    ToolSearchOutputItem item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    WebSearchCallItem item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    ImageGenerationCallItem item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    CompactionItemValue item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    CompactionTriggerItemValue item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
+    ContextCompactionItemValue item ->
+        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
     KnownResponseItem _ tagged ->
         labelled "Context item" (renderTaggedObject tagged)
     UnknownResponseItem tagged ->
@@ -485,6 +503,7 @@ contentPartText = \case
     -- Do not render reasoning text into another model's prompt.
     ReasoningTextPart{} -> []
     EncryptedContentPart{} -> []
+    PlainTextPart{text} -> [text]
     UnknownContentPart{} -> []
 
 renderTaggedObject :: TaggedObject -> Text
@@ -600,6 +619,7 @@ assistantMessageItem assistantText =
         , role = RoleAssistant
         , status = Just ItemCompleted
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 

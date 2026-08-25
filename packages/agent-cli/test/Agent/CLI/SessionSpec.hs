@@ -109,6 +109,7 @@ storedContentPartRoundTrip (StoredRoundTripContentPart part) =
         , role = RoleAssistant
         , status = Just ItemCompleted
         , phase = Just "final"
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -123,6 +124,9 @@ genResponseItem =
         , ReasoningItemValue <$> genReasoningItem
         , ItemReferenceValue <$> genItemReference
         , AgentMessageItem <$> genResponseAgentMessage
+        , AdditionalToolsItemValue <$> genAdditionalToolsItem
+        , CompactionTriggerItemValue <$> genCompactionTriggerItem
+        , CompactionItemValue <$> genCompactionItem
         , do
             tagged <- genTaggedObject "known-item-"
             pure (KnownResponseItem (parseResponseItemType tagged.tag) tagged)
@@ -137,7 +141,11 @@ genResponseMessage =
         <*> genResponseRole
         <*> genMaybe genItemStatus
         <*> genMaybe genText
-        <*> genJsonObject
+        <*> pure Nothing
+        <*> fmap
+            (withoutReservedKeys
+                ["internal_chat_message_metadata_passthrough"])
+            genJsonObject
 
 genResponseAgentMessage :: Gen ResponseAgentMessage
 genResponseAgentMessage =
@@ -147,10 +155,14 @@ genResponseAgentMessage =
         ResponseAgentMessage
             <$> genMaybe genText
             <*> genMaybe genText
+            <*> genMaybe genText
             <*> genSmallList genContentPart
+            <*> pure Nothing
             <*> fmap
                 (withoutReservedKeys
-                    ["type", "author", "recipient", "content"])
+                    [ "type", "id", "author", "recipient", "content"
+                    , "internal_chat_message_metadata_passthrough"
+                    ])
                 genJsonObject
 
 jsonRoundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a) => a -> Maybe a
@@ -166,6 +178,39 @@ withoutReservedKeys names object =
         object
         names
 
+genAdditionalToolsItem :: Gen AdditionalToolsItem
+genAdditionalToolsItem =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        AdditionalToolsItem
+            <$> genMaybe genText
+            <*> genText
+            <*> genSmallList genJsonValue
+            <*> fmap
+                (withoutReservedKeys ["type", "id", "role", "tools"])
+                genJsonObject
+
+genCompactionTriggerItem :: Gen CompactionTriggerItem
+genCompactionTriggerItem =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        CompactionTriggerItem
+            <$> fmap (withoutReservedKeys ["type"]) genJsonObject
+
+genCompactionItem :: Gen CompactionItem
+genCompactionItem =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        CompactionItem
+            <$> genMaybe genText
+            <*> genMaybe genText
+            <*> fmap
+                (withoutReservedKeys ["type", "id", "encrypted_content"])
+                genJsonObject
+
 genMessageContent :: Gen MessageContent
 genMessageContent =
     frequency
@@ -179,18 +224,26 @@ genFunctionCall =
         <$> genMaybe genText
         <*> genText
         <*> genText
+        <*> genMaybe genText
         <*> genText
+        <*> genMaybe (genSmallList genText)
         <*> genMaybe genItemStatus
-        <*> genJsonObject
+        <*> fmap
+            (withoutReservedKeys ["namespace", "encrypted_function_args"])
+            genJsonObject
 
 genFunctionCallOutput :: Gen FunctionCallOutput
 genFunctionCallOutput =
     FunctionCallOutput
         <$> genMaybe genText
         <*> genText
+        <*> genMaybe genText
+        <*> genMaybe genText
         <*> genJsonValue
         <*> genMaybe genItemStatus
-        <*> genJsonObject
+        <*> fmap
+            (withoutReservedKeys ["name", "namespace"])
+            genJsonObject
 
 genCustomToolCall :: Gen CustomToolCall
 genCustomToolCall =
@@ -198,9 +251,10 @@ genCustomToolCall =
         <$> genMaybe genText
         <*> genText
         <*> genText
+        <*> genMaybe genText
         <*> genText
         <*> genMaybe genItemStatus
-        <*> genJsonObject
+        <*> fmap (withoutReservedKeys ["namespace"]) genJsonObject
 
 genCustomToolCallOutput :: Gen CustomToolCallOutput
 genCustomToolCallOutput =
@@ -274,6 +328,9 @@ genContentPart =
             <$> genText
             <*> genJsonObject
         , EncryptedContentPart
+            <$> genText
+            <*> genJsonObject
+        , PlainTextPart
             <$> genText
             <*> genJsonObject
         , UnknownContentPart <$> genTaggedObject "unknown-content-"
@@ -393,6 +450,15 @@ responseItemKind = \case
     ReasoningItemValue{} -> "reasoning"
     ItemReferenceValue{} -> "reference"
     AgentMessageItem{} -> "agent message"
+    AdditionalToolsItemValue{} -> "additional tools"
+    LocalShellCallItem{} -> "local shell"
+    ToolSearchCallItem{} -> "tool search call"
+    ToolSearchOutputItem{} -> "tool search output"
+    WebSearchCallItem{} -> "web search"
+    ImageGenerationCallItem{} -> "image generation"
+    CompactionItemValue{} -> "compaction"
+    CompactionTriggerItemValue{} -> "compaction trigger"
+    ContextCompactionItemValue{} -> "context compaction"
     KnownResponseItem{} -> "known tagged"
     UnknownResponseItem{} -> "unknown tagged"
 
@@ -415,6 +481,7 @@ contentPartKind = \case
     ReasoningTextPart{} -> "reasoning text"
     SummaryTextPart{} -> "summary text"
     EncryptedContentPart{} -> "encrypted content"
+    PlainTextPart{} -> "plain text"
     UnknownContentPart{} -> "unknown content"
 
 spec :: Spec
@@ -446,6 +513,7 @@ spec = describe "Agent.CLI.Session" do
                         , role = RoleAssistant
                         , status = Just ItemCompleted
                         , phase = Nothing
+                        , passthrough = Nothing
                         , extraFields =
                             KeyMap.singleton
                                 "provider_extension"
@@ -487,19 +555,24 @@ spec = describe "Agent.CLI.Session" do
                         , role = RoleDeveloper
                         , status = Just ItemInProgress
                         , phase = Just "commentary"
+                        , passthrough = Nothing
                         , extraFields = KeyMap.empty
                         }
                     , FunctionCallItem FunctionCall
                         { itemId = Just "call-item"
                         , callId = "call-1"
                         , name = "shell"
+                        , namespace = Nothing
                         , arguments = "{\"command\":\"pwd\"}"
+                        , encryptedFunctionArgs = Nothing
                         , status = Just ItemCompleted
                         , extraFields = KeyMap.empty
                         }
                     , FunctionCallOutputItem FunctionCallOutput
                         { itemId = Just "output-item"
                         , callId = "call-1"
+                        , name = Nothing
+                        , namespace = Nothing
                         , output =
                             Aeson.object
                                 ["stdout" Aeson..= ("/tmp/project" :: Text.Text)]
@@ -510,6 +583,7 @@ spec = describe "Agent.CLI.Session" do
                         { itemId = Nothing
                         , callId = "custom-1"
                         , name = "apply_patch"
+                        , namespace = Nothing
                         , input = "*** Begin Patch"
                         , status = Nothing
                         , extraFields = KeyMap.empty
@@ -547,7 +621,8 @@ spec = describe "Agent.CLI.Session" do
                         , extraFields = KeyMap.empty
                         }
                     , AgentMessageItem ResponseAgentMessage
-                        { author = Just "researcher"
+                        { messageId = Nothing
+                        , author = Just "researcher"
                         , recipient = Just "root"
                         , content =
                             [ InputTextPart
@@ -560,11 +635,11 @@ spec = describe "Agent.CLI.Session" do
                                 , extraFields = KeyMap.empty
                                 }
                             ]
+                        , passthrough = Nothing
                         , extraFields = KeyMap.empty
                         }
-                    , KnownResponseItem ItemCompactionTrigger TaggedObject
-                        { tag = "compaction_trigger"
-                        , fields = KeyMap.empty
+                    , CompactionTriggerItemValue CompactionTriggerItem
+                        { extraFields = KeyMap.empty
                         }
                     , UnknownResponseItem TaggedObject
                         { tag = "provider_item"
@@ -640,6 +715,7 @@ spec = describe "Agent.CLI.Session" do
                         , role = RoleUser
                         , status = Nothing
                         , phase = Nothing
+                        , passthrough = Nothing
                         , extraFields = KeyMap.empty
                         }
                     normalTurn = SessionTurn

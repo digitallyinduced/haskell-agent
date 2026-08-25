@@ -30,14 +30,12 @@ module Agent.OpenAI.Compaction
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import qualified Data.Vector as Vector
 
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
@@ -57,9 +55,8 @@ maxRetainedAgentMessageTokens = 10_000
 -- | The exact sentinel understood by the remote compaction v2 protocol.
 compactionTriggerItem :: ResponseItem
 compactionTriggerItem =
-    KnownResponseItem ItemCompactionTrigger TaggedObject
-        { tag = "compaction_trigger"
-        , fields = KeyMap.empty
+    CompactionTriggerItemValue CompactionTriggerItem
+        { extraFields = KeyMap.empty
         }
 
 -- | Build a normal streaming Responses request whose final input item asks the
@@ -134,7 +131,9 @@ sanitizeOversizedToolCall = \case
                 { itemId = call.itemId
                 , callId = call.callId
                 , name = call.name
+                , namespace = call.namespace
                 , arguments = oversizedFunctionArguments
+                , encryptedFunctionArgs = call.encryptedFunctionArgs
                 , status = call.status
                 , extraFields = call.extraFields
                 }
@@ -144,6 +143,7 @@ sanitizeOversizedToolCall = \case
                 { itemId = call.itemId
                 , callId = call.callId
                 , name = call.name
+                , namespace = call.namespace
                 , input = oversizedToolArgumentsMessage
                 , status = call.status
                 , extraFields = call.extraFields
@@ -156,6 +156,8 @@ rewriteOversizedToolOutput = \case
         Just $ FunctionCallOutputItem FunctionCallOutput
             { itemId = output.itemId
             , callId = output.callId
+            , name = output.name
+            , namespace = output.namespace
             , output = Aeson.String contextWindowTruncatedOutputMessage
             , status = output.status
             , extraFields = output.extraFields
@@ -169,14 +171,14 @@ rewriteOversizedToolOutput = \case
             , status = output.status
             , extraFields = output.extraFields
             }
-    KnownResponseItem ItemToolSearchOutput tagged ->
-        Just $ KnownResponseItem ItemToolSearchOutput TaggedObject
-            { tag = tagged.tag
-            , fields =
-                KeyMap.insert
-                    (Key.fromText "tools")
-                    (Aeson.Array Vector.empty)
-                    tagged.fields
+    ToolSearchOutputItem output ->
+        Just $ ToolSearchOutputItem ToolSearchOutput
+            { itemId = output.itemId
+            , callId = output.callId
+            , status = output.status
+            , execution = output.execution
+            , tools = []
+            , extraFields = output.extraFields
             }
     _ -> Nothing
 
@@ -191,7 +193,7 @@ extractRemoteCompactionItem response
     | otherwise =
         case
             [ item
-            | item@(KnownResponseItem ItemCompaction _) <- response.output
+            | item@(CompactionItemValue _) <- response.output
             ]
         of
             [item] -> Right item
@@ -331,6 +333,7 @@ contentPartTokenCount = \case
     RefusalPart { refusal } -> estimateTokens refusal
     ReasoningTextPart { text } -> estimateTokens text
     SummaryTextPart { text } -> estimateTokens text
+    PlainTextPart { text } -> estimateTokens text
     _ -> 0
 
 truncateItemText :: Int -> ResponseItem -> Maybe ResponseItem
@@ -365,6 +368,7 @@ replaceMessageContent message nextContent =
         , role = message.role
         , status = message.status
         , phase = message.phase
+        , passthrough = message.passthrough
         , extraFields = message.extraFields
         }
 
@@ -407,6 +411,7 @@ partText = \case
     RefusalPart { refusal } -> Just refusal
     ReasoningTextPart { text } -> Just text
     SummaryTextPart { text } -> Just text
+    PlainTextPart { text } -> Just text
     _ -> Nothing
 
 partTextValue :: ResponseContentPart -> Text
@@ -424,6 +429,8 @@ replacePartText value = \case
         ReasoningTextPart value extraFields
     SummaryTextPart { extraFields } ->
         SummaryTextPart value extraFields
+    PlainTextPart { extraFields } ->
+        PlainTextPart value extraFields
     part -> part
 
 takeTokenBudget :: Int -> Text -> Text
@@ -504,6 +511,7 @@ userTextItem text = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -522,6 +530,7 @@ assistantSummaryItem summary =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -540,7 +549,7 @@ compactTranscriptAtLastCheckpoint items = go [] (reverse items)
     go _ [] = items
     go after (item : before) =
         case item of
-            KnownResponseItem ItemCompaction _ -> item : after
+            CompactionItemValue{} -> item : after
             _ -> go (item : after) before
 
 -- | Session turns that represent a compaction checkpoint.
@@ -571,7 +580,7 @@ isTranscriptResetTurn text =
 
 hasCompactionCheckpoint :: [ResponseItem] -> Bool
 hasCompactionCheckpoint = any \case
-    KnownResponseItem ItemCompaction _ -> True
+    CompactionItemValue{} -> True
     MessageItem message
         | message.role == RoleAssistant ->
             maybe False

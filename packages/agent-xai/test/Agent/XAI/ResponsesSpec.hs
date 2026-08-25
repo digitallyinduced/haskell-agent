@@ -80,7 +80,8 @@ spec = do
 
         it "flattens resumed OpenAI agent messages into Grok user messages" do
             let agentMessage = AgentMessageItem ResponseAgentMessage
-                    { author = Just "researcher"
+                    { messageId = Nothing
+                    , author = Just "researcher"
                     , recipient = Just "root"
                     , content =
                         [ InputTextPart
@@ -91,6 +92,7 @@ spec = do
                             "opaque-provider-payload"
                             KeyMap.empty
                         ]
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 request = setInstructions Nothing $
@@ -300,6 +302,7 @@ sampleRequest = defaultResponseCreateParams
             , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = mempty
             }
         ])

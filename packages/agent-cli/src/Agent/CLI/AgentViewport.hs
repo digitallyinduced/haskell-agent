@@ -629,6 +629,7 @@ responseContentText = \case
     InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
     InputAudioPart{} -> ["[audio]"]
     EncryptedContentPart{} -> []
+    PlainTextPart{text} -> [text]
     UnknownContentPart{} -> []
 
 appendResponseItem :: Bool -> UiState -> ResponseItem -> UiState
@@ -670,6 +671,15 @@ appendResponseItem showRawReasoning state = \case
         maybe state
             (\text -> reduceUi (UiUserSubmitted text) state)
             (nonEmptyDisplayText (agentMessagePlainText message))
+    AdditionalToolsItemValue{} -> state
+    LocalShellCallItem{} -> state
+    ToolSearchCallItem{} -> state
+    ToolSearchOutputItem{} -> state
+    WebSearchCallItem{} -> state
+    ImageGenerationCallItem{} -> state
+    CompactionItemValue{} -> state
+    CompactionTriggerItemValue{} -> state
+    ContextCompactionItemValue{} -> state
     KnownResponseItem{} -> state
     ItemReferenceValue{} -> state
     UnknownResponseItem{} -> state
@@ -757,6 +767,7 @@ reasoningContentText :: ResponseContentPart -> [Text]
 reasoningContentText = \case
     ReasoningTextPart{text} -> [text]
     SummaryTextPart{text} -> [text]
+    PlainTextPart{text} -> [text]
     _ -> []
 
 agentMessagePlainText :: ResponseAgentMessage -> Text
@@ -769,6 +780,7 @@ agentMessagePlainText message =
             OutputTextPart{text} -> [text]
             ReasoningTextPart{text} -> [text]
             SummaryTextPart{text} -> [text]
+            PlainTextPart{text} -> [text]
             _ -> []
         ]
 

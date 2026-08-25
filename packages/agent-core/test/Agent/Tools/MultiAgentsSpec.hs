@@ -162,7 +162,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             call = ToolCall
                 { callId = "spawn-options"
                 , name = "collaboration.spawn_agent"
-                , arguments =
+                            , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
                     \\"model\":\"gpt-test\",\"reasoning_effort\":\"high\",\
                     \\"fork_turns\":\"3\"}"
@@ -203,7 +203,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             call = ToolCall
                 { callId = "spawn-worktree"
                 , name = "collaboration.spawn_agent"
-                , arguments =
+                            , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
                     \\"isolation\":\"worktree\"}"
                 , callKind = FunctionCallKind
@@ -224,7 +224,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         let call = ToolCall
                 { callId = "spawn-worktree-unavailable"
                 , name = "collaboration.spawn_agent"
-                , arguments =
+                            , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
                     \\"isolation\":\"worktree\"}"
                 , callKind = FunctionCallKind
@@ -242,7 +242,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         let call = ToolCall
                 { callId = "spawn-zero"
                 , name = "collaboration.spawn_agent"
-                , arguments =
+                            , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
                     \\"fork_turns\":\"0\"}"
                 , callKind = FunctionCallKind
@@ -260,7 +260,7 @@ spec = describe "Agent.Tools.MultiAgents" do
         let call = ToolCall
                 { callId = "spawn-overflow"
                 , name = "collaboration.spawn_agent"
-                , arguments =
+                            , arguments =
                     "{\"task_name\":\"worker\",\"message\":\"task\",\
                     \\"fork_turns\":\"18446744073709551617\"}"
                 , callKind = FunctionCallKind
@@ -342,7 +342,7 @@ spec = describe "Agent.Tools.MultiAgents" do
             blankCall name = ToolCall
                 { callId = "blank-" <> name
                 , name = "collaboration." <> name
-                , arguments = "{\"target\":\"/root\",\"message\":\" \\n \"}"
+                            , arguments = "{\"target\":\"/root\",\"message\":\" \\n \"}"
                 , callKind = FunctionCallKind
                 , argumentsEncrypted = False
                 }

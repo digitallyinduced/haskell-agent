@@ -59,6 +59,7 @@ spec = describe "Agent.CLI.Recap" do
                         , role = RoleUser
                         , status = Just ItemCompleted
                         , phase = Nothing
+                        , passthrough = Nothing
                         , extraFields = mempty
                         }
                     ]

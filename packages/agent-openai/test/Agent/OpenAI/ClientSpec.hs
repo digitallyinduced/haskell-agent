@@ -377,9 +377,8 @@ spec = do
                     (helloRequest "compact")
                 response <- expectRight result
                 case response.output of
-                    [KnownResponseItem ItemCompaction tagged] ->
-                        KeyMap.lookup "encrypted_content" tagged.fields
-                            `shouldBe` Just (Aeson.String "opaque")
+                    [CompactionItemValue item] ->
+                        item.encryptedContent `shouldBe` Just "opaque"
                     other ->
                         expectationFailure
                             ("expected one compaction output, got " <> show other)

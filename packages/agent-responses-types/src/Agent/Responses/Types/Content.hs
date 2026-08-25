@@ -115,6 +115,10 @@ data ResponseContentPart
         { encryptedContent :: !Text
         , extraFields      :: !Aeson.Object
         }
+    | PlainTextPart
+        { text        :: !Text
+        , extraFields :: !Aeson.Object
+        }
     | UnknownContentPart !TaggedObject
     deriving stock (Eq, Show)
 
@@ -161,6 +165,8 @@ instance ToJSON ResponseContentPart where
             [ Just (field "type" ("encrypted_content" :: Text))
             , Just (field "encrypted_content" encryptedContent)
             ]
+    toJSON PlainTextPart { text, extraFields } = objectWith extraFields
+        [Just (field "type" ("text" :: Text)), Just (field "text" text)]
     toJSON (UnknownContentPart tagged) = toJSON tagged
 
 instance FromJSON ResponseContentPart where
@@ -205,4 +211,7 @@ instance FromJSON ResponseContentPart where
             "encrypted_content" -> EncryptedContentPart
                 <$> o .: "encrypted_content"
                 <*> pure (without ["type", "encrypted_content"] o)
+            "text" -> PlainTextPart
+                <$> o .: "text"
+                <*> pure (without ["type", "text"] o)
             _ -> UnknownContentPart <$> parseJSON value) value
