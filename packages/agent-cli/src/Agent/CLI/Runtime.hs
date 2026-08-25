@@ -98,10 +98,6 @@ import Agent.CLI.AccountPicker
     , accountPickerRow
     , loadAllAccountPickerOptions
     )
-import Agent.CLI.Btw
-    ( formatBtwError
-    , runBtwWithCancel
-    )
 import Agent.CLI.CancelWatch (withEscCancel, withStdinPaused)
 import Agent.CLI.Clipboard
     ( formatImageSize
@@ -318,7 +314,6 @@ import Agent.CLI.Render
     , clearThinking
     , emptyMarkdownStreamState
     , putTextLn
-    , renderAssistantText
     , renderEvent
     )
 import Agent.CLI.Session
@@ -339,6 +334,12 @@ import Agent.CLI.Session.History
     , foldSessionItems
     , hydrateUiHistory
     , resetLiveConversation
+    )
+import Agent.CLI.Session.Interaction
+    ( buildPromptState
+    , runBtwQuestion
+    , setSessionEffort
+    , syncFullscreenPrompt
     )
 import Agent.CLI.Session.Selection
     ( currentSessionId
@@ -466,8 +467,7 @@ import Agent.CLI.TUI.App
     )
 import qualified Agent.CLI.TUI.Bridge as TuiBridge
 import Agent.TUI.Model
-    ( PromptState(..)
-    , UiEvent(..)
+    ( UiEvent(..)
     , UiState(..)
     , infoNotice
     , progressNotice
@@ -3840,50 +3840,6 @@ runPendingTurnWithCooldownRetry
     finishTurnWithCooldownRetry
         allowCooldownRetry env pending.pendingExitAfter result
 
--- | A retained fullscreen runtime survives provider rebuilds. Publish the new
--- session's prompt metadata before replaying a pending turn so the composer
--- does not keep showing the exhausted provider while its replacement runs.
-syncFullscreenPrompt :: SessionEnv -> IO ()
-syncFullscreenPrompt env =
-    forM_ env.sessionFullscreen \runtime -> do
-        planState <- readIORef env.sessionPlanMode.planStateRef
-        params <- readIORef env.sessionParams
-        policy <- readIORef env.sessionPolicy
-        account <- readIORef env.sessionAccount
-        usage <- readIORef env.sessionUsage
-        attachments <- readIORef env.sessionAttachments
-        emitUiEvent runtime $ UiSetPrompt $
-            buildPromptState
-                params
-                planState
-                policy
-                account
-                (isJust env.sessionSelectAccount)
-                usage
-                (length attachments)
-
-buildPromptState
-    :: ResponseCreateParams
-    -> PlanModeState
-    -> ApprovalPolicy
-    -> Text
-    -> Bool
-    -> TokenUsage
-    -> Int
-    -> PromptState
-buildPromptState params planState policy account accountSelectable usage attachments =
-    PromptState
-        { promptModel = currentModel params
-        , promptEffort = currentEffort params
-        , promptMode =
-            replModeLabel (replModeFromState planState policy)
-        , promptAccount = account
-        , promptAccountSelectable = accountSelectable
-        , promptUsage = usage
-        , promptLimitStatus = Nothing
-        , promptAttachments = attachments
-        }
-
 finishTurn
     :: SessionEnv
     -> Bool
@@ -4070,76 +4026,6 @@ waitAndRetryPendingTurn env delay pending = do
             runPendingTurnWithCooldownRetry
                 False RestartPendingTurn env pending
                 `finally` clearPersistenceActivity env.sessionPersist
-
-setSessionEffort :: SessionEnv -> Text -> IO ()
-setSessionEffort env level = do
-    modifyIORef' env.sessionParams (setReasoningEffort level)
-    case env.sessionFullscreen of
-        Just runtime ->
-            emitUiEvent runtime (UiSetPromptEffort level)
-        Nothing -> pure ()
-    case env.sessionPersist of
-        PersistenceDisabled -> pure ()
-        PersistenceEnabled slotRef -> do
-            slot <- readIORef slotRef
-            case slot of
-                PersistencePending pending sessionId tempDir ->
-                    writeIORef slotRef
-                        (PersistencePending
-                            pending { createEffort = level }
-                            sessionId
-                            tempDir)
-                PersistenceActive handle -> do
-                    let meta = handle.sessionMeta { metaEffort = level }
-                    writeSessionMeta
-                        handle.sessionPool
-                        handle.sessionMetaPath
-                        meta
-                    writeIORef slotRef
-                        (PersistenceActive handle { sessionMeta = meta })
-
-runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
-runBtwQuestion registerCancel env question = do
-    let fullscreen = env.sessionFullscreen
-    color <- resolveColor stdout
-    forM_ fullscreen \runtime ->
-        emitUiEvent runtime
-            (UiSetNotice (Just (progressNotice "btw · asking…")))
-    result <-
-        runBtwWithCancel
-            (\cancel action ->
-                if registerCancel
-                    then
-                        withTurnCancel env.sessionInterrupt cancel $
-                            case fullscreen of
-                                Nothing ->
-                                    withEscCancel
-                                        cancel
-                                        env.sessionEscPaused
-                                        action
-                                Just _ -> action
-                    else action)
-            env.sessionBtwBackend
-            env.sessionParams
-            env.sessionTranscript
-            question
-    forM_ fullscreen \runtime ->
-        emitUiEvent runtime (UiSetNotice Nothing)
-    case result of
-        Left err -> do
-            errorColor <- resolveColor stderr
-            let message = formatBtwError err
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime (UiErrorMessage message)
-                Nothing ->
-                    putTextLn stderr (roleError errorColor message)
-        Right answer ->
-            case fullscreen of
-                Just runtime ->
-                    emitUiEvent runtime (UiAssistantHistory answer)
-                Nothing ->
-                    putTextLn stdout (renderAssistantText color answer)
 
 repl :: SessionEnv -> IO RunResult
 repl env = replWithDraft env ""
