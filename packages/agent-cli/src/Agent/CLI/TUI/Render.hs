@@ -565,6 +565,9 @@ conversationUiForTarget target state = case target of
     AgentChild _ ->
         (.agentConversation)
             <$> lookupAgentEntry target state.appAgentEntries
+    AgentNative _ ->
+        (.agentConversation)
+            <$> lookupAgentEntry target state.appAgentEntries
 
 activeConversationUi :: AppState -> UiState
 activeConversationUi state =
@@ -1474,6 +1477,7 @@ submittedUserMessage state target block =
         [terminalTxtWrap block.blockBody]
             <> case target of
                 AgentChild _ -> []
+                AgentNative _ -> []
                 AgentRoot ->
                     zipWith submittedImage [0 ..] $
                         Map.findWithDefault

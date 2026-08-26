@@ -818,6 +818,18 @@ renderEventUnlocked config = \case
         case painted of
             Nothing -> pure ()
             Just line -> putTextLn config.renderStderr line
+    ToolUpdated _ ->
+        pure ()
+    ToolRetracted _ ->
+        pure ()
+    ResponseAttemptDiscarded ->
+        pure ()
+    NativeAgentStarted{} ->
+        pure ()
+    NativeAgentOutput{} ->
+        pure ()
+    NativeAgentFinished{} ->
+        pure ()
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.

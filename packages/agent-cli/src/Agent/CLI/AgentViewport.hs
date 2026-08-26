@@ -80,6 +80,7 @@ import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 data AgentTarget
     = AgentRoot
     | AgentChild !SubagentId
+    | AgentNative !Text
     deriving (Eq, Ord, Show)
 
 data AgentStepState
@@ -133,6 +134,7 @@ agentStatusGlyph status = case Text.toLower status of
     "done" -> "✓"
     "error" -> "✕"
     "interrupted" -> "■"
+    "cancelled" -> "■"
     "closed" -> "×"
     "missing" -> "?"
     _ -> "·"

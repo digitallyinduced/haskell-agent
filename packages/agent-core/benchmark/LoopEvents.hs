@@ -318,6 +318,19 @@ eventWeight = \case
     TurnStarted -> 1
     TurnFinished _ -> 1
     ToolStarted call -> Text.length call.callId
+    ToolUpdated call -> Text.length call.callId
+    ToolRetracted callId -> Text.length callId
+    ResponseAttemptDiscarded -> 1
+    NativeAgentStarted identifier parent label model ->
+        sum
+            [ Text.length identifier
+            , maybe 0 Text.length parent
+            , Text.length label
+            , maybe 0 Text.length model
+            ]
+    NativeAgentOutput identifier output ->
+        Text.length identifier + Text.length output
+    NativeAgentFinished identifier _ -> Text.length identifier
     ToolOutputUpdated callId output ->
         Text.length callId + Text.length output
     ToolFinished result ->

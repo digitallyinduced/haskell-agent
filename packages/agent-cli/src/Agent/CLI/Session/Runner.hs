@@ -219,6 +219,175 @@ import Data.Time.Clock
     )
 import System.Mem.StableName (StableName, makeStableName)
 
+data NativeAgentView = NativeAgentView
+    { nativeAgentId :: !Text
+    , nativeAgentParent :: !(Maybe Text)
+    , nativeAgentLabel :: !Text
+    , nativeAgentModel :: !(Maybe Text)
+    , nativeAgentStatus :: !Text
+    , nativeAgentTranscript :: ![Text]
+    , nativeAgentConversation :: !UiState
+    }
+
+updateNativeAgents :: IORef (Map.Map Text NativeAgentView) -> LoopEvent -> IO ()
+updateNativeAgents ref event =
+    atomicModifyIORef' ref \current ->
+        case event of
+            TurnStarted ->
+                (settleRunningNativeAgents NativeAgentCancelled current, ())
+            ResponseRestarted _ ->
+                (settleRunningNativeAgents NativeAgentCancelled current, ())
+            ResponseAttemptDiscarded ->
+                (settleRunningNativeAgents NativeAgentCancelled current, ())
+            NativeAgentStarted identifier parent label model ->
+                let update = \case
+                        Nothing ->
+                            Just
+                                (newNativeAgentView
+                                    identifier parent label model)
+                        Just view ->
+                            Just view
+                                { nativeAgentParent = parent
+                                , nativeAgentLabel = label
+                                , nativeAgentModel = model
+                                , nativeAgentStatus = "running"
+                                }
+                in (Map.alter update identifier current, ())
+            NativeAgentOutput identifier output ->
+                let view =
+                        Map.findWithDefault
+                            (newNativeAgentView
+                                identifier Nothing identifier Nothing)
+                            identifier
+                            current
+                    conversation =
+                        reduceUi
+                            (UiLoop (TextDelta output))
+                            view.nativeAgentConversation
+                in ( Map.insert identifier
+                        view
+                            { nativeAgentTranscript =
+                                view.nativeAgentTranscript <> [output]
+                            , nativeAgentConversation = conversation
+                            }
+                        current
+                   , ()
+                   )
+            NativeAgentFinished identifier status ->
+                let view =
+                        Map.findWithDefault
+                            (newNativeAgentView
+                                identifier Nothing identifier Nothing)
+                            identifier
+                            current
+                    conversation =
+                        reduceUi
+                            (UiTurnEnded (nativeAgentBlockState status))
+                            view.nativeAgentConversation
+                in ( Map.insert identifier
+                        view
+                            { nativeAgentStatus =
+                                nativeAgentStatusText status
+                            , nativeAgentConversation = conversation
+                            }
+                        current
+                   , ()
+                   )
+            _ -> (current, ())
+
+settleRunningNativeAgents
+    :: NativeAgentStatus
+    -> Map.Map Text NativeAgentView
+    -> Map.Map Text NativeAgentView
+settleRunningNativeAgents status =
+    Map.map \view ->
+        if view.nativeAgentStatus /= "running"
+            then view
+            else
+                view
+                    { nativeAgentStatus = nativeAgentStatusText status
+                    , nativeAgentConversation =
+                        reduceUi
+                            (UiTurnEnded (nativeAgentBlockState status))
+                            view.nativeAgentConversation
+                    }
+
+nativeAgentBlockState :: NativeAgentStatus -> BlockState
+nativeAgentBlockState = \case
+    NativeAgentRunning -> BlockRunning
+    NativeAgentCompleted -> BlockComplete
+    NativeAgentFailed -> BlockFailed
+    NativeAgentCancelled -> BlockCancelled
+
+newNativeAgentView
+    :: Text
+    -> Maybe Text
+    -> Text
+    -> Maybe Text
+    -> NativeAgentView
+newNativeAgentView identifier parent label model =
+    NativeAgentView
+        { nativeAgentId = identifier
+        , nativeAgentParent = parent
+        , nativeAgentLabel = label
+        , nativeAgentModel = model
+        , nativeAgentStatus = "running"
+        , nativeAgentTranscript = []
+        , nativeAgentConversation =
+            reduceUi (UiLoop TurnStarted) initialUiState
+        }
+
+nativeAgentStatusText :: NativeAgentStatus -> Text
+nativeAgentStatusText = \case
+    NativeAgentRunning -> "running"
+    NativeAgentCompleted -> "done"
+    NativeAgentFailed -> "error"
+    NativeAgentCancelled -> "cancelled"
+
+nativeAgentEntry
+    :: Map.Map Text NativeAgentView
+    -> NativeAgentView
+    -> AgentEntry
+nativeAgentEntry agents view =
+    AgentEntry
+        { agentTarget = AgentNative view.nativeAgentId
+        , agentPath = nativeAgentPath agents Set.empty view
+        , agentStatus = view.nativeAgentStatus
+        , agentModel = view.nativeAgentModel
+        , agentSteps = []
+        , agentTranscript = view.nativeAgentTranscript
+        , agentConversation = view.nativeAgentConversation
+        }
+
+nativeAgentPath
+    :: Map.Map Text NativeAgentView
+    -> Set.Set Text
+    -> NativeAgentView
+    -> Text
+nativeAgentPath agents visited view
+    | Set.member view.nativeAgentId visited =
+        "/native/" <> nativeAgentPathSegment view
+    | otherwise =
+        case view.nativeAgentParent >>= (`Map.lookup` agents) of
+            Nothing -> "/native/" <> nativeAgentPathSegment view
+            Just parent ->
+                nativeAgentPath
+                    agents
+                    (Set.insert view.nativeAgentId visited)
+                    parent
+                    <> "/"
+                    <> nativeAgentPathSegment view
+
+nativeAgentPathSegment :: NativeAgentView -> Text
+nativeAgentPathSegment view =
+    let cleaned =
+            Text.unwords
+                (Text.words
+                    (Text.map
+                        (\char -> if char == '/' then '-' else char)
+                        view.nativeAgentLabel))
+    in if Text.null cleaned then view.nativeAgentId else cleaned
+
 data AgentStepCache = AgentStepCache
     { cachedTranscript :: !(StableName [ResponseItem])
     , cachedVariant :: !(Maybe SubagentStatus)
@@ -323,6 +492,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
+    nativeAgentsRef <- newIORef (Map.empty :: Map.Map Text NativeAgentView)
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
     let cachedAgentSteps target variant items build = do
             transcriptName <- makeStableName items
@@ -346,6 +516,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     pure steps
         loadAgentSnapshot includeSummaries = do
             rootItems <- readLiveTranscript conversationRef
+            nativeAgents <- readIORef nativeAgentsRef
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
@@ -354,6 +525,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         : [ AgentChild agentId
                           | (_, agentId, _) <- agents
                           ]
+                        <> map (\view -> AgentNative view.nativeAgentId)
+                            (Map.elems nativeAgents)
             selected <-
                 atomicModifyIORef' selectedAgent \current ->
                     let reconciled =
@@ -372,6 +545,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 responseItemPreviewLines 12 items
                             | otherwise ->
                                 []
+                        AgentNative nativeId ->
+                            maybe [] (.nativeAgentTranscript)
+                                (Map.lookup nativeId nativeAgents)
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
@@ -379,6 +555,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     | includeSummaries = initialUiState
                     | target /= selected = initialUiState
                     | target == AgentRoot = initialUiState
+                    | AgentNative nativeId <- target =
+                        maybe initialUiState (.nativeAgentConversation)
+                            (Map.lookup nativeId nativeAgents)
                     | otherwise =
                         settleConversation items status $
                             responseItemsToUiStateRelative
@@ -446,7 +625,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     conversationFor
                     sessions)
                 agents
-            pure (selected, rootEntry : children)
+            let nativeEntries =
+                    map (nativeAgentEntry nativeAgents)
+                        (Map.elems nativeAgents)
+            pure (selected, rootEntry : children <> nativeEntries)
           where
             materializeChild
                     transcriptLines
@@ -502,6 +684,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 releaseSelectedAgent previous
             case target of
                 AgentRoot -> pure ()
+                AgentNative _ -> pure ()
                 AgentChild agentId -> do
                     session <-
                         (Just <$>
@@ -525,6 +708,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             writeIORef selectedAgent target
         releaseSelectedAgent = \case
             AgentRoot -> pure ()
+            AgentNative _ -> pure ()
             AgentChild agentId -> do
                 sessions <- readIORef subagentSessions
                 forM_ (Map.lookup agentId sessions) \session -> do
@@ -714,6 +898,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderWorkspace = toText cwd
             }
         emitLoop event = do
+            updateNativeAgents nativeAgentsRef event
             managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
