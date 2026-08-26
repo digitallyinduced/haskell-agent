@@ -1,3 +1,7 @@
+-- This module coordinates IO and Brick events; optimizing its large state
+-- machine costs considerably more than it benefits this non-rendering path.
+{-# OPTIONS_GHC -O0 -Wno-unused-imports #-}
+
 -- | Retained fullscreen terminal application and its session bridge.
 module Agent.CLI.TUI.App
     ( FullscreenInputBuffer
