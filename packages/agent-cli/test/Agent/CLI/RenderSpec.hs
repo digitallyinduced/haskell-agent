@@ -10,6 +10,7 @@ import Agent.Loop
     , TurnCompletion(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    , emptyTurnOutput
     )
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -59,6 +60,30 @@ spec = do
                         visible
             stateThinkingVisible started `shouldBe` True
             statePrintedText started `shouldBe` False
+
+        it "preserves last tok/s across a new generation" do
+            let started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        emptyRenderState
+                            { stateLastTokensPerSecond = Just 42 }
+            stateLastTokensPerSecond started `shouldBe` Just 42
+
+        it "records provider output tokens per second" do
+            let startedAt = UTCTime (fromGregorian 2026 1 2) 0
+                started = beginRenderTurn startedAt emptyRenderState
+                turn =
+                    (emptyTurnOutput "r1" [] (Just "hi"))
+                        { tokenUsage =
+                            TokenUsage
+                                { inputTokens = 10
+                                , outputTokens = 80
+                                , cachedTokens = 0
+                                }
+                        }
+                recorded =
+                    recordRenderTurnRate (addUTCTime 2 startedAt) turn started
+            stateLastTokensPerSecond recorded `shouldBe` Just 40
 
         it "streams markdown through a pure state transition" do
             let (state1, first) = streamMarkdown "hello\n" emptyRenderState
@@ -157,8 +182,10 @@ spec = do
 
     describe "formatActivityLine" do
         it "joins spinner, activity, and elapsed" do
-            formatActivityLine False "⠋" "Thinking…" 1.2
+            formatActivityLine False "⠋" "Thinking…" 1.2 Nothing
                 `shouldBe` "⠋ Thinking…  1.2s"
+            formatActivityLine False "⠋" "Writing…" 1.2 (Just 42)
+                `shouldBe` "⠋ Writing…  1.2s · 42 tok/s"
 
     describe "formatToolStarted" do
         it "renders English verbs for known tools" do

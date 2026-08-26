@@ -54,7 +54,7 @@ import Agent.CLI.Resume
       groupResumeEntries,
       resumeRelativeAge )
 import Agent.CLI.Secret ()
-import Agent.CLI.Status ( formatTokenUsage )
+import Agent.CLI.Status ( formatTokensPerSecond, formatUsageWithRate )
 import Agent.CLI.Style ( motionGlyphSet )
 import Agent.CLI.TUI.History
     ( HistoryWindow(historyWindowTurns, historyWindowTotalTurns,
@@ -132,7 +132,8 @@ import Agent.TUI.Model
       UiState(uiBlocks, uiAwaitingInput, uiActivity,
               uiCompletionRemainingMillis, uiRunning, uiElapsedMillis, uiFocus,
               uiSelectedBlock, uiPermission, uiFollow, uiRetryCountdown,
-              uiNotice, uiBranch, uiCwd, uiPrompt) )
+              uiNotice, uiBranch, uiCwd, uiPrompt),
+      uiTokensPerSecond )
 import Agent.TUI.Motion
     ( backgroundIndicator,
       foregroundIndicator,
@@ -931,7 +932,10 @@ repositoryHeaderText branch cwd =
 drawHeaderRight :: AppState -> Widget Name
 drawHeaderRight state =
     withAttr Theme.mutedAttr $
-        terminalTxt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
+        terminalTxt
+            (formatUsageWithRate
+                state.appUi.uiPrompt.promptUsage
+                (uiTokensPerSecond state.appUi))
 
 drawLiveTodos :: UiState -> Widget Name
 drawLiveTodos ui =
@@ -1029,10 +1033,14 @@ drawPromptActivity state
     elapsed =
         " · "
             <> formatElapsed (fromIntegral ui.uiElapsedMillis / 1000)
-    right =
-        if ui.uiRunning
-            then formatTokenUsage ui.uiPrompt.promptUsage
-            else ""
+    right
+        | ui.uiRunning =
+            formatUsageWithRate
+                ui.uiPrompt.promptUsage
+                (uiTokensPerSecond ui)
+        | ui.uiCompletionRemainingMillis > 0 =
+            maybe "" formatTokensPerSecond (uiTokensPerSecond ui)
+        | otherwise = ""
 
 drawTranscript :: AppState -> Widget Name
 drawTranscript state =

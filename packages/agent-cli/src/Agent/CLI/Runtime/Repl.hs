@@ -53,7 +53,10 @@ import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition ( PendingTurn, TurnResult )
 import Agent.CLI.Recap ()
-import Agent.CLI.Render ( RenderConfig(renderLock) )
+import Agent.CLI.Render
+    ( RenderConfig(..)
+    , stateLastTokensPerSecond
+    )
 import Agent.CLI.ReplMode
     ( replModeFromState, ReplMode(ReplModeAlwaysApprove) )
 import Agent.CLI.Request ()
@@ -314,12 +317,14 @@ replWithDraft env@SessionEnv
                     when (not (Text.null panel)) (Text.putStrLn panel)
             -- Status sits on the line above λ in minimal mode.
             withSynchronizedOutput terminal stdout do
+                tokenRate <- stateLastTokensPerSecond <$> readIORef render.renderState
                 Text.putStrLn $ formatReplStatusLine stdoutColor termCols
                     (currentModel params)
                     (currentEffort params)
                     idleMode
                     account
                     usage
+                    tokenRate
                 hFlush stdout
             let modeTag
                     | planActive = roleWarn stdoutColor "[plan] "

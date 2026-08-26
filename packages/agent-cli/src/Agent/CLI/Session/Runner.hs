@@ -81,8 +81,10 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , RenderState(..)
     , beginRenderTurn
+    , countGenerationChars
     , emptyRenderState
     , putTextLn
+    , recordRenderTurnRate
     , renderEvent
     )
 import Agent.CLI.Session
@@ -711,17 +713,25 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             case fullscreen of
                 Nothing -> renderEvent render event
                 Just runtime -> do
-                    case event of
-                        TurnStarted -> do
-                            now <- getCurrentTime
-                            modifyIORef' renderStateRef (beginRenderTurn now)
-                        TextDelta _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{statePrintedText = True})
-                        ToolStarted _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{stateActivity = "Running tool…"})
-                        _ -> pure ()
+                    now <- getCurrentTime
+                    modifyIORef' renderStateRef \state ->
+                        case event of
+                            TurnStarted -> beginRenderTurn now state
+                            TextDelta delta ->
+                                countGenerationChars delta
+                                    state{statePrintedText = True}
+                            ReasoningDelta delta ->
+                                countGenerationChars delta state
+                            ResponseRestarted _ ->
+                                state
+                                    { stateGenerationChars = 0
+                                    , stateStartedAt = Just now
+                                    }
+                            ToolStarted _ ->
+                                state{stateActivity = "Running tool…"}
+                            TurnFinished turn ->
+                                recordRenderTurnRate now turn state
+                            _ -> state
                     emitUiEvent runtime (UiLoop event)
         shellToolAllowed call = do
             ghciEnabled <- readIORef ghciEnabledRef

@@ -44,6 +44,7 @@ import Agent.CLI.Render
     , renderAssistantText
     , renderPrintedText
     , resetRenderPrintedText
+    , stateLastTokensPerSecond
     , stateStartedAt
     )
 import Agent.CLI.Session
@@ -75,7 +76,7 @@ import Agent.CLI.SessionTitle
     , takeSessionTitleResults
     , titleRefreshIndex
     )
-import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Status (formatUsageWithRate)
 import Agent.CLI.Style
     ( cliWindowTitle
     , glyphSession
@@ -484,9 +485,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         assistantText))
             do
                 model <- readIORef render.renderModelRef
+                tokenRate <-
+                    stateLastTokensPerSecond <$> readIORef render.renderState
                 let turns = Text.pack (show loopResult.turnsUsed)
                     unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
-                    usageDetail = formatTokenUsage loopResult.tokenUsage
+                    usageDetail =
+                        formatUsageWithRate loopResult.tokenUsage tokenRate
                     extra =
                         if Text.null usageDetail
                             then model <> " · " <> turns <> unit

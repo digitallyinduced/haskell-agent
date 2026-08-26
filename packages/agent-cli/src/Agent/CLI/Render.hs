@@ -17,7 +17,11 @@ module Agent.CLI.Render
     , emptyRenderState
     , appendRenderReasoning
     , beginRenderTurn
+    , countGenerationChars
     , formatActivityLine
+    , recordRenderTurnRate
+    , renderTokensPerSecond
+    , stateLastTokensPerSecond
     , formatElapsed
     , formatLoopError
     , formatLoopErrorAt
@@ -64,6 +68,7 @@ import Agent.CLI.Error
     , formatApiErrorAt
     , formatApiErrorPersistedAt
     )
+import Agent.CLI.Status (formatTokensPerSecond)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -98,6 +103,8 @@ import Agent.Loop
     , TokenUsage(..)
     , TurnCompletion(..)
     , TurnOutput(..)
+    , generationTokensPerSecond
+    , liveTokensPerSecond
     )
 import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
@@ -119,6 +126,7 @@ import Agent.TextBuffer
     , emptyTextBuffer
     , textBufferToText
     )
+import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
@@ -169,6 +177,8 @@ data RenderState = RenderState
     , stateActivity :: !Text
     , stateStartedAt :: !(Maybe UTCTime)
     , stateToolCalls :: !(Map.Map Text ToolCall)
+    , stateGenerationChars :: !Int
+    , stateLastTokensPerSecond :: !(Maybe Double)
     }
 
 stateThinkingVisible :: RenderState -> Bool
@@ -195,6 +205,9 @@ stateStartedAt state = state.stateStartedAt
 stateToolCalls :: RenderState -> Map.Map Text ToolCall
 stateToolCalls state = state.stateToolCalls
 
+stateLastTokensPerSecond :: RenderState -> Maybe Double
+stateLastTokensPerSecond state = state.stateLastTokensPerSecond
+
 emptyRenderState :: RenderState
 emptyRenderState =
     RenderState
@@ -206,6 +219,8 @@ emptyRenderState =
         , stateActivity = "Thinking…"
         , stateStartedAt = Nothing
         , stateToolCalls = Map.empty
+        , stateGenerationChars = 0
+        , stateLastTokensPerSecond = Nothing
         }
 
 data MarkdownStreamState = MarkdownStreamState
@@ -567,7 +582,39 @@ beginRenderTurn now state =
     emptyRenderState
         { stateThinkingVisible = state.stateThinkingVisible
         , stateStartedAt = Just now
+        , stateLastTokensPerSecond = state.stateLastTokensPerSecond
         }
+
+countGenerationChars :: Text -> RenderState -> RenderState
+countGenerationChars delta state =
+    state
+        { stateGenerationChars =
+            state.stateGenerationChars + Text.length delta
+        }
+
+recordRenderTurnRate :: UTCTime -> TurnOutput -> RenderState -> RenderState
+recordRenderTurnRate now turn state =
+    let millis = case state.stateStartedAt of
+            Nothing -> 0
+            Just started ->
+                max 0 (floor (diffUTCTime now started * 1000))
+    in state
+        { stateLastTokensPerSecond =
+            generationTokensPerSecond
+                turn.tokenUsage.outputTokens
+                state.stateGenerationChars
+                millis
+                <|> state.stateLastTokensPerSecond
+        }
+
+renderTokensPerSecond :: RenderState -> Double -> Maybe Double
+renderTokensPerSecond state elapsedSeconds
+    | Map.null state.stateToolCalls =
+        liveTokensPerSecond
+            state.stateGenerationChars
+            (max 0 (round (elapsedSeconds * 1000)))
+            <|> state.stateLastTokensPerSecond
+    | otherwise = state.stateLastTokensPerSecond
 
 appendRenderReasoning :: Text -> RenderState -> RenderState
 appendRenderReasoning delta state =
@@ -586,6 +633,8 @@ renderEvent config event =
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
     TextDelta delta -> do
+        modifyRenderState config \state ->
+            (countGenerationChars delta state, ())
         commitThinkingUnlocked config
         if config.renderColor
             then do
@@ -595,7 +644,9 @@ renderEventUnlocked config = \case
                     (state{statePrintedText = True}, ())
                 Text.hPutStr config.renderStdout delta
                 hFlush config.renderStdout
-    ReasoningDelta delta ->
+    ReasoningDelta delta -> do
+        modifyRenderState config \state ->
+            (countGenerationChars delta state, ())
         appendReasoningUnlocked config delta
     ActivityUpdated activity -> do
         modifyRenderState config \state ->
@@ -627,8 +678,14 @@ renderEventUnlocked config = \case
                         , stateLiveActive = False
                         }
                     , ())
+        now <- getCurrentTime
         modifyRenderState config \state ->
-            (setRenderActivity "Retrying response…" state, ())
+            ( setRenderActivity "Retrying response…" state
+                { stateGenerationChars = 0
+                , stateStartedAt = Just now
+                }
+            , ()
+            )
         putTextLn config.renderStderr
             (roleWarn config.renderColor (glyphWarn <> message))
         startThinkingSpinnerUnlocked config
@@ -649,6 +706,9 @@ renderEventUnlocked config = \case
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
     -- tool-free turn is the main answer.
     TurnFinished turn -> do
+        now <- getCurrentTime
+        modifyRenderState config \state ->
+            (recordRenderTurnRate now turn state, ())
         commitThinkingUnlocked config
         when config.renderColor do
             didPrint <- finalizeAssistantBuffer config turn.assistantText
@@ -860,7 +920,8 @@ paintThinkingFrame config = do
 
 paintThinkingFrameAt :: RenderConfig -> Int -> IO ()
 paintThinkingFrameAt config motionMillis = do
-    activity <- (.stateActivity) <$> readRenderState config
+    state <- readRenderState config
+    let activity = state.stateActivity
     elapsed <- thinkingElapsed config
     let glyph =
             foregroundIndicator
@@ -873,6 +934,7 @@ paintThinkingFrameAt config motionMillis = do
                 glyph
                 activity
                 elapsed
+                (renderTokensPerSecond state elapsed)
     void $ tryIO do
         Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
         hFlush config.renderStderr
@@ -978,11 +1040,15 @@ wrapOne width line
             go rest (acc <> " " <> word)
         | otherwise = acc : go (word : rest) ""
 
--- | One-line live status: spinner, current activity, elapsed time.
-formatActivityLine :: Bool -> Text -> Text -> Double -> Text
-formatActivityLine color glyph activity seconds =
+-- | One-line live status: spinner, current activity, elapsed time, tok/s.
+formatActivityLine :: Bool -> Text -> Text -> Double -> Maybe Double -> Text
+formatActivityLine color glyph activity seconds rate =
     roleThinking color (glyph <> " " <> activity)
-        <> roleMuted color ("  " <> formatElapsed seconds)
+        <> roleMuted color ("  " <> formatElapsed seconds <> rateSuffix)
+  where
+    rateSuffix = case rate of
+        Just value -> " · " <> formatTokensPerSecond value
+        Nothing -> ""
 
 -- | Compact elapsed time: @0.4s@, @12.4s@, @1m20s@.
 formatElapsed :: Double -> Text

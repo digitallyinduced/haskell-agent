@@ -7,7 +7,10 @@ import Agent.TUI.Presentation
     )
 import Agent.Loop
     ( LoopEvent(..)
+    , TokenUsage(..)
+    , TurnOutput(..)
     , emptyTurnOutput
+    , liveTokenRateMinMillis
     )
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -600,6 +603,44 @@ spec = describe "fullscreen UI reducer" do
         nonEmptyIdle.uiElapsedMillis `shouldBe` 0
         running.uiElapsedMillis `shouldBe` 200
         after.uiElapsedMillis `shouldBe` 200
+
+    it "reports live and completed tokens per second" do
+        let call = functionToolCall "c1" "read_file" "{\"target_file\":\"A.hs\"}"
+            streaming =
+                advanceUiTime liveTokenRateMinMillis $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (TextDelta "abcdefghijklmnop")
+                        ]
+            reported usage tools =
+                (emptyTurnOutput "r1" tools (Just "abcdefghijklmnop"))
+                    { tokenUsage = usage }
+            usage =
+                TokenUsage
+                    { inputTokens = 20
+                    , outputTokens = 80
+                    , cachedTokens = 0
+                    }
+            finished =
+                reduceUi
+                    (UiLoop (TurnFinished (reported usage [])))
+                    streaming
+            duringTools =
+                reduceUi (UiLoop (ToolStarted call)) $
+                    reduceUi
+                        (UiLoop (TurnFinished (reported usage [call])))
+                        streaming
+            afterNext = reduceUi (UiLoop TurnStarted) finished
+        uiTokensPerSecond streaming `shouldBe` Just 10
+        uiTokensPerSecond finished `shouldBe` Just 200
+        finished.uiGenerating `shouldBe` False
+        uiTokensPerSecond duringTools `shouldBe` Just 200
+        duringTools.uiGenerating `shouldBe` False
+        duringTools.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
+        (advanceUiTime 5000 duringTools).uiGenerationMillis
+            `shouldBe` liveTokenRateMinMillis
+        uiTokensPerSecond afterNext `shouldBe` Just 200
+        afterNext.uiGenerationMillis `shouldBe` 0
 
     it "briefly settles on Finished before returning to Ready" do
         let finished =

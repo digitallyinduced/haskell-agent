@@ -69,6 +69,21 @@ spec = describe "runLoop" do
         (mempty <> usage, usage <> mempty)
             `shouldBe` (usage, usage)
 
+    it "estimates tokens from streamed characters and reports tokens/sec" do
+        estimateTokensFromChars 0 `shouldBe` 0
+        estimateTokensFromChars 1 `shouldBe` 1
+        estimateTokensFromChars 4 `shouldBe` 1
+        estimateTokensFromChars 16 `shouldBe` 4
+        tokensPerSecond 0 1000 `shouldBe` Nothing
+        tokensPerSecond 100 0 `shouldBe` Nothing
+        tokensPerSecond 100 1000 `shouldBe` Just 100
+        tokensPerSecond 40 2000 `shouldBe` Just 20
+        generationTokensPerSecond 80 16 1000 `shouldBe` Just 80
+        generationTokensPerSecond 0 16 1000 `shouldBe` Just 4
+        liveTokensPerSecond 16 (liveTokenRateMinMillis - 1) `shouldBe` Nothing
+        liveTokensPerSecond 16 liveTokenRateMinMillis
+            `shouldBe` tokensPerSecond 4 liveTokenRateMinMillis
+
     it "threads previous_response_id and sends only CompletedTool on the follow-up" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions

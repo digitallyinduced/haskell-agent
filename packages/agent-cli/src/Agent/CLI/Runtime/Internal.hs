@@ -16,6 +16,8 @@ module Agent.CLI.Runtime.Internal
     , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
+    , formatTokensPerSecond
+    , formatUsageWithRate
     , learnAboutUserOnboardingPrompt
     , run
     , withRestoredCurrentDirectory
@@ -59,6 +61,8 @@ import Agent.CLI.Status
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
+    , formatTokensPerSecond
+    , formatUsageWithRate
     )
 import Agent.CLI.Terminal ( resolveColor )
 import Agent.CLI.Worktree ( isUnderWorktreeRoot, worktreeRoot )

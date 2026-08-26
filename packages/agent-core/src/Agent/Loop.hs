@@ -27,7 +27,12 @@ module Agent.Loop
     , defaultLoopDispatch
     , emptyTokenUsage
     , emptyTurnOutput
+    , estimateTokensFromChars
+    , generationTokensPerSecond
+    , liveTokenRateMinMillis
+    , liveTokensPerSecond
     , runLoop
+    , tokensPerSecond
     , runLoopInputs
     , runLoopInputsDetailed
     ) where
@@ -189,6 +194,38 @@ addTokenUsage a b = TokenUsage
     , outputTokens = a.outputTokens + b.outputTokens
     , cachedTokens = a.cachedTokens + b.cachedTokens
     }
+
+-- | Rough streamed-text estimate: about four Unicode scalars per token.
+estimateTokensFromChars :: Int -> Int
+estimateTokensFromChars chars = (max 0 chars + 3) `div` 4
+
+-- | Output tokens per second from a token count and elapsed milliseconds.
+tokensPerSecond :: Int -> Int -> Maybe Double
+tokensPerSecond tokens millis
+    | tokens <= 0 = Nothing
+    | millis <= 0 = Nothing
+    | otherwise =
+        Just (fromIntegral tokens * 1000 / fromIntegral millis)
+
+-- | Prefer provider-reported output tokens; fall back to the streamed-text
+-- estimate when usage is missing.
+generationTokensPerSecond :: Int -> Int -> Int -> Maybe Double
+generationTokensPerSecond reportedOutput chars millis =
+    tokensPerSecond
+        ( if reportedOutput > 0
+            then reportedOutput
+            else estimateTokensFromChars chars
+        )
+        millis
+
+-- | Live tok/s is noisy on the first few hundred milliseconds of a stream.
+liveTokenRateMinMillis :: Int
+liveTokenRateMinMillis = 400
+
+liveTokensPerSecond :: Int -> Int -> Maybe Double
+liveTokensPerSecond chars millis
+    | millis < liveTokenRateMinMillis = Nothing
+    | otherwise = tokensPerSecond (estimateTokensFromChars chars) millis
 
 data TurnOutput = TurnOutput
     { responseId :: !Text
