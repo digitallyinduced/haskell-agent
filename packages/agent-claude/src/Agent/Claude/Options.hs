@@ -16,6 +16,7 @@ import Claude.Agent.SDK.Types
     , defaultClaudeAgentOptions
     )
 import qualified Data.Aeson as Aeson
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 
 -- | Claude's non-interactive permission policies. Neither policy can pause
@@ -91,7 +92,7 @@ setEnvironmentVariable
     -> [(String, String)]
     -> [(String, String)]
 setEnvironmentVariable name value environment =
-    (name, value) : filter ((/= name) . fst) environment
+    Map.toList (Map.insert name value (Map.fromList environment))
 
 emptyMcpConfiguration :: Aeson.Value
 emptyMcpConfiguration =

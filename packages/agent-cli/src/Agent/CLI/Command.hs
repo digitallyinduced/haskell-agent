@@ -19,6 +19,7 @@ module Agent.CLI.Command
     , lookupSlashCommandIn
     , loopScheduleInstruction
     , mkSlashCatalog
+    , slashCatalogWithSkills
     , parseReplLine
     , parseReplLineWithCatalog
     , parseReplLineWithSkills
@@ -52,7 +53,9 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isAlphaNum, isDigit, isSpace)
-import Data.List (find, isPrefixOf, sortOn)
+import Data.List (isPrefixOf, sortOn)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down(..))
 import Data.Set (Set)
@@ -145,13 +148,16 @@ mkSlashCatalog dialect toolNames skills modelIds =
             Set.fromList
                 (map (Text.toLower . Text.strip) toolNames)
         commands =
-            map (commandForDialect dialect) slashCommands
+            filter
+                (commandAvailable dialect tools)
+                (map (commandForDialect dialect) slashCommands)
     in SlashCatalog
         { slashCatalogDialect = dialect
         , slashCatalogToolNames = tools
-        , slashCatalogCommands =
-            filter (commandAvailable dialect tools) commands
+        , slashCatalogCommands = commands
+        , slashCatalogCommandByName = indexSlashCommands commands
         , slashCatalogSkills = skills
+        , slashCatalogSkillByName = indexSkillCommands skills
         , slashCatalogModelIds = modelIds
         }
 
@@ -168,6 +174,32 @@ commandForDialect dialect command
             }
     | otherwise = command
 
+slashCatalogWithSkills :: [SkillCommand] -> SlashCatalog -> SlashCatalog
+slashCatalogWithSkills skills catalog =
+    catalog
+        { slashCatalogSkills = skills
+        , slashCatalogSkillByName = indexSkillCommands skills
+        }
+
+indexSlashCommands :: [SlashCommand] -> Map Text SlashCommand
+indexSlashCommands commands =
+    Map.fromList
+        [ (name, command)
+        | command <- commands
+        , name <- command.slashName : command.slashAliases
+        ]
+
+indexSkillCommands :: [SkillCommand] -> Map Text SkillCommand
+indexSkillCommands skills =
+    Map.fromList
+        [ (Text.toLower skill.skillCommandName, skill)
+        | skill <- skills
+        ]
+
+normalizeSlashName :: Text -> Text
+normalizeSlashName raw =
+    Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
+
 commandAvailable :: DialectId -> Set Text -> SlashCommand -> Bool
 commandAvailable dialect tools command =
     maybe True (dialect `elem`) command.slashDialects
@@ -180,14 +212,12 @@ lookupSlashCommand =
     lookupSlashCommandFrom slashCommands
 
 lookupSlashCommandIn :: SlashCatalog -> Text -> Maybe SlashCommand
-lookupSlashCommandIn catalog =
-    lookupSlashCommandFrom catalog.slashCatalogCommands
+lookupSlashCommandIn catalog raw =
+    Map.lookup (normalizeSlashName raw) catalog.slashCatalogCommandByName
 
 lookupSlashCommandFrom :: [SlashCommand] -> Text -> Maybe SlashCommand
 lookupSlashCommandFrom commands raw =
-    let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
-    in find (\cmd -> cmd.slashName == name || name `elem` cmd.slashAliases)
-        commands
+    Map.lookup (normalizeSlashName raw) (indexSlashCommands commands)
 
 parseReplLine :: Text -> ReplAction
 parseReplLine =
@@ -196,9 +226,7 @@ parseReplLine =
 parseReplLineWithSkills :: [SkillCommand] -> Text -> ReplAction
 parseReplLineWithSkills skills =
     parseReplLineWithCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 parseReplLineWithCatalog :: SlashCatalog -> Text -> ReplAction
 parseReplLineWithCatalog catalog raw =
@@ -232,7 +260,7 @@ parseSlash :: SlashCatalog -> Text -> Text -> ReplAction
 parseSlash catalog raw line = case Text.words line of
     [] -> unknownCommand "/"
     command : args -> case lookupSlashCommandIn catalog command of
-        Nothing -> case lookupSkillCommand catalog.slashCatalogSkills command of
+        Nothing -> case lookupSkillCommandIn catalog command of
             Just skill ->
                 ReplInvokeSkill
                     skill.skillCommandName
@@ -386,17 +414,16 @@ unknownCommand :: Text -> ReplAction
 unknownCommand command =
     ReplCommandError ("unknown command: " <> command <> " (try /help)")
 
-lookupSkillCommand :: [SkillCommand] -> Text -> Maybe SkillCommand
-lookupSkillCommand skills raw =
-    let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
-    in find ((== name) . Text.toLower . (.skillCommandName)) skills
+lookupSkillCommandIn :: SlashCatalog -> Text -> Maybe SkillCommand
+lookupSkillCommandIn catalog raw =
+    Map.lookup (normalizeSlashName raw) catalog.slashCatalogSkillByName
 
 parseHelpCommand :: SlashCatalog -> [Text] -> ReplAction
 parseHelpCommand catalog = \case
     [] -> ReplHelp Nothing
     [name] -> case lookupSlashCommandIn catalog name of
         Just spec -> ReplHelp (Just spec.slashName)
-        Nothing -> case lookupSkillCommand catalog.slashCatalogSkills name of
+        Nothing -> case lookupSkillCommandIn catalog name of
             Just skill -> ReplHelp (Just skill.skillCommandName)
             Nothing -> unknownCommand name
     _ -> ReplCommandError "usage: /help [NAME]"
@@ -692,9 +719,7 @@ formatSlashHelp color =
 formatSlashHelpWithSkills :: Bool -> [SkillCommand] -> Maybe Text -> Text
 formatSlashHelpWithSkills color skills =
     formatSlashHelpWithCatalog color
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 formatSlashHelpWithCatalog
     :: Bool
@@ -711,7 +736,7 @@ formatSlashHelpWithCatalog color catalog = \case
     Just name ->
         case lookupSlashCommandIn catalog name of
             Just spec -> formatSlashHelpRow color spec
-            Nothing -> case lookupSkillCommand catalog.slashCatalogSkills name of
+            Nothing -> case lookupSkillCommandIn catalog name of
                 Just skill -> formatSkillHelpRow color skill
                 Nothing -> roleMuted color ("unknown command: " <> name <> " (try /help)")
 
@@ -767,9 +792,7 @@ slashCompletionCandidatesWithSkills
     -> [String]
 slashCompletionCandidatesWithSkills skills =
     slashCompletionCandidatesWithCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 slashCompletionCandidatesWithSkillsAndModels
     :: [SkillCommand]
@@ -780,10 +803,9 @@ slashCompletionCandidatesWithSkillsAndModels
 slashCompletionCandidatesWithSkillsAndModels
         skills modelIds =
     slashCompletionCandidatesWithCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
 
 slashCompletionCandidatesWithCatalog
     :: SlashCatalog
@@ -857,9 +879,7 @@ slashMenuForWithModels modelIds =
 slashMenuForWithSkills :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 slashMenuForWithSkills skills =
     slashMenuForCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 slashMenuForWithSkillsAndModels
     :: [SkillCommand]
@@ -869,10 +889,9 @@ slashMenuForWithSkillsAndModels
     -> Maybe SlashMenu
 slashMenuForWithSkillsAndModels skills modelIds =
     slashMenuForCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
 
 slashMenuForCatalog
     :: SlashCatalog

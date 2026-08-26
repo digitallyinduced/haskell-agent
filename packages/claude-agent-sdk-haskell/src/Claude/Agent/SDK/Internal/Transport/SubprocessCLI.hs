@@ -62,6 +62,7 @@ import Data.IORef
     , writeIORef
     )
 import qualified Data.Map.Strict as Map
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -742,7 +743,7 @@ setEnvironmentVariable
     -> [(String, String)]
     -> [(String, String)]
 setEnvironmentVariable name value environment =
-    (name, value) : filter ((/= name) . fst) environment
+    Map.toList (Map.insert name value (Map.fromList environment))
 
 subprocessArguments
     :: ClaudeAgentOptions

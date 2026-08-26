@@ -55,6 +55,7 @@ library
                     , text
                     , bytestring
                     , aeson                 >= 2.0
+                    , containers
                     , http-client
                     , http-client-tls
                     , http-conduit
@@ -81,6 +82,7 @@ test-suite agent-openrouter-test
                     , agent-responses
                     , agent-responses-types
                     , agent-openrouter
+                    , containers
                     , hspec
                     , aeson
                     , text

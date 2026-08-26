@@ -22,6 +22,7 @@ import Agent.Error
     )
 import Agent.Provider (BillingMode(..), Provider(..))
 import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Set as Set
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime)
@@ -67,7 +68,7 @@ spec = do
                     ( model.modelTarget.targetProvider
                     , model.modelTarget.targetModelId
                     ))
-                (fallbackCandidates catalog [] XAIProvider exhausted)
+                (fallbackCandidates catalog Set.empty XAIProvider exhausted)
                 `shouldBe`
                     [ (OpenAIProvider, "gpt-5.6-sol")
                     , (OpenRouterProvider, "stealth/ox-alpha")
@@ -79,32 +80,32 @@ spec = do
                     ( model.modelTarget.targetProvider
                     , model.modelTarget.targetModelId
                     ))
-                (fallbackCandidates catalog [] OpenAIProvider exhausted)
+                (fallbackCandidates catalog Set.empty OpenAIProvider exhausted)
                 `shouldBe`
                     [ (XAIProvider, "grok-4.6")
                     , (OpenRouterProvider, "stealth/ox-alpha")
                     ]
 
         it "never automatically enters or leaves the Claude Code provider" do
-            fallbackCandidates catalog [] ClaudeCodeProvider exhausted
+            fallbackCandidates catalog Set.empty ClaudeCodeProvider exhausted
                 `shouldBe` []
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog [] OpenAIProvider exhausted)
+                (fallbackCandidates catalog Set.empty OpenAIProvider exhausted)
                 `shouldSatisfy` (ClaudeCodeProvider `notElem`)
 
         it "skips providers already found unavailable" do
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog [OpenAIProvider] XAIProvider exhausted)
+                (fallbackCandidates catalog (Set.singleton OpenAIProvider) XAIProvider exhausted)
                 `shouldBe` [OpenRouterProvider]
 
         it "accepts direct usage-limit errors from every provider" do
-            fallbackCandidates catalog [] OpenRouterProvider
+            fallbackCandidates catalog Set.empty OpenRouterProvider
                 (ProviderError UsageLimitReached "quota exhausted" (Just 3600))
                 `shouldSatisfy` (not . null)
 
         it "accepts other definitive account and billing exhaustion errors" do
             map
-                (not . null . fallbackCandidates catalog [] XAIProvider)
+                (not . null . fallbackCandidates catalog Set.empty XAIProvider)
                 [ ProviderError UsageBalanceExhausted "balance exhausted" Nothing
                 , ProviderError QuotaExceeded "quota exhausted" Nothing
                 , ProviderError UsageNotIncluded "not included" Nothing
@@ -113,17 +114,17 @@ spec = do
                 `shouldBe` replicate 4 True
 
         it "does not switch for transient capacity failures" do
-            fallbackCandidates catalog [] XAIProvider
+            fallbackCandidates catalog Set.empty XAIProvider
                 (ProviderError OverloadedError "busy" (Just 30))
                 `shouldBe` []
 
         it "can continue past a replacement provider with rejected auth" do
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog [XAIProvider] OpenAIProvider
+                (fallbackCandidates catalog (Set.singleton XAIProvider) OpenAIProvider
                     (ProviderError AuthenticationError "rejected" Nothing))
                 `shouldBe` [OpenRouterProvider]
             map (.modelTarget.targetProvider)
-                (fallbackCandidates catalog [XAIProvider] OpenAIProvider
+                (fallbackCandidates catalog (Set.singleton XAIProvider) OpenAIProvider
                     (CredentialError "credential file is invalid"))
                 `shouldBe` [OpenRouterProvider]
 

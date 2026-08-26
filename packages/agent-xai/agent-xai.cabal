@@ -55,6 +55,7 @@ library
                     , text
                     , bytestring
                     , aeson                 >= 2.0
+                    , containers
                     , async
                     , http-client
                     , http-client-tls
@@ -84,6 +85,7 @@ test-suite agent-xai-test
                     , agent-responses
                     , agent-responses-types
                     , agent-xai
+                    , containers
                     , async
                     , hspec
                     , aeson

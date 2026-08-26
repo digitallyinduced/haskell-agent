@@ -134,6 +134,8 @@ import Data.Maybe
     ( fromMaybe
     , isJust
     )
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text.IO as Text
 import Data.Time.Clock
@@ -287,7 +289,7 @@ requestModelTargetSwitch
     -> IO (Either Text RunResult)
 requestModelTargetSwitch fullscreen choice persist =
     prepareProviderTransition
-        ManualTransition [] Nothing choice persist >>= \case
+        ManualTransition Set.empty Nothing choice persist >>= \case
             Left err -> pure (Left err)
             Right transition -> do
                 color <- resolveColor stdout
@@ -357,7 +359,7 @@ requestAccountProviderSwitch
                             , transitionAccountId = Just accountId
                             , transitionSessionId = sessionId
                             , transitionPendingTurn = Nothing
-                            , transitionUnavailableProviders = []
+                            , transitionUnavailableProviders = Set.empty
                             , transitionCause = ManualTransition
                             , transitionAutomaticBilling = Nothing
                             }
@@ -538,7 +540,7 @@ chooseAutomaticProviderTransition
     -> Maybe FullscreenRuntime
     -> BillingMode
     -> Provider
-    -> [Provider]
+    -> Set Provider
     -> Maybe Text
     -> PendingTurn
     -> ApiError
@@ -604,7 +606,7 @@ chooseStartupProviderTransition
     -> Maybe FullscreenRuntime
     -> BillingMode
     -> Provider
-    -> [Provider]
+    -> Set Provider
     -> Maybe Text
     -> ApiError
     -> IO (Maybe ProviderTransition)
@@ -655,7 +657,7 @@ chooseStartupProviderTransition
 
 prepareProviderTransition
     :: TransitionCause
-    -> [Provider]
+    -> Set Provider
     -> Maybe PendingTurn
     -> ModelOption
     -> Persistence
@@ -871,10 +873,8 @@ commitBackendOnSuccess home projectRoot committed transition persist (Backend su
             Left _ -> pure ()
         pure result
 
-markUnavailable :: Provider -> [Provider] -> [Provider]
-markUnavailable provider unavailable
-    | provider `elem` unavailable = unavailable
-    | otherwise = unavailable <> [provider]
+markUnavailable :: Provider -> Set Provider -> Set Provider
+markUnavailable = Set.insert
 
 reloadAuth :: Provider -> Maybe TokenProvider -> IO (Either Text Text)
 reloadAuth ClaudeCodeProvider _ =

@@ -97,6 +97,7 @@ import Agent.CLI.AgentViewport
     , agentDisplayName
     , agentEntryTreeLabelWithGlyphModel
     , agentStatusGlyph
+    , lookupAgentEntry
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview
@@ -110,6 +111,7 @@ import Agent.CLI.Command
     ( SkillCommand
     , SlashCatalog(..)
     , defaultSlashCatalog
+    , slashCatalogWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Resume
@@ -163,9 +165,11 @@ import Agent.CLI.TUI.History
     , applyHistoryPage
     , clearHistoryRequest
     , emptyHistoryWindow
+    , historyWindowBlock
     , historyWindowRequest
     , historyWindowSetAnchors
     , markHistoryRequest
+    , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.LambdaArt
     ( lambdaArtWidget
@@ -789,10 +793,9 @@ readFullscreenLineOrWithModels
         runtime skills modelIds prompt initial wake = do
     readFullscreenLineOrWithCatalog
         runtime
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
         prompt
         initial
         wake
@@ -2814,9 +2817,7 @@ handleEventInner event = case event of
             then pure ()
             else
                 let catalog =
-                        state.appSlashCatalog
-                            { slashCatalogSkills = skills
-                            }
+                        slashCatalogWithSkills skills state.appSlashCatalog
                 in modify' \current -> current
                     { appSlashCatalog = catalog
                     , appSlashIndex = 0
@@ -2985,13 +2986,9 @@ handleEventInner event = case event of
                     AgentRoot -> False
                     target ->
                         fmap (.agentConversation)
-                            (find
-                                ((== target) . (.agentTarget))
-                                state.appAgentEntries)
+                            (lookupAgentEntry target state.appAgentEntries)
                             /= fmap (.agentConversation)
-                                (find
-                                    ((== target) . (.agentTarget))
-                                    mergedEntries)
+                                (lookupAgentEntry target mergedEntries)
         if state.appAgentSelected == normalized
             && state.appAgentEntries == mergedEntries
             then pure ()
@@ -3009,12 +3006,10 @@ handleEventInner event = case event of
                                 then Nothing
                                 else
                                     current.appAgentHover >>= \hover ->
-                                        if any
-                                            ((== hover.agentHoverTarget)
-                                                . (.agentTarget))
-                                            mergedEntries
-                                            then Just hover
-                                            else Nothing
+                                        hover <$
+                                            lookupAgentEntry
+                                                hover.agentHoverTarget
+                                                mergedEntries
                         }
                 when selectedConversationChanged invalidateCache
                 if selectionChanged
@@ -3460,9 +3455,7 @@ preserveAgentConversationView selected previous =
     preserve incoming
         | incoming.agentTarget /= selected = incoming
         | otherwise =
-            case find
-                ((== incoming.agentTarget) . (.agentTarget))
-                previous of
+            case lookupAgentEntry incoming.agentTarget previous of
                 Nothing -> incoming
                 Just old ->
                     incoming
@@ -3815,8 +3808,7 @@ isSubmittedPrompt = \case
     _ -> False
 
 selectedBlock :: UiState -> BlockId -> Maybe UiBlock
-selectedBlock state ident =
-    find ((== ident) . (.blockId)) (toList state.uiBlocks)
+selectedBlock state ident = lookupBlock ident state
 
 conversationBlocks :: AgentTarget -> AppState -> [UiBlock]
 conversationBlocks target state =
@@ -3832,10 +3824,7 @@ conversationBlocks target state =
 
 historyBlock :: HistoryWindow -> BlockId -> Maybe UiBlock
 historyBlock window ident =
-    find ((== ident) . (.blockId)) $
-        concatMap
-            (toList . (.historyTurnBlocks))
-            (toList window.historyWindowTurns)
+    historyWindowBlock ident window
 
 selectedConversationBlockId
     :: AgentTarget
@@ -3856,8 +3845,12 @@ selectedConversationBlock
     -> Maybe UiBlock
 selectedConversationBlock target state =
     selectedConversationBlockId target state >>= \ident ->
-        find ((== ident) . (.blockId))
-            (conversationBlocks target state)
+        case target of
+            AgentRoot ->
+                historyBlock state.appHistoryWindow ident
+                    <|> lookupBlock ident state.appUi
+            AgentChild _ ->
+                conversationUiForTarget target state >>= lookupBlock ident
 
 selectConversationBlock
     :: AgentTarget
@@ -3950,18 +3943,17 @@ mapHistoryBlock
     -> HistoryWindow
     -> HistoryWindow
 mapHistoryBlock ident update window =
-    window
-        { historyWindowTurns =
-            fmap
-                (\turn ->
-                    turn
-                        { historyTurnBlocks =
-                            fmap
-                                (\block ->
-                                    if block.blockId == ident
-                                        then update block
-                                        else block)
-                                turn.historyTurnBlocks
-                        })
-                window.historyWindowTurns
-        }
+    setHistoryWindowTurns
+        (fmap
+            (\turn ->
+                turn
+                    { historyTurnBlocks =
+                        fmap
+                            (\block ->
+                                if block.blockId == ident
+                                    then update block
+                                    else block)
+                            turn.historyTurnBlocks
+                    })
+            window.historyWindowTurns)
+        window

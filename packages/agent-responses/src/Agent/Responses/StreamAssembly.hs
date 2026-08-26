@@ -24,7 +24,8 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import Data.IntMap.Strict (IntMap)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -63,13 +64,13 @@ data ItemProgress = ItemProgress
 -- indexed so an @output_item.done@ replaces its earlier @added@ form.
 data StreamAssemblyState = StreamAssemblyState
     { responseObject :: !Aeson.Object
-    , outputItems    :: !(Map.Map Int ItemProgress)
+    , outputItems    :: !(IntMap ItemProgress)
     }
 
 emptyStreamAssemblyState :: StreamAssemblyState
 emptyStreamAssemblyState = StreamAssemblyState
     { responseObject = KeyMap.empty
-    , outputItems = Map.empty
+    , outputItems = IntMap.empty
     }
 
 applyStreamEvent :: StreamAssemblyState -> ResponseStreamEvent -> StreamAssemblyState
@@ -375,7 +376,7 @@ updateItem
 updateItem outputIndex done newValue state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . mergeProgress)
                 outputIndex
                 state.outputItems
@@ -419,8 +420,8 @@ resolveOutputIndex explicitIndex identities state =
 
 findIdentityIndex :: Text -> StreamAssemblyState -> Maybe Int
 findIdentityIndex wanted state =
-    fst <$> Map.lookupMin
-        (Map.filter (matchesIdentity wanted . (.itemValue)) state.outputItems)
+    fst <$> IntMap.lookupMin
+        (IntMap.filter (matchesIdentity wanted . (.itemValue)) state.outputItems)
   where
     matchesIdentity wanted = \case
         Aeson.Object object ->
@@ -440,8 +441,8 @@ findPendingItemIndex value state =
     case wantedType of
         Nothing -> Nothing
         Just _ ->
-            fst <$> Map.lookupMin
-                (Map.filter matchesPending state.outputItems)
+            fst <$> IntMap.lookupMin
+                (IntMap.filter matchesPending state.outputItems)
   where
     wantedType = objectTextField "type" value
     matchesPending progress =
@@ -450,7 +451,7 @@ findPendingItemIndex value state =
 
 nextOutputIndex :: StreamAssemblyState -> Int
 nextOutputIndex state =
-    maybe 0 ((+ 1) . fst) (Map.lookupMax state.outputItems)
+    maybe 0 ((+ 1) . fst) (IntMap.lookupMax state.outputItems)
 
 itemIdentities :: Aeson.Value -> [Text]
 itemIdentities = \case
@@ -482,7 +483,7 @@ updateCustomToolInput
 updateCustomToolInput outputIndex itemId callId updateInput state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . updateProgress)
                 outputIndex
                 state.outputItems
@@ -518,7 +519,7 @@ updateReasoningSummary
 updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . updateProgress)
                 outputIndex
                 state.outputItems
@@ -546,12 +547,12 @@ updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
 
 assembledOutput :: StreamAssemblyState -> Aeson.Object -> [Aeson.Value]
 assembledOutput state response =
-    map (.itemValue) . Map.elems $
-        Map.unionWith combine
+    map (.itemValue) . IntMap.elems $
+        IntMap.unionWith combine
             state.outputItems
             terminalItems
   where
-    terminalItems = Map.fromList
+    terminalItems = IntMap.fromList
         [ (index, ItemProgress value True)
         | (index, value) <- zip [0 ..] finalItems
         ]

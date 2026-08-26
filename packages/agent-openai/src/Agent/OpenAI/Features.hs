@@ -4,7 +4,7 @@ module Agent.OpenAI.Features
     , betaFeaturesHeaderValue
     ) where
 
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -15,6 +15,6 @@ remoteCompactionV2Feature = "remote_compaction_v2"
 -- | Render a comma-separated @x-codex-beta-features@ value.
 betaFeaturesHeaderValue :: [Text] -> Maybe Text
 betaFeaturesHeaderValue features =
-    case nub (filter (not . Text.null) (map Text.strip features)) of
+    case nubOrd (filter (not . Text.null) (map Text.strip features)) of
         [] -> Nothing
         values -> Just (Text.intercalate "," values)

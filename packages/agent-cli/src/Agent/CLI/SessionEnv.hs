@@ -32,6 +32,7 @@ import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Agent.Store.Postgres.Connection (StorePool)
 import Data.IORef (IORef)
+import Data.Set (Set)
 import Data.Text (Text)
 import Control.Concurrent.STM (STM)
 
@@ -45,7 +46,7 @@ data SessionEnv = SessionEnv
     , sessionConnection :: !Text
     , sessionModelCatalog :: !ModelCatalog
     , sessionDialect :: !Dialect
-    , sessionUnavailableProviders :: !(IORef [Provider])
+    , sessionUnavailableProviders :: !(IORef (Set Provider))
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionConversation :: !(IORef LiveConversation)
     , sessionParams :: !(IORef ResponseCreateParams)

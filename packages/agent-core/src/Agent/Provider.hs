@@ -37,7 +37,7 @@ data Provider
     | XAIProvider
     | OpenRouterProvider
     | ClaudeCodeProvider
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 providerSlug :: Provider -> Text
 providerSlug = \case

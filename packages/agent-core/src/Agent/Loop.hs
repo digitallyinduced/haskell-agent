@@ -99,7 +99,9 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
-import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntSet as IntSet
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -802,7 +804,7 @@ runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
 runToolCalls config calls = do
     prepared <- prepareIndexedToolCalls config (zip [0..] calls)
     scheduled <- traverse schedule prepared
-    go scheduled Map.empty
+    go scheduled IntMap.empty
   where
     schedule
         :: IndexedPreparedToolCall
@@ -817,17 +819,17 @@ runToolCalls config calls = do
 
     go
         :: [PreparedScheduledToolCall]
-        -> Map.Map Int ToolCallResult
+        -> IntMap ToolCallResult
         -> IO [ToolCallResult]
     go [] completed =
-        pure (map snd (Map.toAscList completed))
+        pure (IntMap.elems completed)
     go remaining completed = do
         let ready = readyCalls remaining
-            readyIndexes = Map.fromList [(call.index, ()) | call <- ready]
+            readyIndexes = IntSet.fromList (map (.index) ready)
             pending =
                 filter
                     (\scheduled ->
-                        Map.notMember scheduled.index readyIndexes)
+                        IntSet.notMember scheduled.index readyIndexes)
                     remaining
         batchResults <-
             mapConcurrently
@@ -841,13 +843,13 @@ runToolCalls config calls = do
                     (\result acc ->
                         maybe
                             acc
-                            (\(index, value) -> Map.insert index value acc)
+                            (\(index, value) -> IntMap.insert index value acc)
                             result)
                     completed
                     batchResults
         cancelled <- isCancelled config.loopCancel
         if cancelled
-            then pure (map snd (Map.toAscList completed'))
+            then pure (IntMap.elems completed')
             else go pending completed'
 
 data IndexedPreparedToolCall = IndexedPreparedToolCall

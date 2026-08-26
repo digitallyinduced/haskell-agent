@@ -87,8 +87,9 @@ assembleSessions sessionKeys metadata turns =
         Map.fromList
             [(value.sessionMetadataKey, value) | value <- metadata]
     turnsByKey =
-        Map.fromListWith (flip (++))
-            [(sessionKey, [turn]) | (sessionKey, turn) <- turns]
+        Map.map reverse $
+            Map.fromListWith (<>)
+                [(sessionKey, [turn]) | (sessionKey, turn) <- turns]
 
     assemble sessionKey =
         case Map.lookup sessionKey metadataByKey of

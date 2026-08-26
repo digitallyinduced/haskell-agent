@@ -32,7 +32,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently)
 import Data.Aeson (FromJSON(..))
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -261,7 +261,7 @@ validateTaskIds taskIds
     | otherwise = Right resolvedIds
   where
     resolvedIds =
-        nub
+        nubOrd
             [ stripped
             | taskId <- taskIds
             , let stripped = Text.strip taskId

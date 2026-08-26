@@ -55,6 +55,7 @@ import Data.IORef
     ( readIORef
     , writeIORef
     )
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
@@ -141,7 +142,7 @@ finishTurnWithCooldownRetry
 finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         env.sessionQueueRecap RecapTurnSummary
-        writeIORef env.sessionUnavailableProviders []
+        writeIORef env.sessionUnavailableProviders Set.empty
         selectionId <- readIORef env.sessionAccountSelectionId
         accountId <- readIORef env.sessionAccountId
         when

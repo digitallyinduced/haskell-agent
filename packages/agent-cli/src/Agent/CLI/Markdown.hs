@@ -1,6 +1,7 @@
 -- | Turn CommonMark-ish assistant text into ANSI-styled terminal output.
 module Agent.CLI.Markdown
-    ( renderMarkdown
+    ( MarkdownFragmentSplit(..)
+    , renderMarkdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     ) where
@@ -265,16 +266,35 @@ renderInlineWith base = Text.concat . map (go base)
 -- until their closing delimiter arrives. A newline makes an unmatched inline
 -- construct literal because the renderer does not span inline markup across
 -- lines.
-splitMarkdownFragment :: Maybe Char -> Text -> (Text, Text, Maybe Char)
+data MarkdownFragmentSplit = MarkdownFragmentSplit
+    { markdownReady :: !Text
+    , markdownPending :: !Text
+    , markdownPrevChar :: !(Maybe Char)
+    }
+    deriving (Eq, Show)
+
+data MarkdownLink = MarkdownLink
+    { markdownLinkText :: !Text
+    , markdownLinkUrl :: !Text
+    , markdownLinkRest :: !Text
+    }
+    deriving (Eq, Show)
+
+splitMarkdownFragment :: Maybe Char -> Text -> MarkdownFragmentSplit
 splitMarkdownFragment initialPrev = go initialPrev []
   where
     go prev chunks t
-        | Text.null t = (Text.concat (reverse chunks), "", prev)
+        | Text.null t =
+            MarkdownFragmentSplit
+                { markdownReady = Text.concat (reverse chunks)
+                , markdownPending = ""
+                , markdownPrevChar = prev
+                }
         | Just (escaped, rest) <- takeEscapedPunctuation t =
             consume (Just escaped) rest
         | Just (code, rest) <- takeInlineCode t =
             consume (lastChar code) rest
-        | Just (_linkText, _url, rest) <- takeLink t =
+        | Just MarkdownLink{markdownLinkRest = rest} <- takeLink t =
             consume (Just ')') rest
         | Just (inner, rest) <- takeEmphasis prev "**" t =
             consume (lastChar inner) rest
@@ -285,7 +305,11 @@ splitMarkdownFragment initialPrev = go initialPrev []
         | Just (inner, rest) <- takeEmphasis prev "_" t =
             consume (lastChar inner) rest
         | shouldWait prev t =
-            (Text.concat (reverse chunks), t, prev)
+            MarkdownFragmentSplit
+                { markdownReady = Text.concat (reverse chunks)
+                , markdownPending = t
+                , markdownPrevChar = prev
+                }
         | otherwise =
             let (plain, rest) =
                     Text.break (`elem` ['\\', '`', '[', '*', '_']) t
@@ -361,7 +385,7 @@ takeInlineCode t =
                         (code, rest') <- findClose n afterClose
                         Just (before <> closeRun <> code, rest')
 
-takeLink :: Text -> Maybe (Text, Text, Text)
+takeLink :: Text -> Maybe MarkdownLink
 takeLink t = do
     afterBracket <- Text.stripPrefix "[" t
     (linkText, afterBracketClose) <- takeLinkLabel afterBracket
@@ -369,7 +393,11 @@ takeLink t = do
     (url, rest) <- takeLinkDestination afterParen
     if Text.null linkText || Text.null url
         then Nothing
-        else Just (linkText, url, rest)
+        else Just MarkdownLink
+            { markdownLinkText = linkText
+            , markdownLinkUrl = url
+            , markdownLinkRest = rest
+            }
 
 linkLabelEnd :: Text -> Maybe Text
 linkLabelEnd = fmap snd . takeLinkLabel
