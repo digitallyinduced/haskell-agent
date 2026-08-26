@@ -39,15 +39,11 @@ module Agent.Store.Postgres.Skill
     ) where
 
 import Data.ByteString (ByteString)
-import Data.Functor.Contravariant ((>$<))
-import Data.Int (Int32, Int64)
+import Data.Int (Int64)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
-import qualified Hasql.Decoders as Decoders
-import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Session as HasqlSession
-import Hasql.Statement (Statement)
 import qualified Hasql.Transaction as Transaction
 import qualified Hasql.Transaction.Sessions as Transactions
 
@@ -55,7 +51,6 @@ import Agent.Store.Postgres.Connection
     ( StorePool
     , withSession
     )
-import Agent.Store.Postgres.Hasql (mkStatement)
 import Agent.Store.Postgres.Scope
     ( Scope(..)
     , ScopeKind(..)
@@ -64,6 +59,18 @@ import Agent.Store.Postgres.Scope
     , scopeKindText
     )
 import Agent.Store.Postgres.Skill.Types
+import Agent.Store.Postgres.Skill.Mapping.Statements.InsertRevision
+import Agent.Store.Postgres.Skill.Mapping.Statements.InsertSkill
+import Agent.Store.Postgres.Skill.Mapping.Statements.InsertSource
+import Agent.Store.Postgres.Skill.Mapping.Statements.ListRevisions
+import Agent.Store.Postgres.Skill.Mapping.Statements.ListSkills
+import Agent.Store.Postgres.Skill.Mapping.Statements.ListSources
+import Agent.Store.Postgres.Skill.Mapping.Statements.LoadRevision
+import Agent.Store.Postgres.Skill.Mapping.Statements.LockSkill
+import Agent.Store.Postgres.Skill.Mapping.Statements.ReadSkill
+import Agent.Store.Postgres.Skill.Mapping.Statements.SearchSkills
+import Agent.Store.Postgres.Skill.Mapping.Statements.UpdateSkill
+import Agent.Store.Postgres.Skill.Mapping.Types
 import Agent.Store.Types (StoreError(..))
 
 learnedSkillSchemaStatements :: [ByteString]
@@ -193,20 +200,21 @@ createLearnedSkill
     -> IO (Either StoreError LearnedSkillMutationResult)
 createLearnedSkill pool input =
     runSkillWrite pool do
-        inserted <- Transaction.statement input insertSkillStatement
+        inserted <- Transaction.statement
+            (insertSkillParams input)
+            insertSkillStatement
         case inserted of
             Nothing -> pure (Right LearnedSkillMutationAlreadyExists)
             Just skillId -> do
                 let skill = skillFromCreate skillId input
                 revisionId <- Transaction.statement
-                    (skill, input.learnedSkillCreateSummary)
+                    (insertRevisionParams skill input.learnedSkillCreateSummary)
                     insertRevisionStatement
                 Transaction.statement
-                    ( revisionId
-                    , 1
-                    , input.learnedSkillCreateSource
-                    , input.learnedSkillCreateAt
-                    )
+                    (insertSourceParams
+                        revisionId
+                        input.learnedSkillCreateSource
+                        input.learnedSkillCreateAt)
                     insertSourceStatement
                 pure (Right (LearnedSkillMutationApplied skill))
 
@@ -217,7 +225,9 @@ updateLearnedSkill
 updateLearnedSkill pool input =
     runSkillWrite pool do
         currentRow <- Transaction.statement
-            (input.learnedSkillUpdateScope, input.learnedSkillUpdateSlug)
+            (scopeSlugParams
+                input.learnedSkillUpdateScope
+                input.learnedSkillUpdateSlug)
             lockSkillStatement
         case currentRow of
             Nothing -> pure (Right LearnedSkillMutationNotFound)
@@ -236,16 +246,19 @@ updateLearnedSkill pool input =
                                     (Left
                                         "learned skill update does not change any stored field")
                             else do
-                                Transaction.statement updated updateSkillStatement
+                                Transaction.statement
+                                    (updateSkillParams updated)
+                                    updateSkillStatement
                                 revisionId <- Transaction.statement
-                                    (updated, input.learnedSkillUpdateSummary)
+                                    (insertRevisionParams
+                                        updated
+                                        input.learnedSkillUpdateSummary)
                                     insertRevisionStatement
                                 Transaction.statement
-                                    ( revisionId
-                                    , updated.learnedSkillRevision
-                                    , input.learnedSkillUpdateSource
-                                    , input.learnedSkillUpdateAt
-                                    )
+                                    (insertSourceParams
+                                        revisionId
+                                        input.learnedSkillUpdateSource
+                                        input.learnedSkillUpdateAt)
                                     insertSourceStatement
                                 pure
                                     (Right
@@ -280,7 +293,9 @@ rollbackLearnedSkill
 rollbackLearnedSkill pool input =
     runSkillWrite pool do
         currentRow <- Transaction.statement
-            (input.learnedSkillRollbackScope, input.learnedSkillRollbackSlug)
+            (scopeSlugParams
+                input.learnedSkillRollbackScope
+                input.learnedSkillRollbackSlug)
             lockSkillStatement
         case currentRow of
             Nothing -> pure (Right LearnedSkillMutationNotFound)
@@ -312,18 +327,19 @@ rollbackLearnedSkill pool input =
                                             input.learnedSkillRollbackAt
                                             current
                                             target
-                                    Transaction.statement restored updateSkillStatement
+                                    Transaction.statement
+                                        (updateSkillParams restored)
+                                        updateSkillStatement
                                     revisionId <- Transaction.statement
-                                        ( restored
-                                        , input.learnedSkillRollbackSummary
-                                        )
+                                        (insertRevisionParams
+                                            restored
+                                            input.learnedSkillRollbackSummary)
                                         insertRevisionStatement
                                     Transaction.statement
-                                        ( revisionId
-                                        , restored.learnedSkillRevision
-                                        , input.learnedSkillRollbackSource
-                                        , input.learnedSkillRollbackAt
-                                        )
+                                        (insertSourceParams
+                                            revisionId
+                                            input.learnedSkillRollbackSource
+                                            input.learnedSkillRollbackAt)
                                         insertSourceStatement
                                     pure $ Right $
                                         LearnedSkillMutationApplied restored
@@ -335,7 +351,9 @@ readLearnedSkill
     -> IO (Either StoreError (Maybe LearnedSkill))
 readLearnedSkill pool scope slug =
     withSession pool
-        (HasqlSession.statement (scope, slug) readSkillStatement)
+        (HasqlSession.statement
+            (scopeSlugParams scope slug)
+            readSkillStatement)
         >>= pure . decodeMaybeSkillResult
 
 searchLearnedSkills
@@ -378,7 +396,9 @@ listLearnedSkillRevisions
     -> IO (Either StoreError [LearnedSkillRevision])
 listLearnedSkillRevisions pool scope slug =
     withSession pool
-        (HasqlSession.statement (scope, slug) listRevisionsStatement)
+        (HasqlSession.statement
+            (scopeSlugParams scope slug)
+            listRevisionsStatement)
         >>= pure . decodeRevisionListResult
 
 listLearnedSkillSources
@@ -390,8 +410,9 @@ listLearnedSkillSources
 listLearnedSkillSources pool scope slug revision =
     withSession pool
         (HasqlSession.statement
-            (scope, slug, revision)
+            (scopeSlugParams scope slug, revision)
             listSourcesStatement)
+        >>= pure . fmap (map sourceFromRow)
 
 emptySkillPatch :: LearnedSkillPatch
 emptySkillPatch = LearnedSkillPatch
@@ -508,37 +529,6 @@ flattenDataResult = \case
     Right (Left err) -> Left (StoreDataError err)
     Right (Right value) -> Right value
 
-data SkillRow = SkillRow
-    { skillRowId :: !Text
-    , skillRowScopeKind :: !Text
-    , skillRowScopeId :: !Text
-    , skillRowSlug :: !Text
-    , skillRowTitle :: !Text
-    , skillRowDescription :: !Text
-    , skillRowAppliesWhen :: !Text
-    , skillRowInstructions :: !Text
-    , skillRowActivation :: !Text
-    , skillRowPriority :: !Int32
-    , skillRowStatus :: !Text
-    , skillRowRevision :: !Int64
-    , skillRowCreatedAt :: !UTCTime
-    , skillRowUpdatedAt :: !UTCTime
-    }
-
-data RevisionRow = RevisionRow
-    { revisionRowId :: !Text
-    , revisionRowNumber :: !Int64
-    , revisionRowTitle :: !Text
-    , revisionRowDescription :: !Text
-    , revisionRowAppliesWhen :: !Text
-    , revisionRowInstructions :: !Text
-    , revisionRowActivation :: !Text
-    , revisionRowPriority :: !Int32
-    , revisionRowStatus :: !Text
-    , revisionRowSummary :: !Text
-    , revisionRowCreatedAt :: !UTCTime
-    }
-
 decodeSkillRow :: SkillRow -> Either Text LearnedSkill
 decodeSkillRow row = do
     kind <- scopeKindFromText row.skillRowScopeKind
@@ -636,10 +626,15 @@ decodeSearchResult = \case
                     LearnedSkillSearchResult <$> decodeSkillRow row <*> pure rank)
                 rows
 
-data ApplicableScopes = ApplicableScopes
-    { applicableUserScopeId :: !Text
-    , applicableRepositoryScopeId :: !Text
-    , applicableCheckoutScopeId :: !Text
+sourceFromRow :: SourceRow -> LearnedSkillSource
+sourceFromRow row = LearnedSkillSource
+    { learnedSkillSourceId = row.sourceRowId
+    , learnedSkillSourceRevision = row.sourceRowRevision
+    , learnedSkillSourceSessionKey = row.sourceRowSessionKey
+    , learnedSkillSourceTurnIndex = row.sourceRowTurnIndex
+    , learnedSkillSourceResponseItemId = row.sourceRowResponseItemId
+    , learnedSkillSourceEvidence = row.sourceRowEvidence
+    , learnedSkillSourceCreatedAt = row.sourceRowCreatedAt
     }
 
 applicableScopes :: [Scope] -> Either Text ApplicableScopes
@@ -654,304 +649,77 @@ applicableScopes scopes = ApplicableScopes
             [] -> Left ("missing " <> scopeKindText kind <> " learned skill scope")
             _ -> Left ("duplicate " <> scopeKindText kind <> " learned skill scope")
 
-data SkillSearchParams = SkillSearchParams
-    { skillSearchScopes :: !ApplicableScopes
-    , skillSearchQuery :: !Text
-    , skillSearchLimit :: !Int64
+scopeSlugParams :: Scope -> Text -> ScopeSlugParams
+scopeSlugParams scope slug = ScopeSlugParams
+    { scopeSlugKind = scopeKindText scope.scopeKind
+    , scopeSlugId = scopeIdText scope.scopeId
+    , scopeSlug = slug
     }
 
-insertSkillStatement :: Statement LearnedSkillCreate (Maybe Text)
-insertSkillStatement = mkStatement
-    "INSERT INTO harness.skills\
-    \ (scope_kind, scope_id, slug, title, description, applies_when,\
-    \ instructions_text, activation_mode, priority, status,\
-    \ current_revision, created_at, updated_at)\
-    \ VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, 1, $11, $11)\
-    \ ON CONFLICT (scope_kind, scope_id, slug) DO NOTHING\
-    \ RETURNING skill_id::text"
-    ( (scopeKindText . (.scopeKind) . (.learnedSkillCreateScope) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (scopeIdText . (.scopeId) . (.learnedSkillCreateScope) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreateSlug) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreateTitle) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreateDescription) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreateAppliesWhen) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreateInstructions) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (learnedSkillActivationText . (.learnedSkillCreateActivation)
-            >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreatePriority) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
-        <> (learnedSkillStatusText . (.learnedSkillCreateStatus) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillCreateAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
-    )
-    (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
+insertSkillParams :: LearnedSkillCreate -> InsertSkillParams
+insertSkillParams input = InsertSkillParams
+    { insertSkillScopeKind =
+        scopeKindText input.learnedSkillCreateScope.scopeKind
+    , insertSkillScopeId =
+        scopeIdText input.learnedSkillCreateScope.scopeId
+    , insertSkillSlug = input.learnedSkillCreateSlug
+    , insertSkillTitle = input.learnedSkillCreateTitle
+    , insertSkillDescription = input.learnedSkillCreateDescription
+    , insertSkillAppliesWhen = input.learnedSkillCreateAppliesWhen
+    , insertSkillInstructions = input.learnedSkillCreateInstructions
+    , insertSkillActivation =
+        learnedSkillActivationText input.learnedSkillCreateActivation
+    , insertSkillPriority = input.learnedSkillCreatePriority
+    , insertSkillStatus =
+        learnedSkillStatusText input.learnedSkillCreateStatus
+    , insertSkillAt = input.learnedSkillCreateAt
+    }
 
-updateSkillStatement :: Statement LearnedSkill ()
-updateSkillStatement = mkStatement
-    "UPDATE harness.skills SET\
-    \ title = $2, description = $3, applies_when = $4,\
-    \ instructions_text = $5, activation_mode = $6, priority = $7,\
-    \ status = $8, current_revision = $9, updated_at = $10\
-    \ WHERE skill_id = $1::uuid"
-    ( ((.learnedSkillId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillTitle) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillDescription) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillAppliesWhen) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillInstructions) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (learnedSkillActivationText . (.learnedSkillActivation) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillPriority) >$< Encoders.param (Encoders.nonNullable Encoders.int4))
-        <> (learnedSkillStatusText . (.learnedSkillStatus) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillRevision) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
-        <> ((.learnedSkillUpdatedAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
-    )
-    Decoders.noResult
-    True
+updateSkillParams :: LearnedSkill -> UpdateSkillParams
+updateSkillParams skill = UpdateSkillParams
+    { updateSkillId = skill.learnedSkillId
+    , updateSkillTitle = skill.learnedSkillTitle
+    , updateSkillDescription = skill.learnedSkillDescription
+    , updateSkillAppliesWhen = skill.learnedSkillAppliesWhen
+    , updateSkillInstructions = skill.learnedSkillInstructions
+    , updateSkillActivation =
+        learnedSkillActivationText skill.learnedSkillActivation
+    , updateSkillPriority = skill.learnedSkillPriority
+    , updateSkillStatus = learnedSkillStatusText skill.learnedSkillStatus
+    , updateSkillRevision = skill.learnedSkillRevision
+    , updateSkillAt = skill.learnedSkillUpdatedAt
+    }
 
-insertRevisionStatement :: Statement (LearnedSkill, Text) Text
-insertRevisionStatement = mkStatement
-    "INSERT INTO harness.skill_revisions\
-    \ (skill_id, revision_number, title, description, applies_when,\
-    \ instructions_text, activation_mode, priority, status, change_summary,\
-    \ created_at)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\
-    \ RETURNING skill_revision_id::text"
-    ( ((.learnedSkillId) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillRevision) . fst >$< Encoders.param (Encoders.nonNullable Encoders.int8))
-        <> ((.learnedSkillTitle) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillDescription) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillAppliesWhen) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillInstructions) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (learnedSkillActivationText . (.learnedSkillActivation) . fst
-            >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillPriority) . fst >$< Encoders.param (Encoders.nonNullable Encoders.int4))
-        <> (learnedSkillStatusText . (.learnedSkillStatus) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.learnedSkillUpdatedAt) . fst >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
-    )
-    (Decoders.singleRow (Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
+insertRevisionParams :: LearnedSkill -> Text -> InsertRevisionParams
+insertRevisionParams skill summary = InsertRevisionParams
+    { insertRevisionSkillId = skill.learnedSkillId
+    , insertRevisionNumber = skill.learnedSkillRevision
+    , insertRevisionTitle = skill.learnedSkillTitle
+    , insertRevisionDescription = skill.learnedSkillDescription
+    , insertRevisionAppliesWhen = skill.learnedSkillAppliesWhen
+    , insertRevisionInstructions = skill.learnedSkillInstructions
+    , insertRevisionActivation =
+        learnedSkillActivationText skill.learnedSkillActivation
+    , insertRevisionPriority = skill.learnedSkillPriority
+    , insertRevisionStatus =
+        learnedSkillStatusText skill.learnedSkillStatus
+    , insertRevisionSummary = summary
+    , insertRevisionAt = skill.learnedSkillUpdatedAt
+    }
 
-insertSourceStatement
-    :: Statement (Text, Int64, LearnedSkillSourceInput, UTCTime) ()
-insertSourceStatement = mkStatement
-    "INSERT INTO harness.skill_sources\
-    \ (skill_revision_id, source_session_key, source_turn_index,\
-    \ source_response_item_id, evidence_text, created_at)\
-    \ VALUES ($1::uuid, $2, $3, $4, $5, $6)"
-    ( (first4 >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (sourceField (.learnedSkillSourceInputSessionKey)
-            >$< Encoders.param (Encoders.nullable Encoders.text))
-        <> (sourceField (.learnedSkillSourceInputTurnIndex)
-            >$< Encoders.param (Encoders.nullable Encoders.int8))
-        <> (sourceField (.learnedSkillSourceInputResponseItemId)
-            >$< Encoders.param (Encoders.nullable Encoders.text))
-        <> (sourceField (.learnedSkillSourceInputEvidence) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (fourth4 >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
-    )
-    Decoders.noResult
-    True
-  where
-    first4 (value, _, _, _) = value
-    fourth4 (_, _, _, value) = value
-    sourceField field (_, _, source, _) = field source
-
-lockSkillStatement :: Statement (Scope, Text) (Maybe SkillRow)
-lockSkillStatement = mkStatement
-    (skillSelectSql
-        <> " WHERE scope_kind = $1 AND scope_id = $2::uuid AND slug = $3\
-           \ FOR UPDATE")
-    scopeSlugEncoder
-    (Decoders.rowMaybe skillRowDecoder)
-    True
-
-readSkillStatement :: Statement (Scope, Text) (Maybe SkillRow)
-readSkillStatement = mkStatement
-    (skillSelectSql
-        <> " WHERE scope_kind = $1 AND scope_id = $2::uuid AND slug = $3")
-    scopeSlugEncoder
-    (Decoders.rowMaybe skillRowDecoder)
-    True
-
-listSkillsStatement :: Statement ApplicableScopes [SkillRow]
-listSkillsStatement = mkStatement
-    (skillSelectSql
-        <> applicableWhereSql
-        <> " AND status = 'active'\
-           \ ORDER BY CASE activation_mode\
-           \   WHEN 'always' THEN 0 WHEN 'relevant' THEN 1 ELSE 2 END,\
-           \ priority DESC,\
-           \ CASE scope_kind\
-           \   WHEN 'checkout' THEN 0 WHEN 'repository' THEN 1 ELSE 2 END,\
-           \ title, slug")
-    applicableScopesEncoder
-    (Decoders.rowList skillRowDecoder)
-    True
-
-searchSkillsStatement
-    :: Statement SkillSearchParams [(SkillRow, Double)]
-searchSkillsStatement = mkStatement
-    ("WITH query AS (SELECT websearch_to_tsquery('english', $4) AS value) "
-        <> skillSelectSqlWithPrefix
-        <> ", ts_rank_cd(s.search_vector, query.value)::float8"
-        <> " FROM harness.skills s CROSS JOIN query"
-        <> applicableWhereSqlWithPrefix
-        <> " AND s.status = 'active' AND (\
-           \ s.search_vector @@ query.value\
-           \ OR s.slug ILIKE '%' || $4 || '%'\
-           \ OR s.title ILIKE '%' || $4 || '%'\
-           \ OR s.description ILIKE '%' || $4 || '%'\
-           \ OR s.applies_when ILIKE '%' || $4 || '%'\
-           \ OR s.instructions_text ILIKE '%' || $4 || '%'\
-           \ )\
-           \ ORDER BY ts_rank_cd(s.search_vector, query.value) DESC,\
-           \ s.priority DESC, s.updated_at DESC\
-           \ LIMIT $5")
-    ( ((.applicableUserScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.applicableRepositoryScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.applicableCheckoutScopeId) . (.skillSearchScopes) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.skillSearchQuery) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.skillSearchLimit) >$< Encoders.param (Encoders.nonNullable Encoders.int8))
-    )
-    (Decoders.rowList ((,) <$> skillRowDecoder <*> doubleColumn))
-    True
-
-loadRevisionStatement :: Statement (Text, Int64) (Maybe RevisionRow)
-loadRevisionStatement = mkStatement
-    (revisionSelectSql
-        <> " WHERE skill_id = $1::uuid AND revision_number = $2")
-    ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
-    )
-    (Decoders.rowMaybe revisionRowDecoder)
-    True
-
-listRevisionsStatement :: Statement (Scope, Text) [RevisionRow]
-listRevisionsStatement = mkStatement
-    ("SELECT r.skill_revision_id::text, r.revision_number, r.title,\
-    \ r.description, r.applies_when, r.instructions_text,\
-    \ r.activation_mode, r.priority, r.status, r.change_summary, r.created_at\
-    \ FROM harness.skill_revisions r\
-    \ JOIN harness.skills s ON s.skill_id = r.skill_id\
-    \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
-    \ ORDER BY r.revision_number DESC")
-    scopeSlugEncoder
-    (Decoders.rowList revisionRowDecoder)
-    True
-
-listSourcesStatement
-    :: Statement (Scope, Text, Int64) [LearnedSkillSource]
-listSourcesStatement = mkStatement
-    "SELECT src.skill_source_id::text, r.revision_number,\
-    \ src.source_session_key, src.source_turn_index,\
-    \ src.source_response_item_id, src.evidence_text, src.created_at\
-    \ FROM harness.skill_sources src\
-    \ JOIN harness.skill_revisions r\
-    \   ON r.skill_revision_id = src.skill_revision_id\
-    \ JOIN harness.skills s ON s.skill_id = r.skill_id\
-    \ WHERE s.scope_kind = $1 AND s.scope_id = $2::uuid AND s.slug = $3\
-    \   AND r.revision_number = $4\
-    \ ORDER BY src.created_at, src.skill_source_id"
-    ( (scopeKindText . (.scopeKind) . first3 >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (scopeIdText . (.scopeId) . first3 >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (second3 >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (third3 >$< Encoders.param (Encoders.nonNullable Encoders.int8))
-    )
-    (Decoders.rowList sourceRowDecoder)
-    True
-  where
-    first3 (scope, _, _) = scope
-    second3 (_, slug, _) = slug
-    third3 (_, _, revision) = revision
-
-scopeSlugEncoder :: Encoders.Params (Scope, Text)
-scopeSlugEncoder =
-    (scopeKindText . (.scopeKind) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (scopeIdText . (.scopeId) . fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.text))
-
-applicableScopesEncoder :: Encoders.Params ApplicableScopes
-applicableScopesEncoder =
-    ((.applicableUserScopeId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.applicableRepositoryScopeId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-        <> ((.applicableCheckoutScopeId) >$< Encoders.param (Encoders.nonNullable Encoders.text))
-
-skillSelectSql :: Text
-skillSelectSql =
-    "SELECT skill_id::text, scope_kind, scope_id::text, slug, title,\
-    \ description, applies_when, instructions_text, activation_mode,\
-    \ priority, status, current_revision, created_at, updated_at\
-    \ FROM harness.skills"
-
-skillSelectSqlWithPrefix :: Text
-skillSelectSqlWithPrefix =
-    "SELECT s.skill_id::text, s.scope_kind, s.scope_id::text, s.slug, s.title,\
-    \ s.description, s.applies_when, s.instructions_text, s.activation_mode,\
-    \ s.priority, s.status, s.current_revision, s.created_at, s.updated_at"
-
-revisionSelectSql :: Text
-revisionSelectSql =
-    "SELECT skill_revision_id::text, revision_number, title, description,\
-    \ applies_when, instructions_text, activation_mode, priority, status,\
-    \ change_summary, created_at FROM harness.skill_revisions"
-
-applicableWhereSql :: Text
-applicableWhereSql =
-    " WHERE (\
-    \ (scope_kind = 'user' AND scope_id = $1::uuid)\
-    \ OR (scope_kind = 'repository' AND scope_id = $2::uuid)\
-    \ OR (scope_kind = 'checkout' AND scope_id = $3::uuid)\
-    \ )"
-
-applicableWhereSqlWithPrefix :: Text
-applicableWhereSqlWithPrefix =
-    " WHERE (\
-    \ (s.scope_kind = 'user' AND s.scope_id = $1::uuid)\
-    \ OR (s.scope_kind = 'repository' AND s.scope_id = $2::uuid)\
-    \ OR (s.scope_kind = 'checkout' AND s.scope_id = $3::uuid)\
-    \ )"
-
-skillRowDecoder :: Decoders.Row SkillRow
-skillRowDecoder =
-    SkillRow
-        <$> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-
-revisionRowDecoder :: Decoders.Row RevisionRow
-revisionRowDecoder =
-    RevisionRow
-        <$> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int4)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-
-sourceRowDecoder :: Decoders.Row LearnedSkillSource
-sourceRowDecoder =
-    LearnedSkillSource
-        <$> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.int8)
-        <*> Decoders.column (Decoders.nullable Decoders.text)
-        <*> Decoders.column (Decoders.nullable Decoders.int8)
-        <*> Decoders.column (Decoders.nullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.text)
-        <*> Decoders.column (Decoders.nonNullable Decoders.timestamptz)
-
-doubleColumn :: Decoders.Row Double
-doubleColumn = Decoders.column (Decoders.nonNullable Decoders.float8)
+insertSourceParams
+    :: Text
+    -> LearnedSkillSourceInput
+    -> UTCTime
+    -> InsertSourceParams
+insertSourceParams revisionId source occurredAt = InsertSourceParams
+    { insertSourceRevisionId = revisionId
+    , insertSourceSessionKey =
+        source.learnedSkillSourceInputSessionKey
+    , insertSourceTurnIndex =
+        source.learnedSkillSourceInputTurnIndex
+    , insertSourceResponseItemId =
+        source.learnedSkillSourceInputResponseItemId
+    , insertSourceEvidence = source.learnedSkillSourceInputEvidence
+    , insertSourceAt = occurredAt
+    }

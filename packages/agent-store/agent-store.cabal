@@ -71,6 +71,18 @@ library
                     , Agent.Store.Postgres.SessionItem.Mapping.Statements.Tagged
                     , Agent.Store.Postgres.SessionItem.Read
                     , Agent.Store.Postgres.SessionItem.Write
+                    , Agent.Store.Postgres.Skill.Mapping.Types
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.InsertRevision
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.InsertSkill
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.InsertSource
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.ListRevisions
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.ListSkills
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.ListSources
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.LoadRevision
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.LockSkill
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.ReadSkill
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.SearchSkills
+                    , Agent.Store.Postgres.Skill.Mapping.Statements.UpdateSkill
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , async
