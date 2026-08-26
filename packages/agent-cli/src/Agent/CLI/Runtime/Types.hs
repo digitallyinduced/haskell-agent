@@ -18,6 +18,7 @@ import Agent.CLI.Session.Runtime.Types
 import Agent.CLI.TUI.App (FullscreenRuntime)
 import Agent.Error (ApiError)
 import Agent.Provider (Provider)
+import Agent.ReasoningEffort (ReasoningEffort)
 import Data.Text (Text)
 import System.OsPath (OsPath)
 
@@ -36,7 +37,7 @@ data RunResult
     | RunResumeSession Text
       -- ^ Persisted session id. Consumed after the current provider-specific
       -- backend shuts down before starting the selected session.
-    | RunSwitchWorktree OsPath Provider Text Text
+    | RunSwitchWorktree OsPath Provider Text ReasoningEffort
       -- ^ Fresh worktree path. Starts a new session after the current backend
       -- and fullscreen UI have shut down, retaining provider, model, and effort.
 

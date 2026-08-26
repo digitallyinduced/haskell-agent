@@ -180,6 +180,10 @@ import Agent.CLI.Runtime.HistorySource
     , loadFullscreenHistoryPage
     , sessionUiPageSize
     )
+import Agent.ReasoningEffort
+    ( parseReasoningEffort
+    , reasoningEffortText
+    )
 import Agent.CLI.Session.History
     ( detectGitBranch,
       foldSessionItems,
@@ -1636,9 +1640,14 @@ runAgentInitializedWithLock
                 fromMaybe
                     (maybe
                         (defaultEffortFor provider)
-                        (.metaEffort)
+                        (either
+                            (const (defaultEffortFor provider))
+                            id
+                            . parseReasoningEffort
+                            . (.metaEffort))
                         (fst <$> resumed))
                     options.optEffort
+        effortText = reasoningEffortText effort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
         claudeBypassEnabled =
@@ -1742,7 +1751,7 @@ runAgentInitializedWithLock
             (trustedPool startup.startupDatabaseStore)
             startup options root
                 inferredTarget { targetDialect = dialectId }
-                (isNothing transition) cwd effort promptText resumed
+                (isNothing transition) cwd effortText promptText resumed
     writeIORef persistSlotRef persist
     forM_ fullscreen \runtime ->
         reservedSessionId persist >>= \case
@@ -1939,7 +1948,7 @@ runAgentInitializedWithLock
             , toolsTransportModel = inferredTarget.targetWireModelId
             , toolsDialect = dialectId
             , toolsCwd = cwd
-            , toolsEffort = effort
+            , toolsEffort = effortText
             , toolsCurrentSessionId =
                 readIORef persistSlotRef >>= currentSessionId
             , toolsLaunchTurn = \handle message -> do
@@ -2064,7 +2073,7 @@ runAgentInitializedWithLock
                     today
                     (isOneShot options)
             params = requestParams provider model instructions
-                (schemasFromAppTools dialect tools) effort
+                (schemasFromAppTools dialect tools) effortText
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             resumeNeedsFreshContext =

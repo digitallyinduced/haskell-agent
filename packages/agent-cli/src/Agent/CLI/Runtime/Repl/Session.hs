@@ -137,6 +137,7 @@ import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( toText )
 import Agent.Provider ( providerSlug )
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ()
@@ -300,7 +301,7 @@ handleSessionAction
                 params <- readIORef paramsRef
                 slot <- readIORef slotRef
                 let model = currentModel params
-                    effort = currentEffort params
+                    effort = reasoningEffortText (currentEffort params)
                     create = case slot of
                         PersistencePending pending _ _ ->
                             pending
@@ -446,7 +447,8 @@ handleSessionAction
                        , "dialect: "
                             <> dialectSlug
                                 (dialectId dialect)
-                       , "effort: " <> currentEffort params
+                       , "effort: "
+                            <> reasoningEffortText (currentEffort params)
                        , "cwd: " <> toText cwd
                        , "shell: "
                             <> shellModeText shellMode

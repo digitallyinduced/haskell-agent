@@ -35,6 +35,7 @@ import Agent.CLI.ReplMode
     , replModeFromState
     )
 import Agent.Dialect (DialectId(..))
+import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.Loop (LoopEvent(..), TokenUsage(..), emptyTokenUsage)
 import Agent.MCP
     ( McpInitState(..)
@@ -248,7 +249,7 @@ spec = do
                         , promptAccount = "grok@example.com"
                         }
                 openAiParams =
-                    setReasoningEffort "medium" $
+                    setReasoningEffort EffortMedium $
                         setModel "gpt-5.6-sol" defaultResponseCreateParams
                 replacement =
                     buildPromptState
@@ -275,7 +276,9 @@ spec = do
             let prompt =
                     buildPromptState
                         GrokBuildDialect
-                        (setReasoningEffort "max" defaultResponseCreateParams)
+                        (setReasoningEffort
+                            EffortMax
+                            defaultResponseCreateParams)
                         PlanInactive
                         PromptMutating
                         "grok@example.com"
