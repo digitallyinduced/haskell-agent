@@ -267,7 +267,7 @@ spec = describe "bounded fullscreen history window" do
             `shouldBe` Seq.singleton (HistoryCursor 2)
         historyWindowLoadedBytes window `shouldSatisfy` (<= 180)
 
-    it "projects reasoning, tool calls, outputs, and assistant text" do
+    it "omits persisted reasoning while projecting tool and assistant history" do
         let projected =
                 sessionHistoryTurn
                     (12 :: Int)
@@ -280,7 +280,9 @@ spec = describe "bounded fullscreen history window" do
                             , summary =
                                 [ ReasoningSummaryPart
                                     { partType = "summary_text"
-                                    , text = Just "Checked the schema"
+                                    , text =
+                                        Just
+                                            "Don't mention skills. Brief summary for the user."
                                     , extraFields = KeyMap.empty
                                     }
                                 ]
@@ -314,13 +316,15 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks
             `shouldBe`
                 [ BlockUser
-                , BlockThinking
                 , BlockShell
                 , BlockAssistant
                 ]
         map (.blockBody) blocks
             `shouldSatisfy`
                 any (Text.isInfixOf "/tmp/project")
+        map (.blockBody) blocks
+            `shouldSatisfy`
+                all (not . Text.isInfixOf "Don't mention skills")
 
     it "does not rematerialise the compacted prefix of replacement turns" do
         let projected =
@@ -337,6 +341,36 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks `shouldBe` [BlockUser, BlockAssistant]
         map (.blockBody) blocks
             `shouldBe` ["current prompt", "current answer"]
+
+    it "keeps mid-turn steering in durable history" do
+        let projected =
+                sessionHistoryTurn
+                    (21 :: Int)
+                    (sessionTurn
+                        TranscriptAppend
+                        "inspect the repository"
+                        [ userMessage "generated skill context"
+                        , userMessage "inspect the repository"
+                        , assistantMessage "I will inspect it."
+                        , userMessage "# Skill instructions: parser\nhidden"
+                        , userMessage "focus on the parser"
+                        , assistantMessage "Done"
+                        ])
+            blocks = toList projected.historyTurnBlocks
+        map (.blockKind) blocks
+            `shouldBe`
+                [ BlockUser
+                , BlockAssistant
+                , BlockUser
+                , BlockAssistant
+                ]
+        map (.blockBody) blocks
+            `shouldBe`
+                [ "inspect the repository"
+                , "I will inspect it."
+                , "focus on the parser"
+                , "Done"
+                ]
 
     it "renders manual compaction as a single checkpoint summary" do
         let turnValue =

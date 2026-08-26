@@ -47,7 +47,6 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Data.Foldable (traverse_)
-import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
@@ -94,6 +93,7 @@ data CatalogModel = CatalogModel
 data ModelCatalog = ModelCatalog
     { catalogConnections :: !(Map Text ModelConnection)
     , catalogModels :: ![CatalogModel]
+    , catalogModelsById :: !(Map Text CatalogModel)
     }
     deriving (Eq, Show)
 
@@ -192,18 +192,21 @@ catalogContextWindowForTransport catalog connectionId modelId wireModelId = do
                     | selected.catalogModelWireId == wireModelId =
                         Just selected
                     | otherwise =
-                        find
-                            (\candidate ->
-                                candidate.catalogModelConnectionId
-                                    == connectionId
-                                    && candidate.catalogModelWireId
-                                        == wireModelId)
-                            catalog.catalogModels
+                        Map.lookup wireModelId
+                            (Map.fromList
+                                [ ( candidate.catalogModelWireId
+                                  , candidate
+                                  )
+                                | candidate <-
+                                    catalogModelsForConnection
+                                        connectionId
+                                        catalog
+                                ])
             in effective >>= (.catalogModelContextWindow)
 
 catalogModelById :: ModelCatalog -> Text -> Maybe CatalogModel
 catalogModelById catalog modelId =
-    find ((== modelId) . (.catalogModelId)) catalog.catalogModels
+    Map.lookup modelId catalog.catalogModelsById
 
 catalogModelsForConnection :: Text -> ModelCatalog -> [CatalogModel]
 catalogModelsForConnection wanted =
@@ -216,8 +219,13 @@ connectionBuiltinProvider connection = case connection.connectionKind of
 
 catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel
 catalogDefaultForProvider catalog provider =
-    find (.catalogModelDefault) $
-        catalogModelsForConnection (builtinConnectionId provider) catalog
+    case
+        [ model
+        | model <- catalogModelsForConnection (builtinConnectionId provider) catalog
+        , model.catalogModelDefault
+        ] of
+        model : _ -> Just model
+        [] -> Nothing
 
 -- | Decode and validate one standalone file. This is mainly useful for tests;
 -- normal startup should use 'mergeModelConfigs' so defaults can be overlaid.
@@ -371,6 +379,11 @@ validateConfig source config = do
     pure ModelCatalog
         { catalogConnections = connections
         , catalogModels = models
+        , catalogModelsById =
+            Map.fromList
+                [ (model.catalogModelId, model)
+                | model <- models
+                ]
         }
   where
     validateConnection connectionId raw = do

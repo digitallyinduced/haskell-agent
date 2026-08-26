@@ -30,8 +30,6 @@ import Agent.Responses.Types
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , MessageContent(..)
-    , ReasoningItem(..)
-    , ReasoningSummaryPart(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
@@ -55,7 +53,6 @@ import Agent.TUI.Model
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Foldable (toList)
-import Data.Maybe (mapMaybe)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -119,7 +116,12 @@ addRegularTurn items state turn =
                 else reduceUi
                     (UiUserSubmitted turn.turnUserText)
                     state
-        withItems = foldl' projectItem withUser items
+        -- Initial generated context, skill activations, and the prompt are all
+        -- encoded as leading user messages. The prompt already has its own
+        -- block above; later user messages are mid-turn steering and must stay
+        -- visible after the live turn is replaced by durable history.
+        withItems =
+            foldl' projectItem withUser (dropWhile isUserMessage items)
         withAssistant =
             if hasAssistantBlock withItems
                 then withItems
@@ -164,12 +166,15 @@ projectItem state = \case
     MessageItem message
         | message.role == RoleAssistant ->
             appendText (UiLoop . TextDelta) (messageText message.content) state
+        | message.role == RoleUser
+        , not (isGeneratedUserText (messageText message.content)) ->
+            appendText UiInputSteered (messageText message.content) state
         | otherwise -> state
-    ReasoningItemValue reasoning ->
-        appendText
-            (UiLoop . ReasoningDelta)
-            (reasoningText reasoning)
-            state
+    -- Persisted reasoning summaries are model scratchpad, not conversation
+    -- history. Replaying them after a tab switch makes old drafting notes look
+    -- like newly surfaced user-visible output. Live turns still render streamed
+    -- ReasoningDelta events; only durable history projection omits them.
+    ReasoningItemValue _ -> state
     FunctionCallItem call ->
         reduceUi
             (UiLoop
@@ -208,6 +213,15 @@ projectItem state = \case
             state
     _ -> state
 
+isUserMessage :: ResponseItem -> Bool
+isUserMessage = \case
+    MessageItem message -> message.role == RoleUser
+    _ -> False
+
+isGeneratedUserText :: Text.Text -> Bool
+isGeneratedUserText =
+    Text.isPrefixOf "# Skill instructions: " . Text.stripStart
+
 appendText :: (Text.Text -> UiEvent) -> Text.Text -> UiState -> UiState
 appendText event text state
     | Text.null (Text.strip text) = state
@@ -222,16 +236,6 @@ hasAssistantBlock =
         . toList
         . (.uiBlocks)
 
-reasoningText :: ReasoningItem -> Text.Text
-reasoningText reasoning =
-    firstNonEmpty
-        [ Text.intercalate "\n" $
-            mapMaybe (.text) reasoning.summary
-        , Text.intercalate "\n" $
-            concatMap responseContentText $
-                maybe [] id reasoning.content
-        ]
-
 messageText :: MessageContent -> Text.Text
 messageText = \case
     MessageContentText text -> text
@@ -245,18 +249,6 @@ responseContentText = \case
     SummaryTextPart{text} -> [text]
     RefusalPart{refusal} -> [refusal]
     _ -> []
-
-firstNonEmpty :: [Text.Text] -> Text.Text
-firstNonEmpty =
-    maybe "" id
-        . findFirst (not . Text.null . Text.strip)
-
-findFirst :: (a -> Bool) -> [a] -> Maybe a
-findFirst predicate = \case
-    [] -> Nothing
-    value : rest
-        | predicate value -> Just value
-        | otherwise -> findFirst predicate rest
 
 renderJsonValue :: Aeson.Value -> Text.Text
 renderJsonValue = \case

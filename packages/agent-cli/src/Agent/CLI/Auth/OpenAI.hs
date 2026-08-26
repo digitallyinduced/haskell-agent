@@ -45,14 +45,14 @@ import Control.Monad.Trans.Except (ExceptT, throwE)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (partitionEithers)
-import Data.Function (on)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
     , newIORef
     , readIORef
     )
-import Data.List (find, nubBy)
+import Data.Containers.ListUtils (nubOrdOn)
+import Data.List (find)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -336,7 +336,7 @@ staticOpenAiState now accountId accessToken =
 
 deduplicateOpenAiAccounts :: [OpenAiAccount] -> [OpenAiAccount]
 deduplicateOpenAiAccounts =
-    nubBy ((==) `on` ((.accountId) . (.openAiState)))
+    nubOrdOn ((.accountId) . (.openAiState))
 
 refreshOpenAiAccount
     :: MVar ()

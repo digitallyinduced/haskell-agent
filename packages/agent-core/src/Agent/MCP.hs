@@ -108,6 +108,7 @@ import Data.IORef
     , newIORef
     , readIORef
     )
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import Data.List (find, sortOn)
 import Data.Maybe (catMaybes, isJust)
@@ -716,7 +717,7 @@ data McpClient = McpClient
     , clientProcess :: !ProcessHandle
     , clientGroupId :: !(Maybe ProcessGroupID)
     , clientNextId :: !(IORef Int)
-    , clientPending :: !(TVar (Map.Map Int (TMVar (Either Text Value))))
+    , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text Value))))
     , clientFailure :: !(TVar (Maybe Text))
     , clientWriteLock :: !(MVar ())
     , clientStderr :: !(IORef CapturedStderr)
@@ -1559,7 +1560,7 @@ startMcpClient config = mask \_ -> do
             hSetBinaryMode errOutput True
             hSetBuffering input LineBuffering
             nextId <- newIORef 1
-            pending <- newTVarIO Map.empty
+            pending <- newTVarIO IntMap.empty
             failure <- newTVarIO Nothing
             writeLock <- newMVar ()
             stderrRef <- newIORef emptyCapturedStderr
@@ -1850,7 +1851,7 @@ requestMcp client timeoutMicros method parameters = do
                 (current + 1, current)
             response <- newEmptyTMVarIO
             atomically $
-                modifyTVar' client.clientPending (Map.insert requestId response)
+                modifyTVar' client.clientPending (IntMap.insert requestId response)
             let message = object
                     [ "jsonrpc" .= ("2.0" :: Text)
                     , "id" .= requestId
@@ -1860,7 +1861,7 @@ requestMcp client timeoutMicros method parameters = do
             sendMessage client message >>= \case
                 Left err -> do
                     atomically $
-                        modifyTVar' client.clientPending (Map.delete requestId)
+                        modifyTVar' client.clientPending (IntMap.delete requestId)
                     pure (Left err)
                 Right () -> do
                     timed <- timeout (max 1 timeoutMicros)
@@ -1870,7 +1871,7 @@ requestMcp client timeoutMicros method parameters = do
                         Nothing -> do
                             atomically $
                                 modifyTVar' client.clientPending
-                                    (Map.delete requestId)
+                                    (IntMap.delete requestId)
                             pure . Left $
                                 "MCP request "
                                     <> method
@@ -1903,7 +1904,7 @@ sendMessage client message =
 
 readerLoop
     :: Handle
-    -> TVar (Map.Map Int (TMVar (Either Text Value)))
+    -> TVar (IntMap.IntMap (TMVar (Either Text Value)))
     -> TVar (Maybe Text)
     -> IO ()
 readerLoop output pending failure =
@@ -1921,7 +1922,7 @@ readerLoop output pending failure =
         loop
 
 routeResponse
-    :: TVar (Map.Map Int (TMVar (Either Text Value)))
+    :: TVar (IntMap.IntMap (TMVar (Either Text Value)))
     -> Value
     -> IO ()
 routeResponse pending (Object fields) =
@@ -1930,8 +1931,8 @@ routeResponse pending (Object fields) =
         Just ident -> do
             destination <- atomically do
                 current <- readTVar pending
-                writeTVar pending (Map.delete ident current)
-                pure (Map.lookup ident current)
+                writeTVar pending (IntMap.delete ident current)
+                pure (IntMap.lookup ident current)
             case destination of
                 Nothing -> pure ()
                 Just response ->
@@ -1985,14 +1986,14 @@ capturedStderrText captured =
                 <> body
 
 failClient
-    :: TVar (Map.Map Int (TMVar (Either Text Value)))
+    :: TVar (IntMap.IntMap (TMVar (Either Text Value)))
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
 failClient = failPending
 
 failPending
-    :: TVar (Map.Map Int (TMVar (Either Text Value)))
+    :: TVar (IntMap.IntMap (TMVar (Either Text Value)))
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
@@ -2001,9 +2002,9 @@ failPending pending failure err =
         existing <- readTVar failure
         when (existing == Nothing) (writeTVar failure (Just err))
         requests <- readTVar pending
-        writeTVar pending Map.empty
+        writeTVar pending IntMap.empty
         mapM_ (\response -> void (tryPutTMVar response (Left err)))
-            (Map.elems requests)
+            (IntMap.elems requests)
 
 closeMcpClient :: McpClient -> IO ()
 closeMcpClient client =

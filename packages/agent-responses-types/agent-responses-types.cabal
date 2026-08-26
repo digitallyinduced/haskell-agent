@@ -46,6 +46,7 @@ library
     exposed-modules:  Agent.Responses.Types
                     , Agent.Responses.Types.Content
                     , Agent.Responses.Types.Items
+                    , Agent.Responses.Types.Items.Known
                     , Agent.Responses.Types.Request
                     , Agent.Responses.Types.Response
                     , Agent.Responses.Types.Streaming

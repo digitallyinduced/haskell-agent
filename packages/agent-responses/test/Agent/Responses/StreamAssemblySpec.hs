@@ -145,6 +145,52 @@ spec = describe "buildStreamResponse" do
             other -> expectationFailure
                 ("expected one custom tool call, got " <> show other)
 
+    it "assembles function-call arguments without output_item.done" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-args\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"\"}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-1\",\"output_index\":0,\"delta\":\"{\\\"target_file\\\":\\\"\"}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-1\",\"delta\":\"README.md\\\"}\"}"
+            , sseBlock "response.function_call_arguments.done"
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-1\",\"name\":\"read_file\",\"arguments\":\"{\\\"target_file\\\":\\\"README.md\\\"}\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-args\",\"output\":[]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        case response.output of
+            [FunctionCallItem FunctionCall { name, arguments }] ->
+                (name, arguments)
+                    `shouldBe` ("read_file", "{\"target_file\":\"README.md\"}")
+            other -> expectationFailure
+                ("expected one function call, got " <> show other)
+
+    it "assembles a function call after a reasoning item from argument events" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-reason-then-call\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"echo\",\"arguments\":\"\"}}"
+            , sseBlock "response.function_call_arguments.done"
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-1\",\"output_index\":1,\"name\":\"echo\",\"arguments\":\"{\\\"message\\\":\\\"hi\\\"}\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-reason-then-call\",\"output\":[]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["echo"]
+        [arguments | FunctionCallItem FunctionCall { arguments } <- response.output]
+            `shouldBe` ["{\"message\":\"hi\"}"]
+
     it "assembles reasoning summary part and text events by item id" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"

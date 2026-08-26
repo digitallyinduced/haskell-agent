@@ -173,6 +173,13 @@ would be useful; otherwise it stays silent. Telegram must also deliver ambient
 messages to the bot: use BotFather's `/setprivacy` command to disable privacy
 mode for that bot, then remove and re-add the bot to existing groups if needed.
 
+The bot only stays in a group or channel if an allowlisted user who is also a
+Telegram administrator of that chat added it. Anyone else adding it causes the
+bot to leave immediately. Anonymous-admin adds are accepted only when an
+allowlisted user is already an administrator of that chat. Existing groups that
+already have a saved session are kept after upgrading; to authorize another
+group, add the bot as an allowed admin or mention it there.
+
 Each private chat, group, and forum topic is mapped to its own persisted agent
 session under `~/.haskell-agent`; `/new` starts a fresh session, `/session`
 shows the current session ID, `/status` reports queued/retrying/failed work,

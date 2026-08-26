@@ -15,7 +15,10 @@ import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Models (ModelOption(..), ModelTarget(..), modelCatalog)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Provider (BillingMode(..), Provider(..))
-import Data.List (nubBy, sortOn)
+import Data.Containers.ListUtils (nubOrdOn)
+import Data.Set (Set)
+import qualified Data.Set as Set
+import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (NominalDiffTime, UTCTime, diffUTCTime)
@@ -100,7 +103,7 @@ rankedModels = sortOn modelRank . filter hasPriority . modelCatalog
 -- that produced this error, are excluded.
 fallbackCandidates
     :: ModelCatalog
-    -> [Provider]
+    -> Set Provider
     -> Provider
     -> ApiError
     -> [ModelOption]
@@ -113,12 +116,9 @@ fallbackCandidates catalog unavailable current err
                 option.modelTarget.targetProvider /= current
                     && option.modelTarget.targetProvider
                         /= ClaudeCodeProvider
-                    && option.modelTarget.targetProvider `notElem` unavailable)
-            (nubBy sameProvider (rankedModels catalog))
-  where
-    sameProvider left right =
-        left.modelTarget.targetProvider
-            == right.modelTarget.targetProvider
+                    && option.modelTarget.targetProvider
+                        `Set.notMember` unavailable)
+            (nubOrdOn (.modelTarget.targetProvider) (rankedModels catalog))
 
 isUsageExhausted :: ApiError -> Bool
 isUsageExhausted = \case

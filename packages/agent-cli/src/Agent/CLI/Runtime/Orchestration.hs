@@ -21,6 +21,8 @@ import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(..),
+      hasOpenAiAuth,
+      loadAuth,
       loadAuthForAccount,
       preferredOpenAiTokenProvider,
       probeLoadedAuthCredential,
@@ -28,7 +30,8 @@ import Agent.CLI.Auth
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction
-    ( installLiveCompactOutcome,
+    ( boundCompletedToolContinuations,
+      installLiveCompactOutcome,
       runProviderCompactWith,
       runResponsesCompactWithContextWindow )
 import Agent.CLI.Config
@@ -76,6 +79,7 @@ import Agent.CLI.ModelConfig
       loadModelCatalogAt )
 import Agent.CLI.Models
     ( defaultModelFor,
+      defaultModelOptionFor,
       rawModelOption,
       resolveConfiguredModel,
       resolvePersistedDialect,
@@ -85,6 +89,7 @@ import Agent.CLI.Models
 import Agent.CLI.Options
     ( defaultEffortFor,
       isOneShot,
+      normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
       CliOptions(optMotionMode, optNoYolo,
                  optYolo, optMaxConcurrentAgents, optCompactThreshold,
@@ -99,12 +104,15 @@ import Agent.CLI.Project
       ProjectModel(..),
       ProjectSettings(..),
       loadProjectSettings,
+      loadUserSettings,
       projectAccountFor,
       projectModelProvider,
       resolveProjectRoot,
-      saveProjectModel )
+      saveRememberedModel,
+      withInheritedLastModel )
 import Agent.CLI.Prompt
     ( subscriptionSubagentModelGuidance, systemPromptForTools )
+import Agent.GrokBuild.Dialect.Task (grokRootChildModels)
 import Agent.CLI.PromptHooks
     ( fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
 import Agent.CLI.Provider.OpenAI
@@ -120,11 +128,12 @@ import Agent.CLI.ProviderFallback
     ( allowsAutomaticBillingFallback, isProviderUnavailable )
 import Agent.CLI.ProviderTransition
     ( applyProviderTransition,
-      ProviderTransition(transitionCause, transitionUnavailableProviders,
+      ProviderTransition(ProviderTransition, transitionCause,
+                         transitionUnavailableProviders,
                          transitionPendingTurn, transitionTarget,
                          transitionAccountSelectionId, transitionAccountId,
-                         transitionAutomaticBilling),
-      TransitionCause(AutomaticFallback) )
+                         transitionAutomaticBilling, transitionSessionId),
+      TransitionCause(AutomaticFallback, ManualTransition) )
 import Agent.CLI.Recap ()
 import Agent.CLI.Resume ( resumeNeedsGeneratedContext )
 import Agent.CLI.Render ( putTextLn )
@@ -165,7 +174,7 @@ import Agent.CLI.Session
                   metaProvider),
       SessionTurn )
 import Agent.CLI.Session.Attachments ()
-import Agent.CLI.Session.Choices ()
+import Agent.CLI.Session.Choices ( modelChoice )
 import Agent.CLI.Runtime.HistorySource
     ( emptyFullscreenHistoryPage
     , loadFullscreenHistoryPage
@@ -220,7 +229,8 @@ import Agent.CLI.Subagents.Runtime
       prepareCollaborationSpawn,
       restoreAgentFromDisk,
       runCodexSubagent,
-      runHttpSubagent )
+      runHttpSubagent,
+      runXaiParentSubagent )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer,
       FullscreenRuntime,
@@ -376,6 +386,7 @@ import Data.IORef
       writeIORef )
 import Data.List ()
 import Data.Maybe ( isNothing, fromMaybe, isJust )
+import qualified Data.Set as Set
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime, utctDay )
 import System.Console.ANSI ()
@@ -573,7 +584,77 @@ runAgent
     let runPrepared = case prepared.preparedFullscreen of
             Nothing -> prepared.preparedRun
             Just runtime ->
-                let callbacks = RestartCallbacks
+                let chooseRecoveryModel nextOptions nextTransition = do
+                        home <- getHomeDirectory
+                        cwd <- case nextOptions.optCwd <|> runMode.runCwdHint of
+                            Nothing -> getCurrentDirectory
+                            Just path -> makeAbsolute path
+                        loadModelCatalogAt home cwd >>= \case
+                            Left err -> pure (Left err)
+                            Right catalog -> do
+                                color <- resolveColor runMode.runStderr
+                                let currentTarget =
+                                        ((.transitionTarget) <$> nextTransition)
+                                            <|> ( (.modelTarget)
+                                                    <$> (nextOptions.optModel
+                                                        >>= resolveConfiguredModel
+                                                            catalog)
+                                                )
+                                            <|> ( (.modelTarget)
+                                                    <$> (nextOptions.optProvider
+                                                        >>= defaultModelOptionFor
+                                                            catalog)
+                                                )
+                                            <|> ( (.modelTarget)
+                                                    <$> defaultModelOptionFor
+                                                        catalog
+                                                        OpenAIProvider
+                                                )
+                                case currentTarget of
+                                    Nothing ->
+                                        pure
+                                            (Left
+                                                "No configured models are available.")
+                                    Just current ->
+                                        modelChoice
+                                            catalog
+                                            (Just runtime)
+                                            color
+                                            current.targetConnectionId
+                                            current.targetProvider
+                                            current.targetModelId
+                                            current.targetDialect >>= \case
+                                                Nothing ->
+                                                    pure (Right Nothing)
+                                                Just choice ->
+                                                    pure $ Right $ Just $
+                                                        recoveryModelTransition
+                                                            nextOptions
+                                                            nextTransition
+                                                            choice.modelTarget
+                    recoveryModelTransition nextOptions nextTransition target =
+                        case nextTransition of
+                            Just active ->
+                                active
+                                    { transitionTarget = target
+                                    , transitionAccountSelectionId = Nothing
+                                    , transitionAccountId = Nothing
+                                    , transitionUnavailableProviders = Set.empty
+                                    , transitionCause = ManualTransition
+                                    , transitionAutomaticBilling = Nothing
+                                    }
+                            Nothing ->
+                                ProviderTransition
+                                    { transitionTarget = target
+                                    , transitionAccountSelectionId = Nothing
+                                    , transitionAccountId = Nothing
+                                    , transitionSessionId = nextOptions.optResume
+                                    , transitionPendingTurn = Nothing
+                                    , transitionUnavailableProviders = Set.empty
+                                    , transitionCause = ManualTransition
+                                    , transitionAutomaticBilling = Nothing
+                                    }
+                    callbacks = RestartCallbacks
                         { restartPrepare =
                             \nextOptions nextTransition ->
                                 prepareAgentIteration
@@ -600,6 +681,7 @@ runAgent
                         , restartManageAccounts = do
                             color <- resolveColor stderr
                             runLoginManager color
+                        , restartChooseModel = chooseRecoveryModel
                         }
                 in
                 runFullscreen runtime $
@@ -886,6 +968,7 @@ prepareAgentIterationTracked
                         runtime
                         (requestCancel toolEnv.toolCancel)
                         (const (pure ()))
+                        (const (pure ()))
                         (pure ())
                         (\level ->
                             readIORef restartEffortActionRef >>= ($ level))
@@ -953,6 +1036,7 @@ resetFullscreenSessionActions runtime =
         runtime
         (pure ())
         (const (pure ()))
+        (const (pure ()))
         (pure ())
         (const (pure ()))
         -- No session-local interrupt state is alive between providers. A
@@ -1013,12 +1097,16 @@ runAgentInitializedWithLock
         deriveDatabaseScopes stateDirectory projectRootPath >>= \case
             Left err -> startupDie startup (Text.unpack err)
             Right scopes -> pure scopes
-    (projectSettings, (catalogResult, branch)) <-
+    ((projectSettings0, userSettings), (catalogResult, branch)) <-
         concurrently
-            (loadProjectSettings projectRoot)
+            (concurrently
+                (loadProjectSettings projectRoot)
+                (loadUserSettings home))
             (concurrently
                 (loadModelCatalogAt home cwd)
                 (detectGitBranch cwd))
+    let projectSettings =
+            withInheritedLastModel projectSettings0 userSettings
     catalog <- either
         (startupDie startup . Text.unpack)
         pure
@@ -1028,7 +1116,7 @@ runAgentInitializedWithLock
     let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
-            maybe [] (.transitionUnavailableProviders) transition
+            maybe Set.empty (.transitionUnavailableProviders) transition
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)
@@ -1542,9 +1630,14 @@ runAgentInitializedWithLock
             Nothing -> False
         legacySubagentTarget =
             sessionLegacySubagentTarget . fst <$> resumed
-        effort = fromMaybe
-            (maybe (defaultEffortFor provider) (.metaEffort) (fst <$> resumed))
-            options.optEffort
+        effort =
+            normalizeReasoningEffortForDialect dialectId $
+                fromMaybe
+                    (maybe
+                        (defaultEffortFor provider)
+                        (.metaEffort)
+                        (fst <$> resumed))
+                    options.optEffort
         policy = resolveApprovalPolicy options isTty
             projectSettings.settingsAutoApprove
         claudeBypassEnabled =
@@ -1553,7 +1646,7 @@ runAgentInitializedWithLock
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
-        saveProjectModel projectRoot
+        saveRememberedModel home projectRoot
             inferredTarget { targetDialect = dialectId }
     activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
@@ -1574,7 +1667,23 @@ runAgentInitializedWithLock
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
-    let sendToRoot message = do
+    openaiChild <- case provider of
+        XAIProvider -> do
+            available <- hasOpenAiAuth
+            if not available
+                then pure Nothing
+                else loadAuth (Just OpenAIProvider) >>= \case
+                    Left _ -> pure Nothing
+                    Right openaiLoaded ->
+                        pure (Just openaiLoaded.loadedTokenProvider)
+        _ ->
+            pure Nothing
+    let grokAllowedChildModels = case provider of
+            XAIProvider ->
+                Just (grokRootChildModels (isJust openaiChild))
+            _ ->
+                Nothing
+        sendToRoot message = do
             atomicModifyIORef' pendingNotices \xs ->
                 (xs <> [AgentMessage message], ())
             pure (Right "queued")
@@ -1623,6 +1732,7 @@ runAgentInitializedWithLock
                 subscriptionSubagentModelGuidance
                     provider
                     (tokenProviderBillingMode tokenProvider)
+            , multiAllowedChildModels = grokAllowedChildModels
             }
     promptRequest <- loadPrompt options
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
@@ -1968,13 +2078,20 @@ runAgentInitializedWithLock
         generatedContextReloadRef <- newIORef (pure ())
         let currentModelContextWindow mapTransportModel = do
                 currentParams <- readIORef paramsRef
-                pure $ do
-                    currentModel <- currentParams.model
-                    catalogContextWindowForTransport
-                        catalog
-                        inferredTarget.targetConnectionId
-                        currentModel
-                        (mapTransportModel currentModel)
+                pure $
+                    catalogContextWindowForParams
+                        mapTransportModel
+                        currentParams
+            catalogContextWindowForParams mapTransportModel params = do
+                currentModel <- params.model
+                catalogContextWindowForTransport
+                    catalog
+                    inferredTarget.targetConnectionId
+                    currentModel
+                    (mapTransportModel currentModel)
+            contextWindowForParams mapTransportModel fallback params =
+                fromMaybe fallback
+                    (catalogContextWindowForParams mapTransportModel params)
             subagentRuntime = SubagentRuntime
                 { subagentOptions = options
                 , subagentGhciEnabled = ghciEnabledRef
@@ -1997,6 +2114,8 @@ runAgentInitializedWithLock
                     subscriptionSubagentModelGuidance
                         provider
                         (tokenProviderBillingMode tokenProvider)
+                , subagentAllowedChildModels = grokAllowedChildModels
+                , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
         atomicModifyIORef' conversationRef \state ->
@@ -2405,7 +2524,7 @@ runAgentInitializedWithLock
                                                 resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        projectRoot transition persist noticingBackend
+                                        home projectRoot transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession
@@ -2457,23 +2576,39 @@ runAgentInitializedWithLock
                                 Right result -> pure result
                     XAIProvider -> do
                         xaiOptions <- XAI.clientOptionsFromEnv
+                        let xaiContextWindow =
+                                contextWindowForParams
+                                    (XAIRequest.mapModel xaiOptions)
+                                    500_000
+                            protectXaiOverflow occupancy getParams backend =
+                                boundCompletedToolContinuations
+                                    xaiContextWindow
+                                    getParams
+                                    occupancy
+                                    backend
+                        xaiOccupancy <- newIORef Nothing
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
-                                    runHttpSubagent
+                                    runXaiParentSubagent
                                         subagentRuntime
                                         dialect
-                                        XAIProvider
                                         ctx.multiSendToRoot
                                         (\childParams ->
-                                            xaiBackend xaiOptions tokenProvider
-                                                (pure childParams))
+                                            protectXaiOverflow
+                                                xaiOccupancy
+                                                (pure childParams)
+                                                (xaiBackend xaiOptions tokenProvider
+                                                    (pure childParams)))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        xaiBackend xaiOptions tokenProvider
+                                        protectXaiOverflow
+                                            xaiOccupancy
                                             (readIORef paramsRef)
+                                            (xaiBackend xaiOptions tokenProvider
+                                                (readIORef paramsRef))
                             btwBackend privateParams =
                                 xaiBackend xaiOptions tokenProvider
                                     (pure privateParams)
@@ -2499,7 +2634,7 @@ runAgentInitializedWithLock
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                projectRoot transition persist backend
+                                home projectRoot transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable
@@ -2573,7 +2708,7 @@ runAgentInitializedWithLock
                             \backend -> do
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        projectRoot transition persist backend
+                                        home projectRoot transition persist backend
                                 result <- runSession
                                     (sessionRequest
                                         startupUnavailable
@@ -2591,7 +2726,10 @@ runAgentInitializedWithLock
                                     =<< readIORef claudeTranscriptRef
                                 pure result
                     OpenRouterProvider -> do
-                        let makeBackend params =
+                        openRouterOccupancy <- newIORef Nothing
+                        let openRouterContextWindow =
+                                contextWindowForParams transportModel 1_048_576
+                            makeBackend params =
                                 case customGenericOptions of
                                     Just genericOptions ->
                                         genericResponsesBackendWith
@@ -2610,6 +2748,12 @@ runAgentInitializedWithLock
                                     Nothing ->
                                         openRouterBackend openRouterOptions
                                             tokenProvider params
+                            protectOverflow occupancy getParams backend =
+                                boundCompletedToolContinuations
+                                    openRouterContextWindow
+                                    getParams
+                                    occupancy
+                                    backend
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
@@ -2619,14 +2763,20 @@ runAgentInitializedWithLock
                                         OpenRouterProvider
                                         ctx.multiSendToRoot
                                         (\childParams ->
-                                            makeBackend
-                                                (pure childParams))
+                                            protectOverflow
+                                                openRouterOccupancy
+                                                (pure childParams)
+                                                (makeBackend
+                                                    (pure childParams)))
                             Nothing -> pure ()
                         let backend =
                                 withPendingInputs pendingNotices $
                                     withConnectionRecovery $
-                                        makeBackend
+                                        protectOverflow
+                                            openRouterOccupancy
                                             (readIORef paramsRef)
+                                            (makeBackend
+                                                (readIORef paramsRef))
                             btwBackend privateParams =
                                 makeBackend
                                     (pure privateParams)
@@ -2670,7 +2820,7 @@ runAgentInitializedWithLock
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                projectRoot transition persist backend
+                                home projectRoot transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable

@@ -49,9 +49,17 @@ library
                     , Agent.Store.Postgres.Skill
     other-modules:    Agent.Store.Custom.QueryResult
                     , Agent.Store.Postgres.Custom.Sql
+                    , Agent.Store.Postgres.Custom.Types
+                    , Agent.Store.Postgres.Skill.Types
+                    , Agent.Store.Postgres.Session.Read
+                    , Agent.Store.Postgres.Session.Schema
+                    , Agent.Store.Postgres.Session.Types
+                    , Agent.Store.Postgres.Session.Write
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
                     , Agent.Store.Postgres.SessionItem
+                    , Agent.Store.Postgres.SessionItem.Read
+                    , Agent.Store.Postgres.SessionItem.Write
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , async
@@ -72,6 +80,7 @@ library
                     , time
                     , unix
                     , uuid-types
+                    , vector
 
 benchmark pool-cache-bench
     import:           common-opts
@@ -111,6 +120,7 @@ benchmark session-history-paging-bench
                     , temporary
                     , text
                     , time
+                    , vector
 
 test-suite agent-store-test
     import:           common-opts

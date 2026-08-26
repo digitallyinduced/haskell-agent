@@ -8,6 +8,7 @@ module Agent.OpenAI.Http
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
 import Agent.OpenAI.Error (mkOpenAIError)
 import Agent.Responses.SSE (parseSseEvents)
+import Agent.Responses.LoopBackend (hasRecoverableIncompleteOutput)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , StreamAssemblyConfig(..)
@@ -108,7 +109,8 @@ decodeCodexHttpBodyWithModel
 decodeCodexHttpBodyWithModel modelHint bodyText
     | looksLikeSse bodyText = do
         events <- parseSseEvents bodyText
-        buildStreamResponseWithModel streamConfig modelHint events
+        response <- buildStreamResponseWithModel streamConfig modelHint events
+        rejectFailedCodexResponse response
     | otherwise =
         case decodeJsonResponseBody bodyText of
             Just jsonValue -> decodeResponseValue jsonValue bodyText
@@ -138,7 +140,9 @@ rejectFailedCodexResponse :: OpenAI.Response -> Either ApiError OpenAI.Response
 rejectFailedCodexResponse response =
     case response.status of
         OpenAI.ResponseFailed -> Left (terminalResponseError response)
-        OpenAI.ResponseIncomplete -> Left (terminalResponseError response)
+        OpenAI.ResponseIncomplete
+            | hasRecoverableIncompleteOutput response -> Right response
+            | otherwise -> Left (terminalResponseError response)
         _ -> Right response
 
 streamConfig :: StreamAssemblyConfig
@@ -155,7 +159,7 @@ streamConfig = StreamAssemblyConfig
             streamError.code
             streamError.retryAfter
     , classifyFailedResponse = failedStreamResponseError
-    , incompleteAsFailure = True
+    , incompleteAsFailure = False
     }
 
 failedStreamResponseError :: ResponseFailure -> ApiError

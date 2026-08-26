@@ -66,7 +66,7 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Control.Monad (forM)
 import Data.Char (isAlphaNum)
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
@@ -407,7 +407,7 @@ cycleResumeSource browser =
             , resumeBrowserIndex = 0
             }
   where
-    providers = nub (map (.resumeProvider) browser.resumeBrowserAll)
+    providers = nubOrd (map (.resumeProvider) browser.resumeBrowserAll)
     first = \case
         [] -> Nothing
         value : _ -> Just value

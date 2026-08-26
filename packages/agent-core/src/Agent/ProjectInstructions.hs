@@ -6,24 +6,24 @@
 -- formatting of the discovered documents.
 module Agent.ProjectInstructions
     ( InstructionFile(..)
+    , InstructionWarning(..)
     , LoadedAgentsMd(..)
     , DiscoverOptions(..)
     , defaultDiscoverOptions
     , defaultProjectDocMaxBytes
     , discoverProjectInstructions
     , loadedInstructionFiles
+    , loadedInstructionWarnings
     , nonEmptyInstructionContent
     ) where
 
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.OsPath (directoryChain, toText, unsafeToFilePath)
-import Control.Applicative ((<|>))
 import Control.Concurrent.Async (concurrently)
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (SomeException, displayException, tryAny)
 import qualified Data.ByteString as BS
 import Data.List (sort)
-import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -52,15 +52,38 @@ data InstructionFile = InstructionFile
     , instructionContent :: !Text
     } deriving (Eq, Show)
 
+-- | A discovered instruction path that existed but could not be used.
+data InstructionWarning = InstructionWarning
+    { instructionWarningPath :: !OsPath
+    , instructionWarningMessage :: !Text
+    } deriving (Eq, Show)
+
 -- | Global home instructions plus project files from root -> cwd.
 data LoadedAgentsMd = LoadedAgentsMd
     { loadedGlobal :: !(Maybe InstructionFile)
     , loadedProject :: ![InstructionFile]
+    , loadedWarnings :: ![InstructionWarning]
     } deriving (Eq, Show)
+
+-- | One discovery pass: loaded files plus warnings for paths that failed.
+data InstructionLoad = InstructionLoad
+    { loadFiles :: ![InstructionFile]
+    , loadWarnings :: ![InstructionWarning]
+    }
+
+instance Semigroup InstructionLoad where
+    InstructionLoad filesA warningsA <> InstructionLoad filesB warningsB =
+        InstructionLoad (filesA <> filesB) (warningsA <> warningsB)
+
+instance Monoid InstructionLoad where
+    mempty = InstructionLoad [] []
 
 loadedInstructionFiles :: LoadedAgentsMd -> [InstructionFile]
 loadedInstructionFiles loaded =
     maybe id (:) loaded.loadedGlobal loaded.loadedProject
+
+loadedInstructionWarnings :: LoadedAgentsMd -> [InstructionWarning]
+loadedInstructionWarnings loaded = loaded.loadedWarnings
 
 nonEmptyInstructionContent :: InstructionFile -> Maybe Text
 nonEmptyInstructionContent file
@@ -88,8 +111,10 @@ defaultDiscoverOptions = DiscoverOptions
     , discoverRootMarkers = [unsafeEncodeUtf ".git"]
     }
 
--- | Load global + project instruction files for @cwd@. Empty / unreadable
--- files are skipped. Project files are ordered root -> cwd.
+-- | Load global + project instruction files for @cwd@. Empty files are
+-- skipped. Files that exist but cannot be read are reported in
+-- 'loadedWarnings' instead of disappearing. Project files are ordered
+-- root -> cwd.
 --
 -- A @.codex@ global directory selects Codex's narrow discovery contract.
 -- Other homes (including @.grok@, @.claude@, and @.haskell-agent@), and calls
@@ -97,7 +122,7 @@ defaultDiscoverOptions = DiscoverOptions
 discoverProjectInstructions :: DiscoverOptions -> OsPath -> IO LoadedAgentsMd
 discoverProjectInstructions options cwd
     | options.discoverMaxBytes <= 0 =
-        pure LoadedAgentsMd { loadedGlobal = Nothing, loadedProject = [] }
+        pure emptyLoadedAgentsMd
     | otherwise = do
         root <- findProjectRoot options.discoverRootMarkers cwd
         let dirs = directoryChain root cwd
@@ -105,18 +130,33 @@ discoverProjectInstructions options cwd
             if usesCodexDiscovery options
                 then do
                     (global, projectFiles) <- concurrently
-                        (maybe (pure Nothing) readPreferredAgentsMd
+                        (maybe (pure mempty) readPreferredAgentsMd
                             options.discoverGlobalDir)
                         (mapConcurrentlyBounded instructionDirectoryConcurrency
                             readPreferredAgentsMd
                             dirs)
-                    let project = mapMaybe id projectFiles
-                    pure LoadedAgentsMd
-                        { loadedGlobal = global
-                        , loadedProject = project
-                        }
+                    let project = mconcat projectFiles
+                    pure $ loadedAgentsFromPreferred global project
                 else discoverGrokInstructions options dirs
         pure (applyByteBudget options.discoverMaxBytes loaded)
+
+emptyLoadedAgentsMd :: LoadedAgentsMd
+emptyLoadedAgentsMd =
+    LoadedAgentsMd
+        { loadedGlobal = Nothing
+        , loadedProject = []
+        , loadedWarnings = []
+        }
+
+loadedAgentsFromPreferred :: InstructionLoad -> InstructionLoad -> LoadedAgentsMd
+loadedAgentsFromPreferred global project =
+    LoadedAgentsMd
+        { loadedGlobal = case global.loadFiles of
+            file : _ -> Just file
+            [] -> Nothing
+        , loadedProject = project.loadFiles
+        , loadedWarnings = global.loadWarnings <> project.loadWarnings
+        }
 
 usesCodexDiscovery :: DiscoverOptions -> Bool
 usesCodexDiscovery options =
@@ -130,32 +170,39 @@ discoverGrokInstructions
     -> IO LoadedAgentsMd
 discoverGrokInstructions options dirs = do
     (home, projectParts) <- concurrently
-        (maybe (pure []) readGrokHomeInstructions options.discoverGlobalDir)
+        (maybe (pure mempty) readGrokHomeInstructions options.discoverGlobalDir)
         (mapConcurrentlyBounded instructionDirectoryConcurrency
             readGrokDirectoryInstructions
             dirs)
-    let project = concat projectParts
-    combined <- dedupeInstructionFiles (home <> project)
-    pure $ case (home, combined) of
-        ([], _) -> LoadedAgentsMd
-            { loadedGlobal = Nothing
-            , loadedProject = combined
-            }
-        (_, first : rest) -> LoadedAgentsMd
-            { loadedGlobal = Just first
-            , loadedProject = rest
-            }
-        (_, []) -> LoadedAgentsMd
-            { loadedGlobal = Nothing
-            , loadedProject = []
-            }
+    let project = mconcat projectParts
+        combinedLoad = home <> project
+    combined <- dedupeInstructionFiles combinedLoad.loadFiles
+    pure $ case (home.loadFiles, combined) of
+        ([], _) ->
+            LoadedAgentsMd
+                { loadedGlobal = Nothing
+                , loadedProject = combined
+                , loadedWarnings = combinedLoad.loadWarnings
+                }
+        (_, first : rest) ->
+            LoadedAgentsMd
+                { loadedGlobal = Just first
+                , loadedProject = rest
+                , loadedWarnings = combinedLoad.loadWarnings
+                }
+        (_, []) ->
+            LoadedAgentsMd
+                { loadedGlobal = Nothing
+                , loadedProject = []
+                , loadedWarnings = combinedLoad.loadWarnings
+                }
 
 -- | Grok Build reads its own home first, followed by compatible Claude and
 -- Cursor homes. For custom harness homes, only that explicit directory is
 -- inspected.
-readGrokHomeInstructions :: OsPath -> IO [InstructionFile]
+readGrokHomeInstructions :: OsPath -> IO InstructionLoad
 readGrokHomeInstructions globalDir =
-    concat
+    mconcat
         <$> mapConcurrentlyBounded instructionDirectoryConcurrency
             readGrokHomeRoot
             roots
@@ -168,22 +215,21 @@ readGrokHomeInstructions globalDir =
             ]
         | otherwise = [globalDir]
 
-readGrokHomeRoot :: OsPath -> IO [InstructionFile]
+readGrokHomeRoot :: OsPath -> IO InstructionLoad
 readGrokHomeRoot dir = do
     (named, rules) <- concurrently
         (readNamedInstructionFiles dir)
         (readRulesDirectory (dir </> unsafeEncodeUtf "rules"))
     pure (named <> rules)
 
-readGrokDirectoryInstructions :: OsPath -> IO [InstructionFile]
+readGrokDirectoryInstructions :: OsPath -> IO InstructionLoad
 readGrokDirectoryInstructions dir = do
     (named, ruleGroups) <- concurrently
         (readNamedInstructionFiles dir)
         (mapConcurrentlyBounded instructionDirectoryConcurrency
             (readRulesDirectory . (dir </>))
             grokProjectRulesDirectories)
-    let rules = concat ruleGroups
-    pure (named <> rules)
+    pure (named <> mconcat ruleGroups)
 
 grokProjectRulesDirectories :: [OsPath]
 grokProjectRulesDirectories =
@@ -192,7 +238,7 @@ grokProjectRulesDirectories =
     , unsafeEncodeUtf ".cursor/rules"
     ]
 
-readNamedInstructionFiles :: OsPath -> IO [InstructionFile]
+readNamedInstructionFiles :: OsPath -> IO InstructionLoad
 readNamedInstructionFiles dir = do
     (preferredAgents, loadedOthers) <- concurrently
         (readPreferredAgentsMd dir)
@@ -201,20 +247,29 @@ readNamedInstructionFiles dir = do
                 loaded <- readAgentsFile (dir </> name)
                 pure (name, loaded))
             grokInstructionNames)
-    let names = case preferredAgents of
-            Just file
-                | takeFileName file.instructionPath
-                    == unsafeEncodeUtf "AGENTS.override.md" ->
-                    filter (not . isAgentsMdSpelling) grokInstructionNames
-            _ -> grokInstructionNames
+    let usedOverride =
+            any
+                (\file ->
+                    takeFileName file.instructionPath
+                        == unsafeEncodeUtf "AGENTS.override.md")
+                preferredAgents.loadFiles
+        names =
+            if usedOverride
+                then filter (not . isAgentsMdSpelling) grokInstructionNames
+                else grokInstructionNames
         allowedNames = Set.fromList names
         other =
-            mapMaybe snd
+            mconcat
                 [ loaded
-                | loaded@(name, _) <- loadedOthers
+                | (name, loaded) <- loadedOthers
                 , name `Set.member` allowedNames
                 ]
-    dedupeInstructionFiles (maybe [] pure preferredAgents <> other)
+        combined = preferredAgents <> other
+    files <- dedupeInstructionFiles combined.loadFiles
+    pure InstructionLoad
+        { loadFiles = files
+        , loadWarnings = combined.loadWarnings
+        }
 
 isAgentsMdSpelling :: OsPath -> Bool
 isAgentsMdSpelling name =
@@ -233,28 +288,30 @@ grokInstructionNames =
     , unsafeEncodeUtf ".claude/CLAUDE.local.md"
     ]
 
-readRulesDirectory :: OsPath -> IO [InstructionFile]
+readRulesDirectory :: OsPath -> IO InstructionLoad
 readRulesDirectory dir = do
     exists <- doesDirectoryExist dir
     if not exists
-        then pure []
-        else do
-            entries <- sort <$> listDirectory dir
-            let candidates =
-                    [ name
-                    | name <- entries
-                    , Text.toLower (toText (takeExtension name)) == ".md"
-                    ]
-            classified <-
-                mapConcurrentlyBounded instructionFileConcurrency
-                    (\name -> do
-                        exists <- doesFileExist (dir </> name)
-                        pure (name, exists))
-                    candidates
-            mapMaybe id
-                <$> mapConcurrentlyBounded instructionFileConcurrency
-                    (readAgentsFile . (dir </>))
-                    [name | (name, True) <- classified]
+        then pure mempty
+        else tryAny (listDirectory dir) >>= \case
+            Left err ->
+                pure (instructionIoWarning dir err)
+            Right entries -> do
+                let candidates =
+                        [ name
+                        | name <- sort entries
+                        , Text.toLower (toText (takeExtension name)) == ".md"
+                        ]
+                classified <-
+                    mapConcurrentlyBounded instructionFileConcurrency
+                        (\name -> do
+                            fileExists <- doesFileExist (dir </> name)
+                            pure (name, fileExists))
+                        candidates
+                mconcat
+                    <$> mapConcurrentlyBounded instructionFileConcurrency
+                        (readAgentsFile . (dir </>))
+                        [name | (name, True) <- classified]
 
 -- | Case-insensitive filesystems can resolve several compatibility spellings
 -- to the same file. Symlinked rule files can do the same. Keep the first
@@ -296,37 +353,73 @@ findProjectRoot markers start = go start
                     else go parent
 
 -- | Prefer @AGENTS.override.md@ over @AGENTS.md@ in a directory.
-readPreferredAgentsMd :: OsPath -> IO (Maybe InstructionFile)
+readPreferredAgentsMd :: OsPath -> IO InstructionLoad
 readPreferredAgentsMd dir = do
     (override, base) <- concurrently
         (readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.override.md"))
         (readAgentsFile (dir </> unsafeEncodeUtf "AGENTS.md"))
-    pure (override <|> base)
+    pure $ case override.loadFiles of
+        _ : _ ->
+            InstructionLoad
+                { loadFiles = override.loadFiles
+                , loadWarnings = override.loadWarnings <> base.loadWarnings
+                }
+        [] ->
+            base <> InstructionLoad [] override.loadWarnings
 
-readAgentsFile :: OsPath -> IO (Maybe InstructionFile)
+readAgentsFile :: OsPath -> IO InstructionLoad
 readAgentsFile path = do
     exists <- doesFileExist path
     if not exists
-        then pure Nothing
+        then pure mempty
         else tryAny (retryOnFileBusy (Text.readFile (unsafeToFilePath path))) >>= \case
-            Left _ -> pure Nothing
+            Left err ->
+                pure (instructionIoWarning path err)
             Right text ->
                 if Text.null (Text.strip text)
-                    then pure Nothing
-                    else pure $ Just InstructionFile
-                        { instructionPath = path
-                        , instructionContent = text
+                    then pure mempty
+                    else pure InstructionLoad
+                        { loadFiles =
+                            [ InstructionFile
+                                { instructionPath = path
+                                , instructionContent = text
+                                }
+                            ]
+                        , loadWarnings = []
                         }
+
+instructionIoWarning :: OsPath -> SomeException -> InstructionLoad
+instructionIoWarning path err =
+    InstructionLoad
+        { loadFiles = []
+        , loadWarnings =
+            [ InstructionWarning
+                { instructionWarningPath = path
+                , instructionWarningMessage = Text.pack (displayException err)
+                }
+            ]
+        }
 
 applyByteBudget :: Int -> LoadedAgentsMd -> LoadedAgentsMd
 applyByteBudget maxBytes loaded =
     case go maxBytes (loadedInstructionFiles loaded) of
-        [] -> LoadedAgentsMd Nothing []
+        [] ->
+            loaded
+                { loadedGlobal = Nothing
+                , loadedProject = []
+                }
         files@(first : rest) -> case loaded.loadedGlobal of
             Just global
                 | first.instructionPath == global.instructionPath ->
-                    LoadedAgentsMd (Just first) rest
-            _ -> LoadedAgentsMd Nothing files
+                    loaded
+                        { loadedGlobal = Just first
+                        , loadedProject = rest
+                        }
+            _ ->
+                loaded
+                    { loadedGlobal = Nothing
+                    , loadedProject = files
+                    }
   where
     go _ [] = []
     go remaining (file : rest)

@@ -9,6 +9,7 @@ module Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithSenderAndHook
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
+    , boundCompletedToolContinuations
     , compactOpenAIWith
     , installCompactOutcome
     , installLiveCompactOutcome
@@ -17,9 +18,13 @@ module Agent.CLI.Compaction
     , runProviderCompactWithContextWindow
     , runResponsesCompactWith
     , runResponsesCompactWithContextWindow
+    , OccupancyKind(..)
+    , OccupancySnapshot(..)
+    , estimatedOccupancy
+    , reportedOccupancy
     ) where
 
-import Agent.CLI.Error (formatApiError)
+import Agent.CLI.Error (formatApiError, formatException)
 import Agent.CLI.Session.History
     ( LiveConversation
     , writeLivePreviousResponseId
@@ -28,9 +33,11 @@ import Agent.CLI.Session.History
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
+    , BackendResult(..)
     , LoopEvent(..)
     , TokenUsage(..)
     , TurnInput(..)
+    , TurnOutput(..)
     , emptyTokenUsage
     )
 import qualified Agent.OpenAI.Client as OpenAI
@@ -75,10 +82,12 @@ import Control.Monad.Trans.Except
     ( ExceptT
     , throwE
     )
+import Control.Applicative ((<|>))
 import Control.Exception.Safe (catchAny, mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
-import Data.Maybe (fromMaybe)
+import Data.List (partition)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -91,6 +100,36 @@ data CompactOutcome = CompactOutcome
     , compactHistory :: ![ResponseItem]
     , compactSummary :: !Text
     } deriving (Eq, Show)
+
+-- | Whether cached occupancy is provider-reported full-request usage or an
+-- items-only estimate. Estimated snapshots must not be treated as complete
+-- occupancy because they omit instructions, skills, and tool schemas.
+data OccupancyKind
+    = ReportedOccupancy
+    | EstimatedOccupancy
+    deriving (Eq, Show)
+
+data OccupancySnapshot = OccupancySnapshot
+    { occupancyTokens :: !Int
+    , occupancyLength :: !Int
+    , occupancyKind :: !OccupancyKind
+    } deriving (Eq, Show)
+
+reportedOccupancy :: Int -> Int -> OccupancySnapshot
+reportedOccupancy tokens historyLength =
+    OccupancySnapshot
+        { occupancyTokens = tokens
+        , occupancyLength = historyLength
+        , occupancyKind = ReportedOccupancy
+        }
+
+estimatedOccupancy :: Int -> Int -> OccupancySnapshot
+estimatedOccupancy tokens historyLength =
+    OccupancySnapshot
+        { occupancyTokens = tokens
+        , occupancyLength = historyLength
+        , occupancyKind = EstimatedOccupancy
+        }
 
 type OpenAiCompactionSender =
     ResponseCreateParams -> IO (Either ApiError Response)
@@ -317,7 +356,7 @@ runAttemptAndRecord recordUsage action =
 installCompactOutcome
     :: IORef (Maybe Text)
     -> IORef [ResponseItem]
-    -> Maybe (IORef (Maybe (Int, Int)))
+    -> Maybe (IORef (Maybe OccupancySnapshot))
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -332,15 +371,15 @@ installCompactOutcome previous transcript contextTokens runCompact focus =
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->
-                        writeIORef ref $ Just
-                            ( outcome.compactAfterTokens
-                            , length outcome.compactHistory
-                            )
+                        writeIORef ref $ Just $
+                            estimatedOccupancy
+                                outcome.compactAfterTokens
+                                (length outcome.compactHistory)
         pure result
 
 installLiveCompactOutcome
     :: IORef LiveConversation
-    -> Maybe (IORef (Maybe (Int, Int)))
+    -> Maybe (IORef (Maybe OccupancySnapshot))
     -> (Maybe Text -> IO (Either Text CompactOutcome))
     -> Maybe Text
     -> IO (Either Text CompactOutcome)
@@ -355,10 +394,10 @@ installLiveCompactOutcome conversationRef contextTokens runCompact focus =
                 case contextTokens of
                     Nothing -> pure ()
                     Just ref ->
-                        writeIORef ref $ Just
-                            ( outcome.compactAfterTokens
-                            , length outcome.compactHistory
-                            )
+                        writeIORef ref $ Just $
+                            estimatedOccupancy
+                                outcome.compactAfterTokens
+                                (length outcome.compactHistory)
         pure result
 
 sendOpenAIRemoteCompaction
@@ -638,7 +677,7 @@ isPortableLocalSummaryItem = \case
 autoCompactOpenAiBackend
     :: TokenProvider
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackend =
@@ -650,7 +689,7 @@ autoCompactOpenAiBackendWithThreshold
     :: Maybe Int
     -> TokenProvider
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithThreshold configuredThreshold tokenProvider
@@ -671,7 +710,7 @@ autoCompactOpenAiBackendWithSender
     -> OpenAiCompactionSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
@@ -694,13 +733,16 @@ autoCompactOpenAiBackendWithSenderAndHook
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
     -> IO ()
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
         getParams onCompacted contextTokensRef backend =
     rejectOversizedInitialRequest getParams $
-        boundCompletedToolContinuations getParams $
+        boundCompletedToolContinuations
+            (codexEffectiveContextWindowFor . (.model))
+            getParams
+            contextTokensRef $
             autoCompactOpenAiBackendWithLimit
                 getLimit
                 compactAction
@@ -808,12 +850,9 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
                                                 }
                                         else attempt
                         _ -> attempt
-    estimateProjectedRequest _ history inputs = do
+    estimateProjectedRequest occupancy history inputs = do
         params <- getParams
-        pure $
-            estimateRequestTokensWithItems
-                params
-                (history <> turnInputsToItems inputs)
+        pure (projectRequestTokens (Just params) occupancy history inputs)
 
 rejectOversizedInitialRequest
     :: IO ResponseCreateParams
@@ -841,26 +880,51 @@ rejectOversizedInitialRequest getParams (Backend submit) =
 -- A completed tool result must be submitted against its live response chain
 -- before that call/output pair can be compacted. If the result itself would
 -- overflow the model context, cap only its output text while preserving the
--- protocol identifiers and continuation id.
+-- protocol identifiers and continuation id. Prefer the last provider-reported
+-- occupancy so skills, instructions, and tool schemas already counted in
+-- @input_tokens@ are not re-estimated with JSON length.
+--
+-- When a previous_response_id is present and occupancy is unknown, Codex only
+-- sends the new tool outputs, so size the continuation against that delta.
+-- Stateless providers and full-history replays trim older transcript items,
+-- keeping the unpaired function calls that match the in-flight results.
 boundCompletedToolContinuations
-    :: IO ResponseCreateParams
+    :: (ResponseCreateParams -> Int)
+    -> IO ResponseCreateParams
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
-boundCompletedToolContinuations getParams (Backend submit) =
+boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
     Backend \history previous inputs onEvent ->
-        if any isCompletedTool inputs
-            then do
+        if not (any isCompletedTool inputs)
+            then submit history previous inputs onEvent
+            else do
                 params <- getParams
-                let contextWindow =
-                        codexEffectiveContextWindowFor params.model
-                    requestTokens candidate =
-                        estimateRequestTokensWithItems
-                            params
-                            (history <> turnInputsToItems candidate)
-                if requestTokens inputs <= contextWindow
-                    then submit history previous inputs onEvent
-                    else
-                        case
+                occupancy <- readIORef contextTokensRef
+                let contextWindow = contextWindowFor params
+                let liveChain = isJust previous
+                    requestTokens candidate
+                        | liveChain =
+                            case occupancy of
+                                Just snapshot
+                                    | snapshot.occupancyLength == length history
+                                    , snapshot.occupancyTokens > 0
+                                    , snapshot.occupancyKind == ReportedOccupancy ->
+                                        snapshot.occupancyTokens
+                                            + estimateItemsTokens
+                                                (turnInputsToItems candidate)
+                                _ ->
+                                    estimateRequestTokensWithItems
+                                        params
+                                        (turnInputsToItems candidate)
+                        | otherwise =
+                            projectRequestTokens
+                                (Just params)
+                                occupancy
+                                history
+                                candidate
+                    truncated =
+                        fromMaybe inputs $
                             fitCompletedToolOutputsToLimit
                                 ( max 0
                                     ( contextWindow
@@ -870,26 +934,56 @@ boundCompletedToolContinuations getParams (Backend submit) =
                                 )
                                 requestTokens
                                 inputs
-                        of
-                            Just bounded ->
-                                submit history previous bounded onEvent
-                            Nothing ->
-                                case
-                                    fitCompletedToolOutputsToLimit
-                                        contextWindow
-                                        requestTokens
-                                        inputs
-                                of
-                                    Just bounded ->
-                                        submit history previous bounded onEvent
-                                    Nothing ->
-                                        pure $
-                                            Left toolContinuationTooLargeError
-            else submit history previous inputs onEvent
+                            <|> fitCompletedToolOutputsToLimit
+                                contextWindow
+                                requestTokens
+                                inputs
+                if requestTokens inputs <= contextWindow
+                    then submit history previous inputs onEvent
+                    else if requestTokens truncated <= contextWindow
+                        then submit history previous truncated onEvent
+                        else submitTrimmedHistory
+                            params
+                            contextWindow
+                            history
+                            truncated
+                            onEvent
   where
     isCompletedTool = \case
         CompletedTool{} -> True
         _ -> False
+
+    submitTrimmedHistory params contextWindow history inputs onEvent = do
+        let callIds = pendingToolCallIds inputs
+            (danglingCalls, prefix) =
+                partition (isPendingToolCall callIds) history
+            trailing = danglingCalls <> turnInputsToItems inputs
+            fittedPrefix =
+                trimResponseHistoryToFit
+                    contextWindow
+                    params
+                    trailing
+                    prefix
+            fittedHistory = fittedPrefix <> danglingCalls
+            fittedTokens =
+                estimateRequestTokensWithItems
+                    params
+                    (fittedHistory <> turnInputsToItems inputs)
+        if fittedTokens <= contextWindow
+            then submit fittedHistory Nothing inputs onEvent
+            else pure (Left toolContinuationTooLargeError)
+
+pendingToolCallIds :: [TurnInput] -> [Text]
+pendingToolCallIds inputs =
+    [ result.callId
+    | CompletedTool result <- inputs
+    ]
+
+isPendingToolCall :: [Text] -> ResponseItem -> Bool
+isPendingToolCall callIds = \case
+    FunctionCallItem call -> call.callId `elem` callIds
+    CustomToolCallItem call -> call.callId `elem` callIds
+    _ -> False
 
 fitCompletedToolOutputsToLimit
     :: Int
@@ -951,7 +1045,7 @@ toolOutputTruncationNotice =
 
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWith compactAction =
@@ -970,7 +1064,7 @@ autoCompactOpenAiBackendWith compactAction =
 
 autoCompactOpenAiBackendWithApi
     :: IO (Either ApiError CompactOutcome)
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithApi compactAction =
@@ -986,9 +1080,9 @@ autoCompactOpenAiBackendWithLimit
     :: IO Int
     -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
-    -> (Maybe (Int, Int) -> [ResponseItem] -> [TurnInput] -> IO Int)
+    -> (Maybe OccupancySnapshot -> [ResponseItem] -> [TurnInput] -> IO Int)
     -> IO ()
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
 autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
@@ -1044,14 +1138,23 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
 
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
-        writeIORef contextTokensRef $
-            Just (outcome.compactAfterTokens, length compactedHistory)
+            compactSnapshot =
+                Just $
+                    estimatedOccupancy
+                        outcome.compactAfterTokens
+                        (length compactedHistory)
+        writeIORef contextTokensRef compactSnapshot
         result <- restore (submit compactedHistory Nothing inputs onEvent)
         case result of
             Left _ -> rollback
-            Right _ -> do
-                invalidateContextTokens
-                onCompacted `catchAny` const (pure ())
+            Right backendResult -> do
+                writeIORef contextTokensRef $
+                    occupancySnapshot backendResult <|> compactSnapshot
+                onCompacted `catchAny` \err ->
+                    onEvent $
+                        WarningRaised
+                            ("failed to reload generated context after compaction: "
+                                <> formatException err)
         pure result
 
     submitAndTrack oldTokens history previous inputs onEvent = do
@@ -1060,15 +1163,9 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                 `onException` writeIORef contextTokensRef oldTokens
         case result of
             Left _ -> writeIORef contextTokensRef oldTokens
-            Right _ -> invalidateContextTokens
+            Right backendResult ->
+                writeIORef contextTokensRef (occupancySnapshot backendResult)
         pure result
-
-    -- Transcript state is committed by the loop after validating the response.
-    -- Keep this separate cache conservative until it becomes part of that
-    -- explicit state; otherwise cancellation or an invalid response id could
-    -- leave token metadata describing an uncommitted transcript.
-    invalidateContextTokens =
-        writeIORef contextTokensRef Nothing
 
     automaticCompactionError = \case
         ProviderError errorType message retryAfter ->
@@ -1082,19 +1179,61 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         err -> err
 
 estimateProjectedFromCache
-    :: Maybe (Int, Int)
+    :: Maybe OccupancySnapshot
     -> [ResponseItem]
     -> [TurnInput]
     -> IO Int
-estimateProjectedFromCache contextState history inputs =
-    pure $
-        case contextState of
-            Just (tokens, observedLength)
-                | observedLength >= 0
-                , observedLength == length history ->
-                    tokens + estimateItemsTokens pendingItems
-            _ ->
-                estimateItemsTokens (history <> pendingItems)
+estimateProjectedFromCache occupancy history inputs =
+    pure (projectRequestTokens Nothing occupancy history inputs)
+
+-- | Last provider-reported context occupancy after a committed response.
+-- @input_tokens@ already includes instructions, tools, and skills in the
+-- request; @output_tokens@ remain in the next turn's context.
+reportedContextTokens :: TokenUsage -> Maybe Int
+reportedContextTokens usage
+    | usage.inputTokens <= 0 && usage.outputTokens <= 0 = Nothing
+    | otherwise =
+        Just (max 0 usage.inputTokens + max 0 usage.outputTokens)
+
+occupancySnapshot :: BackendResult -> Maybe OccupancySnapshot
+occupancySnapshot result
+    | Text.null result.backendOutput.responseId = Nothing
+    | otherwise =
+        reportedContextTokens result.backendOutput.tokenUsage >>= \tokens ->
+            Just (reportedOccupancy tokens (length result.backendState))
+
+-- | Project the next request from last occupancy when that snapshot still
+-- describes @history@. Provider-reported occupancy already includes
+-- instructions, tools, and skills, so only unsent items are estimated.
+-- Estimated compaction snapshots are items-only; recompute against the
+-- complete request when params are available so those fields are counted.
+projectRequestTokens
+    :: Maybe ResponseCreateParams
+    -> Maybe OccupancySnapshot
+    -> [ResponseItem]
+    -> [TurnInput]
+    -> Int
+projectRequestTokens params occupancy history inputs =
+    case occupancy of
+        Just snapshot
+            | snapshot.occupancyLength == length history
+            , snapshot.occupancyTokens > 0
+            , snapshot.occupancyKind == ReportedOccupancy ->
+                snapshot.occupancyTokens + estimateItemsTokens pendingItems
+        Just snapshot
+            | snapshot.occupancyLength == length history
+            , snapshot.occupancyTokens > 0
+            , snapshot.occupancyKind == EstimatedOccupancy
+            , Nothing <- params ->
+                snapshot.occupancyTokens + estimateItemsTokens pendingItems
+        _ ->
+            case params of
+                Just requestParams ->
+                    estimateRequestTokensWithItems
+                        requestParams
+                        (history <> pendingItems)
+                Nothing ->
+                    estimateItemsTokens (history <> pendingItems)
   where
     pendingItems = turnInputsToItems inputs
 

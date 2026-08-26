@@ -30,7 +30,10 @@ import Agent.Store.Postgres.Hasql (mkStatement)
 
 import Agent.Store.Postgres.Connection
 import Agent.Store.Postgres.Scope (customSchemaStatements)
-import Agent.Store.Postgres.Session (sessionSchemaStatements)
+import Agent.Store.Postgres.Session
+    ( sessionSchemaStatements
+    , sessionSearchIndexStatements
+    )
 import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
     , learnedSkillSchemaStatements
@@ -149,6 +152,11 @@ coreMigrations =
         , migrationName = "session transcript effects and paging"
         , migrationStatements =
             [migrateSessionTranscriptEffectsStatement]
+        }
+    , Migration
+        { migrationVersion = 9
+        , migrationName = "trigram indexes for conversation search"
+        , migrationStatements = sessionSearchIndexStatements
         }
     ]
 

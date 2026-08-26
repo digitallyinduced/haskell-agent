@@ -59,7 +59,6 @@ import Agent.CLI.Input
     , truncateDisplayText
     )
 import Agent.CLI.Interrupt (CtrlCDecision)
-import Agent.CLI.Options (reasoningEfforts)
 import qualified Agent.CLI.TUI.Bridge as Bridge
 import Agent.CLI.TUI.Composer.Buffer
 import Agent.CLI.TUI.Composer.Edit
@@ -260,7 +259,7 @@ drawComposer appState =
                     , if Seq.null state.uiQueuedInputs
                         then
                             if not state.uiAwaitingInput
-                                then "next message"
+                                then "steer"
                                 else ""
                         else "queued "
                             <> Text.pack
@@ -386,7 +385,7 @@ renderDraft focused height state (rows, (row, column)) =
             withAttr Theme.mutedAttr $
                 txt
                     (if not state.uiAwaitingInput
-                        then "Type a follow-up…"
+                        then "Type guidance…"
                         else " ")
         | otherwise =
             vBox (map renderRow visibleRows)
@@ -508,7 +507,7 @@ handleEffortControlClick applyUiEvent = do
         then handlePromptControlClick applyUiEvent ReplChooseEffort
         else if ui.uiRunning && not overlayOpen
             then do
-                let efforts = reasoningEfforts
+                let efforts = ui.uiPrompt.promptEffortOptions
                     current = ui.uiPrompt.promptEffort
                     initial = fromMaybe 0 (elemIndex current efforts)
                     choose = \case
@@ -858,7 +857,17 @@ handleComposerKey
                         }
                 liftIO (state.appRuntime.runtimeBtw question)
             Nothing ->
-                enqueueInput state replLine (Just text) True
+                case steeringPrompt state.appUi text of
+                    Just prompt -> do
+                        applyUiEvent UiDraftSubmitted \current ->
+                            current
+                                { appSlashIndex = 0
+                                , appSlashDismissed = False
+                                , appUndo = []
+                                }
+                        liftIO (state.appRuntime.runtimeSteer prompt)
+                    Nothing ->
+                        enqueueInput state replLine (Just text) True
         modify' \current ->
             current
                 { appPasted = False
@@ -867,6 +876,14 @@ handleComposerKey
                 , appHistoryDraft = ""
                 }
         vScrollToEnd (viewportScroll ConversationViewport)
+
+    steeringPrompt ui text
+        | not ui.uiRunning = Nothing
+        | otherwise =
+            case parseReplLine text of
+                ReplPrompt prompt -> Just prompt
+                ReplExpandedPrompt _ prompt -> Just prompt
+                _ -> Nothing
 
     sendNow = do
         state <- get

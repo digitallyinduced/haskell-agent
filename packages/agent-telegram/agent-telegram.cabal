@@ -44,6 +44,9 @@ library
                     , Agent.Telegram.Log
                     , Agent.Telegram.Markdown
                     , Agent.Telegram.Types
+                    , Agent.Telegram.Types.Config
+                    , Agent.Telegram.Types.State
+                    , Agent.Telegram.Types.Wire
                     , Agent.Telegram.Voice
     build-depends:    agent-cli >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2

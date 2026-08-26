@@ -23,7 +23,9 @@ import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
+import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
 import qualified Agent.Tools.FileSystem.ListDirSpeculationSpec as ListDirSpeculationSpec
+import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
 import qualified Agent.Tools.FileSystem.ReadFileSpeculationSpec as ReadFileSpeculationSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.InterpreterSpec as InterpreterSpec
@@ -59,7 +61,9 @@ main = hspec do
     ToolDispatchSpec.spec
     ToolDSLSpec.spec
     GrepSpec.spec
+    ListDirSpec.spec
     ListDirSpeculationSpec.spec
+    ReadFileSpec.spec
     ReadFileSpeculationSpec.spec
     GhciSpec.spec
     InterpreterSpec.spec

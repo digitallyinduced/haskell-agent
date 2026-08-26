@@ -5,6 +5,8 @@ module Agent.Provider.Options
     , parseModelOverrides
     ) where
 
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -33,9 +35,9 @@ parseInt value = case reads value of
 --
 -- Whitespace around each side is ignored. Empty or malformed entries are
 -- skipped so one bad override does not discard the remaining valid entries.
-parseModelOverrides :: Text -> [(Text, Text)]
+parseModelOverrides :: Text -> Map Text Text
 parseModelOverrides raw =
-    Maybe.mapMaybe parseEntry (Text.splitOn "," raw)
+    Map.fromList (Maybe.mapMaybe parseEntry (Text.splitOn "," raw))
   where
     parseEntry entry = case Text.breakOn "=" entry of
         (source, target)

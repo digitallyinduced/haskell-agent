@@ -8,6 +8,9 @@ module Agent.Tools.FileSystem.ListDir
     , waitForListDirSpeculation
     , runListDir
     , listDirResolved
+    , DirNode(..)
+    , capNodes
+    , renderTree
     ) where
 
 import Agent.OsPath (fromText, toText)
@@ -20,6 +23,7 @@ import Agent.ToolDispatch
     , ToolResult
     , typedTool
     )
+import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.Tools.FileSystem.PathPrefix
     ( FileFingerprint
     , PathProgress(..)
@@ -32,7 +36,6 @@ import Agent.Tools.FileSystem.PathPrefix
     , uniqueWorkspaceCandidate
     , workspaceDirectoryIndex
     )
-import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
@@ -136,34 +139,37 @@ listDirResolved :: ToolEnv -> OsPath -> Text -> IO (Either Text Text)
 listDirResolved env path displayName = doesDirectoryExist path >>= \case
     False -> pure $ Left $
         "Error: " <> displayName <> " is not a valid directory"
-    True -> do
-        entries <- collectDir env.toolCwd path
-        let (shown, truncated) = capNodes maxListItems entries
-            tree = renderTree 0 shown
-            notice
-                | truncated =
-                    "\nLarge directory summarized; some nested entries were omitted."
-                | otherwise = ""
-        pure $ Right $
-            "Directory listing for " <> displayName <> ":\n" <> tree <> notice
+    True ->
+        collectDir env.toolCwd path >>= \case
+            Left err -> pure (Left err)
+            Right entries -> do
+                let (shown, truncated) = capNodes maxListItems entries
+                    tree = renderTree 0 shown
+                    notice
+                        | truncated =
+                            "\nLarge directory summarized; some nested entries were omitted."
+                        | otherwise = ""
+                pure $ Right $
+                    "Directory listing for " <> displayName <> ":\n" <> tree <> notice
 
 data DirNode
     = FileNode OsPath
     | DirectoryNode OsPath [DirNode]
+    | ErrorNode OsPath Text
     deriving (Eq, Show)
 
-collectDir :: OsPath -> OsPath -> IO [DirNode]
+collectDir :: OsPath -> OsPath -> IO (Either Text [DirNode])
 collectDir cwd path = do
     listed <- listDirectoryEntries path
     case listed of
-        Left _ -> pure []
+        Left err -> pure (Left err)
         Right raw -> do
             let visible = sortOn fst
                     [ (name, isDir)
                     | (name, isDir) <- raw
                     , not ("." `Text.isPrefixOf` toText name)
                     ]
-            fmap concat $ mapM (toNode cwd path) visible
+            Right <$> (fmap concat $ mapM (toNode cwd path) visible)
 
 toNode :: OsPath -> OsPath -> (OsPath, Bool) -> IO [DirNode]
 toNode cwd parent (name, isDir) = do
@@ -177,34 +183,65 @@ toNode cwd parent (name, isDir) = do
                 isLink <- pathIsSymbolicLink full
                 if isLink
                     then pure [FileNode name]
-                    else do
-                        children <- collectDir cwd full
-                        pure [summarizeDir name children]
+                    else
+                        collectDir cwd full >>= \case
+                            Left err ->
+                                pure [ErrorNode name err]
+                            Right children ->
+                                pure [summarizeDir name children]
 
+-- | Keep as many nodes as @budget@ allows. A directory that does not fit in
+-- full is included as a stub (and maybe a truncated child list) rather than
+-- dropped. Later siblings keep a reserved slot so a large subdirectory cannot
+-- hide the rest of the listing.
 capNodes :: Int -> [DirNode] -> ([DirNode], Bool)
 capNodes budget nodes =
-    let (kept, remaining) = go budget nodes
-    in (kept, remaining <= 0 && countNodes nodes > budget)
-  where
-    go remaining [] = ([], remaining)
-    go remaining _ | remaining <= 0 = ([], remaining)
-    go remaining (node : rest) =
-        let size = countNodes [node]
-            (more, left) = go (remaining - min size remaining) rest
-        in if size > remaining
-            then ([], 0)
-            else (node : more, left)
+    fill (max 0 budget) (length nodes) nodes
+
+-- | @fill remaining restCount nodes@ spends at most @remaining@ slots. @restCount@
+-- is the length of @nodes@, carried so later-sibling reservation stays linear.
+fill :: Int -> Int -> [DirNode] -> ([DirNode], Bool)
+fill _ _ [] = ([], False)
+fill remaining _ _ | remaining <= 0 = ([], True)
+fill remaining restCount (node : rest) =
+    let reserved = min (remaining - 1) (restCount - 1)
+        available = remaining - reserved
+        (keptNode, used, nodeTruncated) = takeNode available node
+        (more, restTruncated) =
+            fill (remaining - used) (restCount - 1) rest
+    in (keptNode : more, nodeTruncated || restTruncated)
+
+takeNode :: Int -> DirNode -> (DirNode, Int, Bool)
+takeNode budget node = case node of
+    FileNode name -> (FileNode name, 1, False)
+    ErrorNode name message -> (ErrorNode name message, 1, False)
+    DirectoryNode name children
+        | budget <= 1 ->
+            ( DirectoryNode name []
+            , 1
+            , not (null children)
+            )
+        | otherwise ->
+            let (keptChildren, truncated) =
+                    fill (budget - 1) (length children) children
+            in
+                ( DirectoryNode name keptChildren
+                , 1 + countNodes keptChildren
+                , truncated
+                )
 
 countNodes :: [DirNode] -> Int
 countNodes = sum . map \case
     FileNode _ -> 1
     DirectoryNode _ children -> 1 + countNodes children
+    ErrorNode _ _ -> 1
 
 summarizeDir :: OsPath -> [DirNode] -> DirNode
 summarizeDir name children =
     let files = [file | FileNode file <- children]
         dirs = [dir | dir@DirectoryNode{} <- children]
-    in if length files > 20 && null dirs
+        errors = [err | err@ErrorNode{} <- children]
+    in if length files > 20 && null dirs && null errors
         then DirectoryNode
             (fromText (toText name <> " " <> extensionSummary files)) []
         else DirectoryNode name children
@@ -226,22 +263,31 @@ extensionSummary files =
         <> Text.intercalate ", " (take 4 rendered) <> ")"
 
 renderTree :: Int -> [DirNode] -> Text
-renderTree depth = Text.unlines . map (renderNode depth)
+renderTree depth = Text.unlines . concatMap (renderNodeLines depth)
 
-renderNode :: Int -> DirNode -> Text
-renderNode depth = \case
-    FileNode name -> indent <> "- " <> toText name
+renderNodeLines :: Int -> DirNode -> [Text]
+renderNodeLines depth = \case
+    FileNode name -> [indent <> "- " <> toText name]
     DirectoryNode name children ->
-        let header = indent <> "- " <> toText name
-                <> if "/" `Text.isSuffixOf` toText name || "(" `Text.isInfixOf` toText name
-                    then ""
-                    else "/"
-        in if null children
-            then header
-            else header <> "\n" <> renderTree (depth + 1) children
+        (indent <> "- " <> directoryLabel name)
+            : concatMap (renderNodeLines (depth + 1)) children
+    ErrorNode name message ->
+        [ indent
+            <> "- "
+            <> toText name
+            <> "/ (listing failed: "
+            <> message
+            <> ")"
+        ]
   where
     indent = Text.replicate depth "  "
 
+directoryLabel :: OsPath -> Text
+directoryLabel name =
+    let label = toText name
+    in if "/" `Text.isSuffixOf` label || "(" `Text.isInfixOf` label
+        then label
+        else label <> "/"
 
 --------------------------------------------------------------------------------
 -- Streamed prefetch

@@ -255,6 +255,30 @@ spec = do
                 , cachedTokens = 80
                 }
 
+        it "preserves incomplete reason and hidden reasoning usage" do
+            let response =
+                    (testResponseWithUsage "resp-incomplete" []
+                        (Aeson.object
+                            [ "input_tokens" Aeson..= (120 :: Int)
+                            , "output_tokens" Aeson..= (32768 :: Int)
+                            , "total_tokens" Aeson..= (32888 :: Int)
+                            , "output_tokens_details" Aeson..= Aeson.object
+                                [ "reasoning_tokens" Aeson..= (32000 :: Int)
+                                ]
+                            ]))
+                        { status = ResponseIncomplete
+                        , incompleteDetails = Just IncompleteDetails
+                            { reason = "max_output_tokens"
+                            , extraFields = KeyMap.empty
+                            }
+                        }
+                turn = responseToTurnOutput response
+            turn.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "max_output_tokens"
+                , incompleteReasoningTokens = Just 32000
+                }
+            turn.tokenUsage.outputTokens `shouldBe` 32768
+
     describe "streamEventToLoopEvent" do
         it "maps output and summary deltas but hides raw reasoning" do
             streamEventToLoopEvent (deltaEvent EventOutputTextDelta "hello")
@@ -355,6 +379,12 @@ spec = do
                 `shouldBe` True
             streamOutputObserved
                 (ResponseIncompleteEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` False
+            streamOutputObserved
+                (ResponseIncompleteEvent
+                    (Aeson.object ["output" Aeson..= [Aeson.object []]])
+                    Nothing
+                    KeyMap.empty)
                 `shouldBe` True
 
         it "treats failed lifecycle events as output only when output is present" do

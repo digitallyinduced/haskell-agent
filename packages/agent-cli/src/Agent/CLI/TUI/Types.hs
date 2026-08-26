@@ -52,9 +52,11 @@ import Data.Int (Int64)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Map.Strict as Map
 import Data.Sequence (Seq)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Data.Time.Clock (NominalDiffTime)
 import Data.Word (Word64)
+import qualified Graphics.Vty as V
 
 data Name
     = ConversationViewport
@@ -71,6 +73,10 @@ data Name
         !Bool
         !Bool
         !(Maybe (Int, Bool))
+    | ConversationBodyCache
+        !AgentTarget
+        !BlockId
+        !Bool
     | CodeBlockCache !AgentTarget !BlockId !Int
     | CodeCopy !AgentTarget !BlockId !Int
     | MarkdownLink !Text
@@ -184,6 +190,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMailbox :: !AppEventMailbox
     , runtimeInput :: !FullscreenInputBuffer
     , runtimeCancel :: !(IO ())
+    , runtimeSteer :: !(Text -> IO ())
     , runtimeBtw :: !(Text -> IO ())
     , runtimeRecap :: !(IO ())
     , runtimeRestartEffort :: !(Text -> IO ())
@@ -204,9 +211,13 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeImagePreviewIdBase :: !Int
     , runtimeNativeImagePreviews :: !Bool
     , runtimeColor :: !Bool
+    , runtimeWaveTrough :: !V.Color
     , runtimeLoadSyntaxHighlighter
         :: !(IO (Either Text SyntaxHighlighter))
     , runtimeSyntaxLoadFinished :: !(NominalDiffTime -> IO ())
+    , runtimeSyntaxRequests :: !(TQueue Text)
+    , runtimeSyntaxHighlighter
+        :: !(IORef (Maybe SyntaxHighlighter))
     , runtimeInitial :: !UiState
     , runtimeSessionActions :: !(IORef FullscreenSessionActions)
     , runtimeHistoryRequests :: !(TQueue HistoryRequest)
@@ -229,6 +240,7 @@ data DictationSession = DictationSession
 -- resources belonging to a backend that has already shut down.
 data FullscreenSessionActions = FullscreenSessionActions
     { sessionCancel :: !(IO ())
+    , sessionSteer :: !(Text -> IO ())
     , sessionBtw :: !(Text -> IO ())
     , sessionRecap :: !(IO ())
     , sessionRestartEffort :: !(Text -> IO ())
@@ -289,6 +301,7 @@ data AppState = AppState
     , appClockNanos :: !Word64
     , appNativeProgressKeepaliveBucket :: !Int
     , appSyntaxHighlighter :: !(Maybe SyntaxHighlighter)
+    , appSyntaxRequested :: !(Set.Set Text)
     , appTerminalFocus :: !TerminalFocus
     }
 

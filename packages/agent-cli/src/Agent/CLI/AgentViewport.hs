@@ -25,6 +25,7 @@ module Agent.CLI.AgentViewport
     , responseItemPreviewLines
     , responseItemStepPreviews
     , responseItemsToUiState
+    , lookupAgentEntry
     , selectAgentTarget
     , selectedAgentEntry
     ) where
@@ -61,7 +62,7 @@ import Agent.TUI.Presentation (liveTodoPanelLines)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef)
-import Data.List (findIndex, sortOn)
+import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
 import qualified Data.Sequence as Seq
@@ -154,6 +155,10 @@ initialAgentViewportState selected entries =
         }
   where
     ordered = sortOn (.agentPath) entries
+
+lookupAgentEntry :: AgentTarget -> [AgentEntry] -> Maybe AgentEntry
+lookupAgentEntry target =
+    find ((== target) . (.agentTarget))
 
 selectedAgentEntry :: AgentViewportState -> Maybe AgentEntry
 selectedAgentEntry state = case state.viewportAll of

@@ -22,6 +22,7 @@ import Agent.CLI.TUI.App
     , mergeConversationView
     , newFullscreenInputBuffer
     , newFullscreenRuntime
+    , withTrackedVtyBuilder
     , wrapFullscreenKeyboardVty
     , motionDemandFor
     , motionDemandForTerminalFocus
@@ -38,10 +39,12 @@ import Agent.CLI.TUI.App
     , resumeSearchCursorColumn
     , selectedAgentConversation
     , setFullscreenWindowTitle
+    , syntaxLanguagesForBlocks
     , textOverlayDisplayText
     , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     )
+import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
@@ -79,9 +82,10 @@ import Agent.TUI.Presentation
 import Agent.TUI.Motion
 import Control.Concurrent.STM (newTChanIO)
 import qualified Data.ByteString as ByteString
-import Data.Foldable (find)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Foldable (find, toList)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -91,6 +95,17 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "on-demand syntax loading" do
+        it "requests grammars used by fenced file paths" do
+            let conversation =
+                    reduceUi
+                        (UiAssistantHistory
+                            "```src/Agent/Syntax.hs\nmain = pure ()\n```\n\
+                            \```python\nprint('hello')\n```")
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.fromList ["haskell", "python"]
+
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
             let url = "https://github.com/digitallyinduced/haskell-agent"
@@ -362,8 +377,8 @@ spec = do
             readIORef events `shouldReturn` [Right ()]
 
     describe "fullscreen window title" do
-        it "replays the stored session title through Vty output" do
-            titles <- newIORef ([] :: [String])
+        it "replays the stored session title as UTF-8 OSC bytes" do
+            titles <- newIORef ([] :: [ByteString.ByteString])
             input <- newFullscreenInputBuffer
             runtime <- newFullscreenRuntime
                 input
@@ -381,16 +396,49 @@ spec = do
                 False
                 initialUiState
             (_, output) <- VMock.mockTerminal (80, 24)
-            setFullscreenWindowTitle runtime "New session"
+            let title = "⠋ New session"
+            setFullscreenWindowTitle runtime title
             readIORef runtime.runtimeWindowTitle
-                `shouldReturn` Just "New session"
+                `shouldReturn` Just title
             applyStoredFullscreenWindowTitle
                 runtime
                 output
-                    { V.setOutputWindowTitle =
-                        \title -> modifyIORef' titles (<> [title])
+                    { V.outputByteBuffer =
+                        \bytes -> modifyIORef' titles (<> [bytes])
                     }
-            readIORef titles `shouldReturn` ["New session"]
+            actual <- readIORef titles
+            actual `shouldBe` [oscWindowTitleBytes title]
+            actual
+                `shouldSatisfy`
+                    any (ByteString.isInfixOf (ByteString.pack [0xE2, 0xA0, 0x8B]))
+
+    describe "fullscreen Vty ownership" do
+        it "shuts down the rebuilt Vty when exit follows suspension" do
+            shutdowns <- newIORef ([] :: [String])
+            useInitial <- newIORef True
+            (_, output) <- VMock.mockTerminal (80, 24)
+            initialVty <- mockVty
+                output
+                (modifyIORef' shutdowns (<> ["initial"]))
+                (pure False)
+            resumedVty <- mockVty
+                output
+                (modifyIORef' shutdowns (<> ["resumed"]))
+                (pure False)
+            let makeVty = do
+                    initial <- readIORef useInitial
+                    writeIORef useInitial False
+                    pure (if initial then initialVty else resumedVty)
+
+            (withTrackedVtyBuilder makeVty \buildVty -> do
+                first <- buildVty
+                V.shutdown first
+                _ <- buildVty
+                ioError (userError "forced exit"))
+                `shouldThrow` anyIOException
+
+            readIORef shutdowns
+                `shouldReturn` ["initial", "resumed"]
 
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do
@@ -408,9 +456,15 @@ spec = do
         it "crops the empty-conversation art to tiny render contexts" do
             let image =
                     V.picImage $
-                        renderWidget Nothing [lambdaArtWidget 0] (5, 3)
+                        renderWidget Nothing [lambdaArtWidget True 0] (5, 3)
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
+
+        it "sweeps the empty-conversation sheen over time" do
+            let rendered elapsed =
+                    show $
+                        renderWidget Nothing [lambdaArtWidget True elapsed] (42, 21)
+            rendered 0 `shouldNotBe` rendered 400
 
         it "shows quick-start actions only when the empty pane has room" do
             quickStartVisible 100 30 `shouldBe` True

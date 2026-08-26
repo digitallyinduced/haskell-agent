@@ -5,7 +5,8 @@ module Agent.CLI.Provider.OpenAI
     ) where
 
 import Agent.CLI.Compaction
-    ( OpenAiCompactionSender
+    ( OccupancySnapshot
+    , OpenAiCompactionSender
     , autoCompactOpenAiBackendWithSenderAndHook
     )
 import Agent.CLI.Connectivity (withConnectionRecovery)
@@ -60,7 +61,7 @@ lockedOpenAiSession
     -> TokenProvider
     -> IORef OpenAiPersistentConnection
     -> IO ResponseCreateParams
-    -> IORef (Maybe (Int, Int))
+    -> IORef (Maybe OccupancySnapshot)
     -> (TokenUsage -> IO ())
     -> IO ()
     -> (OpenAiCompactionSender, Backend)

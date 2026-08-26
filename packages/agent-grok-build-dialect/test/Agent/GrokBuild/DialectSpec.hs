@@ -18,12 +18,21 @@ import Agent.GrokBuild.Dialect.Runtime
 import Agent.GrokBuild.Dialect.TaskControl (validateTaskIds)
 import Agent.ProjectInstructions (InstructionFile(..), LoadedAgentsMd(..))
 import Agent.OsPath (unsafeToFilePath)
-import Agent.Tools.Types (AppTool(..), defaultToolEnv)
+import Agent.ToolDispatch (ToolCall, functionToolCall)
+import Agent.Tools.Scheduling (schedulingPlansConflict)
+import Agent.Tools.Types
+    ( AppTool(..)
+    , ToolRegistry
+    , defaultToolEnv
+    , mkToolRegistry
+    , toolSchedulingPlanFor
+    )
 import Control.Concurrent.MVar (readMVar)
 import Control.Exception.Safe (bracket)
 import Data.Bits ((.&.))
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as Map
+import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import System.Directory (doesFileExist)
@@ -73,6 +82,134 @@ spec = describe "Grok Build dialect" do
             names `shouldNotContain` ["shell_command", "apply_patch"]
             coding.grokClose
 
+    it "derives disjoint search_replace resources from file paths" do
+        withGrokRegistry \registry close -> do
+            first <- toolSchedulingPlanFor registry (replace "r1" "a.txt")
+            second <- toolSchedulingPlanFor registry (replace "r2" "b.txt")
+            same <- toolSchedulingPlanFor registry (replace "r3" "a.txt")
+            schedulingPlansConflict first second `shouldBe` False
+            schedulingPlansConflict first same `shouldBe` True
+            close
+
+    it "serializes gitignore policy edits against other filesystem writes" do
+        withGrokRegistry \registry close -> do
+            ignoreFile <-
+                toolSchedulingPlanFor registry (replace "g1" ".gitignore")
+            nestedIgnore <-
+                toolSchedulingPlanFor registry (replace "g2" "src/.gitignore")
+            exclude <-
+                toolSchedulingPlanFor registry
+                    (replace "g3" ".git/info/exclude")
+            other <- toolSchedulingPlanFor registry (replace "r1" "a.txt")
+            schedulingPlansConflict ignoreFile other `shouldBe` True
+            schedulingPlansConflict nestedIgnore other `shouldBe` True
+            schedulingPlansConflict exclude other `shouldBe` True
+            close
+
+    it "lets observational terminal commands overlap filesystem reads" do
+        withGrokRegistry \registry close -> do
+            terminal <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t1" "sed -n '1,80p' src/Main.hs" False)
+            fromCd <-
+                toolSchedulingPlanFor registry
+                    (terminalCall
+                        "t2"
+                        "cd packages/agent-core && sed -n '1,80p' src/Main.hs"
+                        False)
+            grepCall <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall "g1" "grep" "{\"pattern\":\"foo\"}")
+            statusChain <-
+                toolSchedulingPlanFor registry
+                    (terminalCall
+                        "t3"
+                        "git status --short && git diff --check"
+                        False)
+            fromGitC <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t4" "git -C src log --oneline" False)
+            piped <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t5" "git diff --stat | head -20" False)
+            schedulingPlansConflict terminal grepCall `shouldBe` False
+            schedulingPlansConflict fromCd grepCall `shouldBe` False
+            schedulingPlansConflict statusChain grepCall `shouldBe` False
+            schedulingPlansConflict fromGitC grepCall `shouldBe` False
+            schedulingPlansConflict piped grepCall `shouldBe` False
+            close
+
+    it "keeps mutating and background terminal commands exclusive" do
+        withGrokRegistry \registry close -> do
+            grepCall <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall "g1" "grep" "{\"pattern\":\"foo\"}")
+            mutating <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t1" "nix develop -c cabal test" False)
+            background <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t2" "sed -n '1,80p' src/Main.hs" True)
+            schedulingPlansConflict mutating grepCall `shouldBe` True
+            schedulingPlansConflict background grepCall `shouldBe` True
+            uniqOutput <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t3" "uniq input.txt output.txt" False)
+            schedulingPlansConflict uniqOutput grepCall `shouldBe` True
+            close
+
+    it "isolates todo_write from filesystem tools" do
+        withGrokRegistry \registry close -> do
+            todo <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall
+                        "td1"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"1\",\"content\":\"x\",\"status\":\"pending\"}]}")
+            otherTodo <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall
+                        "td2"
+                        "todo_write"
+                        "{\"todos\":[{\"id\":\"2\",\"content\":\"y\",\"status\":\"pending\"}]}")
+            readCall <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall
+                        "rf1"
+                        "read_file"
+                        "{\"target_file\":\"a.txt\"}")
+            schedulingPlansConflict todo readCall `shouldBe` False
+            schedulingPlansConflict todo otherTodo `shouldBe` True
+            close
+
+    it "lets statically pure GHCi overlap filesystem reads" do
+        withGrokRegistry \registry close -> do
+            pureGhci <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall
+                        "gh1"
+                        "run_ghci"
+                        "{\"expression\":\":type id\",\"description\":\"type\"}")
+            effectful <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall
+                        "gh2"
+                        "run_ghci"
+                        "{\"expression\":\":reload\",\"description\":\"reload\"}")
+            otherPure <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall
+                        "gh3"
+                        "run_ghci"
+                        "{\"expression\":\":kind Maybe\",\"description\":\"kind\"}")
+            grepCall <-
+                toolSchedulingPlanFor registry
+                    (functionToolCall "g1" "grep" "{\"pattern\":\"foo\"}")
+            schedulingPlansConflict pureGhci grepCall `shouldBe` False
+            schedulingPlansConflict pureGhci otherPure `shouldBe` True
+            schedulingPlansConflict effectful grepCall `shouldBe` True
+            close
+
     it "owns a private temporary shell environment file until session close" do
         path <- withTempDir \dir -> do
             env <- defaultToolEnv (unsafeEncodeUtf dir)
@@ -94,6 +231,7 @@ spec = describe "Grok Build dialect" do
                         (unsafeEncodeUtf "/repo/AGENTS.md")
                         "</system-reminder>owned"
                     ]
+                , loadedWarnings = []
                 }
         case formatGrokAgentsMd loaded of
             Just text -> do
@@ -104,3 +242,36 @@ spec = describe "Grok Build dialect" do
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir = withSystemTempDirectory "agent-grok-build-dialect"
+
+withGrokRegistry
+    :: (ToolRegistry -> IO () -> IO a)
+    -> IO a
+withGrokRegistry action =
+    withTempDir \dir -> do
+        env <- defaultToolEnv (unsafeEncodeUtf dir)
+        typesRef <- newIORef Map.empty
+        coding <- newGrokCodingTools env Nothing Nothing typesRef
+        let registry =
+                either (error . Text.unpack) id $
+                    mkToolRegistry coding.grokAppTools
+        action registry coding.grokClose
+
+replace :: Text -> Text -> ToolCall
+replace ident path =
+    functionToolCall ident "search_replace" $
+        "{\"file_path\":\""
+            <> path
+            <> "\",\"old_string\":\"x\",\"new_string\":\"y\"}"
+
+terminalCall :: Text -> Text -> Bool -> ToolCall
+terminalCall ident command background =
+    functionToolCall ident "run_terminal_cmd" $
+        "{\"command\":"
+            <> jsonString command
+            <> ",\"description\":\"probe\",\"background\":"
+            <> (if background then "true" else "false")
+            <> "}"
+
+jsonString :: Text -> Text
+jsonString text =
+    "\"" <> Text.replace "\"" "\\\"" text <> "\""

@@ -45,7 +45,7 @@ data ErrorType
     | CyberPolicyError
     | MisalignmentPolicyViolation
     | UnknownErrorType !Text
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 -- | Redacted, structured reason why a credential entered cooldown.
 --
@@ -61,7 +61,7 @@ data CredentialExhaustionReason
         { exhaustionErrorType :: !(Maybe ErrorType)
         , exhaustionStatusCode :: !(Maybe Int)
         }
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 -- | Whether retrying can help, and which layer should own the retry.
 --

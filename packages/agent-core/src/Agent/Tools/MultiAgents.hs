@@ -109,6 +109,8 @@ data MultiAgentContext = MultiAgentContext
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
       -- | Optional provider/billing-specific guidance for model overrides.
     , multiSpawnModelGuidance :: !(Maybe Text)
+      -- | When set, spawn_subagent may only use these model slugs (or inherit).
+    , multiAllowedChildModels :: !(Maybe [Text])
     }
 
 multiAgentNamespace :: Text

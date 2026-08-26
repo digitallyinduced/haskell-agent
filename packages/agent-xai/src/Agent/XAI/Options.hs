@@ -15,6 +15,8 @@ import Agent.Provider.Options
     , lookupNonEmptyEnv
     , parseModelOverrides
     )
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -63,7 +65,7 @@ grokPlatformArch = case SysInfo.arch of
 data ClientOptions = ClientOptions
     { baseUrl :: !String
       -- ^ Subscription proxy base URL including the @/v1@ segment.
-    , modelOverrides :: ![(Text, Text)]
+    , modelOverrides :: !(Map Text Text)
       -- ^ Exact-match request-model to xAI-model overrides.
     , defaultModel :: !Text
       -- ^ Target for non-Grok model names without an explicit override.
@@ -76,7 +78,7 @@ data ClientOptions = ClientOptions
 defaultClientOptions :: ClientOptions
 defaultClientOptions = ClientOptions
     { baseUrl = "https://cli-chat-proxy.grok.com/v1"
-    , modelOverrides = []
+    , modelOverrides = Map.empty
     , defaultModel = "grok-4.6"
     , requestTimeoutSeconds = 600
     , clientVersion = defaultGrokClientVersion
@@ -92,7 +94,7 @@ clientOptionsFromEnv = do
     clientVersion <- lookupNonEmptyEnv "XAI_GROK_CLIENT_VERSION"
     pure ClientOptions
         { baseUrl = Maybe.fromMaybe defaultClientOptions.baseUrl baseUrl
-        , modelOverrides = maybe [] (parseModelOverrides . Text.pack) modelMap
+        , modelOverrides = maybe Map.empty (parseModelOverrides . Text.pack) modelMap
         , defaultModel = maybe defaultClientOptions.defaultModel Text.pack defaultModel
         , requestTimeoutSeconds = Maybe.fromMaybe defaultClientOptions.requestTimeoutSeconds
             timeoutSeconds

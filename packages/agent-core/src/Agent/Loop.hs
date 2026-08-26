@@ -1,5 +1,7 @@
 -- | Provider-neutral agent loop: submit a user turn, dispatch tool calls,
--- feed results back, repeat until the model answers in text or hits a cap.
+-- feed results back, and repeat until the model answers in visible text or
+-- hits a cap. Reasoning-only or otherwise empty completions are treated as
+-- incomplete model steps, not as a finished turn.
 --
 -- Transports close over model, instructions, and tool schemas. This module
 -- only sees 'ToolCall' / 'ToolCallResult' and a 'Backend' callback.
@@ -16,14 +18,21 @@ module Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TokenUsage(..)
+    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
     , defaultLoopMaxTurns
+    , defaultLoopMaxEmptyContinuations
     , defaultLoopDispatch
     , emptyTokenUsage
     , emptyTurnOutput
+    , estimateTokensFromChars
+    , generationTokensPerSecond
+    , liveTokenRateMinMillis
+    , liveTokensPerSecond
     , runLoop
+    , tokensPerSecond
     , runLoopInputs
     , runLoopInputsDetailed
     ) where
@@ -108,7 +117,9 @@ import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
-import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import Data.IntMap.Strict (IntMap)
+import qualified Data.IntSet as IntSet
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -199,12 +210,53 @@ addTokenUsage a b = TokenUsage
     , cachedTokens = a.cachedTokens + b.cachedTokens
     }
 
+-- | Rough streamed-text estimate: about four Unicode scalars per token.
+estimateTokensFromChars :: Int -> Int
+estimateTokensFromChars chars = (max 0 chars + 3) `div` 4
+
+-- | Output tokens per second from a token count and elapsed milliseconds.
+tokensPerSecond :: Int -> Int -> Maybe Double
+tokensPerSecond tokens millis
+    | tokens <= 0 = Nothing
+    | millis <= 0 = Nothing
+    | otherwise =
+        Just (fromIntegral tokens * 1000 / fromIntegral millis)
+
+-- | Prefer provider-reported output tokens; fall back to the streamed-text
+-- estimate when usage is missing.
+generationTokensPerSecond :: Int -> Int -> Int -> Maybe Double
+generationTokensPerSecond reportedOutput chars millis =
+    tokensPerSecond
+        ( if reportedOutput > 0
+            then reportedOutput
+            else estimateTokensFromChars chars
+        )
+        millis
+
+-- | Live tok/s is noisy on the first few hundred milliseconds of a stream.
+liveTokenRateMinMillis :: Int
+liveTokenRateMinMillis = 400
+
+liveTokensPerSecond :: Int -> Int -> Maybe Double
+liveTokensPerSecond chars millis
+    | millis < liveTokenRateMinMillis = Nothing
+    | otherwise = tokensPerSecond (estimateTokensFromChars chars) millis
+
 data TurnOutput = TurnOutput
     { responseId :: !Text
     , toolCalls :: ![ToolCall]
     , assistantText :: !(Maybe Text)
     , tokenUsage :: !TokenUsage
+    , completion :: !TurnCompletion
     } deriving (Eq, Show)
+
+data TurnCompletion
+    = TurnCompleted
+    | TurnIncomplete
+        { incompleteReason :: !Text
+        , incompleteReasoningTokens :: !(Maybe Int)
+        }
+    deriving (Eq, Show)
 
 data LoopProgress
     = NoResponseCommitted
@@ -223,6 +275,7 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , toolCalls
     , assistantText
     , tokenUsage = emptyTokenUsage
+    , completion = TurnCompleted
     }
 
 data BackendResult = BackendResult
@@ -279,6 +332,11 @@ data LoopConfig = LoopConfig
     -- | 'Left' denies with that tool-output message; 'Right True' runs the
     -- tool; 'Right False' uses the usual user-rejection string.
     , loopApprove :: !(ToolCall -> IO (Either Text Bool))
+    -- | Read pending user guidance submitted while this loop is active.
+    -- Guidance is acknowledged only after the model response commits, so a
+    -- failed submission can be retried without losing it.
+    , loopReadSteering :: !(IO [TurnInput])
+    , loopCommitSteering :: !(Int -> IO ())
       -- | Soft-cancel latch. The caller owns resetting it before publishing
       -- the turn to input/interrupt handlers. When set, the loop stops after
       -- the current tool batch instead of asking the model for another step.
@@ -299,6 +357,7 @@ data LoopError
     -- boundary; this remains the terminal fallback for unwrapped backends.
     | LoopTransportAfterOutput ApiError
     | LoopMaxTurns TurnOutput
+    | LoopIncomplete TurnOutput
     | LoopNoResponseId
     -- | An unexpected synchronous exception escaped a backend, approval
     -- callback, event sink, or other loop-owned IO action. Keeping it in-band
@@ -311,7 +370,22 @@ data LoopError
     deriving (Eq, Show)
 
 defaultLoopMaxTurns :: Int
-defaultLoopMaxTurns = 500
+defaultLoopMaxTurns = 2000
+
+-- | Extra model samples after a reasoning-only or otherwise empty completion
+-- (no tool calls, no visible assistant text, and no pending steering). The
+-- original empty sample plus this many continuations are allowed before the
+-- loop stops.
+defaultLoopMaxEmptyContinuations :: Int
+defaultLoopMaxEmptyContinuations = 2
+
+hasVisibleAssistantText :: Maybe Text -> Bool
+hasVisibleAssistantText =
+    maybe False (not . Text.null . Text.strip)
+
+emptyContinuationWarning :: Text
+emptyContinuationWarning =
+    "The model produced no assistant text or tool calls after reasoning; stopping."
 
 -- | CLI-facing formatter: unknown tools, handler errors, and crashes stay
 -- in-band as tool output so the model can continue.
@@ -373,6 +447,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
     runtime <- newToolSpeculationRuntime (toolRegistryTools config0.loopTools)
+    initialSteering <- config0.loopReadSteering
     flip finally (closeToolSpeculationRuntime runtime) $
         withAsync (runLoopEventPump eventPump) \eventWorker -> do
         let config = config0
@@ -391,7 +466,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     (Left (LoopUnexpected (exceptionSummary exception)))
             protect state progress action =
                 tryAny action >>= either (unexpected state progress) pure
-            go state progress prev turnsUsed inputs lastOutput usageAcc = do
+            go state progress prev turnsUsed inputs steeringCount lastOutput
+                    usageAcc emptyContinuations = do
                 writeIORef progressRef (state, progress)
                 if turnsUsed >= config.loopMaxTurns
                     then finish state progress $ case lastOutput of
@@ -454,8 +530,10 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                             finish state progress (Left LoopNoResponseId)
                                     Right (Right BackendResult{..}) -> do
                                         continueCommitted
-                                            backendState backendOutput turnsUsed usageAcc
-            continueCommitted state turn turnsUsed usageAcc = do
+                                            backendState backendOutput turnsUsed
+                                            steeringCount usageAcc emptyContinuations
+            continueCommitted state turn turnsUsed steeringCount usageAcc
+                    emptyContinuations = do
                 writeIORef progressRef (state, ResponseCommitted)
                 protect state ResponseCommitted do
                     -- A cancel that landed during submitTurn after the race chose
@@ -468,32 +546,83 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         else do
                             config.loopOnEvent (TurnFinished turn)
                             let nextTurnsUsed = turnsUsed + 1
-                            if null turn.toolCalls
-                                then finish state ResponseCommitted $
-                                    Right LoopResult
-                                        { finalResponseId = turn.responseId
-                                        , finalText = turn.assistantText
-                                        , turnsUsed = nextTurnsUsed
-                                        , tokenUsage = usageAcc'
-                                        }
-                                else do
-                                    results <- runToolCalls config runtime turn.toolCalls
+                            case turn.completion of
+                                TurnIncomplete{} ->
+                                    finish state ResponseCommitted
+                                        (Left (LoopIncomplete turn))
+                                TurnCompleted -> do
+                                    config.loopCommitSteering steeringCount
+                                    results <-
+                                        if null turn.toolCalls
+                                            then pure []
+                                            else runToolCalls config runtime turn.toolCalls
                                     cancelledAfter <-
                                         isCancelled config.loopCancel
                                     if cancelledAfter
                                         then finish state ResponseCommitted
                                             (Left (LoopCancelled results))
-                                        else go
-                                            state
-                                            ResponseCommitted
-                                            (Just turn.responseId)
-                                            nextTurnsUsed
-                                            (map CompletedTool results)
-                                            (Just turn)
-                                            usageAcc'
+                                        else do
+                                            steering <- config.loopReadSteering
+                                            let continuation =
+                                                    map CompletedTool results
+                                                        <> steering
+                                            if not (null continuation)
+                                                then go
+                                                    state
+                                                    ResponseCommitted
+                                                    (Just turn.responseId)
+                                                    nextTurnsUsed
+                                                    continuation
+                                                    (length steering)
+                                                    (Just turn)
+                                                    usageAcc'
+                                                    0
+                                                else if hasVisibleAssistantText
+                                                    turn.assistantText
+                                                    then finish state ResponseCommitted $
+                                                        Right LoopResult
+                                                            { finalResponseId =
+                                                                turn.responseId
+                                                            , finalText =
+                                                                turn.assistantText
+                                                            , turnsUsed =
+                                                                nextTurnsUsed
+                                                            , tokenUsage = usageAcc'
+                                                            }
+                                                    else if emptyContinuations
+                                                            >= defaultLoopMaxEmptyContinuations
+                                                        then do
+                                                            config.loopOnEvent
+                                                                (WarningRaised
+                                                                    emptyContinuationWarning)
+                                                            finish state ResponseCommitted $
+                                                                Right LoopResult
+                                                                    { finalResponseId =
+                                                                        turn.responseId
+                                                                    , finalText =
+                                                                        turn.assistantText
+                                                                    , turnsUsed =
+                                                                        nextTurnsUsed
+                                                                    , tokenUsage = usageAcc'
+                                                                    }
+                                                        else
+                                                            go
+                                                                state
+                                                                ResponseCommitted
+                                                                (Just turn.responseId)
+                                                                nextTurnsUsed
+                                                                []
+                                                                0
+                                                                (Just turn)
+                                                                usageAcc'
+                                                                (emptyContinuations + 1)
             run =
-                go initialState NoResponseCommitted previousResponseId 0 firstInputs
-                    Nothing emptyTokenUsage
+                go initialState NoResponseCommitted previousResponseId 0
+                    (firstInputs <> initialSteering)
+                    (length initialSteering)
+                    Nothing
+                    emptyTokenUsage
+                    0
         raced <- race (waitLoopEventFailure eventWorker eventPump) run
         execution <- case raced of
             Left failure -> do
@@ -743,7 +872,7 @@ runToolCalls :: LoopConfig -> ToolSpeculationRuntime -> [ToolCall] -> IO [ToolCa
 runToolCalls config runtime calls = do
     prepared <- prepareIndexedToolCalls config (zip [0..] calls)
     scheduled <- traverse schedule prepared
-    go scheduled Map.empty
+    go scheduled IntMap.empty
   where
     schedule
         :: IndexedPreparedToolCall
@@ -758,17 +887,17 @@ runToolCalls config runtime calls = do
 
     go
         :: [PreparedScheduledToolCall]
-        -> Map.Map Int ToolCallResult
+        -> IntMap ToolCallResult
         -> IO [ToolCallResult]
     go [] completed =
-        pure (map snd (Map.toAscList completed))
+        pure (IntMap.elems completed)
     go remaining completed = do
         let ready = readyCalls remaining
-            readyIndexes = Map.fromList [(call.index, ()) | call <- ready]
+            readyIndexes = IntSet.fromList (map (.index) ready)
             pending =
                 filter
                     (\scheduled ->
-                        Map.notMember scheduled.index readyIndexes)
+                        IntSet.notMember scheduled.index readyIndexes)
                     remaining
         batchResults <-
             mapConcurrently
@@ -782,13 +911,13 @@ runToolCalls config runtime calls = do
                     (\result acc ->
                         maybe
                             acc
-                            (\(index, value) -> Map.insert index value acc)
+                            (\(index, value) -> IntMap.insert index value acc)
                             result)
                     completed
                     batchResults
         cancelled <- isCancelled config.loopCancel
         if cancelled
-            then pure (map snd (Map.toAscList completed'))
+            then pure (IntMap.elems completed')
             else go pending completed'
 
 data IndexedPreparedToolCall = IndexedPreparedToolCall

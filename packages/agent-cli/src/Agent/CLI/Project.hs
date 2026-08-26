@@ -1,10 +1,12 @@
--- | Project-scoped settings under @<project>/.haskell-agent/settings.json@.
+-- | Project-scoped settings under @<project>/.haskell-agent/settings.json@,
+-- plus the user-level last model under @~/.haskell-agent/settings.json@.
 module Agent.CLI.Project
     ( ProjectAccount(..)
     , ProjectModel(..)
     , ProjectSettings(..)
     , defaultProjectSettings
     , loadProjectSettings
+    , loadUserSettings
     , projectDialectFor
     , projectAccountFor
     , projectModelFor
@@ -15,6 +17,9 @@ module Agent.CLI.Project
     , saveProjectMaxConcurrentAgents
     , saveProjectAccount
     , saveProjectModel
+    , saveRememberedModel
+    , userSettingsPath
+    , withInheritedLastModel
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
@@ -67,6 +72,10 @@ projectSettingsPath projectRoot =
     projectRoot
         </> unsafeEncodeUtf ".haskell-agent"
         </> unsafeEncodeUtf "settings.json"
+
+-- | @~/.haskell-agent/settings.json@ given the user's home directory.
+userSettingsPath :: OsPath -> OsPath
+userSettingsPath = projectSettingsPath
 
 data ProjectModel = ProjectModel
     { projectModelTarget :: !ModelTarget
@@ -222,6 +231,22 @@ loadProjectSettings projectRoot = do
                         Left _ -> defaultProjectSettings
                         Right settings -> settings
 
+-- | User-level settings under @~/.haskell-agent/settings.json@.
+loadUserSettings :: OsPath -> IO ProjectSettings
+loadUserSettings = loadProjectSettings
+
+-- | Prefer the checkout's last model. A missing checkout value falls back to
+-- the user-level last model so a freshly created worktree inherits the model
+-- from the previous session instead of catalog or auth defaults.
+withInheritedLastModel
+    :: ProjectSettings
+    -> ProjectSettings
+    -> ProjectSettings
+withInheritedLastModel project user =
+    case project.settingsLastModel of
+        Just _ -> project
+        Nothing -> project { settingsLastModel = user.settingsLastModel }
+
 -- | Persist the project-wide auto-approve flag, creating @.haskell-agent@ as needed.
 saveProjectAutoApprove :: OsPath -> Bool -> IO ()
 saveProjectAutoApprove projectRoot autoApprove =
@@ -277,6 +302,19 @@ saveProjectModel projectRoot target =
             { settingsLastModel = Just ProjectModel
                 { projectModelTarget = target }
             }
+
+-- | Persist the selected model on the current checkout and as the user-level
+-- default so the next freshly created worktree can inherit it.
+saveRememberedModel
+    :: OsPath
+    -- ^ User home (@~/.haskell-agent/settings.json@).
+    -> OsPath
+    -- ^ Checkout root.
+    -> ModelTarget
+    -> IO ()
+saveRememberedModel home projectRoot target = do
+    saveProjectModel projectRoot target
+    saveProjectModel home target
 
 projectModelProvider :: ProjectSettings -> Maybe Provider
 projectModelProvider settings =

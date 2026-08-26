@@ -9,7 +9,9 @@ import Agent.CLI.Compaction
     , autoCompactOpenAiBackendWithThreshold
     , codexAutoCompactTokenLimit
     , compactOpenAIWith
+    , estimatedOccupancy
     , installCompactOutcome
+    , reportedOccupancy
     , runProviderCompact
     , runProviderCompactWith
     , runResponsesCompactWith
@@ -43,6 +45,7 @@ import Agent.Provider
     )
 import Control.Exception
     ( AsyncException(..)
+    , ErrorCall(..)
     , MaskingState(..)
     , getMaskingState
     , throwIO
@@ -567,7 +570,7 @@ spec = do
         it "clears the previous response id with transcript and token state" do
             previous <- newIORef (Just "resp-old")
             transcript <- newIORef [userTextItem "old context"]
-            contextState <- newIORef (Just (100, 1))
+            contextState <- newIORef (Just (reportedOccupancy 100 1))
             actionMasking <- newIORef MaskedUninterruptible
             let compactedHistory = [userTextItem "compacted context"]
                 outcome = CompactOutcome
@@ -590,11 +593,16 @@ spec = do
             readIORef previous `shouldReturn` Nothing
             readIORef transcript `shouldReturn` compactedHistory
             readIORef contextState `shouldReturn`
-                Just (outcome.compactAfterTokens, length compactedHistory)
+                Just
+                    ( estimatedOccupancy
+                        outcome.compactAfterTokens
+                        (length compactedHistory)
+                    )
 
         it "leaves live state unchanged when compaction fails" do
             let oldHistory = [userTextItem "old context"]
-                oldContextState = Just (100, length oldHistory)
+                oldContextState =
+                    Just (reportedOccupancy 100 (length oldHistory))
             previous <- newIORef (Just "resp-old")
             transcript <- newIORef oldHistory
             contextState <- newIORef oldContextState
@@ -640,8 +648,7 @@ spec = do
                 `shouldSatisfy` (< threshold)
             projectedWithoutTools `shouldSatisfy` (< threshold)
             projectedWithTools `shouldSatisfy` (>= threshold)
-            contextState <-
-                newIORef (Just (projectedWithoutTools, length history))
+            contextState <- newIORef Nothing
             compactCalls <- newIORef (0 :: Int)
             let sender _request = do
                     modifyIORef' compactCalls (+ 1)
@@ -652,6 +659,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -663,6 +671,63 @@ spec = do
                         base
             result <- backend.submitTurn history (Just "resp-old")
                 [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 1
+
+        it "does not treat estimated compact occupancy as full request usage" do
+            let history =
+                    [userTextItem (Text.replicate 12_000 "old context ")]
+                params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { tools = Just
+                        [ FunctionToolValue FunctionTool
+                            { name = "large_tool"
+                            , description =
+                                Just (Text.replicate 4_000 "schema")
+                            , parameters = Nothing
+                            , strict = Just True
+                            , extraFields = mempty
+                            }
+                        ]
+                    }
+                pending = [UserMessage "new"]
+                projectedItems = history <> [userTextItem "new"]
+                projectedWithoutTools =
+                    estimateRequestTokensWithItems
+                        defaultResponseCreateParams
+                        projectedItems
+                projectedWithTools =
+                    estimateRequestTokensWithItems params projectedItems
+                threshold =
+                    projectedWithoutTools
+                        + ((projectedWithTools - projectedWithoutTools) `div` 2)
+                estimatedTokens = 50
+            projectedWithoutTools `shouldSatisfy` (< threshold)
+            projectedWithTools `shouldSatisfy` (>= threshold)
+            estimatedTokens + 20 `shouldSatisfy` (< threshold)
+            contextState <- newIORef
+                (Just (estimatedOccupancy estimatedTokens (length history)))
+            compactCalls <- newIORef (0 :: Int)
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn history (Just "resp-old") pending
+                (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
             readIORef compactCalls `shouldReturn` 1
 
@@ -685,6 +750,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -724,6 +790,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -756,6 +823,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -775,10 +843,48 @@ spec = do
             readIORef continuationCalls `shouldReturn` 0
             readIORef contextState `shouldReturn` Nothing
 
+        it "reports a throwing post-compaction hook instead of swallowing it" do
+            let history = [userTextItem "old"]
+                threshold = 20
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
+            events <- newIORef []
+            let sender _request =
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSenderAndHook
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        (throwIO (ErrorCall "reload failed"))
+                        contextState
+                        base
+            result <- backend.submitTurn history Nothing
+                [UserMessage "new"]
+                (\event -> modifyIORef' events (<> [event]))
+            result `shouldSatisfy` either (const False) (const True)
+            events' <- readIORef events
+            events' `shouldSatisfy` any \case
+                WarningRaised message ->
+                    "failed to reload generated context after compaction"
+                        `Text.isInfixOf` message
+                    && "reload failed" `Text.isInfixOf` message
+                _ -> False
+
         it "runs the post-compaction hook only after a successful continuation" do
             let history = [userTextItem "old"]
                 threshold = 20
-            contextState <- newIORef (Just (threshold, length history))
+            contextState <- newIORef
+                (Just (reportedOccupancy threshold (length history)))
             hookCalls <- newIORef (0 :: Int)
             let sender _request =
                     pure (Right remoteCompactionResponse)
@@ -788,6 +894,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSenderAndHook
@@ -971,7 +1078,7 @@ spec = do
                 base = Backend \_ _ _ _ ->
                     error "configured compaction threshold should run first"
             contextState <- newIORef
-                (Just (threshold, length history))
+                (Just (reportedOccupancy threshold (length history)))
             let backend =
                     autoCompactOpenAiBackendWithThreshold
                         (Just threshold)
@@ -1014,6 +1121,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1059,6 +1167,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1081,7 +1190,8 @@ spec = do
             let oldHistory = [userTextItem "old"]
                 compactedHistory = [userTextItem "compacted"]
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit, length oldHistory))
+                (Just (reportedOccupancy
+                    codexAutoCompactTokenLimit (length oldHistory)))
             compactCalls <- newIORef (0 :: Int)
             seenPrevious <- newIORef []
             events <- newIORef []
@@ -1100,6 +1210,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
@@ -1111,14 +1222,16 @@ spec = do
             fmap (.backendState) result `shouldBe` Right compactedHistory
             readIORef compactCalls `shouldReturn` 1
             readIORef seenPrevious `shouldReturn` [Nothing]
-            readIORef contextState `shouldReturn` Nothing
+            readIORef contextState `shouldReturn`
+                Just (reportedOccupancy 25 (length compactedHistory))
             readIORef events `shouldReturn`
                 [ActivityUpdated "Compacting context…"]
 
         it "records active-session compaction usage before a failed continuation" do
             let history = [userTextItem "old"]
                 threshold = 20
-                oldContextState = Just (threshold - 2, length history)
+                oldContextState =
+                    Just (reportedOccupancy (threshold - 2) (length history))
             contextState <- newIORef oldContextState
             requests <- newIORef []
             recordedUsage <- newIORef []
@@ -1149,7 +1262,8 @@ spec = do
         it "rolls back compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
                 threshold = 20
-                oldContextState = Just (threshold, length history)
+                oldContextState =
+                    Just (reportedOccupancy threshold (length history))
             contextState <- newIORef oldContextState
             continuationMasking <- newIORef MaskedUninterruptible
             let sender _request =
@@ -1181,7 +1295,7 @@ spec = do
             let history = [userTextItem "old"]
                 threshold = 20
             contextState <- newIORef
-                (Just (threshold, length history))
+                (Just (reportedOccupancy threshold (length history)))
             compactCalls <- newIORef (0 :: Int)
             continuationCalls <- newIORef (0 :: Int)
             recordedUsage <- newIORef []
@@ -1203,6 +1317,7 @@ spec = do
                                     , toolCalls = []
                                     , assistantText = Just "ok"
                                     , tokenUsage = TokenUsage 20 5 0
+                                    , completion = TurnCompleted
                                     }
                 reconnectingContinuation =
                     withConnectionRecoveryUsing
@@ -1244,7 +1359,8 @@ spec = do
                     , callKind = FunctionCallKind
                     }
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit - 10, length oldHistory))
+                (Just (reportedOccupancy
+                    (codexAutoCompactTokenLimit - 10) (length oldHistory)))
             compactCalls <- newIORef (0 :: Int)
             recordedUsage <- newIORef []
             seenPrevious <- newIORef []
@@ -1260,6 +1376,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1277,7 +1394,8 @@ spec = do
             readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
             readIORef seenInputs `shouldReturn` [inputs]
             fmap (.backendState) result `shouldBe` Right oldHistory
-            readIORef contextState `shouldReturn` Nothing
+            readIORef contextState `shouldReturn`
+                Just (reportedOccupancy 25 (length oldHistory))
             readIORef recordedUsage `shouldReturn` []
 
         it "truncates oversized tool output before continuing the call" do
@@ -1322,6 +1440,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1357,12 +1476,361 @@ spec = do
                         ("expected one bounded tool result, got "
                             <> show submitted)
 
+        it "records provider-reported occupancy after a successful turn" do
+            let history = [userTextItem "old"]
+                usage = TokenUsage 1_200 80 400
+            contextState <- newIORef Nothing
+            let base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = usage
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        (\_ -> error "occupancy tracking should not compact")
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        contextState
+                        base
+            result <- backend.submitTurn history (Just "resp-old")
+                [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef contextState `shouldReturn`
+                Just (reportedOccupancy
+                    (usage.inputTokens + usage.outputTokens)
+                    (length history))
+
+        it "uses last reported occupancy instead of JSON length to decide compaction" do
+            let history =
+                    [userTextItem (Text.replicate 20_000 "old context ")]
+                params = defaultResponseCreateParams
+                occupancy = 200
+                pending = [UserMessage "new"]
+                jsonEstimate =
+                    estimateRequestTokensWithItems
+                        params
+                        (history <> turnInputsToItems pending)
+                threshold = occupancy + 1_000
+            jsonEstimate `shouldSatisfy` (> threshold)
+            contextState <- newIORef
+                (Just (reportedOccupancy occupancy (length history)))
+            compactCalls <- newIORef (0 :: Int)
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        (Just threshold)
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn history (Just "resp-old") pending
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef contextState `shouldReturn`
+                Just (reportedOccupancy 25 (length history))
+
+        it "does not truncate tool output when reported occupancy still fits" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-keep"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory =
+                    [ userTextItem
+                        (Text.replicate ((contextWindow + 1_000) * 4) "x")
+                    , danglingCall
+                    ]
+                toolResult = ToolCallResult
+                    { callId = "call-keep"
+                    , output = "hello from the tool"
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+                occupancy = 500
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef
+                (Just (reportedOccupancy occupancy (length oldHistory)))
+            seenInputs <- newIORef []
+            let base = Backend \_state _previous submitted _ -> do
+                    modifyIORef' seenInputs (<> [submitted])
+                    pure $ successful oldHistory TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        (\_ -> error "fitting tool output should not compact")
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef seenInputs `shouldReturn` [inputs]
+
+        it "truncates tool output against last reported occupancy" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-occupancy"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory = [userTextItem "run it", danglingCall]
+                originalOutput = Text.replicate 80_000 "x"
+                toolResult = ToolCallResult
+                    { callId = "call-occupancy"
+                    , output = originalOutput
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+                occupancy = contextWindow - 10_000
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (<= contextWindow)
+            contextState <- newIORef
+                (Just (reportedOccupancy occupancy (length oldHistory)))
+            seenInputs <- newIORef []
+            let base = Backend \_state _previous submitted _ -> do
+                    modifyIORef' seenInputs (<> [submitted])
+                    pure $ successful oldHistory TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        (\_ -> error "occupancy-bounded tool output should not compact")
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef seenInputs >>= \case
+                [[CompletedTool bounded]] -> do
+                    bounded.callId `shouldBe` toolResult.callId
+                    Text.length bounded.output
+                        `shouldSatisfy` (< Text.length originalOutput)
+                    bounded.output
+                        `shouldSatisfy`
+                            Text.isSuffixOf
+                                "[tool output truncated to fit the model context]"
+                submitted ->
+                    expectationFailure
+                        ("expected occupancy-bounded tool result, got "
+                            <> show submitted)
+
+        it "forgets occupancy when the provider omits usage" do
+            let history = [userTextItem "old"]
+                oldContextState =
+                    Just (reportedOccupancy 1_000 (length history))
+            contextState <- newIORef oldContextState
+            let base = Backend \state _ _ _ ->
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = emptyTokenUsage
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        (\_ -> error "missing usage should not compact")
+                        (const (pure ()))
+                        (pure defaultResponseCreateParams)
+                        contextState
+                        base
+            result <- backend.submitTurn history (Just "resp-old")
+                [UserMessage "new"] (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef contextState `shouldReturn` Nothing
+
+        it "continues a live tool chain without counting retained history against the window" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-live"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory =
+                    [ userTextItem
+                        (Text.replicate ((contextWindow + 1_000) * 4) "x")
+                    , danglingCall
+                    ]
+                toolResult = ToolCallResult
+                    { callId = "call-live"
+                    , output = "ok"
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            seenPrevious <- newIORef []
+            seenInputs <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state previous submitted _ -> do
+                    modifyIORef' seenPrevious (<> [previous])
+                    modifyIORef' seenInputs (<> [submitted])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
+            readIORef seenInputs `shouldReturn` [inputs]
+
+        it "trims replay history when a tool continuation cannot fit the full transcript" do
+            let params = defaultResponseCreateParams
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                danglingCall = FunctionCallItem FunctionCall
+                    { itemId = Nothing
+                    , callId = "call-replay"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Nothing
+                    , extraFields = mempty
+                    }
+                oldHistory =
+                    [ userTextItem
+                        (Text.replicate ((contextWindow + 1_000) * 4) "x")
+                    , danglingCall
+                    ]
+                toolResult = ToolCallResult
+                    { callId = "call-replay"
+                    , output = "ok"
+                    , callKind = FunctionCallKind
+                    }
+                inputs = [CompletedTool toolResult]
+            estimateRequestTokensWithItems
+                params
+                (oldHistory <> turnInputsToItems inputs)
+                `shouldSatisfy` (> contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            seenHistory <- newIORef []
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _previous _submitted _ -> do
+                    modifyIORef' seenHistory (<> [state])
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn oldHistory Nothing inputs
+                (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef seenHistory >>= \case
+                [fitted] -> do
+                    estimateRequestTokensWithItems
+                        params
+                        (fitted <> turnInputsToItems inputs)
+                        `shouldSatisfy` (<= contextWindow)
+                    any
+                        (\case
+                            FunctionCallItem call -> call.callId == "call-replay"
+                            _ -> False)
+                        fitted
+                        `shouldBe` True
+                seen ->
+                    expectationFailure
+                        ("expected one trimmed continuation, got "
+                            <> show (length seen))
+
         it "preserves typed provider failures from automatic compaction" do
             let history = [userTextItem "old"]
                 compactError =
                     ProviderError UsageLimitReached "quota exhausted" (Just 120)
             contextState <- newIORef
-                (Just (codexAutoCompactTokenLimit, length history))
+                (Just (reportedOccupancy
+                    codexAutoCompactTokenLimit (length history)))
             let compactAction =
                     pure (Left compactError)
                 base = Backend \_ _ _ _ ->
@@ -1380,7 +1848,8 @@ spec = do
         it "rejects compacted snapshots at or above the trigger" do
             let history = [userTextItem "old"]
                 oldContextState =
-                    Just (codexAutoCompactTokenLimit, length history)
+                    Just (reportedOccupancy
+                        codexAutoCompactTokenLimit (length history))
                 compactedHistory = [userTextItem "still too large"]
                 compactAction =
                     pure $ Right CompactOutcome
@@ -1398,6 +1867,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
@@ -1434,6 +1904,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith

@@ -4,13 +4,21 @@ module Agent.GrokBuild.Dialect.SearchReplace
     ) where
 
 import Agent.OsPath (fromText)
-import System.OsPath (OsPath)
+import System.OsPath
+    ( OsPath
+    , equalFilePath
+    , takeDirectory
+    , takeFileName
+    )
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( StreamedTool(..)
     , StreamedToolFactory
+    , ToolCall(..)
     , ToolInput(..)
+    , decodeToolArguments
+    , toolArgumentsValue
     , typedTool
     )
 import Agent.Tools.FileSystem.FilePrefetch
@@ -28,6 +36,11 @@ import Agent.Tools.FileSystem.FilePrefetch
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.Tools.IO (readTextFile, resolveUnderCwd, writeTextFile)
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , isPlanFileEditTarget
@@ -41,6 +54,7 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , withToolArgumentInterpreter
+    , withToolResourceClaims
     )
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
@@ -58,7 +72,6 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesFileExist)
-import System.OsPath (equalFilePath)
 
 data SearchReplaceArgs = SearchReplaceArgs
     { filePath :: Text
@@ -89,6 +102,7 @@ searchReplaceToolWithPrefetch env planMode prefetch =
             (searchReplaceInterpreter env planMode)
             (searchReplaceInterpreterWithCache env planMode)
             prefetch) $
+    withToolResourceClaims (searchReplaceResourceClaims env) $
     jsonTool "search_replace" searchReplaceDescription
     [ PropertySchema "file_path" PropertyString True $ Just
         "The path to the file to modify. Relative paths are resolved within the workspace. Absolute paths are accepted only when they resolve within the workspace."
@@ -102,6 +116,37 @@ searchReplaceToolWithPrefetch env planMode prefetch =
     False
     TurnSequential
     (typedTool "search_replace" (runSearchReplace env planMode))
+
+searchReplaceResourceClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+searchReplaceResourceClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text SearchReplaceArgs
+    of
+        Left err -> pure (Left err)
+        Right args ->
+            resolveUnderCwd env (fromText args.filePath)
+                >>= pure . fmap claimsForResolved
+
+claimsForResolved :: OsPath -> [ToolResourceClaim]
+claimsForResolved resolved
+    | isGitIgnorePolicyPath resolved =
+        [ToolResourceClaim ToolWrite ToolAllPaths]
+    | otherwise =
+        [ToolResourceClaim ToolWrite (ToolPath resolved)]
+
+-- | Ignore-policy edits change what later replacements may write, so they
+-- conflict with every filesystem claim rather than only the ignore file path.
+isGitIgnorePolicyPath :: OsPath -> Bool
+isGitIgnorePolicyPath path =
+    takeFileName path == fromText ".gitignore"
+        || (takeFileName path == fromText "exclude"
+            && takeFileName (takeDirectory path) == fromText "info"
+            && takeFileName (takeDirectory (takeDirectory path))
+                == fromText ".git")
 
 searchReplaceDescription :: Text
 searchReplaceDescription =

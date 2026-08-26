@@ -11,7 +11,9 @@ import Agent.CLI.Options (CliOptions(..))
 import Agent.CLI.Render (putTextLn)
 import Agent.CLI.Style
     ( glyphSession
+    , glyphWarn
     , roleMuted
+    , roleWarn
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.CLI.TUI.App
@@ -19,11 +21,14 @@ import Agent.CLI.TUI.App
     , emitUiEvent
     )
 import Agent.Dialect (Dialect)
+import Agent.OsPath (toText)
 import Agent.ProjectInstructions
     ( DiscoverOptions(..)
+    , InstructionWarning(..)
     , defaultDiscoverOptions
     , discoverProjectInstructions
     , loadedInstructionFiles
+    , loadedInstructionWarnings
     )
 import Agent.Responses.Types (ResponseItem)
 import Agent.TUI.Model (UiEvent(..))
@@ -61,6 +66,8 @@ loadAgentsContext
                 , discoverRootMarkers = defaultDiscoverOptions.discoverRootMarkers
                 }
         loaded <- discoverProjectInstructions discoverOptions cwd
+        mapM_ (reportInstructionWarning stderrHandle fullscreen)
+            (loadedInstructionWarnings loaded)
         let files = loadedInstructionFiles loaded
         case formatAgentsMdForDialect dialect cwd loaded of
             Nothing -> newIORef Nothing
@@ -77,3 +84,21 @@ loadAgentsContext
                     Just runtime ->
                         emitUiEvent runtime (UiSystemMessage message)
                 newIORef (Just text)
+
+reportInstructionWarning
+    :: Handle
+    -> Maybe FullscreenRuntime
+    -> InstructionWarning
+    -> IO ()
+reportInstructionWarning stderrHandle fullscreen warning = do
+    let message =
+            "agents.md ignored: "
+                <> toText warning.instructionWarningPath
+                <> ": "
+                <> warning.instructionWarningMessage
+    case fullscreen of
+        Nothing -> do
+            color <- resolveColor stderrHandle
+            putTextLn stderrHandle (roleWarn color (glyphWarn <> message))
+        Just runtime ->
+            emitUiEvent runtime (UiErrorMessage message)

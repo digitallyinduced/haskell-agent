@@ -82,6 +82,25 @@ spec = do
             finishConversation prepared ConversationFailed
                 `shouldBe` finishConversation prepared ConversationCancelled
 
+        it "retains failed multimodal input exactly once for retry" do
+            let image = ImageAttachment "image/png" "png-bytes"
+                multimodalPrepared = PreparedTurn
+                    { preparedBeforeItems = history
+                    , preparedConsumedStartup = Nothing
+                    , preparedTurnInputs =
+                        [UserMultimodal "inspect this" [image]]
+                    }
+                final = applyConversationPatch
+                    (finishConversation
+                        multimodalPrepared
+                        ConversationFailed)
+                    runningState
+            final.conversationTranscript
+                `shouldBe`
+                    history
+                        <> turnInputsToItems
+                            [UserMultimodal "inspect this" [image]]
+
         it "restores startup without changing conversation state for retry" do
             let final = applyConversationPatch
                     (finishConversation

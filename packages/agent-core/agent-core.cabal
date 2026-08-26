@@ -82,6 +82,7 @@ library
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
+                    , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Speculation
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
@@ -147,6 +148,7 @@ benchmark tool-scheduling-bench
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
                     , base >= 4.14 && < 5
+                    , filepath
                     , text
 
 benchmark loop-events-bench
@@ -214,7 +216,9 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.FileSystem.GrepSpec
+                    , Agent.Tools.FileSystem.ListDirSpec
                     , Agent.Tools.FileSystem.ListDirSpeculationSpec
+                    , Agent.Tools.FileSystem.ReadFileSpec
                     , Agent.Tools.FileSystem.ReadFileSpeculationSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.InterpreterSpec

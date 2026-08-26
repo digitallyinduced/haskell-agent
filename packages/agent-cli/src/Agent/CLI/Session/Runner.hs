@@ -43,6 +43,7 @@ import Agent.CLI.Recap
     , RecapRequest(..)
     )
 import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Clipboard (loadImagesFromPastedText)
 import Agent.CLI.Command
 import Agent.CLI.LearnedSkills
     ( defaultLearnedSkillContextMaxChars
@@ -80,9 +81,13 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , RenderState(..)
     , beginRenderTurn
+    , clearRenderTokenRate
+    , countGenerationChars
     , emptyRenderState
     , putTextLn
+    , recordRenderTurnRate
     , renderEvent
+    , resetRenderGeneration
     )
 import Agent.CLI.Session
 import Agent.CLI.Session.History
@@ -126,6 +131,7 @@ import Agent.CLI.Tools
     , requireToolRegistry
     , schemasFromAppTools
     )
+import Agent.CLI.Error (formatException)
 import Agent.CLI.Dialects
     ( filterBashTools
     , filterGhciTools
@@ -250,6 +256,14 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
       withIoLock action = withMVar ioLock (const action)
+      reportSessionError message =
+          case fullscreen of
+              Just runtime ->
+                  emitUiEvent runtime (UiErrorMessage message)
+              Nothing -> do
+                  color <- resolveColor stderrHandle
+                  putTextLn stderrHandle
+                      (roleWarn color (glyphWarn <> message))
   windowTitle <- newWindowTitleController
       options.optMotionMode
       startupWindowTitle
@@ -296,6 +310,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
+    steeringRef <- newIORef []
     let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
@@ -305,6 +320,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
+    lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
@@ -489,7 +505,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     session <-
                         (Just <$>
                             hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure Nothing
+                            `catchAny` \err -> do
+                                reportSessionError
+                                    ("failed to load selected agent: "
+                                        <> formatException err)
+                                pure Nothing
                     forM_ session \selectedSession -> do
                         withMVar selectedSession.subSessionHydrated \_ ->
                             writeIORef selectedSession.subSessionPinned True
@@ -497,7 +517,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         -- refill the same stable object now that it is pinned.
                         void
                             (hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure ()
+                            `catchAny` \err ->
+                                reportSessionError
+                                    ("failed to pin selected agent: "
+                                        <> formatException err)
             writeIORef selectedAgent target
         releaseSelectedAgent = \case
             AgentRoot -> pure ()
@@ -579,6 +602,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 conversationRef
                 planMode
             writeIORef usageRef emptyTokenUsage
+            modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
@@ -692,17 +716,22 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             case fullscreen of
                 Nothing -> renderEvent render event
                 Just runtime -> do
-                    case event of
-                        TurnStarted -> do
-                            now <- getCurrentTime
-                            modifyIORef' renderStateRef (beginRenderTurn now)
-                        TextDelta _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{statePrintedText = True})
-                        ToolStarted _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{stateActivity = "Running tool…"})
-                        _ -> pure ()
+                    now <- getCurrentTime
+                    modifyIORef' renderStateRef \state ->
+                        case event of
+                            TurnStarted -> beginRenderTurn now state
+                            TextDelta delta ->
+                                countGenerationChars delta
+                                    state{statePrintedText = True}
+                            ReasoningDelta delta ->
+                                countGenerationChars delta state
+                            ResponseRestarted _ ->
+                                resetRenderGeneration now state
+                            ToolStarted _ ->
+                                state{stateActivity = "Running tool…"}
+                            TurnFinished turn ->
+                                recordRenderTurnRate now turn state
+                            _ -> state
                     emitUiEvent runtime (UiLoop event)
         shellToolAllowed call = do
             ghciEnabled <- readIORef ghciEnabledRef
@@ -764,6 +793,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             ("Tool " <> call.name
                                 <> " is disabled by the current /shell setting."))
                     True -> approveRegisteredTool call
+            , loopReadSteering =
+                readIORef steeringRef
+            , loopCommitSteering = \count ->
+                atomicModifyIORef' steeringRef \pending ->
+                    (drop count pending, ())
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -877,12 +911,16 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     btwRequests <- newChan
     recapRequests <- newChan
     let
+        reloadGeneratedContextSafely =
+            reloadGeneratedContext `catchAny` \err ->
+                reportSessionError
+                    ("failed to reload generated context: "
+                        <> formatException err)
         compactRunnerWithContext focus = do
             result <- compactRunner focus
             case result of
                 Left _ -> pure ()
-                Right _ ->
-                    reloadGeneratedContext `catchAny` \_ -> pure ()
+                Right _ -> reloadGeneratedContextSafely
             pure result
         env = SessionEnv
             { sessionLoop = config
@@ -927,6 +965,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
             , sessionRestartEffort = restartEffortRef
+            , sessionLastFailedTurn = lastFailedTurnRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionAccount = accountRef
@@ -949,7 +988,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    writeIORef generatedContextReloadRef reloadGeneratedContext
+    writeIORef generatedContextReloadRef reloadGeneratedContextSafely
     writeIORef startup.startupRestartEffort \level -> do
         setSessionEffort env level
         writeIORef restartEffortRef (Just level)
@@ -958,6 +997,23 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
+            (\text -> do
+                images <- loadImagesFromPastedText text
+                let input = case images of
+                        Just attached@(_:_) ->
+                            UserMultimodal
+                                { userText = "Image attached."
+                                , userImages = attached
+                                }
+                        _ -> UserMessage text
+                callbacks.runnerPreparePromptSkillInputs
+                    env text [input] >>= \case
+                        Left err ->
+                            emitUiEvent runtime (UiErrorMessage err)
+                        Right inputs -> do
+                            atomicModifyIORef' steeringRef \pending ->
+                                (pending <> inputs, ())
+                            emitUiEvent runtime (UiInputSteered text))
             (writeChan btwRequests)
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->

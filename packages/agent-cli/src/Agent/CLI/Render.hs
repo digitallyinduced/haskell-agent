@@ -17,7 +17,13 @@ module Agent.CLI.Render
     , emptyRenderState
     , appendRenderReasoning
     , beginRenderTurn
+    , clearRenderTokenRate
+    , countGenerationChars
     , formatActivityLine
+    , recordRenderTurnRate
+    , renderTokensPerSecond
+    , resetRenderGeneration
+    , stateLastTokensPerSecond
     , formatElapsed
     , formatLoopError
     , formatLoopErrorAt
@@ -44,7 +50,8 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown
-    ( renderMarkdown
+    ( MarkdownFragmentSplit(..)
+    , renderMarkdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
@@ -64,6 +71,7 @@ import Agent.CLI.Error
     , formatApiErrorAt
     , formatApiErrorPersistedAt
     )
+import Agent.CLI.Status (formatTokensPerSecond)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
@@ -92,7 +100,15 @@ import Agent.CLI.Style
     , motionGlyphSet
     , style
     )
-import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
+import Agent.Loop
+    ( LoopError(..)
+    , LoopEvent(..)
+    , TokenUsage(..)
+    , TurnCompletion(..)
+    , TurnOutput(..)
+    , generationTokensPerSecond
+    , liveTokensPerSecond
+    )
 import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
@@ -113,6 +129,7 @@ import Agent.TextBuffer
     , emptyTextBuffer
     , textBufferToText
     )
+import Control.Applicative ((<|>))
 import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
@@ -163,6 +180,9 @@ data RenderState = RenderState
     , stateActivity :: !Text
     , stateStartedAt :: !(Maybe UTCTime)
     , stateToolCalls :: !(Map.Map Text ToolCall)
+    , stateGenerationChars :: !Int
+    , stateGenerationStartedAt :: !(Maybe UTCTime)
+    , stateLastTokensPerSecond :: !(Maybe Double)
     }
 
 stateThinkingVisible :: RenderState -> Bool
@@ -189,6 +209,9 @@ stateStartedAt state = state.stateStartedAt
 stateToolCalls :: RenderState -> Map.Map Text ToolCall
 stateToolCalls state = state.stateToolCalls
 
+stateLastTokensPerSecond :: RenderState -> Maybe Double
+stateLastTokensPerSecond state = state.stateLastTokensPerSecond
+
 emptyRenderState :: RenderState
 emptyRenderState =
     RenderState
@@ -200,6 +223,9 @@ emptyRenderState =
         , stateActivity = "Thinking…"
         , stateStartedAt = Nothing
         , stateToolCalls = Map.empty
+        , stateGenerationChars = 0
+        , stateGenerationStartedAt = Nothing
+        , stateLastTokensPerSecond = Nothing
         }
 
 data MarkdownStreamState = MarkdownStreamState
@@ -297,13 +323,25 @@ feedProse state input =
         (linePart, rest)
             | Text.null rest ->
                 let source = state.pending <> linePart
-                    (parsedReady, parsedPending, parsedContext) =
+                    MarkdownFragmentSplit
+                        { markdownReady = parsedReady
+                        , markdownPending = parsedPending
+                        , markdownPrevChar = parsedContext
+                        } =
                         splitMarkdownFragment state.context source
                     (stablePrefix, graphemePending) =
                         splitTerminalGraphemeSuffix parsedReady
-                    (ready, reparsedPending, nextContext)
+                    MarkdownFragmentSplit
+                        { markdownReady = ready
+                        , markdownPending = reparsedPending
+                        , markdownPrevChar = nextContext
+                        }
                         | Text.null graphemePending =
-                            (parsedReady, "", parsedContext)
+                            MarkdownFragmentSplit
+                                { markdownReady = parsedReady
+                                , markdownPending = ""
+                                , markdownPrevChar = parsedContext
+                                }
                         | otherwise =
                             splitMarkdownFragment
                                 state.context
@@ -321,7 +359,10 @@ feedProse state input =
                    )
             | otherwise ->
                 let source = state.pending <> linePart <> "\n"
-                    (ready, pending', _) =
+                    MarkdownFragmentSplit
+                        { markdownReady = ready
+                        , markdownPending = pending'
+                        } =
                         splitMarkdownFragment state.context source
                     rendered =
                         renderMarkdownFragment True state.context
@@ -561,7 +602,61 @@ beginRenderTurn now state =
     emptyRenderState
         { stateThinkingVisible = state.stateThinkingVisible
         , stateStartedAt = Just now
+        , stateGenerationStartedAt = Just now
+        , stateLastTokensPerSecond = state.stateLastTokensPerSecond
         }
+
+-- | Start a new generation-rate window without resetting the turn timer
+-- shown on the thinking spinner.
+resetRenderGeneration :: UTCTime -> RenderState -> RenderState
+resetRenderGeneration now state =
+    state
+        { stateGenerationChars = 0
+        , stateGenerationStartedAt = Just now
+        }
+
+-- | Drop a previous conversation's saved speed after /clear or /new.
+clearRenderTokenRate :: RenderState -> RenderState
+clearRenderTokenRate state =
+    state
+        { stateGenerationChars = 0
+        , stateGenerationStartedAt = Nothing
+        , stateLastTokensPerSecond = Nothing
+        }
+
+countGenerationChars :: Text -> RenderState -> RenderState
+countGenerationChars delta state =
+    state
+        { stateGenerationChars =
+            state.stateGenerationChars + Text.length delta
+        }
+
+generationElapsedMillis :: UTCTime -> RenderState -> Int
+generationElapsedMillis now state =
+    case state.stateGenerationStartedAt of
+        Nothing -> 0
+        Just started ->
+            max 0 (floor (diffUTCTime now started * 1000))
+
+recordRenderTurnRate :: UTCTime -> TurnOutput -> RenderState -> RenderState
+recordRenderTurnRate now turn state =
+    state
+        { stateLastTokensPerSecond =
+            generationTokensPerSecond
+                turn.tokenUsage.outputTokens
+                state.stateGenerationChars
+                (generationElapsedMillis now state)
+                <|> state.stateLastTokensPerSecond
+        }
+
+renderTokensPerSecond :: UTCTime -> RenderState -> Maybe Double
+renderTokensPerSecond now state
+    | Map.null state.stateToolCalls =
+        liveTokensPerSecond
+            state.stateGenerationChars
+            (generationElapsedMillis now state)
+            <|> state.stateLastTokensPerSecond
+    | otherwise = state.stateLastTokensPerSecond
 
 appendRenderReasoning :: Text -> RenderState -> RenderState
 appendRenderReasoning delta state =
@@ -580,6 +675,8 @@ renderEvent config event =
 renderEventUnlocked :: RenderConfig -> LoopEvent -> IO ()
 renderEventUnlocked config = \case
     TextDelta delta -> do
+        modifyRenderState config \state ->
+            (countGenerationChars delta state, ())
         commitThinkingUnlocked config
         if config.renderColor
             then do
@@ -589,7 +686,9 @@ renderEventUnlocked config = \case
                     (state{statePrintedText = True}, ())
                 Text.hPutStr config.renderStdout delta
                 hFlush config.renderStdout
-    ReasoningDelta delta ->
+    ReasoningDelta delta -> do
+        modifyRenderState config \state ->
+            (countGenerationChars delta state, ())
         appendReasoningUnlocked config delta
     ActivityUpdated activity -> do
         modifyRenderState config \state ->
@@ -621,12 +720,25 @@ renderEventUnlocked config = \case
                         , stateLiveActive = False
                         }
                     , ())
+        now <- getCurrentTime
         modifyRenderState config \state ->
-            (setRenderActivity "Retrying response…" state, ())
+            ( setRenderActivity
+                "Retrying response…"
+                (resetRenderGeneration now state)
+            , ()
+            )
         putTextLn config.renderStderr
             (roleWarn config.renderColor (glyphWarn <> message))
         startThinkingSpinnerUnlocked config
     TurnStarted -> do
+        -- A later sample (tool follow-up or empty reasoning continuation)
+        -- must commit any buffered thought before resetting render state.
+        -- Otherwise beginRenderTurn discards the summary without painting it.
+        buffered <-
+            textBufferToText . stateReasoningBuffer
+                <$> readRenderState config
+        unless (Text.null (Text.strip buffered)) $
+            commitThinkingUnlocked config
         now <- getCurrentTime
         modifyRenderState config \state ->
             (beginRenderTurn now state, ())
@@ -635,6 +747,9 @@ renderEventUnlocked config = \case
     -- Pre-tool prose ("I'll check…") is shown before tool lines; the final
     -- tool-free turn is the main answer.
     TurnFinished turn -> do
+        now <- getCurrentTime
+        modifyRenderState config \state ->
+            (recordRenderTurnRate now turn state, ())
         commitThinkingUnlocked config
         when config.renderColor do
             didPrint <- finalizeAssistantBuffer config turn.assistantText
@@ -848,7 +963,9 @@ paintThinkingFrame config = do
 
 paintThinkingFrameAt :: RenderConfig -> Int -> IO ()
 paintThinkingFrameAt config motionMillis = do
-    activity <- (.stateActivity) <$> readRenderState config
+    state <- readRenderState config
+    now <- getCurrentTime
+    let activity = state.stateActivity
     elapsed <- thinkingElapsed config
     let glyph =
             foregroundIndicator
@@ -861,6 +978,7 @@ paintThinkingFrameAt config motionMillis = do
                 glyph
                 activity
                 elapsed
+                (renderTokensPerSecond now state)
     void $ tryIO do
         Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
         hFlush config.renderStderr
@@ -966,11 +1084,15 @@ wrapOne width line
             go rest (acc <> " " <> word)
         | otherwise = acc : go (word : rest) ""
 
--- | One-line live status: spinner, current activity, elapsed time.
-formatActivityLine :: Bool -> Text -> Text -> Double -> Text
-formatActivityLine color glyph activity seconds =
+-- | One-line live status: spinner, current activity, elapsed time, tok/s.
+formatActivityLine :: Bool -> Text -> Text -> Double -> Maybe Double -> Text
+formatActivityLine color glyph activity seconds rate =
     roleThinking color (glyph <> " " <> activity)
-        <> roleMuted color ("  " <> formatElapsed seconds)
+        <> roleMuted color ("  " <> formatElapsed seconds <> rateSuffix)
+  where
+    rateSuffix = case rate of
+        Just value -> " · " <> formatTokensPerSecond value
+        Nothing -> ""
 
 -- | Compact elapsed time: @0.4s@, @12.4s@, @1m20s@.
 formatElapsed :: Double -> Text
@@ -1178,6 +1300,8 @@ formatLoopErrorPersistedAt now = \case
     LoopMaxTurns turn ->
         "Stopped: maximum turns reached."
             <> maybe "" ("\n" <>) turn.assistantText
+    LoopIncomplete turn ->
+        formatIncompleteResponse turn
     LoopNoResponseId ->
         "Provider returned an incomplete response.\nRetry the message."
     LoopUnexpected message ->
@@ -1203,6 +1327,8 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
     LoopMaxTurns turn ->
         roleError color (glyphErr <> "stopped: max turns reached")
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
+    LoopIncomplete turn ->
+        roleError color (glyphErr <> formatIncompleteResponse turn)
     LoopNoResponseId ->
         roleError color
             (glyphErr
@@ -1216,6 +1342,31 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
                 <> "\nRetry the message.")
     LoopCancelled _ ->
         roleMuted color (glyphCancel <> "cancelled")
+
+formatIncompleteResponse :: TurnOutput -> Text
+formatIncompleteResponse turn =
+    "Response incomplete: "
+        <> reason
+        <> "."
+        <> tokenDetails
+        <> "\nUse /retry to retry the same message and attachments."
+  where
+    (reason, reasoningTokens) = case turn.completion of
+        TurnIncomplete incompleteReason incompleteReasoningTokens ->
+            (incompleteReason, incompleteReasoningTokens)
+        TurnCompleted -> ("unknown", Nothing)
+    outputTokens = turn.tokenUsage.outputTokens
+    tokenDetails
+        | outputTokens <= 0 && reasoningTokens == Nothing = ""
+        | otherwise =
+            "\nProvider reported "
+                <> Text.pack (show outputTokens)
+                <> " output tokens"
+                <> maybe ""
+                    (\tokens ->
+                        " (" <> Text.pack (show tokens) <> " reasoning tokens)")
+                    reasoningTokens
+                <> "."
 
 formatInterruptedResponse :: Text -> Text
 formatInterruptedResponse details =

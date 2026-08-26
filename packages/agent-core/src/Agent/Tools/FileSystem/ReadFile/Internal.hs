@@ -71,34 +71,43 @@ readFileResolvedContent path args
 
 formatReadFileContent :: Text -> ReadFileArgs -> Either Text Text
 formatReadFileContent content args =
-    let allLines = Text.splitOn "\n" content
-        total = length allLines
-        start = resolveReadStartLine content args.offset
-        window = drop (start - 1) allLines
-        takeCount = min maxReadLines (fromMaybe maxReadLines args.limit)
-        taken = take takeCount window
-        numbered = formatNumbered start taken
-        tokens = estimateTokens numbered
-        rangeSpecified = args.offset /= Nothing || args.limit /= Nothing
-    in if start > total && total > 0
-        then Right $ "Offset " <> Text.pack (show start)
-            <> " is beyond the end of the file ("
-            <> Text.pack (show total) <> " lines)."
-        else if tokens > maxReadTokens
-            then Left (tokenLimitMessage tokens rangeSpecified args)
-            else Right numbered
+    case args.limit of
+        Just n | n <= 0 ->
+            Left "limit must be a positive integer"
+        _ ->
+            let allLines = readFileLines content
+                total = length allLines
+                start = resolveReadStartLine total args.offset
+                window = drop (start - 1) allLines
+                takeCount = min maxReadLines (fromMaybe maxReadLines args.limit)
+                taken = take takeCount window
+                numbered = formatNumbered start taken
+                tokens = estimateTokens numbered
+                rangeSpecified = args.offset /= Nothing || args.limit /= Nothing
+            in if start > total && total > 0
+                then Right $ "Offset " <> Text.pack (show start)
+                    <> " is beyond the end of the file ("
+                    <> Text.pack (show total) <> " lines)."
+                else if tokens > maxReadTokens
+                    then Left (tokenLimitMessage tokens rangeSpecified args)
+                    else Right numbered
 
-resolveReadStartLine :: Text -> Maybe Int -> Int
-resolveReadStartLine content offset = case fromMaybe 1 offset of
+-- | Split into display lines without treating a POSIX trailing newline as an
+-- extra empty line.
+readFileLines :: Text -> [Text]
+readFileLines content =
+    let fields = Text.splitOn "\n" content
+    in if Text.isSuffixOf "\n" content
+        then case reverse fields of
+            "" : rest -> reverse rest
+            _ -> fields
+        else fields
+
+resolveReadStartLine :: Int -> Maybe Int -> Int
+resolveReadStartLine totalLines offset = case fromMaybe 1 offset of
     0 -> 1
     n | n > 0 -> n
-    n ->
-        let totalFields = length (Text.splitOn "\n" content)
-            extra
-                | not (Text.null content)
-                    && not (Text.isSuffixOf "\n" content) = 1
-                | otherwise = 0
-        in max 1 (totalFields + extra + n + 1)
+    n -> max 1 (totalLines + n + 1)
 
 estimateTokens :: Text -> Int
 estimateTokens text = max 1 (Text.length text `div` 4)

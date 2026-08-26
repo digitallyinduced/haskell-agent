@@ -13,12 +13,18 @@ module Agent.CLI.Subagents.Runtime
     , resolveChildModelAndEffort
     , runCodexSubagent
     , runHttpSubagent
+    , runXaiParentSubagent
+    , grokSpawnedChildIdentity
+    , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
     ) where
 
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
-import Agent.CLI.Compaction (autoCompactOpenAiBackendWithSender)
+import Agent.CLI.Compaction
+    ( OccupancySnapshot
+    , autoCompactOpenAiBackendWithSender
+    )
 import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.CLI.Options
     ( ApprovalPolicy
@@ -111,6 +117,7 @@ import Agent.Responses.Types
 import Agent.Subagents
     ( RunSubagent
     , SubagentId(..)
+    , SubagentIdentity(..)
     , SubagentRegistry
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
@@ -136,10 +143,13 @@ import Agent.GrokBuild.Dialect.Prompt
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpec(..)
     , GrokSubagentSpecs
+    , canonicalizeGrokChildModel
     , defaultSubagentType
+    , isLunaSubagentModel
     , lookupAgentModel
     , lookupAgentReasoningEffort
     , lookupAgentType
+    , lunaSubagentModel
     , recordAgentSpec
     )
 import Agent.Tools.MultiAgents
@@ -167,7 +177,7 @@ import Control.Monad (unless, void, when)
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
@@ -176,7 +186,7 @@ import qualified System.Info as SystemInfo
 
 data SubagentSession = SubagentSession
     { subSessionTranscript :: !(IORef [ResponseItem])
-    , subSessionContextTokens :: !(IORef (Maybe (Int, Int)))
+    , subSessionContextTokens :: !(IORef (Maybe OccupancySnapshot))
     , subSessionProvider :: !Provider
     , subSessionConnection :: !Text
     , subSessionEffectiveModel :: !Text
@@ -209,6 +219,8 @@ data SubagentRuntime = SubagentRuntime
     , subagentCreateWorktree
         :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
     , subagentSpawnModelGuidance :: !(Maybe Text)
+    , subagentAllowedChildModels :: !(Maybe [Text])
+    , subagentOpenAiChild :: !(Maybe TokenProvider)
     }
 
 data PreparedChild = PreparedChild
@@ -457,19 +469,47 @@ restoreAgentFromDisk
                             reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
                         let fields = subagentDiskFields meta
-                            expectedEffectiveModel =
-                                maybe
-                                    parentEffectiveModel
+                            derivedIdentity =
+                                grokSpawnedChildIdentity
+                                    provider
+                                    connection
                                     mapModel
-                                    fields.diskAgentModel
-                            expectedDialect =
-                                maybe
+                                    parentEffectiveModel
                                     parentDialect
-                                    (dialectIdForModel provider . mapModel)
                                     fields.diskAgentModel
+                            ( expectedProvider
+                                , expectedConnection
+                                , expectedEffectiveModel
+                                , expectedDialect
+                                ) =
+                                    if provider == XAIProvider
+                                        then case meta of
+                                            CurrentSubagentDiskMeta _ stored
+                                                | stored.targetProvider
+                                                    == OpenAIProvider ->
+                                                    ( stored.targetProvider
+                                                    , stored.targetConnection
+                                                    , stored.targetEffectiveModel
+                                                    , stored.targetDialect
+                                                    )
+                                            _ ->
+                                                derivedIdentity
+                                        else
+                                            ( provider
+                                            , connection
+                                            , maybe
+                                                parentEffectiveModel
+                                                mapModel
+                                                fields.diskAgentModel
+                                            , maybe
+                                                parentDialect
+                                                (dialectIdForModel provider
+                                                    . mapModel)
+                                                fields.diskAgentModel
+                                            )
                         case validatePersistedSubagentTarget
-                                provider
-                                connection
+                                expectedProvider
+                                expectedConnection
                                 expectedEffectiveModel
                                 expectedDialect
                                 legacyTarget
@@ -478,17 +518,18 @@ restoreAgentFromDisk
                             Right storedTarget
                                 | not
                                     (providerSupportsDialect
-                                        provider storedTarget.targetDialect) ->
+                                        storedTarget.targetProvider
+                                        storedTarget.targetDialect) ->
                                     pure $ Left $
                                         unsupportedDialectMessage
-                                            provider
+                                            storedTarget.targetProvider
                                             agentId
                                             storedTarget.targetDialect
                             Right storedTarget -> do
                                 session <-
                                     getOrInstallSubagentSession
                                         sessionsRef
-                                        provider
+                                        storedTarget.targetProvider
                                         storedTarget.targetConnection
                                         storedTarget.targetEffectiveModel
                                         storedTarget.targetDialect
@@ -595,6 +636,113 @@ freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
                             getParams
                 in submit state previous inputs onEvent
 
+-- | Identity for a Grok-root child, including OpenAI Luna when requested.
+grokSpawnedChildIdentity
+    :: Provider
+    -> Text
+    -> (Text -> Text)
+    -> Text
+    -> DialectId
+    -> Maybe Text
+    -> (Provider, Text, Text, DialectId)
+grokSpawnedChildIdentity
+        parentProvider parentConnection mapModel parentModel parentDialect childModel =
+    case childModel >>= canonicalizeGrokChildModel of
+        Just model
+            | isLunaSubagentModel model ->
+                ( OpenAIProvider
+                , providerSlug OpenAIProvider
+                , lunaSubagentModel
+                , dialectId codexDialect
+                )
+            | otherwise ->
+                (parentProvider, parentConnection, model, parentDialect)
+        Nothing ->
+            ( parentProvider
+            , parentConnection
+            , maybe parentModel mapModel childModel
+            , maybe
+                parentDialect
+                (dialectIdForModel parentProvider . mapModel)
+                childModel
+            )
+
+inheritedGrokChildModel :: SubagentRuntime -> Text -> Text
+inheritedGrokChildModel runtime parentModel =
+    case runtime.subagentAllowedChildModels of
+        Nothing -> parentModel
+        Just allowed ->
+            case canonicalizeGrokChildModel parentModel of
+                Just slug | slug `elem` allowed -> slug
+                _ -> fromMaybe parentModel (listToMaybe allowed)
+
+-- | Luna requests and already-OpenAI descendants stay on Codex/OpenAI.
+-- An omitted or non-Luna override from a Luna child must not fall through
+-- to the xAI HTTP runner.
+usesOpenAiChildTransport
+    :: Maybe Provider
+    -> Maybe Provider
+    -> Maybe Text
+    -> Bool
+usesOpenAiChildTransport childSessionProvider parentSessionProvider childModel =
+    childSessionProvider == Just OpenAIProvider
+        || parentSessionProvider == Just OpenAIProvider
+        || maybe False isLunaSubagentModel
+            (childModel >>= canonicalizeGrokChildModel)
+
+-- | XAI parent runner: Grok children stay on xAI; Luna and its descendants
+-- use Codex/OpenAI.
+runXaiParentSubagent
+    :: SubagentRuntime
+    -> Dialect
+    -> Maybe (InterAgentMessage -> IO (Either Text Text))
+    -> (ResponseCreateParams -> Backend)
+    -> RunSubagent
+runXaiParentSubagent runtime dialect sendToRoot mkBackend =
+    \env previous prompt onEvent -> do
+        childModel <- lookupAgentModel runtime.subagentTypes env.subId
+        sessions <- readIORef runtime.subagentSessions
+        identity <- getSubagentIdentity runtime.subagentRegistry env.subId
+        let childSessionProvider =
+                (.subSessionProvider) <$> Map.lookup env.subId sessions
+            parentSessionProvider = do
+                ident <- identity
+                parentId <- ident.identityParent
+                session <- Map.lookup parentId sessions
+                pure session.subSessionProvider
+        if usesOpenAiChildTransport
+                childSessionProvider parentSessionProvider childModel
+            then case runtime.subagentOpenAiChild of
+                Nothing ->
+                    pure $ Left $ LoopUnexpected $
+                        "OpenAI is not signed in; cannot run this subagent on "
+                            <> lunaSubagentModel
+                            <> "."
+                Just openaiToken ->
+                    runCodexSubagent
+                        runtime
+                            { subagentConnection =
+                                providerSlug OpenAIProvider
+                            , subagentMapModel = id
+                            }
+                        openaiToken
+                        sendToRoot
+                        env
+                        previous
+                        prompt
+                        onEvent
+            else
+                runHttpSubagent
+                    runtime
+                    dialect
+                    XAIProvider
+                    sendToRoot
+                    mkBackend
+                    env
+                    previous
+                    prompt
+                    onEvent
+
 -- | Child Codex agent: per-agent transcript retained across follow-ups,
 -- independently scoped WebSocket requests, and nested multi-agent tools.
 runCodexSubagent
@@ -604,6 +752,9 @@ runCodexSubagent
     -> RunSubagent
 runCodexSubagent runtime tokenProvider sendToRoot =
     \env previous prompt onEvent -> do
+        agentType <-
+            fromMaybe defaultSubagentType
+                <$> lookupAgentType runtime.subagentTypes env.subId
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
         childEffort <- lookupAgentReasoningEffort runtime.subagentTypes env.subId
         parentParams <- readIORef runtime.subagentParams
@@ -651,25 +802,48 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                     bashEnabled <- readIORef runtime.subagentBashEnabled
                     let codingTools =
                             filterGhciTools ghciEnabled $
-                                filterBashTools bashEnabled coding.codingAppTools
+                                filterBashTools bashEnabled $
+                                    filterChildGrokTools
+                                        agentType coding.codingAppTools
                         tools =
                             codingTools <> runtime.subagentMcpTools
+                        generatedInstructions =
+                            systemPromptForTools
+                                codexDialect
+                                (map (.appToolName) tools)
+                                env.subCwd
+                                sessionTmp
+                                today
+                                True
+                        inheritParentPrompt =
+                            case prepared.preparedParentParams.model of
+                                Just parentModel ->
+                                    not
+                                        ( "grok"
+                                            `Text.isPrefixOf`
+                                                Text.toLower parentModel
+                                        )
+                                Nothing -> True
                         baseInstructions =
-                            fromMaybe
-                                (systemPromptForTools
-                                    codexDialect
-                                    (map (.appToolName) tools)
-                                    env.subCwd
-                                    sessionTmp
-                                    today
-                                    True)
-                                prepared.preparedParentParams.instructions
+                            if inheritParentPrompt
+                                then
+                                    fromMaybe
+                                        generatedInstructions
+                                        prepared.preparedParentParams.instructions
+                                else generatedInstructions
                         instructions =
                             baseInstructions
                                 <> "\n\nYou are a Codex subagent. Complete the assigned task and "
                                 <> "report results clearly. Your agent id is "
                                 <> env.subId.unSubagentId
                                 <> "."
+                                <> case agentType of
+                                    "explore" ->
+                                        " Operate read-only: search and report, do not edit files."
+                                    "plan" ->
+                                        " Produce an implementation plan; do not edit implementation files."
+                                    _ ->
+                                        ""
                         childParams = requestParams OpenAIProvider model instructions
                             (schemasFromAppTools codexDialect tools) effort
                     toolRegistry <- requireToolRegistry tools
@@ -733,11 +907,15 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
         childEffort <-
             lookupAgentReasoningEffort runtime.subagentTypes env.subId
         parentParams <- readIORef runtime.subagentParams
-        let (provisionalModel, _) =
+        let inheritedParentModel =
+                inheritedGrokChildModel
+                    runtime
+                    (fromMaybe "" parentParams.model)
+            (provisionalModel, _) =
                 resolveChildModelAndEffort
                     provider
                     parentParams
-                    (fromMaybe "" parentParams.model)
+                    inheritedParentModel
                     childModel
                     childEffort
             provisionalEffectiveModel =
@@ -944,6 +1122,7 @@ prepareChild runtime provider currentEffectiveModel currentDialect env sendToRoo
                     GenericTaskProtocol -> Nothing
                     NoHostChildAgentProtocol -> Nothing
             , multiSpawnModelGuidance = runtime.subagentSpawnModelGuidance
+            , multiAllowedChildModels = runtime.subagentAllowedChildModels
             }
     pure PreparedChild
         { preparedParentParams = parentParams
@@ -998,6 +1177,8 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
             , loopApprove =
                 \call ->
                     childApprove runtime.subagentPolicy toolRegistry call
+            , loopReadSteering = pure []
+            , loopCommitSteering = \_ -> pure ()
             , loopCancel = env.subCancel
             }
     result <- runChild config

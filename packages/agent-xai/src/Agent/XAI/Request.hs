@@ -12,6 +12,7 @@ import Agent.Responses.Request
     )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -118,7 +119,10 @@ xaiReasoningEffort = \case
     Just "medium" -> "medium"
     Just "high" -> "high"
     Just "xhigh" -> "xhigh"
-    Just "max" -> "max"
+    -- The shared UI supports OpenAI's @max@ effort, but Grok's proxy rejects
+    -- it. Keep this projection defensive for resumed sessions and callers
+    -- that construct canonical requests directly.
+    Just "max" -> "high"
     _ -> "high"
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
@@ -142,19 +146,91 @@ requestInputItems request = case request.input of
 -- user switches to Grok, whose Responses union does not recognize that tag.
 -- Preserve the readable collaboration context as an ordinary user message.
 normalizeInputItem :: ResponseItem -> ResponseItem
-normalizeInputItem = \case
-    AgentMessageItem message ->
-        MessageItem ResponseMessage
-            { messageId = Nothing
-            , content = MessageContentParts
-                [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
-            , role = RoleUser
-            , status = Nothing
-            , phase = Nothing
-            , passthrough = Nothing
-            , extraFields = KeyMap.empty
+normalizeInputItem =
+    stripItemStatus . \case
+        AgentMessageItem message ->
+            MessageItem ResponseMessage
+                { messageId = Nothing
+                , content = MessageContentParts
+                    [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
+                , role = RoleUser
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                , extraFields = KeyMap.empty
+                }
+        item -> item
+
+-- The Grok proxy rejects OpenAI item @status@ as an unknown parameter
+-- (@input[n].status@). Strip it from every input item at the wire boundary.
+stripItemStatus :: ResponseItem -> ResponseItem
+stripItemStatus = \case
+    MessageItem message ->
+        MessageItem message
+            { status = Nothing
+            , extraFields = withoutStatusFields message.extraFields
+            }
+    FunctionCallItem call ->
+        FunctionCallItem call
+            { status = Nothing
+            , extraFields = withoutStatusFields call.extraFields
+            }
+    FunctionCallOutputItem output ->
+        FunctionCallOutputItem output
+            { status = Nothing
+            , extraFields = withoutStatusFields output.extraFields
+            }
+    CustomToolCallItem call ->
+        CustomToolCallItem call
+            { status = Nothing
+            , extraFields = withoutStatusFields call.extraFields
+            }
+    CustomToolCallOutputItem output ->
+        CustomToolCallOutputItem output
+            { status = Nothing
+            , extraFields = withoutStatusFields output.extraFields
+            }
+    ReasoningItemValue item ->
+        ReasoningItemValue item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    LocalShellCallItem item ->
+        LocalShellCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    ToolSearchCallItem item ->
+        ToolSearchCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    ToolSearchOutputItem item ->
+        ToolSearchOutputItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    WebSearchCallItem item ->
+        WebSearchCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    ImageGenerationCallItem item ->
+        ImageGenerationCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    KnownResponseItem itemType tagged ->
+        KnownResponseItem itemType tagged
+            { fields = withoutStatusFields tagged.fields
+            }
+    UnknownResponseItem tagged ->
+        UnknownResponseItem tagged
+            { fields = withoutStatusFields tagged.fields
             }
     item -> item
+
+withoutStatusFields = KeyMap.delete (Key.fromText "status")
 
 agentMessageText :: ResponseAgentMessage -> Text
 agentMessageText message =

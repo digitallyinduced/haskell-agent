@@ -4,6 +4,8 @@ module Agent.CLI.Status
     , cycleReplInteraction
     , formatReplStatusLine
     , formatTokenUsage
+    , formatTokensPerSecond
+    , formatUsageWithRate
     ) where
 
 import Agent.CLI.Input (terminalTextWidth, truncateDisplayText)
@@ -29,7 +31,8 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 
 -- | Idle prompt chrome: model, reasoning effort, interaction mode, and active
--- account on the left; session token totals right-aligned when possible.
+-- account on the left; session token totals and last tok/s right-aligned
+-- when possible.
 formatReplStatusLine
     :: Bool
     -> Maybe Int
@@ -38,12 +41,13 @@ formatReplStatusLine
     -> ReplMode
     -> Text
     -> TokenUsage
+    -> Maybe Double
     -> Text
-formatReplStatusLine color width model effort mode account usage =
+formatReplStatusLine color width model effort mode account usage rate =
     let left =
             "  " <> Text.intercalate " · " (filter (not . Text.null)
                 [model, effort, replModeLabel mode, account])
-        right = formatTokenUsage usage
+        right = formatUsageWithRate usage rate
         padded = case width of
             Just cols | cols > 0 ->
                 fitStatusLine cols left right
@@ -108,6 +112,27 @@ formatTokenUsage usage
         | usage.cachedTokens > 0 =
             " · " <> formatTokenCount usage.cachedTokens <> " cached"
         | otherwise = ""
+
+-- | Session totals plus a generation rate: @1.2k in · 340 out · 42 tok/s@.
+formatUsageWithRate :: TokenUsage -> Maybe Double -> Text
+formatUsageWithRate usage rate =
+    Text.intercalate " · " $
+        filter (not . Text.null)
+            [ formatTokenUsage usage
+            , maybe "" formatTokensPerSecond rate
+            ]
+
+-- | Compact generation speed: @4.2 tok/s@, @42 tok/s@, @1.2k tok/s@.
+formatTokensPerSecond :: Double -> Text
+formatTokensPerSecond rate
+    | rate < 0.05 = "<0.1 tok/s"
+    | rate < 9.95 =
+        let tenths = round (rate * 10) :: Int
+            whole = tenths `div` 10
+            frac = tenths `mod` 10
+        in Text.pack (show whole <> "." <> show frac <> " tok/s")
+    | otherwise =
+        formatTokenCount (round rate) <> " tok/s"
 
 formatTokenCount :: Int -> Text
 formatTokenCount n

@@ -12,7 +12,11 @@ module Agent.CLI.TUI.Bridge
     , trimHistory
     ) where
 
-import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentTarget(..)
+    , lookupAgentEntry
+    )
 import Agent.TUI.Model (UiEvent(..), UiState(..))
 import Agent.Loop (LoopEvent(..))
 import Data.Text (Text)
@@ -119,8 +123,9 @@ normalizeAgentSelection
     -> [AgentEntry]
     -> AgentTarget
 normalizeAgentSelection selected entries
-    | any ((== selected) . (.agentTarget)) entries = selected
-    | otherwise = AgentRoot
+    | selected == AgentRoot = selected
+    | otherwise =
+        maybe AgentRoot (const selected) (lookupAgentEntry selected entries)
 
 -- | Normalize the current shared selection against an available target set.
 reconcileAgentSelection

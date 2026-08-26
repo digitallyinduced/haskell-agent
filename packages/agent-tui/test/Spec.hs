@@ -1,5 +1,6 @@
 module Main (main) where
 
+import qualified Agent.TUI.AccentSpec as AccentSpec
 import qualified Agent.TUI.FencedCodeSpec as FencedCodeSpec
 import qualified Agent.TUI.Markdown.BlockSpec as MarkdownBlockSpec
 import qualified Agent.TUI.Markdown.InlineSpec as MarkdownInlineSpec
@@ -14,6 +15,7 @@ import Test.Hspec (hspec)
 
 main :: IO ()
 main = hspec do
+    AccentSpec.spec
     FencedCodeSpec.spec
     MarkdownBlockSpec.spec
     MarkdownInlineSpec.spec

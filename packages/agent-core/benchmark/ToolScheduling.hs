@@ -51,11 +51,13 @@ import System.CPUTime (getCPUTime)
 import System.Environment (getArgs)
 import System.Exit (die)
 import System.Mem (performGC)
+import System.OsPath (unsafeEncodeUtf)
 import Text.Printf (printf)
 
 data Workload
     = OldSequential
     | NewDisjoint
+    | NewDisjointPaths
     | NewConflicting
     | ExistingParallel
     deriving (Eq, Show)
@@ -93,12 +95,13 @@ main = do
             die $
                 "usage: tool-scheduling-bench WORKLOAD CALLS DELAY_US SAMPLES\n"
                     <> "workloads: old-sequential, new-disjoint, "
-                    <> "new-conflicting, existing-parallel"
+                    <> "new-disjoint-paths, new-conflicting, existing-parallel"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "old-sequential" -> pure OldSequential
     "new-disjoint" -> pure NewDisjoint
+    "new-disjoint-paths" -> pure NewDisjointPaths
     "new-conflicting" -> pure NewConflicting
     "existing-parallel" -> pure ExistingParallel
     other -> die ("unknown workload: " <> other)
@@ -158,6 +161,8 @@ runWorkload workload callCount delayMicros = do
             , loopMaxTurns = defaultLoopMaxTurns
             , loopOnEvent = \_ -> pure ()
             , loopApprove = \_ -> pure (Right True)
+            , loopReadSteering = pure []
+            , loopCommitSteering = \_ -> pure ()
             , loopCancel = cancel
             }
     result <- runLoop config Nothing "benchmark"
@@ -185,6 +190,9 @@ benchmarkTool workload delayMicros index name =
         NewDisjoint ->
             withToolResourceClaims
                 (const (pure (Right [writeClaim resourceName])))
+        NewDisjointPaths ->
+            withToolResourceClaims
+                (const (pure (Right [pathWriteClaim index])))
         NewConflicting ->
             withToolResourceClaims
                 (const (pure (Right [writeClaim "shared"])))
@@ -192,6 +200,9 @@ benchmarkTool workload delayMicros index name =
     resourceName = "resource-" <> Text.pack (show index)
     writeClaim resource =
         ToolResourceClaim ToolWrite (ToolNamedResource resource)
+    pathWriteClaim n =
+        ToolResourceClaim ToolWrite
+            (ToolPath (unsafeEncodeUtf ("file-" <> show n)))
 
 measure :: IO Int -> IO Sample
 measure action = do

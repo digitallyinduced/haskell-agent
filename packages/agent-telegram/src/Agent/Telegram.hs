@@ -24,6 +24,9 @@ module Agent.Telegram
     , emptyTelegramState
     , classifyTelegramUpdate
     , classifyTelegramUpdateWithMode
+    , groupJoinAuthorized
+    , isAnonymousAdmin
+    , telegramAnonymousAdminUserId
     , storeUpdateAction
     , nextPendingAction
     , checkpointPendingVoiceTranscript
@@ -81,6 +84,9 @@ import Agent.Telegram.Classify
     , checkpointPendingVoiceTranscript
     , classifyTelegramUpdate
     , classifyTelegramUpdateWithMode
+    , groupJoinAuthorized
+    , isAnonymousAdmin
+    , telegramAnonymousAdminUserId
     , isAmbientGroupPrompt
     , nextPendingAction
     , reactionMessageText
@@ -148,7 +154,8 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.List (partition)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -715,7 +722,9 @@ pollForever runtime = do
                 ]
             threadDelay 2_000_000
         Right updates ->
-            forM_ updates (processUpdate runtime)
+            let (memberships, rest) =
+                    partition isMembershipUpdate updates
+            in forM_ (memberships <> rest) (processUpdate runtime)
     pollForever runtime
 
 processUpdate :: TelegramRuntime -> TelegramUpdate -> IO ()
@@ -733,38 +742,93 @@ processUpdate runtime update = do
                 ]
         Right () -> pure ()
 
+isMembershipUpdate :: TelegramUpdate -> Bool
+isMembershipUpdate update =
+    isJust update.updateMyChatMember
+        || maybe False (not . null . (.messageNewChatMembers)) update.updateMessage
+
 classifyUpdate
     :: TelegramRuntime
     -> TelegramUpdate
     -> IO TelegramUpdateAction
-classifyUpdate runtime update =
-    case update.updateMessageReaction of
-        Just reaction
-            | reaction.messageReactionChat.telegramChatType /= "private" -> do
-                state <- readMVar runtime.runtimeStateVar
-                let key = TelegramChatKey
-                        { chatId =
-                            reaction.messageReactionChat.telegramChatId
-                        , messageThreadId = Nothing
-                        }
-                    belongsToBot =
-                        maybe False
-                            (Set.member reaction.messageReactionMessageId)
-                            (Map.lookup key state.outboundMessageIds)
-                pure $
-                    if belongsToBot
-                        then classifyTelegramUpdateWithMode
-                            runtime.runtimeBot
-                            runtime.runtimeAllowedUsers
-                            runtime.runtimeRespondToAllGroupMessages
-                            update
-                        else IgnoreUpdate
-        _ ->
-            pure (classifyTelegramUpdateWithMode
+classifyUpdate runtime update = do
+    state <- readMVar runtime.runtimeStateVar
+    classified <-
+        case classifyTelegramUpdateWithMode
                 runtime.runtimeBot
                 runtime.runtimeAllowedUsers
+                state.authorizedGroupChatIds
                 runtime.runtimeRespondToAllGroupMessages
-                update)
+                update of
+            ReviewGroupJoin chatId actor ->
+                resolveGroupJoin runtime chatId actor
+            action ->
+                pure action
+    pure $ case (classified, update.updateMessageReaction) of
+        (LeaveUnauthorizedGroup _, _) ->
+            classified
+        (_, Just reaction)
+            | reaction.messageReactionChat.telegramChatType /= "private"
+            , not (reactionBelongsToBot state reaction) ->
+                IgnoreUpdate
+        _ ->
+            classified
+
+reactionBelongsToBot :: TelegramState -> TelegramMessageReaction -> Bool
+reactionBelongsToBot state reaction =
+    let key = TelegramChatKey
+            { chatId = reaction.messageReactionChat.telegramChatId
+            , messageThreadId = Nothing
+            }
+    in maybe False
+        (Set.member reaction.messageReactionMessageId)
+        (Map.lookup key state.outboundMessageIds)
+
+resolveGroupJoin
+    :: TelegramRuntime
+    -> Integer
+    -> TelegramUser
+    -> IO TelegramUpdateAction
+resolveGroupJoin runtime chatId actor
+    | actor.userId `Set.notMember` runtime.runtimeAllowedUsers
+    , not (isAnonymousAdmin actor) = do
+        logRejectedJoin chatId actor "adder is not an allowed user"
+        pure (LeaveUnauthorizedGroup chatId)
+    | otherwise =
+        TelegramClient.getChatAdministrators runtime.runtimeClient chatId >>= \case
+            Left err -> do
+                logTelegramEvent "group_admin_lookup_failed"
+                    [ "chat_id" .= chatId
+                    , "user_id" .= actor.userId
+                    , "error" .=
+                        redactToken runtime.runtimeClient.clientToken err
+                    ]
+                logRejectedJoin chatId actor
+                    "could not verify group administrators"
+                pure (LeaveUnauthorizedGroup chatId)
+            Right admins
+                | groupJoinAuthorized runtime.runtimeAllowedUsers actor admins -> do
+                    logTelegramEvent "group_join_authorized"
+                        [ "chat_id" .= chatId
+                        , "user_id" .= actor.userId
+                        ]
+                    pure (AuthorizeGroupChat chatId)
+                | otherwise -> do
+                    logRejectedJoin chatId actor
+                        "adder is not an allowed group administrator"
+                    pure (LeaveUnauthorizedGroup chatId)
+
+logRejectedJoin
+    :: Integer
+    -> TelegramUser
+    -> Text
+    -> IO ()
+logRejectedJoin chatId actor reason =
+    logTelegramEvent "group_join_rejected"
+        [ "chat_id" .= chatId
+        , "user_id" .= actor.userId
+        , "reason" .= reason
+        ]
 
 dispatchForever :: TelegramRuntime -> IO ()
 dispatchForever runtime =
@@ -803,6 +867,59 @@ telegramWorkerLoop runtime = do
         modifyMVar_ runtime.runtimeScheduled
             (pure . Set.delete key)
     telegramWorkerLoop runtime
+
+unauthorizedGroupLeaveNotice :: Text
+unauthorizedGroupLeaveNotice =
+    "I only join group chats when an authorized admin adds me. Leaving this group."
+
+leaveUnauthorizedGroup
+    :: TelegramRuntime
+    -> TelegramPendingLeave
+    -> IO ()
+leaveUnauthorizedGroup runtime pending = do
+    let key = pending.pendingLeaveChat
+        chatId = key.chatId
+    logTelegramEvent "leaving_unauthorized_group"
+        [ "chat_id" .= chatId
+        , "update_id" .= pending.pendingLeaveUpdateId
+        ]
+    TelegramClient.sendRichMessage
+        runtime.runtimeClient
+        key
+        Nothing
+        unauthorizedGroupLeaveNotice >>= \case
+            Left err ->
+                logTelegramEvent "unauthorized_group_notice_failed"
+                    [ "chat_id" .= chatId
+                    , "error" .=
+                        redactToken runtime.runtimeClient.clientToken err
+                    ]
+            Right _ -> pure ()
+    TelegramClient.leaveChat runtime.runtimeClient chatId >>= \case
+        Left err
+            | isBenignLeaveError err ->
+                logTelegramEvent "unauthorized_group_already_left"
+                    [ "chat_id" .= chatId
+                    , "error" .=
+                        redactToken runtime.runtimeClient.clientToken err
+                    ]
+            | otherwise ->
+                fail (Text.unpack err)
+        Right () ->
+            logTelegramEvent "left_unauthorized_group"
+                [ "chat_id" .= chatId
+                ]
+
+isBenignLeaveError :: Text -> Bool
+isBenignLeaveError err =
+    any (`Text.isInfixOf` Text.toLower err)
+        [ "chat not found"
+        , "bot is not a member"
+        , "chat_id is empty"
+        , "peer_id_invalid"
+        , "bot was kicked"
+        , "bot was blocked"
+        ]
 
 processChatQueue :: TelegramRuntime -> TelegramChatKey -> IO ()
 processChatQueue runtime key =
@@ -856,6 +973,9 @@ processChatQueue runtime key =
                                             (Just pending.pendingMediaMessageId)
                                             replyText))
                                     completed
+                LeaveUnauthorizedChat pending -> do
+                    leaveUnauthorizedGroup runtime pending
+                    modifyState runtime (completePendingAction action)
             case result of
                 Left err -> do
                     delay <- recordPendingFailure
@@ -1009,6 +1129,8 @@ rekeyPendingAction updateId = \case
         RunPendingTurn pending { pendingTurnUpdateId = updateId }
     RunPendingMediaTurn pending ->
         RunPendingMediaTurn pending { pendingMediaUpdateId = updateId }
+    LeaveUnauthorizedChat pending ->
+        LeaveUnauthorizedChat pending { pendingLeaveUpdateId = updateId }
 
 runQueuedMediaTurn :: TelegramRuntime -> TelegramPendingMediaTurn -> IO Text
 runQueuedMediaTurn runtime pending = do
@@ -1300,7 +1422,7 @@ recordPendingFailure runtime action err =
                     (TelegramRetryMetadata 0 Nothing Nothing)
                     (Map.lookup key state.retryMetadata)
             attempts = previous.retryAttempts + 1
-        if attempts >= 5
+        if attempts >= 5 && not (isLeaveAction action)
             then do
                 let withoutAction =
                         (deletePendingAction action state)
@@ -1328,7 +1450,7 @@ recordPendingFailure runtime action err =
                 saveTelegramState runtime.runtimeStatePath next
                 pure (next, Nothing)
             else do
-                let seconds = min 60 (2 ^ attempts)
+                let seconds = min 60 (2 ^ min 6 attempts)
                     retryAt = addUTCTime (fromIntegral seconds) now
                     next = state
                         { retryMetadata =
@@ -1347,6 +1469,7 @@ recordPendingFailure runtime action err =
 failureReply :: PendingChatAction -> Maybe TelegramPendingReply
 failureReply = \case
     DeliverReply _ -> Nothing
+    LeaveUnauthorizedChat _ -> Nothing
     RunPendingTurn pending ->
         Just TelegramPendingReply
             { pendingUpdateId = pending.pendingTurnUpdateId
@@ -1377,19 +1500,27 @@ pendingRetryKey action =
             DeliverReply _ -> "reply"
             RunPendingTurn _ -> "turn"
             RunPendingMediaTurn _ -> "media"
+            LeaveUnauthorizedChat _ -> "leave"
         ]
+
+isLeaveAction :: PendingChatAction -> Bool
+isLeaveAction = \case
+    LeaveUnauthorizedChat _ -> True
+    _ -> False
 
 pendingActionUpdateIdLocal :: PendingChatAction -> Integer
 pendingActionUpdateIdLocal = \case
     DeliverReply pending -> pending.pendingUpdateId
     RunPendingTurn pending -> pending.pendingTurnUpdateId
     RunPendingMediaTurn pending -> pending.pendingMediaUpdateId
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveUpdateId
 
 pendingActionChatLocal :: PendingChatAction -> TelegramChatKey
 pendingActionChatLocal = \case
     DeliverReply pending -> pending.pendingChat
     RunPendingTurn pending -> pending.pendingTurnChat
     RunPendingMediaTurn pending -> pending.pendingMediaChat
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveChat
 
 runAgentTurn
     :: TelegramRuntime
@@ -1556,17 +1687,20 @@ sessionForPrompt
     -> IO SessionHandle
 sessionForPrompt runtime key prompt = do
     state <- readMVar runtime.runtimeStateVar
-    existing <- case lookupBinding key state of
-        Nothing -> pure Nothing
+    case lookupBinding key state of
         Just sessionId ->
             loadSessionHandle
                 runtime.runtimePool
                 runtime.runtimeSessionsRoot
                 sessionId >>= \case
-                Left _ -> pure Nothing
-                Right (handle, _) -> pure (Just handle)
-    case existing of
-        Just handle -> pure handle
+                Left err ->
+                    fail . Text.unpack $
+                        "could not load Telegram session "
+                            <> sessionId
+                            <> ": "
+                            <> err
+                Right (handle, _) ->
+                    pure handle
         Nothing -> do
             handle <- createSession SessionCreate
                 { createPool = runtime.runtimePool

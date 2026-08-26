@@ -14,6 +14,7 @@ import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,7 +25,7 @@ spec = do
     describe "mapModel" do
         it "prefers exact overrides, passes grok names through, and falls back otherwise" do
             let options = defaultClientOptions
-                    { modelOverrides = [("gpt-5.6-sol", "grok-4.6-mini")]
+                    { modelOverrides = Map.fromList [("gpt-5.6-sol", "grok-4.6-mini")]
                     , defaultModel = "grok-4.6"
                     }
             mapModel options "gpt-5.6-sol" `shouldBe` "grok-4.6-mini"
@@ -77,6 +78,43 @@ spec = do
             object <- expectObject value
             input <- expectArray (KeyMap.lookup "input" object)
             length input `shouldBe` 1
+
+        it "omits OpenAI item status fields the Grok proxy rejects" do
+            let call = FunctionCallItem FunctionCall
+                    { itemId = Just "fc_1"
+                    , callId = "call-1"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields =
+                        KeyMap.singleton "status" (Aeson.String "completed")
+                    }
+                message = MessageItem ResponseMessage
+                    { messageId = Just "msg_1"
+                    , content = MessageContentParts
+                        [InputTextPart "hello" Nothing KeyMap.empty]
+                    , role = RoleUser
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields =
+                        KeyMap.singleton "status" (Aeson.String "completed")
+                    }
+                request = setInstructions Nothing $
+                    setInput
+                        (Just (ResponseInputItems [message, call]))
+                        sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            input <- expectArray (KeyMap.lookup "input" object)
+            itemObjects <- traverse expectObject input
+            map (KeyMap.lookup "status") itemObjects `shouldBe` [Nothing, Nothing]
+            map (KeyMap.lookup "type") itemObjects `shouldBe`
+                [ Just (Aeson.String "message")
+                , Just (Aeson.String "function_call")
+                ]
 
         it "flattens resumed OpenAI agent messages into Grok user messages" do
             let agentMessage = AgentMessageItem ResponseAgentMessage
@@ -151,7 +189,7 @@ spec = do
             map (KeyMap.lookup "type") toolObjects `shouldBe`
                 [Just (Aeson.String "x_search")]
 
-        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh/max through" do
+        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh through" do
             let effortOf request = do
                     object <- expectObject (requestValue defaultClientOptions request)
                     reasoning <- expectObject =<< maybe
@@ -170,7 +208,7 @@ spec = do
             effortOf (withEffort "xhigh" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "xhigh"))
             effortOf (withEffort "max" sampleRequest)
-                >>= (`shouldBe` Just (Aeson.String "max"))
+                >>= (`shouldBe` Just (Aeson.String "high"))
             -- Unset effort defaults to high for Grok.
             effortOf (clearEffort sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "high"))
