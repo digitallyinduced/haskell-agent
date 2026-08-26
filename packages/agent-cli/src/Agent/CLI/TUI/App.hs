@@ -54,6 +54,7 @@ module Agent.CLI.TUI.App
     , runFullscreen
     , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
+    , beginFullscreenLiveHistory
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
     , setFullscreenHistorySource
@@ -170,7 +171,9 @@ import Agent.CLI.TUI.History
     , clearHistoryRequest
     , emptyHistoryWindow
     , historyWindowBlock
+    , historyWindowOlderAvailable
     , historyWindowRequest
+    , unarchivedLiveStart
     , historyWindowSetAnchors
     , markHistoryRequest
     , setHistoryWindowTurns
@@ -557,6 +560,13 @@ clearFullscreenHistorySource runtime = do
             , historyPageHasOlder = False
             , historyPageHasNewer = False
             })
+
+beginFullscreenLiveHistory :: FullscreenRuntime -> IO ()
+beginFullscreenLiveHistory runtime = do
+    source <- readIORef runtime.runtimeHistorySource
+    case source of
+        Nothing -> pure ()
+        Just _ -> enqueueAppEvent runtime AppHistoryLiveStarted
 
 commitFullscreenHistoryTurn
     :: FullscreenRuntime
@@ -1356,9 +1366,11 @@ commitLiveHistoryTurn durableTurn commit state =
             case state.appHistoryLiveStart of
                 Just index -> index
                 Nothing
-                    | commit == HistoryCommitAppend ->
-                        Seq.length state.appUi.uiBlocks
-                    | otherwise -> 0
+                    | commit == HistoryCommitReset -> 0
+                    | otherwise ->
+                        unarchivedLiveStart
+                            state.appUi.uiBlocks
+                            durableTurn.historyTurnBlocks
         (nextBlockId, remappedBlocks) =
             remapHistoryBlocks
                 state.appNextHistoryBlockId
@@ -1367,19 +1379,14 @@ commitLiveHistoryTurn durableTurn commit state =
             durableTurn { historyTurnBlocks = remappedBlocks }
         baseWindow =
             case commit of
-                HistoryCommitAppend -> state.appHistoryWindow
-                HistoryCommitReplace ->
-                    emptyHistoryWindow
-                        state.appHistoryWindow.historyWindowGeneration
-                        historyWindowTurnBudget
-                        historyWindowBlockBudget
-                        historyWindowByteBudget
                 HistoryCommitReset ->
                     emptyHistoryWindow
                         state.appHistoryWindow.historyWindowGeneration
                         historyWindowTurnBudget
                         historyWindowBlockBudget
                         historyWindowByteBudget
+                _ ->
+                    state.appHistoryWindow
         replacementPage =
             HistoryPage
                 { historyPageGeneration =
@@ -1394,13 +1401,13 @@ commitLiveHistoryTurn durableTurn commit state =
                 }
         window =
             case commit of
-                HistoryCommitAppend ->
-                    appendHistoryTurn remappedTurn baseWindow
-                _ ->
+                HistoryCommitReset ->
                     either
                         (const baseWindow)
                         id
                         (applyHistoryPage replacementPage baseWindow)
+                _ ->
+                    appendHistoryTurn remappedTurn baseWindow
         ui = truncateUiBlocks start state.appUi
     in state
         { appUi = ui
@@ -2683,6 +2690,7 @@ eventMayExposeSyntax = \case
     AppEvent (AppHistoryReset _) -> True
     AppEvent (AppHistoryLoaded _ _) -> True
     AppEvent (AppHistoryCommitted _ _ _) -> True
+    AppEvent AppHistoryLiveStarted -> True
     AppEvent (AppAgentSnapshot _ _) -> True
     _ -> False
 
@@ -2954,6 +2962,15 @@ handleEventInner event = case event of
                         makeVisible
                             (ConversationBlock AgentRoot blockId)
                 queueConversationReflow
+    AppEvent AppHistoryLiveStarted ->
+        modify' \state ->
+            state
+                { appHistoryLiveStart =
+                    case state.appHistoryLiveStart of
+                        Just start -> Just start
+                        Nothing ->
+                            Just (Seq.length state.appUi.uiBlocks)
+                }
     AppEvent (AppHistoryCommitted generation turn commit) -> do
         state <- get
         let currentGeneration =
@@ -3689,7 +3706,12 @@ scrollConversationBy amount = do
                 pure (Just (top, height, contentHeight))
             Nothing ->
                 pure Nothing
-    case Scroll.conversationScrollGesture amount viewportBounds of
+    case
+        Scroll.conversationScrollGesture
+            (state.appAgentSelected == AgentRoot
+                && historyWindowOlderAvailable state.appHistoryWindow)
+            amount
+            viewportBounds of
         Scroll.IgnoreConversationScroll ->
             pure ()
         Scroll.PauseAndScrollConversation -> do

@@ -147,6 +147,7 @@ data AppEvent
         !HistoryGeneration
         !HistoryTurn
         !HistoryCommit
+    | AppHistoryLiveStarted
     | AppConversationReflow
     | AppMotionTick
     | AppRecapPoll

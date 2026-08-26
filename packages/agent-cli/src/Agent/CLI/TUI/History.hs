@@ -37,6 +37,7 @@ module Agent.CLI.TUI.History
     , historyWindowTurn
     , historyWindowVisible
     , markHistoryRequest
+    , unarchivedLiveStart
     ) where
 
 import Agent.TUI.Model (BlockId, UiBlock(..))
@@ -264,6 +265,25 @@ historyWindowRequest direction window
 
 -- | Mark a request as in flight.  A request that cannot currently be made is
 -- ignored, which keeps event handlers idempotent when scroll ticks coalesce.
+-- | Live start index when archiving a turn that was rendered without
+-- 'UiUserSubmitted'. If the durable blocks already sit at the end of the
+-- live transcript, drop that suffix so 'drawTranscript' does not show both.
+unarchivedLiveStart :: Seq UiBlock -> Seq UiBlock -> Int
+unarchivedLiveStart liveBlocks durableBlocks
+    | Seq.null durableBlocks = liveCount
+    | liveCount >= durableCount
+    , map blockKey (drop (liveCount - durableCount) live)
+        == map blockKey durable =
+        liveCount - durableCount
+    | otherwise = liveCount
+  where
+    live = toList liveBlocks
+    durable = toList durableBlocks
+    liveCount = length live
+    durableCount = length durable
+    blockKey block =
+        (block.blockKind, Text.strip block.blockBody)
+
 markHistoryRequest
     :: HistoryDirection
     -> HistoryWindow
