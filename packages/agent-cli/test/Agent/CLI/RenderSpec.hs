@@ -10,6 +10,7 @@ import Agent.Loop
     , TurnCompletion(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    , emptyTurnOutput
     )
 import Agent.ToolDispatch
     ( ToolCallKind(..)
@@ -22,7 +23,7 @@ import Agent.TextBuffer
     , textBufferToText
     )
 import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
@@ -30,7 +31,8 @@ import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), addUTCTime)
+import Data.Maybe (fromMaybe)
+import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (BufferMode(..), Handle, hClose, hSetBuffering, openTempFile)
 import Test.Hspec
@@ -59,6 +61,84 @@ spec = do
                         visible
             stateThinkingVisible started `shouldBe` True
             statePrintedText started `shouldBe` False
+
+        it "preserves last tok/s across a new generation" do
+            let started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        emptyRenderState
+                            { stateLastTokensPerSecond = Just 42 }
+            stateLastTokensPerSecond started `shouldBe` Just 42
+
+        it "records provider output tokens per second" do
+            let startedAt = UTCTime (fromGregorian 2026 1 2) 0
+                started = beginRenderTurn startedAt emptyRenderState
+                turn =
+                    (emptyTurnOutput "r1" [] (Just "hi"))
+                        { tokenUsage =
+                            TokenUsage
+                                { inputTokens = 10
+                                , outputTokens = 80
+                                , cachedTokens = 0
+                                }
+                        }
+                recorded =
+                    recordRenderTurnRate (addUTCTime 2 startedAt) turn started
+            stateLastTokensPerSecond recorded `shouldBe` Just 40
+
+        it "keeps the turn timer when a generation restarts" do
+            let startedAt = UTCTime (fromGregorian 2026 1 2) 0
+                started = beginRenderTurn startedAt $
+                    emptyRenderState
+                        { stateGenerationChars = 16
+                        , stateLastTokensPerSecond = Just 12
+                        }
+                restartedAt = addUTCTime 3 startedAt
+                restarted = resetRenderGeneration restartedAt started
+                turn =
+                    (emptyTurnOutput "r1" [] (Just "hi"))
+                        { tokenUsage =
+                            TokenUsage
+                                { inputTokens = 10
+                                , outputTokens = 80
+                                , cachedTokens = 0
+                                }
+                        }
+                recorded =
+                    recordRenderTurnRate (addUTCTime 2 restartedAt) turn restarted
+            stateStartedAt restarted `shouldBe` stateStartedAt started
+            restarted.stateGenerationChars `shouldBe` 0
+            restarted.stateGenerationStartedAt `shouldBe` Just restartedAt
+            stateLastTokensPerSecond recorded `shouldBe` Just 40
+
+        it "drops a previous conversation's saved rate" do
+            let started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        emptyRenderState
+                            { stateLastTokensPerSecond = Just 42
+                            , stateGenerationChars = 16
+                            }
+                cleared = clearRenderTokenRate started
+            stateLastTokensPerSecond cleared `shouldBe` Nothing
+            cleared.stateGenerationChars `shouldBe` 0
+            cleared.stateGenerationStartedAt `shouldBe` Nothing
+            stateStartedAt cleared `shouldBe` stateStartedAt started
+
+        it "keeps spinner elapsed time across ResponseRestarted" do
+            withRenderConfig True False \config _handle _path -> do
+                renderEvent config TurnStarted
+                before <- readIORef config.renderState
+                threadDelay 1_100_000
+                renderEvent config (ResponseRestarted "retry")
+                after <- readIORef config.renderState
+                now <- getCurrentTime
+                let started = fromMaybe now after.stateStartedAt
+                    elapsed = realToFrac (diffUTCTime now started) :: Double
+                stateStartedAt after `shouldBe` stateStartedAt before
+                after.stateGenerationStartedAt
+                    `shouldNotBe` after.stateStartedAt
+                elapsed `shouldSatisfy` (>= 1.0)
 
         it "streams markdown through a pure state transition" do
             let (state1, first) = streamMarkdown "hello\n" emptyRenderState
@@ -157,8 +237,10 @@ spec = do
 
     describe "formatActivityLine" do
         it "joins spinner, activity, and elapsed" do
-            formatActivityLine False "⠋" "Thinking…" 1.2
+            formatActivityLine False "⠋" "Thinking…" 1.2 Nothing
                 `shouldBe` "⠋ Thinking…  1.2s"
+            formatActivityLine False "⠋" "Writing…" 1.2 (Just 42)
+                `shouldBe` "⠋ Writing…  1.2s · 42 tok/s"
 
     describe "formatToolStarted" do
         it "renders English verbs for known tools" do

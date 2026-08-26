@@ -34,6 +34,7 @@ module Agent.TUI.Model
     , visibleTodoList
     , uiNextDeadlineMillis
     , uiNeedsTick
+    , uiTokensPerSecond
     , warningNotice
     , advanceUiTime
     ) where
@@ -55,15 +56,18 @@ import Agent.TUI.Motion
     )
 import Agent.Loop
     ( LoopEvent(..)
-    , TokenUsage
+    , TokenUsage(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    , generationTokensPerSecond
+    , liveTokensPerSecond
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , canonicalToolName
     )
+import Control.Applicative ((<|>))
 import qualified Data.Foldable as Foldable
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
@@ -194,6 +198,10 @@ data UiState = UiState
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
     , uiTodos :: ![TodoDisplayLine]
+    , uiGenerating :: !Bool
+    , uiGenerationChars :: !Int
+    , uiGenerationMillis :: !Int
+    , uiLastTokensPerSecond :: !(Maybe Double)
     }
     deriving (Eq, Show)
 
@@ -273,6 +281,10 @@ initialUiState = UiState
     , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
     , uiTodos = []
+    , uiGenerating = False
+    , uiGenerationChars = 0
+    , uiGenerationMillis = 0
+    , uiLastTokensPerSecond = Nothing
     }
 
 -- | Checklist shown above the prompt during a turn, or while an item is still
@@ -369,6 +381,8 @@ reduceUi event state = case event of
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
             , uiRunning = if awaiting then False else state.uiRunning
+            , uiGenerating =
+                if awaiting then False else state.uiGenerating
             , uiActivity =
                 if awaiting && state.uiCompletionRemainingMillis == 0
                     then "Ready"
@@ -475,6 +489,10 @@ reduceUi event state = case event of
             , uiToolCalls = Map.empty
             , uiRetryCountdown = Nothing
             , uiTodos = []
+            , uiGenerating = False
+            , uiGenerationChars = 0
+            , uiGenerationMillis = 0
+            , uiLastTokensPerSecond = Nothing
             }
     UiSetFollow follow ->
         state
@@ -508,6 +526,7 @@ reduceUi event state = case event of
             , uiBlockIndices =
                 Map.filter (< Seq.length blocks) state.uiBlockIndices
             , uiRunning = False
+            , uiGenerating = False
             , uiActivity = "Restarting…"
             , uiNotice =
                 Just (progressNotice "Restarting current turn…")
@@ -543,6 +562,10 @@ advanceUiTime rawElapsedMillis state =
             if state.uiRunning
                 then state.uiElapsedMillis + elapsedMillis
                 else state.uiElapsedMillis
+        , uiGenerationMillis =
+            if state.uiGenerating
+                then state.uiGenerationMillis + elapsedMillis
+                else state.uiGenerationMillis
         , uiActivity =
             if state.uiCompletionRemainingMillis > 0
                 && completionRemainingMillis == 0
@@ -552,6 +575,44 @@ advanceUiTime rawElapsedMillis state =
         , uiNotice = notice
         , uiNoticeElapsedMillis =
             if notice == Nothing then 0 else noticeElapsedMillis
+        }
+
+-- | Live generation speed while the model is streaming; otherwise the last
+-- completed model response.
+uiTokensPerSecond :: UiState -> Maybe Double
+uiTokensPerSecond state
+    | state.uiGenerating =
+        liveTokensPerSecond
+            state.uiGenerationChars
+            state.uiGenerationMillis
+            <|> state.uiLastTokensPerSecond
+    | otherwise = state.uiLastTokensPerSecond
+
+resetGeneration :: UiState -> UiState
+resetGeneration state =
+    state
+        { uiGenerating = True
+        , uiGenerationChars = 0
+        , uiGenerationMillis = 0
+        }
+
+appendGenerationChars :: Text -> UiState -> UiState
+appendGenerationChars delta state =
+    state
+        { uiGenerationChars =
+            state.uiGenerationChars + Text.length delta
+        }
+
+snapshotGenerationRate :: TokenUsage -> UiState -> UiState
+snapshotGenerationRate usage state =
+    state
+        { uiGenerating = False
+        , uiLastTokensPerSecond =
+            generationTokensPerSecond
+                usage.outputTokens
+                state.uiGenerationChars
+                state.uiGenerationMillis
+                <|> state.uiLastTokensPerSecond
         }
 
 uiNeedsTick :: UiState -> Bool
@@ -666,24 +727,31 @@ millisecondsUntilNextDisplayedSecond remainingMillis =
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
     TurnStarted ->
-        state
-            { uiRunning = True
-            , uiAwaitingInput = False
-            , uiActivity = "Thinking…"
-            , uiNotice = Nothing
-            , uiNoticeElapsedMillis = 0
-            , uiElapsedMillis = 0
-            , uiCompletionRemainingMillis = 0
-            , uiTurnStartBlock = Seq.length state.uiBlocks
-            , uiAttemptStartBlock = Seq.length state.uiBlocks
-            , uiToolCalls = Map.empty
-            }
+        resetGeneration
+            state
+                { uiRunning = True
+                , uiAwaitingInput = False
+                , uiActivity = "Thinking…"
+                , uiNotice = Nothing
+                , uiNoticeElapsedMillis = 0
+                , uiElapsedMillis = 0
+                , uiCompletionRemainingMillis = 0
+                , uiTurnStartBlock = Seq.length state.uiBlocks
+                , uiAttemptStartBlock = Seq.length state.uiBlocks
+                , uiToolCalls = Map.empty
+                }
     ReasoningDelta delta ->
-        appendOrExtend BlockThinking "Thought" delta BlockStreaming state
-            { uiActivity = "Thinking…" }
+        appendOrExtend BlockThinking "Thought" delta BlockStreaming $
+            appendGenerationChars delta state
+                { uiActivity = "Thinking…"
+                , uiGenerating = True
+                }
     TextDelta delta ->
-        appendOrExtend BlockAssistant "Assistant" delta BlockStreaming state
-            { uiActivity = "Writing…" }
+        appendOrExtend BlockAssistant "Assistant" delta BlockStreaming $
+            appendGenerationChars delta state
+                { uiActivity = "Writing…"
+                , uiGenerating = True
+                }
     ActivityUpdated activity ->
         state { uiActivity = activity }
     WarningRaised warning ->
@@ -693,17 +761,19 @@ reduceLoop event state = case event of
             }
     ResponseRestarted message ->
         let finalized = finalizeStreams state
-        in finalized
-            { uiRunning = True
-            , uiActivity = "Retrying response…"
-            , uiNotice = Just (warningNotice message)
-            , uiNoticeElapsedMillis = 0
-            , uiAttemptStartBlock = Seq.length finalized.uiBlocks
-            }
+        in resetGeneration
+            finalized
+                { uiRunning = True
+                , uiActivity = "Retrying response…"
+                , uiNotice = Just (warningNotice message)
+                , uiNoticeElapsedMillis = 0
+                , uiAttemptStartBlock = Seq.length finalized.uiBlocks
+                }
     ToolStarted call
         | isTodoTool call.name ->
             state
                 { uiRunning = True
+                , uiGenerating = False
                 , uiAwaitingInput = False
                 , uiActivity = toolCallTitle call
                 , uiToolCalls =
@@ -726,6 +796,7 @@ reduceLoop event state = case event of
                 BlockRunning (Just call.callId)
                 state
                     { uiRunning = True
+                    , uiGenerating = False
                     , uiAwaitingInput = False
                     , uiActivity = title
                     , uiToolCalls =
@@ -778,7 +849,7 @@ reduceLoop event state = case event of
                         appendBlock BlockAssistant "Assistant" text ""
                             BlockComplete Nothing finalized
                 _ -> finalized
-        in withFallback
+        in snapshotGenerationRate output.tokenUsage withFallback
             { uiRunning = continuing
             , uiActivity =
                 if continuing
@@ -954,6 +1025,13 @@ finalizeTurn terminalState state =
                         else block)
                 state.uiBlocks
         , uiRunning = False
+        , uiGenerating = False
+        , uiLastTokensPerSecond =
+            state.uiLastTokensPerSecond
+                <|> generationTokensPerSecond
+                    0
+                    state.uiGenerationChars
+                    state.uiGenerationMillis
         , uiActivity =
             if terminalState == BlockComplete
                 then "Finished"
