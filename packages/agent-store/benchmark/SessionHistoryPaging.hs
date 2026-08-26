@@ -46,10 +46,13 @@ import Text.Printf (printf)
 
 data Workload
     = FullTranscript
+    | FullTranscriptListBoundary
     | ActiveTranscript
     | RecentPage
     | ListRows
     | VectorRows
+    | ListRowsRetained
+    | VectorRowsRetained
     deriving (Eq, Show)
 
 data Sample = Sample
@@ -124,10 +127,13 @@ runMatrix store turnCounts payloadBytes sampleCount = do
             payloadBytes
         forM_
             [ FullTranscript
+            , FullTranscriptListBoundary
             , ActiveTranscript
             , RecentPage
             , ListRows
             , VectorRows
+            , ListRowsRetained
+            , VectorRowsRetained
             ]
             \workload -> do
             _ <- measure (workloadAction store sessionKey workload)
@@ -210,6 +216,11 @@ workloadAction store sessionKey = \case
     FullTranscript ->
         fmap (fmap checksumStoredSession . joinMaybe "full transcript") $
             loadSession (trustedPool store) sessionKey
+    FullTranscriptListBoundary ->
+        fmap
+            (fmap checksumStoredSessionListBoundary
+                . joinMaybe "full transcript list boundary") $
+            loadSession (trustedPool store) sessionKey
     ActiveTranscript ->
         fmap (fmap checksumStoredSession . joinMaybe "active transcript") $
             loadActiveSession (trustedPool store) sessionKey
@@ -223,6 +234,16 @@ workloadAction store sessionKey = \case
                 (Session.statement sessionKey listRowsStatement)
     VectorRows ->
         fmap (fmap checksumVectorRows) $
+            withSession
+                (trustedPool store)
+                (Session.statement sessionKey vectorRowsStatement)
+    ListRowsRetained ->
+        fmap (fmap retainListRows) $
+            withSession
+                (trustedPool store)
+                (Session.statement sessionKey listRowsStatement)
+    VectorRowsRetained ->
+        fmap (fmap retainVectorRows) $
             withSession
                 (trustedPool store)
                 (Session.statement sessionKey vectorRowsStatement)
@@ -282,6 +303,13 @@ checksumStoredSession stored =
         (Text.length stored.storedMetadata.sessionMetadataTitle)
         stored.storedTurns
 
+checksumStoredSessionListBoundary :: StoredSession -> Int
+checksumStoredSessionListBoundary stored =
+    foldl'
+        checksumTurn
+        (Text.length stored.storedMetadata.sessionMetadataTitle)
+        (Vector.toList stored.storedTurns)
+
 checksumPage :: SessionTurnPage -> Int
 checksumPage page =
     foldl'
@@ -309,6 +337,15 @@ checksumVectorRows :: Vector.Vector (Int64, Maybe Text) -> Int
 checksumVectorRows =
     Vector.foldl' checksumRow 0
 
+retainListRows :: [(Int64, Maybe Text)] -> Int
+retainListRows = \case
+    [] -> 0
+    row : _ -> checksumRow 0 row
+
+retainVectorRows :: Vector.Vector (Int64, Maybe Text) -> Int
+retainVectorRows rows =
+    maybe 0 (checksumRow 0 . fst) (Vector.uncons rows)
+
 checksumRow :: Int -> (Int64, Maybe Text) -> Int
 checksumRow current (turnIndex, assistantText) =
     current + fromIntegral turnIndex + maybe 0 Text.length assistantText
@@ -333,10 +370,13 @@ printSample turnCount payloadBytes activeTurns workload sample =
         activeTurns
         (case workload of
             FullTranscript -> "full"
+            FullTranscriptListBoundary -> "full-list-boundary"
             ActiveTranscript -> "active"
             RecentPage -> "recent"
             ListRows -> "list-rows"
             VectorRows -> "vector-rows"
+            ListRowsRetained -> "list-rows-retained"
+            VectorRowsRetained -> "vector-rows-retained"
             :: String)
         sample.elapsedMillis
         sample.cpuMillis

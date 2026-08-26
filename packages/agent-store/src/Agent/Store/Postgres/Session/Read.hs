@@ -19,12 +19,12 @@ module Agent.Store.Postgres.Session.Read
     , searchConversationTurns
     ) where
 
-import Control.Monad (forM)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int64)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
+import qualified Data.Vector as Vector
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
 import qualified Hasql.Session as HasqlSession
@@ -67,8 +67,10 @@ loadSessions pool sessionKeys =
                 sessionKeys
                 loadMetadataManyStatement
             rows <- Transaction.statement sessionKeys loadTurnsManyStatement
-            turns <- forM rows \(sessionKey, row) ->
-                fmap ((,) sessionKey) (loadStoredTurn row)
+            turns <- Vector.mapM
+                (\(sessionKey, row) ->
+                    fmap ((,) sessionKey) (loadStoredTurn row))
+                rows
             pure (assembleSessions sessionKeys metadata turns))
         >>= \case
             Left err -> pure (replicate (length sessionKeys) (Left err))
@@ -77,26 +79,34 @@ loadSessions pool sessionKeys =
 
 assembleSessions
     :: [Text]
-    -> [SessionMetadata]
-    -> [(Text, Either Text StoredTurn)]
+    -> Vector.Vector SessionMetadata
+    -> Vector.Vector (Text, Either Text StoredTurn)
     -> [Either Text (Maybe StoredSession)]
 assembleSessions sessionKeys metadata turns =
     map assemble sessionKeys
   where
     metadataByKey =
-        Map.fromList
-            [(value.sessionMetadataKey, value) | value <- metadata]
+        Vector.foldl'
+            (\byKey value ->
+                Map.insert value.sessionMetadataKey value byKey)
+            Map.empty
+            metadata
     turnsByKey =
-        Map.map reverse $
-            Map.fromListWith (<>)
-                [(sessionKey, [turn]) | (sessionKey, turn) <- turns]
+        Map.fromList
+            [ (sessionKey, Vector.map snd group)
+            | group <- Vector.groupBy
+                (\left right -> fst left == fst right)
+                turns
+            , Just ((sessionKey, _), _) <- [Vector.uncons group]
+            ]
 
     assemble sessionKey =
         case Map.lookup sessionKey metadataByKey of
             Nothing -> Right Nothing
             Just value -> do
                 decodedTurns <-
-                    sequence (Map.findWithDefault [] sessionKey turnsByKey)
+                    sequence
+                        (Map.findWithDefault Vector.empty sessionKey turnsByKey)
                 pure $ Just StoredSession
                     { storedMetadata = value
                     , storedTurns = decodedTurns
@@ -123,7 +133,7 @@ loadActiveSession pool sessionKey =
                 Nothing -> pure (Right Nothing)
                 Just value -> do
                     rows <- Transaction.statement sessionKey loadActiveTurnsStatement
-                    turns <- forM rows loadStoredTurn
+                    turns <- Vector.mapM loadStoredTurn rows
                     pure do
                         decodedTurns <- sequence turns
                         pure $ Just StoredSession
@@ -187,7 +197,7 @@ data PageMode = PageRecent | PageBefore | PageAfter
 loadTurnPage
     :: StorePool
     -> Text
-    -> Transaction.Transaction [TurnRow]
+    -> Transaction.Transaction (Vector.Vector TurnRow)
     -> Int
     -> PageMode
     -> IO (Either StoreError (Maybe SessionTurnPage))
@@ -202,29 +212,25 @@ loadTurnPage pool sessionKey loadRows limit mode =
                     (generationStart, total) <-
                         Transaction.statement sessionKey currentGenerationStatement
                     let visibleRows = case mode of
-                            PageRecent -> reverse (take limit rows0)
-                            PageBefore -> reverse (take limit rows0)
-                            PageAfter -> take limit rows0
-                    turns <- forM visibleRows loadStoredTurn
+                            PageRecent -> Vector.reverse (Vector.take limit rows0)
+                            PageBefore -> Vector.reverse (Vector.take limit rows0)
+                            PageAfter -> Vector.take limit rows0
+                    turns <- Vector.mapM loadStoredTurn visibleRows
                     pure do
                         decoded <- sequence turns
                         let generationEnd =
                                 generationStart + max 0 total - 1
                             (hasOlder, hasNewer) =
-                                case decoded of
-                                    firstTurn : rest ->
-                                        let lastTurn =
-                                                foldl
-                                                    (\_ current -> current)
-                                                    firstTurn
-                                                    rest
+                                case Vector.uncons decoded of
+                                    Just (firstTurn, _) ->
+                                        let lastTurn = Vector.last decoded
                                         in
                                             ( firstTurn.storedTurnIndex
                                                 > generationStart
                                             , lastTurn.storedTurnIndex
                                                 < generationEnd
                                             )
-                                    [] -> case mode of
+                                    Nothing -> case mode of
                                         PageRecent -> (False, False)
                                         PageBefore -> (False, total > 0)
                                         PageAfter -> (total > 0, False)
@@ -336,13 +342,14 @@ flattenDataResult = pure . \case
     Right (Left err) -> Left (StoreDataError err)
     Right (Right value) -> Right value
 
-loadMetadataManyStatement :: Statement [Text] [SessionMetadata]
+loadMetadataManyStatement
+    :: Statement [Text] (Vector.Vector SessionMetadata)
 loadMetadataManyStatement = mkStatement
     (metadataSelectSql
         <> " WHERE session_key = ANY($1::text[]) AND deleted_at IS NULL\
            \ ORDER BY array_position($1::text[], session_key)")
     textArrayParams
-    (Decoders.rowList metadataRow)
+    (Decoders.rowVector metadataRow)
     True
 
 loadMetadataStatement :: Statement Text (Maybe SessionMetadata)
@@ -373,7 +380,8 @@ metadataSelectSql =
     \ cached_tokens, last_recap, last_turn_summary, last_recap_main_turns\
     \ FROM harness.sessions"
 
-loadTurnsManyStatement :: Statement [Text] [(Text, TurnRow)]
+loadTurnsManyStatement
+    :: Statement [Text] (Vector.Vector (Text, TurnRow))
 loadTurnsManyStatement = mkStatement
     "SELECT s.session_key, t.turn_id::text, t.turn_index, t.event_sequence,\
     \ t.occurred_at, t.user_text, t.assistant_text, t.error_text,\
@@ -384,13 +392,13 @@ loadTurnsManyStatement = mkStatement
     \ WHERE s.session_key = ANY($1::text[]) AND s.deleted_at IS NULL\
     \ ORDER BY array_position($1::text[], s.session_key), t.turn_index ASC"
     textArrayParams
-    (Decoders.rowList $
+    (Decoders.rowVector $
         (,)
             <$> Decoders.column (Decoders.nonNullable Decoders.text)
             <*> turnRowDecoder)
     True
 
-loadActiveTurnsStatement :: Statement Text [TurnRow]
+loadActiveTurnsStatement :: Statement Text (Vector.Vector TurnRow)
 loadActiveTurnsStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
@@ -404,10 +412,11 @@ loadActiveTurnsStatement = mkStatement
            \ ), 0)\
            \ ORDER BY t.turn_index ASC")
     (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowList turnRowDecoder)
+    (Decoders.rowVector turnRowDecoder)
     True
 
-loadRecentTurnsStatement :: Statement (Text, Int64) [TurnRow]
+loadRecentTurnsStatement
+    :: Statement (Text, Int64) (Vector.Vector TurnRow)
 loadRecentTurnsStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
@@ -424,10 +433,11 @@ loadRecentTurnsStatement = mkStatement
     ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
         <> (snd >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
-    (Decoders.rowList turnRowDecoder)
+    (Decoders.rowVector turnRowDecoder)
     True
 
-loadTurnsBeforeStatement :: Statement (Text, Int64, Int64) [TurnRow]
+loadTurnsBeforeStatement
+    :: Statement (Text, Int64, Int64) (Vector.Vector TurnRow)
 loadTurnsBeforeStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
@@ -449,10 +459,11 @@ loadTurnsBeforeStatement = mkStatement
         <> ((\(_, _, value) -> value)
             >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
-    (Decoders.rowList turnRowDecoder)
+    (Decoders.rowVector turnRowDecoder)
     True
 
-loadTurnsAfterStatement :: Statement (Text, Int64, Int64) [TurnRow]
+loadTurnsAfterStatement
+    :: Statement (Text, Int64, Int64) (Vector.Vector TurnRow)
 loadTurnsAfterStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
@@ -474,7 +485,7 @@ loadTurnsAfterStatement = mkStatement
         <> ((\(_, _, value) -> value)
             >$< Encoders.param (Encoders.nonNullable Encoders.int8))
     )
-    (Decoders.rowList turnRowDecoder)
+    (Decoders.rowVector turnRowDecoder)
     True
 
 currentGenerationStatement :: Statement Text (Int64, Int64)

@@ -80,6 +80,7 @@ library
                     , time
                     , unix
                     , uuid-types
+                    , vector
 
 benchmark pool-cache-bench
     import:           common-opts

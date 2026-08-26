@@ -10,7 +10,7 @@ mkDerivation {
   libraryHaskellDepends = [
     async base bytestring containers contravariant directory filelock
     filepath hasql hasql-pool hasql-transaction pqi-ffi process
-    safe-exceptions stm text time unix uuid-types
+    safe-exceptions stm text time unix uuid-types vector
   ];
   testHaskellDepends = [
     async base bytestring hasql hspec safe-exceptions temporary text
