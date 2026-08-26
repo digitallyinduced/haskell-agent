@@ -62,9 +62,8 @@ import Agent.TUI.Presentation (liveTodoPanelLines)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef)
-import Data.List (findIndex, sortOn)
+import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
-import Data.Map.Strict (Map)
 import Data.Maybe (listToMaybe)
 import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
@@ -158,15 +157,8 @@ initialAgentViewportState selected entries =
     ordered = sortOn (.agentPath) entries
 
 lookupAgentEntry :: AgentTarget -> [AgentEntry] -> Maybe AgentEntry
-lookupAgentEntry target entries =
-    Map.lookup target (agentEntriesByTarget entries)
-
-agentEntriesByTarget :: [AgentEntry] -> Map AgentTarget AgentEntry
-agentEntriesByTarget entries =
-    Map.fromList
-        [ (entry.agentTarget, entry)
-        | entry <- entries
-        ]
+lookupAgentEntry target =
+    find ((== target) . (.agentTarget))
 
 selectedAgentEntry :: AgentViewportState -> Maybe AgentEntry
 selectedAgentEntry state = case state.viewportAll of
