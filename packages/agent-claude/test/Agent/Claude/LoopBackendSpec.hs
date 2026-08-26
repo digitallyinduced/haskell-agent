@@ -199,6 +199,7 @@ spec = do
                         fake.workingDirectory <> "/result-emitted"
                 result <- withEnvironmentVariables
                     [ ("FAKE_CLAUDE_TOOL_NAME", Just "Task")
+                    , ("FAKE_CLAUDE_PAUSE_AFTER_TOOL", Just "1")
                     , ("FAKE_CLAUDE_RESULT_MARKER", Just resultMarker)
                     ]
                     $ timeout 5_000_000
@@ -1222,6 +1223,7 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-b-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"response\"}}}\\n' \"$turn\" \"$session_id\""
         , "  tool_name=${FAKE_CLAUDE_TOOL_NAME:-Read}"
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"tool-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"%s\",\"input\":{\"file_path\":\"README.md\"}}]}}\\n' \"$turn\" \"$session_id\" \"$tool_name\""
+        , "  if [ \"$FAKE_CLAUDE_PAUSE_AFTER_TOOL\" = 1 ]; then sleep 1; fi"
         , "  printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
