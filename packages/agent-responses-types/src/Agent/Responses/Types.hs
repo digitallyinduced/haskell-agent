@@ -71,6 +71,7 @@ module Agent.Responses.Types
     , responseStreamEventSequenceNumber
     , streamEventTypeText
     , parseStreamEventWithType
+    , unparsedStreamEventTypeText
     ) where
 
 import Agent.Responses.Types.Common

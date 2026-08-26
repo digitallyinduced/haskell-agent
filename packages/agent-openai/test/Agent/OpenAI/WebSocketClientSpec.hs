@@ -223,7 +223,31 @@ spec = do
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
             , lifecycleFrame "response.completed" (Aeson.object [])
             ]
-            [EventResponseCreated, EventResponseCompleted]
+            [ StreamEventUnknown unparsedStreamEventTypeText
+            , EventResponseCreated
+            , EventResponseCompleted
+            ]
+            \response -> response.output `shouldBe` []
+
+    it "surfaces unparsed function_call items and still completes the turn" do
+        testPartialTerminalResponse
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.added" :: Text)
+                , "output_index" Aeson..= (0 :: Int)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("function_call" :: Text)
+                    , "id" Aeson..= ("fc-1" :: Text)
+                    , "status" Aeson..= ("in_progress" :: Text)
+                    ]
+                ]
+            , lifecycleFrame "response.completed" (Aeson.object [])
+            ]
+            [ EventResponseCreated
+            , StreamEventUnknown unparsedStreamEventTypeText
+            , EventResponseCompleted
+            ]
             \response -> response.output `shouldBe` []
 
     it "returns response.incomplete with the server reason" do

@@ -663,11 +663,13 @@ receiveWsResponseWithActions modelHint actions onEvent =
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
                 case ResponsesCodec.decodeResponseStreamEvent msgBytes of
-                    Left _err -> do
-                        -- Codex treats an unrecognised or malformed event as
-                        -- forward-compatible noise. Keep receiving so one
-                        -- bad frame cannot strand an otherwise valid turn.
+                    Left err -> do
+                        -- Keep receiving so one bad frame cannot strand an
+                        -- otherwise valid turn, but surface the dropped
+                        -- payload. Silent decode failures are how a terminal
+                        -- or tool-call frame can leave the loop in thinking.
                         logStreamStats "json_decode_error" frames' bytes'
+                        onEvent (unparsedStreamEvent err msgBytes)
                         loop assembly frames' bytes'
                     Right event -> do
                         onEvent event
@@ -751,6 +753,23 @@ receiveWsResponseWithActions modelHint actions onEvent =
                     (failedStreamResponseMessage failure)
                     failure.failureErrorCode
                     Nothing
+
+unparsedStreamEvent :: String -> LBS.ByteString -> ResponseStreamEvent
+unparsedStreamEvent err bytes =
+    OtherResponseStreamEvent
+        { otherEventType = StreamEventUnknown unparsedStreamEventTypeText
+        , sequenceNumber = Nothing
+        , eventExtraFields = KeyMap.fromList
+            [ (Key.fromText "error", Aeson.String (Text.pack err))
+            , (Key.fromText "payload", Aeson.String (framePreview bytes))
+            ]
+        }
+
+framePreview :: LBS.ByteString -> Text
+framePreview =
+    Text.take 2000
+        . Text.decodeUtf8Lenient
+        . LBS.toStrict
 
 -- | Parse a server @type: error@ event into a structured 'ApiError'.
 --
