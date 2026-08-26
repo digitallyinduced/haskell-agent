@@ -25,7 +25,7 @@ module Agent.CLI.Session.History
 import Agent.CLI.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
-    , loadSession
+    , loadActiveSession
     )
 import Agent.CLI.Session.ConversationStore
     ( ConversationStore
@@ -162,7 +162,10 @@ durableTranscriptCheckpoint pool root sessionId =
     TranscriptCheckpoint
         { checkpointDescription = "session:" <> sessionId
         , checkpointLoad =
-            loadSession pool root sessionId >>= \case
+            -- Load only the checkpoint-bounded active suffix. Loading the
+            -- complete immutable history would briefly rematerialize every
+            -- superseded transcript before 'foldSessionItems' discarded it.
+            loadActiveSession pool root sessionId >>= \case
                 Left err ->
                     throwString
                         ("could not hydrate durable conversation: "
