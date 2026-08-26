@@ -9,6 +9,7 @@ import Data.Aeson ((.=))
 import Agent.Provider
 import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -837,6 +838,32 @@ spec = do
                                 "Output exceeded the available model context and was truncated")
                 _ -> False
 
+    describe "image payload token estimates" do
+        it "does not treat inline image payloads as model-visible text" do
+            let payload = Text.replicate 1_200_000 "A"
+                item = imageUser payload
+                naiveTokens = naiveEncodedTokens item
+                estimated = estimateItemsTokens [item]
+            naiveTokens `shouldSatisfy` (> 250_000)
+            estimated `shouldSatisfy` (< 5_000)
+            estimated `shouldSatisfy`
+                (>= max 1 (resizedImageBytesEstimate `div` 4))
+
+        it "still counts ordinary text at four characters per token" do
+            let text = Text.replicate 8_000 "x"
+            estimateItemsTokens [user text]
+                `shouldSatisfy` (> 1_500)
+
+        it "keeps a first-turn image request under the Codex context window" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { model = Just "gpt-5.6-sol" }
+                payload = Text.replicate 1_200_000 "A"
+                item = imageUser payload
+                contextWindow = codexEffectiveContextWindowFor params.model
+            naiveEncodedTokens item `shouldSatisfy` (> contextWindow)
+            estimateRequestTokensWithItems params [item]
+                `shouldSatisfy` (< contextWindow)
+
     describe "Codex model metadata" do
         it "derives the 90% auto-compaction limit for curated 272k models" do
             codexModelMetadata "gpt-5.6-luna"
@@ -1017,9 +1044,33 @@ spec = do
                     "Codex compaction requires an OpenAI credential" Nothing)
 
   where
+    naiveEncodedTokens :: Aeson.ToJSON a => a -> Int
+    naiveEncodedTokens value =
+        Text.length
+            (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode value)))
+            `div` 4
+
     user text = MessageItem ResponseMessage
         { messageId = Nothing
         , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , role = RoleUser
+        , status = Nothing
+        , phase = Nothing
+        , passthrough = Nothing
+        , extraFields = KeyMap.empty
+        }
+    imageUser payload = MessageItem ResponseMessage
+        { messageId = Nothing
+        , content = MessageContentParts
+            [ InputTextPart "inspect this" Nothing KeyMap.empty
+            , InputImagePart
+                { detail = Just "auto"
+                , fileId = Nothing
+                , imageUrl = Just ("data:image/png;base64," <> payload)
+                , promptCacheBreakpoint = Nothing
+                , extraFields = KeyMap.empty
+                }
+            ]
         , role = RoleUser
         , status = Nothing
         , phase = Nothing

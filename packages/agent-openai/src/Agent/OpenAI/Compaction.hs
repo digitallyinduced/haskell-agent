@@ -15,6 +15,7 @@ module Agent.OpenAI.Compaction
     , estimateItemsTokens
     , estimateResponseCreateParamsTokens
     , estimateRequestTokensWithItems
+    , resizedImageBytesEstimate
     , trimResponseHistoryToFit
     , sanitizeCompactionHistory
     , collectRecentUserTexts
@@ -92,7 +93,8 @@ buildRemoteCompactionRequest params history =
                 }
 
 -- | Estimate the complete serialized request, including instructions, tools,
--- and all other request-level fields.
+-- and all other request-level fields. Inline image data URLs are counted as
+-- vision tokens rather than as base64 text; see 'estimateEncodedValue'.
 estimateRequestTokensWithItems
     :: ResponseCreateParams
     -> [ResponseItem]
@@ -103,10 +105,71 @@ estimateRequestTokensWithItems params items =
 estimateResponseCreateParamsTokens :: ResponseCreateParams -> Int
 estimateResponseCreateParamsTokens = estimateEncodedValue
 
+-- | Estimate serialized JSON at four characters per token, matching the rest
+-- of compaction accounting. Inline @data:image/...;base64,...@ payloads are
+-- replaced with 'resizedImageBytesEstimate' because the model consumes those
+-- images as vision tokens, not as the transport encoding.
 estimateEncodedValue :: Aeson.ToJSON value => value -> Int
 estimateEncodedValue value =
-    estimateTokens
-        (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode value)))
+    estimateAdjustedJsonTokens (Aeson.toJSON value)
+
+estimateAdjustedJsonTokens :: Aeson.Value -> Int
+estimateAdjustedJsonTokens json =
+    let encoded =
+            TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode json))
+        (payloadBytes, replacementBytes) = mediaEstimateAdjustment json
+        adjusted =
+            max 0 (Text.length encoded - payloadBytes) + replacementBytes
+    in max 1 (adjusted `div` 4)
+
+-- | Approximate model-visible byte cost for one inline image, matching Codex.
+-- Four bytes per token maps this to about 1,843 tokens. Attachments from this
+-- harness use @detail: "auto"@, so original-detail patch counting is unused.
+resizedImageBytesEstimate :: Int
+resizedImageBytesEstimate = 7_373
+
+mediaEstimateAdjustment :: Aeson.Value -> (Int, Int)
+mediaEstimateAdjustment = \case
+    Aeson.String text ->
+        case parseBase64ImageDataUrl text of
+            Just payload ->
+                (Text.length payload, resizedImageBytesEstimate)
+            Nothing ->
+                (0, 0)
+    Aeson.Array values ->
+        foldl' addPair (0, 0) values
+    Aeson.Object fields ->
+        foldl' addPair (0, 0) fields
+    _ ->
+        (0, 0)
+  where
+    addPair acc value =
+        let (payload, replacement) = mediaEstimateAdjustment value
+        in (fst acc + payload, snd acc + replacement)
+
+-- | Return the base64 payload of a @data:image/...;base64,...@ URL.
+-- Hosted HTTP(S) image URLs and non-image data URLs stay at raw size.
+parseBase64ImageDataUrl :: Text -> Maybe Text
+parseBase64ImageDataUrl url
+    | not (hasInsensitivePrefix "data:" url) = Nothing
+    | otherwise =
+        case Text.break (== ',') (Text.drop 5 url) of
+            (_, payload)
+                | Text.null payload -> Nothing
+            (metadata, payload) ->
+                let parts = Text.splitOn ";" metadata
+                    mime = case parts of
+                        (value : _) -> value
+                        [] -> Text.empty
+                    hasBase64 =
+                        any (\part -> Text.toLower part == "base64") parts
+                in if hasBase64 && hasInsensitivePrefix "image/" mime
+                    then Just (Text.drop 1 payload)
+                    else Nothing
+
+hasInsensitivePrefix :: Text -> Text -> Bool
+hasInsensitivePrefix prefix text =
+    Text.toLower (Text.take (Text.length prefix) text) == Text.toLower prefix
 
 contextWindowTruncatedOutputMessage :: Text
 contextWindowTruncatedOutputMessage =
@@ -888,10 +951,7 @@ estimateTokens text = max 1 (Text.length text `div` 4)
 
 estimateItemsTokens :: [ResponseItem] -> Int
 estimateItemsTokens items =
-    sum
-        [ estimateTokens (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode item)))
-        | item <- items
-        ]
+    sum [estimateEncodedValue item | item <- items]
 
 -- | Collect recent real user message texts (newest last), skipping /compact markers.
 collectRecentUserTexts :: Int -> [ResponseItem] -> [Text]
