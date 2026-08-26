@@ -4,15 +4,22 @@ module Agent.CLI.Auth
     , authErrorNeedsOnboarding
     , GrokAuthState(..)
     , credentialAccountLabel
+    , applyGrokAuthTokens
     , grokCredentialFromAuthJson
     , grokAuthStateFromJson
     , grokAuthStateToJson
     , grokEmailFromAuthJson
+    , grokNeedsRefresh
+    , grokOAuthOptionsFromAuthJson
     , externalAuthSelectionId
+    , externalGrokTokenProvider
     , loadAuth
     , loadAuthForAccount
     , managedAuthSelectionId
     , managedGrokTokenProvider
+    , ExternalGrokLoaded(..)
+    , ExternalGrokSource(..)
+    , refreshGrokLoginPayload
     , openAIOAuthClientId
     , openAiAuthStateChanged
     , openaiAuthStateFromJson
@@ -25,8 +32,13 @@ module Agent.CLI.Auth
     ) where
 
 import Agent.CLI.Auth.Grok
-    ( loadExternalGrokCredentials
+    ( ExternalGrokLoaded(..)
+    , ExternalGrokSource(..)
+    , externalGrokTokenProvider
+    , grokNeedsRefresh
+    , loadExternalGrokCredentials
     , managedGrokTokenProvider
+    , refreshGrokLoginPayload
     )
 import Agent.CLI.Auth.OpenAI
     ( loadOpenAi
@@ -39,10 +51,12 @@ import Agent.CLI.Auth.Types
     , credentialAccountLabel
     , credentialAccountLabelWith
     , externalAuthSelectionId
+    , applyGrokAuthTokens
     , grokAuthStateFromJson
     , grokAuthStateToJson
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
+    , grokOAuthOptionsFromAuthJson
     , managedAuthSelectionId
     , openAIOAuthClientId
     , openaiAuthStateFromJson
@@ -201,7 +215,7 @@ loadXai requestedSelectionId = do
                 }
         Nothing -> do
             selected <- lift $
-                selectExternalCredential
+                selectExternalGrok
                     requestedSelectionId
                     <$> loadExternalGrokCredentials
             case selected of
@@ -212,19 +226,24 @@ loadXai requestedSelectionId = do
                                 (accountNotFound
                                     XAIProvider requestedSelectionId))
                             requestedSelectionId
-                Just (selectionId, loaded) -> do
-                    provider <- lift $ reloadableFileCredentialProvider
-                        XAIProvider
-                        SubscriptionBilled
-                        loaded
-                        (fmap snd
-                            . selectExternalCredential (Just selectionId)
-                            <$> loadExternalGrokCredentials)
+                Just loaded -> do
+                    clientId <-
+                        lift $
+                            xaiOAuthClientId
+                                <$> lookupNonEmpty "XAI_OAUTH_CLIENT_ID"
+                    let refreshToken =
+                            XAIAuth.refreshAccessToken
+                                (maybe
+                                    (XAIAuth.defaultOAuthOptions clientId)
+                                    (grokOAuthOptionsFromAuthJson clientId)
+                                    loaded.grokRawJson)
+                    provider <- lift $
+                        externalGrokTokenProvider loaded refreshToken
                     pure LoadedAuth
                         { loadedProvider = XAIProvider
                         , loadedTokenProvider = provider
                         , loadedAccountLabel = pure . credentialAccountLabel
-                        , loadedSelectionId = Just selectionId
+                        , loadedSelectionId = Just loaded.grokSelectionId
                         , loadedOpenAiPool = Nothing
                         }
 
@@ -376,13 +395,24 @@ matchesSelection requested selectionId credential =
                 || requestedId == credential.accountId)
         requested
 
-selectExternalCredential
+selectExternalGrok
     :: Maybe Text
-    -> [(Text, Credential)]
-    -> Maybe (Text, Credential)
-selectExternalCredential requested =
-    find (\(selectionId, credential) ->
-        matchesSelection requested selectionId credential)
+    -> [ExternalGrokLoaded]
+    -> Maybe ExternalGrokLoaded
+selectExternalGrok requested =
+    find \loaded ->
+        matchesSelection
+            requested
+            loaded.grokSelectionId
+            (Credential
+                { accessToken = loaded.grokState.grokAccessToken
+                , accountId =
+                    fromMaybe "grok"
+                        (XAIAuth.accountIdFromAccessToken
+                            loaded.grokState.grokAccessToken)
+                , leaseId = Nothing
+                , provider = XAIProvider
+                })
 
 accountNotFound :: Provider -> Maybe Text -> Text
 accountNotFound provider requested =

@@ -30,6 +30,8 @@ import Agent.CLI.Auth
     , openaiAuthStateFromJson
     , xaiOAuthClientId
     )
+import Agent.CLI.Auth.Grok (refreshGrokLoginPayload)
+import Agent.Error (ApiError)
 import Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
     , ManagedCredential(..)
@@ -86,7 +88,7 @@ import Control.Monad (join, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nubBy)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -827,6 +829,35 @@ openAIAccountEmail auth =
     (auth.idToken >>= OpenAI.deriveEmail)
         <|> OpenAI.deriveEmail auth.accessToken
 
+prepareGrokLoginAccount :: LoginAccount -> IO (Either ApiError LoginAccount)
+prepareGrokLoginAccount account
+    | account.loginAuthKind /= ManagedGrokAuthJson =
+        pure (Right account)
+    | Text.null account.loginSecretPayload =
+        pure (Right account)
+    | otherwise =
+        refreshGrokLoginPayload
+            account.loginManagedId
+            grokFilePath
+            account.loginSecretPayload
+            >>= \case
+                Left err -> pure (Left err)
+                Right (state, payload) ->
+                    pure $ Right account
+                        { loginAccessToken = state.grokAccessToken
+                        , loginSecretPayload = payload
+                        , loginAccountId =
+                            fromMaybe account.loginAccountId
+                                (XAIAuth.accountIdFromAccessToken
+                                    state.grokAccessToken)
+                        }
+  where
+    grokFilePath
+        | isJust account.loginManagedId = Nothing
+        | account.loginSource == "environment" = Nothing
+        | otherwise =
+            Just (unsafeEncodeUtf (Text.unpack account.loginSource))
+
 refreshLoginAccount :: LoginAccount -> IO LoginAccount
 refreshLoginAccount account
     | Text.null account.loginAccessToken = pure case account.loginUsage of
@@ -863,32 +894,41 @@ refreshLoginAccount account
                                         (openAIUsage snapshot)
                                 }
         XAIProvider ->
-            XAI.fetchGrokUsage Credential
-                { accessToken = account.loginAccessToken
-                , accountId = account.loginAccountId
-                , leaseId = Nothing
-                , provider = XAIProvider
-                } >>= \case
-                Left err ->
-                    pure account
-                        { loginUsage = UsageUnavailable err }
-                Right snapshot ->
+            prepareGrokLoginAccount account >>= \case
+                Left err -> do
+                    now <- getCurrentTime
                     pure account
                         { loginUsage =
-                            UsageAvailable AccountUsage
-                                { usagePlan = Nothing
-                                , usageWindows =
-                                    [ UsageWindow
-                                        { windowName = "current period"
-                                        , usedPercent = snapshot.usedPercent
-                                        , windowSeconds = snapshot.windowSeconds
-                                        , resetsAt = snapshot.resetsAt
-                                        }
-                                    ]
-                                , creditsRemaining = Nothing
-                                , creditsUsed = Nothing
-                                }
+                            UsageUnavailable (formatApiErrorInlineAt now err)
                         }
+                Right prepared ->
+                    XAI.fetchGrokUsage Credential
+                        { accessToken = prepared.loginAccessToken
+                        , accountId = prepared.loginAccountId
+                        , leaseId = Nothing
+                        , provider = XAIProvider
+                        } >>= \case
+                        Left err ->
+                            pure prepared
+                                { loginUsage = UsageUnavailable err }
+                        Right snapshot ->
+                            pure prepared
+                                { loginUsage =
+                                    UsageAvailable AccountUsage
+                                        { usagePlan = Nothing
+                                        , usageWindows =
+                                            [ UsageWindow
+                                                { windowName = "current period"
+                                                , usedPercent = snapshot.usedPercent
+                                                , windowSeconds =
+                                                    snapshot.windowSeconds
+                                                , resetsAt = snapshot.resetsAt
+                                                }
+                                            ]
+                                        , creditsRemaining = Nothing
+                                        , creditsUsed = Nothing
+                                        }
+                                }
         OpenRouterProvider ->
             OpenRouter.fetchOpenRouterUsage account.loginAccessToken >>= \case
                 Left err ->
