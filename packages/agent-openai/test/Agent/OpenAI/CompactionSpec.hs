@@ -864,6 +864,35 @@ spec = do
             estimateRequestTokensWithItems params [item]
                 `shouldSatisfy` (< contextWindow)
 
+        it "still counts tool-output data URLs as model-visible text" do
+            let payload = Text.replicate 200_000 "A"
+                item = toolOutput (Aeson.String ("data:image/png;base64," <> payload))
+            estimateItemsTokens [item]
+                `shouldBe` naiveEncodedTokens item
+
+        it "still counts user-text data URLs as model-visible text" do
+            let payload = Text.replicate 200_000 "A"
+            estimateItemsTokens [user ("data:image/png;base64," <> payload)]
+                `shouldBe` naiveEncodedTokens
+                    (user ("data:image/png;base64," <> payload))
+
+        it "discounts structured input_image parts in tool output" do
+            let payload = Text.replicate 200_000 "A"
+                item =
+                    toolOutput $
+                        Aeson.Array $
+                            Vector.fromList
+                                [ Aeson.object
+                                    [ "type" .= ("input_image" :: Text.Text)
+                                    , "image_url" .=
+                                        ("data:image/png;base64," <> payload)
+                                    ]
+                                ]
+                estimated = estimateItemsTokens [item]
+            estimated `shouldSatisfy` (< 5_000)
+            estimated `shouldSatisfy`
+                (>= max 1 (resizedImageBytesEstimate `div` 4))
+
     describe "Codex model metadata" do
         it "derives the 90% auto-compaction limit for curated 272k models" do
             codexModelMetadata "gpt-5.6-luna"
@@ -1075,6 +1104,15 @@ spec = do
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
+        , extraFields = KeyMap.empty
+        }
+    toolOutput output = FunctionCallOutputItem FunctionCallOutput
+        { itemId = Nothing
+        , callId = "call-image"
+        , name = Nothing
+        , namespace = Nothing
+        , output
+        , status = Just ItemCompleted
         , extraFields = KeyMap.empty
         }
     assistant text = MessageItem ResponseMessage
