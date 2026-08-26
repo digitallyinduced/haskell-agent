@@ -168,6 +168,31 @@ spec = describe "PostgreSQL session schema" do
                                                       ]
                                                     ))
                                             ]
+                            let metadata3 = metadata
+                                    { sessionMetadataKey = "session-batched"
+                                    , sessionMetadataTitle = "batched"
+                                    }
+                                batchedTurn = turn
+                                    { sessionTurnUserText = "batched children"
+                                    , sessionTurnItems =
+                                        concat $
+                                            replicate 9 $
+                                                filter isBatchableItem
+                                                    turn.sessionTurnItems
+                                    }
+                            createSession pool metadata3
+                                `shouldReturn` Right True
+                            appendSessionTurn pool batchedTurn metadata3
+                                `shouldReturn` Right True
+                            loadSession pool "session-batched" >>= \case
+                                Right (Just stored) ->
+                                    map (.storedTurn) (toList stored.storedTurns)
+                                        `shouldBe` [batchedTurn]
+                                other ->
+                                    expectationFailure
+                                        ( "unexpected batched session: "
+                                            <> show other
+                                        )
                             searchConversationTurns pool "compact" 10 >>= \case
                                 Right [match] -> do
                                     match.searchSessionId `shouldBe` "session-1"
@@ -479,6 +504,14 @@ testTurn now = SessionTurn
         , sessionUsageCachedTokens = 2
         }
     }
+
+isBatchableItem :: StoredResponseItem -> Bool
+isBatchableItem = \case
+    StoredMessageItem{} -> True
+    StoredFunctionCallItem{} -> True
+    StoredFunctionCallOutputItem{} -> True
+    StoredReasoningItem{} -> True
+    _ -> False
 
 emptyObject :: StoredOpaqueObject
 emptyObject = StoredOpaqueObject "{}"
