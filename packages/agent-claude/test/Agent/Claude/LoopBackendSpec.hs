@@ -47,6 +47,7 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory
     ( createDirectory
+    , doesFileExist
     , getTemporaryDirectory
     , removeDirectoryRecursive
     , removeFile
@@ -189,6 +190,42 @@ spec = do
                     "<--setting-sources>\n<>"
                 arguments `shouldContain` "<--no-chrome>"
                 arguments `shouldNotContain` "<--ax-screen-reader>"
+
+        it "publishes Claude Task starts before the terminal result" $
+            withFakeClaude \fake -> do
+                transcript <- newIORef []
+                observedBeforeResult <- newIORef []
+                let resultMarker =
+                        fake.workingDirectory <> "/result-emitted"
+                result <- withEnvironmentVariables
+                    [ ("FAKE_CLAUDE_TOOL_NAME", Just "Task")
+                    , ("FAKE_CLAUDE_RESULT_MARKER", Just resultMarker)
+                    ]
+                    $ timeout 5_000_000
+                    $ withClaudeCodeBackend
+                        (defaultClaudeCodeOptions
+                            fake.executable
+                            fake.workingDirectory)
+                        Nothing
+                        (pure defaultResponseCreateParams)
+                        transcript
+                        \backend ->
+                            submitBackend backend
+                                Nothing
+                                [UserMessage "spawn a reviewer"]
+                                \case
+                                    ToolStarted call
+                                        | call.name == "Task" -> do
+                                            resultAlreadyEmitted <-
+                                                doesFileExist resultMarker
+                                            modifyIORef'
+                                                observedBeforeResult
+                                                (<> [not resultAlreadyEmitted])
+                                    _ -> pure ()
+                result `shouldSatisfy` \case
+                    Just (Right _) -> True
+                    _ -> False
+                readIORef observedBeforeResult `shouldReturn` [True]
 
         it "forwards pasted images as Claude image content blocks" $
             withFakeClaude \fake -> do
@@ -572,7 +609,10 @@ spec = do
                                         && "was active"
                                             `Text.isInfixOf` message
                             _ -> False
-                        readIORef events `shouldReturn` []
+                        readIORef events `shouldReturn`
+                            [ ToolStarted expectedFakeToolCall
+                            , ToolFinished expectedFakeToolResult
+                            ]
 
         it "reports malformed structured output" $
             withFakeClaude \fake ->
@@ -1180,10 +1220,12 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"message-start-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"message-%s\"}}}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-a-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fake \"}}}\\n' \"$turn\" \"$session_id\""
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-b-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"response\"}}}\\n' \"$turn\" \"$session_id\""
-        , "  printf '{\"type\":\"assistant\",\"uuid\":\"tool-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"Read\",\"input\":{\"file_path\":\"README.md\"}}]}}\\n' \"$turn\" \"$session_id\""
+        , "  tool_name=${FAKE_CLAUDE_TOOL_NAME:-Read}"
+        , "  printf '{\"type\":\"assistant\",\"uuid\":\"tool-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"%s\",\"input\":{\"file_path\":\"README.md\"}}]}}\\n' \"$turn\" \"$session_id\" \"$tool_name\""
         , "  printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  result_session_id=${FAKE_CLAUDE_RESULT_SESSION_ID:-$session_id}"
+        , "  if [ -n \"$FAKE_CLAUDE_RESULT_MARKER\" ]; then : > \"$FAKE_CLAUDE_RESULT_MARKER\"; fi"
         , "  cumulative_input=$((turn * 2))"
         , "  cumulative_cache_creation=$((turn * 3))"
         , "  cumulative_cache_read=$((turn * 5))"
