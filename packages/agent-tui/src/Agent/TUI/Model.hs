@@ -762,7 +762,8 @@ reduceLoop event state = case event of
             , uiNoticeElapsedMillis = 0
             }
     ResponseRestarted message ->
-        let finalized = finalizeStreams state
+        let finalized =
+                finalizeAttempt BlockFailed (finalizeStreams state)
         in resetGeneration
             finalized
                 { uiRunning = True
@@ -770,6 +771,7 @@ reduceLoop event state = case event of
                 , uiNotice = Just (warningNotice message)
                 , uiNoticeElapsedMillis = 0
                 , uiAttemptStartBlock = Seq.length finalized.uiBlocks
+                , uiToolCalls = Map.empty
                 }
     ToolStarted call
         | isTodoTool call.name ->
@@ -809,6 +811,8 @@ reduceLoop event state = case event of
                             (blockIndex, call)
                             state.uiToolCalls
                     }
+    ToolUpdated call ->
+        updateToolCall call state
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
@@ -845,6 +849,10 @@ reduceLoop event state = case event of
                 | blockIndex < Seq.length state.uiBlocks ->
                     completeTool blockIndex displayed next
             Just _ -> next
+    ToolRetracted callId ->
+        retractToolCall callId state
+    ResponseAttemptDiscarded ->
+        discardResponseAttempt state
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
@@ -919,14 +927,21 @@ selectedIndexFor selected remaining =
 removeBlockAt :: Int -> UiState -> UiState
 removeBlockAt index state =
     let remaining = Seq.deleteAt index state.uiBlocks
-        selected =
-            listToMaybe
-                [ block.blockId
-                | idx <- [min index (max 0 (Seq.length remaining - 1))]
-                , idx >= 0
-                , idx < Seq.length remaining
-                , let block = Seq.index remaining idx
-                ]
+        selected
+            | Just selectedId <- state.uiSelectedBlock
+            , any ((== selectedId) . (.blockId)) remaining =
+                Just selectedId
+            | otherwise =
+                listToMaybe
+                    [ block.blockId
+                    | idx <- [min index (max 0 (Seq.length remaining - 1))]
+                    , idx >= 0
+                    , idx < Seq.length remaining
+                    , let block = Seq.index remaining idx
+                    ]
+        adjustIndex oldIndex
+            | oldIndex > index = oldIndex - 1
+            | otherwise = oldIndex
     in state
         { uiBlocks = remaining
         , uiSelectedBlock = selected
@@ -936,6 +951,15 @@ removeBlockAt index state =
                 [ (block.blockId, idx)
                 | (idx, block) <- zip [0 ..] (Foldable.toList remaining)
                 ]
+        , uiToolCalls =
+            Map.mapMaybe
+                (\(blockIndex, call) ->
+                    if blockIndex == index
+                        then Nothing
+                        else Just (adjustIndex blockIndex, call))
+                state.uiToolCalls
+        , uiTurnStartBlock = adjustIndex state.uiTurnStartBlock
+        , uiAttemptStartBlock = adjustIndex state.uiAttemptStartBlock
         }
 
 appendBlock
@@ -1002,6 +1026,96 @@ completeTool blockIndex result state =
                         else block)
                 blockIndex
                 state.uiBlocks
+        }
+
+finalizeAttempt :: BlockState -> UiState -> UiState
+finalizeAttempt terminalState state =
+    state
+        { uiBlocks =
+            Seq.mapWithIndex
+                (\index block ->
+                    if index >= state.uiAttemptStartBlock
+                        && block.blockState == BlockRunning
+                        then block { blockState = terminalState }
+                        else block)
+                state.uiBlocks
+        }
+
+updateToolCall :: ToolCall -> UiState -> UiState
+updateToolCall call state =
+    case Map.lookup call.callId state.uiToolCalls of
+        Nothing -> state
+        Just (blockIndex, previous) ->
+            let title =
+                    toolCallTitleRelative state.uiWorkspaceRoot call
+                body = case canonicalToolName call.name of
+                    "search_replace" ->
+                        formatSearchReplaceDiffRelative
+                            state.uiWorkspaceRoot
+                            call.arguments
+                    _ -> ""
+                blocks
+                    | isTodoTool previous.name = state.uiBlocks
+                    | otherwise =
+                        Seq.adjust
+                            (\block ->
+                                if block.blockCallId == Just call.callId
+                                    then block
+                                        { blockKind = toolBlockKind call.name
+                                        , blockTitle = title
+                                        , blockBody =
+                                            if Text.null body
+                                                then block.blockBody
+                                                else body
+                                        , blockDetail = toolCallInput call
+                                        }
+                                    else block)
+                            blockIndex
+                            state.uiBlocks
+            in state
+                { uiBlocks = blocks
+                , uiActivity = title
+                , uiToolCalls =
+                    Map.insert
+                        call.callId
+                        (blockIndex, call)
+                        state.uiToolCalls
+                }
+
+retractToolCall :: Text -> UiState -> UiState
+retractToolCall callId state =
+    case Map.lookup callId state.uiToolCalls of
+        Nothing -> state
+        Just (_, call)
+            | isTodoTool call.name ->
+                state
+                    { uiToolCalls = Map.delete callId state.uiToolCalls }
+        Just (blockIndex, _) ->
+            case Seq.lookup blockIndex state.uiBlocks of
+                Just block
+                    | block.blockCallId == Just callId ->
+                        removeBlockAt blockIndex state
+                _ ->
+                    state
+                        { uiToolCalls =
+                            Map.delete callId state.uiToolCalls }
+
+discardResponseAttempt :: UiState -> UiState
+discardResponseAttempt state =
+    let boundary =
+            min (Seq.length state.uiBlocks) state.uiAttemptStartBlock
+        blocks = Seq.take boundary state.uiBlocks
+        selected =
+            selectionAfterTruncate blocks state.uiSelectedBlockIndex
+    in state
+        { uiBlocks = blocks
+        , uiSelectedBlock = (.blockId) . snd <$> selected
+        , uiSelectedBlockIndex = fst <$> selected
+        , uiBlockIndices =
+            Map.filter (< boundary) state.uiBlockIndices
+        , uiToolCalls =
+            Map.filter ((< boundary) . fst) state.uiToolCalls
+        , uiGenerating = False
         }
 
 updateToolOutput :: Text -> Text -> UiState -> UiState
