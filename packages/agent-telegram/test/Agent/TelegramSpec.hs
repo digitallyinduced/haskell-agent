@@ -998,6 +998,30 @@ spec = describe "Agent.Telegram" do
                     (LeaveUnauthorizedChat
                         (TelegramPendingLeave 40 key))
 
+        it "keeps every update when a batch is applied in ascending id order" do
+            -- pollForever must process a getUpdates batch in ascending
+            -- update_id order: storeUpdateAction advances the offset
+            -- monotonically, so applying a higher-id update first makes
+            -- updateAlreadyStored drop the lower-id one. Two messages live in
+            -- different chats (ids 100 and 101) so no per-chat batching hides
+            -- the effect.
+            let keyA = TelegramChatKey 100100 Nothing
+                keyB = TelegramChatKey 200200 Nothing
+                apply uid messageId key =
+                    storeUpdateAction uid (QueueTurn messageId key "hi" Nothing)
+                ascending =
+                    apply 101 20 keyB (apply 100 10 keyA emptyTelegramState)
+                reordered =
+                    apply 100 10 keyA (apply 101 20 keyB emptyTelegramState)
+            -- Ascending order keeps both messages.
+            Map.member keyA ascending.pendingQueues `shouldBe` True
+            Map.member keyB ascending.pendingQueues `shouldBe` True
+            -- Processing the higher id first silently drops the lower-id
+            -- message: the bug the poll-loop sort prevents.
+            Map.member keyB reordered.pendingQueues `shouldBe` True
+            Map.member keyA reordered.pendingQueues `shouldBe` False
+            reordered.nextUpdateId `shouldBe` Just 102
+
     describe "durable queue state" do
         it "loads state written before pending turns were introduced" do
             let decoded = eitherDecode

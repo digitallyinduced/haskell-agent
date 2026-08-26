@@ -167,8 +167,8 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
-import Data.List (partition)
-import Data.Maybe (fromMaybe, isJust)
+import Data.List (sortOn)
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -750,9 +750,15 @@ pollForever runtime = do
                 ]
             threadDelay 2_000_000
         Right updates ->
-            let (memberships, rest) =
-                    partition isMembershipUpdate updates
-            in forM_ (memberships <> rest) (processUpdate runtime)
+            -- Process updates in ascending update_id order. storeUpdateAction
+            -- advances the poll offset (nextUpdateId) monotonically and
+            -- updateAlreadyStored drops anything at or below it, so handling a
+            -- higher-id update before a lower-id one in the same batch would
+            -- advance the offset past the lower-id update and silently drop it
+            -- — a queued message or approval callback lost, and getUpdates
+            -- never returns it again. Telegram already returns updates sorted;
+            -- sort defensively to keep the offset invariant robust.
+            forM_ (sortOn (.updateId) updates) (processUpdate runtime)
     pollForever runtime
 
 processUpdate :: TelegramRuntime -> TelegramUpdate -> IO ()
@@ -770,11 +776,6 @@ processUpdate runtime update = do
                         (Text.pack (displayException err))
                 ]
         Right () -> pure ()
-
-isMembershipUpdate :: TelegramUpdate -> Bool
-isMembershipUpdate update =
-    isJust update.updateMyChatMember
-        || maybe False (not . null . (.messageNewChatMembers)) update.updateMessage
 
 classifyUpdate
     :: TelegramRuntime
