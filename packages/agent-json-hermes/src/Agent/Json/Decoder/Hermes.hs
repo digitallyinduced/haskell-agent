@@ -56,6 +56,10 @@ decoderRequiresRawCapture = \case
     ObjectDecoder _ fields unknown _ ->
         any namedFieldRequiresRawCapture fields
             || unknownFieldRequiresRawCapture unknown
+    PlannedObjectDecoder _ ->
+        -- Hermes 0.8 cannot apply heterogeneous planned fields in one pass.
+        -- Keep the portable direct interpreter until the dependent fold lands.
+        True
     NullableDecoder inner ->
         decoderRequiresRawCapture inner
     ByTypeDecoder select ->
@@ -102,6 +106,8 @@ toHermes = \case
                 initialState
                 updates
         either (fail . Text.unpack) pure (finish state)
+    PlannedObjectDecoder _ ->
+        fail "planned objects require the portable direct backend"
     NullableDecoder inner ->
         Hermes.nullable (toHermes inner)
     ByTypeDecoder select -> do

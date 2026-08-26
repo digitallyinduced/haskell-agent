@@ -29,7 +29,12 @@ module Agent.Json.Decoder
     , rawJson
     , skip
     , object
+    , objectFields
     , field
+    , requiredField
+    , optionalField
+    , defaultField
+    , extensionFields
     , unknownField
     , mapEither
     , mapDecoder
@@ -38,7 +43,7 @@ module Agent.Json.Decoder
     , renderDecodeError
     ) where
 
-import Agent.Json (RawJson)
+import Agent.Json (Extensions, RawJson, emptyExtensions)
 import Agent.Json.Decoder.Backend
 import Agent.Json.Decoder.Portable
     ( DecodeError(..)
@@ -149,12 +154,47 @@ object
     -> Decoder a
 object = ObjectDecoder
 
+objectFields :: ObjectPlan a -> Decoder a
+objectFields = PlannedObjectDecoder
+
 field
     :: Text
     -> Decoder value
     -> (value -> state -> Either Text state)
     -> NamedField state
 field = NamedField
+
+requiredField :: Text -> Decoder a -> ObjectPlan a
+requiredField name decoder =
+    PlanField PlannedField
+        { plannedName = name
+        , plannedDecoder = decoder
+        , plannedMissing = Left ("missing required field " <> name)
+        , plannedValue = Nothing
+        }
+
+optionalField :: Text -> Decoder a -> ObjectPlan (Maybe a)
+optionalField name decoder =
+    PlanField PlannedField
+        { plannedName = name
+        , plannedDecoder = nullable decoder
+        , plannedMissing = Right Nothing
+        , plannedValue = Nothing
+        }
+
+defaultField :: a -> Text -> Decoder a -> ObjectPlan a
+defaultField fallback name decoder =
+    PlanField PlannedField
+        { plannedName = name
+        , plannedDecoder =
+            mapDecoder (Prelude.maybe fallback id) (nullable decoder)
+        , plannedMissing = Right fallback
+        , plannedValue = Nothing
+        }
+
+extensionFields :: ObjectPlan Extensions
+extensionFields =
+    PlanExtensions emptyExtensions
 
 unknownField
     :: Decoder value

@@ -6,9 +6,21 @@ module Agent.Json.Decoder.Backend
     , JsonType(..)
     , NamedField(..)
     , UnknownField(..)
+    , ObjectPlan(..)
+    , PlannedField(..)
+    , PlannedFieldMatch(..)
+    , matchPlannedField
+    , capturePlannedExtension
+    , finishObjectPlan
+    , objectPlanRequiresRawCapture
+    , objectPlanCapturesExtensions
     ) where
 
-import Agent.Json (RawJson)
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , insertExtension
+    )
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 
@@ -24,6 +36,7 @@ data Decoder a where
         -> UnknownField state
         -> (state -> Either Text a)
         -> Decoder a
+    PlannedObjectDecoder :: ObjectPlan a -> Decoder a
     NullableDecoder :: Decoder a -> Decoder (Maybe a)
     ByTypeDecoder :: (JsonType -> Decoder a) -> Decoder a
     RawJsonDecoder :: Decoder RawJson
@@ -32,6 +45,132 @@ data Decoder a where
         :: (a -> Either Text b)
         -> Decoder a
         -> Decoder b
+
+data ObjectPlan a where
+    PlanPure :: a -> ObjectPlan a
+    PlanApply
+        :: ObjectPlan (field -> a)
+        -> ObjectPlan field
+        -> ObjectPlan a
+    PlanField
+        :: PlannedField a
+        -> ObjectPlan a
+    PlanExtensions
+        :: Extensions
+        -> ObjectPlan Extensions
+
+data PlannedField a = PlannedField
+    { plannedName :: !Text
+    , plannedDecoder :: !(Decoder a)
+    , plannedMissing :: !(Either Text a)
+    , plannedValue :: !(Maybe a)
+    }
+
+instance Functor ObjectPlan where
+    fmap transform plan =
+        PlanApply (PlanPure transform) plan
+
+instance Applicative ObjectPlan where
+    pure = PlanPure
+    (<*>) = PlanApply
+
+data PlannedFieldMatch result where
+    PlannedFieldMatch
+        :: Decoder field
+        -> (field -> ObjectPlan result)
+        -> PlannedFieldMatch result
+
+matchPlannedField
+    :: Text
+    -> ObjectPlan result
+    -> Maybe (PlannedFieldMatch result)
+matchPlannedField key = \case
+    PlanPure _ -> Nothing
+    PlanExtensions _ -> Nothing
+    PlanField field
+        | field.plannedName == key ->
+            Just (PlannedFieldMatch
+                field.plannedDecoder
+                (\value -> PlanField field { plannedValue = Just value }))
+        | otherwise -> Nothing
+    PlanApply functions argument ->
+        case matchPlannedField key functions of
+            Just (PlannedFieldMatch decoder rebuild) ->
+                Just (PlannedFieldMatch decoder
+                    (\value -> PlanApply (rebuild value) argument))
+            Nothing -> do
+                PlannedFieldMatch decoder rebuild <-
+                    matchPlannedField key argument
+                pure (PlannedFieldMatch decoder
+                    (\value -> PlanApply functions (rebuild value)))
+
+capturePlannedExtension
+    :: Text
+    -> RawJson
+    -> ObjectPlan result
+    -> ObjectPlan result
+capturePlannedExtension key value = \case
+    PlanPure result -> PlanPure result
+    PlanExtensions fields ->
+        PlanExtensions (insertExtension key value fields)
+    PlanField field -> PlanField field
+    PlanApply functions argument ->
+        PlanApply
+            (capturePlannedExtension key value functions)
+            (capturePlannedExtension key value argument)
+
+finishObjectPlan :: ObjectPlan a -> Either Text a
+finishObjectPlan = \case
+    PlanPure value -> Right value
+    PlanExtensions fields -> Right fields
+    PlanField field ->
+        case field.plannedValue of
+            Just value -> Right value
+            Nothing -> field.plannedMissing
+    PlanApply functions argument ->
+        finishObjectPlan functions <*> finishObjectPlan argument
+
+objectPlanRequiresRawCapture :: ObjectPlan a -> Bool
+objectPlanRequiresRawCapture = \case
+    PlanPure _ -> False
+    PlanExtensions _ -> True
+    PlanField field ->
+        decoderRequiresRaw field.plannedDecoder
+    PlanApply functions argument ->
+        objectPlanRequiresRawCapture functions
+            || objectPlanRequiresRawCapture argument
+  where
+    decoderRequiresRaw :: Decoder value -> Bool
+    decoderRequiresRaw = \case
+        NullDecoder _ -> False
+        BoolDecoder -> False
+        TextDecoder -> False
+        ScientificDecoder -> False
+        ArrayDecoder decoder -> decoderRequiresRaw decoder
+        ObjectDecoder _ fields unknown _ ->
+            any namedRequiresRaw fields || unknownRequiresRaw unknown
+        PlannedObjectDecoder plan -> objectPlanRequiresRawCapture plan
+        NullableDecoder decoder -> decoderRequiresRaw decoder
+        ByTypeDecoder select ->
+            any (decoderRequiresRaw . select)
+                [JsonNull, JsonBoolean, JsonNumber, JsonString, JsonArray, JsonObject]
+        RawJsonDecoder -> True
+        SkipDecoder -> False
+        MapDecoder _ decoder -> decoderRequiresRaw decoder
+    namedRequiresRaw (NamedField _ decoder _) = decoderRequiresRaw decoder
+    unknownRequiresRaw (UnknownField decoder _) = decoderRequiresRaw decoder
+
+objectPlanCapturesExtensions :: ObjectPlan a -> Bool
+objectPlanCapturesExtensions = \case
+    PlanPure _ -> False
+    PlanExtensions _ -> True
+    PlanField _ -> False
+    PlanApply functions argument ->
+        objectPlanCapturesExtensions functions
+            || objectPlanCapturesExtensions argument
+instance Functor Decoder where
+    fmap transform =
+        MapDecoder (Right . transform)
 
 data JsonType
     = JsonNull

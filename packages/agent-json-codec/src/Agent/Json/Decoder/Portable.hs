@@ -71,6 +71,8 @@ runDecoder decoder initial = case decoder of
         parseArray elementDecoder initial
     ObjectDecoder state fields unknown finish ->
         parseObject state fields unknown finish initial
+    PlannedObjectDecoder plan ->
+        parsePlannedObject plan initial
     NullableDecoder inner ->
         let cursor = skipWhitespace initial
         in if literalAt "null" cursor
@@ -207,6 +209,54 @@ decodeObjectField key state cursor fields unknown =
     finishUpdate decodedCursor = \case
         Left err -> failure decodedCursor err
         Right updated -> pure (updated, leave decodedCursor)
+
+parsePlannedObject
+    :: ObjectPlan a
+    -> Cursor
+    -> Either DecodeError (a, Cursor)
+parsePlannedObject initialPlan initial = do
+    opened <- consumeByte openBrace (skipWhitespace initial)
+    let cursor = skipWhitespace opened
+    if peekByte cursor == Just closeBrace
+        then do
+            finished <- consumeByte closeBrace cursor
+            finishPlan initialPlan finished
+        else go initialPlan cursor
+  where
+    go plan cursor = do
+        (key, afterKey) <- parseString cursor
+        afterColon <- consumeByte colon (skipWhitespace afterKey)
+        let nested = enter (PathKey key) afterColon
+        (updatedPlan, afterValue) <-
+            case matchPlannedField key plan of
+                Just (PlannedFieldMatch decoder rebuild) -> do
+                    (value, decodedCursor) <- runDecoder decoder nested
+                    pure (rebuild value, leave decodedCursor)
+                Nothing
+                    | objectPlanCapturesExtensions plan -> do
+                        (value, decodedCursor) <-
+                            runDecoder RawJsonDecoder nested
+                        pure
+                            ( capturePlannedExtension key value plan
+                            , leave decodedCursor
+                            )
+                    | otherwise -> do
+                        ((), decodedCursor) <-
+                            runDecoder SkipDecoder nested
+                        pure (plan, leave decodedCursor)
+        let next = skipWhitespace afterValue
+        case peekByte next of
+            Just byte | byte == comma ->
+                consumeByte comma next >>= go updatedPlan . skipWhitespace
+            Just byte | byte == closeBrace -> do
+                finished <- consumeByte closeBrace next
+                finishPlan updatedPlan finished
+            _ -> failure next "expected ',' or '}'"
+
+    finishPlan plan cursor =
+        case finishObjectPlan plan of
+            Left err -> failure cursor err
+            Right value -> pure (value, cursor)
 
 parseString :: Cursor -> Either DecodeError (Text, Cursor)
 parseString initial = do
