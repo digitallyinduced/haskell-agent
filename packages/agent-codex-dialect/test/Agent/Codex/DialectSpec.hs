@@ -82,11 +82,21 @@ spec = describe "Codex dialect" do
             , "git diff -- src/Main.hs"
             , "gh pr view 123 --json statusCheckRollup"
             , "uniq -c file.txt"
+            , "cd src && rg --files"
+            , "cd /tmp/repo && git diff -- src/Main.hs"
+            , "cd 'packages/agent-core' && ls"
+            , "git status --short"
+            , "git status --short && git diff --check && git log --oneline"
+            , "git -C src log --oneline"
+            , "git diff --stat | head -20"
+            , "git branch"
+            , "cd src && git status --short && git diff"
+            , "cd src; ls"
+            , "gh issue list"
             ]
-            `shouldBe` replicate 5 True
+            `shouldBe` replicate 16 True
         map shellCommandIsReadOnly
-            [ "git status --short"
-            , "git fetch origin"
+            [ "git fetch origin"
             , "cat src/Main.hs > copy"
             , "printf x | tee output"
             , "nix develop -c cabal test"
@@ -95,8 +105,15 @@ spec = describe "Codex dialect" do
             , "sed -n '/pattern/w output' src/Main.hs"
             , "git diff --output=copy"
             , "uniq input.txt output.txt"
+            , "cd src && nix develop -c cabal test"
+            , "cd -- src && ls"
+            , "cd $HOME && ls"
+            , "git branch -d leftover"
+            , "git status --short && git fetch origin"
+            , "git diff | tee output"
+            , "git rebase origin/master"
             ]
-            `shouldBe` replicate 10 False
+            `shouldBe` replicate 16 False
 
     it "derives disjoint apply_patch resources from patch paths" do
         withTempDir \dir -> do

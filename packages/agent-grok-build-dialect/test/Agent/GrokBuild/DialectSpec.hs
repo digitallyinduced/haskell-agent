@@ -111,10 +111,32 @@ spec = describe "Grok Build dialect" do
             terminal <-
                 toolSchedulingPlanFor registry
                     (terminalCall "t1" "sed -n '1,80p' src/Main.hs" False)
+            fromCd <-
+                toolSchedulingPlanFor registry
+                    (terminalCall
+                        "t2"
+                        "cd packages/agent-core && sed -n '1,80p' src/Main.hs"
+                        False)
             grepCall <-
                 toolSchedulingPlanFor registry
                     (functionToolCall "g1" "grep" "{\"pattern\":\"foo\"}")
+            statusChain <-
+                toolSchedulingPlanFor registry
+                    (terminalCall
+                        "t3"
+                        "git status --short && git diff --check"
+                        False)
+            fromGitC <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t4" "git -C src log --oneline" False)
+            piped <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t5" "git diff --stat | head -20" False)
             schedulingPlansConflict terminal grepCall `shouldBe` False
+            schedulingPlansConflict fromCd grepCall `shouldBe` False
+            schedulingPlansConflict statusChain grepCall `shouldBe` False
+            schedulingPlansConflict fromGitC grepCall `shouldBe` False
+            schedulingPlansConflict piped grepCall `shouldBe` False
             close
 
     it "keeps mutating and background terminal commands exclusive" do
