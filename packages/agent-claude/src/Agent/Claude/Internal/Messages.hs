@@ -172,7 +172,8 @@ nativeLifecycleEvents state = concatMap \case
         , isNativeAgentName call.name ->
             [NativeAgentFinished
                 result.callId
-                (if "error" `Text.isInfixOf` Text.toLower result.output
+                (if "error:" `Text.isPrefixOf`
+                        Text.toLower (Text.stripStart result.output)
                     then NativeAgentFailed
                     else NativeAgentCompleted)]
     _ -> []
