@@ -104,6 +104,20 @@ spec = describe "dispatchToolCall" do
             (functionToolCall "call-1" "ping" "{this is ignored")
         result `shouldBe` functionResult "call-1" "pong"
 
+    it "finalizes formatted output before returning the tool result" do
+        seen <- newIORef []
+        let config = testConfig
+                { toolDispatchFormatResult = either ("formatted:" <>) id
+                , toolDispatchFinalizeOutput = \call output -> do
+                    modifyIORef' seen (<> [(call.callId, output)])
+                    pure ("finalized:" <> output)
+                }
+        result <- dispatchToolCall config
+            [noArgsTool "ping" (pure (Right "pong"))]
+            (functionToolCall "call-1" "ping" "{}")
+        result `shouldBe` functionResult "call-1" "finalized:pong"
+        readIORef seen `shouldReturn` [("call-1", "pong")]
+
     it "forwards snapshots from streaming typed tools with their call" do
         seen <- newIORef []
         let call = functionToolCall "call-1" "echo" "{\"message\":\"hello\"}"
@@ -159,6 +173,7 @@ testConfig = ToolDispatchConfig
     , toolDispatchFormatException = \name _ -> "EX " <> name
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
     }
 
 functionResult :: Text -> Text -> ToolCallResult

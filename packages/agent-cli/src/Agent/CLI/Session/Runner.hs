@@ -23,6 +23,7 @@ import Agent.CLI.NativeAgents
     , nativeAgentEntries
     , restoreNativeAgents
     )
+import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.CLI.SessionTitle
     ( SessionTitleEvent(..)
     , SessionTitleFailure(..)
@@ -198,7 +199,11 @@ import Agent.Subagents
     , subagentConfig
     )
 import Agent.Subagents.TaskPath (taskPathText)
-import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolDispatchConfig(..)
+    , canonicalToolName
+    )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , multiAgentToolNames
@@ -816,7 +821,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 , commitBackendState = writeLiveTranscript conversationRef
                 }
             , loopTools = toolRegistry
-            , loopDispatch = defaultLoopDispatch
+            , loopDispatch =
+                defaultLoopDispatch
+                    { toolDispatchFinalizeOutput = finalizeToolOutput toolEnv }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->

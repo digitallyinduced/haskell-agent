@@ -90,6 +90,16 @@ spec = describe "Agent.CLI.Dialects" do
                     `shouldContain` ["ask_secret"])
                     `finally` withSecret.codingClose
 
+    it "registers bounded artifact readers on coding tool surfaces" do
+        withTempToolEnv \env ->
+            forM_ [codexDialect, grokBuildDialect] \dialect -> do
+                coding <- codingToolsFor dialect env Nothing Nothing Nothing
+                let names = map (.appToolName) coding.codingAppTools
+                names `shouldContain`
+                    ["read_tool_output", "search_tool_output"]
+                names `shouldNotContain` ["analyze_tool_output"]
+                coding.codingClose
+
     it "filters shell and ghci tools independently" do
         let tools = map fakeTool
                 [ "run_ghci"

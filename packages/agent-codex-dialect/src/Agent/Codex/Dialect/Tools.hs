@@ -47,6 +47,7 @@ import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
 import Agent.Tools.IO
     ( CommandResult(..)
+    , commandResultArtifacts
     , resolveUnderCwd
     , runShellCommandStreaming
     )
@@ -289,7 +290,12 @@ renderShellResult = \case
 
 renderFinished :: CommandResult -> Text
 renderFinished result =
-    let body = commandBody result.commandStdout result.commandStderr
+    let output = commandBody result.commandStdout result.commandStderr
+        artifacts = commandResultArtifacts result
+        body
+            | Text.null output = artifacts
+            | Text.null artifacts = output
+            | otherwise = output <> "\n" <> artifacts
     in if result.commandCancelled
         then "Error: Command cancelled\n" <> body
         else if result.commandTimedOut
