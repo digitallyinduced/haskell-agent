@@ -27,6 +27,7 @@ import Agent.Loop
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
+    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     )
@@ -278,6 +279,7 @@ submitClaudeCodeTurn
                 , toolCalls = []
                 , assistantText = completed.assistantText
                 , tokenUsage = sdkUsageToTokenUsage usage
+                , completion = TurnCompleted
                 }
             commit =
                 commitHostTranscript

@@ -27,7 +27,7 @@ import Agent.CLI.Command
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
                  ReplSetModel, ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
-                 ReplBtw, ReplRecap, ReplResume, ReplSearch, ReplClear, ReplNew,
+                 ReplBtw, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
                  ReplHelp),
@@ -74,7 +74,10 @@ import Agent.CLI.Provider.Switch
 import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition
-    ( ProviderTransition, TurnResult(TurnProviderUnavailable) )
+    ( PendingTurn
+    , ProviderTransition
+    , TurnResult(TurnProviderUnavailable)
+    )
 import Agent.CLI.Recap ( RecapKind(..), RecapRequest(..) )
 import Agent.CLI.Render
     ( RenderConfig(..),
@@ -197,7 +200,7 @@ import Control.Concurrent.STM ()
 import Control.Exception ( AsyncException(UserInterrupt) )
 import Control.Exception.Safe ( finally, throwIO )
 import Control.Monad ( when, forM_ )
-import Data.IORef ( newIORef, readIORef, writeIORef )
+import Data.IORef ( atomicModifyIORef', newIORef, readIORef, writeIORef )
 import Data.List ()
 import Data.Maybe ( isNothing )
 import Data.Text ( Text )
@@ -231,6 +234,7 @@ handleReplLine
     :: SessionEnv
     -> (Text -> IO RunResult)
     -> (Bool -> TurnResult -> IO RunResult)
+    -> (PendingTurn -> IO RunResult)
     -> SlashCatalog
     -> [SkillInvocation]
     -> Bool
@@ -262,6 +266,7 @@ handleReplLine
             }
         continueWith
         finishTurn
+        retryPendingTurn
         slashCatalog
         skillInvocations
         stdoutColor
@@ -639,6 +644,17 @@ handleReplLine
                             Nothing -> do
                                 runSessionRecap True env RecapManual
                                 continue
+                    ReplRetry ->
+                        atomicModifyIORef'
+                            env.sessionLastFailedTurn
+                            (\pending -> (Nothing, pending))
+                            >>= \case
+                                Just pending -> retryPendingTurn pending
+                                Nothing -> do
+                                    displayInfo
+                                        "No failed turn is available to retry."
+                                        (pure ())
+                                    continue
                     action@ReplResume{} -> handleSessionAction env slashCatalog continue action
                     action@ReplSearch{} -> handleSessionAction env slashCatalog continue action
                     action@ReplClear -> handleSessionAction env slashCatalog continue action

@@ -62,7 +62,9 @@ import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl.Commands
     ( handleReplLine, preparePromptSkillInputs )
 import Agent.CLI.Runtime.Types
-    ( PendingTurnPresentation, RunResult(RunSwitchProvider) )
+    ( PendingTurnPresentation
+    , RunResult(RunSwitchProvider)
+    )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session ()
 import Agent.CLI.Session.Attachments ()
@@ -181,7 +183,7 @@ import qualified Agent.OpenRouter.Usage as OpenRouterUsage
     ( fetchOpenRouterUsage )
 import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle
-    ( finishTurn, runPendingTurn )
+    ( finishTurn, retryFailedTurn, runPendingTurn )
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, strip, pack )
@@ -364,6 +366,7 @@ replWithDraft env@SessionEnv
                 env
                 (replWithDraft env)
                 (finishTurn env)
+                (SessionLifecycle.retryFailedTurn sessionContinuation env)
                 slashCatalog
                 skillInvocations
                 stdoutColor

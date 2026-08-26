@@ -30,6 +30,8 @@ data ReplAction
     -- ^ Ask an isolated one-shot question over the current context.
     | ReplRecap
     -- ^ Generate a display-only "where was I" recap of the current session.
+    | ReplRetry
+    -- ^ Retry the last failed turn with its original attachments.
     | ReplShowSession
     | ReplShowSessionInfo
     | ReplAfk (Maybe Text)

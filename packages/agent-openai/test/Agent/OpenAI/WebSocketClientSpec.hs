@@ -226,7 +226,7 @@ spec = do
             [EventResponseCreated, EventResponseCompleted]
             \response -> response.output `shouldBe` []
 
-    it "rejects response.incomplete with the server reason" do
+    it "returns response.incomplete with the server reason" do
         frames <- newIORef
             [ lifecycleFrame "response.created"
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])

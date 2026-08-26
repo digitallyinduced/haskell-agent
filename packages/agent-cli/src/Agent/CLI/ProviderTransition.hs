@@ -49,7 +49,7 @@ data ProviderTransition = ProviderTransition
 data TurnResult
     = TurnSucceeded
     | TurnCancelled
-    | TurnFailed
+    | TurnFailed !PendingTurn
     | TurnRestartRequested !Text !PendingTurn
     | TurnProviderUnavailable !ApiError !PendingTurn
 

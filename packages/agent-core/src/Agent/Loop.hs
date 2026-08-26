@@ -16,6 +16,7 @@ module Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TokenUsage(..)
+    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , addTokenUsage
@@ -191,7 +192,16 @@ data TurnOutput = TurnOutput
     , toolCalls :: ![ToolCall]
     , assistantText :: !(Maybe Text)
     , tokenUsage :: !TokenUsage
+    , completion :: !TurnCompletion
     } deriving (Eq, Show)
+
+data TurnCompletion
+    = TurnCompleted
+    | TurnIncomplete
+        { incompleteReason :: !Text
+        , incompleteReasoningTokens :: !(Maybe Int)
+        }
+    deriving (Eq, Show)
 
 data LoopProgress
     = NoResponseCommitted
@@ -210,6 +220,7 @@ emptyTurnOutput responseId toolCalls assistantText = TurnOutput
     , toolCalls
     , assistantText
     , tokenUsage = emptyTokenUsage
+    , completion = TurnCompleted
     }
 
 data BackendResult = BackendResult
@@ -288,6 +299,7 @@ data LoopError
     -- boundary; this remains the terminal fallback for unwrapped backends.
     | LoopTransportAfterOutput ApiError
     | LoopMaxTurns TurnOutput
+    | LoopIncomplete TurnOutput
     | LoopNoResponseId
     -- | An unexpected synchronous exception escaped a backend, approval
     -- callback, event sink, or other loop-owned IO action. Keeping it in-band
@@ -445,35 +457,44 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                             config.loopCommitSteering steeringCount
                             config.loopOnEvent (TurnFinished turn)
                             let nextTurnsUsed = turnsUsed + 1
-                            results <-
-                                if null turn.toolCalls
-                                    then pure []
-                                    else runToolCalls config turn.toolCalls
-                            cancelledAfter <- isCancelled config.loopCancel
-                            if cancelledAfter
-                                then finish state ResponseCommitted
-                                    (Left (LoopCancelled results))
-                                else do
-                                    steering <- config.loopReadSteering
-                                    let continuation =
-                                            map CompletedTool results <> steering
-                                    if null continuation
-                                        then finish state ResponseCommitted $
-                                            Right LoopResult
-                                                { finalResponseId = turn.responseId
-                                                , finalText = turn.assistantText
-                                                , turnsUsed = nextTurnsUsed
-                                                , tokenUsage = usageAcc'
-                                                }
-                                        else go
-                                            state
-                                            ResponseCommitted
-                                            (Just turn.responseId)
-                                            nextTurnsUsed
-                                            continuation
-                                            (length steering)
-                                            (Just turn)
-                                            usageAcc'
+                            case turn.completion of
+                                TurnIncomplete{} ->
+                                    finish state ResponseCommitted
+                                        (Left (LoopIncomplete turn))
+                                TurnCompleted -> do
+                                    results <-
+                                        if null turn.toolCalls
+                                            then pure []
+                                            else runToolCalls config turn.toolCalls
+                                    cancelledAfter <- isCancelled config.loopCancel
+                                    if cancelledAfter
+                                        then finish state ResponseCommitted
+                                            (Left (LoopCancelled results))
+                                        else do
+                                            steering <- config.loopReadSteering
+                                            let continuation =
+                                                    map CompletedTool results
+                                                        <> steering
+                                            if null continuation
+                                                then finish state ResponseCommitted $
+                                                    Right LoopResult
+                                                        { finalResponseId =
+                                                            turn.responseId
+                                                        , finalText =
+                                                            turn.assistantText
+                                                        , turnsUsed =
+                                                            nextTurnsUsed
+                                                        , tokenUsage = usageAcc'
+                                                        }
+                                                else go
+                                                    state
+                                                    ResponseCommitted
+                                                    (Just turn.responseId)
+                                                    nextTurnsUsed
+                                                    continuation
+                                                    (length steering)
+                                                    (Just turn)
+                                                    usageAcc'
             run =
                 go initialState NoResponseCommitted previousResponseId 0
                     (firstInputs <> initialSteering)

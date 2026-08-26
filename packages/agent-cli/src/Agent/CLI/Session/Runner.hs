@@ -316,6 +316,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
+    lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
@@ -954,6 +955,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
             , sessionRestartEffort = restartEffortRef
+            , sessionLastFailedTurn = lastFailedTurnRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionAccount = accountRef

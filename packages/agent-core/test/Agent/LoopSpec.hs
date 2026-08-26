@@ -1249,12 +1249,14 @@ spec = describe "runLoop" do
                 , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 , assistantText = Just "calling"
                 , tokenUsage = TokenUsage 10 4 2
+                , completion = TurnCompleted
                 }
             , Right TurnOutput
                 { responseId = "resp-2"
                 , toolCalls = []
                 , assistantText = Just "done"
                 , tokenUsage = TokenUsage 12 6 0
+                , completion = TurnCompleted
                 }
             ]
         config <- testConfig backend
@@ -1301,6 +1303,46 @@ spec = describe "runLoop" do
             , (Just "resp-1", [UserMessage "use the existing schema"])
             ]
         readIORef pending `shouldReturn` []
+
+    it "commits terminal incomplete responses without running their tools" do
+        submissions <- newIORef []
+        calls <- newIORef ([] :: [Text])
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-incomplete"
+                , toolCalls =
+                    [functionToolCall "c1" "echo" "{\"message\":\"unsafe\"}"]
+                , assistantText = Just "partial"
+                , tokenUsage = TokenUsage 120 32768 0
+                , completion = TurnIncomplete
+                    { incompleteReason = "max_output_tokens"
+                    , incompleteReasoningTokens = Just 32000
+                    }
+                }
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \case
+                    ToolStarted call -> modifyIORef' calls (<> [call.callId])
+                    _ -> pure ()
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionResult `shouldBe`
+            Left
+                (LoopIncomplete TurnOutput
+                    { responseId = "resp-incomplete"
+                    , toolCalls =
+                        [functionToolCall
+                            "c1" "echo" "{\"message\":\"unsafe\"}"]
+                    , assistantText = Just "partial"
+                    , tokenUsage = TokenUsage 120 32768 0
+                    , completion = TurnIncomplete
+                        { incompleteReason = "max_output_tokens"
+                        , incompleteReasoningTokens = Just 32000
+                        }
+                    })
+        readIORef calls `shouldReturn` []
 
 --------------------------------------------------------------------------------
 -- Helpers

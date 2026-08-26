@@ -92,7 +92,13 @@ import Agent.CLI.Style
     , motionGlyphSet
     , style
     )
-import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..))
+import Agent.Loop
+    ( LoopError(..)
+    , LoopEvent(..)
+    , TokenUsage(..)
+    , TurnCompletion(..)
+    , TurnOutput(..)
+    )
 import Agent.TUI.Presentation
     ( SearchReplaceAction(..)
     , SearchReplaceDiff(..)
@@ -1176,6 +1182,8 @@ formatLoopErrorPersistedAt now = \case
     LoopMaxTurns turn ->
         "Stopped: maximum turns reached."
             <> maybe "" ("\n" <>) turn.assistantText
+    LoopIncomplete turn ->
+        formatIncompleteResponse turn
     LoopNoResponseId ->
         "Provider returned an incomplete response.\nRetry the message."
     LoopUnexpected message ->
@@ -1201,6 +1209,8 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
     LoopMaxTurns turn ->
         roleError color (glyphErr <> "stopped: max turns reached")
             <> maybe "" (\text -> "\n" <> text) turn.assistantText
+    LoopIncomplete turn ->
+        roleError color (glyphErr <> formatIncompleteResponse turn)
     LoopNoResponseId ->
         roleError color
             (glyphErr
@@ -1214,6 +1224,31 @@ formatLoopErrorColoredMaybeAt color maybeNow = \case
                 <> "\nRetry the message.")
     LoopCancelled _ ->
         roleMuted color (glyphCancel <> "cancelled")
+
+formatIncompleteResponse :: TurnOutput -> Text
+formatIncompleteResponse turn =
+    "Response incomplete: "
+        <> reason
+        <> "."
+        <> tokenDetails
+        <> "\nUse /retry to retry the same message and attachments."
+  where
+    (reason, reasoningTokens) = case turn.completion of
+        TurnIncomplete incompleteReason incompleteReasoningTokens ->
+            (incompleteReason, incompleteReasoningTokens)
+        TurnCompleted -> ("unknown", Nothing)
+    outputTokens = turn.tokenUsage.outputTokens
+    tokenDetails
+        | outputTokens <= 0 && reasoningTokens == Nothing = ""
+        | otherwise =
+            "\nProvider reported "
+                <> Text.pack (show outputTokens)
+                <> " output tokens"
+                <> maybe ""
+                    (\tokens ->
+                        " (" <> Text.pack (show tokens) <> " reasoning tokens)")
+                    reasoningTokens
+                <> "."
 
 formatInterruptedResponse :: Text -> Text
 formatInterruptedResponse details =

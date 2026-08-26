@@ -3,7 +3,14 @@ module Agent.CLI.RenderSpec (spec) where
 import Agent.CLI.Render
 import Agent.CLI.Style (motionGlyphSet)
 import Agent.Error (ApiError(..), ErrorType(..), credentialsExhausted)
-import Agent.Loop (LoopError(..), LoopEvent(..), TurnOutput(..), emptyTokenUsage)
+import Agent.Loop
+    ( LoopError(..)
+    , LoopEvent(..)
+    , TokenUsage(..)
+    , TurnCompletion(..)
+    , TurnOutput(..)
+    , emptyTokenUsage
+    )
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
@@ -231,8 +238,27 @@ spec = do
                 , toolCalls = []
                 , assistantText = Just "almost"
                 , tokenUsage = emptyTokenUsage
+                , completion = TurnCompleted
                 })
                 `shouldSatisfy` (/= "")
+
+        it "reports incomplete output and hidden reasoning usage" do
+            let rendered = formatLoopError (LoopIncomplete TurnOutput
+                    { responseId = "r"
+                    , toolCalls = []
+                    , assistantText = Nothing
+                    , tokenUsage = emptyTokenUsage
+                        { outputTokens = 32768 }
+                    , completion = TurnIncomplete
+                        { incompleteReason = "max_output_tokens"
+                        , incompleteReasoningTokens = Just 32000
+                        }
+                    })
+            rendered `shouldSatisfy`
+                Text.isInfixOf "max_output_tokens"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "32000 reasoning tokens"
+            rendered `shouldSatisfy` Text.isInfixOf "/retry"
 
         it "renders exhausted credentials as actionable user-facing text" do
             let now = UTCTime (fromGregorian 2026 8 22) 0
@@ -403,6 +429,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "Complete"
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 activity <- stateActivity <$> readIORef config.renderState
                 activity `shouldBe` "Retrying response…"
@@ -430,6 +457,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -451,6 +479,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 (stateReasoningBuffer <$> readIORef config.renderState)
                     `shouldReturn` emptyTextBuffer
@@ -480,6 +509,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -500,6 +530,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -530,6 +561,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -557,6 +589,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Nothing
                         , tokenUsage = emptyTokenUsage
+                        , completion = TurnCompleted
                         })
                     hClose handle
                     actual <- stripTerminalControls <$> Text.readFile path
@@ -588,6 +621,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 actual <- stripTerminalControls <$> Text.readFile path
@@ -606,6 +640,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- stripTerminalControls <$> Text.readFile path
@@ -624,6 +659,7 @@ spec = do
                     , toolCalls = [call]
                     , assistantText = Nothing
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- Text.readFile path
@@ -637,6 +673,7 @@ spec = do
                     , toolCalls = []
                     , assistantText = Just "see `file.txt`"
                     , tokenUsage = emptyTokenUsage
+                    , completion = TurnCompleted
                     })
                 hClose handle
                 body <- Text.readFile path

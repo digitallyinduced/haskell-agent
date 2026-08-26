@@ -110,6 +110,7 @@ import Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TurnInput(..)
+    , TurnOutput(..)
     , addTokenUsage
     , runLoopInputsDetailed
     )
@@ -157,7 +158,10 @@ import System.Process
 import System.Timeout (timeout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
-runOneTurn env promptText inputs =
+runOneTurn env promptText inputs = do
+    -- A newly submitted turn supersedes any older retry candidate. If this
+    -- attempt fails, finishTurn installs its own PendingTurn afterwards.
+    writeIORef env.sessionLastFailedTurn Nothing
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
@@ -298,7 +302,9 @@ runOneTurnBusy env@SessionEnv
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-        persistIncomplete retainedItems errorText = case persist of
+        persistIncomplete
+            :: [ResponseItem] -> Text -> Maybe TurnOutput -> IO ()
+        persistIncomplete retainedItems errorText maybeTurn = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -308,12 +314,12 @@ runOneTurnBusy env@SessionEnv
                 let turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
-                        , turnAssistantText = Nothing
+                        , turnAssistantText = maybeTurn >>= (.assistantText)
                         , turnError = Just errorText
-                        , turnResponseId = Nothing
+                        , turnResponseId = (.responseId) <$> maybeTurn
                         , turnEffect = TranscriptAppend
                         , turnItems = retainedItems
-                        , turnUsage = Nothing
+                        , turnUsage = (.tokenUsage) <$> maybeTurn
                         }
                 (handle', turnIndex) <-
                     appendTurnWithMetaUpdateIndexed handle turn \meta ->
@@ -364,7 +370,7 @@ runOneTurnBusy env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete (inputOnlyTurnItems prepared) "cancelled"
+            persistIncomplete (inputOnlyTurnItems prepared) "cancelled" Nothing
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -415,9 +421,30 @@ runOneTurnBusy env@SessionEnv
                                 (formatLoopErrorColoredAt color finishedAt err)
                             putTextLn stderrHandle
                                 (formatTurnStatus color "error" (elapsedDetail model))
+                    let maybeIncompleteTurn = case err of
+                            LoopIncomplete turn -> Just turn
+                            _ -> Nothing
+                    forM_ maybeIncompleteTurn \turn ->
+                        atomicModifyIORef' usageRef \current ->
+                            (addTokenUsage current turn.tokenUsage, ())
+                    -- Keep the live and resumed model transcript aligned:
+                    -- terminal failures checkpoint only the prepared input.
+                    -- Partial assistant text, response id, usage, and the
+                    -- incomplete reason remain available in turn metadata.
                     persistIncomplete (inputOnlyTurnItems prepared)
                         (formatLoopErrorPersistedAt finishedAt err)
-                    pure TurnFailed
+                        maybeIncompleteTurn
+                    planState <- readIORef planMode.planStateRef
+                    pure $ TurnFailed PendingTurn
+                        { pendingPromptText = promptText
+                        -- ConversationFailed checkpoints the exact stamped
+                        -- inputs (including attachments) in the live
+                        -- transcript. Do not retain a second potentially
+                        -- large copy here.
+                        , pendingInputs = []
+                        , pendingExitAfter = False
+                        , pendingPlanState = planState
+                        }
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
                 stdoutHandle terminal wallStarted finishedAt 0

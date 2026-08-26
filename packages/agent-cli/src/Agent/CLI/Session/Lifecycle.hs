@@ -2,6 +2,7 @@
 module Agent.CLI.Session.Lifecycle
     ( SessionContinuation(..)
     , finishTurn
+    , retryFailedTurn
     , runPendingTurn
     ) where
 
@@ -73,6 +74,28 @@ runPendingTurn
 runPendingTurn continuation presentation =
     runPendingTurnWithCooldownRetry continuation True presentation
 
+-- | Retry a failed turn from its retained input checkpoint. The original
+-- inputs are already present in the live transcript after a terminal failure;
+-- submitting them again would duplicate the user message and attachments.
+retryFailedTurn
+    :: SessionContinuation
+    -> SessionEnv
+    -> PendingTurn
+    -> IO RunResult
+retryFailedTurn continuation env pending = do
+    writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    syncFullscreenPrompt env
+    case env.sessionFullscreen of
+        Nothing -> pure ()
+        Just runtime -> emitUiEvent runtime UiTurnRestarted
+    writeIORef env.sessionLastFailedTurn Nothing
+    -- The failed turn already owns the persisted/displayed user prompt.
+    -- Keep the retry turn's user text empty so session history does not show
+    -- the same prompt twice.
+    result <- runOneTurn env "" []
+    finishTurnWithCooldownRetry
+        continuation True env pending.pendingExitAfter result
+
 runPendingTurnWithCooldownRetry
     :: SessionContinuation
     -> Bool
@@ -94,6 +117,7 @@ runPendingTurnWithCooldownRetry
                 emitUiEvent runtime UiTurnRestarted
             ContinuePendingTurn ->
                 pure ()
+    writeIORef env.sessionLastFailedTurn Nothing
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
     finishTurnWithCooldownRetry
         continuation allowCooldownRetry env pending.pendingExitAfter result
@@ -141,7 +165,9 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
         if exitAfter
             then pure RunQuit
             else continuation.resumeSession env
-    TurnFailed ->
+    TurnFailed pending -> do
+        writeIORef env.sessionLastFailedTurn
+            (Just (setPendingExitAfter exitAfter pending))
         if exitAfter
             then
                 if env.sessionBackground
