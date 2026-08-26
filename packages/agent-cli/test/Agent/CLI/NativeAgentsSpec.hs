@@ -108,3 +108,38 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentModel `shouldBe` Just "sonnet"
         view.nativeAgentStatus `shouldBe` "done"
         view.nativeAgentTranscript `shouldBe` ["review complete"]
+
+    it "does not restore unpaired or non-Claude canonical calls" do
+        let claudeFields =
+                KeyMap.singleton "provider"
+                    (Aeson.String "claude-code")
+            otherFields =
+                KeyMap.singleton "provider"
+                    (Aeson.String "openai")
+            call identifier fields = FunctionCallItem FunctionCall
+                { itemId = Nothing
+                , callId = identifier
+                , name = "Task"
+                , namespace = Nothing
+                , arguments = "{}"
+                , encryptedFunctionArgs = Nothing
+                , status = Just ItemCompleted
+                , extraFields = fields
+                }
+            wrongOutput = FunctionCallOutputItem FunctionCallOutput
+                { itemId = Nothing
+                , callId = "claude-unpaired"
+                , name = Nothing
+                , namespace = Nothing
+                , output = Aeson.String "not Claude metadata"
+                , status = Just ItemCompleted
+                , extraFields = otherFields
+                }
+            restored =
+                restoreNativeAgents
+                    [ call "claude-unpaired" claudeFields
+                    , wrongOutput
+                    , call "other" otherFields
+                    ]
+                    Map.empty
+        restored `shouldBe` Map.empty

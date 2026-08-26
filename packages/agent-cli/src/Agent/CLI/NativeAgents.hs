@@ -121,11 +121,15 @@ restoreNativeAgents items current =
     Map.union current restored
   where
     outputs = Map.fromList
-        [(output.callId, output) | FunctionCallOutputItem output <- items]
+        [ (output.callId, output)
+        | FunctionCallOutputItem output <- items
+        , isClaudeNativeItem output.extraFields
+        ]
     restored = Map.fromList
         [ (call.callId, restoredView call)
         | FunctionCallItem call <- items
         , isClaudeNativeCall call
+        , Map.member call.callId outputs
         ]
     restoredView call =
         let maybeOutput = Map.lookup call.callId outputs
@@ -165,8 +169,12 @@ restoreNativeAgents items current =
 isClaudeNativeCall :: FunctionCall -> Bool
 isClaudeNativeCall call =
     Text.toLower call.name `elem` ["agent", "task"]
-        && KeyMap.lookup "provider" call.extraFields
-            == Just (Aeson.String "claude-code")
+        && isClaudeNativeItem call.extraFields
+
+isClaudeNativeItem :: KeyMap.KeyMap Aeson.Value -> Bool
+isClaudeNativeItem fields =
+    KeyMap.lookup "provider" fields
+        == Just (Aeson.String "claude-code")
 
 argumentText :: Text -> Text -> Maybe Text
 argumentText key raw = do
