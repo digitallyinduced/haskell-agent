@@ -123,7 +123,7 @@ import Agent.Error ()
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Workflow ()
-import Agent.Loop ()
+import Agent.Loop ( emptyTokenUsage )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ( fetchUsage )
 import Agent.OpenAI.WebSocketClient ()
@@ -317,7 +317,11 @@ replWithDraft env@SessionEnv
                     when (not (Text.null panel)) (Text.putStrLn panel)
             -- Status sits on the line above λ in minimal mode.
             withSynchronizedOutput terminal stdout do
-                tokenRate <- stateLastTokensPerSecond <$> readIORef render.renderState
+                savedRate <-
+                    stateLastTokensPerSecond <$> readIORef render.renderState
+                let tokenRate
+                        | usage == emptyTokenUsage = Nothing
+                        | otherwise = savedRate
                 Text.putStrLn $ formatReplStatusLine stdoutColor termCols
                     (currentModel params)
                     (currentEffort params)

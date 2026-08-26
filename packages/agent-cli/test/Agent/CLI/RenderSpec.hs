@@ -23,7 +23,7 @@ import Agent.TextBuffer
     , textBufferToText
     )
 import Agent.TUI.Motion (MotionMode(..), foregroundIndicator)
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
@@ -31,7 +31,8 @@ import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
-import Data.Time.Clock (UTCTime(..), addUTCTime)
+import Data.Maybe (fromMaybe)
+import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime, getCurrentTime)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (BufferMode(..), Handle, hClose, hSetBuffering, openTempFile)
 import Test.Hspec
@@ -123,6 +124,21 @@ spec = do
             cleared.stateGenerationChars `shouldBe` 0
             cleared.stateGenerationStartedAt `shouldBe` Nothing
             stateStartedAt cleared `shouldBe` stateStartedAt started
+
+        it "keeps spinner elapsed time across ResponseRestarted" do
+            withRenderConfig True False \config _handle _path -> do
+                renderEvent config TurnStarted
+                before <- readIORef config.renderState
+                threadDelay 1_100_000
+                renderEvent config (ResponseRestarted "retry")
+                after <- readIORef config.renderState
+                now <- getCurrentTime
+                let started = fromMaybe now after.stateStartedAt
+                    elapsed = realToFrac (diffUTCTime now started) :: Double
+                stateStartedAt after `shouldBe` stateStartedAt before
+                after.stateGenerationStartedAt
+                    `shouldNotBe` after.stateStartedAt
+                elapsed `shouldSatisfy` (>= 1.0)
 
         it "streams markdown through a pure state transition" do
             let (state1, first) = streamMarkdown "hello\n" emptyRenderState
