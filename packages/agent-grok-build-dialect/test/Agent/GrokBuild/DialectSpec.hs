@@ -111,10 +111,17 @@ spec = describe "Grok Build dialect" do
             terminal <-
                 toolSchedulingPlanFor registry
                     (terminalCall "t1" "sed -n '1,80p' src/Main.hs" False)
+            fromCd <-
+                toolSchedulingPlanFor registry
+                    (terminalCall
+                        "t2"
+                        "cd packages/agent-core && sed -n '1,80p' src/Main.hs"
+                        False)
             grepCall <-
                 toolSchedulingPlanFor registry
                     (functionToolCall "g1" "grep" "{\"pattern\":\"foo\"}")
             schedulingPlansConflict terminal grepCall `shouldBe` False
+            schedulingPlansConflict fromCd grepCall `shouldBe` False
             close
 
     it "keeps mutating and background terminal commands exclusive" do

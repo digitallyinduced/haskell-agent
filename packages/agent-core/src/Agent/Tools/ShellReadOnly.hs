@@ -1,24 +1,33 @@
 -- | Strict observational-shell allowlist used by tool resource claims.
 --
 -- Unknown, mutating, redirected, piped, or compound commands stay exclusive.
+-- A single @cd DIR && COMMAND@ prefix is accepted when DIR is a simple path
+-- and COMMAND itself is observational.
 module Agent.Tools.ShellReadOnly
     ( shellCommandIsReadOnly
     ) where
 
+import Data.Char (isSpace)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified System.FilePath as FilePath
 
 -- | True when the complete command is a recognized read-only invocation.
 shellCommandIsReadOnly :: Text -> Bool
-shellCommandIsReadOnly command
-    | Text.null stripped = False
-    | Text.any (`elem` forbiddenChars) stripped = False
-    | "$(" `Text.isInfixOf` stripped = False
-    | "`" `Text.isInfixOf` stripped = False
-    | "$" `Text.isInfixOf` stripped = False
+shellCommandIsReadOnly command =
+    classifySimple $ maybe stripped id (cdAndCommand stripped)
+  where
+    stripped = Text.strip command
+
+classifySimple :: Text -> Bool
+classifySimple command
+    | Text.null command = False
+    | Text.any (`elem` forbiddenChars) command = False
+    | "$(" `Text.isInfixOf` command = False
+    | "`" `Text.isInfixOf` command = False
+    | "$" `Text.isInfixOf` command = False
     | otherwise =
-        case Text.words stripped of
+        case Text.words command of
             [] -> False
             executable : arguments ->
                 allowedCommand
@@ -26,8 +35,49 @@ shellCommandIsReadOnly command
                         (FilePath.takeFileName (Text.unpack executable)))
                     arguments
   where
-    stripped = Text.strip command
     forbiddenChars = ['\n', '\r', ';', '&', '|', '>', '<']
+
+-- | Strip one @cd DIR && COMMAND@ prefix. Anything more compound stays
+-- exclusive via 'classifySimple'.
+cdAndCommand :: Text -> Maybe Text
+cdAndCommand text = do
+    afterCd <- Text.stripPrefix "cd" (Text.stripStart text)
+    afterSpace <- case Text.uncons afterCd of
+        Just (char, rest) | isSpace char ->
+            Just (Text.dropWhile isSpace rest)
+        _ -> Nothing
+    (dir, afterDir) <- nextToken afterSpace
+    afterAnd <- Text.stripPrefix "&&" (Text.dropWhile isSpace afterDir)
+    let command = Text.strip afterAnd
+    if simpleDirectory dir && not (Text.null command)
+        then Just command
+        else Nothing
+
+nextToken :: Text -> Maybe (Text, Text)
+nextToken text
+    | Text.null text = Nothing
+    | otherwise = case Text.uncons text of
+        Just (quote, rest)
+            | quote == '\'' || quote == '"' ->
+                case Text.break (== quote) rest of
+                    (inside, after)
+                        | Text.null after -> Nothing
+                        | Text.any (== '\\') inside -> Nothing
+                        | otherwise -> Just (inside, Text.drop 1 after)
+        _ ->
+            let (token, rest) = Text.break isSpace text
+            in if Text.null token then Nothing else Just (token, rest)
+
+simpleDirectory :: Text -> Bool
+simpleDirectory dir =
+    not (Text.null dir)
+        && not (Text.isPrefixOf "-" dir)
+        && Text.all allowedDirectoryChar dir
+
+allowedDirectoryChar :: Char -> Bool
+allowedDirectoryChar char =
+    char `notElem`
+        ['$', '`', '\n', '\r', ';', '&', '|', '>', '<', '(', ')', '{', '}', '*', '?', '~', '!']
 
 allowedCommand :: Text -> [Text] -> Bool
 allowedCommand executable arguments
