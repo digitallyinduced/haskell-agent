@@ -35,6 +35,7 @@ import Agent.Tools.Types
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
+    , withDefaultArgumentInterpreter
     )
 import Agent.ToolDispatch (typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
@@ -1064,7 +1065,7 @@ mcpFleetGrokMetaTools fleet =
     ]
 
 mcpSearchTool :: McpFleet -> AppTool
-mcpSearchTool fleet = AppTool
+mcpSearchTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "mcp_search"
     , appToolDescription =
         "Search currently available MCP tools. Servers may still be connecting."
@@ -1122,7 +1123,7 @@ mcpSearchTool fleet = AppTool
     }
 
 grokSearchTool :: McpFleet -> AppTool
-grokSearchTool fleet = AppTool
+grokSearchTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "search_tool"
     , appToolDescription =
         "Search for MCP tools by keyword and retrieve their input schemas.\n\n\
@@ -1345,7 +1346,7 @@ reconnectCatalogEntry fleet qualifiedName failedEntry =
                             Just replacement -> pure (Right replacement)
 
 mcpCallTool :: McpFleet -> AppTool
-mcpCallTool fleet = AppTool
+mcpCallTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "mcp_call"
     , appToolDescription =
         "Call a currently available read-only MCP tool by its qualified server__tool name."
@@ -1381,7 +1382,7 @@ mcpCallTool fleet = AppTool
     }
 
 grokUseTool :: McpFleet -> AppTool
-grokUseTool fleet = AppTool
+grokUseTool fleet = withDefaultArgumentInterpreter AppTool
     { appToolName = "use_tool"
     , appToolDescription =
         "Call an MCP integration tool.\n\n\
@@ -1769,7 +1770,7 @@ discoverMcpTools client = go Nothing [] []
             <*> fields .:? "nextCursor"
 
 appToolFor :: McpClient -> McpTool -> AppTool
-appToolFor client tool = AppTool
+appToolFor client tool = withDefaultArgumentInterpreter AppTool
     { appToolName = qualifiedName
     , appToolDescription = tool.discoveredDescription
     , appToolSchema = RawJsonFunctionSchema tool.discoveredInputSchema

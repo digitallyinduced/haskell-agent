@@ -183,13 +183,13 @@ jsonArgsTool
 jsonArgsTool name consume =
     StreamedTool
         { streamedStart = pure ()
-        , streamedInterpret = \() -> \case
-            ToolPrefix _ ->
-                pure (Right ())
-            ToolDone text ->
-                case decodeCallArguments name text of
-                    Left _ -> pure (Right ())
-                    Right args -> pure (Left (args, ()))
+        , streamedInterpret = \() input ->
+            let text = case input of
+                    ToolPrefix prefix -> prefix
+                    ToolDone arguments -> arguments
+            in pure $ case decodeCallArguments name text of
+                Right args -> Left (args, ())
+                Left _ -> Right ()
         , streamedConsume = consume
         , streamedClose = \_ -> pure ()
         }

@@ -30,7 +30,7 @@ import Agent.ToolDispatch
     , canonicalToolName
     , functionToolCall
     )
-import Agent.Tools.Types (AppTool(..))
+import Agent.Tools.Types (AppTool(..), interpreterForTool)
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async
     ( Async
@@ -132,21 +132,18 @@ newToolSpeculationRuntime tools = mask \restore -> do
         -> Map.Map Text StreamedTool
         -> AppTool
         -> IO (Map.Map Text StreamedTool)
-    openOne resources current tool =
-        case tool.appToolArgumentInterpreter of
-            Nothing -> pure current
-            Just acquireTool
-                | Map.member name current -> pure current
-                | otherwise ->
-                    tryAny
-                        (allocateAcquireResource
-                            resources
-                            acquireTool) >>= \case
-                        Left (_ :: SomeException) -> pure current
-                        Right (_, streamed) ->
-                            pure (Map.insert name streamed current)
-              where
-                name = canonicalToolName tool.appToolName
+    openOne resources current tool
+        | Map.member name current = pure current
+        | otherwise =
+            tryAny
+                (allocateAcquireResource
+                    resources
+                    (interpreterForTool tool)) >>= \case
+                Left (_ :: SomeException) -> pure current
+                Right (_, streamed) ->
+                    pure (Map.insert name streamed current)
+      where
+        name = canonicalToolName tool.appToolName
 
 closeToolSpeculationRuntime :: ToolSpeculationRuntime -> IO ()
 closeToolSpeculationRuntime runtime = mask \restore -> do

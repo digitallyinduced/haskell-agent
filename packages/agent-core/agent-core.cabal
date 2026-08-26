@@ -214,6 +214,7 @@ test-suite agent-core-test
                     , Agent.Tools.FileSystem.GrepSpec
                     , Agent.Tools.FileSystem.ReadFileSpeculationSpec
                     , Agent.Tools.GhciSpec
+                    , Agent.Tools.InterpreterSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
                     , Agent.Tools.PlanModeSpec

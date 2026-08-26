@@ -25,6 +25,7 @@ import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ReadFileSpeculationSpec as ReadFileSpeculationSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
+import qualified Agent.Tools.InterpreterSpec as InterpreterSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
@@ -59,6 +60,7 @@ main = hspec do
     GrepSpec.spec
     ReadFileSpeculationSpec.spec
     GhciSpec.spec
+    InterpreterSpec.spec
     IOSpec.spec
     MultiAgentsSpec.spec
     PlanModeSpec.spec

@@ -18,6 +18,8 @@ module Agent.Tools.Types
     , withToolResourceClaims
     , withTypedResourceClaims
     , withToolArgumentInterpreter
+    , withDefaultArgumentInterpreter
+    , interpreterForTool
     , mkToolRegistry
     , toolRegistryTools
     , lookupRegisteredTool
@@ -259,6 +261,18 @@ withToolArgumentInterpreter
     -> AppTool
 withToolArgumentInterpreter interpreter tool =
     tool { appToolArgumentInterpreter = Just interpreter }
+
+-- | Give a raw 'AppTool' record the same streamed interpreter 'jsonTool' uses.
+withDefaultArgumentInterpreter :: AppTool -> AppTool
+withDefaultArgumentInterpreter tool =
+    withToolArgumentInterpreter (streamedToolFactoryForHandler tool.appToolHandler) tool
+
+-- | Interpreter used at runtime: an explicit factory, or the handler fold.
+interpreterForTool :: AppTool -> StreamedToolFactory
+interpreterForTool tool =
+    case tool.appToolArgumentInterpreter of
+        Just factory -> factory
+        Nothing -> streamedToolFactoryForHandler tool.appToolHandler
 
 -- | Construct a freeform tool with the conservative turn-sequential default.
 freeformApplyPatchAppTool

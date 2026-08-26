@@ -20,6 +20,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     , jsonToolParameters
+    , withDefaultArgumentInterpreter
     )
 import Control.Concurrent.MVar
 import Data.IORef
@@ -205,7 +206,7 @@ expectAlwaysReadOnly AlwaysReadOnly = pure ()
 expectAlwaysReadOnly _ = expectationFailure "expected AlwaysReadOnly"
 
 fake :: Text -> AppTool
-fake name = AppTool
+fake name = withDefaultArgumentInterpreter AppTool
     { appToolName = name
     , appToolDescription = name
     , appToolSchema = JsonFunctionSchema []

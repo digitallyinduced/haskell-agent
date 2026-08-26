@@ -40,6 +40,7 @@ import Agent.Tools.Types
     , ToolSchema(..)
     , defaultToolEnv
     , jsonToolParameters
+    , withDefaultArgumentInterpreter
     )
 import Control.Concurrent
     ( newChan
@@ -547,7 +548,7 @@ withRegistry action =
         action
 
 fake :: Text -> AppTool
-fake name = AppTool
+fake name = withDefaultArgumentInterpreter AppTool
     { appToolName = name
     , appToolDescription = name
     , appToolSchema = JsonFunctionSchema []
