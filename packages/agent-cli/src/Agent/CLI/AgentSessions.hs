@@ -271,11 +271,12 @@ sessionThreadStatus manager sessionId =
                 poll worker >>= \case
                     Nothing -> pure (state, "running")
                     Just (Right ()) ->
-                        terminalStatus state "completed"
+                        settle state ManagedSessionThreadCompleted "completed"
                     Just (Left err) ->
-                        terminalStatus
-                            state
-                            ("failed (" <> formatException err <> ")")
+                        let message = "failed (" <> formatException err <> ")"
+                        in settle state
+                            (ManagedSessionThreadFailed message)
+                            message
             Just ManagedSessionThreadCompleted ->
                 terminalStatus state "completed"
             Just (ManagedSessionThreadFailed err) ->
@@ -286,15 +287,26 @@ sessionThreadStatus manager sessionId =
             (sessionLockPath
                 (manager.threadManagerRoot
                     </> unsafeEncodeUtf (Text.unpack sessionId)))
-    terminalStatus state terminal = do
+    -- Persist the terminal outcome instead of deleting it, so repeated status
+    -- polls stay observable. The background worker itself records the same
+    -- terminal constructor on exit (launchSessionThread); deleting it here
+    -- destroyed that record, making a failed session report "idle" on the
+    -- second poll (and never report its failure at all when a poll landed
+    -- while the session lock was still held). A still-active lock only masks
+    -- the outcome as "running" for this poll; the retained record surfaces the
+    -- real status once the lock clears.
+    settle state record terminal = do
         locked <- lockIsActive
         pure
             ( state
                 { managedThreads =
-                    Map.delete sessionId state.managedThreads
+                    Map.insert sessionId record state.managedThreads
                 }
             , if locked then "running" else terminal
             )
+    terminalStatus state terminal = do
+        locked <- lockIsActive
+        pure (state, if locked then "running" else terminal)
 
 closeSessionThreadManager :: SessionThreadManager -> IO ()
 closeSessionThreadManager manager = do
@@ -614,26 +626,19 @@ sessionProcessStatus manager sessionId =
             Just ManagedSessionStarting{} ->
                 pure (state, "running")
             Just (ManagedSessionRunning managedHandle) ->
+                -- Keep the exited process record rather than deleting it on
+                -- read: getProcessExitCode returns a stable code once the
+                -- process has exited, so retaining the handle lets repeated
+                -- polls keep reporting "completed"/"failed" instead of
+                -- decaying to "idle" after the first read. Re-launch tolerates
+                -- a retained exited record (startSessionProcess treats a
+                -- Just exit code as not-running).
                 getProcessExitCode managedHandle >>= \case
                     Nothing -> pure (state, "running")
-                    Just ExitSuccess ->
-                        pure
-                            ( state
-                                { sessionManagerProcesses =
-                                    Map.delete sessionId
-                                        state.sessionManagerProcesses
-                                }
-                            , "completed"
-                            )
+                    Just ExitSuccess -> pure (state, "completed")
                     Just (ExitFailure code) ->
                         pure
-                            ( state
-                                { sessionManagerProcesses =
-                                    Map.delete sessionId
-                                        state.sessionManagerProcesses
-                                }
-                            , "failed (" <> Text.pack (show code) <> ")"
-                            )
+                            (state, "failed (" <> Text.pack (show code) <> ")")
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager = do
