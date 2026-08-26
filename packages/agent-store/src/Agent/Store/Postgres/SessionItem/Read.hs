@@ -351,6 +351,14 @@ contentPartFromRow row = StoredContentPart
     , storedContentPartFileUrl = row.contentPartRowFileUrl
     , storedContentPartFilename = row.contentPartRowFilename
     , storedContentPartImageUrl = row.contentPartRowImageUrl
+    , storedContentPartFileBinary =
+        StoredBinaryData
+            <$> row.contentPartRowFileDataMimeType
+            <*> row.contentPartRowFileDataBytes
+    , storedContentPartImageBinary =
+        StoredBinaryData
+            <$> row.contentPartRowImageMimeType
+            <*> row.contentPartRowImageBytes
     , storedContentPartInputAudio =
         StoredOpaqueValue <$> row.contentPartRowInputAudio
     , storedContentPartPromptCacheBreakpoint =

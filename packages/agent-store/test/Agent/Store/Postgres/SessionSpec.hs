@@ -372,6 +372,21 @@ testTurn now = SessionTurn
                         StoredOpaqueObject
                             "{\"provider_extension\":true}"
                     }
+                , (emptyContentPart "input_image")
+                    { storedContentPartImageBinary =
+                        Just StoredBinaryData
+                            { storedBinaryDataMimeType = "image/png"
+                            , storedBinaryDataBytes = "png-bytes"
+                            }
+                    }
+                , (emptyContentPart "input_file")
+                    { storedContentPartFilename = Just "notes.txt"
+                    , storedContentPartFileBinary =
+                        Just StoredBinaryData
+                            { storedBinaryDataMimeType = "text/plain"
+                            , storedBinaryDataBytes = "file-bytes"
+                            }
+                    }
                 ]
             , storedMessageRole = "developer"
             , storedMessageStatus = Just "in_progress"
@@ -494,6 +509,8 @@ emptyContentPart partType = StoredContentPart
     , storedContentPartFileUrl = Nothing
     , storedContentPartFilename = Nothing
     , storedContentPartImageUrl = Nothing
+    , storedContentPartFileBinary = Nothing
+    , storedContentPartImageBinary = Nothing
     , storedContentPartInputAudio = Nothing
     , storedContentPartPromptCacheBreakpoint = Nothing
     , storedContentPartAnnotations = Nothing

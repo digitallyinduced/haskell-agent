@@ -9,6 +9,7 @@ module Agent.Store.SessionItem
     , StoredOpaqueValue(..)
     , StoredToolOutputKind(..)
     , StoredToolOutput(..)
+    , StoredBinaryData(..)
     , StoredMessageContent(..)
     , StoredContentPart(..)
     , StoredMessage(..)
@@ -25,6 +26,7 @@ module Agent.Store.SessionItem
     , storedResponseItemRepresentation
     ) where
 
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 
 data StoredResponseItemRepresentation
@@ -54,6 +56,12 @@ data StoredToolOutput = StoredToolOutput
     }
     deriving (Eq, Show)
 
+data StoredBinaryData = StoredBinaryData
+    { storedBinaryDataMimeType :: !Text
+    , storedBinaryDataBytes :: !ByteString
+    }
+    deriving (Eq, Show)
+
 data StoredMessageContent
     = StoredMessageText !Text
     | StoredMessageParts ![StoredContentPart]
@@ -69,6 +77,8 @@ data StoredContentPart = StoredContentPart
     , storedContentPartFileUrl :: !(Maybe Text)
     , storedContentPartFilename :: !(Maybe Text)
     , storedContentPartImageUrl :: !(Maybe Text)
+    , storedContentPartFileBinary :: !(Maybe StoredBinaryData)
+    , storedContentPartImageBinary :: !(Maybe StoredBinaryData)
     , storedContentPartInputAudio :: !(Maybe StoredOpaqueValue)
     , storedContentPartPromptCacheBreakpoint :: !(Maybe StoredOpaqueValue)
     , storedContentPartAnnotations :: !(Maybe StoredOpaqueValue)
