@@ -396,6 +396,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiPrepareSpawn = Nothing
                 , multiSendToRoot = Just deliverRoot
                 , multiSpawnModelGuidance = Nothing
+                , multiAllowedChildModels = Nothing
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context))
@@ -429,6 +430,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
     , multiSpawnModelGuidance = Nothing
+    , multiAllowedChildModels = Nothing
     }
 
 childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext

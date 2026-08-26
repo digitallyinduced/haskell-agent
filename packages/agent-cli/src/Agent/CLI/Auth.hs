@@ -13,6 +13,7 @@ module Agent.CLI.Auth
     , grokOAuthOptionsFromAuthJson
     , externalAuthSelectionId
     , externalGrokTokenProvider
+    , hasOpenAiAuth
     , loadAuth
     , loadAuthForAccount
     , managedAuthSelectionId

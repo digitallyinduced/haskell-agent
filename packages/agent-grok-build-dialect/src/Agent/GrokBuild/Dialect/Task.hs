@@ -19,6 +19,12 @@ module Agent.GrokBuild.Dialect.Task
     , lookupAgentModel
     , lookupAgentReasoningEffort
     , spawnManagedGrokSubagent
+    , lunaSubagentModel
+    , lunaSubagentEffort
+    , grokRootChildModels
+    , canonicalizeGrokChildModel
+    , resolveRequestedGrokChildModel
+    , isLunaSubagentModel
     ) where
 
 import Agent.InterAgentMessage (plainInterAgentContent)
@@ -76,6 +82,91 @@ runtimeSubagentType = "runtime-bounded"
 knownSubagentTypes :: [Text]
 knownSubagentTypes = ["general-purpose", "explore", "plan"]
 
+-- | OpenAI child slug allowed from a Grok root when OpenAI auth is present.
+lunaSubagentModel :: Text
+lunaSubagentModel = "gpt-5.6-luna"
+
+-- | Grok-root Luna children always run at high reasoning effort.
+lunaSubagentEffort :: Text
+lunaSubagentEffort = "high"
+
+-- | Models a Grok-root spawn_subagent call may select.
+grokRootChildModels :: Bool -> [Text]
+grokRootChildModels openaiAvailable =
+    "grok-4.6" : "grok-4.5" : [lunaSubagentModel | openaiAvailable]
+
+isLunaSubagentModel :: Text -> Bool
+isLunaSubagentModel = (== lunaSubagentModel)
+
+-- | Map a model-facing slug onto the Grok-root allowlist, if it is one.
+canonicalizeGrokChildModel :: Text -> Maybe Text
+canonicalizeGrokChildModel raw =
+    case folded of
+        "grok-4.6" -> Just "grok-4.6"
+        "grok-4-6" -> Just "grok-4.6"
+        "grok4.6" -> Just "grok-4.6"
+        "grok4-6" -> Just "grok-4.6"
+        "grok-4.5" -> Just "grok-4.5"
+        "grok-4-5" -> Just "grok-4.5"
+        "grok4.5" -> Just "grok-4.5"
+        "grok4-5" -> Just "grok-4.5"
+        "gpt-5.6-luna" -> Just lunaSubagentModel
+        "gpt-5-6-luna" -> Just lunaSubagentModel
+        "gpt5.6luna" -> Just lunaSubagentModel
+        "gpt5-6luna" -> Just lunaSubagentModel
+        "luna" -> Just lunaSubagentModel
+        "openai/gpt-5.6-luna" -> Just lunaSubagentModel
+        "openai/gpt-5-6-luna" -> Just lunaSubagentModel
+        _ -> Nothing
+  where
+    folded =
+        Text.toLower
+            $ Text.replace "_" "-"
+            $ Text.filter (/= ' ')
+            $ Text.strip raw
+
+-- | 'Nothing' policy keeps historical passthrough. A Just allowlist rejects
+-- unknown slugs and canonicalizes aliases. Omitting model still inherits.
+resolveRequestedGrokChildModel
+    :: Maybe [Text]
+    -> Maybe Text
+    -> Either Text (Maybe Text)
+resolveRequestedGrokChildModel Nothing requested = Right requested
+resolveRequestedGrokChildModel _ Nothing = Right Nothing
+resolveRequestedGrokChildModel (Just allowed) (Just raw) =
+    case canonicalizeGrokChildModel raw of
+        Just canonical
+            | canonical `elem` allowed -> Right (Just canonical)
+            | otherwise -> Left (unknownChildModelMessage raw allowed)
+        Nothing -> Left (unknownChildModelMessage raw allowed)
+
+unknownChildModelMessage :: Text -> [Text] -> Text
+unknownChildModelMessage raw allowed =
+    "Unknown spawn_subagent model '"
+        <> raw
+        <> "'. Valid model slugs: "
+        <> Text.intercalate ", " allowed
+        <> ". Omit `model` to inherit the parent model."
+
+grokChildModelGuidance :: [Text] -> Text
+grokChildModelGuidance slugs =
+    "If you choose an explicit model, you may ONLY use model slugs from this list:\n"
+        <> Text.intercalate "\n" (map ("- " <>) slugs)
+        <> "\n\nIf you do not explicitly request a model, omit `model` to inherit the parent model."
+        <> lunaNote
+  where
+    lunaNote
+        | lunaSubagentModel `elem` slugs =
+            " Use `"
+                <> lunaSubagentModel
+                <> "` for small, bounded tasks; it runs at high reasoning effort."
+        | otherwise = ""
+
+taskModelProperty :: Maybe [Text] -> Text
+taskModelProperty = \case
+    Just slugs -> grokChildModelGuidance slugs
+    Nothing -> "Optional model slug. Omit to inherit the parent model."
+
 data GrokSubagentSpec = GrokSubagentSpec
     { agentType :: !Text
     , modelOverride :: !(Maybe Text)
@@ -130,7 +221,7 @@ sanitizeOptional value = value >>= \raw ->
 
 taskTool :: OsPath -> MultiAgentContext -> GrokSubagentSpecs -> AppTool
 taskTool baseCwd ctx specsRef =
-    jsonAppToolWithExecution "task" taskDescription
+    jsonAppToolWithExecution "task" (taskDescription ctx.multiAllowedChildModels)
         [ PropertySchema "prompt" PropertyString True $ Just
             "The full task prompt for the subagent to execute."
         , PropertySchema "description" PropertyString True $ Just
@@ -144,7 +235,7 @@ taskTool baseCwd ctx specsRef =
         , PropertySchema "cwd" PropertyString False $ Just
             "Explicit working directory for the subagent. Mutually exclusive with isolation=\"worktree\"."
         , PropertySchema "model" PropertyString False $ Just
-            "Optional model slug. Omit to inherit the parent model."
+            (taskModelProperty ctx.multiAllowedChildModels)
         , PropertySchema "isolation" (PropertyEnum ["none", "worktree"]) False $ Just
             "Isolation mode: \"none\" (default, shared workspace) or \"worktree\" (isolated git worktree). Worktree mode prevents child edits from affecting the parent workspace until explicitly applied."
         ]
@@ -157,8 +248,8 @@ taskApproval ctx = case ctx.multiSelfId of
     Nothing -> AlwaysPrompt
     Just _ -> AlwaysReadOnly
 
-taskDescription :: Text
-taskDescription =
+taskDescription :: Maybe [Text] -> Text
+taskDescription allowedModels =
     "Start a subagent that works on a task independently and reports back.\n\n\
     \Agent types:\n\n\
     \- **general-purpose**: General purpose agent for multi-step tasks. Can delegate further work with spawn_subagent while below the harness nesting limit.\n\
@@ -178,6 +269,7 @@ taskDescription =
     \- The resumed agent must use the same subagent_type as the source.\n\n\
     \Isolation mode:\n\
     \- Use isolation=\"worktree\" to run the child in an isolated git worktree. The worktree is preserved after completion and its path is returned in the output."
+    <> maybe "" (\slugs -> "\n\n" <> grokChildModelGuidance slugs) allowedModels
 
 runTask
     :: OsPath
@@ -201,11 +293,20 @@ runTask baseCwd ctx typesRef args
     , Just iso <- args.isolation
     , isWorktreeIsolation iso =
         pure (Left "cwd and isolation are mutually exclusive.")
-    | otherwise = mask \restore ->
-        resolveTaskWorkspace baseCwd ctx args >>= \case
+    | otherwise =
+        case resolveRequestedGrokChildModel ctx.multiAllowedChildModels args.model of
             Left err -> pure (Left err)
-            Right (childCwd, worktree) ->
-                restore (spawnFresh childCwd worktree ctx typesRef args)
+            Right model -> mask \restore ->
+                resolveTaskWorkspace baseCwd ctx args >>= \case
+                    Left err -> pure (Left err)
+                    Right (childCwd, worktree) ->
+                        restore
+                            (spawnFresh
+                                childCwd
+                                worktree
+                                ctx
+                                typesRef
+                                args { model })
 
 spawnFresh
     :: OsPath
@@ -220,7 +321,10 @@ spawnFresh childCwd worktree ctx typesRef args = mask \restore -> do
     let spec = GrokSubagentSpec
             { agentType = args.subagentType
             , modelOverride = args.model
-            , reasoningEffortOverride = Nothing
+            , reasoningEffortOverride =
+                if maybe False isLunaSubagentModel args.model
+                    then Just lunaSubagentEffort
+                    else Nothing
             }
         worktreePath = (.subagentWorktreePath) <$> ownedWorktree
         prepare agentId = do

@@ -89,13 +89,16 @@ main =
             (\_ _ -> pure ())
 
     rootContext registry = MultiAgentContext
-        registry
-        Nothing
-        0
-        taskPathRoot
-        (pure Nothing)
-        Nothing
-        Nothing
-        Nothing
-        Nothing
-        Nothing
+        { multiRegistry = registry
+        , multiCwd = unsafeEncodeUtf "/tmp"
+        , multiSelfId = Nothing
+        , multiDepth = 0
+        , multiTaskPath = taskPathRoot
+        , multiRootTurnId = pure Nothing
+        , multiResumeFromDisk = Nothing
+        , multiCreateWorktree = Nothing
+        , multiPrepareSpawn = Nothing
+        , multiSendToRoot = Nothing
+        , multiSpawnModelGuidance = Nothing
+        , multiAllowedChildModels = Nothing
+        }
