@@ -313,21 +313,31 @@ spec = describe "query" do
                 [_] -> True
                 _ -> False
 
-    it "rejects a mismatched live message before exposing progress" do
-        let wrongSession =
-                "{\"type\":\"assistant\",\"uuid\":\"wrong-session\",\
-                \\"session_id\":\"123e4567-e89b-42d3-a456-426614174999\",\
+    it "rejects mismatched live tool and nested-result messages without progress" do
+        let wrongSessionId =
+                "123e4567-e89b-42d3-a456-426614174999"
+            wrongTool =
+                "{\"type\":\"assistant\",\"uuid\":\"wrong-tool\",\
+                \\"session_id\":\"" <> wrongSessionId <> "\",\
                 \\"message\":{\"content\":[{\"type\":\"tool_use\",\
                 \\"id\":\"agent-tool\",\"name\":\"Agent\",\"input\":{}}]}}"
-        (result, progress) <- runQueryProgress
-            [wrongSession, successResult testSessionId]
-
-        result `shouldSatisfy` \case
-            Left (CLIProtocolError message) ->
-                "while 123e4567-e89b-42d3-a456-426614174000 was active"
-                    `Text.isInfixOf` message
-            _ -> False
-        progress `shouldBe` []
+            wrongNestedResult =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"uuid\":\"wrong-nested-result\",\
+                \\"parent_tool_use_id\":\"agent-tool\",\
+                \\"session_id\":\"" <> wrongSessionId <> "\",\
+                \\"result\":\"must stay hidden\"}"
+        mapM_
+            (\wrongMessage -> do
+                (result, progress) <- runQueryProgress
+                    [wrongMessage, successResult testSessionId]
+                result `shouldSatisfy` \case
+                    Left (CLIProtocolError message) ->
+                        "while 123e4567-e89b-42d3-a456-426614174000 was active"
+                            `Text.isInfixOf` message
+                    _ -> False
+                progress `shouldBe` [])
+            [wrongTool, wrongNestedResult]
 
     it "treats an origin-less result as the human result for compatibility" do
         (result, messages) <- runQueryLines
