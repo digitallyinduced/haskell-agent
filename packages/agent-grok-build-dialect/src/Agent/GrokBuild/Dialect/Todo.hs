@@ -4,10 +4,19 @@ module Agent.GrokBuild.Dialect.Todo
     ) where
 
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch (ToolCall, typedTool)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.GrokBuild.Dialect.Shell (GrokSession(..))
-import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
+import Agent.Tools.Types
+    ( AppTool
+    , ToolExecutionPolicy(..)
+    , withToolResourceClaims
+    )
 import Control.Monad (foldM)
 import Data.Aeson
     ( FromJSON(..)
@@ -66,7 +75,9 @@ instance FromJSON TodoWriteArgs where
         <*> object .: "todos"
 
 todoWriteTool :: GrokSession -> AppTool
-todoWriteTool session = jsonTool "todo_write" todoWriteDescription
+todoWriteTool session =
+    withToolResourceClaims todoWriteResourceClaims $
+    jsonTool "todo_write" todoWriteDescription
     [ PropertySchema "merge" PropertyBoolean False $ Just
         "Optional. When true (default), merges the provided todos into the existing list by id. When false, the provided todos replace the existing list."
     , PropertySchema "todos" (PropertyArray todoUpdateSchema) True $ Just
@@ -87,6 +98,13 @@ todoWriteTool session = jsonTool "todo_write" todoWriteDescription
             False
             (Just "The status of the todo item.")
         ]
+
+todoWriteResourceClaims
+    :: ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+todoWriteResourceClaims _ =
+    pure $ Right
+        [ToolResourceClaim ToolWrite (ToolNamedResource "todos")]
 
 todoWriteDescription :: Text
 todoWriteDescription =

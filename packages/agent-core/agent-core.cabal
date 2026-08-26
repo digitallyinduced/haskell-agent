@@ -80,6 +80,7 @@ library
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
+                    , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src

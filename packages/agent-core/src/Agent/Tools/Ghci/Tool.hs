@@ -13,7 +13,7 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch (ToolCall(..), typedTool)
-import Agent.Tools.Ghci.Classify (GhciClass(..))
+import Agent.Tools.Ghci.Classify (GhciClass(..), classifyGhciInput)
 import Agent.Tools.Ghci.Runtime
     ( GhciOutcome(..)
     , GhciResult(..)
@@ -21,11 +21,17 @@ import Agent.Tools.Ghci.Runtime
     , classifyGhci
     , evalGhci
     )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
     , ToolExecutionPolicy(..)
     , jsonAppToolWithExecution
+    , withToolResourceClaims
     )
 import Data.Aeson (FromJSON(..), Object)
 import qualified Data.Aeson as Aeson
@@ -55,6 +61,7 @@ optionalTimeout object =
 
 runGhciTool :: GhciSession -> AppTool
 runGhciTool session =
+    withToolResourceClaims ghciResourceClaims $
     jsonAppToolWithExecution "run_ghci" ghciDescription
         [ PropertySchema "expression" PropertyString True $ Just
             "Haskell expression, statement, or GHCi :command to evaluate."
@@ -66,6 +73,18 @@ runGhciTool session =
         (ClassifyReadOnly (isGhciReadOnlyCall session))
         TurnSequential
         (typedTool "run_ghci" (runGhci session))
+
+ghciResourceClaims
+    :: ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+ghciResourceClaims call =
+    pure $ case decodeExpression call.arguments of
+        Just expression
+            | classifyGhciInput expression == Just GhciPure ->
+                Right
+                    [ToolResourceClaim ToolWrite (ToolNamedResource "ghci")]
+        _ ->
+            Left "effectful GHCi remains exclusive"
 
 ghciDescription :: Text
 ghciDescription =
