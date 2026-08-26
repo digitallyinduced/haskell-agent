@@ -69,6 +69,22 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentStatus `shouldBe` "cancelled"
         states `shouldSatisfy` all (/= BlockRunning)
 
+    it "settles stale running children before the next turn starts" do
+        let tracked =
+                foldl
+                    (flip applyNativeAgentEvent)
+                    Map.empty
+                    [ NativeAgentStarted "child" Nothing "Explore" Nothing
+                    , NativeAgentOutput "child" "partial"
+                    , TurnStarted
+                    ]
+            view = tracked Map.! "child"
+            states =
+                map (.blockState)
+                    (Foldable.toList view.nativeAgentConversation.uiBlocks)
+        view.nativeAgentStatus `shouldBe` "cancelled"
+        states `shouldSatisfy` all (/= BlockRunning)
+
     it "creates and terminates a placeholder for reordered finish events" do
         let tracked =
                 applyNativeAgentEvent
