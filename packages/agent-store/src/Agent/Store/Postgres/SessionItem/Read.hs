@@ -10,12 +10,20 @@ module Agent.Store.Postgres.SessionItem.Read
 
 import Control.Monad (forM)
 import Data.Text (Text)
-import qualified Hasql.Decoders as Decoders
-import qualified Hasql.Encoders as Encoders
 import Hasql.Statement (Statement)
 import qualified Hasql.Transaction as Transaction
 
-import Agent.Store.Postgres.Hasql (mkStatement)
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.BaseRows
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.ContentParts
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.CustomCall
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.CustomOutput
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.FunctionCall
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.FunctionOutput
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.Message
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.Reasoning
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.Reference
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.Summaries
+import Agent.Store.Postgres.SessionItem.Mapping.Statements.Tagged
 import Agent.Store.SessionItem
 
 representationFromText :: Text -> Either Text StoredResponseItemRepresentation
@@ -30,55 +38,6 @@ toolOutputKindFromText = \case
     "text" -> Right StoredToolOutputText
     "encoded" -> Right StoredToolOutputEncoded
     value -> Left ("unknown stored tool output kind: " <> value)
-
-data BaseRow = BaseRow
-    { baseRowId :: !Text
-    , baseRowStorageKind :: !Text
-    , baseRowItemType :: !Text
-    , baseRowRepresentation :: !Text
-    }
-
-data MessageRow = MessageRow
-    { messageRowProviderItemId :: !(Maybe Text)
-    , messageRowRole :: !Text
-    , messageRowStatus :: !(Maybe Text)
-    , messageRowPhase :: !(Maybe Text)
-    , messageRowContentKind :: !Text
-    , messageRowContentText :: !(Maybe Text)
-    , messageRowExtraFields :: !Text
-    }
-
-data FunctionOutputRow = FunctionOutputRow
-    { functionOutputRowProviderItemId :: !(Maybe Text)
-    , functionOutputRowCallId :: !Text
-    , functionOutputRowKind :: !Text
-    , functionOutputRowText :: !Text
-    , functionOutputRowStatus :: !(Maybe Text)
-    , functionOutputRowExtraFields :: !Text
-    }
-
-data CustomOutputRow = CustomOutputRow
-    { customOutputRowProviderItemId :: !(Maybe Text)
-    , customOutputRowCallId :: !Text
-    , customOutputRowName :: !(Maybe Text)
-    , customOutputRowKind :: !Text
-    , customOutputRowText :: !Text
-    , customOutputRowStatus :: !(Maybe Text)
-    , customOutputRowExtraFields :: !Text
-    }
-
-data ReasoningRow = ReasoningRow
-    { reasoningRowProviderItemId :: !(Maybe Text)
-    , reasoningRowHasContent :: !Bool
-    , reasoningRowEncryptedContent :: !(Maybe Text)
-    , reasoningRowStatus :: !(Maybe Text)
-    , reasoningRowExtraFields :: !Text
-    }
-
-data TaggedRow = TaggedRow
-    { taggedRowWireTag :: !Text
-    , taggedRowFields :: !Text
-    }
 
 loadResponseItems
     :: Text
@@ -129,7 +88,8 @@ loadMessage base =
                             base.baseRowId
                             loadContentPartsStatement
                         pure $ Right $ StoredMessageItem $
-                            messageFromRow row (StoredMessageParts parts)
+                            messageFromRow row $
+                                StoredMessageParts (map contentPartFromRow parts)
                     value ->
                         pure $ Left $
                             "unknown stored message content kind: " <> value
@@ -153,7 +113,7 @@ loadFunctionCall base =
         "function_call"
         base
         loadFunctionCallStatement
-        StoredFunctionCallItem
+        (StoredFunctionCallItem . functionCallFromRow)
 
 loadFunctionOutput
     :: BaseRow
@@ -194,7 +154,7 @@ loadCustomCall base =
         "custom_tool_call"
         base
         loadCustomCallStatement
-        StoredCustomToolCallItem
+        (StoredCustomToolCallItem . customCallFromRow)
 
 loadCustomOutput
     :: BaseRow
@@ -248,14 +208,16 @@ loadReasoning base =
                         loadSummariesStatement
                     content <-
                         if row.reasoningRowHasContent
-                            then Just <$> Transaction.statement
-                                base.baseRowId
-                                loadContentPartsStatement
+                            then Just . map contentPartFromRow
+                                <$> Transaction.statement
+                                    base.baseRowId
+                                    loadContentPartsStatement
                             else pure Nothing
                     pure $ Right $ StoredReasoningItem StoredReasoning
                         { storedReasoningProviderItemId =
                             row.reasoningRowProviderItemId
-                        , storedReasoningSummary = summaries
+                        , storedReasoningSummary =
+                            map summaryFromRow summaries
                         , storedReasoningContent = content
                         , storedReasoningEncryptedContent =
                             row.reasoningRowEncryptedContent
@@ -272,7 +234,7 @@ loadItemReference base =
         "item_reference"
         base
         loadReferenceStatement
-        StoredItemReferenceItem
+        (StoredItemReferenceItem . referenceFromRow)
 
 loadTagged
     :: BaseRow
@@ -341,188 +303,62 @@ missingChildMessage kind base =
         <> kind
         <> " row"
 
-loadBaseRowsStatement :: Statement Text [BaseRow]
-loadBaseRowsStatement = mkStatement
-    "SELECT response_item_id::text, storage_kind, item_type, representation\
-    \ FROM harness.session_response_items\
-    \ WHERE turn_id = $1::uuid\
-    \ ORDER BY item_index"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowList $
-        BaseRow
-            <$> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text))
-    True
+functionCallFromRow :: FunctionCallRow -> StoredFunctionCall
+functionCallFromRow row = StoredFunctionCall
+    { storedFunctionCallProviderItemId = row.functionCallRowProviderItemId
+    , storedFunctionCallCallId = row.functionCallRowCallId
+    , storedFunctionCallName = row.functionCallRowName
+    , storedFunctionCallArguments = row.functionCallRowArguments
+    , storedFunctionCallStatus = row.functionCallRowStatus
+    , storedFunctionCallExtraFields =
+        StoredOpaqueObject row.functionCallRowExtraFields
+    }
 
-loadMessageStatement :: Statement Text (Maybe MessageRow)
-loadMessageStatement = mkStatement
-    "SELECT provider_item_id, role_name, status_name, phase, content_kind,\
-    \ content_text, extra_fields_text\
-    \ FROM harness.session_messages\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        MessageRow
-            <$> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text))
-    True
+customCallFromRow :: CustomCallRow -> StoredCustomToolCall
+customCallFromRow row = StoredCustomToolCall
+    { storedCustomToolCallProviderItemId = row.customCallRowProviderItemId
+    , storedCustomToolCallCallId = row.customCallRowCallId
+    , storedCustomToolCallName = row.customCallRowName
+    , storedCustomToolCallInput = row.customCallRowInput
+    , storedCustomToolCallStatus = row.customCallRowStatus
+    , storedCustomToolCallExtraFields =
+        StoredOpaqueObject row.customCallRowExtraFields
+    }
 
-loadFunctionCallStatement :: Statement Text (Maybe StoredFunctionCall)
-loadFunctionCallStatement = mkStatement
-    "SELECT provider_item_id, call_id, function_name, arguments, status_name,\
-    \ extra_fields_text\
-    \ FROM harness.session_function_calls\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        StoredFunctionCall
-            <$> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
+referenceFromRow :: ReferenceRow -> StoredItemReference
+referenceFromRow row = StoredItemReference
+    { storedItemReferenceProviderItemId = row.referenceRowProviderItemId
+    , storedItemReferenceExtraFields =
+        StoredOpaqueObject row.referenceRowExtraFields
+    }
 
-loadFunctionOutputStatement :: Statement Text (Maybe FunctionOutputRow)
-loadFunctionOutputStatement = mkStatement
-    "SELECT provider_item_id, call_id, output_kind, output_text, status_name,\
-    \ extra_fields_text\
-    \ FROM harness.session_function_call_outputs\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        FunctionOutputRow
-            <$> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text))
-    True
+summaryFromRow :: SummaryRow -> StoredReasoningSummaryPart
+summaryFromRow row = StoredReasoningSummaryPart
+    { storedReasoningSummaryPartType = row.summaryRowType
+    , storedReasoningSummaryPartText = row.summaryRowText
+    , storedReasoningSummaryPartExtraFields =
+        StoredOpaqueObject row.summaryRowExtraFields
+    }
 
-loadCustomCallStatement :: Statement Text (Maybe StoredCustomToolCall)
-loadCustomCallStatement = mkStatement
-    "SELECT provider_item_id, call_id, tool_name, input_text, status_name,\
-    \ extra_fields_text\
-    \ FROM harness.session_custom_tool_calls\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        StoredCustomToolCall
-            <$> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
-
-loadCustomOutputStatement :: Statement Text (Maybe CustomOutputRow)
-loadCustomOutputStatement = mkStatement
-    "SELECT provider_item_id, call_id, tool_name, output_kind, output_text,\
-    \ status_name, extra_fields_text\
-    \ FROM harness.session_custom_tool_call_outputs\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        CustomOutputRow
-            <$> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text))
-    True
-
-loadReasoningStatement :: Statement Text (Maybe ReasoningRow)
-loadReasoningStatement = mkStatement
-    "SELECT provider_item_id, has_content, encrypted_content, status_name,\
-    \ extra_fields_text\
-    \ FROM harness.session_reasoning_items\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        ReasoningRow
-            <$> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.bool)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nonNullable Decoders.text))
-    True
-
-loadSummariesStatement :: Statement Text [StoredReasoningSummaryPart]
-loadSummariesStatement = mkStatement
-    "SELECT part_type, text_value, extra_fields_text\
-    \ FROM harness.session_reasoning_summaries\
-    \ WHERE response_item_id = $1::uuid\
-    \ ORDER BY part_index"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowList $
-        StoredReasoningSummaryPart
-            <$> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
-
-loadReferenceStatement :: Statement Text (Maybe StoredItemReference)
-loadReferenceStatement = mkStatement
-    "SELECT provider_item_id, extra_fields_text\
-    \ FROM harness.session_item_references\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        StoredItemReference
-            <$> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
-
-loadTaggedStatement :: Statement Text (Maybe TaggedRow)
-loadTaggedStatement = mkStatement
-    "SELECT wire_tag, fields_text\
-    \ FROM harness.session_tagged_items\
-    \ WHERE response_item_id = $1::uuid"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowMaybe $
-        TaggedRow <$> Decoders.column (Decoders.nonNullable Decoders.text) <*> Decoders.column (Decoders.nonNullable Decoders.text))
-    True
-
-loadContentPartsStatement :: Statement Text [StoredContentPart]
-loadContentPartsStatement = mkStatement
-    "SELECT part_type, text_value, refusal_text, detail, file_data, file_id,\
-    \ file_url, filename, image_url, input_audio_text,\
-    \ prompt_cache_breakpoint_text, annotations_text, logprobs_text,\
-    \ extra_fields_text\
-    \ FROM harness.session_response_content_parts\
-    \ WHERE response_item_id = $1::uuid\
-    \ ORDER BY part_index"
-    (Encoders.param (Encoders.nonNullable Encoders.text))
-    (Decoders.rowList $
-        StoredContentPart
-            <$> Decoders.column (Decoders.nonNullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> Decoders.column (Decoders.nullable Decoders.text)
-            <*> nullableOpaqueValueColumn
-            <*> nullableOpaqueValueColumn
-            <*> nullableOpaqueValueColumn
-            <*> nullableOpaqueValueColumn
-            <*> (StoredOpaqueObject <$> Decoders.column (Decoders.nonNullable Decoders.text)))
-    True
-
-nullableOpaqueValueColumn :: Decoders.Row (Maybe StoredOpaqueValue)
-nullableOpaqueValueColumn =
-    fmap StoredOpaqueValue <$> Decoders.column (Decoders.nullable Decoders.text)
+contentPartFromRow :: ContentPartRow -> StoredContentPart
+contentPartFromRow row = StoredContentPart
+    { storedContentPartType = row.contentPartRowType
+    , storedContentPartText = row.contentPartRowText
+    , storedContentPartRefusal = row.contentPartRowRefusal
+    , storedContentPartDetail = row.contentPartRowDetail
+    , storedContentPartFileData = row.contentPartRowFileData
+    , storedContentPartFileId = row.contentPartRowFileId
+    , storedContentPartFileUrl = row.contentPartRowFileUrl
+    , storedContentPartFilename = row.contentPartRowFilename
+    , storedContentPartImageUrl = row.contentPartRowImageUrl
+    , storedContentPartInputAudio =
+        StoredOpaqueValue <$> row.contentPartRowInputAudio
+    , storedContentPartPromptCacheBreakpoint =
+        StoredOpaqueValue <$> row.contentPartRowPromptCacheBreakpoint
+    , storedContentPartAnnotations =
+        StoredOpaqueValue <$> row.contentPartRowAnnotations
+    , storedContentPartLogprobs =
+        StoredOpaqueValue <$> row.contentPartRowLogprobs
+    , storedContentPartExtraFields =
+        StoredOpaqueObject row.contentPartRowExtraFields
+    }
