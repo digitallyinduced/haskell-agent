@@ -29,7 +29,10 @@ import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
 import Agent.CLI.Resume (ResumeBrowser, ResumeEntry)
-import Agent.CLI.TUI.ImagePreview (TuiImagePreview)
+import Agent.CLI.TUI.ImagePreview
+    ( NativePreviewPlacement
+    , TuiImagePreview
+    )
 import Agent.CLI.TUI.History
     ( HistoryGeneration
     , HistoryPage
@@ -60,7 +63,9 @@ import qualified Graphics.Vty as V
 
 data Name
     = ConversationViewport
+    | ConversationViewportExtent
     | ConversationReserve
+    | ConversationImage !BlockId !Int
     | OverlayViewport
     | ConversationBlock !AgentTarget !BlockId
     | ConversationChunkCache
@@ -149,6 +154,7 @@ data AppEvent
         !HistoryCommit
     | AppHistoryLiveStarted
     | AppConversationReflow
+    | AppSyncSubmittedImagePlacements
     | AppMotionTick
     | AppRecapPoll
     | AppStop
@@ -207,6 +213,8 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMotionTickQueued :: !(TVar Bool)
     , runtimeMotionMode :: !MotionMode
     , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
+    , runtimeSubmittedImagePlacements
+        :: !(IORef [NativePreviewPlacement])
     , runtimeImagePreviewRevision :: !(IORef Int)
     , runtimeImagePreviewVisible :: !(IORef Bool)
     , runtimeImagePreviewIdBase :: !Int

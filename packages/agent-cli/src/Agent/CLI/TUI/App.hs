@@ -226,6 +226,7 @@ import Agent.CLI.TUI.ImagePreview
     , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
+    , sameNativePreviewLayout
     )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting
@@ -413,6 +414,7 @@ newFullscreenRuntimeWithSyntaxLoader
         historyGeneration <- newIORef 0
         dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
+        submittedImagePlacements <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
@@ -463,6 +465,7 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeMotionTickQueued = motionTickQueued
             , runtimeMotionMode = motionMode
             , runtimeImagePreviews = imagePreviews
+            , runtimeSubmittedImagePlacements = submittedImagePlacements
             , runtimeImagePreviewRevision = imagePreviewRevision
             , runtimeImagePreviewVisible = imagePreviewVisible
             , runtimeImagePreviewIdBase = imagePreviewIdBase
@@ -694,12 +697,8 @@ commitFullscreenImagePreviews runtime images = do
         if map fst previous == images
             then pure previous
             else prepareFullscreenImagePreviews runtime images
-    -- Submitted images use the ANSI renderer even when the transient overlay
-    -- used Kitty placement, so finish sampling before the Brick render thread.
-    mapM_
-        (\(_, preview) ->
-            void $ pure $! pixelAt preview.previewSample 0 0)
-        prepared
+    -- Unsupported terminals render only the compact image summary. Native
+    -- terminals retain the encoded attachment for a viewport-aware placement.
     enqueueAppEvent runtime (AppCommitImagePreviews prepared)
 
 prepareFullscreenImagePreviews
@@ -1560,12 +1559,20 @@ wrapNativePreviewVty runtime vty
                         if visible
                             then readIORef runtime.runtimeImagePreviews
                             else pure []
-                    let placements =
-                            nativePreviewPlacements
-                                runtime.runtimeImagePreviewIdBase
-                                terminalColumns
-                                terminalRows
-                                previews
+                    submitted <-
+                        if visible
+                            then
+                                readIORef
+                                    runtime.runtimeSubmittedImagePlacements
+                            else pure []
+                    let placements
+                            | null previews = submitted
+                            | otherwise =
+                                nativePreviewPlacements
+                                    runtime.runtimeImagePreviewIdBase
+                                    terminalColumns
+                                    terminalRows
+                                    previews
                         oldImageIds = case previous of
                             Just (_, _, imageIds) -> imageIds
                             Nothing -> []
@@ -2357,6 +2364,8 @@ handleUiEvents uiEvents = do
                 (initial, Nothing, False, False)
                 uiEvents
     put final
+    when (any (== UiConversationCleared) uiEvents) $
+        clearSubmittedImagePlacements final.appRuntime
     case nativeProgress of
         Nothing -> pure ()
         Just active ->
@@ -2886,6 +2895,7 @@ handleEventInner event = case event of
                 { appImagePreviews = []
                 , appSubmittedImagePreviews = submitted
                 }
+        queueConversationReflow
     AppEvent (AppDictationPartial text) -> do
         state <- get
         when (isJust state.appDictation) $
@@ -3051,6 +3061,13 @@ handleEventInner event = case event of
         modify' \state ->
             state { appConversationReflowQueued = False }
         reflowConversation
+        state <- get
+        liftIO $
+            enqueueAppEvent
+                state.appRuntime
+                AppSyncSubmittedImagePlacements
+    AppEvent AppSyncSubmittedImagePlacements ->
+        syncSubmittedImagePlacements
     AppEvent (AppAskPermission summary reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
@@ -3816,6 +3833,107 @@ reflowConversation = do
                         Scroll.ScrollConversationToEnd ->
                             vScrollToEnd
                                 (viewportScroll ConversationViewport)
+
+syncSubmittedImagePlacements :: EventM Name AppState ()
+syncSubmittedImagePlacements = do
+    state <- get
+    when state.appRuntime.runtimeNativeImagePreviews do
+        let submitted =
+                [ (blockId, index, preview)
+                | (blockId, previews) <-
+                    Map.toAscList state.appSubmittedImagePreviews
+                , (index, preview) <- zip [0 ..] previews
+                ]
+        viewportExtent <- lookupExtent ConversationViewportExtent
+        placements <-
+            case viewportExtent of
+                Nothing -> pure []
+                Just viewportBounds ->
+                    fmap concat $
+                        sequence
+                            [ placementFor
+                                state
+                                viewportBounds
+                                ordinal
+                                blockId
+                                index
+                                preview
+                            | (ordinal, (blockId, index, preview)) <-
+                                zip [0 ..] submitted
+                            ]
+        previous <-
+            liftIO $
+                readIORef
+                    state.appRuntime.runtimeSubmittedImagePlacements
+        when (not (sameNativePreviewLayout previous placements)) $
+            liftIO do
+                writeIORef
+                    state.appRuntime.runtimeSubmittedImagePlacements
+                    placements
+                modifyIORef'
+                    state.appRuntime.runtimeImagePreviewRevision
+                    (+ 1)
+
+placementFor
+    :: AppState
+    -> Extent Name
+    -> Int
+    -> BlockId
+    -> Int
+    -> TuiImagePreview
+    -> EventM Name AppState [NativePreviewPlacement]
+placementFor state viewportBounds ordinal blockId index preview =
+    lookupExtent (ConversationImage blockId index) >>= \case
+        Just imageBounds
+            | extentInside viewportBounds imageBounds ->
+                let Location (column, row) = imageBounds.extentUpperLeft
+                    (columns, rows) = imageBounds.extentSize
+                    imageId =
+                        submittedImageId
+                            state.appRuntime.runtimeImagePreviewIdBase
+                            ordinal
+                in pure
+                    [ NativePreviewPlacement
+                        { nativePreviewImageId = imageId
+                        , nativePreviewRow = row
+                        , nativePreviewColumn = column
+                        , nativePreviewColumns = columns
+                        , nativePreviewRows = rows
+                        , nativePreviewAttachment =
+                            preview.previewKittyAttachment
+                        }
+                    ]
+        _ -> pure []
+
+extentInside :: Extent Name -> Extent Name -> Bool
+extentInside outer inner =
+    innerColumn >= outerColumn
+        && innerRow >= outerRow
+        && innerColumn + innerWidth <= outerColumn + outerWidth
+        && innerRow + innerHeight <= outerRow + outerHeight
+        && innerWidth > 0
+        && innerHeight > 0
+  where
+    Location (outerColumn, outerRow) = outer.extentUpperLeft
+    (outerWidth, outerHeight) = outer.extentSize
+    Location (innerColumn, innerRow) = inner.extentUpperLeft
+    (innerWidth, innerHeight) = inner.extentSize
+
+submittedImageId :: Int -> Int -> Int
+submittedImageId imageIdBase ordinal =
+    fromInteger $
+        ((toInteger imageIdBase + 2 + toInteger ordinal)
+            `mod` 4_294_967_295)
+            + 1
+
+clearSubmittedImagePlacements :: FullscreenRuntime -> EventM Name AppState ()
+clearSubmittedImagePlacements runtime = do
+    previous <-
+        liftIO $ readIORef runtime.runtimeSubmittedImagePlacements
+    when (not (null previous)) $
+        liftIO do
+            writeIORef runtime.runtimeSubmittedImagePlacements []
+            modifyIORef' runtime.runtimeImagePreviewRevision (+ 1)
 
 conversationRenderedReserveRows :: EventM Name AppState Int
 conversationRenderedReserveRows =
