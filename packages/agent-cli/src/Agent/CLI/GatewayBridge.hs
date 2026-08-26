@@ -170,6 +170,9 @@ managedGatewayTools request =
                 "send_voice"
             , reactTool
             , choiceTool
+            , allowUserTool
+            , denyUserTool
+            , listUsersTool
             ]
   where
     sendPathTool name description kind =
@@ -215,6 +218,44 @@ managedGatewayTools request =
             TurnSequential
             (typedToolWithCall "ask_telegram_choice" \call args ->
                 bridgeTool request call "ask_choice" (toChoicePayload args))
+
+    allowUserTool =
+        jsonTool
+            "allow_telegram_user"
+            "Allow another Telegram user to talk to this bot. Use this when an already-allowed user asks to accept messages from someone in the current group. Identify them by name, @username, or numeric user id. Omit query to allow the user this message replies to."
+            [ PropertySchema "query" PropertyString False
+                (Just "Name, @username, or numeric Telegram user id.")
+            , PropertySchema "user_id" PropertyInteger False
+                (Just "Numeric Telegram user id when already known.")
+            ]
+            True
+            TurnSequential
+            (typedToolWithCall "allow_telegram_user" \call args ->
+                bridgeTool request call "allow_user" (toAllowlistPayload args))
+
+    denyUserTool =
+        jsonTool
+            "deny_telegram_user"
+            "Remove a Telegram user from the allowlist so this bot stops accepting their messages."
+            [ PropertySchema "query" PropertyString False
+                (Just "Name, @username, or numeric Telegram user id.")
+            , PropertySchema "user_id" PropertyInteger False
+                (Just "Numeric Telegram user id when already known.")
+            ]
+            True
+            TurnSequential
+            (typedToolWithCall "deny_telegram_user" \call args ->
+                bridgeTool request call "deny_user" (toAllowlistPayload args))
+
+    listUsersTool =
+        jsonTool
+            "list_telegram_users"
+            "List Telegram users currently allowed to talk to this bot, plus people recently seen in this chat so you can allow someone by name without knowing their numeric id."
+            []
+            True
+            TurnSequential
+            (typedToolWithCall "list_telegram_users" \call (_ :: Value) ->
+                bridgeTool request call "list_users" (object []))
 
 data SendPathArgs = SendPathArgs
     { sendPath :: !Text
@@ -266,6 +307,23 @@ toChoicePayload :: ChoiceArgs -> Value
 toChoicePayload args = object
     [ "question" .= args.choiceQuestion
     , "options" .= args.choiceOptions
+    ]
+
+data AllowlistArgs = AllowlistArgs
+    { allowlistQuery :: !(Maybe Text)
+    , allowlistUserId :: !(Maybe Int)
+    }
+
+instance FromJSON AllowlistArgs where
+    parseJSON = objectArgs \input ->
+        AllowlistArgs
+            <$> optText input "query"
+            <*> optInt input "user_id"
+
+toAllowlistPayload :: AllowlistArgs -> Value
+toAllowlistPayload args = object
+    [ "query" .= args.allowlistQuery
+    , "user_id" .= args.allowlistUserId
     ]
 
 bridgeTool

@@ -10,7 +10,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
-import Agent.Tools.Types (appToolHandlers)
+import Agent.Tools.Types (AppTool(..), appToolHandlers)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (bracket)
@@ -52,6 +52,13 @@ spec = describe "Agent.CLI.GatewayBridge" do
                         }
                     result <- wait running
                     result.output `shouldBe` "sent"
+
+    it "advertises Telegram allowlist tools on the managed gateway bridge" $
+        withBridgeRequest \request -> do
+            let names = map (.appToolName) (managedGatewayTools request)
+            names `shouldContain` ["allow_telegram_user"]
+            names `shouldContain` ["deny_telegram_user"]
+            names `shouldContain` ["list_telegram_users"]
 
     it "uses the bridge for mutating-tool approval choices" $
         withBridgeRequest \request -> do

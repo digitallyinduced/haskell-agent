@@ -18,7 +18,7 @@ module Agent.Telegram.Types.State
     , deletePendingAction
     ) where
 
-import Agent.Telegram.Types.Wire (TelegramMedia, TelegramVoice)
+import Agent.Telegram.Types.Wire (TelegramMedia, TelegramUser(..), TelegramVoice)
 import Data.Aeson
     ( FromJSON(..)
     , ToJSON(..)
@@ -110,6 +110,9 @@ data TelegramState = TelegramState
     , deadLetters :: ![TelegramDeadLetter]
     , outboundMessageIds :: !(Map TelegramChatKey (Set Integer))
     , authorizedGroupChatIds :: !(Set Integer)
+    , allowedUserIds :: !(Set Integer)
+    , seenTelegramUsers :: !(Map Integer TelegramUser)
+    , seenUsersByChat :: !(Map Integer (Set Integer))
     } deriving (Eq, Show)
 
 instance ToJSON TelegramState where
@@ -154,6 +157,13 @@ instance ToJSON TelegramState where
             | (key, messageIds) <- Map.toList state.outboundMessageIds
             ]
         , "authorizedGroupChats" .= sort (Set.toList state.authorizedGroupChatIds)
+        , "allowedUserIds" .= sort (Set.toList state.allowedUserIds)
+        , "seenTelegramUsers" .=
+            sortOn (.userId) (Map.elems state.seenTelegramUsers)
+        , "seenUsersByChat" .=
+            [ TelegramSeenChatUsers chatId (sort (Set.toList userIds))
+            | (chatId, userIds) <- Map.toAscList state.seenUsersByChat
+            ]
         ]
 
 instance FromJSON TelegramState where
@@ -184,6 +194,12 @@ instance FromJSON TelegramState where
         deadLetters <- o .:? "deadLetters" .!= []
         outboundMessages <-
             o .:? "outboundMessages" .!= ([] :: [TelegramOutboundMessages])
+        storedAllowedUsers <-
+            o .:? "allowedUserIds" .!= ([] :: [Integer])
+        storedSeenUsers <-
+            o .:? "seenTelegramUsers" .!= ([] :: [TelegramUser])
+        storedSeenByChat <-
+            o .:? "seenUsersByChat" .!= ([] :: [TelegramSeenChatUsers])
         let bindings =
                 foldr
                     (\binding ->
@@ -229,7 +245,33 @@ instance FromJSON TelegramState where
                     | messages <- outboundMessages
                     ]
             , authorizedGroupChatIds
+            , allowedUserIds = Set.fromList storedAllowedUsers
+            , seenTelegramUsers =
+                Map.fromList
+                    [ (user.userId, user)
+                    | user <- storedSeenUsers
+                    ]
+            , seenUsersByChat =
+                Map.fromList
+                    [ (seen.seenChatId, Set.fromList seen.seenChatUserIds)
+                    | seen <- storedSeenByChat
+                    ]
             }
+
+data TelegramSeenChatUsers = TelegramSeenChatUsers
+    { seenChatId :: !Integer
+    , seenChatUserIds :: ![Integer]
+    } deriving (Eq, Show)
+
+instance ToJSON TelegramSeenChatUsers where
+    toJSON seen = object
+        [ "chatId" .= seen.seenChatId
+        , "userIds" .= seen.seenChatUserIds
+        ]
+
+instance FromJSON TelegramSeenChatUsers where
+    parseJSON = withObject "TelegramSeenChatUsers" \o ->
+        TelegramSeenChatUsers <$> o .: "chatId" <*> (o .:? "userIds" .!= [])
 
 data TelegramOutboundMessages = TelegramOutboundMessages
     { outboundChat :: !TelegramChatKey
@@ -519,4 +561,7 @@ emptyTelegramState = TelegramState
     , deadLetters = []
     , outboundMessageIds = Map.empty
     , authorizedGroupChatIds = Set.empty
+    , allowedUserIds = Set.empty
+    , seenTelegramUsers = Map.empty
+    , seenUsersByChat = Map.empty
     }

@@ -69,6 +69,9 @@ data TelegramBridgeEnv = TelegramBridgeEnv
     , telegramBridgeAllowedRoot :: !FilePath
     , telegramBridgeModifyState ::
         !((TelegramState -> TelegramState) -> IO ())
+    , telegramBridgeGrantUser :: !(Text -> IO Text)
+    , telegramBridgeRevokeUser :: !(Text -> IO Text)
+    , telegramBridgeListUsers :: !(IO Text)
     }
 
 data PathRequest = PathRequest
@@ -110,6 +113,21 @@ data ApprovalRequest = ApprovalRequest
 instance FromJSON ApprovalRequest where
     parseJSON = withObject "ApprovalRequest" \o ->
         ApprovalRequest <$> o .: "tool_name" <*> o .: "arguments"
+
+data AllowlistRequest = AllowlistRequest
+    { allowlistQuery :: !(Maybe Text)
+    , allowlistUserId :: !(Maybe Integer)
+    }
+
+instance FromJSON AllowlistRequest where
+    parseJSON = withObject "AllowlistRequest" \o ->
+        AllowlistRequest <$> o .:? "query" <*> o .:? "user_id"
+
+allowlistRequestQuery :: AllowlistRequest -> Text
+allowlistRequestQuery request =
+    case request.allowlistUserId of
+        Just userId -> Text.pack (show userId)
+        Nothing -> Text.strip (fromMaybe "" request.allowlistQuery)
 
 withTelegramBridge :: TelegramBridgeEnv -> IO a -> IO a
 withTelegramBridge env =
@@ -266,6 +284,18 @@ processBridgeRequest env request =
                         , ("Allow all", "allow_all")
                         , ("Deny", "deny")
                         ]
+            "allow_user" ->
+                withPayload current \(payload :: AllowlistRequest) ->
+                    Right . Just . String
+                        <$> env.telegramBridgeGrantUser
+                            (allowlistRequestQuery payload)
+            "deny_user" ->
+                withPayload current \(payload :: AllowlistRequest) ->
+                    Right . Just . String
+                        <$> env.telegramBridgeRevokeUser
+                            (allowlistRequestQuery payload)
+            "list_users" ->
+                Right . Just . String <$> env.telegramBridgeListUsers
             other ->
                 pure (Left ("unknown Telegram bridge request: " <> other))
 
@@ -388,16 +418,17 @@ removeRequestBindings env requestId =
 
 processTelegramCallbacks
     :: TelegramClient
-    -> Set.Set Integer
+    -> IO (Set.Set Integer)
     -> ((TelegramState -> TelegramState) -> IO ())
     -> IO TelegramState
     -> IO ()
-processTelegramCallbacks client allowedUsers modifyState readState =
+processTelegramCallbacks client readAllowedUsers modifyState readState =
     readState >>= \state ->
         case Map.lookupMin state.pendingCallbacks of
             Nothing -> pure ()
             Just (updateId, callback) -> do
                 now <- getCurrentTime
+                allowedUsers <- readAllowedUsers
                 case Map.lookup callback.pendingCallbackData state.callbackBindings of
                     Nothing ->
                         finishInvalid updateId callback
@@ -455,7 +486,7 @@ processTelegramCallbacks client allowedUsers modifyState readState =
                                     }
                 processTelegramCallbacks
                     client
-                    allowedUsers
+                    readAllowedUsers
                     modifyState
                     readState
   where

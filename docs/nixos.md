@@ -37,7 +37,9 @@ running one or more Telegram gateways as systemd services.
 The module:
 
 - creates a dedicated system user and private home for each instance;
-- writes the non-secret gateway configuration declaratively;
+- writes the non-secret gateway configuration declaratively (`allowedUsers` is
+  the minimum set after each restart; in-chat `/allow` grants persist in
+  `state.json`);
 - loads the BotFather token through systemd credentials, without copying it
   to the Nix store;
 - supplies Bash, Git, and PostgreSQL 18 by default;

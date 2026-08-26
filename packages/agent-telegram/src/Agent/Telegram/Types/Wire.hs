@@ -19,6 +19,7 @@ module Agent.Telegram.Types.Wire
     , TelegramPoll(..)
     , TelegramDice(..)
     , TelegramUser(..)
+    , TelegramMessageEntity(..)
     , TelegramChat(..)
     , TelegramChatMember(..)
     , TelegramChatMemberUpdated(..)
@@ -79,14 +80,38 @@ data TelegramUser = TelegramUser
     , userUsername :: !(Maybe Text)
     } deriving (Eq, Show)
 
+instance ToJSON TelegramUser where
+    toJSON user = object
+        [ "id" .= user.userId
+        , "isBot" .= user.userIsBot
+        , "firstName" .= user.userFirstName
+        , "lastName" .= user.userLastName
+        , "username" .= user.userUsername
+        ]
+
 instance FromJSON TelegramUser where
     parseJSON = withObject "TelegramUser" \o ->
         TelegramUser
             <$> o .: "id"
-            <*> (o .:? "is_bot" .!= False)
-            <*> o .:? "first_name"
-            <*> o .:? "last_name"
+            <*> (o .:? "is_bot" >>= maybe (o .:? "isBot" .!= False) pure)
+            <*> (o .:? "first_name" >>= maybe (o .:? "firstName") (pure . Just))
+            <*> (o .:? "last_name" >>= maybe (o .:? "lastName") (pure . Just))
             <*> o .:? "username"
+
+data TelegramMessageEntity = TelegramMessageEntity
+    { entityType :: !Text
+    , entityOffset :: !Int
+    , entityLength :: !Int
+    , entityUser :: !(Maybe TelegramUser)
+    } deriving (Eq, Show)
+
+instance FromJSON TelegramMessageEntity where
+    parseJSON = withObject "TelegramMessageEntity" \o ->
+        TelegramMessageEntity
+            <$> o .: "type"
+            <*> o .: "offset"
+            <*> o .: "length"
+            <*> o .:? "user"
 
 data TelegramChat = TelegramChat
     { telegramChatId :: !Integer
@@ -150,6 +175,8 @@ data TelegramMessage = TelegramMessage
     , messageEditDate :: !(Maybe Integer)
     , messageReplyTo :: !(Maybe TelegramMessage)
     , messageNewChatMembers :: ![TelegramUser]
+    , messageEntities :: ![TelegramMessageEntity]
+    , messageCaptionEntities :: ![TelegramMessageEntity]
     } deriving (Eq, Show)
 
 instance FromJSON TelegramMessage where
@@ -179,6 +206,8 @@ instance FromJSON TelegramMessage where
             <*> o .:? "edit_date"
             <*> o .:? "reply_to_message"
             <*> (o .:? "new_chat_members" .!= [])
+            <*> (o .:? "entities" .!= [])
+            <*> (o .:? "caption_entities" .!= [])
 
 data TelegramReactionType = TelegramReactionType
     { reactionType :: !Text
