@@ -394,10 +394,20 @@ resolveArtifactPath env rawHandle
                         unsafeToFilePath root
                             </> artifactDirectoryName
                             </> Text.unpack rawHandle
+                    rootPath = unsafeToFilePath root
+                    directory = rootPath </> artifactDirectoryName
+                rootExists <- doesDirectoryExist rootPath
+                rootSymbolic <-
+                    if rootExists then pathIsSymbolicLink rootPath else pure False
+                directoryExists <- doesDirectoryExist directory
+                directorySymbolic <-
+                    if directoryExists then pathIsSymbolicLink directory else pure False
                 exists <- doesFileExist path
                 symbolic <- if exists then pathIsSymbolicLink path else pure False
                 pure $
-                    if not exists
+                    if rootSymbolic || directorySymbolic
+                        then Left "tool-output artifact symlinks are not allowed"
+                        else if not exists
                         then Left "tool-output artifact was not found"
                         else if symbolic
                             then Left "tool-output artifact symlinks are not allowed"
