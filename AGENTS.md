@@ -110,9 +110,9 @@ When changing the CLI UI (prompt, colors, chrome, keybindings, paste, approval p
 `nix develop` does not impose a heap ceiling on every development command. The
 `repl` wrapper defaults `GHCRTS` to `-M8G`, which protects the machine from an
 unbounded long-running GHCi/agent process while preserving the RTS allocation
-area default. The compiled `agent-cli` executable defaults to
-`-N4 -Fd1 -M8G`; four capabilities cover concurrent agent work while prompt
-page release keeps idle memory bounded. Both defaults are overridable because
+area default. The compiled `agent-cli` executable defaults to `-N4 -M8G`; four
+capabilities cover concurrent agent work without multiplying the RTS
+allocation area by every host core. Both defaults are overridable because
 `-rtsopts` is enabled. Set `GHCRTS` explicitly to override the wrapper:
 
 ```
