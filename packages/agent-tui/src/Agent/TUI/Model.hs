@@ -853,6 +853,12 @@ reduceLoop event state = case event of
         retractToolCall callId state
     ResponseAttemptDiscarded ->
         discardResponseAttempt state
+    NativeAgentStarted{} ->
+        state
+    NativeAgentOutput{} ->
+        state
+    NativeAgentFinished{} ->
+        state
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
@@ -1085,7 +1091,12 @@ updateToolCall call state =
 retractToolCall :: Text -> UiState -> UiState
 retractToolCall callId state =
     case Map.lookup callId state.uiToolCalls of
-        Nothing -> state
+        Nothing ->
+            case Seq.findIndexL
+                ((== Just callId) . (.blockCallId))
+                state.uiBlocks of
+                Just blockIndex -> removeBlockAt blockIndex state
+                Nothing -> state
         Just (_, call)
             | isTodoTool call.name ->
                 state

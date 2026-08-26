@@ -14,6 +14,7 @@ module Agent.Loop
     , LoopConfig(..)
     , LoopExecution(..)
     , LoopEvent(..)
+    , NativeAgentStatus(..)
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
@@ -312,6 +313,18 @@ data LoopEvent
     -- | Discard all UI activity emitted by the current response attempt.
     -- This is distinct from ending the whole turn: a retry may follow.
     | ResponseAttemptDiscarded
+    -- | Lifecycle/activity from a provider-managed child agent. These agents
+    -- are display-only unless the provider exposes targeted controls.
+    | NativeAgentStarted Text (Maybe Text) Text (Maybe Text)
+    | NativeAgentOutput Text Text
+    | NativeAgentFinished Text NativeAgentStatus
+    deriving (Eq, Show)
+
+data NativeAgentStatus
+    = NativeAgentRunning
+    | NativeAgentCompleted
+    | NativeAgentFailed
+    | NativeAgentCancelled
     deriving (Eq, Show)
 
 data LoopConfig = LoopConfig

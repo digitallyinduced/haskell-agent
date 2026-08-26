@@ -359,6 +359,25 @@ spec = describe "fullscreen UI reducer" do
             `shouldBe` [BlockComplete, BlockComplete]
         finished.uiToolCalls `shouldBe` mempty
 
+    it "removes a completed tool when its provider message is retracted" do
+        let call = functionToolCall "c1" "Task" "{}"
+            completed =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "c1"
+                                , output = "done"
+                                , callKind = FunctionCallKind
+                                })
+                    ]
+            retracted =
+                reduceUi (UiLoop (ToolRetracted "c1")) completed
+        retracted.uiBlocks `shouldBe` mempty
+        retracted.uiToolCalls `shouldBe` mempty
+
     it "discards only blocks from the current response attempt" do
         let state =
                 apply

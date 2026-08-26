@@ -23,7 +23,9 @@ import Agent.Loop
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
-    ( MessageContent(..)
+    ( FunctionCall(..)
+    , FunctionCallOutput(..)
+    , MessageContent(..)
     , ReasoningConfig(..)
     , ResponseContentPart(..)
     , ResponseCreateParams(..)
@@ -160,7 +162,18 @@ spec = do
                         [ "hello"
                         , "fake response"
                         ]
-                length history `shouldBe` 2
+                let persistedCalls =
+                        [ (call.callId, call.name, call.arguments)
+                        | FunctionCallItem call <- history
+                        ]
+                    persistedOutputs =
+                        [ output.callId
+                        | FunctionCallOutputItem output <- history
+                        ]
+                persistedCalls `shouldBe`
+                    [("fake-tool", "Read", "{\"file_path\":\"README.md\"}")]
+                persistedOutputs `shouldBe` ["fake-tool"]
+                length history `shouldBe` 4
 
                 submitted <- readFile fake.promptLog
                 submitted `shouldContain`
@@ -613,6 +626,7 @@ spec = do
                         readIORef events `shouldReturn`
                             [ ToolStarted expectedFakeToolCall
                             , ToolFinished expectedFakeToolResult
+                            , ResponseAttemptDiscarded
                             ]
 
         it "reports malformed structured output" $

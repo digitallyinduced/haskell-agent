@@ -14,10 +14,11 @@ import Agent.Claude.Options
 import Agent.Claude.Internal.Messages
     ( ClaudeEventState
     , CompletedClaudeTurn(..)
+    , claudeEventStateHasActivity
     , emptyClaudeEventState
     , interpretClaudeTurn
     , remainingClaudeEvents
-    , streamClaudeMessage
+    , streamClaudeProgress
     )
 import Agent.Error
     ( ApiError(..)
@@ -91,7 +92,7 @@ import Claude.Agent.SDK.Errors
     , renderClaudeSDKError
     )
 import Claude.Agent.SDK.Query
-    ( queryTurnContentWithMessageValidator
+    ( queryTurnContentWithMessageValidatorAndProgress
     )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
@@ -230,39 +231,47 @@ submitClaudeCodeTurn
                             content =
                                 claudeUserContent inputImages prompt
                         awaitResult <-
-                            queryTurnContentWithMessageValidator
+                            queryTurnContentWithMessageValidatorAndProgress
                                 turn
                                 content
                                 (\message -> do
                                     validated <-
                                         validateSubscriptionMessage message
-                                    case validated of
-                                        Left err -> pure (Left err)
-                                        Right () -> do
-                                            state <- readIORef eventState
-                                            let (nextState, events) =
-                                                    streamClaudeMessage
-                                                        state
-                                                        message
-                                            writeIORef eventState nextState
-                                            mapM_ onEvent events
-                                            pure (Right ()))
+                                    pure validated)
+                                (\progress -> do
+                                    state <- readIORef eventState
+                                    let (nextState, events) =
+                                            streamClaudeProgress
+                                                state
+                                                progress
+                                    writeIORef eventState nextState
+                                    mapM_ onEvent events)
                                 (\message ->
                                     modifyIORef' messages (message :))
                         case awaitResult of
                             Left sdkError ->
-                                pure (Left sdkError)
+                                do
+                                    state <- readIORef eventState
+                                    if claudeEventStateHasActivity state
+                                        then onEvent ResponseAttemptDiscarded
+                                        else pure ()
+                                    pure (Left sdkError)
                             Right result -> do
                                 turnMessages <- reverse <$> readIORef messages
                                 case interpretClaudeTurn turnMessages result of
                                     Left message ->
-                                        pure $
-                                            Left ResultError
-                                                { subtype = "authentication_error"
-                                                , apiErrorStatus = Nothing
-                                                , errors = [message]
-                                                , result = Nothing
-                                                }
+                                        do
+                                            state <- readIORef eventState
+                                            if claudeEventStateHasActivity state
+                                                then onEvent ResponseAttemptDiscarded
+                                                else pure ()
+                                            pure
+                                                (Left ResultError
+                                                    { subtype = "authentication_error"
+                                                    , apiErrorStatus = Nothing
+                                                    , errors = [message]
+                                                    , result = Nothing
+                                                    })
                                     Right completed -> do
                                         finalEventState <-
                                             readIORef eventState
@@ -309,6 +318,7 @@ submitClaudeCodeTurn
                     transcript
                     completed.sessionId
                     inputs
+                    completed.toolItems
                     completed.assistantText
         mapM_ onEvent (remainingClaudeEvents eventState completed)
         pure (Right (output, commit))
@@ -586,6 +596,7 @@ commitHostTranscript
     -> IORef [ResponseItem]
     -> Text
     -> [TurnInput]
+    -> [ResponseItem]
     -> Maybe Text
     -> IO ()
 commitHostTranscript
@@ -593,8 +604,9 @@ commitHostTranscript
     transcript
     sessionId
     inputs
+    toolItems
     assistantText = do
-    appendHostTranscriptRef transcript inputs assistantText
+    appendHostTranscriptRef transcript inputs toolItems assistantText
     -- Read and enter the exact object installed in the IORef before taking its
     -- StableName. Otherwise the lazy append thunk can later be entered by the
     -- CLI, changing the StableName despite no host-side transcript change.
@@ -622,11 +634,17 @@ appendHostTranscript history inputs assistantText =
 appendHostTranscriptRef
     :: IORef [ResponseItem]
     -> [TurnInput]
+    -> [ResponseItem]
     -> Maybe Text
     -> IO ()
-appendHostTranscriptRef transcript inputs assistantText =
+appendHostTranscriptRef transcript inputs toolItems assistantText =
     atomicModifyIORef' transcript \history ->
-        (appendHostTranscript history inputs assistantText, ())
+        ( history
+            <> turnInputsToItems inputs
+            <> toolItems
+            <> [assistantMessageItem assistantText]
+        , ()
+        )
 
 assistantMessageItem :: Maybe Text -> ResponseItem
 assistantMessageItem assistantText =
