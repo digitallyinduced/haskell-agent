@@ -6,6 +6,7 @@
 -- Multi-agent v1 tools are optional and registered when a registry is supplied.
 module Agent.Codex.Dialect.Tools
     ( codexTools
+    , applyPatchTool
     , shellCommandIsReadOnly
     ) where
 
