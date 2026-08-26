@@ -120,8 +120,10 @@ withRequestInput ResponseCreateParams{..} items =
         normalizedItems = map normalizeRequestItem items
         requestItems
             | any isAdditionalTools prefix =
-                map stripResponsesLiteImageDetails normalizedItems
-            | otherwise = normalizedItems
+                ensureReasoningHasFollowingItem
+                    (map stripResponsesLiteImageDetails normalizedItems)
+            | otherwise =
+                ensureReasoningHasFollowingItem normalizedItems
     in
     ResponseCreateParams
         { input = Just
@@ -245,6 +247,29 @@ normalizeAssistantPart = \case
             , extraFields
             }
     part -> part
+
+-- | Responses rejects a trailing reasoning item with @missing_following_item@.
+-- Stateless backends resend the local transcript, so splice an empty assistant
+-- message when the last item is reasoning. Backends that send only deltas plus
+-- @previous_response_id@ never include that trailing reasoning in @input@.
+ensureReasoningHasFollowingItem :: [ResponseItem] -> [ResponseItem]
+ensureReasoningHasFollowingItem items =
+    case reverse items of
+        ReasoningItemValue{} : _ ->
+            items <> [emptyAssistantFollowupItem]
+        _ -> items
+
+emptyAssistantFollowupItem :: ResponseItem
+emptyAssistantFollowupItem = MessageItem ResponseMessage
+    { messageId = Nothing
+    , content = MessageContentParts
+        [OutputTextPart "" Nothing Nothing KeyMap.empty]
+    , role = RoleAssistant
+    , status = Nothing
+    , phase = Nothing
+    , passthrough = Nothing
+    , extraFields = KeyMap.empty
+    }
 
 turnInputsToItems :: [TurnInput] -> [ResponseItem]
 turnInputsToItems = map turnInputToItem
@@ -385,13 +410,34 @@ responseToTurnOutput response = TurnOutput
     }
 
 -- | An incomplete response can still finish the turn when it already contains
--- executable tool calls or assistant text. Empty @max_output_tokens@ stops
--- remain transport failures so a replay-safe fallback can still run.
+-- executable tool calls or assistant text, or when it is a continuable
+-- reasoning-only stop. @max_output_tokens@ during reasoning is handed to the
+-- loop as an empty completion so it can continue the chain. Reasons such as
+-- @content_filter@ stay transport failures, as do completely empty incomplete
+-- responses, so a replay-safe fallback can still run.
 hasRecoverableIncompleteOutput :: Response -> Bool
 hasRecoverableIncompleteOutput response =
     not (null (mapMaybe responseItemToToolCall response.output))
         || maybe False (not . Text.null . Text.strip)
             (assistantTextFromResponse response)
+        || (any isReasoningOutput response.output
+            && isContinuableIncompleteReason response)
+
+isReasoningOutput :: ResponseItem -> Bool
+isReasoningOutput = \case
+    ReasoningItemValue{} -> True
+    _ -> False
+
+isContinuableIncompleteReason :: Response -> Bool
+isContinuableIncompleteReason response =
+    maybe False ((`elem` continuableIncompleteReasons) . (.reason))
+        response.incompleteDetails
+
+-- | Incomplete reasons where the model can still produce tools or text on a
+-- follow-up sample. Safety/filter stops are not continuable.
+continuableIncompleteReasons :: [Text]
+continuableIncompleteReasons =
+    ["max_output_tokens"]
 
 responseTokenUsage :: Response -> TokenUsage
 responseTokenUsage response =

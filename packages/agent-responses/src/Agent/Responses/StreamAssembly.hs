@@ -111,6 +111,26 @@ applyStreamEvent state event = case event of
                         (setInput finalInput)
                         state
                 _ -> state
+    ResponseFunctionCallArgumentsDeltaEvent
+        { delta, streamItemId, streamOutputIndex } ->
+            case ( delta
+                 , resolveOutputIndex streamOutputIndex [streamItemId] state
+                 ) of
+                (Just argumentsDelta, Just outputIndex) ->
+                    updateFunctionCallArguments outputIndex
+                        streamItemId
+                        (appendArguments argumentsDelta)
+                        state
+                _ -> state
+    ResponseFunctionCallArgumentsDoneEvent
+        { arguments, functionName, streamItemId, streamOutputIndex } ->
+            case resolveOutputIndex streamOutputIndex [streamItemId] state of
+                Just outputIndex ->
+                    updateFunctionCallArguments outputIndex
+                        streamItemId
+                        (setArguments arguments functionName)
+                        state
+                Nothing -> state
     ResponseReasoningSummaryPartAddedEvent
         { streamItemId, streamOutputIndex, summaryIndex, partValue } ->
             case ( summaryIndex
@@ -577,6 +597,49 @@ appendInput delta object =
 setInput :: Text -> Aeson.Object -> Aeson.Object
 setInput input =
     KeyMap.insert "input" (Aeson.String input)
+
+updateFunctionCallArguments
+    :: Int
+    -> Maybe Text
+    -> (Aeson.Object -> Aeson.Object)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateFunctionCallArguments outputIndex itemId updateArgs state =
+    state
+        { outputItems =
+            Map.alter
+                (Just . updateProgress)
+                outputIndex
+                state.outputItems
+        }
+  where
+    baseObject =
+        maybe id
+            (KeyMap.insert "id" . Aeson.String)
+            itemId
+        $ KeyMap.fromList
+            [ ("type", Aeson.String "function_call")
+            , ("arguments", Aeson.String "")
+            ]
+    updateProgress Nothing =
+        ItemProgress (Aeson.Object (updateArgs baseObject)) False
+    updateProgress (Just progress) =
+        progress
+            { itemValue = case progress.itemValue of
+                Aeson.Object object -> Aeson.Object (updateArgs object)
+                _ -> Aeson.Object (updateArgs baseObject)
+            }
+
+appendArguments :: Text -> Aeson.Object -> Aeson.Object
+appendArguments delta object =
+    let current = fromMaybe "" (textField "arguments" object)
+    in KeyMap.insert "arguments" (Aeson.String (current <> delta)) object
+
+setArguments :: Maybe Text -> Maybe Text -> Aeson.Object -> Aeson.Object
+setArguments arguments functionName object =
+    maybe id (KeyMap.insert "name" . Aeson.String) functionName $
+        maybe id (KeyMap.insert "arguments" . Aeson.String) arguments
+            object
 
 setObjectText :: Text -> Aeson.Value -> Aeson.Value
 setObjectText text = \case

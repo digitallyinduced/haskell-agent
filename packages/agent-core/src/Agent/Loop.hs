@@ -1,5 +1,7 @@
 -- | Provider-neutral agent loop: submit a user turn, dispatch tool calls,
--- feed results back, repeat until the model answers in text or hits a cap.
+-- feed results back, and repeat until the model answers in visible text or
+-- hits a cap. Reasoning-only or otherwise empty completions are treated as
+-- incomplete model steps, not as a finished turn.
 --
 -- Transports close over model, instructions, and tool schemas. This module
 -- only sees 'ToolCall' / 'ToolCallResult' and a 'Backend' callback.
@@ -21,6 +23,7 @@ module Agent.Loop
     , TurnOutput(..)
     , addTokenUsage
     , defaultLoopMaxTurns
+    , defaultLoopMaxEmptyContinuations
     , defaultLoopDispatch
     , emptyTokenUsage
     , emptyTurnOutput
@@ -314,6 +317,21 @@ data LoopError
 defaultLoopMaxTurns :: Int
 defaultLoopMaxTurns = 2000
 
+-- | Extra model samples after a reasoning-only or otherwise empty completion
+-- (no tool calls, no visible assistant text, and no pending steering). The
+-- original empty sample plus this many continuations are allowed before the
+-- loop stops.
+defaultLoopMaxEmptyContinuations :: Int
+defaultLoopMaxEmptyContinuations = 2
+
+hasVisibleAssistantText :: Maybe Text -> Bool
+hasVisibleAssistantText =
+    maybe False (not . Text.null . Text.strip)
+
+emptyContinuationWarning :: Text
+emptyContinuationWarning =
+    "The model produced no assistant text or tool calls after reasoning; stopping."
+
 -- | CLI-facing formatter: unknown tools, handler errors, and crashes stay
 -- in-band as tool output so the model can continue.
 defaultLoopDispatch :: ToolDispatchConfig
@@ -390,7 +408,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                     (Left (LoopUnexpected (exceptionSummary exception)))
             protect state progress action =
                 tryAny action >>= either (unexpected state progress) pure
-            go state progress prev turnsUsed inputs steeringCount lastOutput usageAcc = do
+            go state progress prev turnsUsed inputs steeringCount lastOutput
+                    usageAcc emptyContinuations = do
                 writeIORef progressRef (state, progress)
                 if turnsUsed >= config.loopMaxTurns
                     then finish state progress $ case lastOutput of
@@ -442,8 +461,9 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                     Right (Right BackendResult{..}) -> do
                                         continueCommitted
                                             backendState backendOutput turnsUsed
-                                            steeringCount usageAcc
-            continueCommitted state turn turnsUsed steeringCount usageAcc = do
+                                            steeringCount usageAcc emptyContinuations
+            continueCommitted state turn turnsUsed steeringCount usageAcc
+                    emptyContinuations = do
                 writeIORef progressRef (state, ResponseCommitted)
                 protect state ResponseCommitted do
                     -- A cancel that landed during submitTurn after the race chose
@@ -466,7 +486,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         if null turn.toolCalls
                                             then pure []
                                             else runToolCalls config turn.toolCalls
-                                    cancelledAfter <- isCancelled config.loopCancel
+                                    cancelledAfter <-
+                                        isCancelled config.loopCancel
                                     if cancelledAfter
                                         then finish state ResponseCommitted
                                             (Left (LoopCancelled results))
@@ -475,18 +496,8 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                             let continuation =
                                                     map CompletedTool results
                                                         <> steering
-                                            if null continuation
-                                                then finish state ResponseCommitted $
-                                                    Right LoopResult
-                                                        { finalResponseId =
-                                                            turn.responseId
-                                                        , finalText =
-                                                            turn.assistantText
-                                                        , turnsUsed =
-                                                            nextTurnsUsed
-                                                        , tokenUsage = usageAcc'
-                                                        }
-                                                else go
+                                            if not (null continuation)
+                                                then go
                                                     state
                                                     ResponseCommitted
                                                     (Just turn.responseId)
@@ -495,12 +506,53 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                                     (length steering)
                                                     (Just turn)
                                                     usageAcc'
+                                                    0
+                                                else if hasVisibleAssistantText
+                                                    turn.assistantText
+                                                    then finish state ResponseCommitted $
+                                                        Right LoopResult
+                                                            { finalResponseId =
+                                                                turn.responseId
+                                                            , finalText =
+                                                                turn.assistantText
+                                                            , turnsUsed =
+                                                                nextTurnsUsed
+                                                            , tokenUsage = usageAcc'
+                                                            }
+                                                    else if emptyContinuations
+                                                            >= defaultLoopMaxEmptyContinuations
+                                                        then do
+                                                            config.loopOnEvent
+                                                                (WarningRaised
+                                                                    emptyContinuationWarning)
+                                                            finish state ResponseCommitted $
+                                                                Right LoopResult
+                                                                    { finalResponseId =
+                                                                        turn.responseId
+                                                                    , finalText =
+                                                                        turn.assistantText
+                                                                    , turnsUsed =
+                                                                        nextTurnsUsed
+                                                                    , tokenUsage = usageAcc'
+                                                                    }
+                                                        else
+                                                            go
+                                                                state
+                                                                ResponseCommitted
+                                                                (Just turn.responseId)
+                                                                nextTurnsUsed
+                                                                []
+                                                                0
+                                                                (Just turn)
+                                                                usageAcc'
+                                                                (emptyContinuations + 1)
             run =
                 go initialState NoResponseCommitted previousResponseId 0
                     (firstInputs <> initialSteering)
                     (length initialSteering)
                     Nothing
                     emptyTokenUsage
+                    0
         raced <- race (waitLoopEventFailure eventWorker eventPump) run
         execution <- case raced of
             Left failure -> do

@@ -26,6 +26,7 @@ import Agent.Responses.Types
     ( MessageContent(..)
     , FunctionCallOutput(..)
     , InternalChatMetadata(..)
+    , ReasoningItem(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
@@ -281,6 +282,38 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
             other -> expectationFailure
                 ("unexpected normalized Lite input: " <> show other)
 
+    it "appends an empty assistant message after a trailing reasoning item" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Nothing
+                , status = Nothing
+                , extraFields = KeyMap.empty
+                }
+            user = turnInputsToItems [UserMessage "hello"]
+            params = defaultResponseCreateParams
+            request = withRequestInput params (user <> [reasoning])
+        case request.input of
+            Just (ResponseInputItems items) -> do
+                length items `shouldBe` 3
+                last items `shouldSatisfy` isEmptyAssistantFollowup
+            _ -> expectationFailure "expected request input items"
+
+    it "does not invent a follow-up when reasoning already has a successor" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Nothing
+                , status = Nothing
+                , extraFields = KeyMap.empty
+                }
+            items = turnInputsToItems [UserMessage "hello"] <> [reasoning]
+                <> turnInputsToItems [UserMessage "continue"]
+            request = withRequestInput defaultResponseCreateParams items
+        request.input `shouldBe` Just (ResponseInputItems items)
+
 credential :: String -> Credential
 credential label = Credential
     { accessToken = "token-" <> Text.pack label
@@ -306,6 +339,16 @@ isUserMessage = \case
             && case message.content of
                 MessageContentParts [InputTextPart{ text = value }] ->
                     value == "hello"
+                _ -> False
+    _ -> False
+
+isEmptyAssistantFollowup :: ResponseItem -> Bool
+isEmptyAssistantFollowup = \case
+    MessageItem message ->
+        message.role == RoleAssistant
+            && case message.content of
+                MessageContentParts [OutputTextPart{ text = value }] ->
+                    Text.null value
                 _ -> False
     _ -> False
 

@@ -135,6 +135,8 @@ retainForResponse = \case
     ResponseOutputItemDoneEvent {} -> True
     ResponseCustomToolInputDeltaEvent {} -> True
     ResponseCustomToolInputDoneEvent {} -> True
+    ResponseFunctionCallArgumentsDeltaEvent {} -> True
+    ResponseFunctionCallArgumentsDoneEvent {} -> True
     ResponseReasoningSummaryPartAddedEvent {} -> True
     ResponseReasoningSummaryTextDoneEvent {} -> True
     event
