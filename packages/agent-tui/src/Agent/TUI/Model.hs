@@ -41,13 +41,13 @@ module Agent.TUI.Model
 
 import Agent.TUI.Presentation
     ( TodoDisplayLine
-    , formatSearchReplaceDiff
-    , formatToolOutput
+    , formatSearchReplaceDiffRelative
+    , formatToolOutputRelative
     , todoListFromToolOutput
     , todoListHasInProgress
     , todoListHasOpenWork
     , toolCallInput
-    , toolCallTitle
+    , toolCallTitleRelative
     )
 import Agent.TUI.TextWidth (clampGraphemeCursor)
 import Agent.TUI.Motion
@@ -188,6 +188,7 @@ data UiState = UiState
     , uiPrompt :: !PromptState
     , uiBranch :: !Text
     , uiCwd :: !Text
+    , uiWorkspaceRoot :: !Text
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
     , uiRetryCountdown :: !(Maybe RetryCountdown)
@@ -218,7 +219,7 @@ data UiEvent
     | UiSetPromptEffort !Text
     | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
     | UiSetAwaitingInput !Bool
-    | UiSetRepository !Text !Text
+    | UiSetRepository !Text !Text !Text
     | UiSetNotice !(Maybe UiNotice)
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId
@@ -271,6 +272,7 @@ initialUiState = UiState
         }
     , uiBranch = ""
     , uiCwd = ""
+    , uiWorkspaceRoot = ""
     , uiPermission = Nothing
     , uiNotice = Nothing
     , uiRetryCountdown = Nothing
@@ -388,8 +390,8 @@ reduceUi event state = case event of
                     then "Ready"
                     else state.uiActivity
             }
-    UiSetRepository branch cwd ->
-        state { uiBranch = branch, uiCwd = cwd }
+    UiSetRepository branch cwd workspace ->
+        state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
         state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
     UiMoveSelection delta ->
@@ -775,7 +777,7 @@ reduceLoop event state = case event of
                 { uiRunning = True
                 , uiGenerating = False
                 , uiAwaitingInput = False
-                , uiActivity = toolCallTitle call
+                , uiActivity = toolCallTitleRelative state.uiWorkspaceRoot call
                 , uiToolCalls =
                     Map.insert
                         call.callId
@@ -785,11 +787,13 @@ reduceLoop event state = case event of
         | otherwise ->
             let
                 kind = toolBlockKind call.name
-                title = toolCallTitle call
+                title = toolCallTitleRelative state.uiWorkspaceRoot call
                 blockIndex = Seq.length state.uiBlocks
                 body = case canonicalToolName call.name of
                     "search_replace" ->
-                        formatSearchReplaceDiff call.arguments
+                        formatSearchReplaceDiffRelative
+                            state.uiWorkspaceRoot
+                            call.arguments
                     _ -> ""
                 detail = toolCallInput call
             in appendBlock kind title body detail
@@ -813,7 +817,12 @@ reduceLoop event state = case event of
                 Nothing -> result
                 Just (_, call) ->
                     result
-                        { output = formatToolOutput call result.output }
+                        { output =
+                            formatToolOutputRelative
+                                state.uiWorkspaceRoot
+                                call
+                                result.output
+                        }
             todos =
                 case activeCall of
                     Just (_, call)

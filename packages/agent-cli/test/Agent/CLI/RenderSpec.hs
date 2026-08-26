@@ -250,6 +250,14 @@ spec = do
                 `shouldBe` "◆ $ git status"
             formatToolStarted False (functionToolCall "c3" "search_replace" "{\"file_path\":\"src/A.hs\"}")
                 `shouldBe` "◆ Edited src/A.hs"
+            formatToolStartedRelative
+                False
+                "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+                (functionToolCall
+                    "c3b"
+                    "search_replace"
+                    "{\"file_path\":\"/Users/marc/.haskell-agent/worktrees/haskell-agent/wt/nix/modules/telegram.nix\"}")
+                `shouldBe` "◆ Edited nix/modules/telegram.nix"
             formatToolStarted False
                 (functionToolCall
                     "c4"
@@ -930,6 +938,7 @@ withRenderConfigNativeMode showThinking color native motionMode action = do
                 , renderModelRef = modelRef
                 , renderNativeProgress = native
                 , renderMotionMode = motionMode
+                , renderWorkspace = ""
                 }
         action config handle path
         clearThinking config

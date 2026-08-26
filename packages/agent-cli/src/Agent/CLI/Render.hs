@@ -35,6 +35,7 @@ module Agent.CLI.Render
     , formatToolBody
     , formatToolOutput
     , formatToolStarted
+    , formatToolStartedRelative
     , formatTurnStatus
     , putTextLn
     , renderAssistantText
@@ -114,9 +115,12 @@ import Agent.TUI.Presentation
     , SearchReplaceDiff(..)
     , SearchReplaceLine(..)
     , formatToolOutput
+    , formatToolOutputRelative
     , parseSearchReplaceDiff
     , summarizeToolCall
+    , summarizeToolCallRelative
     , toolDetail
+    , workspaceRelativeDisplayPath
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -166,6 +170,7 @@ data RenderConfig = RenderConfig
     , renderModelRef :: !(IORef Text)
     , renderNativeProgress :: !Bool -- ^ Ghostty / WT OSC 9;4; off in tests
     , renderMotionMode :: !MotionMode
+    , renderWorkspace :: !Text
     }
 
 -- | Immutable logical renderer state. IO effects (terminal output and the
@@ -760,13 +765,22 @@ renderEventUnlocked config = \case
         modifyRenderState config \state ->
             ( state
                 { stateToolCalls = Map.insert call.callId call state.stateToolCalls
-                , stateActivity = summarizeToolCall call
+                , stateActivity =
+                    summarizeToolCallRelative config.renderWorkspace call
                 }
             , ()
             )
         unless (isTodoTool call.name) do
-            putTextLn config.renderStderr (formatToolStarted config.renderColor call)
-            let extra = formatToolBody config.renderColor call
+            putTextLn config.renderStderr
+                (formatToolStartedRelative
+                    config.renderColor
+                    config.renderWorkspace
+                    call)
+            let extra =
+                    formatToolBodyRelative
+                        config.renderColor
+                        config.renderWorkspace
+                        call
             unless (Text.null extra) do
                 putTextLn config.renderStderr extra
         when config.renderShowThinking do
@@ -786,7 +800,11 @@ renderEventUnlocked config = \case
             )
         let maybeCall = Map.lookup result.callId calls
             formatted = maybe result.output
-                (`formatToolOutput` result.output)
+                (\call ->
+                    formatToolOutputRelative
+                        config.renderWorkspace
+                        call
+                        result.output)
                 maybeCall
             painted = case maybeCall of
                 Just call
@@ -1139,7 +1157,10 @@ putTextLn handle text = do
 -- Known coding tools use English verbs (Read / Listed / $) instead of
 -- wire names, matching grok-build's linear chrome while staying Solarized.
 formatToolStarted :: Bool -> ToolCall -> Text
-formatToolStarted color call =
+formatToolStarted color = formatToolStartedRelative color ""
+
+formatToolStartedRelative :: Bool -> Text -> ToolCall -> Text
+formatToolStartedRelative color workspace call =
     let arrow = roleToolArrow color glyphTool
         detail = toolDetail call
     in case toolChrome call.name of
@@ -1159,7 +1180,8 @@ formatToolStarted color call =
                         | otherwise -> " " <> roleToolDetail color detail
                     ToolDetailPath
                         | Text.null detail -> ""
-                        | otherwise -> " " <> renderToolPath color detail
+                        | otherwise ->
+                            " " <> renderToolPath color workspace detail
                     ToolDetailCommand
                         | Text.null detail -> ""
                         | otherwise -> " " <> roleToolCommand color detail
@@ -1214,20 +1236,29 @@ isTodoTool name =
     canonicalToolName name `elem` ["todo_write", "update_plan"]
 
 formatToolBody :: Bool -> ToolCall -> Text
-formatToolBody color call = case canonicalToolName call.name of
-    "search_replace" -> formatSearchReplaceDiff color call.arguments
+formatToolBody color = formatToolBodyRelative color ""
+
+formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
+formatToolBodyRelative color workspace call = case canonicalToolName call.name of
+    "search_replace" ->
+        formatSearchReplaceDiffRelative color workspace call.arguments
     _ -> ""
 
 -- | Compact unified-diff preview for @search_replace@ arguments.
 formatSearchReplaceDiff :: Bool -> Text -> Text
-formatSearchReplaceDiff color arguments =
+formatSearchReplaceDiff color = formatSearchReplaceDiffRelative color ""
+
+formatSearchReplaceDiffRelative :: Bool -> Text -> Text -> Text
+formatSearchReplaceDiffRelative color workspace arguments =
     let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
             parseSearchReplaceDiff arguments
         header = case diffAction of
             Just SearchReplaceCreate ->
-                roleMuted color "  create " <> renderToolPath color diffPath
+                roleMuted color "  create "
+                    <> renderToolPath color workspace diffPath
             Just SearchReplaceDelete ->
-                roleMuted color "  delete " <> renderToolPath color diffPath
+                roleMuted color "  delete "
+                    <> renderToolPath color workspace diffPath
             _ -> ""
         shown = map paintLine diffLines
         more =
@@ -1246,12 +1277,23 @@ formatSearchReplaceDiff color arguments =
         SearchReplaceAdded line ->
             style color [terminalGreen] ("  +" <> line)
 
-renderToolPath :: Bool -> Text -> Text
-renderToolPath color path =
-    let styled = roleToolPath color path
-    in if "/" `Text.isPrefixOf` path
-        then osc8Link color (fileUri (Text.unpack path)) styled
+renderToolPath :: Bool -> Text -> Text -> Text
+renderToolPath color workspace path =
+    let displayed = workspaceRelativeDisplayPath workspace path
+        styled = roleToolPath color displayed
+        absolute = absoluteToolPath workspace path
+    in if "/" `Text.isPrefixOf` absolute
+        then osc8Link color (fileUri (Text.unpack absolute)) styled
         else styled
+
+absoluteToolPath :: Text -> Text -> Text
+absoluteToolPath workspace path
+    | "/" `Text.isPrefixOf` path = path
+    | Text.null root = path
+    | path == "." = root
+    | otherwise = root <> "/" <> Text.dropWhile (== '/') path
+  where
+    root = Text.dropWhileEnd (== '/') workspace
 
 truncateToolOutput :: Text -> Text
 truncateToolOutput output =

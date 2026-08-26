@@ -259,13 +259,7 @@ import Agent.TUI.Motion
     , waitingIndicator
     )
 import Agent.TUI.Presentation
-    ( TodoDisplayLine(..)
-    , TodoDisplayStatus(..)
-    , liveTodoPanelLines
-    , parseTodoList
-    , permissionToolCallPrompt
-    , todoStatusGlyph
-    )
+    ( permissionToolCallPromptRelative )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -917,11 +911,12 @@ withTrackedVtyBuilder build action = do
 
 requestFullscreenPermission
     :: FullscreenRuntime
+    -> Text
     -> ToolCall
     -> IO (Maybe PermissionChoice)
-requestFullscreenPermission runtime call = do
+requestFullscreenPermission runtime workspace call = do
     reply <- newEmptyTMVarIO
-    let summary = permissionToolCallPrompt call
+    let summary = permissionToolCallPromptRelative workspace call
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
@@ -2705,7 +2700,7 @@ uiEventMayExposeSyntax = \case
     UiSetPromptEffort _ -> False
     UiSetPromptLimitStatus _ -> False
     UiSetAwaitingInput _ -> False
-    UiSetRepository _ _ -> False
+    UiSetRepository _ _ _ -> False
     UiSetNotice _ -> False
     UiMoveSelection _ -> False
     UiSelectBlock _ -> False

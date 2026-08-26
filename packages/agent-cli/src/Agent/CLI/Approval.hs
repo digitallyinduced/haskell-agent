@@ -25,7 +25,7 @@ import Agent.CLI.Style
     )
 import Agent.CLI.Terminal (resolveColor)
 import Agent.JsonText (jsonTextFieldDefault)
-import Agent.OsPath (fromText)
+import Agent.OsPath (fromText, toText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
@@ -66,13 +66,15 @@ approveToolDecision
     -> ToolRegistry
     -> PlanModeEnv
     -> OsPath
+    -> OsPath
     -> ToolCall
     -> IO (Either Text Bool)
-approveToolDecision policyRef allowedToolsRef tools planMode projectRoot call = do
+approveToolDecision
+        policyRef allowedToolsRef tools planMode projectRoot cwd call = do
     approveToolDecisionWithReporterAndPersistence
         (\requested -> do
             color <- resolveColor stderr
-            promptPermission color requested)
+            promptPermission color (toText cwd) requested)
         (\case
             ApprovalWarning message -> do
                 color <- resolveColor stderr

@@ -858,7 +858,8 @@ prepareAgentIterationTracked
                         ""
                         (toText (takeFileName (takeDirectory initialCwd))
                             <> "/"
-                            <> toText (takeFileName initialCwd)))
+                            <> toText (takeFileName initialCwd))
+                        (toText initialCwd))
                     initialUiState))
                         { uiQueuedInputs = queuedInputDisplays }
     firstFrameReady <-
