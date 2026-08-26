@@ -328,9 +328,12 @@ receiveResponseWithMessageValidatorAndProgress
                             Left err ->
                                 pure (Left err)
                             Right (nextAccumulator, progress, Nothing) -> do
-                                validatedProgress <-
-                                    validateProgressSessions turn progress
-                                case validatedProgress of
+                                sessionAccepted <-
+                                    validateLiveProgressSession
+                                        turn
+                                        message
+                                        progress
+                                case sessionAccepted of
                                     Left err -> pure (Left err)
                                     Right () -> do
                                         mapM_ onProgress progress
@@ -348,22 +351,17 @@ receiveResponseWithMessageValidatorAndProgress
                                         mapM_ onMessage messages
                                         pure (Right result)
 
-validateProgressSessions
+validateLiveProgressSession
     :: ClaudeSDKTurn
+    -> Message
     -> [QueryProgress]
     -> IO (Either ClaudeSDKError ())
-validateProgressSessions turn =
-    go
-  where
-    go [] = pure (Right ())
-    go (progress : rest) =
-        case progress of
-            QueryMessageObserved _ message
-                | Just sessionId <- messageSessionId message ->
-                    acceptTurnSessionId turn sessionId >>= \case
-                        Left err -> pure (Left err)
-                        Right () -> go rest
-            _ -> go rest
+validateLiveProgressSession turn message progress
+    | null progress = pure (Right ())
+    | otherwise =
+        case messageSessionId message of
+            Nothing -> pure (Right ())
+            Just sessionId -> acceptTurnSessionId turn sessionId
 
 timeoutError :: ClaudeSDKTurn -> Text -> IO ClaudeSDKError
 timeoutError turn reason = do

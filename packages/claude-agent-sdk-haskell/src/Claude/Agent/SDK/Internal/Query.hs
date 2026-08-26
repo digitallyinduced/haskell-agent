@@ -120,16 +120,9 @@ consumeQueryMessageWithProgress accumulator message = do
     (next, completed) <- consumeQueryMessage accumulator message
     let progress = observedProgress accumulator message
         nextWithProgress = next
-            { progressSeenIds =
-                case progress of
-                    [] -> accumulator.progressSeenIds
-                    _ -> maybe
-                        accumulator.progressSeenIds
-                        (\identifier ->
-                            Set.insert
-                                (messageScope message, identifier)
-                                accumulator.progressSeenIds)
-                        (messageUuid message)
+            { progressSeenIds = applyProgressSeen
+                accumulator.progressSeenIds
+                progress
             }
     pure (nextWithProgress, progress, completed)
 
@@ -137,10 +130,38 @@ observedProgress :: QueryAccumulator -> Message -> [QueryProgress]
 observedProgress accumulator message
     | not (belongsToOwnTurn accumulator message) = []
     | not (messageWouldBeObserved accumulator message) =
-        retractionsFor message
+        retractionsFor accumulator message
     | otherwise =
-        retractionsFor message
+        retractionsFor accumulator message
             <> [QueryMessageObserved (publicScope message) message]
+
+applyProgressSeen
+    :: Set (MessageScope, Text)
+    -> [QueryProgress]
+    -> Set (MessageScope, Text)
+applyProgressSeen = foldl' step
+  where
+    step seen = \case
+        QueryMessageObserved _ message ->
+            maybe seen
+                (\identifier ->
+                    Set.insert (messageScope message, identifier) seen)
+                (messageUuid message)
+        QueryMessagesRetracted scope identifiers ->
+            case scope of
+                Nothing ->
+                    Set.filter
+                        (\(_, identifier) -> identifier `notElem` identifiers)
+                        seen
+                Just public ->
+                    let internal = case public of
+                            QueryTopLevel -> TopLevelScope
+                            QueryNested parent -> NestedScope parent
+                    in foldl'
+                        (\current identifier ->
+                            Set.delete (internal, identifier) current)
+                        seen
+                        identifiers
 
 belongsToOwnTurn :: QueryAccumulator -> Message -> Bool
 belongsToOwnTurn accumulator message =
@@ -184,18 +205,34 @@ messageWouldBeObserved accumulator message =
                         (messageScope candidate, identifier)
                         current.retractedIds
 
-retractionsFor :: Message -> [QueryProgress]
-retractionsFor = \case
+retractionsFor :: QueryAccumulator -> Message -> [QueryProgress]
+retractionsFor accumulator = \case
     MessageAssistant assistant
-        | not (null assistant.supersedes) ->
+        | let identifiers =
+                filter
+                    (\identifier ->
+                        Set.member
+                            ( messageScope (MessageAssistant assistant)
+                            , identifier
+                            )
+                            accumulator.progressSeenIds)
+                    assistant.supersedes
+        , not (null identifiers) ->
             [ QueryMessagesRetracted
                 (Just (publicScope (MessageAssistant assistant)))
-                assistant.supersedes
+                identifiers
             ]
     MessageSystem system
-        | system.subtype == "model_refusal_fallback"
-        , not (null system.retractedMessageUuids) ->
-            [QueryMessagesRetracted Nothing system.retractedMessageUuids]
+        | let identifiers =
+                filter
+                    (\identifier ->
+                        any
+                            ((== identifier) . snd)
+                            accumulator.progressSeenIds)
+                    system.retractedMessageUuids
+        , system.subtype == "model_refusal_fallback"
+        , not (null identifiers) ->
+            [QueryMessagesRetracted Nothing identifiers]
     _ -> []
 
 publicScope :: Message -> QueryMessageScope
