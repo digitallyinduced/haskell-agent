@@ -3,6 +3,7 @@
 -- This module is for decoder backend implementations, not application code.
 module Agent.Json.Decoder.Backend
     ( Decoder(..)
+    , JsonType(..)
     , NamedField(..)
     , UnknownField(..)
     ) where
@@ -24,12 +25,22 @@ data Decoder a where
         -> (state -> Either Text a)
         -> Decoder a
     NullableDecoder :: Decoder a -> Decoder (Maybe a)
+    ByTypeDecoder :: (JsonType -> Decoder a) -> Decoder a
     RawJsonDecoder :: Decoder RawJson
     SkipDecoder :: Decoder ()
     MapDecoder
         :: (a -> Either Text b)
         -> Decoder a
         -> Decoder b
+
+data JsonType
+    = JsonNull
+    | JsonBoolean
+    | JsonNumber
+    | JsonString
+    | JsonArray
+    | JsonObject
+    deriving stock (Eq, Show)
 
 data NamedField state where
     NamedField

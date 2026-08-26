@@ -7,6 +7,7 @@ module Agent.Json.Encoder
     ( Encoder
     , Field
     , encode
+    , choose
     , contramap
     , nullValue
     , bool
@@ -56,6 +57,12 @@ data Field a =
 encode :: Encoder a -> a -> BS.ByteString
 encode (Encoder renderValue) =
     Jsonifier.toByteString . renderValue
+
+choose :: (value -> Encoder value) -> Encoder value
+choose select =
+    Encoder \value ->
+        case select value of
+            Encoder renderValue -> renderValue value
 
 contramap :: (b -> a) -> Encoder a -> Encoder b
 contramap transform (Encoder renderValue) =

@@ -78,6 +78,9 @@ runDecoder decoder initial = case decoder of
             else do
                 (value, next) <- runDecoder inner cursor
                 pure (Just value, next)
+    ByTypeDecoder select -> do
+        valueType <- jsonTypeAt initial
+        runDecoder (select valueType) initial
     RawJsonDecoder -> do
         let start = (skipWhitespace initial).position
         next <- skipJsonValue initial
@@ -93,6 +96,19 @@ runDecoder decoder initial = case decoder of
         case transform value of
             Left err -> failure next err
             Right transformed -> pure (transformed, next)
+
+jsonTypeAt :: Cursor -> Either DecodeError JsonType
+jsonTypeAt initial =
+    let cursor = skipWhitespace initial
+    in case peekByte cursor of
+        Just byte
+            | byte == 0x6e -> Right JsonNull
+            | byte == 0x74 || byte == 0x66 -> Right JsonBoolean
+            | byte == quote -> Right JsonString
+            | byte == openBracket -> Right JsonArray
+            | byte == openBrace -> Right JsonObject
+            | byte == minus || isDigit byte -> Right JsonNumber
+        _ -> failure cursor "expected a JSON value"
 
 parseBool :: Cursor -> Either DecodeError (Bool, Cursor)
 parseBool initial

@@ -58,6 +58,15 @@ decoderRequiresRawCapture = \case
             || unknownFieldRequiresRawCapture unknown
     NullableDecoder inner ->
         decoderRequiresRawCapture inner
+    ByTypeDecoder select ->
+        any (decoderRequiresRawCapture . select)
+            [ JsonNull
+            , JsonBoolean
+            , JsonNumber
+            , JsonString
+            , JsonArray
+            , JsonObject
+            ]
     RawJsonDecoder -> True
     SkipDecoder -> False
     MapDecoder _ inner ->
@@ -95,6 +104,9 @@ toHermes = \case
         either (fail . Text.unpack) pure (finish state)
     NullableDecoder inner ->
         Hermes.nullable (toHermes inner)
+    ByTypeDecoder select -> do
+        valueType <- hermesJsonType
+        toHermes (select valueType)
     RawJsonDecoder ->
         fail "RawJson requires the portable direct backend"
     SkipDecoder ->
@@ -137,6 +149,16 @@ validateValue =
         Hermes.VNull -> do
             isNull <- Hermes.isNull
             if isNull then pure () else fail "expected null"
+
+hermesJsonType :: Hermes.Decoder JsonType
+hermesJsonType =
+    Hermes.getType >>= \case
+        Hermes.VArray -> pure JsonArray
+        Hermes.VObject -> pure JsonObject
+        Hermes.VNumber -> pure JsonNumber
+        Hermes.VString -> pure JsonString
+        Hermes.VBoolean -> pure JsonBoolean
+        Hermes.VNull -> pure JsonNull
 
 firstNonWhitespace :: BS.ByteString -> Maybe Word8
 firstNonWhitespace =

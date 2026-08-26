@@ -6,6 +6,7 @@
 -- bytes.
 module Agent.Json.Decoder
     ( Decoder
+    , JsonType(..)
     , NamedField
     , UnknownField
     , DecodeError(..)
@@ -23,6 +24,7 @@ module Agent.Json.Decoder
     , list
     , vector
     , nullable
+    , byType
     , maybe
     , rawJson
     , skip
@@ -126,6 +128,9 @@ vector decoder = mapDecoder Vector.fromList (array decoder)
 
 nullable :: Decoder a -> Decoder (Maybe a)
 nullable = NullableDecoder
+
+byType :: (JsonType -> Decoder a) -> Decoder a
+byType = ByTypeDecoder
 
 maybe :: Decoder a -> Decoder (Maybe a)
 maybe = nullable
