@@ -280,6 +280,35 @@ spec = do
                     Just
                         (ActivityUpdated
                             "Warning: unsupported provider event response.future.done")
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown "response.future.done"
+                    , sequenceNumber = Just 42
+                    , eventExtraFields =
+                        KeyMap.singleton "delta" (Aeson.String "partial")
+                    })
+                `shouldBe`
+                    Just
+                        (ActivityUpdated
+                            "Warning: unsupported provider event response.future.done: {\"delta\":\"partial\"}")
+
+        it "surfaces unparsed websocket frames as warnings without marking output" do
+            let event = OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown unparsedStreamEventTypeText
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.fromList
+                        [ (Key.fromText "error", Aeson.String "key \"call_id\" not found")
+                        , (Key.fromText "payload", Aeson.String "{\"type\":\"response.output_item.added\"}")
+                        ]
+                    }
+            streamEventToLoopEvent event
+                `shouldBe`
+                    Just
+                        (WarningRaised
+                            "Codex websocket dropped an unparsed frame: key \"call_id\" not found payload={\"type\":\"response.output_item.added\"}")
+            streamOutputObserved event `shouldBe` False
 
         it "surfaces low Codex usage as a persistent warning" do
             streamEventToLoopEvent

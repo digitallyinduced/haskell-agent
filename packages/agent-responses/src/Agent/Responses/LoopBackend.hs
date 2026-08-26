@@ -52,6 +52,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy as LBS
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
@@ -605,10 +606,18 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
         | index > 0 ->
             Just (ReasoningDelta "\n\n")
     OtherResponseStreamEvent
-        { otherEventType = StreamEventUnknown eventType } ->
+        { otherEventType
+        , eventExtraFields
+        }
+        | streamEventTypeText otherEventType == unparsedStreamEventTypeText ->
+            Just (WarningRaised (unparsedStreamFrameWarning eventExtraFields))
+    OtherResponseStreamEvent
+        { otherEventType = StreamEventUnknown eventType
+        , eventExtraFields
+        } ->
             Just
                 (ActivityUpdated
-                    ("Warning: unsupported provider event " <> eventType))
+                    (unknownProviderEventWarning eventType eventExtraFields))
     OtherResponseStreamEvent
         { otherEventType = EventCodexRateLimits
         , eventExtraFields
@@ -645,9 +654,35 @@ streamOutputObserved event = case event of
     ResponseCustomToolInputDoneEvent{} -> True
     ResponseReasoningSummaryPartAddedEvent{} -> True
     ResponseReasoningSummaryTextDoneEvent{} -> True
+    OtherResponseStreamEvent { otherEventType }
+        | streamEventTypeText otherEventType == unparsedStreamEventTypeText ->
+            False
     _ ->
         responseStreamEventType event /= EventCodexRateLimits
             && isJust (streamEventToLoopEvent event)
+
+unknownProviderEventWarning :: Text -> Aeson.Object -> Text
+unknownProviderEventWarning eventType extras =
+    "Warning: unsupported provider event "
+        <> eventType
+        <> foldMap (": " <>) (objectPreview extras)
+
+unparsedStreamFrameWarning :: Aeson.Object -> Text
+unparsedStreamFrameWarning extras =
+    "Codex websocket dropped an unparsed frame"
+        <> foldMap (": " <>) (nonEmptyText extras "error")
+        <> foldMap (" payload=" <>) (nonEmptyText extras "payload")
+
+objectPreview :: Aeson.Object -> Maybe Text
+objectPreview extras
+    | KeyMap.null extras = Nothing
+    | otherwise =
+        Just
+            . Text.take 500
+            . Text.decodeUtf8Lenient
+            . LBS.toStrict
+            . Aeson.encode
+            $ Aeson.Object extras
 
 extraDeltaText :: Aeson.Object -> Maybe Text
 extraDeltaText extras = nonEmptyText extras "delta" <|> nonEmptyText extras "text"
