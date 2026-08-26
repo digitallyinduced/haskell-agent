@@ -771,6 +771,48 @@ spec = describe "fullscreen UI reducer" do
         finished.uiRetryCountdown `shouldBe` Nothing
         uiNeedsTick finished `shouldBe` False
 
+    it "shows worktree-relative paths for edits" do
+        let workspace =
+                "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+            path = workspace <> "/nix/modules/telegram.nix"
+            call =
+                functionToolCall
+                    "edit-abs"
+                    "search_replace"
+                    ("{\"file_path\":\""
+                        <> path
+                        <> "\",\"old_string\":\"old\",\"new_string\":\"new\"}")
+            started =
+                apply
+                    [ UiSetRepository "main" "~/project" workspace
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            finished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "edit-abs"
+                                , output =
+                                    "The file "
+                                        <> path
+                                        <> " has been updated successfully."
+                                , callKind = FunctionCallKind
+                                }))
+                    started
+        case Foldable.toList started.uiBlocks of
+            [block] ->
+                block.blockTitle
+                    `shouldBe` "Edited nix/modules/telegram.nix"
+            _ -> expectationFailure "expected one running edit block"
+        case Foldable.toList finished.uiBlocks of
+            [block] ->
+                block.blockBody
+                    `shouldBe`
+                        "The file nix/modules/telegram.nix has been updated successfully."
+            _ -> expectationFailure "expected one completed edit block"
+
     it "shows a search-replace diff while the tool is running" do
         let call =
                 functionToolCall

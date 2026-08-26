@@ -6,21 +6,28 @@ module Agent.TUI.Presentation
     , TodoDisplayLine(..)
     , TodoDisplayStatus(..)
     , formatSearchReplaceDiff
+    , formatSearchReplaceDiffRelative
     , formatTodoList
     , formatToolOutput
+    , formatToolOutputRelative
     , liveTodoPanelLines
     , parseSearchReplaceDiff
     , parseTodoList
     , permissionToolCallPrompt
+    , permissionToolCallPromptRelative
     , todoListFromToolOutput
     , summarizeToolCall
+    , summarizeToolCallRelative
     , todoCallPreview
     , todoListHasInProgress
     , todoListHasOpenWork
     , todoStatusGlyph
     , toolCallInput
     , toolCallTitle
+    , toolCallTitleRelative
     , toolDetail
+    , toolPathArgument
+    , workspaceRelativeDisplayPath
     ) where
 
 import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
@@ -41,16 +48,26 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 
 summarizeToolCall :: ToolCall -> Text
-summarizeToolCall call =
+summarizeToolCall = summarizeToolCallRelative ""
+
+-- | Like 'summarizeToolCall', but filesystem paths inside the workspace are
+-- shown relative to that workspace.
+summarizeToolCallRelative :: Text -> ToolCall -> Text
+summarizeToolCallRelative workspace call =
     let verb = toolVerb call.name
-        detail = toolDetail call
+        detail = case toolPathArgument call of
+            Just path -> workspaceRelativeDisplayPath workspace path
+            Nothing -> toolDetail call
     in if Text.null detail then verb else verb <> " " <> detail
 
 -- | Complete question shown before a mutating tool call is approved.
 -- Command-like tools include their full input: a first-line activity summary
 -- is not enough for multiline @do@ blocks or shell scripts.
 permissionToolCallPrompt :: ToolCall -> Text
-permissionToolCallPrompt call =
+permissionToolCallPrompt = permissionToolCallPromptRelative ""
+
+permissionToolCallPromptRelative :: Text -> ToolCall -> Text
+permissionToolCallPromptRelative workspace call =
     displayTerminalText case canonicalToolName call.name of
         "run_ghci" ->
             detailedPrompt
@@ -72,7 +89,7 @@ permissionToolCallPrompt call =
             "Archive learned skill " <> skillIdentity call.arguments <> "?"
         "skill_rollback" ->
             "Restore learned skill " <> skillIdentity call.arguments <> "?"
-        _ -> "Allow " <> summarizeToolCall call <> "?"
+        _ -> "Allow " <> summarizeToolCallRelative workspace call <> "?"
   where
     detailedPrompt question input
         | Text.null (Text.strip input) = question
@@ -82,9 +99,12 @@ permissionToolCallPrompt call =
 -- separately as code, so keeping them out of the heading avoids an unbounded
 -- single terminal row and leaves a useful activity label.
 toolCallTitle :: ToolCall -> Text
-toolCallTitle call
+toolCallTitle = toolCallTitleRelative ""
+
+toolCallTitleRelative :: Text -> ToolCall -> Text
+toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
-    | otherwise = summarizeToolCall call
+    | otherwise = summarizeToolCallRelative workspace call
 
 -- | Full invocation text that benefits from dedicated code rendering.
 toolCallInput :: ToolCall -> Text
@@ -131,12 +151,16 @@ parseSearchReplaceDiff arguments =
         }
 
 formatSearchReplaceDiff :: Text -> Text
-formatSearchReplaceDiff arguments =
+formatSearchReplaceDiff = formatSearchReplaceDiffRelative ""
+
+formatSearchReplaceDiffRelative :: Text -> Text -> Text
+formatSearchReplaceDiffRelative workspace arguments =
     let SearchReplaceDiff { diffPath, diffAction, diffLines, diffHiddenLines } =
             parseSearchReplaceDiff arguments
+        displayedPath = workspaceRelativeDisplayPath workspace diffPath
         header = case diffAction of
-            Just SearchReplaceCreate -> "  create " <> diffPath
-            Just SearchReplaceDelete -> "  delete " <> diffPath
+            Just SearchReplaceCreate -> "  create " <> displayedPath
+            Just SearchReplaceDelete -> "  delete " <> displayedPath
             _ -> ""
         shown = map formatLine diffLines
         more
@@ -167,6 +191,58 @@ formatToolOutput call output = case canonicalToolName call.name of
     "todo_write" -> formatTodoList output
     "update_plan" -> formatTodoList output
     _ -> output
+
+-- | Rewrite workspace-absolute filesystem paths in tool chrome/output without
+-- touching file contents returned by @read_file@.
+formatToolOutputRelative :: Text -> ToolCall -> Text -> Text
+formatToolOutputRelative workspace call output =
+    formatToolOutput call $
+        if shouldRelativizeToolOutput call
+            then rewriteToolPathInText workspace call output
+            else output
+
+shouldRelativizeToolOutput :: ToolCall -> Bool
+shouldRelativizeToolOutput call =
+    canonicalToolName call.name
+        `elem` ["search_replace", "list_dir", "apply_patch"]
+
+rewriteToolPathInText :: Text -> ToolCall -> Text -> Text
+rewriteToolPathInText workspace call output =
+    case toolPathArgument call of
+        Just path ->
+            let displayed = workspaceRelativeDisplayPath workspace path
+            in if path == displayed
+                then output
+                else Text.replace path displayed output
+        Nothing -> output
+
+-- | Show @path@ relative to @workspace@ when it is inside that tree.
+-- Already-relative paths and paths outside the workspace are unchanged.
+workspaceRelativeDisplayPath :: Text -> Text -> Text
+workspaceRelativeDisplayPath workspace path
+    | Text.null root || Text.null candidate = path
+    | candidate == root = "."
+    | Just relative <- Text.stripPrefix (root <> "/") candidate
+    , not (Text.null relative) =
+        relative
+    | otherwise = path
+  where
+    root = Text.dropWhileEnd (== '/') workspace
+    candidate = Text.dropWhileEnd (== '/') path
+
+-- | Filesystem path argument used in tool chrome, when the tool has one.
+toolPathArgument :: ToolCall -> Maybe Text
+toolPathArgument call =
+    nonEmptyPath $ case canonicalToolName call.name of
+        "read_file" -> jsonTextFieldDefault "target_file" call.arguments
+        "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
+        "search_replace" -> jsonTextFieldDefault "file_path" call.arguments
+        "apply_patch" -> fromMaybe "" (firstPatchPath call.arguments)
+        _ -> ""
+  where
+    nonEmptyPath text =
+        let stripped = Text.strip text
+        in if Text.null stripped then Nothing else Just stripped
 
 data TodoDisplayStatus
     = TodoDisplayPending

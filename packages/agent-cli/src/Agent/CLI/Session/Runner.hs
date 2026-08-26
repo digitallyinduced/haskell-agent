@@ -710,6 +710,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     && nativeProgressAnimationEnabled
                         options.optMotionMode
             , renderMotionMode = options.optMotionMode
+            , renderWorkspace = toText cwd
             }
         emitLoop event = do
             managedLoopPublisher event
@@ -759,10 +760,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             withStdinPaused escPaused $
                                 approveToolDecision
                                     policyRef allowedToolsRef toolRegistry planMode
-                                    projectRoot call
+                                    projectRoot cwd call
                         Just runtime ->
                             approveToolDecisionWithReporterAndPersistence
-                                (requestFullscreenPermission runtime)
+                                (requestFullscreenPermission runtime (toText cwd))
                                 (\case
                                     ApprovalWarning _ -> pure ()
                                     ApprovalSuccess message ->

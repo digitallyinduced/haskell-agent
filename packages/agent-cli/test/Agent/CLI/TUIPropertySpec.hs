@@ -91,7 +91,7 @@ data TuiAction
     | SetDraft !Text !Int
     | QueueInput !Text
     | StartQueuedInput
-    | SetRepository !Text !Text
+    | SetRepository !Text !Text !Text
     | SetNotice !Text
     | ClearNotice
     | MoveSelection !Int
@@ -582,7 +582,8 @@ applyAction action harness =
         SetDraft text cursor -> applyUi (UiSetDraft text cursor)
         QueueInput text -> applyUi (UiInputQueued text)
         StartQueuedInput -> applyUi UiQueuedInputStarted
-        SetRepository branch cwd -> applyUi (UiSetRepository branch cwd)
+        SetRepository branch cwd workspace ->
+            applyUi (UiSetRepository branch cwd workspace)
         SetNotice text -> applyUi (UiSetNotice (Just (warningNotice text)))
         ClearNotice -> applyUi (UiSetNotice Nothing)
         MoveSelection amount -> applyUi (UiMoveSelection amount)
@@ -737,7 +738,7 @@ genAction =
         , (7, SetDraft <$> genBodyText <*> genCursor)
         , (3, QueueInput <$> genBodyText)
         , (1, pure StartQueuedInput)
-        , (2, SetRepository <$> genLineText <*> genLineText)
+        , (2, SetRepository <$> genLineText <*> genLineText <*> genLineText)
         , (2, SetNotice <$> genLineText)
         , (1, pure ClearNotice)
         , (2, MoveSelection <$> chooseInt (-20, 20))
