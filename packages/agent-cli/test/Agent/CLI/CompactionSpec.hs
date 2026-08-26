@@ -659,6 +659,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -715,6 +716,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -748,6 +750,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -787,6 +790,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -819,6 +823,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -852,6 +857,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSenderAndHook
@@ -888,6 +894,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSenderAndHook
@@ -1114,6 +1121,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1159,6 +1167,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1201,6 +1210,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
@@ -1307,6 +1317,7 @@ spec = do
                                     , toolCalls = []
                                     , assistantText = Just "ok"
                                     , tokenUsage = TokenUsage 20 5 0
+                                    , completion = TurnCompleted
                                     }
                 reconnectingContinuation =
                     withConnectionRecoveryUsing
@@ -1365,6 +1376,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1428,6 +1440,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1473,6 +1486,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = usage
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1514,6 +1528,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1570,6 +1585,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1621,6 +1637,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1658,6 +1675,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = emptyTokenUsage
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1716,6 +1734,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1774,6 +1793,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWithSender
@@ -1847,6 +1867,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith
@@ -1883,6 +1904,7 @@ spec = do
                         , toolCalls = []
                         , assistantText = Just "ok"
                         , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
                         }
                 backend =
                     autoCompactOpenAiBackendWith

@@ -23,6 +23,11 @@ spec = do
             parseReplLine ":reload" `shouldBe` ReplReload
             parseReplLine "  :reload  " `shouldBe` ReplReload
 
+        it "parses exact-turn retry" do
+            parseReplLine "/retry" `shouldBe` ReplRetry
+            parseReplLine "/retry now"
+                `shouldBe` ReplCommandError "usage: /retry"
+
         it "sends ordinary lines to the model" do
             parseReplLine "list the files" `shouldBe` ReplPrompt "list the files"
             parseReplLine ":status" `shouldBe` ReplPrompt ":status"
@@ -284,6 +289,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "recap"
+                    , "retry"
                     , "session"
                     , "session-info"
                     , "afk"

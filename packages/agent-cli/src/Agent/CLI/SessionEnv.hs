@@ -26,6 +26,7 @@ import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
+import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
@@ -76,6 +77,7 @@ data SessionEnv = SessionEnv
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
     , sessionRestartEffort :: !(IORef (Maybe Text))
+    , sessionLastFailedTurn :: !(IORef (Maybe PendingTurn))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !(IORef Text)

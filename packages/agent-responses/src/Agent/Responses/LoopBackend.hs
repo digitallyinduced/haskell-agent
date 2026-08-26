@@ -30,6 +30,7 @@ import Agent.Loop
     , ImageAttachment(..)
     , LoopEvent(..)
     , TokenUsage(..)
+    , TurnCompletion(..)
     , TurnInput(..)
     , TurnOutput(..)
     , emptyTokenUsage
@@ -371,6 +372,16 @@ responseToTurnOutput response = TurnOutput
     , toolCalls = mapMaybe responseItemToToolCall response.output
     , assistantText = assistantTextFromResponse response
     , tokenUsage = responseTokenUsage response
+    , completion = case response.status of
+        ResponseIncomplete -> TurnIncomplete
+            { incompleteReason =
+                maybe "unknown" (.reason) response.incompleteDetails
+            , incompleteReasoningTokens =
+                response.usage
+                    >>= (.outputTokensDetails)
+                    >>= (.reasoningTokens)
+            }
+        _ -> TurnCompleted
     }
 
 -- | An incomplete response can still finish the turn when it already contains

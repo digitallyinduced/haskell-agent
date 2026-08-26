@@ -69,6 +69,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
+    , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
@@ -256,6 +257,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplRecap
                     else ReplCommandError "usage: /recap"
+            "retry" ->
+                if null args
+                    then ReplRetry
+                    else ReplCommandError "usage: /retry"
             "session" ->
                 if null args
                     then ReplShowSession
