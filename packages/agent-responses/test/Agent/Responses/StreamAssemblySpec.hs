@@ -86,6 +86,25 @@ spec = describe "buildStreamResponse" do
                 Left (ConnectionError
                     "failed: response.incomplete: max_output_tokens")
 
+    it "recovers a dropped stream after response.created as incomplete" do
+        -- A real response.created frame carries status "in_progress". When the
+        -- socket dies mid-stream the recovery path must force an "incomplete"
+        -- status rather than leaking the stale "in_progress" through, which
+        -- would otherwise be classified as a completed turn.
+        let created = ResponseCreatedEvent
+                (Aeson.object
+                    [ "id" Aeson..= ("resp-dropped" :: Text)
+                    , "created_at" Aeson..= (0 :: Int)
+                    , "model" Aeson..= ("test" :: Text)
+                    , "status" Aeson..= ("in_progress" :: Text)
+                    ])
+                Nothing
+                mempty
+            state = applyStreamEvent emptyStreamAssemblyState created
+        response <- expectRight (finishAssembledIncomplete (Just "test") state)
+        response.status `shouldBe` ResponseIncomplete
+        response.responseId `shouldBe` "resp-dropped"
+
     it "replaces indexed added items with done items without duplicates" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
