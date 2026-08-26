@@ -4,6 +4,10 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- These database statements are dominated by decoding and IO; optimizing the
+-- generated expression trees adds substantially more build cost than value.
+{-# OPTIONS_GHC -O0 #-}
+
 -- | PostgreSQL session read operations.
 module Agent.Store.Postgres.Session.Read
     ( loadSession
