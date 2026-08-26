@@ -34,6 +34,16 @@ spec = describe "Agent.CLI.Config" do
         withTempDir "agent-config-" \home ->
             loadHarnessConfig home `shouldReturn` Right defaultHarnessConfig
 
+    it "defaults when the global config is empty" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home ""
+            loadHarnessConfig home `shouldReturn` Right defaultHarnessConfig
+
+    it "defaults when the global config is only whitespace" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home " \n\t"
+            loadHarnessConfig home `shouldReturn` Right defaultHarnessConfig
+
     it "loads MCP servers with defaults and deterministic map ordering" $
         withTempDir "agent-config-" \home -> do
             writeConfig home

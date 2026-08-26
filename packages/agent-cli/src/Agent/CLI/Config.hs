@@ -342,8 +342,15 @@ harnessConfigPath home =
         </> unsafeEncodeUtf ".haskell-agent"
         </> unsafeEncodeUtf "config.json"
 
--- | Load and validate the machine-wide configuration. A missing file is the
--- empty default. Decode, I/O, and semantic validation failures remain
+isBlankJson :: LBS.ByteString -> Bool
+isBlankJson =
+    LBS.null . LBS.dropWhile isJsonWhitespace
+  where
+    isJsonWhitespace byte =
+        byte == 9 || byte == 10 || byte == 13 || byte == 32
+
+-- | Load and validate the machine-wide configuration. A missing or empty file
+-- is the empty default. Decode, I/O, and semantic validation failures remain
 -- distinguishable to the CLI through their error text.
 loadHarnessConfig :: OsPath -> IO (Either Text HarnessConfig)
 loadHarnessConfig home = do
@@ -364,15 +371,18 @@ loadHarnessConfig home = do
                                 <> Text.pack (displayException exception)
                             )
                     Right bytes -> Right bytes
-                config <- case Aeson.eitherDecode' bytes of
-                    Left err ->
-                        Left
-                            ( "Invalid "
-                                <> Text.pack (unsafeToFilePath path)
-                                <> ": "
-                                <> Text.pack err
-                            )
-                    Right parsed -> Right parsed
+                config <-
+                    if isBlankJson bytes
+                        then Right defaultHarnessConfig
+                        else case Aeson.eitherDecode' bytes of
+                            Left err ->
+                                Left
+                                    ( "Invalid "
+                                        <> Text.pack (unsafeToFilePath path)
+                                        <> ": "
+                                        <> Text.pack err
+                                    )
+                            Right parsed -> Right parsed
                 validateHarnessConfig config
 
 -- | Persist the machine-wide harness configuration with owner-only

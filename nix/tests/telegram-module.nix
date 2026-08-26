@@ -257,6 +257,9 @@ pkgs.runCommand "haskell-agent-telegram-module-test"
       and .environment.MODULE_TEST == "present"
       and (.ExecStart | endswith("/bin/agent-telegram run"))
       and (.preStart | contains("$CREDENTIALS_DIRECTORY/telegram-token"))
+      and (.preStart | contains("jq -n --slurpfile managed"))
+      and (.preStart | contains("jq -e ."))
+      and (.preStart | contains("[ -s \"$harness_config\" ] && grep -q '[^[:space:]]' \"$harness_config\""))
       and (.preStart | contains(".mcpInitStrategy = $managed[0].mcpInitStrategy"))
       and (.preStart | contains(".mcpServers = $managed[0].mcpServers"))
     ' >/dev/null

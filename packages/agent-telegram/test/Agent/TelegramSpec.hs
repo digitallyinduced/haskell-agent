@@ -1075,13 +1075,55 @@ spec = describe "Agent.Telegram" do
                     first
             nextPendingAction key second `shouldBe`
                 Just
+                    (RunPendingTurn
+                        (TelegramPendingTurn
+                            11
+                            78
+                            key
+                            "first\n\n---\n\nsecond"
+                            Nothing))
+
+        it "coalesces a later photo into a managed media turn" do
+            let key = TelegramChatKey 123 Nothing
+                photo =
+                    TelegramMedia
+                        { telegramMediaKind = TelegramMediaPhoto
+                        , telegramMediaFile =
+                            Just TelegramFileMedia
+                                { fileMediaFileId = "large"
+                                , fileMediaName = Nothing
+                                , fileMediaMimeType = Just "image/jpeg"
+                                , fileMediaFileSize = Just 1024
+                                , fileMediaDuration = Nothing
+                                }
+                        , telegramMediaDescription = "[Photo]"
+                        }
+                first = storeUpdateAction
+                    10
+                    (QueueTurn 77 key "first" Nothing)
+                    emptyTelegramState
+                second = storeUpdateAction
+                    11
+                    (QueueMediaTurn TelegramPendingMediaTurn
+                        { pendingMediaUpdateId = 11
+                        , pendingMediaMessageId = 78
+                        , pendingMediaChat = key
+                        , pendingMediaUserId = 456
+                        , pendingMediaText = "second"
+                        , pendingMediaAttachments = [photo]
+                        , pendingMediaEdited = False
+                        , pendingMediaGroupId = Nothing
+                        })
+                    first
+            nextPendingAction key second `shouldBe`
+                Just
                     (RunPendingMediaTurn TelegramPendingMediaTurn
                         { pendingMediaUpdateId = 11
                         , pendingMediaMessageId = 78
                         , pendingMediaChat = key
-                        , pendingMediaUserId = 0
+                        , pendingMediaUserId = 456
                         , pendingMediaText = "first\n\n---\n\nsecond"
-                        , pendingMediaAttachments = []
+                        , pendingMediaAttachments = [photo]
                         , pendingMediaEdited = False
                         , pendingMediaGroupId = Nothing
                         })

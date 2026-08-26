@@ -156,21 +156,37 @@ mergePendingActions previous incoming =
         (incomingText, incomingMedia, incomingUser, incomingMessageId,
             incomingEdited, incomingGroup) =
                 pendingActionParts incoming
-    in RunPendingMediaTurn TelegramPendingMediaTurn
-        { pendingMediaUpdateId = pendingActionUpdateIdLocal incoming
-        , pendingMediaMessageId = incomingMessageId
-        , pendingMediaChat = pendingActionChatLocal incoming
-        , pendingMediaUserId =
-            if incomingUser == 0 then previousUser else incomingUser
-        , pendingMediaText =
+        mergedText =
             Text.intercalate
                 pendingTurnSeparator
                 (filter (not . Text.null)
                     [Text.strip previousText, Text.strip incomingText])
-        , pendingMediaAttachments = previousMedia <> incomingMedia
-        , pendingMediaEdited = incomingEdited
-        , pendingMediaGroupId = incomingGroup <|> previousGroup
-        }
+        mergedAttachments = previousMedia <> incomingMedia
+        mergedUser =
+            if incomingUser == 0 then previousUser else incomingUser
+        mergedGroup = incomingGroup <|> previousGroup
+        chat = pendingActionChatLocal incoming
+        updateId = pendingActionUpdateIdLocal incoming
+    in if null mergedAttachments && not incomingEdited
+        then RunPendingTurn
+            TelegramPendingTurn
+                { pendingTurnUpdateId = updateId
+                , pendingTurnMessageId = incomingMessageId
+                , pendingTurnChat = chat
+                , pendingTurnText = mergedText
+                , pendingTurnVoice = Nothing
+                }
+        else RunPendingMediaTurn
+            TelegramPendingMediaTurn
+                { pendingMediaUpdateId = updateId
+                , pendingMediaMessageId = incomingMessageId
+                , pendingMediaChat = chat
+                , pendingMediaUserId = mergedUser
+                , pendingMediaText = mergedText
+                , pendingMediaAttachments = mergedAttachments
+                , pendingMediaEdited = incomingEdited
+                , pendingMediaGroupId = mergedGroup
+                }
 
 pendingActionParts
     :: PendingChatAction
