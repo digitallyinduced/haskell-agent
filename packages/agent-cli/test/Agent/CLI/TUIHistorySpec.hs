@@ -1,3 +1,5 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
 module Agent.CLI.TUIHistorySpec (spec) where
@@ -18,7 +20,10 @@ import Agent.TUI.Model
     , BlockState(..)
     , BlockKind(..)
     , UiBlock(..)
+    , UiEvent(..)
+    , UiState(..)
     , initialUiState
+    , reduceUi
     )
 import qualified Data.Sequence as Seq
 import Data.Int (Int64)
@@ -399,6 +404,34 @@ spec = describe "bounded fullscreen history window" do
                 , "focus on the parser"
                 , "Done"
                 ]
+
+    it "drops a live compact summary that was rendered without a user turn" do
+        let asked =
+                reduceUi (UiAssistantHistory "answer") $
+                    reduceUi (UiUserSubmitted "question") initialUiState
+            live =
+                reduceUi
+                    (UiSystemMessage "Earlier conversation summary")
+                    asked
+            durable =
+                sessionHistoryTurn
+                    (30 :: Int)
+                    ((sessionTurn TranscriptReplace "/compact" [])
+                        { turnAssistantText =
+                            Just "Earlier conversation summary"
+                        })
+        unarchivedLiveStart live.uiBlocks durable.historyTurnBlocks
+            `shouldBe` Seq.length asked.uiBlocks
+
+    it "keeps live blocks when the durable turn is not already on screen" do
+        let live =
+                reduceUi (UiUserSubmitted "question") initialUiState
+            durable =
+                sessionHistoryTurn
+                    (1 :: Int)
+                    (sessionTurn TranscriptAppend "other" [])
+        unarchivedLiveStart live.uiBlocks durable.historyTurnBlocks
+            `shouldBe` Seq.length live.uiBlocks
 
     it "renders manual compaction as a single checkpoint summary" do
         let turnValue =

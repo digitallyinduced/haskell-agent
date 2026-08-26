@@ -136,6 +136,7 @@ import Agent.CLI.Style
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
+      beginFullscreenLiveHistory,
       commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
@@ -570,9 +571,7 @@ handleReplLine
                                     Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
-                                fullscreenEvent
-                                    (UiSystemMessage outcome.compactSummary)
-                                let message =
+                                let statsMessage =
                                         "compacted "
                                             <> Text.pack
                                                 (show outcome.compactBeforeTokens)
@@ -583,13 +582,17 @@ handleReplLine
                                             <> Text.pack
                                                 (show (length outcome.compactHistory))
                                             <> " items)"
-                                displayInfo message $
-                                    Text.hPutStrLn stderr
-                                        (roleMuted color
-                                            (glyphSession <> message))
                                 case persist of
-                                    PersistenceDisabled -> pure ()
+                                    PersistenceDisabled ->
+                                        fullscreenEvent
+                                            (UiSystemMessage
+                                                outcome.compactSummary)
                                     PersistenceEnabled slotRef -> do
+                                        forM_ fullscreen
+                                            beginFullscreenLiveHistory
+                                        fullscreenEvent
+                                            (UiSystemMessage
+                                                outcome.compactSummary)
                                         now <- getCurrentTime
                                         handle <- ensureSession slotRef
                                         let turn = SessionTurn
@@ -618,6 +621,10 @@ handleReplLine
                                                 runtime
                                                 (sessionHistoryTurn turnIndex turn)
                                                 HistoryCommitAppend
+                                displayInfo statsMessage $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphSession <> statsMessage))
                                 continue
                     ReplPlan _
                         | provider == ClaudeCodeProvider -> do
