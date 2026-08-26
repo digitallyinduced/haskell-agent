@@ -1,0 +1,70 @@
+cabal-version:      3.0
+name:               agent-json-hermes
+version:            0.1.0.0
+synopsis:           Hermes backend for direct agent JSON codecs
+description:        Scoped Hermes decoding sessions for direct typed agent
+                    JSON codecs, with no generic JSON value representation.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
+                  , benchmark/README.md
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , DerivingStrategies
+                      , GADTs
+                      , LambdaCase
+                      , NoFieldSelectors
+                      , OverloadedRecordDot
+                      , OverloadedStrings
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Wincomplete-record-updates
+                      -Wincomplete-uni-patterns
+                      -Wpartial-fields
+                      -Werror=incomplete-patterns
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.Json.Decoder.Hermes
+    build-depends:    agent-json-codec == 0.1.0.0
+                    , base >= 4.17 && < 5
+                    , bytestring >= 0.11 && < 0.13
+                    , hermes-json >= 0.8 && < 0.9
+                    , safe-exceptions >= 0.1.7 && < 0.2
+                    , text >= 2.0 && < 2.2
+
+test-suite agent-json-hermes-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    build-depends:    agent-json-codec
+                    , agent-json-hermes
+                    , async >= 2.2 && < 2.3
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , hspec >= 2.11 && < 2.12
+                    , text
+
+benchmark direct-json-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          JsonCodec.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-json-codec
+                    , agent-json-hermes
+                    , aeson >= 2.2 && < 2.4
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , jsonifier >= 0.2.1.3 && < 0.3
+                    , text

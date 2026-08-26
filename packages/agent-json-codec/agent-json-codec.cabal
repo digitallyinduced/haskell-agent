@@ -1,0 +1,68 @@
+cabal-version:      3.0
+name:               agent-json-codec
+version:            0.1.0.0
+synopsis:           Direct JSON codecs without an intermediate DOM
+description:        Typed JSON encoding and decoding for the agent harness,
+                    including opaque retention of validated extension fields.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+extra-source-files: README.md
+
+common common-options
+    default-language: GHC2021
+    default-extensions: BlockArguments
+                      , DerivingStrategies
+                      , DuplicateRecordFields
+                      , GADTs
+                      , LambdaCase
+                      , NoFieldSelectors
+                      , NumericUnderscores
+                      , OverloadedRecordDot
+                      , OverloadedStrings
+                      , RankNTypes
+                      , RecordWildCards
+                      , ScopedTypeVariables
+    ghc-options:      -Wall
+                      -Wcompat
+                      -Widentities
+                      -Wincomplete-record-updates
+                      -Wincomplete-uni-patterns
+                      -Wpartial-fields
+                      -Werror=incomplete-patterns
+
+library
+    import:           common-options
+    hs-source-dirs:   src
+    exposed-modules:  Agent.Json
+                    , Agent.Json.Decoder
+                    , Agent.Json.Decoder.Backend
+                    , Agent.Json.Encoder
+    other-modules:    Agent.Json.Decoder.Portable
+                    , Agent.Json.Internal
+    build-depends:    base >= 4.17 && < 5
+                    , bytestring >= 0.11 && < 0.13
+                    , containers >= 0.6 && < 0.8
+                    , jsonifier >= 0.2.1.3 && < 0.3
+                    , scientific >= 0.3.7 && < 0.4
+                    , text >= 2.0 && < 2.2
+                    , vector >= 0.12 && < 0.14
+
+test-suite agent-json-codec-test
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    build-depends:    agent-json-codec
+                    , aeson >= 2.2 && < 2.4
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , hspec >= 2.11 && < 2.12
+                    , QuickCheck >= 2.14 && < 2.16
+                    , scientific
+                    , text
+

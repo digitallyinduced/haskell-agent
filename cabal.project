@@ -5,6 +5,8 @@ packages:
     packages/agent-core
     packages/agent-codex-dialect
     packages/agent-grok-build-dialect
+    packages/agent-json-codec
+    packages/agent-json-hermes
     packages/agent-syntax
     packages/agent-tui
     packages/agent-responses-types

@@ -39,6 +39,30 @@
                     ];
                 };
 
+                agentJsonHermesSource = nix-filter.lib {
+                    root = ./packages/agent-json-hermes;
+                    include = [
+                        "src"
+                        "test"
+                        "benchmark"
+                        "agent-json-hermes.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
+                agentJsonCodecSource = nix-filter.lib {
+                    root = ./packages/agent-json-codec;
+                    include = [
+                        "src"
+                        "test"
+                        "benchmark"
+                        "agent-json-codec.cabal"
+                        "LICENSE"
+                        "README.md"
+                    ];
+                };
+
                 agentProcessSource = nix-filter.lib {
                     root = ./packages/agent-process;
                     include = [
@@ -332,6 +356,22 @@
                                 {
                                     src = agentGrokBuildDialectSource;
                                 });
+                        agent-json-codec = localPackage (
+                            pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-json-codec/package.nix
+                                    { })
+                                {
+                                    src = agentJsonCodecSource;
+                                });
+                        agent-json-hermes = localPackage (
+                            pkgs.haskell.lib.overrideSrc
+                                (final.callPackage
+                                    ./packages/agent-json-hermes/package.nix
+                                    { })
+                                {
+                                    src = agentJsonHermesSource;
+                                });
                         agent-responses = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses/package.nix { }) {
                             src = agentResponsesSource;
                         });
@@ -392,6 +432,8 @@
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = productionHaskellPackages.agent-grok-build-dialect;
+                agentJsonCodecPackage = productionHaskellPackages.agent-json-codec;
+                agentJsonHermesPackage = productionHaskellPackages.agent-json-hermes;
                 agentSyntaxPackage = productionHaskellPackages.agent-syntax;
                 agentResponsesTypesPackage = productionHaskellPackages.agent-responses-types;
                 agentResponsesPackage = productionHaskellPackages.agent-responses;
@@ -572,6 +614,8 @@
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
+                packages.agent-json-codec = agentJsonCodecPackage;
+                packages.agent-json-hermes = agentJsonHermesPackage;
                 packages.agent-syntax = agentSyntaxPackage;
                 packages.agent-tui = agentTuiPackage;
                 packages.agent-store = agentStorePackage;
@@ -606,6 +650,8 @@
                         packages.agent-process
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
+                        packages.agent-json-codec
+                        packages.agent-json-hermes
                         packages.agent-syntax
                         packages.agent-tui
                         packages.agent-responses-types
@@ -647,6 +693,8 @@
                     agent-process = haskellPackages.agent-process;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
                     agent-grok-build-dialect = haskellPackages.agent-grok-build-dialect;
+                    agent-json-codec = haskellPackages.agent-json-codec;
+                    agent-json-hermes = haskellPackages.agent-json-hermes;
                     agent-syntax = haskellPackages.agent-syntax;
                     agent-tui = haskellPackages.agent-tui;
                     agent-responses-types = haskellPackages.agent-responses-types;
