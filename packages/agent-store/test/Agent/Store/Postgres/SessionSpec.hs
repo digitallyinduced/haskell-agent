@@ -5,6 +5,7 @@ module Agent.Store.Postgres.SessionSpec (spec) where
 import Control.Exception.Safe (finally)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Char8 as ByteString.Char8
+import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
@@ -100,7 +101,8 @@ spec = describe "PostgreSQL session schema" do
                             loadSession pool "session-1" >>= \case
                                 Right (Just stored) -> do
                                     stored.storedMetadata `shouldBe` metadata
-                                    case map (.storedTurn) stored.storedTurns of
+                                    case map (.storedTurn)
+                                        (toList stored.storedTurns) of
                                         [loadedTurn] -> do
                                             loadedTurn `shouldBe` turn
                                         loaded ->
@@ -116,9 +118,14 @@ spec = describe "PostgreSQL session schema" do
                                 turn2 = turn
                                     { sessionTurnUserText = "batch load"
                                     }
+                                turn3 = turn
+                                    { sessionTurnUserText = "batch load 2"
+                                    }
                             createSession pool metadata2
                                 `shouldReturn` Right True
                             appendSessionTurn pool turn2 metadata2
+                                `shouldReturn` Right True
+                            appendSessionTurn pool turn3 metadata2
                                 `shouldReturn` Right True
                             loadSessions pool [] `shouldReturn` []
                             loadSessions pool
@@ -136,14 +143,16 @@ spec = describe "PostgreSQL session schema" do
                                                         ( (.sessionTurnUserText)
                                                             . (.storedTurn)
                                                         )
-                                                        stored.storedTurns
+                                                        (toList stored.storedTurns)
                                                     ))))
                                         results
                                         `shouldBe`
                                             [ Right
                                                 (Just
                                                     ( "session-2"
-                                                    , ["batch load"]
+                                                    , [ "batch load"
+                                                      , "batch load 2"
+                                                      ]
                                                     ))
                                             , Right Nothing
                                             , Right
@@ -154,7 +163,9 @@ spec = describe "PostgreSQL session schema" do
                                             , Right
                                                 (Just
                                                     ( "session-2"
-                                                    , ["batch load"]
+                                                    , [ "batch load"
+                                                      , "batch load 2"
+                                                      ]
                                                     ))
                                             ]
                             searchConversationTurns pool "compact" 10 >>= \case
@@ -228,7 +239,7 @@ spec = describe "PostgreSQL session schema" do
                                         (\storedTurn ->
                                             storedTurn.storedTurn.sessionTurnUserText
                                         )
-                                        stored.storedTurns
+                                        (toList stored.storedTurns)
                                         `shouldBe`
                                             [ "/compact"
                                             , "/question-1"
@@ -240,7 +251,8 @@ spec = describe "PostgreSQL session schema" do
                                         ("unexpected active session: " <> show other)
                             loadRecentSessionTurns pool "session-1" 2 >>= \case
                                 Right (Just page) -> do
-                                    map (.storedTurnIndex) page.sessionPageTurns
+                                    map (.storedTurnIndex)
+                                        (toList page.sessionPageTurns)
                                         `shouldBe` [4, 5]
                                     page.sessionPageGenerationStart
                                         `shouldBe` 2
@@ -252,7 +264,8 @@ spec = describe "PostgreSQL session schema" do
                                         ("unexpected recent page: " <> show other)
                             loadSessionTurnsBefore pool "session-1" 4 2 >>= \case
                                 Right (Just page) -> do
-                                    map (.storedTurnIndex) page.sessionPageTurns
+                                    map (.storedTurnIndex)
+                                        (toList page.sessionPageTurns)
                                         `shouldBe` [2, 3]
                                     page.sessionPageHasOlder `shouldBe` False
                                     page.sessionPageHasNewer `shouldBe` True
@@ -261,7 +274,8 @@ spec = describe "PostgreSQL session schema" do
                                         ("unexpected before page: " <> show other)
                             loadSessionTurnsAfter pool "session-1" 3 2 >>= \case
                                 Right (Just page) -> do
-                                    map (.storedTurnIndex) page.sessionPageTurns
+                                    map (.storedTurnIndex)
+                                        (toList page.sessionPageTurns)
                                         `shouldBe` [4, 5]
                                     page.sessionPageHasOlder `shouldBe` True
                                     page.sessionPageHasNewer `shouldBe` False
@@ -270,7 +284,7 @@ spec = describe "PostgreSQL session schema" do
                                         ("unexpected after page: " <> show other)
                             loadSessionTurnsBefore pool "session-1" 2 2 >>= \case
                                 Right (Just page) -> do
-                                    page.sessionPageTurns `shouldBe` []
+                                    toList page.sessionPageTurns `shouldBe` []
                                     page.sessionPageHasOlder `shouldBe` False
                                     page.sessionPageHasNewer `shouldBe` True
                                 other ->
@@ -278,7 +292,7 @@ spec = describe "PostgreSQL session schema" do
                                         ("unexpected empty before page: " <> show other)
                             loadSessionTurnsAfter pool "session-1" 5 2 >>= \case
                                 Right (Just page) -> do
-                                    page.sessionPageTurns `shouldBe` []
+                                    toList page.sessionPageTurns `shouldBe` []
                                     page.sessionPageHasOlder `shouldBe` True
                                     page.sessionPageHasNewer `shouldBe` False
                                 other ->

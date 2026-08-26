@@ -121,6 +121,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Word (Word64)
+import qualified Data.Vector as Vector
 import Numeric (showHex)
 import System.Directory.OsPath
     ( createDirectory
@@ -899,7 +900,7 @@ loadSessionTurnPage root pool sessionId loader = runExceptT do
         (\storedTurn -> do
             turn <- fromStoredTurn storedTurn.storedTurn
             pure (storedTurn.storedTurnIndex, turn))
-        stored.sessionPageTurns
+        (Vector.toList stored.sessionPageTurns)
     pure SessionTurnPage
         { pageTurns = turns
         , pageGenerationStart = stored.sessionPageGenerationStart
@@ -1307,7 +1308,10 @@ decodeStoredSession
 decodeStoredSession sessionId stored = do
     meta <- except (fromStoredMetadata stored.storedMetadata)
     validateSessionMeta sessionId meta
-    turns <- except $ mapM (fromStoredTurn . (.storedTurn)) stored.storedTurns
+    turns <- except $
+        traverse
+            (fromStoredTurn . (.storedTurn))
+            (Vector.toList stored.storedTurns)
     pure (meta, turns)
 
 toStoredMetadata :: SessionMeta -> Store.SessionMetadata

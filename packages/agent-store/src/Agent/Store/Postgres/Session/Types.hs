@@ -18,6 +18,7 @@ module Agent.Store.Postgres.Session.Types
 import Data.Int (Int32, Int64)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
+import Data.Vector (Vector)
 
 import Agent.Store.SessionItem (StoredResponseItem)
 
@@ -30,7 +31,7 @@ data SessionLegacyTarget = SessionLegacyTarget
     deriving (Eq, Show)
 
 data SessionTurnPage = SessionTurnPage
-    { sessionPageTurns :: ![StoredTurn]
+    { sessionPageTurns :: !(Vector StoredTurn)
     , sessionPageGenerationStart :: !Int64
     , sessionPageTotal :: !Int64
     , sessionPageHasOlder :: !Bool
@@ -102,7 +103,7 @@ data SessionTurn = SessionTurn
 
 data StoredSession = StoredSession
     { storedMetadata :: !SessionMetadata
-    , storedTurns :: ![StoredTurn]
+    , storedTurns :: !(Vector StoredTurn)
     }
     deriving (Eq, Show)
 
