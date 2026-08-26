@@ -58,6 +58,17 @@ library
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
                     , Agent.Store.Postgres.SessionItem
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.BaseRows
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.ContentParts
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.CustomCall
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.CustomOutput
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.FunctionCall
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.FunctionOutput
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.Message
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.Reasoning
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.Reference
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.Summaries
+                    , Agent.Store.Postgres.SessionItem.Mapping.Statements.Tagged
                     , Agent.Store.Postgres.SessionItem.Read
                     , Agent.Store.Postgres.SessionItem.Write
     hs-source-dirs:   src
