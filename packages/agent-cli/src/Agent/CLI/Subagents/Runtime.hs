@@ -15,6 +15,7 @@ module Agent.CLI.Subagents.Runtime
     , runHttpSubagent
     , runXaiParentSubagent
     , grokSpawnedChildIdentity
+    , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
     ) where
 
@@ -116,6 +117,7 @@ import Agent.Responses.Types
 import Agent.Subagents
     ( RunSubagent
     , SubagentId(..)
+    , SubagentIdentity(..)
     , SubagentRegistry
     , SubagentSpawnEnv(..)
     , SubagentStatus(..)
@@ -467,20 +469,31 @@ restoreAgentFromDisk
                             reopenInMemory Nothing Nothing
                     Right (Just (items, meta)) -> do
                         let fields = subagentDiskFields meta
+                            derivedIdentity =
+                                grokSpawnedChildIdentity
+                                    provider
+                                    connection
+                                    mapModel
+                                    parentEffectiveModel
+                                    parentDialect
+                                    fields.diskAgentModel
                             ( expectedProvider
                                 , expectedConnection
                                 , expectedEffectiveModel
                                 , expectedDialect
                                 ) =
                                     if provider == XAIProvider
-                                        then
-                                            grokSpawnedChildIdentity
-                                                provider
-                                                connection
-                                                mapModel
-                                                parentEffectiveModel
-                                                parentDialect
-                                                fields.diskAgentModel
+                                        then case meta of
+                                            CurrentSubagentDiskMeta _ stored
+                                                | stored.targetProvider
+                                                    == OpenAIProvider ->
+                                                    ( stored.targetProvider
+                                                    , stored.targetConnection
+                                                    , stored.targetEffectiveModel
+                                                    , stored.targetDialect
+                                                    )
+                                            _ ->
+                                                derivedIdentity
                                         else
                                             ( provider
                                             , connection
@@ -663,7 +676,22 @@ inheritedGrokChildModel runtime parentModel =
                 Just slug | slug `elem` allowed -> slug
                 _ -> fromMaybe parentModel (listToMaybe allowed)
 
--- | XAI parent runner: Grok children stay on xAI; Luna uses Codex/OpenAI.
+-- | Luna requests and already-OpenAI descendants stay on Codex/OpenAI.
+-- An omitted or non-Luna override from a Luna child must not fall through
+-- to the xAI HTTP runner.
+usesOpenAiChildTransport
+    :: Maybe Provider
+    -> Maybe Provider
+    -> Maybe Text
+    -> Bool
+usesOpenAiChildTransport childSessionProvider parentSessionProvider childModel =
+    childSessionProvider == Just OpenAIProvider
+        || parentSessionProvider == Just OpenAIProvider
+        || maybe False isLunaSubagentModel
+            (childModel >>= canonicalizeGrokChildModel)
+
+-- | XAI parent runner: Grok children stay on xAI; Luna and its descendants
+-- use Codex/OpenAI.
 runXaiParentSubagent
     :: SubagentRuntime
     -> Dialect
@@ -673,27 +701,37 @@ runXaiParentSubagent
 runXaiParentSubagent runtime dialect sendToRoot mkBackend =
     \env previous prompt onEvent -> do
         childModel <- lookupAgentModel runtime.subagentTypes env.subId
-        case childModel >>= canonicalizeGrokChildModel of
-            Just model | isLunaSubagentModel model ->
-                case runtime.subagentOpenAiChild of
-                    Nothing ->
-                        pure $ Left $ LoopUnexpected $
-                            lunaSubagentModel
-                                <> " is unavailable because OpenAI is not signed in."
-                    Just openaiToken ->
-                        runCodexSubagent
-                            runtime
-                                { subagentConnection =
-                                    providerSlug OpenAIProvider
-                                , subagentMapModel = id
-                                }
-                            openaiToken
-                            sendToRoot
-                            env
-                            previous
-                            prompt
-                            onEvent
-            _ ->
+        sessions <- readIORef runtime.subagentSessions
+        identity <- getSubagentIdentity runtime.subagentRegistry env.subId
+        let childSessionProvider =
+                (.subSessionProvider) <$> Map.lookup env.subId sessions
+            parentSessionProvider = do
+                ident <- identity
+                parentId <- ident.identityParent
+                session <- Map.lookup parentId sessions
+                pure session.subSessionProvider
+        if usesOpenAiChildTransport
+                childSessionProvider parentSessionProvider childModel
+            then case runtime.subagentOpenAiChild of
+                Nothing ->
+                    pure $ Left $ LoopUnexpected $
+                        "OpenAI is not signed in; cannot run this subagent on "
+                            <> lunaSubagentModel
+                            <> "."
+                Just openaiToken ->
+                    runCodexSubagent
+                        runtime
+                            { subagentConnection =
+                                providerSlug OpenAIProvider
+                            , subagentMapModel = id
+                            }
+                        openaiToken
+                        sendToRoot
+                        env
+                        previous
+                        prompt
+                        onEvent
+            else
                 runHttpSubagent
                     runtime
                     dialect

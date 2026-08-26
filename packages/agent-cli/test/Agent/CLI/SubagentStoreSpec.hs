@@ -14,6 +14,7 @@ import Agent.CLI.Subagents.Runtime
     , grokSpawnedChildIdentity
     , restoreAgentFromDisk
     , resolveChildModelAndEffort
+    , usesOpenAiChildTransport
     , validatePersistedSubagentTarget
     )
 import Agent.CLI.Request (requestParams)
@@ -171,6 +172,74 @@ spec = describe "Agent.CLI.SubagentStore" do
                 Nothing
                 `shouldBe`
                     (XAIProvider, "xai", "grok-4.6", GrokBuildDialect)
+
+        it "keeps Luna descendants on OpenAI even without a model override" do
+            usesOpenAiChildTransport
+                (Just OpenAIProvider)
+                Nothing
+                Nothing
+                `shouldBe` True
+            usesOpenAiChildTransport
+                Nothing
+                (Just OpenAIProvider)
+                (Just "gpt-5.6-sol")
+                `shouldBe` True
+            usesOpenAiChildTransport
+                Nothing
+                Nothing
+                (Just "luna")
+                `shouldBe` True
+            usesOpenAiChildTransport
+                Nothing
+                Nothing
+                (Just "grok-4.5")
+                `shouldBe` False
+            usesOpenAiChildTransport Nothing Nothing Nothing
+                `shouldBe` False
+
+        it "restores an inherited Luna descendant under a Grok parent" do
+            withTempDir \dir -> do
+                let agentId = SubagentId "agent-luna-descendant"
+                saveSubagentState
+                    dir
+                    agentId
+                    (testSnapshot
+                        [messageItem RoleUser "inherited"]
+                        (Completed (Just "OK"))
+                        OpenAIProvider
+                        "openai"
+                        "gpt-5.6-luna"
+                        CodexDialect)
+                    `shouldReturn` Right ()
+                sessionsRef <- newIORef Map.empty
+                storeRootRef <- newIORef (Just dir)
+                typesRef <- newIORef Map.empty
+                bracket
+                    (newSubagentRegistry defaultSubagentConfig dir
+                        (\_ _ _ _ -> fail "unexpected subagent runner invocation")
+                        (\_ _ -> pure ()))
+                    closeSubagentRegistry
+                    \registry -> do
+                        restoreAgentFromDisk
+                            XAIProvider
+                            "xai"
+                            id
+                            "grok-4.6"
+                            GrokBuildDialect
+                            Nothing
+                            storeRootRef
+                            registry
+                            sessionsRef
+                            typesRef
+                            agentId
+                            `shouldReturn` Right ()
+                        Just session <-
+                            Map.lookup agentId <$> readIORef sessionsRef
+                        session.subSessionProvider `shouldBe` OpenAIProvider
+                        session.subSessionConnection `shouldBe` "openai"
+                        session.subSessionEffectiveModel
+                            `shouldBe` "gpt-5.6-luna"
+                        session.subSessionDialect `shouldBe` CodexDialect
 
     it "round-trips transcript items and meta" do
         withTempDir \dir -> do
