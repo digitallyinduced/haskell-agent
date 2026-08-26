@@ -642,6 +642,47 @@ spec = describe "fullscreen UI reducer" do
         uiTokensPerSecond afterNext `shouldBe` Just 200
         afterNext.uiGenerationMillis `shouldBe` 0
 
+    it "keeps turn elapsed time when a response restarts" do
+        let streaming =
+                advanceUiTime 800 $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (TextDelta "abcdefghijklmnop")
+                        ]
+            restarted =
+                reduceUi (UiLoop (ResponseRestarted "retrying")) streaming
+        streaming.uiElapsedMillis `shouldBe` 800
+        restarted.uiElapsedMillis `shouldBe` 800
+        restarted.uiGenerationMillis `shouldBe` 0
+        restarted.uiGenerationChars `shouldBe` 0
+        restarted.uiGenerating `shouldBe` True
+        restarted.uiActivity `shouldBe` "Retrying response…"
+
+    it "drops last tok/s when the conversation is cleared" do
+        let finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            ((emptyTurnOutput "r1" [] (Just "abcdefghijklmnop"))
+                                { tokenUsage =
+                                    TokenUsage
+                                        { inputTokens = 20
+                                        , outputTokens = 80
+                                        , cachedTokens = 0
+                                        }
+                                })))
+                    (advanceUiTime liveTokenRateMinMillis $
+                        apply
+                            [ UiLoop TurnStarted
+                            , UiLoop (TextDelta "abcdefghijklmnop")
+                            ])
+            cleared = reduceUi UiConversationCleared finished
+        uiTokensPerSecond finished `shouldBe` Just 200
+        uiTokensPerSecond cleared `shouldBe` Nothing
+        cleared.uiLastTokensPerSecond `shouldBe` Nothing
+        cleared.uiGenerationChars `shouldBe` 0
+        cleared.uiGenerating `shouldBe` False
+
     it "briefly settles on Finished before returning to Ready" do
         let finished =
                 apply

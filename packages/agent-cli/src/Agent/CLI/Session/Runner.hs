@@ -81,11 +81,13 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , RenderState(..)
     , beginRenderTurn
+    , clearRenderTokenRate
     , countGenerationChars
     , emptyRenderState
     , putTextLn
     , recordRenderTurnRate
     , renderEvent
+    , resetRenderGeneration
     )
 import Agent.CLI.Session
 import Agent.CLI.Session.History
@@ -600,6 +602,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 conversationRef
                 planMode
             writeIORef usageRef emptyTokenUsage
+            modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
             writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
@@ -723,10 +726,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             ReasoningDelta delta ->
                                 countGenerationChars delta state
                             ResponseRestarted _ ->
-                                state
-                                    { stateGenerationChars = 0
-                                    , stateStartedAt = Just now
-                                    }
+                                resetRenderGeneration now state
                             ToolStarted _ ->
                                 state{stateActivity = "Running tool…"}
                             TurnFinished turn ->

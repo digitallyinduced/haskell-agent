@@ -488,6 +488,10 @@ reduceUi event state = case event of
             , uiToolCalls = Map.empty
             , uiRetryCountdown = Nothing
             , uiTodos = []
+            , uiGenerating = False
+            , uiGenerationChars = 0
+            , uiGenerationMillis = 0
+            , uiLastTokensPerSecond = Nothing
             }
     UiSetFollow follow ->
         state

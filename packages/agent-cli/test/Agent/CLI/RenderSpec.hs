@@ -85,6 +85,45 @@ spec = do
                     recordRenderTurnRate (addUTCTime 2 startedAt) turn started
             stateLastTokensPerSecond recorded `shouldBe` Just 40
 
+        it "keeps the turn timer when a generation restarts" do
+            let startedAt = UTCTime (fromGregorian 2026 1 2) 0
+                started = beginRenderTurn startedAt $
+                    emptyRenderState
+                        { stateGenerationChars = 16
+                        , stateLastTokensPerSecond = Just 12
+                        }
+                restartedAt = addUTCTime 3 startedAt
+                restarted = resetRenderGeneration restartedAt started
+                turn =
+                    (emptyTurnOutput "r1" [] (Just "hi"))
+                        { tokenUsage =
+                            TokenUsage
+                                { inputTokens = 10
+                                , outputTokens = 80
+                                , cachedTokens = 0
+                                }
+                        }
+                recorded =
+                    recordRenderTurnRate (addUTCTime 2 restartedAt) turn restarted
+            stateStartedAt restarted `shouldBe` stateStartedAt started
+            restarted.stateGenerationChars `shouldBe` 0
+            restarted.stateGenerationStartedAt `shouldBe` Just restartedAt
+            stateLastTokensPerSecond recorded `shouldBe` Just 40
+
+        it "drops a previous conversation's saved rate" do
+            let started =
+                    beginRenderTurn
+                        (UTCTime (fromGregorian 2026 1 2) 0)
+                        emptyRenderState
+                            { stateLastTokensPerSecond = Just 42
+                            , stateGenerationChars = 16
+                            }
+                cleared = clearRenderTokenRate started
+            stateLastTokensPerSecond cleared `shouldBe` Nothing
+            cleared.stateGenerationChars `shouldBe` 0
+            cleared.stateGenerationStartedAt `shouldBe` Nothing
+            stateStartedAt cleared `shouldBe` stateStartedAt started
+
         it "streams markdown through a pure state transition" do
             let (state1, first) = streamMarkdown "hello\n" emptyRenderState
                 (state2, second) = streamMarkdown "world\n" state1

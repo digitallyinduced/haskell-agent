@@ -17,10 +17,12 @@ module Agent.CLI.Render
     , emptyRenderState
     , appendRenderReasoning
     , beginRenderTurn
+    , clearRenderTokenRate
     , countGenerationChars
     , formatActivityLine
     , recordRenderTurnRate
     , renderTokensPerSecond
+    , resetRenderGeneration
     , stateLastTokensPerSecond
     , formatElapsed
     , formatLoopError
@@ -178,6 +180,7 @@ data RenderState = RenderState
     , stateStartedAt :: !(Maybe UTCTime)
     , stateToolCalls :: !(Map.Map Text ToolCall)
     , stateGenerationChars :: !Int
+    , stateGenerationStartedAt :: !(Maybe UTCTime)
     , stateLastTokensPerSecond :: !(Maybe Double)
     }
 
@@ -220,6 +223,7 @@ emptyRenderState =
         , stateStartedAt = Nothing
         , stateToolCalls = Map.empty
         , stateGenerationChars = 0
+        , stateGenerationStartedAt = Nothing
         , stateLastTokensPerSecond = Nothing
         }
 
@@ -582,7 +586,26 @@ beginRenderTurn now state =
     emptyRenderState
         { stateThinkingVisible = state.stateThinkingVisible
         , stateStartedAt = Just now
+        , stateGenerationStartedAt = Just now
         , stateLastTokensPerSecond = state.stateLastTokensPerSecond
+        }
+
+-- | Start a new generation-rate window without resetting the turn timer
+-- shown on the thinking spinner.
+resetRenderGeneration :: UTCTime -> RenderState -> RenderState
+resetRenderGeneration now state =
+    state
+        { stateGenerationChars = 0
+        , stateGenerationStartedAt = Just now
+        }
+
+-- | Drop a previous conversation's saved speed after /clear or /new.
+clearRenderTokenRate :: RenderState -> RenderState
+clearRenderTokenRate state =
+    state
+        { stateGenerationChars = 0
+        , stateGenerationStartedAt = Nothing
+        , stateLastTokensPerSecond = Nothing
         }
 
 countGenerationChars :: Text -> RenderState -> RenderState
@@ -592,27 +615,30 @@ countGenerationChars delta state =
             state.stateGenerationChars + Text.length delta
         }
 
+generationElapsedMillis :: UTCTime -> RenderState -> Int
+generationElapsedMillis now state =
+    case state.stateGenerationStartedAt of
+        Nothing -> 0
+        Just started ->
+            max 0 (floor (diffUTCTime now started * 1000))
+
 recordRenderTurnRate :: UTCTime -> TurnOutput -> RenderState -> RenderState
 recordRenderTurnRate now turn state =
-    let millis = case state.stateStartedAt of
-            Nothing -> 0
-            Just started ->
-                max 0 (floor (diffUTCTime now started * 1000))
-    in state
+    state
         { stateLastTokensPerSecond =
             generationTokensPerSecond
                 turn.tokenUsage.outputTokens
                 state.stateGenerationChars
-                millis
+                (generationElapsedMillis now state)
                 <|> state.stateLastTokensPerSecond
         }
 
-renderTokensPerSecond :: RenderState -> Double -> Maybe Double
-renderTokensPerSecond state elapsedSeconds
+renderTokensPerSecond :: UTCTime -> RenderState -> Maybe Double
+renderTokensPerSecond now state
     | Map.null state.stateToolCalls =
         liveTokensPerSecond
             state.stateGenerationChars
-            (max 0 (round (elapsedSeconds * 1000)))
+            (generationElapsedMillis now state)
             <|> state.stateLastTokensPerSecond
     | otherwise = state.stateLastTokensPerSecond
 
@@ -680,10 +706,9 @@ renderEventUnlocked config = \case
                     , ())
         now <- getCurrentTime
         modifyRenderState config \state ->
-            ( setRenderActivity "Retrying response…" state
-                { stateGenerationChars = 0
-                , stateStartedAt = Just now
-                }
+            ( setRenderActivity
+                "Retrying response…"
+                (resetRenderGeneration now state)
             , ()
             )
         putTextLn config.renderStderr
@@ -921,6 +946,7 @@ paintThinkingFrame config = do
 paintThinkingFrameAt :: RenderConfig -> Int -> IO ()
 paintThinkingFrameAt config motionMillis = do
     state <- readRenderState config
+    now <- getCurrentTime
     let activity = state.stateActivity
     elapsed <- thinkingElapsed config
     let glyph =
@@ -934,7 +960,7 @@ paintThinkingFrameAt config motionMillis = do
                 glyph
                 activity
                 elapsed
-                (renderTokensPerSecond state elapsed)
+                (renderTokensPerSecond now state)
     void $ tryIO do
         Text.hPutStr config.renderStderr ("\r\ESC[K" <> line)
         hFlush config.renderStderr
