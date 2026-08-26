@@ -2,7 +2,11 @@
 -- provider-neutral events expected by the harness.
 module Agent.Claude.Internal.Messages
     ( CompletedClaudeTurn(..)
+    , ClaudeEventState
+    , emptyClaudeEventState
     , interpretClaudeTurn
+    , streamClaudeMessage
+    , remainingClaudeEvents
     ) where
 
 import Agent.Loop (LoopEvent(..))
@@ -43,6 +47,62 @@ data CompletedClaudeTurn = CompletedClaudeTurn
     , tokenUsage :: !Usage
     , cumulativeModelUsage :: !(Maybe Usage)
     } deriving (Eq, Show)
+
+data ClaudeEventState = ClaudeEventState
+    { startedToolCalls :: !(Set Text)
+    , finishedToolCalls :: !(Set Text)
+    } deriving (Eq, Show)
+
+emptyClaudeEventState :: ClaudeEventState
+emptyClaudeEventState = ClaudeEventState Set.empty Set.empty
+
+-- | Expose completed top-level tool messages as soon as Claude Code emits
+-- them. In particular, its @Task@ tool remains in flight while a native
+-- subagent runs, so buffering this event until the final result leaves the UI
+-- blank for the entire child-agent lifetime.
+streamClaudeMessage
+    :: ClaudeEventState
+    -> Message
+    -> (ClaudeEventState, [LoopEvent])
+streamClaudeMessage state message
+    | messageHasParentToolUseId message = (state, [])
+    | otherwise = advanceToolEvents state (messageToolEvents message)
+
+-- | Emit anything not already exposed by 'streamClaudeMessage'. Assistant
+-- text remains completion-buffered because the SDK can supersede messages;
+-- tool lifecycle events are safe to expose incrementally by stable call id.
+remainingClaudeEvents
+    :: ClaudeEventState
+    -> CompletedClaudeTurn
+    -> [LoopEvent]
+remainingClaudeEvents state completed =
+    reverse eventsRev <> textEvents
+  where
+    (_, eventsRev) = foldl' step (state, []) completed.events
+    textEvents =
+        [event | event@TextDelta{} <- completed.events]
+    step (current, events) event = case event of
+        ToolStarted call
+            | Set.member call.callId current.startedToolCalls ->
+                (current, events)
+            | otherwise ->
+                ( current
+                    { startedToolCalls =
+                        Set.insert call.callId current.startedToolCalls
+                    }
+                , event : events
+                )
+        ToolFinished result
+            | Set.member result.callId current.finishedToolCalls ->
+                (current, events)
+            | otherwise ->
+                ( current
+                    { finishedToolCalls =
+                        Set.insert result.callId current.finishedToolCalls
+                    }
+                , event : events
+                )
+        _ -> (current, events)
 
 interpretClaudeTurn
     :: [Message]
@@ -164,30 +224,43 @@ userBlockEvents = \case
 
 canonicalToolEvents :: [ClaudeToolEvent] -> [LoopEvent]
 canonicalToolEvents toolEvents =
-    reverse eventsRev
+    events
   where
-    (_, _, eventsRev) =
-        foldl' step (Set.empty, Set.empty, []) toolEvents
+    (_, events) = advanceToolEvents emptyClaudeEventState toolEvents
+
+advanceToolEvents
+    :: ClaudeEventState
+    -> [ClaudeToolEvent]
+    -> (ClaudeEventState, [LoopEvent])
+advanceToolEvents initialState toolEvents =
+    let (state, eventsRev) =
+            foldl' step (initialState, []) toolEvents
+    in (state, reverse eventsRev)
+  where
     step
-        :: (Set Text, Set Text, [LoopEvent])
+        :: (ClaudeEventState, [LoopEvent])
         -> ClaudeToolEvent
-        -> (Set Text, Set Text, [LoopEvent])
-    step (started, finished, events) = \case
+        -> (ClaudeEventState, [LoopEvent])
+    step (state, events) = \case
         ClaudeToolStarted call
-            | Set.member call.callId started ->
-                (started, finished, events)
+            | Set.member call.callId state.startedToolCalls ->
+                (state, events)
             | otherwise ->
-                ( Set.insert call.callId started
-                , finished
+                ( state
+                    { startedToolCalls =
+                        Set.insert call.callId state.startedToolCalls
+                    }
                 , ToolStarted call : events
                 )
         ClaudeToolFinished result
-            | not (Set.member result.callId started)
-                || Set.member result.callId finished ->
-                (started, finished, events)
+            | not (Set.member result.callId state.startedToolCalls)
+                || Set.member result.callId state.finishedToolCalls ->
+                (state, events)
             | otherwise ->
-                ( started
-                , Set.insert result.callId finished
+                ( state
+                    { finishedToolCalls =
+                        Set.insert result.callId state.finishedToolCalls
+                    }
                 , ToolFinished result : events
                 )
 

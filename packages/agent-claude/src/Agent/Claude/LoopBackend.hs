@@ -12,8 +12,12 @@ import Agent.Claude.Options
     , toClaudeAgentOptions
     )
 import Agent.Claude.Internal.Messages
-    ( CompletedClaudeTurn(..)
+    ( ClaudeEventState
+    , CompletedClaudeTurn(..)
+    , emptyClaudeEventState
     , interpretClaudeTurn
+    , remainingClaudeEvents
+    , streamClaudeMessage
     )
 import Agent.Error
     ( ApiError(..)
@@ -216,6 +220,7 @@ submitClaudeCodeTurn
                     \turn -> do
                         history <- readIORef transcript
                         messages <- newIORef []
+                        eventState <- newIORef emptyClaudeEventState
                         let prompt =
                                 buildClaudePrompt
                                     params
@@ -228,7 +233,20 @@ submitClaudeCodeTurn
                             queryTurnContentWithMessageValidator
                                 turn
                                 content
-                                validateSubscriptionMessage
+                                (\message -> do
+                                    validated <-
+                                        validateSubscriptionMessage message
+                                    case validated of
+                                        Left err -> pure (Left err)
+                                        Right () -> do
+                                            state <- readIORef eventState
+                                            let (nextState, events) =
+                                                    streamClaudeMessage
+                                                        state
+                                                        message
+                                            writeIORef eventState nextState
+                                            mapM_ onEvent events
+                                            pure (Right ()))
                                 (\message ->
                                     modifyIORef' messages (message :))
                         case awaitResult of
@@ -246,11 +264,14 @@ submitClaudeCodeTurn
                                                 , result = Nothing
                                                 }
                                     Right completed -> do
+                                        finalEventState <-
+                                            readIORef eventState
                                         completeTurn
                                             turn
                                             completed
                                             result
                                             inputs
+                                            finalEventState
                                             onEvent
                 pure (either (Left . sdkErrorToApiError) Right result)
   where
@@ -265,9 +286,10 @@ submitClaudeCodeTurn
         -> CompletedClaudeTurn
         -> ResultMessage
         -> [TurnInput]
+        -> ClaudeEventState
         -> (LoopEvent -> IO ())
         -> IO (Either ClaudeSDKError (TurnOutput, IO ()))
-    completeTurn turn completed result inputs onEvent = do
+    completeTurn turn completed result inputs eventState onEvent = do
         usage <- resolveTurnUsage
             turn
             completed.tokenUsage
@@ -288,7 +310,7 @@ submitClaudeCodeTurn
                     completed.sessionId
                     inputs
                     completed.assistantText
-        mapM_ onEvent completed.events
+        mapM_ onEvent (remainingClaudeEvents eventState completed)
         pure (Right (output, commit))
 
 collectTurnInputs :: [TurnInput] -> IO (Text, [ImageAttachment], [FilePath])
