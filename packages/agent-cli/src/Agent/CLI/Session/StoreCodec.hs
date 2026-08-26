@@ -8,9 +8,11 @@ module Agent.CLI.Session.StoreCodec
     , toStoredResponseItem
     ) where
 
+import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -348,10 +350,13 @@ toStoredContentPart = \case
             }
     InputImagePart
         { detail, fileId, imageUrl, promptCacheBreakpoint, extraFields } ->
-            (emptyStoredContentPart "input_image" extraFields)
+            let (storedImageUrl, storedImageBinary) =
+                    separateInlineBinary imageUrl
+            in (emptyStoredContentPart "input_image" extraFields)
                 { storedContentPartDetail = detail
                 , storedContentPartFileId = fileId
-                , storedContentPartImageUrl = imageUrl
+                , storedContentPartImageUrl = storedImageUrl
+                , storedContentPartImageBinary = storedImageBinary
                 , storedContentPartPromptCacheBreakpoint =
                     encodeValue <$> promptCacheBreakpoint
                 }
@@ -359,9 +364,12 @@ toStoredContentPart = \case
         { detail, fileData, fileId, fileUrl, filename
         , promptCacheBreakpoint, extraFields
         } ->
-            (emptyStoredContentPart "input_file" extraFields)
+            let (storedFileData, storedFileBinary) =
+                    separateInlineBinary fileData
+            in (emptyStoredContentPart "input_file" extraFields)
                 { storedContentPartDetail = detail
-                , storedContentPartFileData = fileData
+                , storedContentPartFileData = storedFileData
+                , storedContentPartFileBinary = storedFileBinary
                 , storedContentPartFileId = fileId
                 , storedContentPartFileUrl = fileUrl
                 , storedContentPartFilename = filename
@@ -422,7 +430,10 @@ fromStoredContentPart part = do
             InputImagePart
                 part.storedContentPartDetail
                 part.storedContentPartFileId
-                part.storedContentPartImageUrl
+                ( (renderInlineBinary
+                        <$> part.storedContentPartImageBinary)
+                    <|> part.storedContentPartImageUrl
+                )
                 <$> traverse
                     (decodeValue "stored prompt_cache_breakpoint")
                     part.storedContentPartPromptCacheBreakpoint
@@ -430,7 +441,10 @@ fromStoredContentPart part = do
         "input_file" ->
             InputFilePart
                 part.storedContentPartDetail
-                part.storedContentPartFileData
+                ( (renderInlineBinary
+                        <$> part.storedContentPartFileBinary)
+                    <|> part.storedContentPartFileData
+                )
                 part.storedContentPartFileId
                 part.storedContentPartFileUrl
                 part.storedContentPartFilename
@@ -507,12 +521,50 @@ emptyStoredContentPart partType extraFields = StoredContentPart
     , storedContentPartFileUrl = Nothing
     , storedContentPartFilename = Nothing
     , storedContentPartImageUrl = Nothing
+    , storedContentPartFileBinary = Nothing
+    , storedContentPartImageBinary = Nothing
     , storedContentPartInputAudio = Nothing
     , storedContentPartPromptCacheBreakpoint = Nothing
     , storedContentPartAnnotations = Nothing
     , storedContentPartLogprobs = Nothing
     , storedContentPartExtraFields = encodeObject extraFields
     }
+
+separateInlineBinary
+    :: Maybe Text
+    -> (Maybe Text, Maybe StoredBinaryData)
+separateInlineBinary value =
+    case value >>= parseInlineBinary of
+        Just binary -> (Nothing, Just binary)
+        Nothing -> (value, Nothing)
+
+parseInlineBinary :: Text -> Maybe StoredBinaryData
+parseInlineBinary value = do
+    body <- Text.stripPrefix "data:" value
+    let (metadata, payloadWithComma) = Text.breakOn "," body
+        base64Marker = ";base64"
+    payload <- Text.stripPrefix "," payloadWithComma
+    if Text.takeEnd (Text.length base64Marker) metadata /= base64Marker
+        then Nothing
+        else do
+            let mimeType =
+                    Text.dropEnd (Text.length base64Marker) metadata
+            if Text.null mimeType
+                then Nothing
+                else case Base64.decode (TextEncoding.encodeUtf8 payload) of
+                    Left _ -> Nothing
+                    Right bytes -> Just StoredBinaryData
+                        { storedBinaryDataMimeType = mimeType
+                        , storedBinaryDataBytes = bytes
+                        }
+
+renderInlineBinary :: StoredBinaryData -> Text
+renderInlineBinary binary =
+    "data:"
+        <> binary.storedBinaryDataMimeType
+        <> ";base64,"
+        <> TextEncoding.decodeUtf8
+            (Base64.encode binary.storedBinaryDataBytes)
 
 toStoredToolOutput :: Aeson.Value -> StoredToolOutput
 toStoredToolOutput = \case
