@@ -633,6 +633,14 @@ renderEventUnlocked config = \case
             (roleWarn config.renderColor (glyphWarn <> message))
         startThinkingSpinnerUnlocked config
     TurnStarted -> do
+        -- A later sample (tool follow-up or empty reasoning continuation)
+        -- must commit any buffered thought before resetting render state.
+        -- Otherwise beginRenderTurn discards the summary without painting it.
+        buffered <-
+            textBufferToText . stateReasoningBuffer
+                <$> readRenderState config
+        unless (Text.null (Text.strip buffered)) $
+            commitThinkingUnlocked config
         now <- getCurrentTime
         modifyRenderState config \state ->
             (beginRenderTurn now state, ())

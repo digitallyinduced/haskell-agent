@@ -378,6 +378,57 @@ spec = do
         readIORef completeCount `shouldReturn` 1
         readIORef invalidations `shouldReturn` []
 
+    it "rejects content-filtered incomplete reasoning instead of recovering it" do
+        frames <- newIORef
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("reasoning" :: Text)
+                    , "id" Aeson..= ("rs-1" :: Text)
+                    , "summary" Aeson..= ([] :: [Aeson.Value])
+                    ]
+                ]
+            , lifecycleFrame "response.incomplete"
+                (Aeson.object
+                    [ "incomplete_details" Aeson..= Aeson.object
+                        [ "reason" Aeson..=
+                            ("content_filter" :: Text)
+                        ]
+                    ])
+            ]
+        receiveCount <- newIORef (0 :: Int)
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        callbackTypes <- newIORef ([] :: [StreamEventType])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = do
+                    modifyIORef' receiveCount (+ 1)
+                    atomicModifyIORef' frames \case
+                        frame : rest -> (rest, Right frame)
+                        [] -> error "unexpected receive after terminal event"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+            onEvent event =
+                modifyIORef' callbackTypes
+                    (<> [responseStreamEventType event])
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions onEvent
+
+        result `shouldBe` Left
+            (ProviderError ApiErrorType
+                "response.incomplete: content_filter"
+                Nothing)
+        readIORef callbackTypes `shouldReturn`
+            [EventResponseCreated, EventOutputItemDone, EventResponseIncomplete]
+        readIORef completeCount `shouldReturn` 0
+        readIORef invalidations `shouldReturn`
+            ["WebSocket response incomplete"]
+
     it "recovers assembled tool calls when the socket dies after output_item.done" do
         remaining <- newIORef
             [ Right $ lifecycleFrame "response.created"

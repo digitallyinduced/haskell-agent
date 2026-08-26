@@ -386,6 +386,20 @@ spec = do
                 second <- readIORef config.renderThinkingSpinner
                 second `shouldBe` first
 
+        it "commits buffered reasoning before a continuation TurnStarted" do
+            withRenderConfig True False \config handle path -> do
+                renderEvent config TurnStarted
+                renderEvent config (ReasoningDelta "inspect the loop")
+                renderEvent config TurnStarted
+                buffered <-
+                    textBufferToText . stateReasoningBuffer
+                        <$> readIORef config.renderState
+                buffered `shouldBe` ""
+                hClose handle
+                body <- Text.readFile path
+                body `shouldSatisfy` Text.isInfixOf "inspect the loop"
+                body `shouldSatisfy` Text.isInfixOf "Thought for"
+
         it "shows retry activity on the live thinking status" do
             withRenderConfig True False \config handle path -> do
                 renderEvent config TurnStarted

@@ -98,6 +98,27 @@ spec = do
                     ])
             rejectFailedCodexResponse response `shouldBe` Right response
 
+        it "rejects a content-filtered incomplete response even with reasoning" do
+            let response = decodeResponse (Aeson.object
+                    [ "id" .= ("response-id" :: Text)
+                    , "created_at" .= (0 :: Int)
+                    , "model" .= ("gpt-5.6-sol" :: Text)
+                    , "status" .= ("incomplete" :: Text)
+                    , "incomplete_details" .= Aeson.object
+                        [ "reason" .= ("content_filter" :: Text) ]
+                    , "output" .=
+                        [ Aeson.object
+                            [ "type" .= ("reasoning" :: Text)
+                            , "id" .= ("rs-1" :: Text)
+                            , "summary" .= ([] :: [Aeson.Value])
+                            ]
+                        ]
+                    ])
+            rejectFailedCodexResponse response
+                `shouldBe` Left (ProviderError ApiErrorType
+                    "response.incomplete: content_filter"
+                    Nothing)
+
     describe "retryTransientCodexResultWithPolicy" do
         it "retries ordinary Left overloads before returning success" do
             let overload = ProviderError OverloadedError "server_is_overloaded" Nothing
