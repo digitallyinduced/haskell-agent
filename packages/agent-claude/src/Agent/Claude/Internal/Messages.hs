@@ -356,7 +356,7 @@ interpretClaudeTurn messages result = do
         toolEvents =
             canonicalToolEvents
                 (concatMap messageToolEvents visibleMessages)
-        toolItems = concatMap messageToolItems visibleMessages
+        toolItems = canonicalToolItems visibleMessages
         events =
             toolEvents
                 <> maybe [] (pure . TextDelta) assistantText
@@ -444,6 +444,19 @@ messageToolItems = \case
         ServerToolResultBlock{toolUseId, content} ->
             [functionOutputItem toolUseId content Nothing]
         _ -> []
+
+canonicalToolItems :: [Message] -> [ResponseItem]
+canonicalToolItems messages =
+    filter keepItem items
+  where
+    items = concatMap messageToolItems messages
+    started =
+        Set.fromList
+            [call.callId | FunctionCallItem call <- items]
+    keepItem = \case
+        FunctionCallOutputItem output ->
+            Set.member output.callId started
+        _ -> True
 
 functionCallItem :: Text -> Text -> Aeson.Value -> ResponseItem
 functionCallItem callId name input =
