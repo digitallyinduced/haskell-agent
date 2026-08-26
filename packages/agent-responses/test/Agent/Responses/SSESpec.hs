@@ -61,6 +61,11 @@ spec = describe "Responses SSE decoder" do
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
 
+    it "accepts Unicode whitespace around the done sentinel" do
+        events <- expectRight $ parseSseEvents $
+            "data: \x2003[DONE]\x2003\n\n" <> completedBlock
+        eventTypes events `shouldBe` [EventResponseCompleted]
+
     it "skips malformed event payloads while preserving unknown events" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.output_item.done"
