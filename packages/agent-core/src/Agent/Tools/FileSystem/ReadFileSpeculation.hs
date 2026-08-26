@@ -18,9 +18,11 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.FileSystem (resolveForRead)
 import Agent.Tools.FileSystem.ReadFile.Internal
-    ( ReadFileArgs(..)
+    ( FileWindow(..)
+    , ReadFileArgs(..)
+    , fileWindowCoversArgs
     , formatReadFileContent
-    , readFileResolvedContent
+    , readFileWindowForArgs
     , runReadFile
     )
 import Agent.Tools.Types (ToolEnv(..))
@@ -107,11 +109,9 @@ data ReadCandidate = ReadCandidate
     }
 
 data PrefetchedRead = PrefetchedRead
-    { prefetchedArguments :: !ReadFileArgs
-    , prefetchedResolvedPath :: !OsPath
+    { prefetchedResolvedPath :: !OsPath
     , prefetchedFingerprint :: !FileFingerprint
-    , prefetchedContent :: !Text
-    , prefetchedOutput :: !(Either Text Text)
+    , prefetchedWindow :: !FileWindow
     }
 
 data FileFingerprint = FileFingerprint
@@ -367,19 +367,23 @@ consumeReadFile speculation args partial =
                     | otherwise ->
                         fileFingerprint finalPath >>= \case
                             Just current
-                                | current == prefetched.prefetchedFingerprint -> do
-                                    modifyMetrics speculation \metrics ->
-                                        metrics
-                                            { speculativeReadHits =
-                                                metrics.speculativeReadHits + 1
-                                            }
-                                    pure $
-                                        if prefetched.prefetchedArguments == args
-                                            then prefetched.prefetchedOutput
-                                            else
+                                | current == prefetched.prefetchedFingerprint ->
+                                    if fileWindowCoversArgs
+                                        prefetched.prefetchedWindow
+                                        args
+                                        then do
+                                            modifyMetrics speculation \metrics ->
+                                                metrics
+                                                    { speculativeReadHits =
+                                                        metrics.speculativeReadHits + 1
+                                                    }
+                                            pure $
                                                 formatReadFileContent
-                                                    prefetched.prefetchedContent
+                                                    prefetched.prefetchedWindow.fileWindowText
                                                     args
+                                        else do
+                                            recordMiss speculation
+                                            runReadFile speculation.environment args
                             _ -> do
                                 modifyMetrics speculation \metrics ->
                                     metrics
@@ -575,32 +579,23 @@ prefetchRead environment arguments
             case before of
                 Just fingerprint
                     | fingerprint.fingerprintSize <= maxSpeculativeReadBytes ->
-                        readFileResolvedContent path arguments >>= \case
+                        readFileWindowForArgs path arguments >>= \case
                             Left _ -> pure Nothing
-                            Right content -> do
-                                forceText content
-                                let output =
-                                        formatReadFileContent content arguments
-                                forceTextResult output
+                            Right window -> do
+                                forceText window.fileWindowText
                                 after <- fileFingerprint path
                                 pure do
                                     guard (after == Just fingerprint)
                                     pure PrefetchedRead
-                                        { prefetchedArguments = arguments
-                                        , prefetchedResolvedPath = path
+                                        { prefetchedResolvedPath = path
                                         , prefetchedFingerprint = fingerprint
-                                        , prefetchedContent = content
-                                        , prefetchedOutput = output
+                                        , prefetchedWindow = window
                                         }
                 _ -> pure Nothing
   where
     target = arguments.targetFile
 
     forceText text = void (evaluate (Text.length text))
-
-    forceTextResult = \case
-        Left err -> forceText err
-        Right output -> forceText output
 
 waitForReadFileSpeculation :: ReadFileSpeculation -> IO ()
 waitForReadFileSpeculation speculation = do

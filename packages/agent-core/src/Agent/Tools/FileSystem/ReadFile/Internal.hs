@@ -1,20 +1,35 @@
 module Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
+    , FileWindow(..)
     , runReadFile
     , runReadFileResolved
     , readFileResolvedContent
+    , readFileWindowForArgs
+    , fileWindowCoversArgs
     , formatReadFileContent
     ) where
 
-import Agent.OsPath (fromText)
+import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.Tools.IO (readTextFile, resolveForRead)
 import Agent.Tools.Types (ToolEnv)
+import Control.Exception.Safe (SomeException, try)
 import Data.Aeson (FromJSON(..))
+import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Text.Encoding (decodeUtf8With)
+import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory.OsPath (doesFileExist)
+import System.IO
+    ( BufferMode(..)
+    , Handle
+    , IOMode(..)
+    , hIsEOF
+    , hSetBuffering
+    , withBinaryFile
+    )
 import System.OsPath (OsPath)
 
 data ReadFileArgs = ReadFileArgs
@@ -45,13 +60,18 @@ runReadFile env args =
         Left err -> pure (Left err)
         Right path -> runReadFileResolved path args
 
+data FileWindow = FileWindow
+    { fileWindowText :: !Text
+    , fileWindowComplete :: !Bool
+    }
+
 runReadFileResolved
     :: OsPath
     -> ReadFileArgs
     -> IO (Either Text Text)
 runReadFileResolved path args =
-    readFileResolvedContent path args
-        >>= pure . (>>= (`formatReadFileContent` args))
+    readFileWindowForArgs path args
+        >>= pure . (>>= (`formatReadFileContent` args) . (.fileWindowText))
 
 readFileResolvedContent
     :: OsPath
@@ -68,6 +88,111 @@ readFileResolvedContent path args
             Right content -> do
                 _ <- pure (args.pages, args.format)
                 pure (Right content)
+
+-- | Read only the line window 'read_file' will return when the offset is a
+-- non-negative start. Negative offsets still slurp the whole file so the last
+-- line can be found.
+readFileWindowForArgs :: OsPath -> ReadFileArgs -> IO (Either Text FileWindow)
+readFileWindowForArgs path args
+    | ".pdf" `Text.isSuffixOf` Text.toLower args.targetFile =
+        pure $ Left
+            "PDF rendering is not available. Use an explicit terminal conversion tool if available, or convert the file to text first."
+    | otherwise = doesFileExist path >>= \case
+        False -> pure $ Left $ "File not found: " <> args.targetFile
+        True -> case boundedLineCount args of
+            Nothing ->
+                readFileResolvedContent path args >>= \case
+                    Left err -> pure (Left err)
+                    Right content ->
+                        pure (Right (FileWindow content True))
+            Just lineCount ->
+                readFirstLines path lineCount
+
+boundedLineCount :: ReadFileArgs -> Maybe Int
+boundedLineCount args =
+    case args.offset of
+        Just n | n <= 0 -> Nothing
+        Just n | n > 1 -> Nothing
+        _ ->
+            Just (min maxReadLines (fromMaybe maxReadLines args.limit))
+
+fileWindowCoversArgs :: FileWindow -> ReadFileArgs -> Bool
+fileWindowCoversArgs window args
+    | window.fileWindowComplete = True
+    | otherwise =
+        case args.offset of
+            Just n | n <= 0 -> False
+            Just n | n > 1 -> False
+            _ ->
+                let have = length (readFileLines window.fileWindowText)
+                    need = min maxReadLines (fromMaybe maxReadLines args.limit)
+                in have >= need
+
+readFirstLines :: OsPath -> Int -> IO (Either Text FileWindow)
+readFirstLines path maxLines = do
+    result <-
+        try @_ @SomeException $
+            withBinaryFile (unsafeToFilePath path) ReadMode \handle -> do
+                hSetBuffering handle (BlockBuffering (Just 65536))
+                first <- BS.hGetSome handle 8192
+                if BS.elem 0 first
+                    then pure $ Left "Cannot read binary file"
+                    else Right <$> collectLines handle maxLines first
+    pure $ case result of
+        Left err ->
+            Left ("Failed to read file: " <> Text.pack (show err))
+        Right inner -> inner
+
+collectLines
+    :: Handle
+    -> Int
+    -> BS.ByteString
+    -> IO FileWindow
+collectLines handle maxLines firstChunk =
+    go [firstChunk] (BS.count 10 firstChunk)
+  where
+    go chunks newlines
+        | newlines >= maxLines = do
+            let gathered = BS.concat (reverse chunks)
+                bytes = takeNthLines maxLines gathered
+            eof <-
+                if BS.length bytes == BS.length gathered
+                    then hIsEOF handle
+                    else pure False
+            decodeWindow (BS.length bytes == BS.length gathered && eof) bytes
+        | otherwise = do
+            eof <- hIsEOF handle
+            if eof
+                then decodeWindow True (BS.concat (reverse chunks))
+                else do
+                    chunk <- BS.hGetSome handle 65536
+                    if BS.null chunk
+                        then decodeWindow True (BS.concat (reverse chunks))
+                    else if BS.elem 0 chunk
+                        then fail "Cannot read binary file"
+                    else
+                        go (chunk : chunks) (newlines + BS.count 10 chunk)
+
+    decodeWindow complete bytes =
+        pure FileWindow
+            { fileWindowText = decodeUtf8With lenientDecode bytes
+            , fileWindowComplete = complete
+            }
+
+takeNthLines :: Int -> BS.ByteString -> BS.ByteString
+takeNthLines n bytes =
+    case nthNewlineEnd n bytes of
+        Nothing -> bytes
+        Just end -> BS.take end bytes
+
+nthNewlineEnd :: Int -> BS.ByteString -> Maybe Int
+nthNewlineEnd n bytes = go n 0
+  where
+    go 0 idx = Just idx
+    go left idx =
+        case BS.elemIndex 10 (BS.drop idx bytes) of
+            Nothing -> Nothing
+            Just offset -> go (left - 1) (idx + offset + 1)
 
 formatReadFileContent :: Text -> ReadFileArgs -> Either Text Text
 formatReadFileContent content args =
