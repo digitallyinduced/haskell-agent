@@ -46,7 +46,7 @@ import Agent.CLI.TUI.App
     ( emitUiEvent
     , hasQueuedFullscreenInput
     )
-import Agent.CLI.Turn (runOneTurn)
+import Agent.CLI.Turn (retryCheckpointedTurn, runOneTurn)
 import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Exception.Safe (throwIO)
@@ -92,7 +92,7 @@ retryFailedTurn continuation env pending = do
     -- The failed turn already owns the persisted/displayed user prompt.
     -- Keep the retry turn's user text empty so session history does not show
     -- the same prompt twice.
-    result <- runOneTurn env "" []
+    result <- retryCheckpointedTurn env
     finishTurnWithCooldownRetry
         continuation True env pending.pendingExitAfter result
 

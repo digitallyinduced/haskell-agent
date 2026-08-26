@@ -1307,6 +1307,7 @@ spec = describe "runLoop" do
     it "commits terminal incomplete responses without running their tools" do
         submissions <- newIORef []
         calls <- newIORef ([] :: [Text])
+        pending <- newIORef ["keep this guidance"]
         backend <- scriptedBackend submissions
             [ Right TurnOutput
                 { responseId = "resp-incomplete"
@@ -1325,6 +1326,10 @@ spec = describe "runLoop" do
                 { loopOnEvent = \case
                     ToolStarted call -> modifyIORef' calls (<> [call.callId])
                     _ -> pure ()
+                , loopReadSteering = map UserMessage <$> readIORef pending
+                , loopCommitSteering = \count ->
+                    atomicModifyIORef' pending \messages ->
+                        (drop count messages, ())
                 }
         execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
         execution.executionProgress `shouldBe` ResponseCommitted
@@ -1343,6 +1348,13 @@ spec = describe "runLoop" do
                         }
                     })
         readIORef calls `shouldReturn` []
+        readIORef submissions `shouldReturn`
+            [ (Nothing
+              , [ UserMessage "hello"
+                , UserMessage "keep this guidance"
+                ])
+            ]
+        readIORef pending `shouldReturn` ["keep this guidance"]
 
 --------------------------------------------------------------------------------
 -- Helpers

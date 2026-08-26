@@ -454,7 +454,6 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                         then finish state ResponseCommitted
                             (Left (LoopCancelled []))
                         else do
-                            config.loopCommitSteering steeringCount
                             config.loopOnEvent (TurnFinished turn)
                             let nextTurnsUsed = turnsUsed + 1
                             case turn.completion of
@@ -462,6 +461,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                     finish state ResponseCommitted
                                         (Left (LoopIncomplete turn))
                                 TurnCompleted -> do
+                                    config.loopCommitSteering steeringCount
                                     results <-
                                         if null turn.toolCalls
                                             then pure []

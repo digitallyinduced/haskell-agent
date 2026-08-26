@@ -7,6 +7,7 @@ module Agent.CLI.Turn
     , grokFrameLastUserInput
     , grokUserQuery
     , restorePlanStateAfterIncomplete
+    , retryCheckpointedTurn
     , runOneTurn
     ) where
 
@@ -158,17 +159,31 @@ import System.Process
 import System.Timeout (timeout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
-runOneTurn env promptText inputs = do
+runOneTurn = runOneTurnWithContext True
+
+-- | Retry after a failed turn whose exact prepared inputs are already
+-- checkpointed in the live transcript. Per-turn plan/startup context must not
+-- be generated again.
+retryCheckpointedTurn :: SessionEnv -> IO TurnResult
+retryCheckpointedTurn env = runOneTurnWithContext False env "" []
+
+runOneTurnWithContext
+    :: Bool
+    -> SessionEnv
+    -> Text
+    -> [TurnInput]
+    -> IO TurnResult
+runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- A newly submitted turn supersedes any older retry candidate. If this
     -- attempt fails, finishTurn installs its own PendingTurn afterwards.
     writeIORef env.sessionLastFailedTurn Nothing
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
-        (runOneTurnBusy env promptText inputs)
+        (runOneTurnBusy includeTurnContext env promptText inputs)
 
-runOneTurnBusy :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
-runOneTurnBusy env@SessionEnv
+runOneTurnBusy :: Bool -> SessionEnv -> Text -> [TurnInput] -> IO TurnResult
+runOneTurnBusy includeTurnContext env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
     , sessionConversation = conversationRef
@@ -233,18 +248,27 @@ runOneTurnBusy env@SessionEnv
         PersistenceDisabled -> pure ()
     prev <- readLivePreviousResponseId conversationRef
     beforeItems <- readLiveTranscript conversationRef
-    pendingStartup <- atomicModifyIORef' startupContext \pendingCtx -> (Nothing, pendingCtx)
-    planActive <- isPlanModeActive planMode
-    planPath <- planFilePath planMode
-    let planReminder =
-            if planActive
-                then Just $
-                    planModeReminder
-                        (case env.sessionProvider of
-                            OpenAIProvider -> CompleteWithProposedPlan
-                            _ -> CompleteWithExitTool)
-                        planPath
-                else Nothing
+    pendingStartup <-
+        if includeTurnContext
+            then atomicModifyIORef' startupContext \pendingCtx ->
+                (Nothing, pendingCtx)
+            else pure Nothing
+    planReminder <-
+        if includeTurnContext
+            then do
+                planActive <- isPlanModeActive planMode
+                planPath <- planFilePath planMode
+                pure $
+                    if planActive
+                        then Just $
+                            planModeReminder
+                                (case env.sessionProvider of
+                                    OpenAIProvider -> CompleteWithProposedPlan
+                                    _ -> CompleteWithExitTool)
+                                planPath
+                        else Nothing
+            else pure Nothing
+    let
         turnInputs0 =
             turnInputsWithContext planReminder pendingStartup inputs
     stampedInputs <- stampTurnInputs turnInputs0
