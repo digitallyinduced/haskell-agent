@@ -5,6 +5,7 @@ module Agent.Tools.IO
     , combineCommandOutput
     , commandResultOutput
     , formatCommandResult
+    , displayPathInWorkspace
     , resolveForRead
     , resolveUnderCwd
     , readTextFile
@@ -31,6 +32,7 @@ import Agent.OsPath (unsafeToFilePath)
 import Agent.Process (terminateProcessGroup)
 import Agent.Tools.FileSystem
     ( deleteTextFile
+    , displayPathInWorkspace
     , listDirectoryEntries
     , readTextFile
     , renameTextFile

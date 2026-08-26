@@ -11,11 +11,11 @@ import Agent.CLI.AgentViewport
     , AgentStep
     , AgentTarget(..)
     , AgentViewportEnv(..)
-    , agentStepsForStatus
+    , agentStepsForStatusRelative
     , formatAgentStatus
     , responseItemPreviewLines
-    , responseItemStepPreviews
-    , responseItemsToUiState
+    , responseItemStepPreviewsRelative
+    , responseItemsToUiStateRelative
     )
 import Agent.CLI.SessionTitle
     ( SessionTitleEvent(..)
@@ -381,8 +381,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     | target == AgentRoot = initialUiState
                     | otherwise =
                         settleConversation items status $
-                            responseItemsToUiState
+                            responseItemsToUiStateRelative
                                 options.optShowRawReasoning
+                                (toText cwd)
                                 items
                 settleConversation items status conversation =
                     case status of
@@ -428,7 +429,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         AgentRoot
                         Nothing
                         rootItems
-                        (responseItemStepPreviews 2)
+                        (responseItemStepPreviewsRelative (toText cwd) 2)
             let rootEntry = AgentEntry
                     { agentTarget = AgentRoot
                     , agentPath = "/root"
@@ -460,7 +461,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     target
                     (Just status)
                     items
-                    (agentStepsForStatus 2 status)
+                    (agentStepsForStatusRelative (toText cwd) 2 status)
                 let transcript =
                         transcriptLines target items
                             <> case status of

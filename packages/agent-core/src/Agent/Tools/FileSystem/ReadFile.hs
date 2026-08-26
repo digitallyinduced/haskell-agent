@@ -13,7 +13,7 @@ import Agent.ToolDispatch
     , toolArgumentsValue
     , typedTool
     )
-import Agent.Tools.IO (readTextFile, resolveForRead)
+import Agent.Tools.IO (displayPathInWorkspace, readTextFile, resolveForRead)
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -101,7 +101,9 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
             pure $ Left
                 "PDF rendering is not available. Use an explicit terminal conversion tool if available, or convert the file to text first."
         | otherwise -> doesFileExist path >>= \case
-            False -> pure $ Left $ "File not found: " <> args.targetFile
+            False -> do
+                display <- displayPathInWorkspace env path
+                pure $ Left $ "File not found: " <> display
             True -> readTextFile path >>= \case
                 Left err -> pure (Left err)
                 Right content -> do

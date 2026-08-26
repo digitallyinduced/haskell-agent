@@ -17,7 +17,12 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
-import Agent.Tools.IO (readTextFile, resolveUnderCwd, writeTextFile)
+import Agent.Tools.IO
+    ( displayPathInWorkspace
+    , readTextFile
+    , resolveUnderCwd
+    , writeTextFile
+    )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -150,26 +155,23 @@ runSearchReplaceBody env args
 
 createNewFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 createNewFile env args = do
-    path <- resolvePath env args.filePath
-    gitignoreGuard env path args.filePath
+    (path, display) <- resolveDisplayPath env args.filePath
+    gitignoreGuard env path display
     exists <- lift (doesFileExist path)
     when exists do
         existing <- ExceptT (readTextFile path)
         unless (Text.null existing) $
             throwE "An empty old_string cannot overwrite an existing non-empty file."
-    writeCreated path
-  where
-    writeCreated path = do
-        ExceptT (writeTextFile path args.newString)
-        pure ("The file " <> args.filePath <> " has been created successfully.")
+    ExceptT (writeTextFile path args.newString)
+    pure ("The file " <> display <> " has been created successfully.")
 
 replaceInFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 replaceInFile env args = do
-    path <- resolvePath env args.filePath
-    gitignoreGuard env path args.filePath
+    (path, display) <- resolveDisplayPath env args.filePath
+    gitignoreGuard env path display
     exists <- lift (doesFileExist path)
     unless exists $
-        throwE ("File not found: " <> args.filePath)
+        throwE ("File not found: " <> display)
     content <- ExceptT (readTextFile path)
     let count = countOccurrences args.oldString content
     when (count == 0) $
@@ -183,14 +185,20 @@ replaceInFile env args = do
     ExceptT (writeTextFile path updated)
     pure $
         if args.replaceAll && count > 1
-            then "The file " <> args.filePath
+            then "The file " <> display
                 <> " has been updated. All occurrences were successfully replaced."
-            else "The file " <> args.filePath
+            else "The file " <> display
                 <> " has been updated successfully."
 
 resolvePath :: ToolEnv -> Text -> ExceptT Text IO OsPath
 resolvePath env path =
     ExceptT (resolveUnderCwd env (fromText path))
+
+resolveDisplayPath :: ToolEnv -> Text -> ExceptT Text IO (OsPath, Text)
+resolveDisplayPath env requested = do
+    path <- resolvePath env requested
+    display <- lift (displayPathInWorkspace env path)
+    pure (path, display)
 
 gitignoreGuard :: ToolEnv -> OsPath -> Text -> ExceptT Text IO ()
 gitignoreGuard env path display = do

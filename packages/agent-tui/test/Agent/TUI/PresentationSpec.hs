@@ -38,6 +38,12 @@ spec = describe "tool presentation" do
         workspaceRelativeDisplayPath workspace "/tmp/outside.hs"
             `shouldBe` "/tmp/outside.hs"
         workspaceRelativeDisplayPath
+            workspace
+            (workspace <> "/./nix/../nix/modules/telegram.nix")
+            `shouldBe` "nix/modules/telegram.nix"
+        workspaceRelativeDisplayPath workspace "src/../nix/foo.nix"
+            `shouldBe` "nix/foo.nix"
+        workspaceRelativeDisplayPath
             "/worktree"
             "/worktree-other/Foo.hs"
             `shouldBe` "/worktree-other/Foo.hs"

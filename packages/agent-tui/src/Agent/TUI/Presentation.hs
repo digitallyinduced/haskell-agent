@@ -31,6 +31,7 @@ module Agent.TUI.Presentation
     ) where
 
 import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
+import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.TUI.TextWidth (displayTerminalText)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -217,18 +218,11 @@ rewriteToolPathInText workspace call output =
         Nothing -> output
 
 -- | Show @path@ relative to @workspace@ when it is inside that tree.
--- Already-relative paths and paths outside the workspace are unchanged.
+-- Already-relative paths are rewritten through the workspace so @src/../a@
+-- becomes @a@. Paths outside the workspace stay absolute after normalization.
 workspaceRelativeDisplayPath :: Text -> Text -> Text
-workspaceRelativeDisplayPath workspace path
-    | Text.null root || Text.null candidate = path
-    | candidate == root = "."
-    | Just relative <- Text.stripPrefix (root <> "/") candidate
-    , not (Text.null relative) =
-        relative
-    | otherwise = path
-  where
-    root = Text.dropWhileEnd (== '/') workspace
-    candidate = Text.dropWhileEnd (== '/') path
+workspaceRelativeDisplayPath workspace path =
+    relativeDisplayPath (fromText workspace) (fromText path)
 
 -- | Filesystem path argument used in tool chrome, when the tool has one.
 toolPathArgument :: ToolCall -> Maybe Text

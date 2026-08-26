@@ -252,6 +252,32 @@ spec = do
             body True
                 `shouldBe` Just "Visible summary\nprivate detail"
 
+        it "shows workspace-relative tool titles when hydrating a child transcript" do
+            let workspace = "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+                ui =
+                    responseItemsToUiStateRelative False workspace
+                        [ functionCallItem
+                            "call-1"
+                            "read_file"
+                            ("{\"target_file\":\""
+                                <> workspace
+                                <> "/nix/modules/telegram.nix\"}")
+                            (Just ItemCompleted)
+                        ]
+            map (.blockTitle) (toList ui.uiBlocks)
+                `shouldBe` ["Read nix/modules/telegram.nix"]
+            map (.agentStepTitle)
+                (responseItemStepPreviewsRelative workspace 1
+                    [ functionCallItem
+                        "call-1"
+                        "search_replace"
+                        ("{\"file_path\":\""
+                            <> workspace
+                            <> "/nix/modules/telegram.nix\"}")
+                        (Just ItemCompleted)
+                    ])
+                `shouldBe` ["Edited nix/modules/telegram.nix"]
+
     describe "responseItemStepPreviews" do
         it "coalesces tool calls with their outputs and returns newest first" do
             let steps =

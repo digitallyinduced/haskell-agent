@@ -24,13 +24,16 @@ module Agent.CLI.AgentViewport
     , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
+    , responseItemStepPreviewsRelative
     , responseItemsToUiState
+    , responseItemsToUiStateRelative
+    , agentStepsForStatusRelative
     , lookupAgentEntry
     , selectAgentTarget
     , selectedAgentEntry
     ) where
 
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render (summarizeToolCallRelative)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -351,8 +354,13 @@ responseItemLines = concatMap responseItemLineList
 -- and tool blocks without maintaining a second presentation model.
 responseItemsToUiState :: Bool -> [ResponseItem] -> UiState
 responseItemsToUiState showRawReasoning =
+    responseItemsToUiStateRelative showRawReasoning ""
+
+responseItemsToUiStateRelative :: Bool -> Text -> [ResponseItem] -> UiState
+responseItemsToUiStateRelative showRawReasoning workspace =
     normalizeTranscriptUi
-        . foldl' (appendResponseItem showRawReasoning) initialUiState
+        . foldl' (appendResponseItem showRawReasoning)
+            initialUiState { uiWorkspaceRoot = workspace }
 
 -- | Keep a compact agent preview: the first line for picker context plus
 -- only the most recent logical lines for the live pane. Earlier response
@@ -383,7 +391,10 @@ responseItemPreviewLines count items
 -- folded into their originating calls so the preview shows one semantic step
 -- instead of adjacent @tool: name@ / @tool: completed@ rows.
 responseItemStepPreviews :: Int -> [ResponseItem] -> [AgentStep]
-responseItemStepPreviews count items
+responseItemStepPreviews = responseItemStepPreviewsRelative ""
+
+responseItemStepPreviewsRelative :: Text -> Int -> [ResponseItem] -> [AgentStep]
+responseItemStepPreviewsRelative workspace count items
     | count <= 0 = []
     | otherwise = go count Map.empty (reverse items)
   where
@@ -413,7 +424,8 @@ responseItemStepPreviews count items
                         AgentStep
                             { agentStepState = state
                             , agentStepTitle =
-                                summarizeToolCall
+                                summarizeToolCallRelative
+                                    workspace
                                     (functionToolCall
                                         call.callId
                                         call.name
@@ -434,7 +446,8 @@ responseItemStepPreviews count items
                         AgentStep
                             { agentStepState = state
                             , agentStepTitle =
-                                summarizeToolCall
+                                summarizeToolCallRelative
+                                    workspace
                                     (customToolCall
                                         call.callId
                                         call.name
@@ -498,7 +511,15 @@ agentStepsForStatus
     -> SubagentStatus
     -> [ResponseItem]
     -> [AgentStep]
-agentStepsForStatus count status items
+agentStepsForStatus = agentStepsForStatusRelative ""
+
+agentStepsForStatusRelative
+    :: Text
+    -> Int
+    -> SubagentStatus
+    -> [ResponseItem]
+    -> [AgentStep]
+agentStepsForStatusRelative workspace count status items
     | count <= 0 = []
     | otherwise = take count $ case status of
         Pending ->
@@ -533,7 +554,7 @@ agentStepsForStatus count status items
         NotFound ->
             AgentStep AgentStepFailed "Agent unavailable" Nothing : settled
   where
-    recent = responseItemStepPreviews count items
+    recent = responseItemStepPreviewsRelative workspace count items
     settled = map settleStep recent
 
     settleStep step
