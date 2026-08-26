@@ -542,7 +542,8 @@ spec = describe "Agent.Telegram" do
                         , pendingMediaChat = TelegramChatKey (-1001) Nothing
                         , pendingMediaUserId = 456
                         , pendingMediaText =
-                            "[Telegram group message from Marc, user 456]\n\
+                            "[Replying to Telegram message 77 from user 999]\n\
+                            \[Telegram group message from Marc, user 456]\n\
                             \[Document: report.pdf]"
                         , pendingMediaAttachments =
                             [ TelegramMedia
@@ -648,7 +649,8 @@ spec = describe "Agent.Telegram" do
                 QueueTurn
                     83
                     (TelegramChatKey (-1001) Nothing)
-                    "[Telegram group message from Marc, user 456]\ncontinue"
+                    "[Replying to Telegram message 70 from @HarnessBot, user 999]\n\
+                    \[Telegram group message from Marc, user 456]\ncontinue"
                     Nothing
 
             commandAction <- classify
@@ -680,7 +682,8 @@ spec = describe "Agent.Telegram" do
                 QueueTurn
                     85
                     (TelegramChatKey (-1002) (Just 7))
-                    "[Telegram group message from Marc, user 456]\n\
+                    "[Replying to Telegram message 71 from @HarnessBot, user 999]\n\
+                    \[Telegram group message from Marc, user 456]\n\
                     \[Voice message]"
                     (Just (TelegramVoice "voice-file" 4 Nothing Nothing))
 
@@ -866,6 +869,105 @@ spec = describe "Agent.Telegram" do
             isAnonymousAdmin anonymous `shouldBe` True
             isAnonymousAdmin allowedUser `shouldBe` False
 
+        it "rewrites a reply /allow command into the other member's user id" do
+            action <- classifyAuthorized
+                "{\"update_id\":51,\"message\":{\
+                \\"message_id\":101,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/allow\",\
+                \\"reply_to_message\":{\"message_id\":100,\
+                \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"hello\"}}}"
+            action `shouldBe`
+                QueueTurn
+                    101
+                    (TelegramChatKey (-1001) Nothing)
+                    "/allow 789"
+                    Nothing
+
+        it "keeps a named /allow command so the gateway can resolve it later" do
+            action <- classifyAuthorized
+                "{\"update_id\":52,\"message\":{\
+                \\"message_id\":102,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/allow Hendi\"}}"
+            action `shouldBe`
+                QueueTurn
+                    102
+                    (TelegramChatKey (-1001) Nothing)
+                    "/allow Hendi"
+                    Nothing
+
+        it "includes reply identity and mentions in the agent prompt" do
+            action <- classifyAuthorized
+                "{\"update_id\":53,\"message\":{\
+                \\"message_id\":103,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"@HarnessBot also accept messages from Hendi\",\
+                \\"entities\":[{\"offset\":0,\"length\":12,\"type\":\"mention\"},\
+                \{\"offset\":38,\"length\":5,\"type\":\"text_mention\",\
+                \\"user\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"}}],\
+                \\"reply_to_message\":{\"message_id\":100,\
+                \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"can I use the bot?\"}}}"
+            action `shouldBe`
+                QueueTurn
+                    103
+                    (TelegramChatKey (-1001) Nothing)
+                    "[Replying to Telegram message 100 from Hendi, @hendi, user 789: \
+                    \can I use the bot?]\n\
+                    \[Telegram mentions: Hendi, @hendi, user 789]\n\
+                    \[Telegram group message from Marc, user 456]\n\
+                    \also accept messages from Hendi"
+                    Nothing
+
+        it "records ignored group members so they can be allowed by name" do
+            update <- (eitherDecode
+                (LBS.pack
+                    "{\"update_id\":54,\"message\":{\
+                    \\"message_id\":104,\
+                    \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                    \\"username\":\"hendi\"},\
+                    \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                    \\"text\":\"hello everyone\"}}")
+                :: Either String TelegramUpdate)
+                `shouldReturnRight` "ignored group update should decode"
+            classifyAuthorized
+                "{\"update_id\":54,\"message\":{\
+                \\"message_id\":104,\
+                \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"hello everyone\"}}"
+                >>= (`shouldBe` IgnoreUpdate)
+            let state = recordSeenTelegramUsers update emptyTelegramState
+                hendi = TelegramUser
+                    { userId = 789
+                    , userIsBot = False
+                    , userFirstName = Just "Hendi"
+                    , userLastName = Nothing
+                    , userUsername = Just "hendi"
+                    }
+            Map.lookup 789 state.seenTelegramUsers `shouldBe` Just hendi
+            Map.lookup (-1001) state.seenUsersByChat
+                `shouldBe` Just (Set.singleton 789)
+            resolveTelegramUser state (-1001) Nothing "Hendi"
+                `shouldBe` ResolvedTelegramUser hendi
+            resolveTelegramUser state (-1001) Nothing "@hendi"
+                `shouldBe` ResolvedTelegramUser hendi
+            telegramReplyUserIdFromPrompt
+                "[Replying to Telegram message 100 from Hendi, @hendi, user 789: hi]\n\
+                \please allow them"
+                `shouldBe` Just 789
+
         it "authorizes a group after an allowed user targets the bot there" do
             let key = TelegramChatKey (-1001) Nothing
                 state = storeUpdateAction
@@ -1035,6 +1137,9 @@ spec = describe "Agent.Telegram" do
                     , "deadLetters" .= ([] :: [TelegramDeadLetter])
                     , "outboundMessages" .= ([] :: [Value])
                     , "authorizedGroupChats" .= ([] :: [Integer])
+                    , "allowedUserIds" .= ([] :: [Integer])
+                    , "seenTelegramUsers" .= ([] :: [TelegramUser])
+                    , "seenUsersByChat" .= ([] :: [Value])
                     ]
             (eitherDecode (encode state) :: Either String Value)
                 `shouldBe` Right expected

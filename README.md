@@ -162,8 +162,12 @@ Never paste the bot token into an agent conversation.
 
 Only messages from allowlisted Telegram users are handled. Repeat
 `--allowed-user` during setup, or manage the local allowlist later with
-`agent-telegram users list|add ID|remove ID`; running gateways must be restarted
-after an allowlist change. Private chats work directly. In groups and
+`agent-telegram users list|add ID|remove ID`. CLI allowlist edits still require
+a gateway restart. In a group, an already-allowed member can grant someone else
+immediately by telling the bot to accept them, or with `/allow` by name,
+`@username`, or by replying to one of their messages. `/users` lists the
+allowlist and people the bot has already seen in that chat; `/deny` removes
+someone. Private chats work directly. In groups and
 supergroups, mention the bot, use a command addressed to its username (for
 example `/new@your_bot`), or reply to one of its messages. Ambient group traffic
 and messages from non-allowlisted members are ignored by default. Pass
@@ -185,7 +189,9 @@ session under `~/.haskell-agent`; `/new` starts a fresh session, `/session`
 shows the current session ID, `/status` reports queued/retrying/failed work,
 and `/retry` requeues the latest failed turn. Group replies include the
 sender's identity in the agent prompt and are posted as replies to the
-triggering Telegram message.
+triggering Telegram message. The agent can also list, allow, and deny Telegram
+users through gateway-scoped tools, so you can say “also accept messages from
+Hendi” without looking up a numeric user ID.
 
 The default approval mode asks through Telegram inline buttons when a mutating
 tool is requested. `--deny-mutations` disables those tools and `--yolo`

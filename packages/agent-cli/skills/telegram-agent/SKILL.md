@@ -58,15 +58,18 @@ disables terminal echo and stores the token in a private gateway file.
 
 9. Tell the user to open their new bot and send `/start`. The bot supports
    `/new` for a fresh agent session, `/session` for the current session ID,
-   `/status` for queue/retry state, and `/retry` for the latest failed turn.
-   To use it in a group, an allowlisted Telegram administrator of that group
-   must add the bot. If anyone else adds it, the bot leaves. Then mention its
-   `@username`, reply to one of its messages, or address commands to it (for
-   example `/new@your_bot_username`). Each group or forum topic has a shared
-   agent session. Only messages from allowlisted users are accepted; ambient
-   group traffic is ignored unless setup used `--all-group-messages`. In that
+   `/status` for queue/retry state, `/retry` for the latest failed turn, and
+   `/allow` / `/deny` / `/users` to manage who may talk to it. To use it in a
+   group, an allowlisted Telegram administrator of that group must add the bot.
+   If anyone else adds it, the bot leaves. Then mention its `@username`, reply
+   to one of its messages, or address commands to it (for example
+   `/new@your_bot_username`). Each group or forum topic has a shared agent
+   session. Only messages from allowlisted users are accepted; ambient group
+   traffic is ignored unless setup used `--all-group-messages`. In that
    mode each allowed-user message is considered, but the agent stays silent
-   unless a response would be useful. Text, edited messages, reactions, photos,
+   unless a response would be useful. An already-allowed member can grant
+   someone else immediately by asking the bot to accept them, or with `/allow`
+   by name, `@username`, or by replying to one of their messages. Text, edited messages, reactions, photos,
    documents, audio, video, video notes, animations, stickers, locations,
    contacts, venues, polls, dice, and voice messages are persisted before
    processing.
@@ -87,7 +90,8 @@ disables terminal echo and stores the token in a private gateway file.
   as bot output.
 - Mutating-tool approvals and generic choices use scoped, expiring inline
   buttons. The agent can also send Telegram documents, photos, voice files,
-  and reactions through parent-owned gateway tools.
+  and reactions through parent-owned gateway tools, and can list, allow, or
+  deny Telegram users when an already-allowed person asks it to.
 - Transient Telegram and agent failures use bounded backoff and durable retry
   metadata. `/retry` restores the latest dead-lettered turn.
 - Voice messages are limited to 10 minutes and 20 MB. They are downloaded to a
@@ -96,7 +100,8 @@ disables terminal echo and stores the token in a private gateway file.
 
 ## Management
 
-Use `agent-telegram users list|add ID|remove ID` to manage the local allowlist;
-restart the running gateway after changes. Use `agent-telegram stop` to stop
-the background gateway. Redacted JSON logs and durable queue state live below
-`~/.haskell-agent/gateways/telegram/`.
+Use `agent-telegram users list|add ID|remove ID` to manage the local allowlist
+from the CLI; restart the running gateway after those changes. In chat, `/allow`
+and the `allow_telegram_user` tool apply immediately and do not require a
+restart. Use `agent-telegram stop` to stop the background gateway. Redacted JSON
+logs and durable queue state live below `~/.haskell-agent/gateways/telegram/`.
