@@ -55,6 +55,8 @@ library
                     , Agent.Store.Postgres.Hasql
                     , Agent.Store.Postgres.Sql
                     , Agent.Store.Postgres.SessionItem
+                    , Agent.Store.Postgres.SessionItem.Read
+                    , Agent.Store.Postgres.SessionItem.Write
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , async
