@@ -2,7 +2,8 @@ module Agent.Tools.OutputArtifactSpec (spec) where
 
 import Agent.ToolDispatch (functionToolCall)
 import Agent.Tools.OutputArtifact
-    ( boundedPreview
+    ( artifactTools
+    , boundedPreview
     , finalizeToolOutput
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
@@ -10,7 +11,8 @@ import Agent.Tools.OutputArtifact
     , writeOutputArtifact
     )
 import Agent.Tools.Types
-    ( ToolEnv(..)
+    ( AppTool(..)
+    , ToolEnv(..)
     , defaultToolEnv
     , setToolSessionTmp
     )
@@ -82,6 +84,21 @@ spec = describe "Agent.Tools.OutputArtifact" do
         withTempEnv \env ->
             readOutputArtifact env "../output-secret"
                 `shouldReturn` Left "invalid tool-output artifact handle"
+
+    it "exposes delegated analysis only when a spawner is available" do
+        withTempEnv \env -> do
+            let names = map (.appToolName)
+                childNames = names (artifactTools env Nothing)
+                rootNames = names
+                    (artifactTools env
+                        (Just (\_ _ _ -> pure (Right "spawned"))))
+            childNames `shouldBe`
+                ["read_tool_output", "search_tool_output"]
+            rootNames `shouldBe`
+                [ "read_tool_output"
+                , "search_tool_output"
+                , "analyze_tool_output"
+                ]
 
 listArtifactHandles :: Text.Text -> IO [Text.Text]
 listArtifactHandles rendered =
