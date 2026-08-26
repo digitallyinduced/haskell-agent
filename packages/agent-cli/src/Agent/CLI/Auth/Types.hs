@@ -5,10 +5,12 @@ module Agent.CLI.Auth.Types
     , credentialAccountLabel
     , credentialAccountLabelWith
     , externalAuthSelectionId
+    , applyGrokAuthTokens
     , grokAuthStateFromJson
     , grokAuthStateToJson
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
+    , grokOAuthOptionsFromAuthJson
     , managedAuthSelectionId
     , nonEmptyText
     , openAIOAuthClientId
@@ -187,20 +189,80 @@ grokAuthStateToJson state = Aeson.object
     , "expires_at" .= state.grokExpiresAt
     ]
 
+-- | Patch rotated Grok tokens into an existing auth document, preserving the
+-- grok CLI's nested map and any profile fields around the token object.
+applyGrokAuthTokens :: GrokAuthState -> Aeson.Value -> Maybe Aeson.Value
+applyGrokAuthTokens state = \case
+    Aeson.Object object
+        | hasGrokAccessToken object ->
+            Just (Aeson.Object (updateGrokAuthObject state object))
+        | otherwise ->
+            let updated = KeyMap.map updateNested object
+            in if updated == object
+                then Nothing
+                else Just (Aeson.Object updated)
+    _ -> Nothing
+  where
+    updateNested = \case
+        Aeson.Object nestedObject | hasGrokAccessToken nestedObject ->
+            Aeson.Object (updateGrokAuthObject state nestedObject)
+        nested -> nested
+
+updateGrokAuthObject :: GrokAuthState -> Aeson.Object -> Aeson.Object
+updateGrokAuthObject state object =
+    insertOptional "expires_at" (Aeson.toJSON <$> state.grokExpiresAt)
+        . insertOptional "id_token" (Aeson.String <$> state.grokIdToken)
+        . insertOptional "refresh_token" (Aeson.String <$> state.grokRefreshToken)
+        . insertAccess
+        $ object
+  where
+    insertAccess current
+        | KeyMap.member keyKey current =
+            KeyMap.insert keyKey (Aeson.String state.grokAccessToken)
+                (if KeyMap.member accessKey current
+                    then KeyMap.insert accessKey
+                        (Aeson.String state.grokAccessToken) current
+                    else current)
+        | otherwise =
+            KeyMap.insert accessKey (Aeson.String state.grokAccessToken) current
+    insertOptional _ Nothing current = current
+    insertOptional name (Just value) current =
+        KeyMap.insert (Key.fromText name) value current
+    keyKey = Key.fromText "key"
+    accessKey = Key.fromText "access_token"
+
+-- | Build the xAI OAuth client used to refresh grok CLI / managed JSON.
+-- Nested grok CLI documents carry @oidc_client_id@ and optional team
+-- principal fields that must be echoed on refresh.
+grokOAuthOptionsFromAuthJson :: Text -> Text -> XAIAuth.OAuthOptions
+grokOAuthOptionsFromAuthJson defaultClientId raw =
+    case Aeson.decodeStrict (TextEncoding.encodeUtf8 raw) >>= authObject of
+        Nothing -> XAIAuth.defaultOAuthOptions defaultClientId
+        Just object ->
+            let clientId =
+                    fromMaybe defaultClientId
+                        (textField "oidc_client_id" object)
+                options = XAIAuth.defaultOAuthOptions clientId
+            in options
+                { XAIAuth.principalType = textField "principal_type" object
+                , XAIAuth.principalId = textField "principal_id" object
+                }
+
 authObject :: Aeson.Value -> Maybe Aeson.Object
 authObject = \case
     Aeson.Object object
-        | hasAccessToken object -> Just object
+        | hasGrokAccessToken object -> Just object
         | otherwise ->
             listToMaybe
                 [ nestedObject
                 | Aeson.Object nestedObject <- KeyMap.elems object
-                , hasAccessToken nestedObject
+                , hasGrokAccessToken nestedObject
                 ]
     _ -> Nothing
-  where
-    hasAccessToken object =
-        isJust (textField "key" object <|> textField "access_token" object)
+
+hasGrokAccessToken :: Aeson.Object -> Bool
+hasGrokAccessToken object =
+    isJust (textField "key" object <|> textField "access_token" object)
 
 utcTimeField :: Text -> Aeson.Object -> Maybe UTCTime
 utcTimeField name object =

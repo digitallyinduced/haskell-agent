@@ -602,6 +602,73 @@ spec = do
             let state = testAuthState "access" "refresh"
             openAiAuthStateChanged state state `shouldBe` False
 
+    describe "applyGrokAuthTokens" do
+        it "updates grok CLI nested key/refresh fields without dropping profile data" do
+            let expiresAt = addUTCTime 3600 epoch
+                original = Aeson.object
+                    [ "https://auth.x.ai::cli-id" .= Aeson.object
+                        [ "auth_mode" .= ("oidc" :: Text)
+                        , "email" .= ("marc@example.com" :: Text)
+                        , "key" .= ("stale" :: Text)
+                        , "oidc_client_id" .= ("cli-id" :: Text)
+                        , "principal_id" .= ("user-1" :: Text)
+                        , "principal_type" .= ("user" :: Text)
+                        , "refresh_token" .= ("refresh-old" :: Text)
+                        ]
+                    ]
+                state = GrokAuthState
+                    "fresh" (Just "refresh-new") (Just "id-new") (Just expiresAt)
+            case applyGrokAuthTokens state original of
+                Nothing -> expectationFailure "expected patched grok CLI JSON"
+                Just patched ->
+                    case grokAuthStateFromJson epoch
+                        (TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode patched))) of
+                        Nothing ->
+                            expectationFailure "expected patched Grok auth state"
+                        Just parsed -> do
+                            parsed.grokAccessToken `shouldBe` "fresh"
+                            parsed.grokRefreshToken `shouldBe` Just "refresh-new"
+                            grokEmailFromAuthJson
+                                (TextEncoding.decodeUtf8
+                                    (LBS.toStrict (Aeson.encode patched)))
+                                `shouldBe` Just "marc@example.com"
+                            grokOAuthOptionsFromAuthJson "default"
+                                (TextEncoding.decodeUtf8
+                                    (LBS.toStrict (Aeson.encode patched)))
+                                `shouldSatisfy` \options ->
+                                    options.clientId == "cli-id"
+                                        && options.principalType == Just "user"
+                                        && options.principalId == Just "user-1"
+
+        it "updates a flat access_token document" do
+            let original = Aeson.object
+                    [ "access_token" .= ("stale" :: Text)
+                    , "refresh_token" .= ("refresh-old" :: Text)
+                    ]
+                state = GrokAuthState "fresh" (Just "refresh-new") Nothing Nothing
+            applyGrokAuthTokens state original
+                `shouldBe` Just
+                    (Aeson.object
+                        [ "access_token" .= ("fresh" :: Text)
+                        , "refresh_token" .= ("refresh-new" :: Text)
+                        ])
+
+    describe "grokNeedsRefresh" do
+        it "refreshes tokens at or inside the 10-minute skew" do
+            grokNeedsRefresh epoch
+                (GrokAuthState "tok" (Just "refresh") Nothing
+                    (Just (addUTCTime 600 epoch)))
+                `shouldBe` True
+            grokNeedsRefresh epoch
+                (GrokAuthState "tok" (Just "refresh") Nothing
+                    (Just (addUTCTime 601 epoch)))
+                `shouldBe` False
+
+        it "does not refresh when expiry is unknown" do
+            grokNeedsRefresh epoch
+                (GrokAuthState "tok" (Just "refresh") Nothing Nothing)
+                `shouldBe` False
+
     describe "grokCredentialFromAuthJson" do
         it "accepts a plain access_token object or a nested grok CLI map" do
             grokCredentialFromAuthJson "{\"access_token\":\"abc\"}"
@@ -703,6 +770,135 @@ spec = do
                 getNextToken provider Nothing `shouldReturn`
                     Right adoptedManagedGrok
                 readIORef refreshes `shouldReturn` 0
+
+    describe "externalGrokTokenProvider" do
+        it "refreshes an expiring grok CLI file and preserves nested profile fields" $
+            withTempHome \home -> do
+                now <- getCurrentTime
+                let path = grokAuthPath home
+                    original = nestedGrokAuthJson "stale" "refresh-old"
+                        (Just (addUTCTime (-1) now))
+                writeGrokAuthFile home original
+                refreshes <- newIORef (0 :: Int)
+                let loaded = ExternalGrokLoaded
+                        { grokSelectionId = "file"
+                        , grokState = expiringGrokState now
+                        , grokSource = GrokSourceFile path
+                        , grokRawJson = Just original
+                        }
+                    refresh refreshToken = do
+                        refreshToken `shouldBe` "refresh-old"
+                        modifyIORef' refreshes (+ 1)
+                        pure (Right refreshedGrokTokens)
+                provider <- externalGrokTokenProvider loaded refresh
+                getNextToken provider Nothing `shouldReturn`
+                    Right (grokCredentialFor "fresh")
+                getNextToken provider Nothing `shouldReturn`
+                    Right (grokCredentialFor "fresh")
+                readIORef refreshes `shouldReturn` 1
+                persisted <- LBS.readFile (toFilePath path)
+                grokAuthStateFromJson now
+                    (TextEncoding.decodeUtf8 (LBS.toStrict persisted))
+                    `shouldSatisfy` \case
+                        Just state ->
+                            state.grokAccessToken == "fresh"
+                                && state.grokRefreshToken == Just "refresh-new"
+                        Nothing -> False
+                grokEmailFromAuthJson
+                    (TextEncoding.decodeUtf8 (LBS.toStrict persisted))
+                    `shouldBe` Just "marc@example.com"
+
+        it "force-refreshes an unexpired file after auth rejection" $
+            withTempHome \home -> do
+                now <- getCurrentTime
+                let path = grokAuthPath home
+                    original = nestedGrokAuthJson "stale" "refresh-old"
+                        (Just (addUTCTime 3600 now))
+                    loaded = ExternalGrokLoaded
+                        { grokSelectionId = "file"
+                        , grokState = unexpiredGrokState now
+                        , grokSource = GrokSourceFile path
+                        , grokRawJson = Just original
+                        }
+                writeGrokAuthFile home original
+                provider <- externalGrokTokenProvider loaded
+                    (const (pure (Right refreshedGrokTokens)))
+                getNextToken provider
+                    (Just
+                        (FailedCredential
+                            staleGrok
+                            AccountAuthenticationRejected
+                            testAuthenticationReason))
+                    `shouldReturn` Right (grokCredentialFor "fresh")
+
+        it "adopts a token rotated on disk without refreshing" $
+            withTempHome \home -> do
+                now <- getCurrentTime
+                refreshes <- newIORef (0 :: Int)
+                let path = grokAuthPath home
+                    stale = nestedGrokAuthJson "stale" "refresh-old"
+                        (Just (addUTCTime (-1) now))
+                    current = nestedGrokAuthJson "adopted" "refresh-adopted"
+                        (Just (addUTCTime 3600 now))
+                    loaded = ExternalGrokLoaded
+                        { grokSelectionId = "file"
+                        , grokState = expiringGrokState now
+                        , grokSource = GrokSourceFile path
+                        , grokRawJson = Just stale
+                        }
+                    refresh _ = do
+                        modifyIORef' refreshes (+ 1)
+                        pure (Right refreshedGrokTokens)
+                writeGrokAuthFile home current
+                provider <- externalGrokTokenProvider loaded refresh
+                getNextToken provider Nothing `shouldReturn`
+                    Right (grokCredentialFor "adopted")
+                readIORef refreshes `shouldReturn` 0
+
+        it "fails closed when an expired file has no refresh token" $
+            withTempHome \home -> do
+                now <- getCurrentTime
+                let path = grokAuthPath home
+                    expiresAt = addUTCTime (-1) now
+                    raw = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+                        Aeson.object
+                            [ "access_token" .= ("stale" :: Text)
+                            , "expires_at" .= expiresAt
+                            ]
+                    state = GrokAuthState "stale" Nothing Nothing (Just expiresAt)
+                    loaded = ExternalGrokLoaded
+                        { grokSelectionId = "file"
+                        , grokState = state
+                        , grokSource = GrokSourceFile path
+                        , grokRawJson = Just raw
+                        }
+                writeGrokAuthFile home raw
+                provider <- externalGrokTokenProvider loaded
+                    (\_ -> expectationFailure "refresh should not run"
+                        >> fail "refresh")
+                result <- getNextToken provider Nothing
+                case result of
+                    Left (CredentialError message) ->
+                        Text.unpack message `shouldContain` "no refresh token"
+                    other ->
+                        expectationFailure
+                            ("expected CredentialError, got " <> show other)
+
+    describe "refreshGrokLoginPayload" do
+        it "returns a still-valid grok CLI file without contacting xAI" $
+            withTempHome \home -> do
+                now <- getCurrentTime
+                let path = grokAuthPath home
+                    payload = nestedGrokAuthJson "live" "refresh-live"
+                        (Just (addUTCTime 3600 now))
+                writeGrokAuthFile home payload
+                refreshGrokLoginPayload Nothing (Just path) payload >>= \case
+                    Left err ->
+                        expectationFailure ("expected live payload, got " <> show err)
+                    Right (state, returned) -> do
+                        state.grokAccessToken `shouldBe` "live"
+                        grokNeedsRefresh now state `shouldBe` False
+                        returned `shouldBe` payload
 
     describe "staticCredentialProvider" do
         it "preserves rate-limit cooldowns for managed bearer tokens" do
@@ -1069,6 +1265,39 @@ refreshedGrokTokens =
 freshManagedGrok :: Credential
 freshManagedGrok =
     Credential "fresh" "account" Nothing XAIProvider
+
+grokCredentialFor :: Text -> Credential
+grokCredentialFor token =
+    Credential token "grok" Nothing XAIProvider
+
+grokAuthPath :: OsPath -> OsPath
+grokAuthPath home =
+    fromFilePath (toFilePath home </> ".grok" </> "auth.json")
+
+writeGrokAuthFile :: OsPath -> Text -> IO ()
+writeGrokAuthFile home raw = do
+    createDirectoryIfMissing True (toFilePath home </> ".grok")
+    LBS.writeFile
+        (toFilePath home </> ".grok" </> "auth.json")
+        (LBS.fromStrict (TextEncoding.encodeUtf8 raw))
+
+nestedGrokAuthJson :: Text -> Text -> Maybe UTCTime -> Text
+nestedGrokAuthJson token refresh expiresAt =
+    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $
+        Aeson.object
+            [ "https://auth.x.ai::cli-id" .= Aeson.object
+                ( [ "auth_mode" .= ("oidc" :: Text)
+                  , "email" .= ("marc@example.com" :: Text)
+                  , "key" .= token
+                  , "oidc_client_id" .= ("cli-id" :: Text)
+                  , "refresh_token" .= refresh
+                  ]
+                    <> maybe
+                        []
+                        (\time -> ["expires_at" .= time])
+                        expiresAt
+                )
+            ]
 
 testAuthState :: Text -> Text -> AuthState
 testAuthState access refresh =
