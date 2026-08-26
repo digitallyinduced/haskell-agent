@@ -608,7 +608,7 @@ updateFunctionCallArguments
 updateFunctionCallArguments outputIndex itemId updateArgs state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . updateProgress)
                 outputIndex
                 state.outputItems

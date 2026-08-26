@@ -99,7 +99,7 @@ import Data.IORef
     , writeIORef
     )
 import Data.List (find)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
