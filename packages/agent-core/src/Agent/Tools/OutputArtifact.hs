@@ -5,9 +5,7 @@ module Agent.Tools.OutputArtifact
     ( OutputArtifact(..)
     , OutputArtifactWriter
     , artifactTools
-    , outputArtifactTools
     , finalizeToolOutput
-    , finalizeOutputArtifact
     , boundedPreview
     , OutputArtifactMetadata(..)
     , outputArtifactMetadata
@@ -139,15 +137,6 @@ artifactTools env analysis =
                         Left err -> pure (Left err)
                         Right () -> spawn call handle instruction))
         ]) analysis
-
-outputArtifactTools
-    :: ToolEnv
-    -> Maybe (Text -> Text -> IO (Either Text Text))
-    -> [AppTool]
-outputArtifactTools env callback =
-    artifactTools env
-        (fmap (\spawn _call handle instruction -> spawn handle instruction)
-            callback)
 
 data ReadArgs = ReadArgs
     { handle :: Text
@@ -470,9 +459,6 @@ boundedPreview cap text
         | BS.length (Encoding.encodeUtf8 value) <= cap = value
         | Text.null value = ""
         | otherwise = fit (Text.dropEnd 1 value)
-
-finalizeOutputArtifact :: ToolEnv -> ToolCall -> Text -> IO Text
-finalizeOutputArtifact = finalizeToolOutput
 
 boundResult :: Text -> Text
 boundResult result
