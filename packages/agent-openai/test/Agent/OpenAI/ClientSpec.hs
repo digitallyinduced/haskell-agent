@@ -80,6 +80,24 @@ spec = do
                     ])
             rejectFailedCodexResponse response `shouldBe` Right response
 
+        it "keeps an incomplete response that already contains reasoning" do
+            let response = decodeResponse (Aeson.object
+                    [ "id" .= ("response-id" :: Text)
+                    , "created_at" .= (0 :: Int)
+                    , "model" .= ("gpt-5.6-sol" :: Text)
+                    , "status" .= ("incomplete" :: Text)
+                    , "incomplete_details" .= Aeson.object
+                        [ "reason" .= ("max_output_tokens" :: Text) ]
+                    , "output" .=
+                        [ Aeson.object
+                            [ "type" .= ("reasoning" :: Text)
+                            , "id" .= ("rs-1" :: Text)
+                            , "summary" .= ([] :: [Aeson.Value])
+                            ]
+                        ]
+                    ])
+            rejectFailedCodexResponse response `shouldBe` Right response
+
     describe "retryTransientCodexResultWithPolicy" do
         it "retries ordinary Left overloads before returning success" do
             let overload = ProviderError OverloadedError "server_is_overloaded" Nothing
@@ -142,6 +160,34 @@ spec = do
                 (ProviderError ApiErrorType
                     "response.incomplete: max_output_tokens"
                     Nothing)
+
+        it "reads function-call arguments from SSE deltas when completed output is empty" do
+            let body = Text.concat
+                    [ "event: response.output_item.added\n"
+                    , "data: {\"output_index\":0,\"item\":"
+                    , "{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"\"}"
+                    , "}\n\n"
+                    , "event: response.function_call_arguments.done\n"
+                    , "data: {\"item_id\":\"fc-1\",\"output_index\":0,\"name\":\"read_file\",\"arguments\":\"{\\\"target_file\\\":\\\"README.md\\\"}\"}\n\n"
+                    , "event: response.completed\n"
+                    , "data: "
+                    , Text.decodeUtf8 (LBS.toStrict (Aeson.encode (Aeson.object
+                        [ "response" .= Aeson.object
+                            [ "id" .= ("resp-args" :: Text)
+                            , "created_at" .= (0 :: Int)
+                            , "model" .= ("gpt-test" :: Text)
+                            , "status" .= ("completed" :: Text)
+                            , "output" .= ([] :: [Aeson.Value])
+                            ]
+                        ])))
+                    , "\n\n"
+                    ]
+            case decodeCodexHttpBody body of
+                Right response -> do
+                    response.responseId `shouldBe` "resp-args"
+                    [(name, arguments) | FunctionCallItem FunctionCall { name, arguments } <- response.output]
+                        `shouldBe` [("read_file", "{\"target_file\":\"README.md\"}")]
+                Left err -> expectationFailure ("expected response, got " <> show err)
 
         it "reads an incomplete SSE response that already contains a function call" do
             let body = Text.concat

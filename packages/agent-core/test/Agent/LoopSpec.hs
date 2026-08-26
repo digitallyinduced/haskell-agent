@@ -1268,6 +1268,113 @@ spec = describe "runLoop" do
             , tokenUsage = TokenUsage 22 10 2
             }
 
+    it "continues after a reasoning-only completion until the model answers" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "done"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        seen `shouldBe`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [])
+            ]
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-1" [] Nothing)
+            , TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-2" [] (Just "done"))
+            ]
+
+    it "continues after whitespace-only assistant text" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] (Just "  \n")
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "done"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        seen `shouldBe`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [])
+            ]
+
+    it "can call tools after a reasoning-only continuation" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-3" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-3"
+            , finalText = Just "done"
+            , turnsUsed = 3
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [ (Nothing, [UserMessage "hello"])
+                , (Just "resp-1", [])
+                , (Just "resp-2", [CompletedTool echoed])
+                ] ->
+                    echoed.output `shouldBe` "echo:hi"
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "stops after repeated empty completions and warns" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] Nothing
+            , Right $ emptyTurnOutput "resp-3" [] Nothing
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-3"
+            , finalText = Nothing
+            , turnsUsed = 3
+            , tokenUsage = emptyTokenUsage
+            }
+        length <$> readIORef submissions `shouldReturn` 3
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-1" [] Nothing)
+            , TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-2" [] Nothing)
+            , TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-3" [] Nothing)
+            , WarningRaised
+                "The model produced no assistant text or tool calls after reasoning; stopping."
+            ]
+
     it "injects pending steering at the next committed model boundary" do
         submissions <- newIORef []
         pending <- newIORef []

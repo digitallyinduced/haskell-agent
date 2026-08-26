@@ -325,6 +325,59 @@ spec = do
         readIORef completeCount `shouldReturn` 1
         readIORef invalidations `shouldReturn` []
 
+    it "keeps an incomplete response that already contains reasoning" do
+        frames <- newIORef
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("reasoning" :: Text)
+                    , "id" Aeson..= ("rs-1" :: Text)
+                    , "summary" Aeson..= ([] :: [Aeson.Value])
+                    ]
+                ]
+            , lifecycleFrame "response.incomplete"
+                (Aeson.object
+                    [ "incomplete_details" Aeson..= Aeson.object
+                        [ "reason" Aeson..=
+                            ("max_output_tokens" :: Text)
+                        ]
+                    ])
+            ]
+        receiveCount <- newIORef (0 :: Int)
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        callbackTypes <- newIORef ([] :: [StreamEventType])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = do
+                    modifyIORef' receiveCount (+ 1)
+                    atomicModifyIORef' frames \case
+                        frame : rest -> (rest, Right frame)
+                        [] -> error "unexpected receive after terminal event"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+            onEvent event =
+                modifyIORef' callbackTypes
+                    (<> [responseStreamEventType event])
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions onEvent
+
+        case result of
+            Right response -> do
+                response.responseId `shouldBe` "resp-test"
+                response.status `shouldBe` ResponseIncomplete
+                [itemId | ReasoningItemValue ReasoningItem { itemId } <- response.output]
+                    `shouldBe` [Just "rs-1"]
+            other -> expectationFailure ("expected incomplete response, got " <> show other)
+        readIORef callbackTypes `shouldReturn`
+            [EventResponseCreated, EventOutputItemDone, EventResponseIncomplete]
+        readIORef completeCount `shouldReturn` 1
+        readIORef invalidations `shouldReturn` []
+
     it "recovers assembled tool calls when the socket dies after output_item.done" do
         remaining <- newIORef
             [ Right $ lifecycleFrame "response.created"
