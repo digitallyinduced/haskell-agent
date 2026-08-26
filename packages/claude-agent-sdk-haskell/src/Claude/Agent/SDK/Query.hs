@@ -2,15 +2,21 @@
 -- top-level @query()@ API.
 module Claude.Agent.SDK.Query
     ( query
+    , queryWithProgress
     , queryContent
+    , queryContentWithProgress
     , queryClient
     , queryClientContent
     , queryTurn
+    , queryTurnWithProgress
     , queryTurnContent
+    , queryTurnContentWithProgress
     , queryTurnWithMessageValidator
     , queryTurnContentWithMessageValidator
+    , queryTurnContentWithMessageValidatorAndProgress
     , receiveResponse
     , receiveResponseWithMessageValidator
+    , receiveResponseWithMessageValidatorAndProgress
     ) where
 
 import Claude.Agent.SDK.Client
@@ -32,14 +38,16 @@ import Claude.Agent.SDK.Errors
     )
 import Claude.Agent.SDK.Internal.Query
     ( QueryAccumulator
-    , consumeQueryMessage
+    , consumeQueryMessageWithProgress
     , emptyQueryAccumulator
     )
 import Claude.Agent.SDK.Types
     ( ClaudeAgentOptions(..)
     , Message
+    , QueryProgress(..)
     , ResultMessage(..)
     , UserContentBlock(..)
+    , messageSessionId
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -55,6 +63,33 @@ query
 query options prompt onMessage =
     queryContent options [UserTextBlock prompt] onMessage
 
+queryWithProgress
+    :: ClaudeAgentOptions
+    -> Text
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryWithProgress options prompt onProgress onMessage =
+    queryContentWithProgress
+        options
+        [UserTextBlock prompt]
+        onProgress
+        onMessage
+
+queryTurnContentWithProgress
+    :: ClaudeSDKTurn
+    -> [UserContentBlock]
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryTurnContentWithProgress turn content onProgress onMessage =
+    queryTurnContentWithMessageValidatorAndProgress
+        turn
+        content
+        (const (pure (Right ())))
+        onProgress
+        onMessage
+
 -- | Run a self-contained query with structured user content.
 queryContent
     :: ClaudeAgentOptions
@@ -62,6 +97,19 @@ queryContent
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryContent options content onMessage =
+    queryContentWithProgress
+        options
+        content
+        (const (pure ()))
+        onMessage
+
+queryContentWithProgress
+    :: ClaudeAgentOptions
+    -> [UserContentBlock]
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryContentWithProgress options content onProgress onMessage =
     withClaudeSDKClient options \client ->
         withClaudeSDKTurn
             client
@@ -70,7 +118,12 @@ queryContent options content onMessage =
             options.model
             options.effort
             \turn -> do
-                result <- queryTurnContent turn content onMessage
+                result <-
+                    queryTurnContentWithProgress
+                        turn
+                        content
+                        onProgress
+                        onMessage
                 pure ((, pure ()) <$> result)
 
 -- | Submit a prompt through a persistent client and continue its active
@@ -113,6 +166,19 @@ queryTurn
 queryTurn turn prompt onMessage =
     queryTurnContent turn [UserTextBlock prompt] onMessage
 
+queryTurnWithProgress
+    :: ClaudeSDKTurn
+    -> Text
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryTurnWithProgress turn prompt onProgress onMessage =
+    queryTurnContentWithProgress
+        turn
+        [UserTextBlock prompt]
+        onProgress
+        onMessage
+
 -- | Submit structured user content and receive one complete response.
 queryTurnContent
     :: ClaudeSDKTurn
@@ -145,6 +211,26 @@ queryTurnContentWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
+    queryTurnContentWithMessageValidatorAndProgress
+        turn
+        content
+        validateMessage
+        (const (pure ()))
+        onMessage
+
+-- | Like 'queryTurnContentWithMessageValidator', with a live observer that
+-- runs after query routing and canonicalization state updates. It sees only
+-- records belonging to the submitted human turn; autonomous/background
+-- records remain hidden.
+queryTurnContentWithMessageValidatorAndProgress
+    :: ClaudeSDKTurn
+    -> [UserContentBlock]
+    -> (Message -> IO (Either ClaudeSDKError ()))
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+queryTurnContentWithMessageValidatorAndProgress
+    turn content validateMessage onProgress onMessage = do
     completed <-
         timeout
             (max 1 (turnTimeoutMicros turn))
@@ -152,9 +238,10 @@ queryTurnContentWithMessageValidator turn content validateMessage onMessage = do
                 sendQueryContent turn content >>= \case
                     Left err -> pure (Left err)
                     Right () ->
-                        receiveResponseWithMessageValidator
+                        receiveResponseWithMessageValidatorAndProgress
                             turn
                             validateMessage
+                            onProgress
                             onMessage
     case completed of
         Nothing ->
@@ -183,6 +270,21 @@ receiveResponseWithMessageValidator
     -> (Message -> IO ())
     -> IO (Either ClaudeSDKError ResultMessage)
 receiveResponseWithMessageValidator turn validateMessage onMessage =
+    receiveResponseWithMessageValidatorAndProgress
+        turn
+        validateMessage
+        (const (pure ()))
+        onMessage
+
+-- | Receive a response with classified live query progress.
+receiveResponseWithMessageValidatorAndProgress
+    :: ClaudeSDKTurn
+    -> (Message -> IO (Either ClaudeSDKError ()))
+    -> (QueryProgress -> IO ())
+    -> (Message -> IO ())
+    -> IO (Either ClaudeSDKError ResultMessage)
+receiveResponseWithMessageValidatorAndProgress
+    turn validateMessage onProgress onMessage =
     go emptyQueryAccumulator False
   where
     go
@@ -218,12 +320,22 @@ receiveResponseWithMessageValidator turn validateMessage onMessage =
                     Left err ->
                         pure (Left err)
                     Right () ->
-                        case consumeQueryMessage accumulator message of
+                        case
+                            consumeQueryMessageWithProgress
+                                accumulator
+                                message
+                        of
                             Left err ->
                                 pure (Left err)
-                            Right (nextAccumulator, Nothing) ->
-                                go nextAccumulator True
-                            Right (_, Just (messages, result)) -> do
+                            Right (nextAccumulator, progress, Nothing) -> do
+                                validatedProgress <-
+                                    validateProgressSessions turn progress
+                                case validatedProgress of
+                                    Left err -> pure (Left err)
+                                    Right () -> do
+                                        mapM_ onProgress progress
+                                        go nextAccumulator True
+                            Right (_, progress, Just (messages, result)) -> do
                                 accepted <-
                                     acceptTurnSessionId
                                         turn
@@ -232,8 +344,26 @@ receiveResponseWithMessageValidator turn validateMessage onMessage =
                                     Left err ->
                                         pure (Left err)
                                     Right () -> do
+                                        mapM_ onProgress progress
                                         mapM_ onMessage messages
                                         pure (Right result)
+
+validateProgressSessions
+    :: ClaudeSDKTurn
+    -> [QueryProgress]
+    -> IO (Either ClaudeSDKError ())
+validateProgressSessions turn =
+    go
+  where
+    go [] = pure (Right ())
+    go (progress : rest) =
+        case progress of
+            QueryMessageObserved _ message
+                | Just sessionId <- messageSessionId message ->
+                    acceptTurnSessionId turn sessionId >>= \case
+                        Left err -> pure (Left err)
+                        Right () -> go rest
+            _ -> go rest
 
 timeoutError :: ClaudeSDKTurn -> Text -> IO ClaudeSDKError
 timeoutError turn reason = do

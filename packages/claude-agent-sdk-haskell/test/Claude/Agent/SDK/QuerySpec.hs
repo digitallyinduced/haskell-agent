@@ -209,6 +209,126 @@ spec = describe "query" do
         show messages `shouldNotContain` "background answer"
         show messages `shouldNotContain` "background tool output"
 
+    it "classifies live own and nested records while hiding foreign turns" do
+        let topTool =
+                "{\"type\":\"assistant\",\"uuid\":\"top-tool\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"message\":{\"content\":[{\"type\":\"tool_use\",\
+                \\"id\":\"agent-tool\",\"name\":\"Agent\",\"input\":{}}]}}"
+            nestedText =
+                "{\"type\":\"assistant\",\"uuid\":\"nested-text\",\
+                \\"parent_tool_use_id\":\"agent-tool\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"message\":{\"content\":[{\"type\":\"text\",\
+                \\"text\":\"child progress\"}]}}"
+            nestedResult =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
+                \\"uuid\":\"nested-result\",\
+                \\"parent_tool_use_id\":\"agent-tool\",\
+                \\"result\":\"child complete\"}"
+            backgroundUser =
+                "{\"type\":\"user\",\"uuid\":\"background-user\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"origin\":{\"kind\":\"task_notification\"},\
+                \\"message\":{\"role\":\"user\",\"content\":\"background\"}}"
+            backgroundAssistant =
+                "{\"type\":\"assistant\",\"uuid\":\"background-assistant\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"message\":{\"content\":[{\"type\":\"text\",\
+                \\"text\":\"must stay hidden\"}]}}"
+            backgroundResult =
+                "{\"type\":\"result\",\"subtype\":\"success\",\
+                \\"is_error\":false,\"session_id\":\"" <> testSessionId <> "\",\
+                \\"uuid\":\"background-result\",\
+                \\"origin\":{\"kind\":\"task_notification\"}}"
+        (result, progress) <- runQueryProgress
+            [ topTool
+            , nestedText
+            , nestedResult
+            , backgroundUser
+            , backgroundAssistant
+            , backgroundResult
+            , successResult testSessionId
+            ]
+
+        _ <- expectRight result
+        progress `shouldSatisfy` any \case
+            QueryMessageObserved QueryTopLevel message ->
+                messageUuid message == Just "top-tool"
+            _ -> False
+        progress `shouldSatisfy` any \case
+            QueryMessageObserved
+                (QueryNested (Just "agent-tool"))
+                message ->
+                    messageUuid message == Just "nested-text"
+            _ -> False
+        progress `shouldSatisfy` any \case
+            QueryMessageObserved
+                (QueryNested (Just "agent-tool"))
+                message ->
+                    messageUuid message == Just "nested-result"
+            _ -> False
+        show progress `shouldNotContain` "must stay hidden"
+        show progress `shouldNotContain` "background-result"
+
+    it "reports scoped and global retractions before replacement records" do
+        let replacement =
+                "{\"type\":\"assistant\",\"uuid\":\"replacement\",\
+                \\"supersedes\":[\"old\"],\"session_id\":\""
+                    <> testSessionId
+                    <> "\",\"message\":{\"content\":[{\"type\":\"text\",\
+                    \\"text\":\"new\"}]}}"
+            fallback =
+                "{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\
+                \\"session_id\":\"" <> testSessionId <> "\",\
+                \\"uuid\":\"fallback\",\
+                \\"retracted_message_uuids\":[\"replacement\"]}"
+        (result, progress) <- runQueryProgress
+            [ assistantLine "old" "old"
+            , replacement
+            , fallback
+            , successResult testSessionId
+            ]
+
+        _ <- expectRight result
+        map progressTag progress `shouldBe`
+            [ "message:old"
+            , "retract:top:old"
+            , "message:replacement"
+            , "retract:global:replacement"
+            , "message:fallback"
+            ]
+
+    it "deduplicates live progress by UUID without changing canonical output" do
+        (result, progress) <- runQueryProgress
+            [ assistantLine "same" "first"
+            , assistantLine "same" "duplicate"
+            , successResult testSessionId
+            ]
+
+        _ <- expectRight result
+        filter (Text.isInfixOf "message:same" . progressTag) progress
+            `shouldSatisfy` \case
+                [_] -> True
+                _ -> False
+
+    it "rejects a mismatched live message before exposing progress" do
+        let wrongSession =
+                "{\"type\":\"assistant\",\"uuid\":\"wrong-session\",\
+                \\"session_id\":\"123e4567-e89b-42d3-a456-426614174999\",\
+                \\"message\":{\"content\":[{\"type\":\"tool_use\",\
+                \\"id\":\"agent-tool\",\"name\":\"Agent\",\"input\":{}}]}}"
+        (result, progress) <- runQueryProgress
+            [wrongSession, successResult testSessionId]
+
+        result `shouldSatisfy` \case
+            Left (CLIProtocolError message) ->
+                "while 123e4567-e89b-42d3-a456-426614174000 was active"
+                    `Text.isInfixOf` message
+            _ -> False
+        progress `shouldBe` []
+
     it "treats an origin-less result as the human result for compatibility" do
         (result, messages) <- runQueryLines
             [ "{\"type\":\"user\",\"uuid\":\"background-user\",\
@@ -466,6 +586,34 @@ runQueryLines linesToEmit =
                     modifyIORef' messagesRef (<> [message]))
         messages <- readIORef messagesRef
         pure (result, messages)
+
+runQueryProgress
+    :: [Text]
+    -> IO (Either ClaudeSDKError ResultMessage, [QueryProgress])
+runQueryProgress linesToEmit =
+    withFakeClaude (oneShotScript linesToEmit) \directory executable -> do
+        progressRef <- newIORef []
+        result <-
+            queryWithProgress
+                (testOptions executable directory)
+                "hello"
+                (\progress ->
+                    modifyIORef' progressRef (<> [progress]))
+                (\_ -> pure ())
+        progress <- readIORef progressRef
+        pure (result, progress)
+
+progressTag :: QueryProgress -> Text
+progressTag = \case
+    QueryMessageObserved _ message ->
+        "message:" <> maybe "anonymous" id (messageUuid message)
+    QueryMessagesRetracted scope identifiers ->
+        "retract:" <> scopeTag scope <> ":" <> Text.intercalate "," identifiers
+  where
+    scopeTag = \case
+        Nothing -> "global"
+        Just QueryTopLevel -> "top"
+        Just QueryNested{} -> "nested"
 
 canonicalResponseLines :: [Text]
 canonicalResponseLines =
