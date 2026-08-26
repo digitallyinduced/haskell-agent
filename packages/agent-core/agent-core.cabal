@@ -80,6 +80,7 @@ library
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
+                    , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src
@@ -142,6 +143,7 @@ benchmark tool-scheduling-bench
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
                     , base >= 4.14 && < 5
+                    , filepath
                     , text
 
 benchmark loop-events-bench

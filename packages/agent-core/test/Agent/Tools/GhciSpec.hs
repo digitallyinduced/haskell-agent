@@ -2,7 +2,9 @@ module Agent.Tools.GhciSpec (spec) where
 
 import Agent.Cancel (requestCancel, resetCancel)
 import System.OsPath (decodeUtf, unsafeEncodeUtf)
-import Agent.Tools.Types (defaultToolEnv)
+import Agent.ToolDispatch (functionToolCall)
+import Agent.Tools.FileSystem.Grep (grepTool)
+import Agent.Tools.Scheduling (schedulingPlansConflict)
 import Agent.Tools.Ghci
     ( GhciClass(..)
     , GhciOutcome(..)
@@ -14,10 +16,16 @@ import Agent.Tools.Ghci
     , defaultGhciExtensions
     , evalGhci
     , newGhciSession
+    , runGhciTool
     , suspendGhciSession
     , typeLooksEffectful
     )
-import Agent.Tools.Types (ToolEnv(..))
+import Agent.Tools.Types
+    ( ToolEnv(..)
+    , defaultToolEnv
+    , mkToolRegistry
+    , toolSchedulingPlanFor
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently, wait, withAsync)
 import Control.Exception.Safe (SomeException, bracket, try)
@@ -55,6 +63,38 @@ spec = describe "Agent.Tools.Ghci" do
             typeLooksEffectful "1 + 1 :: Num a => a" `shouldBe` False
             typeLooksEffectful "id :: a -> a" `shouldBe` False
             typeLooksEffectful "getLine :: IO String" `shouldBe` True
+
+    describe "scheduling" do
+        it "lets statically pure GHCi overlap filesystem reads" do
+            withTempEnv \env ->
+                bracket (newGhciSession env) closeGhciSession \ghci -> do
+                    let registry =
+                            either (error . Text.unpack) id $
+                                mkToolRegistry [runGhciTool ghci, grepTool env]
+                        pureCall =
+                            functionToolCall
+                                "gh1"
+                                "run_ghci"
+                                "{\"expression\":\":type id\",\"description\":\"type\"}"
+                        otherPure =
+                            functionToolCall
+                                "gh2"
+                                "run_ghci"
+                                "{\"expression\":\":kind Maybe\",\"description\":\"kind\"}"
+                        effectful =
+                            functionToolCall
+                                "gh3"
+                                "run_ghci"
+                                "{\"expression\":\":reload\",\"description\":\"reload\"}"
+                        grepCall =
+                            functionToolCall "g1" "grep" "{\"pattern\":\"foo\"}"
+                    purePlan <- toolSchedulingPlanFor registry pureCall
+                    otherPlan <- toolSchedulingPlanFor registry otherPure
+                    effectPlan <- toolSchedulingPlanFor registry effectful
+                    grepPlan <- toolSchedulingPlanFor registry grepCall
+                    schedulingPlansConflict purePlan grepPlan `shouldBe` False
+                    schedulingPlansConflict purePlan otherPlan `shouldBe` True
+                    schedulingPlansConflict effectPlan grepPlan `shouldBe` True
 
     describe "defaultGhciExtensions" do
         it "covers the extra extensions this repo enables on top of GHC2021" do

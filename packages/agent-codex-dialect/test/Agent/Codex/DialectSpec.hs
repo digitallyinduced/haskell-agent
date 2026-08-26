@@ -81,8 +81,9 @@ spec = describe "Codex dialect" do
             , "sed -n '1,80p' src/Main.hs"
             , "git diff -- src/Main.hs"
             , "gh pr view 123 --json statusCheckRollup"
+            , "uniq -c file.txt"
             ]
-            `shouldBe` replicate 4 True
+            `shouldBe` replicate 5 True
         map shellCommandIsReadOnly
             [ "git status --short"
             , "git fetch origin"
@@ -93,8 +94,9 @@ spec = describe "Codex dialect" do
             , "find . -delete"
             , "sed -n '/pattern/w output' src/Main.hs"
             , "git diff --output=copy"
+            , "uniq input.txt output.txt"
             ]
-            `shouldBe` replicate 9 False
+            `shouldBe` replicate 10 False
 
     it "derives disjoint apply_patch resources from patch paths" do
         withTempDir \dir -> do

@@ -2,9 +2,20 @@ module Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool) where
 
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedStreamingTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedStreamingTool
+    )
 import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
 import Agent.GrokBuild.Dialect.Common (jsonTool, optionalTimeout, stripAnsi)
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
+import Agent.Tools.ShellReadOnly (shellCommandIsReadOnly)
 import Agent.GrokBuild.Dialect.Shell
     ( GrokSession
     , hasUnwaitedBackgroundOp
@@ -18,6 +29,7 @@ import Agent.Tools.IO
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
+    , withToolResourceClaims
     )
 import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
@@ -39,7 +51,9 @@ instance FromJSON TerminalArgs where
         <*> (fromMaybe False <$> optBool object "background")
 
 runTerminalCmdTool :: GrokSession -> AppTool
-runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
+runTerminalCmdTool session =
+    withToolResourceClaims terminalResourceClaims $
+    jsonTool "run_terminal_cmd" terminalDescription
     [ PropertySchema "command" PropertyString True $ Just
         "The bash command to run."
     , PropertySchema "timeout" PropertyInteger False $ Just
@@ -52,6 +66,24 @@ runTerminalCmdTool session = jsonTool "run_terminal_cmd" terminalDescription
     False
     TurnSequential
     (typedStreamingTool "run_terminal_cmd" (runTerminal session))
+
+terminalResourceClaims
+    :: ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+terminalResourceClaims call =
+    pure $ do
+        args <-
+            decodeToolArguments (toolArgumentsValue call.arguments)
+                :: Either Text TerminalArgs
+        if args.background
+            then Left "background terminal commands remain exclusive"
+            else if not (shellCommandIsReadOnly args.command)
+                then Left "shell command is not in the read-only allowlist"
+                else Right
+                    [ ToolResourceClaim
+                        ToolRead
+                        ToolAllPaths
+                    ]
 
 terminalDescription :: Text
 terminalDescription =
