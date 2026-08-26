@@ -119,6 +119,7 @@ benchmark session-history-paging-bench
                     , temporary
                     , text
                     , time
+                    , vector
 
 test-suite agent-store-test
     import:           common-opts

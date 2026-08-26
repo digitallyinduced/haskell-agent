@@ -1,7 +1,7 @@
 { mkDerivation, async, base, bytestring, containers, contravariant
 , directory, filelock, filepath, hasql, hasql-pool
 , hasql-transaction, hspec, lib, pqi-ffi, process, safe-exceptions
-, stm, temporary, text, time, unix, uuid-types
+, stm, temporary, text, time, unix, uuid-types, vector
 }:
 mkDerivation {
   pname = "agent-store";
@@ -18,7 +18,7 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [
     async base containers contravariant hasql safe-exceptions temporary
-    text time
+    text time vector
   ];
   description = "PostgreSQL persistence for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

@@ -25,6 +25,7 @@ import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
+import qualified Data.Vector as Vector
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
     ( RTSStats(..)
@@ -47,6 +48,8 @@ data Workload
     = FullTranscript
     | ActiveTranscript
     | RecentPage
+    | ListRows
+    | VectorRows
     deriving (Eq, Show)
 
 data Sample = Sample
@@ -119,7 +122,14 @@ runMatrix store turnCounts payloadBytes sampleCount = do
             turnCount
             activeTurns
             payloadBytes
-        forM_ [FullTranscript, ActiveTranscript, RecentPage] \workload -> do
+        forM_
+            [ FullTranscript
+            , ActiveTranscript
+            , RecentPage
+            , ListRows
+            , VectorRows
+            ]
+            \workload -> do
             _ <- measure (workloadAction store sessionKey workload)
             samples <- forM [1 .. sampleCount] \_ ->
                 measure (workloadAction store sessionKey workload)
@@ -206,6 +216,16 @@ workloadAction store sessionKey = \case
     RecentPage ->
         fmap (fmap checksumPage . joinMaybe "recent page") $
             loadRecentSessionTurns (trustedPool store) sessionKey 80
+    ListRows ->
+        fmap (fmap checksumListRows) $
+            withSession
+                (trustedPool store)
+                (Session.statement sessionKey listRowsStatement)
+    VectorRows ->
+        fmap (fmap checksumVectorRows) $
+            withSession
+                (trustedPool store)
+                (Session.statement sessionKey vectorRowsStatement)
 
 joinMaybe
     :: Text
@@ -281,6 +301,18 @@ checksumTurn current stored =
         + maybe 0 Text.length turn.sessionTurnResponseId
         + length turn.sessionTurnItems
 
+checksumListRows :: [(Int64, Maybe Text)] -> Int
+checksumListRows =
+    foldl' checksumRow 0
+
+checksumVectorRows :: Vector.Vector (Int64, Maybe Text) -> Int
+checksumVectorRows =
+    Vector.foldl' checksumRow 0
+
+checksumRow :: Int -> (Int64, Maybe Text) -> Int
+checksumRow current (turnIndex, assistantText) =
+    current + fromIntegral turnIndex + maybe 0 Text.length assistantText
+
 median :: [Sample] -> Sample
 median samples =
     Sample
@@ -303,6 +335,8 @@ printSample turnCount payloadBytes activeTurns workload sample =
             FullTranscript -> "full"
             ActiveTranscript -> "active"
             RecentPage -> "recent"
+            ListRows -> "list-rows"
+            VectorRows -> "vector-rows"
             :: String)
         sample.elapsedMillis
         sample.cpuMillis
@@ -356,3 +390,31 @@ seedSessionStatement =
         )
         (Decoders.singleRow $
             Decoders.column (Decoders.nonNullable Decoders.int8))
+
+listRowsStatement :: Statement Text [(Int64, Maybe Text)]
+listRowsStatement =
+    Statement.preparable
+        benchmarkRowsSql
+        (Encoders.param (Encoders.nonNullable Encoders.text))
+        (Decoders.rowList benchmarkRowDecoder)
+
+vectorRowsStatement :: Statement Text (Vector.Vector (Int64, Maybe Text))
+vectorRowsStatement =
+    Statement.preparable
+        benchmarkRowsSql
+        (Encoders.param (Encoders.nonNullable Encoders.text))
+        (Decoders.rowVector benchmarkRowDecoder)
+
+benchmarkRowsSql :: Text
+benchmarkRowsSql =
+    "SELECT t.turn_index, t.assistant_text\
+    \ FROM harness.session_turns t\
+    \ JOIN harness.sessions s ON s.session_id = t.session_id\
+    \ WHERE s.session_key = $1 AND s.deleted_at IS NULL\
+    \ ORDER BY t.turn_index ASC"
+
+benchmarkRowDecoder :: Decoders.Row (Int64, Maybe Text)
+benchmarkRowDecoder =
+    (,)
+        <$> Decoders.column (Decoders.nonNullable Decoders.int8)
+        <*> Decoders.column (Decoders.nullable Decoders.text)

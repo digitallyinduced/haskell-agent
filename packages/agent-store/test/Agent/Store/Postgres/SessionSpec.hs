@@ -116,9 +116,14 @@ spec = describe "PostgreSQL session schema" do
                                 turn2 = turn
                                     { sessionTurnUserText = "batch load"
                                     }
+                                turn3 = turn
+                                    { sessionTurnUserText = "batch load 2"
+                                    }
                             createSession pool metadata2
                                 `shouldReturn` Right True
                             appendSessionTurn pool turn2 metadata2
+                                `shouldReturn` Right True
+                            appendSessionTurn pool turn3 metadata2
                                 `shouldReturn` Right True
                             loadSessions pool [] `shouldReturn` []
                             loadSessions pool
@@ -143,7 +148,9 @@ spec = describe "PostgreSQL session schema" do
                                             [ Right
                                                 (Just
                                                     ( "session-2"
-                                                    , ["batch load"]
+                                                    , [ "batch load"
+                                                      , "batch load 2"
+                                                      ]
                                                     ))
                                             , Right Nothing
                                             , Right
@@ -154,7 +161,9 @@ spec = describe "PostgreSQL session schema" do
                                             , Right
                                                 (Just
                                                     ( "session-2"
-                                                    , ["batch load"]
+                                                    , [ "batch load"
+                                                      , "batch load 2"
+                                                      ]
                                                     ))
                                             ]
                             searchConversationTurns pool "compact" 10 >>= \case
