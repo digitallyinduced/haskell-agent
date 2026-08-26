@@ -617,7 +617,7 @@ handleReplLine
                                             commitFullscreenHistoryTurn
                                                 runtime
                                                 (sessionHistoryTurn turnIndex turn)
-                                                HistoryCommitReplace
+                                                HistoryCommitAppend
                                 continue
                     ReplPlan _
                         | provider == ClaudeCodeProvider -> do

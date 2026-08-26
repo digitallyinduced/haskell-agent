@@ -553,7 +553,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                             (sessionHistoryTurn turnIndex turn)
                             (case effect of
                                 TranscriptAppend -> HistoryCommitAppend
-                                TranscriptReplace -> HistoryCommitReplace
+                                -- Compaction replaces model context, not the
+                                -- on-screen transcript. Keep earlier turns
+                                -- scrollable and archive the compact summary.
+                                TranscriptReplace -> HistoryCommitAppend
                                 TranscriptReset -> HistoryCommitReset)
                     when
                         ( not countedMeta.metaTitleIsManual

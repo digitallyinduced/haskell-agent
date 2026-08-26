@@ -111,6 +111,34 @@ spec = describe "bounded fullscreen history window" do
         historyWindowRequest HistoryOlder requested
             `shouldBe` Nothing
 
+    it "keeps older persisted turns requestable after appending a compaction summary" do
+        let generation = HistoryGeneration 3
+            initial = emptyHistoryWindow generation 200 400 1_000_000
+            recent =
+                HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = HistoryNewer
+                    , historyPageTurns =
+                        Seq.fromList [turn 10 1, turn 11 1, turn 12 1]
+                    , historyPageGenerationStart = HistoryCursor 0
+                    , historyPageTotalTurns = 13
+                    , historyPageHasOlder = True
+                    , historyPageHasNewer = False
+                    }
+        window <- expectRight (applyHistoryPage recent initial)
+        let compacted = appendHistoryTurn (turn 13 1) window
+        historyWindowCursors compacted
+            `shouldBe` Seq.fromList (map HistoryCursor [10, 11, 12, 13])
+        compacted.historyWindowTotalTurns `shouldBe` 14
+        historyWindowOlderAvailable compacted `shouldBe` True
+        historyWindowRequest HistoryOlder compacted
+            `shouldBe`
+                Just HistoryRequest
+                    { historyRequestGeneration = generation
+                    , historyRequestDirection = HistoryOlder
+                    , historyRequestCursor = Just (HistoryCursor 10)
+                    }
+
     it "resets a non-tail window before archiving a new latest turn" do
         let generation = HistoryGeneration 7
             initial = emptyHistoryWindow generation 200 400 1_000_000

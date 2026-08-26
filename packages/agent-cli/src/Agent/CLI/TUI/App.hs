@@ -170,6 +170,7 @@ import Agent.CLI.TUI.History
     , clearHistoryRequest
     , emptyHistoryWindow
     , historyWindowBlock
+    , historyWindowOlderAvailable
     , historyWindowRequest
     , historyWindowSetAnchors
     , markHistoryRequest
@@ -1356,9 +1357,9 @@ commitLiveHistoryTurn durableTurn commit state =
             case state.appHistoryLiveStart of
                 Just index -> index
                 Nothing
-                    | commit == HistoryCommitAppend ->
+                    | commit == HistoryCommitReset -> 0
+                    | otherwise ->
                         Seq.length state.appUi.uiBlocks
-                    | otherwise -> 0
         (nextBlockId, remappedBlocks) =
             remapHistoryBlocks
                 state.appNextHistoryBlockId
@@ -1367,19 +1368,14 @@ commitLiveHistoryTurn durableTurn commit state =
             durableTurn { historyTurnBlocks = remappedBlocks }
         baseWindow =
             case commit of
-                HistoryCommitAppend -> state.appHistoryWindow
-                HistoryCommitReplace ->
-                    emptyHistoryWindow
-                        state.appHistoryWindow.historyWindowGeneration
-                        historyWindowTurnBudget
-                        historyWindowBlockBudget
-                        historyWindowByteBudget
                 HistoryCommitReset ->
                     emptyHistoryWindow
                         state.appHistoryWindow.historyWindowGeneration
                         historyWindowTurnBudget
                         historyWindowBlockBudget
                         historyWindowByteBudget
+                _ ->
+                    state.appHistoryWindow
         replacementPage =
             HistoryPage
                 { historyPageGeneration =
@@ -1394,13 +1390,13 @@ commitLiveHistoryTurn durableTurn commit state =
                 }
         window =
             case commit of
-                HistoryCommitAppend ->
-                    appendHistoryTurn remappedTurn baseWindow
-                _ ->
+                HistoryCommitReset ->
                     either
                         (const baseWindow)
                         id
                         (applyHistoryPage replacementPage baseWindow)
+                _ ->
+                    appendHistoryTurn remappedTurn baseWindow
         ui = truncateUiBlocks start state.appUi
     in state
         { appUi = ui
@@ -3689,7 +3685,12 @@ scrollConversationBy amount = do
                 pure (Just (top, height, contentHeight))
             Nothing ->
                 pure Nothing
-    case Scroll.conversationScrollGesture amount viewportBounds of
+    case
+        Scroll.conversationScrollGesture
+            (state.appAgentSelected == AgentRoot
+                && historyWindowOlderAvailable state.appHistoryWindow)
+            amount
+            viewportBounds of
         Scroll.IgnoreConversationScroll ->
             pure ()
         Scroll.PauseAndScrollConversation -> do
