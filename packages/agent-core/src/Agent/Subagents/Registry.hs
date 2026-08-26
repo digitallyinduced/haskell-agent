@@ -1633,9 +1633,24 @@ interruptSubagent registry agentId = do
     case mrecord of
         Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
         Just record -> do
-            previous <- atomically $
-                phaseStatus <$> readTVar record.recordPhase
-            requestCancel record.recordCancel
+            (previous, settledPending) <- atomically do
+                phase <- readTVar record.recordPhase
+                case phase of
+                    -- A cancel latched while the agent is still Pending is
+                    -- wiped by the supervisor's resetCancel before the turn's
+                    -- cancel race ever observes it, so requestCancel alone is a
+                    -- no-op and the agent would run its whole task regardless.
+                    -- Settle the pending work directly (mirroring
+                    -- interruptRecordForTurn) so the queued turn never starts.
+                    AgentPending{} -> do
+                        releaseSlotSTM registry record
+                        writeTVar record.recordPhase
+                            (AgentIdle Interrupted (phaseRootTurnId phase))
+                        pure (phaseStatus phase, True)
+                    _ -> pure (phaseStatus phase, False)
+            if settledPending
+                then notifySettled registry record.recordId Interrupted
+                else requestCancel record.recordCancel
             pure (Right previous)
 
 -- | Queue a message without starting a new turn when idle (v2 send_message).
