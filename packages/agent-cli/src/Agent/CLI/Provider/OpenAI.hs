@@ -18,7 +18,6 @@ import Agent.OpenAI.LoopBackend
     ( isOpenAiWebSocketTransportFailure
     , openAiAuxiliaryResponseSenderReconnecting
     , openAiBackendWithReasoningVisibility
-    , openAiBackendWithReasoningVisibilityAndToolSpeculation
     , openAiBackendWithTransportFallback
     , openAiResponseSenderReconnecting
     , withCodexTurnStateScope
@@ -35,7 +34,6 @@ import Agent.Responses.LoopBackend
     ( statelessResponsesBackendWithRawReasoning
     )
 import Agent.Responses.Types (ResponseCreateParams)
-import Agent.Tools.Speculation (ToolSpeculationRuntime)
 import Control.Concurrent.MVar
     ( MVar
     , withMVar
@@ -57,7 +55,6 @@ data OpenAiPersistentConnection
 lockedOpenAiSession
     :: Maybe Int
     -> Bool
-    -> Maybe ToolSpeculationRuntime
     -> MVar ()
     -> IORef Bool
     -> TokenProvider
@@ -67,7 +64,7 @@ lockedOpenAiSession
     -> (TokenUsage -> IO ())
     -> IO ()
     -> (OpenAiCompactionSender, Backend)
-lockedOpenAiSession compactThreshold showRawReasoning toolSpeculation wsLock
+lockedOpenAiSession compactThreshold showRawReasoning wsLock
         fallbackActive provider activeConnection getParams contextTokens
         recordCompactionUsage onCompacted =
     let sendResponse request previousResponseId onEvent = do
@@ -114,18 +111,10 @@ lockedOpenAiSession compactThreshold showRawReasoning toolSpeculation wsLock
                 provider
                 request
         websocketBackend =
-            case toolSpeculation of
-                Nothing ->
-                    openAiBackendWithReasoningVisibility
-                        showRawReasoning
-                        sendResponse
-                        getParams
-                Just speculation ->
-                    openAiBackendWithReasoningVisibilityAndToolSpeculation
-                        showRawReasoning
-                        speculation
-                        sendResponse
-                        getParams
+            openAiBackendWithReasoningVisibility
+                showRawReasoning
+                sendResponse
+                getParams
         httpFallbackBackend =
             statelessResponsesBackendWithRawReasoning
                 showRawReasoning

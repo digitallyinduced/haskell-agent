@@ -22,8 +22,11 @@ import Agent.Tools.FileSystem.ReadFileSpeculation
     , waitForReadFileSpeculation
     )
 import Agent.Tools.Speculation
-    ( closeToolSpeculationRuntime
+    ( ToolSpeculationRuntime
+    , closeToolSpeculationRuntime
     , newToolSpeculationRuntime
+    , observeToolArgumentEvent
+    , retainToolSpeculation
     , takeToolSpeculation
     , waitForToolSpeculation
     )
@@ -549,8 +552,7 @@ spec = do
                                 pure $ Right $
                                     testResponse "resp-streamed" [finalCall]
                             backend =
-                                openAiBackendWithToolSpeculation
-                                    runtime
+                                openAiBackendWith
                                     send
                                     (pure baseParams)
                         result <- submitWithState
@@ -558,7 +560,7 @@ spec = do
                             backend
                             Nothing
                             [UserMessage "read it"]
-                            (const (pure ()))
+                            (observeArguments runtime)
                         result `shouldBe`
                             Right
                                 (emptyTurnOutput
@@ -569,6 +571,8 @@ spec = do
                                         arguments
                                     ]
                                     Nothing)
+                        retainToolSpeculation runtime
+                            [ functionToolCall callId "read_file" arguments ]
                         takeToolSpeculation
                             runtime
                             (functionToolCall
@@ -617,8 +621,7 @@ spec = do
                                 pure $ Right $
                                     testResponse "resp-done" [finalCall]
                             backend =
-                                openAiBackendWithToolSpeculation
-                                    runtime
+                                openAiBackendWith
                                     send
                                     (pure baseParams)
                             call =
@@ -631,13 +634,14 @@ spec = do
                             backend
                             Nothing
                             [UserMessage "read it"]
-                            (const (pure ()))
+                            (observeArguments runtime)
                         result `shouldBe`
                             Right
                                 (emptyTurnOutput
                                     "resp-done"
                                     [call]
                                     Nothing)
+                        retainToolSpeculation runtime [call]
                         takeToolSpeculation runtime call
                             `shouldReturn` Just (Right "1→done")
 
@@ -1411,6 +1415,12 @@ spec = do
 --------------------------------------------------------------------------------
 -- Fixtures
 --------------------------------------------------------------------------------
+
+
+observeArguments :: ToolSpeculationRuntime -> LoopEvent -> IO ()
+observeArguments runtime = \case
+    ToolArgumentEvent event -> observeToolArgumentEvent runtime event
+    _ -> pure ()
 
 submitWithState
     :: IORef [ResponseItem]

@@ -90,8 +90,7 @@ import Agent.CLI.Options
                  optYolo, optMaxConcurrentAgents, optCompactThreshold,
                  optShowRawReasoning, optProvider, optModel, optWorktree, optEffort,
                  optPrompt, optPromptFile, optManagedTurnFile,
-                 optScreenMode, optGhci, optBash, optResume, optCwd,
-                 optSpeculativeReadFile),
+                 optScreenMode, optGhci, optBash, optResume, optCwd),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
 import Agent.CLI.Plan ( cliPlanHooks )
@@ -336,8 +335,6 @@ import Agent.Tools.PlanMode
       PlanDecision(PlanCancel) )
 import Agent.Tools.Secret
     ( SecretPrompt(..), SecretPromptHooks(..) )
-import Agent.Tools.Speculation
-    ( closeToolSpeculationRuntime, newToolSpeculationRuntime )
 import Agent.Tools.Types
     ( AppTool(..), ToolEnv(..), defaultToolEnv, setToolSessionTmp )
 import Agent.XAI.LoopBackend ( xaiBackend )
@@ -1917,25 +1914,19 @@ runAgentInitializedWithLock
                         subagentSessions agentTypesRef
                     closeSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
-    toolSpeculation <-
-        if provider == OpenAIProvider && options.optSpeculativeReadFile
-            then Just <$> newToolSpeculationRuntime allTools
-            else pure Nothing
     let closeAll =
-            mapM_ closeToolSpeculationRuntime toolSpeculation
+            closeAgents
                 `finally`
-                    (closeAgents
+                    ((readIORef activeSessionLock
+                        >>= mapM_ releaseSessionLock)
                         `finally`
-                            ((readIORef activeSessionLock
-                                >>= mapM_ releaseSessionLock)
+                            (closeExtraTools
                                 `finally`
-                                    (closeExtraTools
+                                    (MCP.releaseMcpFleetLease mcpLease
                                         `finally`
-                                            (MCP.releaseMcpFleetLease mcpLease
+                                            (coding.codingClose
                                                 `finally`
-                                                    (coding.codingClose
-                                                        `finally`
-                                                            cleanupScratch)))))
+                                                    cleanupScratch))))
     flip finally closeAll do
         case
                 mcpToolCollision
@@ -2093,7 +2084,6 @@ runAgentInitializedWithLock
                                 , dialect
                                 , policy
                                 , allTools
-                                , toolSpeculation
                                 , suspendGhci = coding.codingSuspendGhci
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
@@ -2370,7 +2360,6 @@ runAgentInitializedWithLock
                                         lockedOpenAiSession
                                             options.optCompactThreshold
                                             options.optShowRawReasoning
-                                            toolSpeculation
                                             wsLock
                                             httpFallbackActive
                                             tokenProvider

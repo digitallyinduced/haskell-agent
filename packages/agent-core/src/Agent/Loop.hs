@@ -39,7 +39,8 @@ import Agent.TextBuffer
     , textBufferToText
     )
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( ToolArgumentStreamEvent
+    , ToolCall(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     )
@@ -50,12 +51,17 @@ import Agent.Tools.Scheduling
 import Agent.Tools.Types
     ( ToolRegistry
     , dispatchRegisteredToolCall
+    , toolRegistryTools
     , toolSchedulingPlanFor
     )
 import Agent.Tools.Speculation
     ( ToolSpeculationRuntime
+    , closeToolSpeculationRuntime
     , discardToolSpeculation
+    , newToolSpeculationRuntime
+    , observeToolArgumentEvent
     , resetToolSpeculationRuntime
+    , retainToolSpeculation
     , takeToolSpeculationEmitting
     )
 import Control.Concurrent.Async
@@ -91,6 +97,7 @@ import Control.Exception.Safe
     ( SomeException
     , catchAsync
     , displayException
+    , finally
     , isAsyncException
     , mask
     , throwIO
@@ -257,13 +264,15 @@ data LoopEvent
     -- | Latest accumulated output snapshot for an in-flight tool call.
     | ToolOutputUpdated Text Text
     | ToolFinished ToolCallResult
+    -- | Provider-neutral streamed tool-argument updates. The loop consumes
+    -- these internally; user-facing sinks can ignore them.
+    | ToolArgumentEvent ToolArgumentStreamEvent
     deriving (Eq, Show)
 
 data LoopConfig = LoopConfig
     { loopBackend :: !Backend
     , loopBackendState :: !BackendStateStore
     , loopTools :: !ToolRegistry
-    , loopToolSpeculation :: !(Maybe ToolSpeculationRuntime)
     , loopDispatch :: !ToolDispatchConfig
     , loopMaxTurns :: !Int
     , loopOnEvent :: !(LoopEvent -> IO ())
@@ -363,14 +372,14 @@ runLoopInputsUnsafe
 runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
     eventPump <- newLoopEventPump config0.loopOnEvent
     progressRef <- newIORef (initialState, NoResponseCommitted)
-    withAsync (runLoopEventPump eventPump) \eventWorker -> do
+    runtime <- newToolSpeculationRuntime (toolRegistryTools config0.loopTools)
+    flip finally (closeToolSpeculationRuntime runtime) $
+        withAsync (runLoopEventPump eventPump) \eventWorker -> do
         let config = config0
                 { loopOnEvent = emitLoopEvent eventPump
                 }
             finish state progress result = do
-                mapM_
-                    resetToolSpeculationRuntime
-                    config.loopToolSpeculation
+                resetToolSpeculationRuntime runtime
                 writeIORef progressRef (state, progress)
                 pure LoopExecution
                     { executionState = state
@@ -397,12 +406,21 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                 outputSeen <- newIORef False
                                 let onBackendEvent event = do
                                         case event of
-                                            TextDelta _ -> writeIORef outputSeen True
-                                            ReasoningDelta _ -> writeIORef outputSeen True
+                                            ToolArgumentEvent argumentEvent ->
+                                                observeToolArgumentEvent
+                                                    runtime
+                                                    argumentEvent
+                                            TextDelta _ ->
+                                                writeIORef outputSeen True
+                                            ReasoningDelta _ ->
+                                                writeIORef outputSeen True
                                             _ -> pure ()
-                                        config.loopOnEvent event
+                                        case event of
+                                            ToolArgumentEvent _ -> pure ()
+                                            _ -> config.loopOnEvent event
                                 -- Race the model call against cancel so Ctrl-C / Esc
                                 -- can stop reasoning mid-stream, not only between tools.
+                                resetToolSpeculationRuntime runtime
                                 raced <- mask \restore -> do
                                     result <- restore $ race
                                         (waitCancel config.loopCancel)
@@ -417,6 +435,9 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                                     backendState
                                                 writeIORef progressRef
                                                     (backendState, ResponseCommitted)
+                                                retainToolSpeculation
+                                                    runtime
+                                                    backendOutput.toolCalls
                                         _ -> pure ()
                                     pure result
                                 case raced of
@@ -456,7 +477,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                         , tokenUsage = usageAcc'
                                         }
                                 else do
-                                    results <- runToolCalls config turn.toolCalls
+                                    results <- runToolCalls config runtime turn.toolCalls
                                     cancelledAfter <-
                                         isCancelled config.loopCancel
                                     if cancelledAfter
@@ -718,8 +739,8 @@ recordLoopEventFailure pump failure =
 -- | Preserve model order between conflicting calls while allowing independent
 -- calls from the same model turn to overlap. Results are returned in model
 -- order regardless of completion order.
-runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
-runToolCalls config calls = do
+runToolCalls :: LoopConfig -> ToolSpeculationRuntime -> [ToolCall] -> IO [ToolCallResult]
+runToolCalls config runtime calls = do
     prepared <- prepareIndexedToolCalls config (zip [0..] calls)
     scheduled <- traverse schedule prepared
     go scheduled Map.empty
@@ -753,7 +774,7 @@ runToolCalls config calls = do
             mapConcurrently
                 (\scheduled -> do
                     result <-
-                        runPreparedToolCall config scheduled.prepared
+                        runPreparedToolCall config runtime scheduled.prepared
                     pure (fmap (\value -> (scheduled.index, value)) result))
                 ready
         let completed' =
@@ -858,32 +879,27 @@ prepareToolCall config call = do
 
 runPreparedToolCall
     :: LoopConfig
+    -> ToolSpeculationRuntime
     -> PreparedToolCall
     -> IO (Maybe ToolCallResult)
-runPreparedToolCall config (PreparedToolCall call approval) = do
+runPreparedToolCall config runtime (PreparedToolCall call approval) = do
     cancelled <- isCancelled config.loopCancel
     if cancelled
         then do
-            mapM_
-                (`discardToolSpeculation` call)
-                config.loopToolSpeculation
+            discardToolSpeculation runtime call
             pure Nothing
         else do
             config.loopOnEvent (ToolStarted call)
             result <- case approval of
                 ToolApprovalDenied denial -> do
-                    mapM_
-                        (`discardToolSpeculation` call)
-                        config.loopToolSpeculation
+                    discardToolSpeculation runtime call
                     pure ToolCallResult
                         { callId = call.callId
                         , output = denial
                         , callKind = call.callKind
                         }
                 ToolApprovalRejected -> do
-                    mapM_
-                        (`discardToolSpeculation` call)
-                        config.loopToolSpeculation
+                    discardToolSpeculation runtime call
                     pure ToolCallResult
                         { callId = call.callId
                         , output = "Tool call rejected by user."
@@ -891,14 +907,10 @@ runPreparedToolCall config (PreparedToolCall call approval) = do
                         }
                 ToolApprovalGranted ->
                     tryAny
-                        (maybe
-                            (pure Nothing)
-                            (\runtime ->
-                                takeToolSpeculationEmitting runtime call \output ->
-                                    config.loopDispatch.toolDispatchOnOutput call output
-                                        >> config.loopOnEvent
-                                            (ToolOutputUpdated call.callId output))
-                            config.loopToolSpeculation) >>= \case
+                        (takeToolSpeculationEmitting runtime call \output ->
+                            config.loopDispatch.toolDispatchOnOutput call output
+                                >> config.loopOnEvent
+                                    (ToolOutputUpdated call.callId output)) >>= \case
                         Left exception ->
                             toolExceptionResult config call exception
                         Right (Just toolResult) ->

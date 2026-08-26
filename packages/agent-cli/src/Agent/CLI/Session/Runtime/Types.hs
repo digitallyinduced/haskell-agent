@@ -64,7 +64,6 @@ import Agent.Subagents
     )
 import Agent.Tools.MultiAgents (MultiAgentContext)
 import Agent.Tools.PlanMode (PlanModeEnv)
-import Agent.Tools.Speculation (ToolSpeculationRuntime)
 import Agent.Tools.Types
     ( AppTool
     , ToolEnv
@@ -95,7 +94,6 @@ data SessionRequest = SessionRequest
     , dialect :: !Dialect
     , policy :: !ApprovalPolicy
     , allTools :: ![AppTool]
-    , toolSpeculation :: !(Maybe ToolSpeculationRuntime)
     , suspendGhci :: !(IO ())
     , grokRuntime :: !(Maybe GrokRuntimeControl)
     , mcpRegistrations :: ![MCP.McpToolRegistration]

@@ -720,6 +720,8 @@ reduceLoop event state = case event of
                             (blockIndex, call)
                             state.uiToolCalls
                     }
+    ToolArgumentEvent _ ->
+        state
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->

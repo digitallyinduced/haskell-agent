@@ -13,12 +13,6 @@ import Agent.Tools.Scheduling
     , ToolSchedulingPlan(..)
     , schedulingPlansConflict
     )
-import Agent.Tools.Speculation
-    ( closeToolSpeculationRuntime
-    , newToolSpeculationRuntime
-    , observeToolArgumentEvent
-    , retainToolSpeculation
-    )
 import Agent.Tools.Types
     ( AppTool
     , ApprovalRule(..)
@@ -1151,9 +1145,7 @@ spec = describe "runLoop" do
                 Nothing
             , Right $ emptyTurnOutput "resp-2" [] (Just "done")
             ]
-        let call =
-                functionToolCall "c1" "explode" "{\"message\":\"hi\"}"
-            tool =
+        let tool =
                 jsonAppToolWithExecution
                     "explode"
                     ""
@@ -1163,32 +1155,18 @@ spec = describe "runLoop" do
                     (typedTool "explode" \(EchoArgs _) -> do
                         modifyIORef' calls (+ 1)
                         Exception.throwIO (userError "boom"))
-        Exception.bracket
-            (newToolSpeculationRuntime [tool])
-            closeToolSpeculationRuntime
-            \runtime -> do
-                observeToolArgumentEvent runtime $
-                    ToolArgumentsStarted
-                        { argumentStreamRefs =
-                            [ToolCallStreamItem "item-explode"]
-                        , argumentStreamCallId = call.callId
-                        , argumentStreamName = Just call.name
-                        , argumentStreamArguments = call.arguments
-                        }
-                retainToolSpeculation runtime [call]
-                config0 <- testConfig backend
-                let config = config0
-                        { loopTools = registryFromTools [tool]
-                        , loopToolSpeculation = Just runtime
-                        }
-                runLoop config Nothing "hello"
-                    `shouldReturn` Right LoopResult
-                        { finalResponseId = "resp-2"
-                        , finalText = Just "done"
-                        , turnsUsed = 2
-                        , tokenUsage = emptyTokenUsage
-                        }
-                readIORef calls `shouldReturn` 1
+        config0 <- testConfig backend
+        let config = config0
+                { loopTools = registryFromTools [tool]
+                }
+        runLoop config Nothing "hello"
+            `shouldReturn` Right LoopResult
+                { finalResponseId = "resp-2"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = emptyTokenUsage
+                }
+        readIORef calls `shouldReturn` 1
 
 
     it "returns LoopCancelled when the cancel flag is set during tools" do
@@ -1335,7 +1313,6 @@ testConfig backend = do
             [ typedTool "echo" $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
             ]
-        , loopToolSpeculation = Nothing
         , loopDispatch = defaultLoopDispatch
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()

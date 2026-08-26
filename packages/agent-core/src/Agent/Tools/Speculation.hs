@@ -287,7 +287,7 @@ retainToolSpeculation runtime calls = do
                 [ (call.callId, call)
                 | call <- calls
                 ]
-    (retained, abandoned) <-
+    (_, abandoned) <-
         modifyMVar runtime.state \current ->
             if current.closed
                 then pure (current, ([], []))
@@ -345,8 +345,17 @@ retainToolSpeculation runtime calls = do
                           )
                         )
     releaseEntries abandoned
-    forM_ retained \(entryId, _entry, call) ->
-        feedPrefix runtime entryId (const call.arguments)
+    -- Start interpreters for completed calls that were never streamed, then
+    -- feed the authoritative arguments. Streaming backends will already have
+    -- an active entry here.
+    forM_ calls \call -> do
+        active <-
+            ensureActive
+                runtime
+                call
+                (withCallRef call.callId [])
+        forM_ active \(entryId, _) ->
+            feedPrefix runtime entryId (const call.arguments)
 
 -- | Finish one interpreter after normal approval and scheduling. Failures
 -- before the real handler starts become ordinary misses; failures once

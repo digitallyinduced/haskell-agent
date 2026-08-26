@@ -662,6 +662,8 @@ renderEventUnlocked config = \case
     -- The append-only renderer cannot safely repaint accumulated snapshots
     -- without duplicating output in terminal scrollback. The retained TUI
     -- handles these updates; minimal mode prints the final ToolFinished result.
+    ToolArgumentEvent _ ->
+        pure ()
     ToolOutputUpdated _callId _output ->
         pure ()
     ToolFinished result -> do

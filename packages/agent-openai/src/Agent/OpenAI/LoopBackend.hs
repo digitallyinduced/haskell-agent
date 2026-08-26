@@ -14,8 +14,6 @@ module Agent.OpenAI.LoopBackend
     , openAiResponseSenderWithRetryPolicy
     , openAiBackendWith
     , openAiBackendWithReasoningVisibility
-    , openAiBackendWithToolSpeculation
-    , openAiBackendWithReasoningVisibilityAndToolSpeculation
     , openAiBackendWithRetryPolicy
     , openAiBackendWithConnectionRecovery
     , openAiBackendWithTransportFallback
@@ -79,12 +77,6 @@ import Agent.ToolDispatch
     , ToolCall
     , functionToolCall
     , ToolCallStreamRef(..)
-    )
-import Agent.Tools.Speculation
-    ( ToolSpeculationRuntime
-    , observeToolArgumentEvent
-    , resetToolSpeculationRuntime
-    , retainToolSpeculation
     )
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (onException)
@@ -581,39 +573,6 @@ openAiBackendWithReasoningVisibility
 openAiBackendWithReasoningVisibility showRawReasoning =
     openAiBackendWithRetryPolicyAndFeatures
         showRawReasoning
-        Nothing
-        transientStreamingResultPolicy
-
--- | OpenAI backend with invisible, best-effort streamed tool preparation.
-openAiBackendWithToolSpeculation
-    :: ToolSpeculationRuntime
-    -> (ResponseCreateParams
-        -> Maybe Text
-        -> (ResponseStreamEvent -> IO ())
-        -> IO (Either ApiError Response))
-    -> IO ResponseCreateParams
-    -> Backend
-openAiBackendWithToolSpeculation speculation =
-    openAiBackendWithReasoningVisibilityAndToolSpeculation
-        False
-        speculation
-
--- | OpenAI backend with streamed tool preparation and explicit raw-reasoning
--- visibility.
-openAiBackendWithReasoningVisibilityAndToolSpeculation
-    :: Bool
-    -> ToolSpeculationRuntime
-    -> (ResponseCreateParams
-        -> Maybe Text
-        -> (ResponseStreamEvent -> IO ())
-        -> IO (Either ApiError Response))
-    -> IO ResponseCreateParams
-    -> Backend
-openAiBackendWithReasoningVisibilityAndToolSpeculation
-        showRawReasoning speculation =
-    openAiBackendWithRetryPolicyAndFeatures
-        showRawReasoning
-        (Just speculation)
         transientStreamingResultPolicy
 
 -- | Streaming retries are replay-safe only until the loop has observed output.
@@ -628,11 +587,10 @@ openAiBackendWithRetryPolicy
     -> IO ResponseCreateParams
     -> Backend
 openAiBackendWithRetryPolicy =
-    openAiBackendWithRetryPolicyAndFeatures False Nothing
+    openAiBackendWithRetryPolicyAndFeatures False
 
 openAiBackendWithRetryPolicyAndFeatures
     :: Bool
-    -> Maybe ToolSpeculationRuntime
     -> RetryPolicyM IO
     -> (ResponseCreateParams
         -> Maybe Text
@@ -641,9 +599,8 @@ openAiBackendWithRetryPolicyAndFeatures
     -> IO ResponseCreateParams
     -> Backend
 openAiBackendWithRetryPolicyAndFeatures
-        showRawReasoning speculation retryPolicy send getParams =
+        showRawReasoning retryPolicy send getParams =
     Backend \history previousResponseId inputs onLoopEvent -> do
-        mapM_ resetToolSpeculationRuntime speculation
         let submit = do
                 baseParams <- sanitizeCodexRequest <$> getParams
                 let newItems = turnInputsToItems inputs
@@ -667,32 +624,23 @@ openAiBackendWithRetryPolicyAndFeatures
                     Left err
                         | isJust initialPrevious
                         , isResponseChainCompatibilityError err
-                        , not (null history) -> do
-                            mapM_ resetToolSpeculationRuntime speculation
+                        , not (null history) ->
                             sendRetrying onLoopEvent fullRequest Nothing
                         | otherwise -> pure (Left err)
                     Right response -> pure (Right response)
                 case recovered of
-                    Left err -> do
-                        mapM_ resetToolSpeculationRuntime speculation
+                    Left err ->
                         pure (Left err)
                     Right response -> do
                         mapM_
-                            (\runtime -> do
-                                mapM_
-                                    (observeToolArgumentEvent runtime)
-                                    (responseToolCallCompletions
-                                        response.output)
-                                retainToolSpeculation
-                                    runtime
-                                    (responseToolCalls response.output))
-                            speculation
+                            (onLoopEvent . ToolArgumentEvent)
+                            (responseToolCallCompletions response.output)
                         pure $ Right BackendResult
                             { backendOutput = responseToTurnOutput response
                             , backendState =
                                 history <> newItems <> response.output
                             }
-        submit `onException` mapM_ resetToolSpeculationRuntime speculation
+        submit
   where
     sendRetrying onLoopEvent request previousResponseId = do
         emittedRawOutput <- newIORef False
@@ -704,9 +652,8 @@ openAiBackendWithRetryPolicyAndFeatures
                 if streamOutputObserved event
                     then writeIORef emittedRawOutput True
                     else pure ()
-                forM_ speculation \runtime ->
-                    forM_ (responseEventToToolArgumentEvent event) $
-                        observeToolArgumentEvent runtime
+                forM_ (responseEventToToolArgumentEvent event) $
+                    onLoopEvent . ToolArgumentEvent
                 mapM_
                     (\loopEvent -> do
                         when (isVisibleModelOutput loopEvent) $
@@ -732,7 +679,6 @@ openAiBackendWithRetryPolicyAndFeatures
                                 onLoopEvent $ ActivityUpdated $
                                     "Retrying Codex request (attempt "
                                         <> Text.pack (show attempt) <> ")…"
-                                mapM_ resetToolSpeculationRuntime speculation
                                 go emittedRawOutput emittedVisibleOutput nextStatus
                     | emitted -> do
                         visible <- readIORef emittedVisibleOutput
