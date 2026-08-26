@@ -22,7 +22,7 @@ import Agent.Error
     )
 import Control.Exception.Safe (Exception, displayException)
 import Data.Char (isControl, isSpace)
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (UTCTime, addUTCTime, diffUTCTime)
@@ -122,7 +122,7 @@ credentialsExhaustedRetryParts reasons =
 
 exhaustionReasonDetails :: [CredentialExhaustionReason] -> Text
 exhaustionReasonDetails reasons =
-    case nub (map formatExhaustionReason reasons) of
+    case nubOrd (map formatExhaustionReason reasons) of
         [] -> ""
         rendered ->
             "\nObserved account failures: "

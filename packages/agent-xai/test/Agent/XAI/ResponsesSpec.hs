@@ -14,6 +14,7 @@ import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,7 +25,7 @@ spec = do
     describe "mapModel" do
         it "prefers exact overrides, passes grok names through, and falls back otherwise" do
             let options = defaultClientOptions
-                    { modelOverrides = [("gpt-5.6-sol", "grok-4.6-mini")]
+                    { modelOverrides = Map.fromList [("gpt-5.6-sol", "grok-4.6-mini")]
                     , defaultModel = "grok-4.6"
                     }
             mapModel options "gpt-5.6-sol" `shouldBe` "grok-4.6-mini"

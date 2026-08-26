@@ -10,6 +10,7 @@ module Agent.CLI.Command.Types
     ) where
 
 import Agent.Dialect (DialectId)
+import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
 
@@ -119,7 +120,9 @@ data SlashCatalog = SlashCatalog
     { slashCatalogDialect :: !DialectId
     , slashCatalogToolNames :: !(Set Text)
     , slashCatalogCommands :: ![SlashCommand]
+    , slashCatalogCommandByName :: !(Map Text SlashCommand)
     , slashCatalogSkills :: ![SkillCommand]
+    , slashCatalogSkillByName :: !(Map Text SkillCommand)
     , slashCatalogModelIds :: ![Text]
     }
     deriving (Eq, Show)

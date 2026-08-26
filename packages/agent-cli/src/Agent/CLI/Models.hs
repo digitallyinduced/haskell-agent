@@ -40,7 +40,7 @@ import Agent.Dialect
 import qualified Agent.OpenRouter.Options as OpenRouter
 import qualified Agent.OpenRouter.Request as OpenRouter
 import Agent.Provider (Provider(..))
-import Data.List (findIndex, nub)
+import Data.List (findIndex)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -117,7 +117,7 @@ modelsForProvider catalog provider =
 
 catalogModelIds :: ModelCatalog -> [Text]
 catalogModelIds =
-    nub . map (.modelTarget.targetModelId) . modelCatalog
+    map (.modelTarget.targetModelId) . modelCatalog
 
 defaultModelOptionFor :: ModelCatalog -> Provider -> Maybe ModelOption
 defaultModelOptionFor catalog provider =

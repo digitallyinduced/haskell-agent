@@ -44,7 +44,8 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown
-    ( renderMarkdown
+    ( MarkdownFragmentSplit(..)
+    , renderMarkdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
@@ -303,13 +304,25 @@ feedProse state input =
         (linePart, rest)
             | Text.null rest ->
                 let source = state.pending <> linePart
-                    (parsedReady, parsedPending, parsedContext) =
+                    MarkdownFragmentSplit
+                        { markdownReady = parsedReady
+                        , markdownPending = parsedPending
+                        , markdownPrevChar = parsedContext
+                        } =
                         splitMarkdownFragment state.context source
                     (stablePrefix, graphemePending) =
                         splitTerminalGraphemeSuffix parsedReady
-                    (ready, reparsedPending, nextContext)
+                    MarkdownFragmentSplit
+                        { markdownReady = ready
+                        , markdownPending = reparsedPending
+                        , markdownPrevChar = nextContext
+                        }
                         | Text.null graphemePending =
-                            (parsedReady, "", parsedContext)
+                            MarkdownFragmentSplit
+                                { markdownReady = parsedReady
+                                , markdownPending = ""
+                                , markdownPrevChar = parsedContext
+                                }
                         | otherwise =
                             splitMarkdownFragment
                                 state.context
@@ -327,7 +340,10 @@ feedProse state input =
                    )
             | otherwise ->
                 let source = state.pending <> linePart <> "\n"
-                    (ready, pending', _) =
+                    MarkdownFragmentSplit
+                        { markdownReady = ready
+                        , markdownPending = pending'
+                        } =
                         splitMarkdownFragment state.context source
                     rendered =
                         renderMarkdownFragment True state.context

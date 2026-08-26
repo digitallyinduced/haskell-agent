@@ -79,7 +79,10 @@ import Data.IORef
     , newIORef
     , readIORef
     )
-import Data.List (find, nub)
+import Data.Containers.ListUtils (nubOrd)
+import Data.Foldable (toList)
+import Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
 import Data.Maybe (catMaybes, fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -127,7 +130,7 @@ data AccountEntry = AccountEntry
 type AccountDiscovery = [Text] -> IO (Either ApiError [AuthState])
 
 data PoolState = PoolState
-    { stateEntries :: ![AccountEntry]
+    { stateEntries :: !(Seq AccountEntry)
     , stateEmptyExhaustion
         :: !(Maybe (UTCTime, [CredentialExhaustionReason]))
     , stateCounter :: !Int
@@ -212,13 +215,13 @@ buildPool
     -> Maybe AccountDiscovery
     -> IO Pool
 buildPool initial emptyRetryAt refresh discovery = do
-    entries <- mapM mkEntry initial
+    entries <- Seq.fromList <$> mapM mkEntry initial
     now <- getCurrentTime
     let offset = floor (toRational (utctDayTime now) * 1000) :: Int
     state <- newIORef PoolState
         { stateEntries = entries
         , stateEmptyExhaustion = (, []) <$> emptyRetryAt
-        , stateCounter = offset `mod` max 1 (length entries)
+        , stateCounter = offset `mod` max 1 (Seq.length entries)
         , stateDiscovery = Nothing
         }
     pure Pool
@@ -253,9 +256,10 @@ getAccessTokenWithDiscovery
     -> Bool
     -> IO (Either ApiError (Text, Text))
 getAccessTokenWithDiscovery pool allowDiscovery = do
-    entries <- (.stateEntries) <$> readIORef pool.poolState
-    let accountIdsAtCheckout = map (.entryAccountId) entries
-    result <- go (length entries)
+    poolState <- readIORef pool.poolState
+    let entries = poolState.stateEntries
+        accountIdsAtCheckout = map (.entryAccountId) (toList entries)
+    result <- go (Seq.length entries)
     case result of
         Left exhausted@CredentialsExhausted
             { retryAt = previousRetryAt
@@ -266,7 +270,7 @@ getAccessTokenWithDiscovery pool allowDiscovery = do
                     True -> getAccessTokenWithDiscovery pool False
                     False -> do
                         current <- readIORef pool.poolState
-                        if null current.stateEntries
+                        if Seq.null current.stateEntries
                             then
                                 let (retryAt, reasons) =
                                         fromMaybe
@@ -408,8 +412,9 @@ claimDiscovery
     -> PoolState
     -> (PoolState, DiscoveryClaim)
 claimDiscovery accountIdsAtCheckout promise current =
-    let knownAccountIds = map (.entryAccountId) current.stateEntries
-    in if any (`notElem` accountIdsAtCheckout) knownAccountIds
+    let knownAccountIds = map (.entryAccountId) (toList current.stateEntries)
+        checkout = Set.fromList accountIdsAtCheckout
+    in if any (`Set.notMember` checkout) knownAccountIds
         then (current, DiscoveryAlreadyAdded)
         else case current.stateDiscovery of
             Just active -> (current, DiscoveryWait active)
@@ -440,12 +445,13 @@ finishDiscovery outcome candidates current =
 
 appendEntries :: [AccountEntry] -> PoolState -> (PoolState, Bool)
 appendEntries candidates current =
-    let known = Set.fromList (map (.entryAccountId) current.stateEntries)
+    let known = Set.fromList (map (.entryAccountId) (toList current.stateEntries))
         (newEntries, _) = foldl addCandidate ([], known) candidates
         added = not (null newEntries)
     in
         ( current
-            { stateEntries = current.stateEntries <> reverse newEntries
+            { stateEntries =
+                current.stateEntries <> Seq.fromList (reverse newEntries)
             , stateEmptyExhaustion =
                 if added then Nothing else current.stateEmptyExhaustion
             }
@@ -478,14 +484,14 @@ pickAccount pool = do
     now <- getCurrentTime
     (entries, startIdx, emptyExhaustion) <-
         atomicModifyIORef' pool.poolState selectStart
-    case entries of
-        [] -> pure (Left (fromMaybe (now, []) emptyExhaustion))
-        _ -> do
+    if Seq.null entries
+        then pure (Left (fromMaybe (now, []) emptyExhaustion))
+        else do
             available <- tryFrom entries startIdx now 0
             case available of
                 Just entry -> pure (Right entry)
                 Nothing -> do
-                    cooldowns <- fmap catMaybes $ forM entries \entry ->
+                    cooldowns <- fmap catMaybes $ forM (toList entries) \entry ->
                         effectiveCooldown . (.accountCooldowns)
                             <$> readIORef entry.entryState
                     case cooldowns of
@@ -494,29 +500,30 @@ pickAccount pool = do
                             let active = first : rest
                             in pure $ Left
                                 ( minimum (map fst active)
-                                , nub (concatMap snd active)
+                                , nubOrd (concatMap snd active)
                                 )
   where
-    selectStart current =
-        case current.stateEntries of
-            [] ->
-                ( current
-                , ([], 0, current.stateEmptyExhaustion)
+    selectStart current
+        | Seq.null current.stateEntries =
+            ( current
+            , (Seq.empty, 0, current.stateEmptyExhaustion)
+            )
+        | otherwise =
+            let entries = current.stateEntries
+                n = Seq.length entries
+                startIdx = current.stateCounter `mod` n
+                nextCounter = (current.stateCounter + 1) `mod` n
+            in
+                ( current { stateCounter = nextCounter }
+                , (entries, startIdx, current.stateEmptyExhaustion)
                 )
-            entries ->
-                let n = length entries
-                    startIdx = current.stateCounter `mod` n
-                    nextCounter = (current.stateCounter + 1) `mod` n
-                in
-                    ( current { stateCounter = nextCounter }
-                    , (entries, startIdx, current.stateEmptyExhaustion)
-                    )
 
     tryFrom entries startIdx now offset
-        | offset >= length entries = pure Nothing
+        | offset >= Seq.length entries = pure Nothing
         | otherwise = do
-            let entry =
-                    entries !! ((startIdx + offset) `mod` length entries)
+            let n = Seq.length entries
+                entry =
+                    Seq.index entries ((startIdx + offset) `mod` n)
             cooldown <- atomicModifyAccount entry \current ->
                 let updated = expireCooldowns now current
                 in (updated, effectiveCooldown updated.accountCooldowns)
@@ -696,8 +703,9 @@ claimAuthRecoveryAt now rejectedAccessToken current
 --------------------------------------------------------------------------------
 
 allAccountIds :: Pool -> IO [Text]
-allAccountIds pool =
-    map (.entryAccountId) . (.stateEntries) <$> readIORef pool.poolState
+allAccountIds pool = do
+    poolState <- readIORef pool.poolState
+    pure (map (.entryAccountId) (toList poolState.stateEntries))
 
 readAccountState :: Pool -> Text -> IO (Maybe AuthState)
 readAccountState pool targetAccountId =
@@ -713,8 +721,8 @@ data AccountSnapshot = AccountSnapshot
 
 snapshotAccounts :: Pool -> IO [AccountSnapshot]
 snapshotAccounts pool = do
-    entries <- (.stateEntries) <$> readIORef pool.poolState
-    forM entries \entry -> do
+    poolState <- readIORef pool.poolState
+    forM (toList poolState.stateEntries) \entry -> do
         state <- readIORef entry.entryState
         pure AccountSnapshot
             { snapshotAuth = state.accountAuth
@@ -770,10 +778,13 @@ forceRefresh pool targetAccountId =
 
 findEntry :: Pool -> Text -> IO (Maybe AccountEntry)
 findEntry pool targetAccountId = do
-    entries <- (.stateEntries) <$> readIORef pool.poolState
-    pure $ find
-        ((== targetAccountId) . (.entryAccountId))
-        entries
+    poolState <- readIORef pool.poolState
+    let entries = poolState.stateEntries
+    pure $
+        Seq.findIndexL
+            ((== targetAccountId) . (.entryAccountId))
+            entries
+            >>= (`Seq.lookup` entries)
 
 updateAccount
     :: Pool
@@ -850,7 +861,7 @@ effectiveCooldown cooldowns =
         active ->
             Just
                 ( maximum (map (.cooldownUntil) active)
-                , nub (map (.cooldownReason) active)
+                , nubOrd (map (.cooldownReason) active)
                 )
 
 genericAuthReason :: CredentialExhaustionReason

@@ -386,6 +386,7 @@ import Data.IORef
       writeIORef )
 import Data.List ()
 import Data.Maybe ( isNothing, fromMaybe, isJust )
+import qualified Data.Set as Set
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime, utctDay )
 import System.Console.ANSI ()
@@ -638,7 +639,7 @@ runAgent
                                     { transitionTarget = target
                                     , transitionAccountSelectionId = Nothing
                                     , transitionAccountId = Nothing
-                                    , transitionUnavailableProviders = []
+                                    , transitionUnavailableProviders = Set.empty
                                     , transitionCause = ManualTransition
                                     , transitionAutomaticBilling = Nothing
                                     }
@@ -649,7 +650,7 @@ runAgent
                                     , transitionAccountId = Nothing
                                     , transitionSessionId = nextOptions.optResume
                                     , transitionPendingTurn = Nothing
-                                    , transitionUnavailableProviders = []
+                                    , transitionUnavailableProviders = Set.empty
                                     , transitionCause = ManualTransition
                                     , transitionAutomaticBilling = Nothing
                                     }
@@ -1115,7 +1116,7 @@ runAgentInitializedWithLock
     let transitionTarget = (.transitionTarget) <$> transition
         pendingTurn = transition >>= (.transitionPendingTurn)
         unavailableProviders =
-            maybe [] (.transitionUnavailableProviders) transition
+            maybe Set.empty (.transitionUnavailableProviders) transition
         configuredOptionTarget =
             (.modelTarget)
                 <$> (options.optModel >>= resolveConfiguredModel catalog)

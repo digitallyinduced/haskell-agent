@@ -45,7 +45,7 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import Data.Char (isAlphaNum)
-import Data.List (find, sort, sortOn)
+import Data.List (sort, sortOn)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -613,13 +613,20 @@ resolveSkillInvocation
     -> Text
     -> Either Text SkillInvocation
 resolveSkillInvocation invocations rawName =
-    case find ((== Text.toLower rawName) . Text.toLower . (.invocationName)) invocations of
+    case Map.lookup (Text.toLower rawName) (skillInvocationsByName invocations) of
         Just invocation -> Right invocation
         Nothing ->
             Left $
                 "unknown skill: "
                     <> rawName
                     <> availableSuffix invocations
+
+skillInvocationsByName :: [SkillInvocation] -> Map Text SkillInvocation
+skillInvocationsByName invocations =
+    Map.fromList
+        [ (Text.toLower invocation.invocationName, invocation)
+        | invocation <- invocations
+        ]
 
 resolveSkillMentions
     :: [SkillInvocation]

@@ -28,7 +28,8 @@ import Agent.CLI.AgentViewport
       AgentTarget(..),
       agentDisplayName,
       agentEntryTreeLabelWithGlyphModel,
-      agentStatusGlyph )
+      agentStatusGlyph,
+      lookupAgentEntry )
 import Agent.CLI.Artifact ()
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Command ()
@@ -209,7 +210,7 @@ import Data.Char ()
 import Data.Foldable ( toList )
 import Data.IORef ()
 import Data.List
-    ( find, findIndex, intersperse, nub, sort, sortOn )
+    ( findIndex, intersperse, nub, sort, sortOn )
 import Data.List.NonEmpty ()
 import Data.Maybe ( fromMaybe, isJust, maybeToList )
 import Data.Sequence ( Seq )
@@ -552,17 +553,14 @@ selectedAgentConversation
     -> Maybe AgentEntry
 selectedAgentConversation selected entries = case selected of
     AgentRoot -> Nothing
-    target ->
-        find ((== target) . (.agentTarget)) entries
+    target -> lookupAgentEntry target entries
 
 conversationUiForTarget :: AgentTarget -> AppState -> Maybe UiState
 conversationUiForTarget target state = case target of
     AgentRoot -> Just state.appUi
     AgentChild _ ->
         (.agentConversation)
-            <$> find
-                ((== target) . (.agentTarget))
-                state.appAgentEntries
+            <$> lookupAgentEntry target state.appAgentEntries
 
 activeConversationUi :: AppState -> UiState
 activeConversationUi state =
@@ -729,9 +727,7 @@ agentPopoverLayers state =
         (False, _) -> []
         (_, Nothing) -> []
         (True, Just hover) ->
-            case find
-                ((== hover.agentHoverTarget) . (.agentTarget))
-                state.appAgentEntries of
+            case lookupAgentEntry hover.agentHoverTarget state.appAgentEntries of
                 Nothing -> []
                 Just entry -> [positionAgentPopover state hover entry]
 

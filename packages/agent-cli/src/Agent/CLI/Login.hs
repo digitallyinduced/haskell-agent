@@ -87,7 +87,7 @@ import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (join, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (nubBy)
+import Data.Containers.ListUtils (nubOrdOn)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -298,11 +298,10 @@ replaceAt index replacement accounts =
 discoverLoginAccounts :: IO [LoginAccount]
 discoverLoginAccounts = do
     accounts <- discoverLoginAccountSources
-    pure (nubBy sameAccount accounts)
+    pure (nubOrdOn loginAccountKey accounts)
   where
-    sameAccount left right =
-        left.loginProvider == right.loginProvider
-            && left.loginAccountId == right.loginAccountId
+    loginAccountKey account =
+        (account.loginProvider, account.loginAccountId)
 
 -- | Accounts that can be selected in a live session. Unlike the login
 -- dashboard, disabled managed entries do not shadow usable external sources,
@@ -310,10 +309,7 @@ discoverLoginAccounts = do
 discoverSelectableLoginAccounts :: IO [LoginAccount]
 discoverSelectableLoginAccounts = do
     accounts <- filter (.loginEnabled) <$> discoverLoginAccountSources
-    pure (nubBy sameSelection accounts)
-  where
-    sameSelection left right =
-        loginAccountSelectionId left == loginAccountSelectionId right
+    pure (nubOrdOn loginAccountSelectionId accounts)
 
 loginAccountSelectionId :: LoginAccount -> Text
 loginAccountSelectionId account =

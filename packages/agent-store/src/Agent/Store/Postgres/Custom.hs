@@ -283,18 +283,24 @@ assembleCatalog
 assembleCatalog objects columns constraints indexes =
     map assembleObject objects
   where
-    columnsByObject = Map.fromListWith (flip (<>))
-        [ (row.catalogColumnRowObjectId, [row.catalogColumnRowValue])
-        | row <- columns
-        ]
-    constraintsByObject = Map.fromListWith (flip (<>))
-        [ (row.catalogConstraintRowObjectId, [row.catalogConstraintRowValue])
-        | row <- constraints
-        ]
-    indexesByObject = Map.fromListWith (flip (<>))
-        [ (row.catalogIndexRowObjectId, [row.catalogIndexRowValue])
-        | row <- indexes
-        ]
+    columnsByObject =
+        Map.map reverse $
+            Map.fromListWith (<>)
+                [ (row.catalogColumnRowObjectId, [row.catalogColumnRowValue])
+                | row <- columns
+                ]
+    constraintsByObject =
+        Map.map reverse $
+            Map.fromListWith (<>)
+                [ (row.catalogConstraintRowObjectId, [row.catalogConstraintRowValue])
+                | row <- constraints
+                ]
+    indexesByObject =
+        Map.map reverse $
+            Map.fromListWith (<>)
+                [ (row.catalogIndexRowObjectId, [row.catalogIndexRowValue])
+                | row <- indexes
+                ]
     assembleObject :: CatalogObjectRow -> CatalogObject
     assembleObject row = CatalogObject
         { catalogObjectKind = row.catalogRowKind

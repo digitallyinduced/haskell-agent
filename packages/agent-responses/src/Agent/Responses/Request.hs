@@ -7,6 +7,8 @@ module Agent.Responses.Request
     ) where
 
 import Agent.Responses.Types
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 
@@ -45,14 +47,14 @@ setResponseModel selected ResponseCreateParams{..} =
 -- | Apply an exact override, preserve a provider-native model identifier, or
 -- fall back to the configured default when no model was supplied.
 selectConfiguredModel
-    :: [(Text, Text)]
+    :: Map Text Text
     -> (Text -> Bool)
     -> Text
     -> Maybe Text
     -> Text
 selectConfiguredModel overrides isNative defaultModel = \case
     Nothing -> defaultModel
-    Just model -> case lookup model overrides of
+    Just model -> case Map.lookup model overrides of
         Just target -> target
         Nothing
             | isNative model -> model

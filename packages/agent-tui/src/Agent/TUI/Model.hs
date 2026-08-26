@@ -26,6 +26,7 @@ module Agent.TUI.Model
     , moveWordLeft
     , moveWordRight
     , reduceUi
+    , lookupBlock
     , selectedBlockIndex
     , timestampNewMessageBlocks
     , progressNotice
@@ -1033,18 +1034,27 @@ moveSelection delta state =
 
 selectBlock :: BlockId -> UiState -> UiState
 selectBlock ident state =
-    case Map.lookup ident state.uiBlockIndices of
+    case lookupBlockIndex ident state of
         Nothing -> state
-        Just index -> case Seq.lookup index state.uiBlocks of
-            Just block
-                | block.blockId == ident ->
-                    state
-                        { uiSelectedBlock = Just ident
-                        , uiSelectedBlockIndex = Just index
-                        , uiFollow =
-                            index == Seq.length state.uiBlocks - 1
-                        }
-            _ -> state
+        Just (index, _) ->
+            state
+                { uiSelectedBlock = Just ident
+                , uiSelectedBlockIndex = Just index
+                , uiFollow =
+                    index == Seq.length state.uiBlocks - 1
+                }
+
+lookupBlock :: BlockId -> UiState -> Maybe UiBlock
+lookupBlock ident state =
+    snd <$> lookupBlockIndex ident state
+
+lookupBlockIndex :: BlockId -> UiState -> Maybe (Int, UiBlock)
+lookupBlockIndex ident state = do
+    index <- Map.lookup ident state.uiBlockIndices
+    block <- Seq.lookup index state.uiBlocks
+    if block.blockId == ident
+        then Just (index, block)
+        else Nothing
 
 selectedBlockIndex :: UiState -> Int
 selectedBlockIndex state =

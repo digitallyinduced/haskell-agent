@@ -42,6 +42,7 @@ import Agent.CLI.Command
     , SlashMenu(..)
     , SlashSuggestion(..)
     , defaultSlashCatalog
+    , slashCatalogWithSkills
     , slashMenuForCatalog
     )
 import Agent.CLI.Input.Display
@@ -163,9 +164,7 @@ readReplLineWithSkills
     -> IO ReplLine
 readReplLineWithSkills skills =
     readReplLineConfigured
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
         True
 
 readReplLineWithSkillsAndModels
@@ -177,10 +176,9 @@ readReplLineWithSkillsAndModels
     -> IO ReplLine
 readReplLineWithSkillsAndModels skills modelIds =
     readReplLineConfigured
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
         True
 
 readReplLineConfigured

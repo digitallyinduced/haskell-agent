@@ -13,8 +13,9 @@ import Agent.CLI.Input.Types (DisplayCell(..))
 import Agent.TUI.TextWidth (clampGraphemeCursor)
 import Data.ByteString (ByteString)
 import Data.Char (isControl)
-import Data.List (foldl')
+import Data.Foldable (toList)
 import Data.Maybe (fromMaybe)
+import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -195,19 +196,19 @@ draftCursorLocation text requestedCursor =
 verticalCursorMove :: Int -> Text -> Int -> Maybe Int
 verticalCursorMove delta text requestedCursor =
     let cursor = clampGraphemeCursor text requestedCursor
-        draftLines = Text.splitOn "\n" text
+        draftLines = Seq.fromList (Text.splitOn "\n" text)
         (row, column) = draftCursorLocation text cursor
         targetRow = row + delta
-    in if targetRow < 0 || targetRow >= length draftLines
+    in if targetRow < 0 || targetRow >= Seq.length draftLines
         then Nothing
-        else
+        else do
+            line <- Seq.lookup targetRow draftLines
             let lineStart =
                     sum
-                        [ Text.length line + 1
-                        | line <- take targetRow draftLines
+                        [ Text.length prefix + 1
+                        | prefix <- toList (Seq.take targetRow draftLines)
                         ]
-                line = draftLines !! targetRow
-            in Just (lineStart + offsetAtColumn line column)
+            Just (lineStart + offsetAtColumn line column)
 
 -- | Source offset of the grapheme boundary in a single line that renders
 -- closest to the requested terminal column without crossing it.

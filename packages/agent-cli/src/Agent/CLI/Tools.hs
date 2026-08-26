@@ -35,7 +35,8 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.List (find, partition)
+import Data.List (partition)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -45,8 +46,14 @@ requireToolRegistry tools =
     either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
-lookupAppTool name =
-    find (\tool -> tool.appToolName == canonicalToolName name)
+lookupAppTool name tools =
+    Map.lookup (canonicalToolName name) byName
+  where
+    byName =
+        Map.fromList
+            [ (canonicalToolName tool.appToolName, tool)
+            | tool <- tools
+            ]
 
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.
