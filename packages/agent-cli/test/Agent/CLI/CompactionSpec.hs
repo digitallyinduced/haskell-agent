@@ -53,8 +53,11 @@ import Control.Exception
     )
 import Data.IORef
 import Control.Monad.Trans.Except (runExceptT)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
 
 spec :: Spec
@@ -1185,6 +1188,60 @@ spec = do
                 _ -> False
             readIORef compactCalls `shouldReturn` 0
             readIORef submitCalls `shouldReturn` 0
+
+        it "does not reject a first turn whose size is dominated by an image" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { model = Just "gpt-5.6-sol" }
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                image =
+                    ImageAttachment
+                        { imageMime = "image/png"
+                        , imageBytes = ByteString.replicate (1024 * 1024) 1
+                        }
+                inputs =
+                    [ UserMultimodal
+                        { userText = "what does this screenshot show?"
+                        , userImages = [image]
+                        }
+                    ]
+                items = turnInputsToItems inputs
+                naiveTokens =
+                    Text.length
+                        (TextEncoding.decodeUtf8
+                            (LBS.toStrict (Aeson.encode items)))
+                        `div` 4
+                estimated =
+                    estimateRequestTokensWithItems params items
+            naiveTokens `shouldSatisfy` (> contextWindow)
+            estimated `shouldSatisfy` (< contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            submitCalls <- newIORef (0 :: Int)
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' submitCalls (+ 1)
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn [] Nothing inputs (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef submitCalls `shouldReturn` 1
 
         it "compacts before the next request at the Codex token limit" do
             let oldHistory = [userTextItem "old"]
