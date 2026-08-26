@@ -11,6 +11,7 @@ import Agent.CLI.Subagents.Runtime
     , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     , prepareCollaborationSpawn
+    , grokSpawnedChildIdentity
     , restoreAgentFromDisk
     , resolveChildModelAndEffort
     , validatePersistedSubagentTarget
@@ -132,6 +133,44 @@ spec = describe "Agent.CLI.SubagentStore" do
                 Nothing
                 Nothing
                 `shouldBe` ("gpt-5.6-terra", "medium")
+
+    describe "Grok-root child identity" do
+        it "routes Luna to OpenAI Codex" do
+            grokSpawnedChildIdentity
+                XAIProvider
+                "xai"
+                id
+                "grok-4.6"
+                GrokBuildDialect
+                (Just "luna")
+                `shouldBe`
+                    ( OpenAIProvider
+                    , "openai"
+                    , "gpt-5.6-luna"
+                    , CodexDialect
+                    )
+
+        it "keeps grok-4.5 on the Grok parent" do
+            grokSpawnedChildIdentity
+                XAIProvider
+                "xai"
+                id
+                "grok-4.6"
+                GrokBuildDialect
+                (Just "grok-4.5")
+                `shouldBe`
+                    (XAIProvider, "xai", "grok-4.5", GrokBuildDialect)
+
+        it "inherits the Grok parent when model is omitted" do
+            grokSpawnedChildIdentity
+                XAIProvider
+                "xai"
+                id
+                "grok-4.6"
+                GrokBuildDialect
+                Nothing
+                `shouldBe`
+                    (XAIProvider, "xai", "grok-4.6", GrokBuildDialect)
 
     it "round-trips transcript items and meta" do
         withTempDir \dir -> do

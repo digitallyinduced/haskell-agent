@@ -513,6 +513,7 @@ rootContext registry = MultiAgentContext
     Nothing
     Nothing
     Nothing
+    Nothing
 
 childContext registry = MultiAgentContext
     registry
@@ -521,6 +522,7 @@ childContext registry = MultiAgentContext
     1
     taskPathRoot
     (pure Nothing)
+    Nothing
     Nothing
     Nothing
     Nothing

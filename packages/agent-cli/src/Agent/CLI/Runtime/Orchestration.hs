@@ -21,6 +21,8 @@ import Agent.CLI.Approval ()
 import Agent.CLI.Artifact ()
 import Agent.CLI.Auth
     ( LoadedAuth(..),
+      hasOpenAiAuth,
+      loadAuth,
       loadAuthForAccount,
       preferredOpenAiTokenProvider,
       probeLoadedAuthCredential,
@@ -110,6 +112,7 @@ import Agent.CLI.Project
       withInheritedLastModel )
 import Agent.CLI.Prompt
     ( subscriptionSubagentModelGuidance, systemPromptForTools )
+import Agent.GrokBuild.Dialect.Task (grokRootChildModels)
 import Agent.CLI.PromptHooks
     ( fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
 import Agent.CLI.Provider.OpenAI
@@ -226,7 +229,8 @@ import Agent.CLI.Subagents.Runtime
       prepareCollaborationSpawn,
       restoreAgentFromDisk,
       runCodexSubagent,
-      runHttpSubagent )
+      runHttpSubagent,
+      runXaiParentSubagent )
 import Agent.CLI.TUI.App
     ( FullscreenInputBuffer,
       FullscreenRuntime,
@@ -1662,7 +1666,23 @@ runAgentInitializedWithLock
         (\_ _ -> pure ())
     rootTurnRef <- newIORef (Nothing :: Maybe RootTurnId)
     agentTypesRef <- newIORef Map.empty
-    let sendToRoot message = do
+    openaiChild <- case provider of
+        XAIProvider -> do
+            available <- hasOpenAiAuth
+            if not available
+                then pure Nothing
+                else loadAuth (Just OpenAIProvider) >>= \case
+                    Left _ -> pure Nothing
+                    Right openaiLoaded ->
+                        pure (Just openaiLoaded.loadedTokenProvider)
+        _ ->
+            pure Nothing
+    let grokAllowedChildModels = case provider of
+            XAIProvider ->
+                Just (grokRootChildModels (isJust openaiChild))
+            _ ->
+                Nothing
+        sendToRoot message = do
             atomicModifyIORef' pendingNotices \xs ->
                 (xs <> [AgentMessage message], ())
             pure (Right "queued")
@@ -1711,6 +1731,7 @@ runAgentInitializedWithLock
                 subscriptionSubagentModelGuidance
                     provider
                     (tokenProviderBillingMode tokenProvider)
+            , multiAllowedChildModels = grokAllowedChildModels
             }
     promptRequest <- loadPrompt options
     let promptText = fmap (\request -> request.managedTurnText) promptRequest
@@ -2092,6 +2113,8 @@ runAgentInitializedWithLock
                     subscriptionSubagentModelGuidance
                         provider
                         (tokenProviderBillingMode tokenProvider)
+                , subagentAllowedChildModels = grokAllowedChildModels
+                , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
         atomicModifyIORef' conversationRef \state ->
@@ -2566,10 +2589,9 @@ runAgentInitializedWithLock
                         case multiCtx of
                             Just ctx ->
                                 setSubagentRunner ctx.multiRegistry $
-                                    runHttpSubagent
+                                    runXaiParentSubagent
                                         subagentRuntime
                                         dialect
-                                        XAIProvider
                                         ctx.multiSendToRoot
                                         (\childParams ->
                                             protectXaiOverflow
