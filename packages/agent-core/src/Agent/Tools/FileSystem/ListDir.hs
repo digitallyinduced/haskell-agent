@@ -1,13 +1,36 @@
-module Agent.Tools.FileSystem.ListDir (listDirTool) where
+module Agent.Tools.FileSystem.ListDir
+    ( ListDirArgs(..)
+    , ListDirSpeculation
+    , listDirTool
+    , listDirToolWithSpeculation
+    , newListDirSpeculation
+    , closeListDirSpeculation
+    , waitForListDirSpeculation
+    , runListDir
+    , listDirResolved
+    ) where
 
 import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
-    ( ToolCall(..)
-    , decodeToolArguments
-    , toolArgumentsValue
+    ( StreamedTool(..)
+    , StreamedToolFactory
+    , ToolInput(..)
+    , ToolResult
     , typedTool
+    )
+import Agent.Tools.FileSystem.PathPrefix
+    ( FileFingerprint
+    , PathProgress(..)
+    , cancelAndJoin
+    , directoryFingerprint
+    , fingerprintsMatch
+    , jsonStringFieldProgress
+    , maximumConcurrentSpeculativeTasks
+    , minimumPredictionPrefix
+    , uniqueWorkspaceCandidate
+    , workspaceDirectoryIndex
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
@@ -21,15 +44,36 @@ import Agent.Tools.Types
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
     , jsonTool
-    , withToolResourceClaims
+    , withToolArgumentInterpreter
+    , withTypedResourceClaims
     )
+import Control.Concurrent.Async
+    ( Async
+    , asyncWithUnmask
+    , waitCatch
+    )
+import Control.Concurrent.MVar
+    ( MVar
+    , modifyMVar
+    , modifyMVar_
+    , newMVar
+    , readMVar
+    )
+import Control.Exception (evaluate)
+import Control.Exception.Safe (mask)
+import Control.Monad (forM_, void)
+import Data.Acquire (mkAcquire)
 import Data.Aeson (FromJSON(..))
+import qualified Data.Aeson as Aeson
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, isNothing)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import System.Directory.OsPath (doesDirectoryExist, pathIsSymbolicLink)
-import System.OsPath (OsPath, takeExtension, (</>))
+import System.OsPath (OsPath, equalFilePath, takeExtension, (</>))
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
 
@@ -37,7 +81,20 @@ instance FromJSON ListDirArgs where
     parseJSON = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
 
 listDirTool :: ToolEnv -> AppTool
-listDirTool env = withToolResourceClaims (listDirClaims env) $
+listDirTool env =
+    listDirToolWithSpeculation env Nothing
+
+listDirToolWithSpeculation
+    :: ToolEnv
+    -> Maybe ListDirSpeculation
+    -> AppTool
+listDirToolWithSpeculation env speculation =
+    withToolArgumentInterpreter
+        (maybe
+            (listDirArgumentInterpreter env)
+            listDirArgumentInterpreterWithCache
+            speculation) $
+    withTypedResourceClaims (listDirClaims env) $
     jsonTool "list_dir" listDirDescription
     [ PropertySchema "target_directory" PropertyString True $ Just
         "Path to a directory within an allowed filesystem root. Relative paths use the workspace root; absolute paths may resolve within the workspace or session temp directory."
@@ -48,19 +105,13 @@ listDirTool env = withToolResourceClaims (listDirClaims env) $
 
 listDirClaims
     :: ToolEnv
-    -> ToolCall
+    -> ListDirArgs
     -> IO (Either Text [ToolResourceClaim])
-listDirClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text ListDirArgs
-    of
-        Left err -> pure (Left err)
-        Right args ->
-            resolveForRead env (fromText args.targetDirectory)
-                >>= pure . fmap
-                    (\path ->
-                        [ToolResourceClaim ToolRead (ToolPathTree path)])
+listDirClaims env args =
+    resolveForRead env (fromText args.targetDirectory)
+        >>= pure . fmap
+            (\path ->
+                [ToolResourceClaim ToolRead (ToolPathTree path)])
 
 listDirDescription :: Text
 listDirDescription =
@@ -76,21 +127,25 @@ maxListItems :: Int
 maxListItems = 200
 
 runListDir :: ToolEnv -> ListDirArgs -> IO (Either Text Text)
-runListDir env args = resolveForRead env (fromText args.targetDirectory) >>= \case
-    Left err -> pure (Left err)
-    Right path -> doesDirectoryExist path >>= \case
-        False -> pure $ Left $
-            "Error: " <> args.targetDirectory <> " is not a valid directory"
-        True -> do
-            entries <- collectDir env.toolCwd path
-            let (shown, truncated) = capNodes maxListItems entries
-                tree = renderTree 0 shown
-                notice
-                    | truncated =
-                        "\nLarge directory summarized; some nested entries were omitted."
-                    | otherwise = ""
-            pure $ Right $
-                "Directory listing for " <> args.targetDirectory <> ":\n" <> tree <> notice
+runListDir env args =
+    resolveForRead env (fromText args.targetDirectory) >>= \case
+        Left err -> pure (Left err)
+        Right path -> listDirResolved env path args.targetDirectory
+
+listDirResolved :: ToolEnv -> OsPath -> Text -> IO (Either Text Text)
+listDirResolved env path displayName = doesDirectoryExist path >>= \case
+    False -> pure $ Left $
+        "Error: " <> displayName <> " is not a valid directory"
+    True -> do
+        entries <- collectDir env.toolCwd path
+        let (shown, truncated) = capNodes maxListItems entries
+            tree = renderTree 0 shown
+            notice
+                | truncated =
+                    "\nLarge directory summarized; some nested entries were omitted."
+                | otherwise = ""
+        pure $ Right $
+            "Directory listing for " <> displayName <> ":\n" <> tree <> notice
 
 data DirNode
     = FileNode OsPath
@@ -186,3 +241,312 @@ renderNode depth = \case
             else header <> "\n" <> renderTree (depth + 1) children
   where
     indent = Text.replicate depth "  "
+
+
+--------------------------------------------------------------------------------
+-- Streamed prefetch
+--------------------------------------------------------------------------------
+
+data ListDirSpeculation = ListDirSpeculation
+    { listEnv :: !ToolEnv
+    , listState :: !(MVar ListDirState)
+    }
+
+data ListDirState = ListDirState
+    { listClosed :: !Bool
+    , listDirectories :: !(Maybe (Set.Set Text))
+    , listIndexTask :: !(Maybe (Async ()))
+    , listNextKey :: !Int
+    , listActive :: !(Map.Map Int (Async (Maybe PrefetchedListing)))
+    }
+
+data PrefetchedListing = PrefetchedListing
+    { listingPath :: !OsPath
+    , listingFingerprint :: !FileFingerprint
+    , listingOutput :: !ToolResult
+    }
+
+data ListCandidate = ListCandidate
+    { listCandidateTarget :: !Text
+    , listCandidateKey :: !Int
+    , listCandidateTask :: !(Async (Maybe PrefetchedListing))
+    }
+
+data PartialListCall = PartialListCall
+    { partialListArguments :: !Text
+    , partialListCandidate :: !(Maybe ListCandidate)
+    }
+
+listDirArgumentInterpreter :: ToolEnv -> StreamedToolFactory
+listDirArgumentInterpreter environment =
+    streamedListDir
+        <$> mkAcquire
+            (newListDirSpeculation environment)
+            closeListDirSpeculation
+
+listDirArgumentInterpreterWithCache :: ListDirSpeculation -> StreamedToolFactory
+listDirArgumentInterpreterWithCache speculation =
+    streamedListDir
+        <$> mkAcquire (pure speculation) (\_ -> pure ())
+
+waitForListDirSpeculation :: ListDirSpeculation -> IO ()
+waitForListDirSpeculation speculation = do
+    initial <- readMVar speculation.listState
+    mapM_ (void . waitCatch) initial.listIndexTask
+    current <- readMVar speculation.listState
+    mapM_ (void . waitCatch) (Map.elems current.listActive)
+
+newListDirSpeculation :: ToolEnv -> IO ListDirSpeculation
+newListDirSpeculation env = do
+    state <- newMVar ListDirState
+        { listClosed = False
+        , listDirectories = Nothing
+        , listIndexTask = Nothing
+        , listNextKey = 0
+        , listActive = Map.empty
+        }
+    pure ListDirSpeculation { listEnv = env, listState = state }
+
+closeListDirSpeculation :: ListDirSpeculation -> IO ()
+closeListDirSpeculation speculation = mask \_ -> do
+    (indexTask, active) <-
+        modifyMVar speculation.listState \current ->
+            case current of
+                ListDirState
+                    { listIndexTask = indexTask
+                    , listActive = active
+                    } ->
+                    pure
+                        ( current
+                            { listClosed = True
+                            , listIndexTask = Nothing
+                            , listActive = Map.empty
+                            }
+                        , (indexTask, Map.elems active)
+                        )
+    mapM_ cancelAndJoin indexTask
+    mapM_ cancelAndJoin active
+
+streamedListDir :: ListDirSpeculation -> StreamedTool
+streamedListDir speculation =
+    StreamedTool
+        { streamedStart = pure emptyPartialList
+        , streamedInterpret = interpretListDir speculation
+        , streamedConsume = \_call _emit -> consumeListDir speculation
+        , streamedClose = closePartialList speculation
+        }
+
+emptyPartialList :: PartialListCall
+emptyPartialList =
+    PartialListCall
+        { partialListArguments = ""
+        , partialListCandidate = Nothing
+        }
+
+interpretListDir
+    :: ListDirSpeculation
+    -> PartialListCall
+    -> ToolInput
+    -> IO (Either (ListDirArgs, PartialListCall) PartialListCall)
+interpretListDir speculation state = \case
+    ToolPrefix text ->
+        Right <$> refreshListCall speculation state { partialListArguments = text }
+    ToolDone text -> do
+        next <- refreshListCall speculation state { partialListArguments = text }
+        case decodeListDirArgs next.partialListArguments of
+            Nothing -> pure (Right next)
+            Just args -> pure (Left (args, next))
+
+refreshListCall
+    :: ListDirSpeculation
+    -> PartialListCall
+    -> IO PartialListCall
+refreshListCall speculation partial = do
+    startListIndex speculation
+    refreshed <- refreshListCandidate speculation partial
+    pending <- pendingListIndex speculation refreshed
+    case pending of
+        Nothing -> pure refreshed
+        Just indexTask -> do
+            void (waitCatch indexTask)
+            refreshListCandidate speculation refreshed
+
+closePartialList :: ListDirSpeculation -> PartialListCall -> IO ()
+closePartialList speculation =
+    mapM_ (cancelListCandidate speculation) . (.partialListCandidate)
+
+refreshListCandidate
+    :: ListDirSpeculation
+    -> PartialListCall
+    -> IO PartialListCall
+refreshListCandidate speculation partial = mask \_ -> do
+    current <- readMVar speculation.listState
+    let progress = jsonStringFieldProgress "target_directory" partial.partialListArguments
+        desired = desiredListTarget current.listDirectories progress
+    case (partial.partialListCandidate, desired) of
+        (Just existing, Just target)
+            | existing.listCandidateTarget == target ->
+                pure partial
+        (Just existing, Nothing)
+            | candidateStillMatches progress existing.listCandidateTarget ->
+                pure partial
+        (existing, next) -> do
+            forM_ existing (cancelListCandidate speculation)
+            nextCandidate <-
+                case next of
+                    Nothing -> pure Nothing
+                    Just target -> startListCandidate speculation target
+            pure partial { partialListCandidate = nextCandidate }
+
+pendingListIndex
+    :: ListDirSpeculation
+    -> PartialListCall
+    -> IO (Maybe (Async ()))
+pendingListIndex speculation partial
+    | not (isNothing partial.partialListCandidate) = pure Nothing
+    | otherwise =
+        case jsonStringFieldProgress "target_directory" partial.partialListArguments of
+            Just (PathPrefix prefix)
+                | Text.length prefix >= minimumPredictionPrefix ->
+                    (.listIndexTask) <$> readMVar speculation.listState
+            _ -> pure Nothing
+
+desiredListTarget
+    :: Maybe (Set.Set Text)
+    -> Maybe PathProgress
+    -> Maybe Text
+desiredListTarget _ Nothing = Nothing
+desiredListTarget _ (Just (PathComplete target))
+    | Text.null target = Nothing
+    | otherwise = Just target
+desiredListTarget directories (Just (PathPrefix prefix))
+    | Text.length prefix < minimumPredictionPrefix = Nothing
+    | otherwise =
+        uniqueWorkspaceCandidate prefix (fromMaybe Set.empty directories)
+
+candidateStillMatches :: Maybe PathProgress -> Text -> Bool
+candidateStillMatches progress candidate =
+    case progress of
+        Just (PathPrefix prefix) ->
+            not (Text.null candidate) && prefix `Text.isPrefixOf` candidate
+        Just (PathComplete target) -> target == candidate
+        Nothing -> False
+
+startListIndex :: ListDirSpeculation -> IO ()
+startListIndex speculation =
+    modifyMVar_ speculation.listState \current ->
+        case (current.listClosed, current.listDirectories, current.listIndexTask) of
+            (False, Nothing, Nothing) -> do
+                worker <- asyncWithUnmask \restore ->
+                    restore (workspaceDirectoryIndex speculation.listEnv)
+                        >>= installListIndex speculation
+                pure current { listIndexTask = Just worker }
+            _ -> pure current
+
+installListIndex :: ListDirSpeculation -> Set.Set Text -> IO ()
+installListIndex speculation paths =
+    modifyMVar_ speculation.listState \current ->
+        if current.listClosed
+            then pure current
+            else pure current
+                { listDirectories = Just paths
+                , listIndexTask = Nothing
+                }
+
+startListCandidate
+    :: ListDirSpeculation
+    -> Text
+    -> IO (Maybe ListCandidate)
+startListCandidate speculation target = mask \_ -> do
+    candidate <-
+        modifyMVar speculation.listState \current ->
+            if current.listClosed
+                || Map.size current.listActive >= maximumConcurrentSpeculativeTasks
+                then pure (current, Nothing)
+                else do
+                    let key = current.listNextKey
+                    worker <-
+                        asyncWithUnmask \restore ->
+                            restore (prefetchListing speculation.listEnv target)
+                    pure
+                        ( current
+                            { listNextKey = key + 1
+                            , listActive = Map.insert key worker current.listActive
+                            }
+                        , Just ListCandidate
+                            { listCandidateTarget = target
+                            , listCandidateKey = key
+                            , listCandidateTask = worker
+                            }
+                        )
+    pure candidate
+
+prefetchListing :: ToolEnv -> Text -> IO (Maybe PrefetchedListing)
+prefetchListing env target =
+    resolveForRead env (fromText target) >>= \case
+        Left _ -> pure Nothing
+        Right path -> do
+            before <- directoryFingerprint path
+            case before of
+                Nothing -> pure Nothing
+                Just fingerprint ->
+                    listDirResolved env path target >>= \case
+                        Left _ -> pure Nothing
+                        Right output -> do
+                            void (evaluate (Text.length output))
+                            after <- directoryFingerprint path
+                            if fingerprintsMatch after (Just fingerprint)
+                                then pure $ Just PrefetchedListing
+                                    { listingPath = path
+                                    , listingFingerprint = fingerprint
+                                    , listingOutput = Right output
+                                    }
+                                else pure Nothing
+
+cancelListCandidate :: ListDirSpeculation -> ListCandidate -> IO ()
+cancelListCandidate speculation candidate = do
+    releaseListCandidate speculation candidate
+    cancelAndJoin candidate.listCandidateTask
+
+releaseListCandidate :: ListDirSpeculation -> ListCandidate -> IO ()
+releaseListCandidate speculation candidate =
+    modifyMVar_ speculation.listState \current ->
+        pure current
+            { listActive = Map.delete candidate.listCandidateKey current.listActive
+            }
+
+consumeListDir
+    :: ListDirSpeculation
+    -> ListDirArgs
+    -> PartialListCall
+    -> IO ToolResult
+consumeListDir speculation args partial =
+    case partial.partialListCandidate of
+        Nothing -> runListDir speculation.listEnv args
+        Just selected ->
+            waitCatch selected.listCandidateTask >>= \case
+                Left _ -> miss selected
+                Right Nothing -> miss selected
+                Right (Just prefetched) ->
+                    resolveForRead
+                        speculation.listEnv
+                        (fromText args.targetDirectory) >>= \case
+                            Left _ -> miss selected
+                            Right finalPath
+                                | not (equalFilePath finalPath prefetched.listingPath) ->
+                                    miss selected
+                                | otherwise ->
+                                    directoryFingerprint finalPath >>= \case
+                                        Just current
+                                            | current == prefetched.listingFingerprint -> do
+                                                releaseListCandidate speculation selected
+                                                pure prefetched.listingOutput
+                                        _ -> miss selected
+  where
+    miss selected = do
+        cancelListCandidate speculation selected
+        runListDir speculation.listEnv args
+
+decodeListDirArgs :: Text -> Maybe ListDirArgs
+decodeListDirArgs =
+    Aeson.decodeStrict' . TextEncoding.encodeUtf8

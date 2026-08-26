@@ -1,10 +1,30 @@
-module Agent.GrokBuild.Dialect.SearchReplace (searchReplaceTool) where
+module Agent.GrokBuild.Dialect.SearchReplace
+    ( searchReplaceTool
+    , searchReplaceToolWithPrefetch
+    ) where
 
 import Agent.OsPath (fromText)
 import System.OsPath (OsPath)
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( StreamedTool(..)
+    , StreamedToolFactory
+    , ToolInput(..)
+    , typedTool
+    )
+import Agent.Tools.FileSystem.FilePrefetch
+    ( FileCallState
+    , FilePrefetch
+    , PathProgress
+    , closeFileCall
+    , closeFilePrefetch
+    , consumePrefetchedFile
+    , emptyFileCallState
+    , jsonStringFieldProgress
+    , newFilePrefetch
+    , refreshFileCall
+    )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
 import Agent.Tools.IO (readTextFile, resolveUnderCwd, writeTextFile)
@@ -20,6 +40,7 @@ import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
+    , withToolArgumentInterpreter
     )
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
@@ -28,7 +49,10 @@ import Control.Monad.Trans.Except
     , runExceptT
     , throwE
     )
+import Data.Acquire (mkAcquire)
 import Data.Aeson (FromJSON(..))
+import qualified Data.Aeson as Aeson
+import qualified Data.Text.Encoding as TextEncoding
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
@@ -51,7 +75,21 @@ instance FromJSON SearchReplaceArgs where
         <*> (fromMaybe False <$> optBool object "replace_all")
 
 searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
-searchReplaceTool env planMode = jsonTool "search_replace" searchReplaceDescription
+searchReplaceTool env planMode =
+    searchReplaceToolWithPrefetch env planMode Nothing
+
+searchReplaceToolWithPrefetch
+    :: ToolEnv
+    -> PlanModeEnv
+    -> Maybe FilePrefetch
+    -> AppTool
+searchReplaceToolWithPrefetch env planMode prefetch =
+    withToolArgumentInterpreter
+        (maybe
+            (searchReplaceInterpreter env planMode)
+            (searchReplaceInterpreterWithCache env planMode)
+            prefetch) $
+    jsonTool "search_replace" searchReplaceDescription
     [ PropertySchema "file_path" PropertyString True $ Just
         "The path to the file to modify. Relative paths are resolved within the workspace. Absolute paths are accepted only when they resolve within the workspace."
     , PropertySchema "old_string" PropertyString True $ Just
@@ -116,13 +154,22 @@ createNewFile env args = do
         pure ("The file " <> args.filePath <> " has been created successfully.")
 
 replaceInFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
-replaceInFile env args = do
+replaceInFile env args = replaceInFileWithContent env args Nothing
+
+replaceInFileWithContent
+    :: ToolEnv
+    -> SearchReplaceArgs
+    -> Maybe Text
+    -> ExceptT Text IO Text
+replaceInFileWithContent env args cachedContent = do
     path <- resolvePath env args.filePath
     gitignoreGuard env path args.filePath
     exists <- lift (doesFileExist path)
     unless exists $
         throwE ("File not found: " <> args.filePath)
-    content <- ExceptT (readTextFile path)
+    content <- case cachedContent of
+        Just text -> pure text
+        Nothing -> ExceptT (readTextFile path)
     let count = countOccurrences args.oldString content
     when (count == 0) $
         throwE $
@@ -185,3 +232,75 @@ replaceOccurrences old new replaceAll hay
         (before, after)
             | Text.null after -> hay
             | otherwise -> before <> new <> Text.drop (Text.length old) after
+
+searchReplaceInterpreter :: ToolEnv -> PlanModeEnv -> StreamedToolFactory
+searchReplaceInterpreter env planMode =
+    streamedSearchReplace env planMode
+        <$> mkAcquire (newFilePrefetch env) closeFilePrefetch
+
+searchReplaceInterpreterWithCache
+    :: ToolEnv
+    -> PlanModeEnv
+    -> FilePrefetch
+    -> StreamedToolFactory
+searchReplaceInterpreterWithCache env planMode prefetch =
+    streamedSearchReplace env planMode
+        <$> mkAcquire (pure prefetch) (\_ -> pure ())
+
+streamedSearchReplace
+    :: ToolEnv
+    -> PlanModeEnv
+    -> FilePrefetch
+    -> StreamedTool
+streamedSearchReplace env planMode prefetch =
+    StreamedTool
+        { streamedStart = pure emptyFileCallState
+        , streamedInterpret = interpretSearchReplace prefetch
+        , streamedConsume = \_call _emit args state ->
+            consumeSearchReplace env planMode prefetch args state
+        , streamedClose = closeFileCall prefetch
+        }
+
+interpretSearchReplace
+    :: FilePrefetch
+    -> FileCallState
+    -> ToolInput
+    -> IO (Either (SearchReplaceArgs, FileCallState) FileCallState)
+interpretSearchReplace prefetch state = \case
+    ToolPrefix text ->
+        Right <$> refreshFileCall prefetch state text (pathProgress text)
+    ToolDone text -> do
+        next <- refreshFileCall prefetch state text (pathProgress text)
+        case decodeSearchReplaceArgs text of
+            Nothing -> pure (Right next)
+            Just args -> pure (Left (args, next))
+
+pathProgress :: Text -> Maybe PathProgress
+pathProgress = jsonStringFieldProgress "file_path"
+
+decodeSearchReplaceArgs :: Text -> Maybe SearchReplaceArgs
+decodeSearchReplaceArgs =
+    Aeson.decodeStrict' . TextEncoding.encodeUtf8
+
+consumeSearchReplace
+    :: ToolEnv
+    -> PlanModeEnv
+    -> FilePrefetch
+    -> SearchReplaceArgs
+    -> FileCallState
+    -> IO (Either Text Text)
+consumeSearchReplace env planMode prefetch args state = runExceptT do
+    guardPlanMode env planMode args.filePath
+    cached <- lift (consumePrefetchedFile prefetch args.filePath state)
+    runSearchReplaceBodyWithCache env args (snd <$> cached)
+
+runSearchReplaceBodyWithCache
+    :: ToolEnv
+    -> SearchReplaceArgs
+    -> Maybe Text
+    -> ExceptT Text IO Text
+runSearchReplaceBodyWithCache env args cached
+    | args.oldString == args.newString =
+        throwE "Old string and new string are the same"
+    | Text.null args.oldString = createNewFile env args
+    | otherwise = replaceInFileWithContent env args cached

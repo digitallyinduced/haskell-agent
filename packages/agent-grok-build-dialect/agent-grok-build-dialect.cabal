@@ -54,6 +54,7 @@ library
     hs-source-dirs:   src
     build-depends:    agent-core >= 0.1 && < 0.2
                     , aeson >= 2.0
+                    , resourcet
                     , async
                     , base >= 4.14 && < 5
                     , containers
@@ -92,6 +93,7 @@ test-suite agent-grok-build-dialect-test
     main-is:          Spec.hs
     other-modules:    Agent.GrokBuild.DialectSpec
                     , Agent.GrokBuild.RuntimeSpec
+                    , Agent.GrokBuild.SearchReplaceSpec
                     , Agent.GrokBuild.TaskSpec
                     , Agent.GrokBuild.WebLspSpec
     build-depends:    agent-grok-build-dialect

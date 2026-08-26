@@ -23,15 +23,30 @@ import Agent.ToolDSL
     , PropertyType(..)
     )
 import Agent.ToolDispatch
-    ( ToolCall(..)
+    ( StreamedTool(..)
+    , StreamedToolFactory
+    , ToolCall(..)
+    , ToolInput(..)
     , toolArgumentsValue
     , typedStreamingTool
     , typedTool
     )
 import Agent.Codex.Dialect.ApplyPatch
     ( Hunk(..)
-    , applyPatch
+    , applyPatchWithContents
     , parsePatch
+    , streamingPatchReadTarget
+    )
+import Agent.Tools.FileSystem.FilePrefetch
+    ( FileCallState
+    , FilePrefetch
+    , PathProgress(..)
+    , closeFileCall
+    , closeFilePrefetch
+    , consumePrefetchedFile
+    , emptyFileCallState
+    , newFilePrefetch
+    , refreshFileCall
     )
 import Agent.Codex.Dialect.Shell
     ( CodexShellResult(..)
@@ -70,10 +85,13 @@ import Agent.Tools.Types
     , freeformApplyPatchAppToolWithExecution
     , jsonAppToolWithExecution
     , jsonTool
+    , withToolArgumentInterpreter
     , withTypedResourceClaims
     )
 import Control.Applicative ((<|>))
+import Data.Acquire (mkAcquire)
 import Data.Aeson (FromJSON(..), Value(..), withObject)
+import qualified Data.Map.Strict as Map
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseFail)
 import Data.Maybe (fromMaybe)
@@ -393,6 +411,7 @@ instance FromJSON ApplyPatchArgs where
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
+    withToolArgumentInterpreter (applyPatchInterpreter env) $
     withTypedResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
@@ -446,7 +465,55 @@ applyPatchDescription =
     \*** End Patch"
 
 runApplyPatch :: ToolEnv -> ApplyPatchArgs -> IO (Either Text Text)
-runApplyPatch env args = applyPatch env args.patch
+runApplyPatch env args = applyPatchWithContents env Map.empty args.patch
+
+applyPatchInterpreter :: ToolEnv -> StreamedToolFactory
+applyPatchInterpreter env =
+    streamedApplyPatch env
+        <$> mkAcquire (newFilePrefetch env) closeFilePrefetch
+
+streamedApplyPatch :: ToolEnv -> FilePrefetch -> StreamedTool
+streamedApplyPatch env prefetch =
+    StreamedTool
+        { streamedStart = pure emptyFileCallState
+        , streamedInterpret = interpretApplyPatch prefetch
+        , streamedConsume = \_call _emit args state ->
+            consumeApplyPatch env prefetch args state
+        , streamedClose = closeFileCall prefetch
+        }
+
+interpretApplyPatch
+    :: FilePrefetch
+    -> FileCallState
+    -> ToolInput
+    -> IO (Either (ApplyPatchArgs, FileCallState) FileCallState)
+interpretApplyPatch prefetch state = \case
+    ToolPrefix text ->
+        Right <$> refreshFileCall prefetch state text (streamingPatchReadTarget text)
+    ToolDone text -> do
+        next <-
+            refreshFileCall prefetch state text (streamingPatchReadTarget text)
+        pure (Left (ApplyPatchArgs text, next))
+
+consumeApplyPatch
+    :: ToolEnv
+    -> FilePrefetch
+    -> ApplyPatchArgs
+    -> FileCallState
+    -> IO (Either Text Text)
+consumeApplyPatch env prefetch args state = do
+    overlay <-
+        case streamingPatchReadTarget args.patch of
+            Just (PathComplete target) ->
+                consumePrefetchedFile prefetch target state >>= \case
+                    Just (path, contents) ->
+                        pure (Map.singleton path contents)
+                    Nothing ->
+                        pure Map.empty
+            _ -> do
+                closeFileCall prefetch state
+                pure Map.empty
+    applyPatchWithContents env overlay args.patch
 
 --------------------------------------------------------------------------------
 -- update_plan

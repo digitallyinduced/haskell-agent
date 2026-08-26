@@ -69,6 +69,7 @@ library
                     , Agent.Tools.FileSystem
                     , Agent.Tools.FileSystem.GitIgnore
                     , Agent.Tools.FileSystem.Grep
+                    , Agent.Tools.FileSystem.FilePrefetch
                     , Agent.Tools.FileSystem.ListDir
                     , Agent.Tools.FileSystem.ReadFile
                     , Agent.Tools.FileSystem.ReadFileSpeculation
@@ -84,7 +85,8 @@ library
                     , Agent.Tools.Speculation
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Tools.FileSystem.ReadFile.Internal
+    other-modules:    Agent.Tools.FileSystem.PathPrefix
+                    , Agent.Tools.FileSystem.ReadFile.Internal
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , agent-process >= 0.1 && < 0.2
@@ -212,6 +214,7 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.FileSystem.GrepSpec
+                    , Agent.Tools.FileSystem.ListDirSpeculationSpec
                     , Agent.Tools.FileSystem.ReadFileSpeculationSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.InterpreterSpec
