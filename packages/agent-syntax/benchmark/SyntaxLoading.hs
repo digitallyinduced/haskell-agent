@@ -13,6 +13,7 @@ import Agent.Syntax
 -- safe-exceptions does not re-export it.
 import Control.Exception (evaluate)
 import Control.Monad (foldM, forM)
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -32,6 +33,7 @@ import Text.Printf (printf)
 data Workload
     = Eager
     | OnDemand
+    | OnDemandReleased
 
 data Sample = Sample
     { elapsedMillis :: !Double
@@ -77,7 +79,7 @@ main = do
             die $
                 "usage: syntax-loading-bench WORKLOAD LANGUAGES "
                     <> "SOURCE_LINES SAMPLES\n"
-                    <> "workloads: eager, on-demand\n"
+                    <> "workloads: eager, on-demand, on-demand-released\n"
                     <> "LANGUAGES is none or a comma-separated list\n"
                     <> "output: workload,language_count,source_lines,samples,"
                     <> "elapsed_ms,cpu_ms,allocated_bytes,live_bytes"
@@ -86,6 +88,7 @@ parseWorkload :: String -> IO Workload
 parseWorkload = \case
     "eager" -> pure Eager
     "on-demand" -> pure OnDemand
+    "on-demand-released" -> pure OnDemandReleased
     other -> die ("unknown workload: " <> other)
 
 parseLanguages :: String -> IO [Text]
@@ -106,18 +109,30 @@ parsePositive label raw =
 
 measure :: Workload -> FilePath -> [Text] -> Text -> IO Sample
 measure workload syntaxDirectory languages source = do
+    cache <- newIORef Nothing
     performGC
     beforeStats <- getRTSStats
     beforeCpu <- getCPUTime
     beforeElapsed <- getMonotonicTimeNSec
-    highlighter <- buildHighlighter workload syntaxDirectory languages
-    checksum <- evaluate (highlightChecksum highlighter languages source)
+    checksum <-
+        buildStoredHighlighter
+            cache
+            workload
+            syntaxDirectory
+            languages
+            source
+    case workload of
+        OnDemandReleased -> writeIORef cache Nothing
+        _ -> pure ()
     performGC
     afterStats <- getRTSStats
     afterElapsed <- getMonotonicTimeNSec
     afterCpu <- getCPUTime
-    -- Keep the loaded grammar cache live through the measured collection.
-    _ <- evaluate highlighter
+    -- Model the runtime IORef which owns the grammar cache. The released
+    -- workload clears that owner before collection, just as a hidden terminal
+    -- does; the other workloads keep their cache live as baselines.
+    retained <- readIORef cache
+    _ <- evaluate retained
     _ <- evaluate checksum
     pure
         Sample
@@ -131,6 +146,18 @@ measure workload syntaxDirectory languages source = do
             , liveBytes =
                 fromIntegral afterStats.gc.gcdetails_live_bytes
             }
+
+buildStoredHighlighter
+    :: IORef (Maybe SyntaxHighlighter)
+    -> Workload
+    -> FilePath
+    -> [Text]
+    -> Text
+    -> IO Int
+buildStoredHighlighter cache workload syntaxDirectory languages source = do
+    highlighter <- buildHighlighter workload syntaxDirectory languages
+    writeIORef cache (Just highlighter)
+    evaluate (highlightChecksum highlighter languages source)
 
 buildHighlighter
     :: Workload
@@ -151,6 +178,8 @@ buildHighlighter workload syntaxDirectory languages =
                         >>= requireHighlighter)
                 initial
                 languages
+        OnDemandReleased ->
+            buildHighlighter OnDemand syntaxDirectory languages
 
 requireHighlighter
     :: Either Text SyntaxHighlighter

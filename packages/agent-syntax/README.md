@@ -7,9 +7,10 @@ Renderer-independent syntax highlighting for the universal agent harness.
 `syntax-loading-bench` retains the previous eager-loading path as a baseline
 and compares it with initialization plus on-demand grammar loading. Each sample
 loads from `AGENT_SYNTAX_DIR`, highlights a generated source block with every
-requested grammar to force the result, performs a major GC while the grammar
-cache remains live, and reports median wall time, CPU time, allocated bytes,
-and live bytes.
+requested grammar to force the result, and performs a major GC. The
+`on-demand-released` workload clears the runtime-style cache reference before
+that collection; the other workloads retain it as baselines. The benchmark
+reports median wall time, CPU time, allocated bytes, and live bytes.
 
 Build the optimized benchmark and run equivalent workloads with:
 
@@ -23,8 +24,10 @@ bin=$(cabal list-bin agent-syntax:bench:syntax-loading-bench)
 "$bin" on-demand none 50 7
 "$bin" eager haskell 50 7
 "$bin" on-demand haskell 50 7
+"$bin" on-demand-released haskell 50 7
 "$bin" eager haskell,javascript,python,typescript,json,xml,bash 500 7
 "$bin" on-demand haskell,javascript,python,typescript,json,xml,bash 500 7
+"$bin" on-demand-released haskell,javascript,python,typescript,json,xml,bash 500 7
 "$bin" eager haskell 5000 7
 "$bin" on-demand haskell 5000 7
 ```
