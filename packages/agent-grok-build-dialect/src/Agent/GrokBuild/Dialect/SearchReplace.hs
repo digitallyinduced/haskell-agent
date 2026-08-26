@@ -1,7 +1,12 @@
 module Agent.GrokBuild.Dialect.SearchReplace (searchReplaceTool) where
 
 import Agent.OsPath (fromText)
-import System.OsPath (OsPath)
+import System.OsPath
+    ( OsPath
+    , equalFilePath
+    , takeDirectory
+    , takeFileName
+    )
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
@@ -45,7 +50,6 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesFileExist)
-import System.OsPath (equalFilePath)
 
 data SearchReplaceArgs = SearchReplaceArgs
     { filePath :: Text
@@ -90,9 +94,24 @@ searchReplaceResourceClaims env call =
         Left err -> pure (Left err)
         Right args ->
             resolveUnderCwd env (fromText args.filePath)
-                >>= pure . fmap
-                    (\resolved ->
-                        [ToolResourceClaim ToolWrite (ToolPath resolved)])
+                >>= pure . fmap claimsForResolved
+
+claimsForResolved :: OsPath -> [ToolResourceClaim]
+claimsForResolved resolved
+    | isGitIgnorePolicyPath resolved =
+        [ToolResourceClaim ToolWrite ToolAllPaths]
+    | otherwise =
+        [ToolResourceClaim ToolWrite (ToolPath resolved)]
+
+-- | Ignore-policy edits change what later replacements may write, so they
+-- conflict with every filesystem claim rather than only the ignore file path.
+isGitIgnorePolicyPath :: OsPath -> Bool
+isGitIgnorePolicyPath path =
+    takeFileName path == fromText ".gitignore"
+        || (takeFileName path == fromText "exclude"
+            && takeFileName (takeDirectory path) == fromText "info"
+            && takeFileName (takeDirectory (takeDirectory path))
+                == fromText ".git")
 
 searchReplaceDescription :: Text
 searchReplaceDescription =

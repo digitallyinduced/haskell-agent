@@ -91,6 +91,21 @@ spec = describe "Grok Build dialect" do
             schedulingPlansConflict first same `shouldBe` True
             close
 
+    it "serializes gitignore policy edits against other filesystem writes" do
+        withGrokRegistry \registry close -> do
+            ignoreFile <-
+                toolSchedulingPlanFor registry (replace "g1" ".gitignore")
+            nestedIgnore <-
+                toolSchedulingPlanFor registry (replace "g2" "src/.gitignore")
+            exclude <-
+                toolSchedulingPlanFor registry
+                    (replace "g3" ".git/info/exclude")
+            other <- toolSchedulingPlanFor registry (replace "r1" "a.txt")
+            schedulingPlansConflict ignoreFile other `shouldBe` True
+            schedulingPlansConflict nestedIgnore other `shouldBe` True
+            schedulingPlansConflict exclude other `shouldBe` True
+            close
+
     it "lets observational terminal commands overlap filesystem reads" do
         withGrokRegistry \registry close -> do
             terminal <-
@@ -115,6 +130,10 @@ spec = describe "Grok Build dialect" do
                     (terminalCall "t2" "sed -n '1,80p' src/Main.hs" True)
             schedulingPlansConflict mutating grepCall `shouldBe` True
             schedulingPlansConflict background grepCall `shouldBe` True
+            uniqOutput <-
+                toolSchedulingPlanFor registry
+                    (terminalCall "t3" "uniq input.txt output.txt" False)
+            schedulingPlansConflict uniqOutput grepCall `shouldBe` True
             close
 
     it "isolates todo_write from filesystem tools" do

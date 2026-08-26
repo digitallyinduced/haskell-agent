@@ -33,12 +33,15 @@ allowedCommand :: Text -> [Text] -> Bool
 allowedCommand executable arguments
     | executable `elem`
         [ "cat", "head", "tail", "grep", "rg", "fd", "ls"
-        , "pwd", "wc", "stat", "file", "jq", "sort", "uniq", "cut"
+        , "pwd", "wc", "stat", "file", "jq", "sort", "cut"
         , "tr", "realpath", "basename", "dirname", "which", "du", "df"
         , "nl", "ps", "test", "diff", "printf", "echo"
         ] =
         not (any mutatingFlag arguments)
             && not (executable == "sort" && any outputFlag arguments)
+    | executable == "uniq" =
+        not (any mutatingFlag arguments)
+            && not (uniqWritesOutput arguments)
     | executable == "find" =
         not (any findAction arguments)
     | executable == "sed" =
@@ -79,6 +82,16 @@ allowedCommand executable arguments
                 [ "-d", "-D", "-m", "-M", "-c", "-C"
                 , "--delete", "--move", "--copy"
                 ]
+
+-- | GNU uniq writes a second positional operand: @uniq [OPTION]... [INPUT [OUTPUT]]@.
+uniqWritesOutput :: [Text] -> Bool
+uniqWritesOutput arguments =
+    length positional >= 2
+  where
+    positional =
+        filter
+            (\argument -> argument /= "--" && not ("-" `Text.isPrefixOf` argument))
+            arguments
 
 safeSed :: [Text] -> Bool
 safeSed = \case
