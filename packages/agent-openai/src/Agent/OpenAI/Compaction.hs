@@ -93,8 +93,9 @@ buildRemoteCompactionRequest params history =
                 }
 
 -- | Estimate the complete serialized request, including instructions, tools,
--- and all other request-level fields. Inline image data URLs are counted as
--- vision tokens rather than as base64 text; see 'estimateEncodedValue'.
+-- and all other request-level fields. @input_image.image_url@ data URLs are
+-- counted as vision tokens rather than as base64 text; see
+-- 'estimateEncodedValue'.
 estimateRequestTokensWithItems
     :: ResponseCreateParams
     -> [ResponseItem]
@@ -106,9 +107,11 @@ estimateResponseCreateParamsTokens :: ResponseCreateParams -> Int
 estimateResponseCreateParamsTokens = estimateEncodedValue
 
 -- | Estimate serialized JSON at four characters per token, matching the rest
--- of compaction accounting. Inline @data:image/...;base64,...@ payloads are
+-- of compaction accounting. Base64 payloads on @input_image.image_url@ are
 -- replaced with 'resizedImageBytesEstimate' because the model consumes those
--- images as vision tokens, not as the transport encoding.
+-- images as vision tokens, not as the transport encoding. Ordinary strings
+-- that happen to contain a data URL, including tool-output text, stay at raw
+-- size.
 estimateEncodedValue :: Aeson.ToJSON value => value -> Int
 estimateEncodedValue value =
     estimateAdjustedJsonTokens (Aeson.toJSON value)
@@ -130,22 +133,41 @@ resizedImageBytesEstimate = 7_373
 
 mediaEstimateAdjustment :: Aeson.Value -> (Int, Int)
 mediaEstimateAdjustment = \case
+    Aeson.Array values ->
+        foldl'
+            (\acc value -> addPair acc (mediaEstimateAdjustment value))
+            (0, 0)
+            values
+    Aeson.Object fields ->
+        let isInputImage =
+                KeyMap.lookup "type" fields == Just (Aeson.String "input_image")
+        in foldl'
+            (\acc (key, value) ->
+                addPair acc (fieldAdjustment isInputImage key value))
+            (0, 0)
+            (KeyMap.toList fields)
+    _ ->
+        (0, 0)
+  where
+    addPair (payloadAcc, replacementAcc) (payload, replacement) =
+        (payloadAcc + payload, replacementAcc + replacement)
+
+    fieldAdjustment isInputImage key value
+        | isInputImage && key == "image_url" =
+            imageUrlAdjustment value
+        | otherwise =
+            mediaEstimateAdjustment value
+
+imageUrlAdjustment :: Aeson.Value -> (Int, Int)
+imageUrlAdjustment = \case
     Aeson.String text ->
         case parseBase64ImageDataUrl text of
             Just payload ->
                 (Text.length payload, resizedImageBytesEstimate)
             Nothing ->
                 (0, 0)
-    Aeson.Array values ->
-        foldl' addPair (0, 0) values
-    Aeson.Object fields ->
-        foldl' addPair (0, 0) fields
     _ ->
         (0, 0)
-  where
-    addPair acc value =
-        let (payload, replacement) = mediaEstimateAdjustment value
-        in (fst acc + payload, snd acc + replacement)
 
 -- | Return the base64 payload of a @data:image/...;base64,...@ URL.
 -- Hosted HTTP(S) image URLs and non-image data URLs stay at raw size.
