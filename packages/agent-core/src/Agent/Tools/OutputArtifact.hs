@@ -434,8 +434,8 @@ renderOutputArtifactNotice source artifact =
         <> "when available for bounded Luna analysis.]"
 
 -- | Return a bounded head/tail preview.  The bound is in UTF-8 bytes (the
--- same unit used by the inline and artifact caps), and malformed byte
--- boundaries are decoded leniently.
+-- same unit used by the inline and artifact caps). Partial UTF-8 code points
+-- at the head/tail boundaries are omitted.
 boundedPreview :: Int -> Text -> Text
 boundedPreview cap text
     | cap <= 0 = ""
@@ -454,7 +454,7 @@ boundedPreview cap text
     encoded = Encoding.encodeUtf8 text
     marker = "\n… [middle omitted] …\n"
     markerBytes = Encoding.encodeUtf8 marker
-    decode = Encoding.decodeUtf8With EncodingError.lenientDecode
+    decode = Encoding.decodeUtf8With EncodingError.ignore
     fit value
         | BS.length (Encoding.encodeUtf8 value) <= cap = value
         | Text.null value = ""
@@ -464,12 +464,14 @@ boundResult :: Text -> Text
 boundResult result
     | BS.length encoded <= resultCap = result
     | otherwise =
-        Encoding.decodeUtf8With EncodingError.lenientDecode
-            (BS.take resultCap encoded)
-            <> "\n[artifact tool result truncated]"
+        Encoding.decodeUtf8With EncodingError.ignore
+            (BS.take (resultCap - BS.length suffixBytes) encoded)
+            <> suffix
   where
     encoded = Encoding.encodeUtf8 result
     resultCap = 50 * 1024
+    suffix = "\n[artifact tool result truncated]"
+    suffixBytes = Encoding.encodeUtf8 suffix
 
 showText :: Show a => a -> Text
 showText = Text.pack . show
