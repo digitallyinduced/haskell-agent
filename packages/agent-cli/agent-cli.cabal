@@ -239,9 +239,9 @@ executable agent-cli
     import:           common-options
     hs-source-dirs:   app
     main-is:          Main.hs
-    -- Agent concurrency is I/O-bound, so one capability avoids per-capability
-    -- heap overhead. Return unused pages promptly after major collections.
-    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N1 -Fd1 -M8G"
+    -- Keep enough capabilities for concurrent agent work while returning
+    -- unused pages promptly after major collections.
+    ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -Fd1 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
 
