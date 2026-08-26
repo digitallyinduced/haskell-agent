@@ -45,6 +45,7 @@ module Agent.CLI.Render
     , setRenderActivity
     , streamMarkdown
     , summarizeToolCall
+    , summarizeToolCallRelative
     , thinkingMaxWidth
     , truncateToolOutput
     , wrapThinkingLines

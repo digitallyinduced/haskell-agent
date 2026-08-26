@@ -92,6 +92,7 @@ test-suite agent-grok-build-dialect-test
     main-is:          Spec.hs
     other-modules:    Agent.GrokBuild.DialectSpec
                     , Agent.GrokBuild.RuntimeSpec
+                    , Agent.GrokBuild.SearchReplaceSpec
                     , Agent.GrokBuild.TaskSpec
                     , Agent.GrokBuild.WebLspSpec
     build-depends:    agent-grok-build-dialect

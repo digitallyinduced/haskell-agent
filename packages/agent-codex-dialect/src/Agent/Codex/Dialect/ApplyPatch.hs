@@ -10,13 +10,14 @@ module Agent.Codex.Dialect.ApplyPatch
     , applyPatchGrammar
     ) where
 
+import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.Tools.IO
     ( deleteTextFile
     , readTextFile
     , resolveUnderCwd
     , writeTextFile
     )
-import Agent.Tools.Types (ToolEnv)
+import Agent.Tools.Types (ToolEnv(..))
 import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -230,7 +231,7 @@ prepareHunks env hunks = go hunks Map.empty [] [] [] []
     go [] _ actions added modified deleted =
         pure
             ( reverse actions
-            , summary added modified deleted
+            , summary env.toolCwd added modified deleted
             )
     go (hunk : rest) files actions added modified deleted = case hunk of
         AddFile path contents -> do
@@ -384,10 +385,13 @@ joinFileLines newLines original
     | otherwise =
         Text.intercalate "\n" newLines
 
-summary :: [FilePath] -> [FilePath] -> [FilePath] -> Text
-summary added modified deleted =
+summary :: OsPath -> [FilePath] -> [FilePath] -> [FilePath] -> Text
+summary workspace added modified deleted =
     Text.unlines $
         "Success. Updated the following files:"
-            : [ "A " <> Text.pack p | p <- reverse added ]
-            ++ [ "M " <> Text.pack p | p <- reverse modified ]
-            ++ [ "D " <> Text.pack p | p <- reverse deleted ]
+            : [ "A " <> display p | p <- reverse added ]
+            ++ [ "M " <> display p | p <- reverse modified ]
+            ++ [ "D " <> display p | p <- reverse deleted ]
+  where
+    display path =
+        relativeDisplayPath workspace (fromText (Text.pack path))

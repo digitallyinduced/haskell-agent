@@ -15,7 +15,11 @@ import Agent.ToolDispatch
     , typedTool
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
-import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
+import Agent.Tools.IO
+    ( displayPathInWorkspace
+    , listDirectoryEntries
+    , resolveForRead
+    )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -83,25 +87,27 @@ maxListItems = 200
 runListDir :: ToolEnv -> ListDirArgs -> IO (Either Text Text)
 runListDir env args = resolveForRead env (fromText args.targetDirectory) >>= \case
     Left err -> pure (Left err)
-    Right path -> doesDirectoryExist path >>= \case
-        False -> pure $ Left $
-            "Error: " <> args.targetDirectory <> " is not a valid directory"
-        True ->
-            collectDir env.toolCwd path >>= \case
-                Left err -> pure (Left err)
-                Right entries -> do
-                    let (shown, truncated) = capNodes maxListItems entries
-                        tree = renderTree 0 shown
-                        notice
-                            | truncated =
-                                "\nLarge directory summarized; some nested entries were omitted."
-                            | otherwise = ""
-                    pure $ Right $
-                        "Directory listing for "
-                            <> args.targetDirectory
-                            <> ":\n"
-                            <> tree
-                            <> notice
+    Right path -> do
+        display <- displayPathInWorkspace env path
+        doesDirectoryExist path >>= \case
+            False -> pure $ Left $
+                "Error: " <> display <> " is not a valid directory"
+            True ->
+                collectDir env.toolCwd path >>= \case
+                    Left err -> pure (Left err)
+                    Right entries -> do
+                        let (shown, truncated) = capNodes maxListItems entries
+                            tree = renderTree 0 shown
+                            notice
+                                | truncated =
+                                    "\nLarge directory summarized; some nested entries were omitted."
+                                | otherwise = ""
+                        pure $ Right $
+                            "Directory listing for "
+                                <> display
+                                <> ":\n"
+                                <> tree
+                                <> notice
 
 data DirNode
     = FileNode OsPath
