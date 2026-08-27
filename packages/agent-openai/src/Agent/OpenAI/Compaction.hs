@@ -1,5 +1,4 @@
--- | Conversation compaction helpers shared by OpenAI remote compact and
--- xAI/OpenRouter local summarization.
+-- | Conversation compaction helpers.
 module Agent.OpenAI.Compaction
     ( summaryPrefix
     , summarizationPrompt
@@ -34,9 +33,22 @@ module Agent.OpenAI.Compaction
     , clearSessionUserText
     , newSessionUserText
     ) where
-
-import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
-import Agent.Responses.LoopBackend (withRequestInput)
+import Agent.OpenAI.Compaction.Request
+    ( buildRemoteCompactionRequest
+    , estimateEncodedValue
+    , estimateRequestTokensWithItems
+    , estimateResponseCreateParamsTokens
+    , resizedImageBytesEstimate
+    )
+import Agent.OpenAI.Compaction.Commands
+    ( clearSessionUserText
+    , compactTranscriptAtLastCheckpoint
+    , isClearSessionTurn
+    , isCompactSessionTurn
+    , isNewSessionTurn
+    , isTranscriptResetTurn
+    , newSessionUserText
+    )
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -47,7 +59,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Vector as Vector
-
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
 summaryPrefix = "Compacted conversation summary:"
@@ -69,129 +80,6 @@ compactionTriggerItem =
     CompactionTriggerItemValue CompactionTriggerItem
         { extraFields = KeyMap.empty
         }
-
--- | Build a normal streaming Responses request whose final input item asks the
--- model to emit an opaque compaction checkpoint.
---
--- Regular Codex compaction enables parallel tool calls. Responses Lite
--- rejects that value, so keep the flag false for sol/terra/luna.
-buildRemoteCompactionRequest
-    :: ResponseCreateParams
-    -> [ResponseItem]
-    -> ResponseCreateParams
-buildRemoteCompactionRequest params history =
-    case withRequestInput params (history <> [compactionTriggerItem]) of
-        ResponseCreateParams{..} ->
-            ResponseCreateParams
-                { parallelToolCalls =
-                    Just (not (maybe False isCodexResponsesLiteModel model))
-                , previousResponseId = Nothing
-                , store = Just False
-                , stream = Just True
-                , toolChoice = Just (ToolChoiceMode ToolChoiceAuto)
-                , ..
-                }
-
--- | Estimate the complete serialized request, including instructions, tools,
--- and all other request-level fields. @input_image.image_url@ data URLs are
--- counted as vision tokens rather than as base64 text; see
--- 'estimateEncodedValue'.
-estimateRequestTokensWithItems
-    :: ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
-estimateRequestTokensWithItems params items =
-    estimateEncodedValue (withRequestInput params items)
-
-estimateResponseCreateParamsTokens :: ResponseCreateParams -> Int
-estimateResponseCreateParamsTokens = estimateEncodedValue
-
--- | Estimate serialized JSON at four characters per token, matching the rest
--- of compaction accounting. Base64 payloads on @input_image.image_url@ are
--- replaced with 'resizedImageBytesEstimate' because the model consumes those
--- images as vision tokens, not as the transport encoding. Ordinary strings
--- that happen to contain a data URL, including tool-output text, stay at raw
--- size.
-estimateEncodedValue :: Aeson.ToJSON value => value -> Int
-estimateEncodedValue value =
-    estimateAdjustedJsonTokens (Aeson.toJSON value)
-
-estimateAdjustedJsonTokens :: Aeson.Value -> Int
-estimateAdjustedJsonTokens json =
-    let encoded =
-            TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode json))
-        (payloadBytes, replacementBytes) = mediaEstimateAdjustment json
-        adjusted =
-            max 0 (Text.length encoded - payloadBytes) + replacementBytes
-    in max 1 (adjusted `div` 4)
-
--- | Approximate model-visible byte cost for one inline image, matching Codex.
--- Four bytes per token maps this to about 1,843 tokens. Attachments from this
--- harness use @detail: "auto"@, so original-detail patch counting is unused.
-resizedImageBytesEstimate :: Int
-resizedImageBytesEstimate = 7_373
-
-mediaEstimateAdjustment :: Aeson.Value -> (Int, Int)
-mediaEstimateAdjustment = \case
-    Aeson.Array values ->
-        foldl'
-            (\acc value -> addPair acc (mediaEstimateAdjustment value))
-            (0, 0)
-            values
-    Aeson.Object fields ->
-        let isInputImage =
-                KeyMap.lookup "type" fields == Just (Aeson.String "input_image")
-        in foldl'
-            (\acc (key, value) ->
-                addPair acc (fieldAdjustment isInputImage key value))
-            (0, 0)
-            (KeyMap.toList fields)
-    _ ->
-        (0, 0)
-  where
-    addPair (payloadAcc, replacementAcc) (payload, replacement) =
-        (payloadAcc + payload, replacementAcc + replacement)
-
-    fieldAdjustment isInputImage key value
-        | isInputImage && key == "image_url" =
-            imageUrlAdjustment value
-        | otherwise =
-            mediaEstimateAdjustment value
-
-imageUrlAdjustment :: Aeson.Value -> (Int, Int)
-imageUrlAdjustment = \case
-    Aeson.String text ->
-        case parseBase64ImageDataUrl text of
-            Just payload ->
-                (Text.length payload, resizedImageBytesEstimate)
-            Nothing ->
-                (0, 0)
-    _ ->
-        (0, 0)
-
--- | Return the base64 payload of a @data:image/...;base64,...@ URL.
--- Hosted HTTP(S) image URLs and non-image data URLs stay at raw size.
-parseBase64ImageDataUrl :: Text -> Maybe Text
-parseBase64ImageDataUrl url
-    | not (hasInsensitivePrefix "data:" url) = Nothing
-    | otherwise =
-        case Text.break (== ',') (Text.drop 5 url) of
-            (_, payload)
-                | Text.null payload -> Nothing
-            (metadata, payload) ->
-                let parts = Text.splitOn ";" metadata
-                    mime = case parts of
-                        (value : _) -> value
-                        [] -> Text.empty
-                    hasBase64 =
-                        any (\part -> Text.toLower part == "base64") parts
-                in if hasBase64 && hasInsensitivePrefix "image/" mime
-                    then Just (Text.drop 1 payload)
-                    else Nothing
-
-hasInsensitivePrefix :: Text -> Text -> Bool
-hasInsensitivePrefix prefix text =
-    Text.toLower (Text.take (Text.length prefix) text) == Text.toLower prefix
 
 contextWindowTruncatedOutputMessage :: Text
 contextWindowTruncatedOutputMessage =
@@ -1100,44 +988,6 @@ fitLocalSummaryItem targetWindow params summary
             in if requestTokens candidate <= targetWindow
                 then search (middle + 1) high (Just candidate)
                 else search low (middle - 1) best
-
--- | Legacy helper retained for API compatibility. Installed v2 snapshots must
--- be replayed in full because they intentionally place retained messages
--- before the checkpoint; new loop code therefore no longer calls this.
-compactTranscriptAtLastCheckpoint :: [ResponseItem] -> [ResponseItem]
-compactTranscriptAtLastCheckpoint items = go [] (reverse items)
-  where
-    go _ [] = items
-    go after (item : before) =
-        case item of
-            CompactionItemValue{} -> item : after
-            _ -> go (item : after) before
-
--- | Session turns that represent a compaction checkpoint.
-isCompactSessionTurn :: Text -> Bool
-isCompactSessionTurn text =
-    let stripped = Text.strip text
-    in stripped == "/compact" || Text.isPrefixOf "/compact " stripped
-
-clearSessionUserText :: Text
-clearSessionUserText = "/clear"
-
-newSessionUserText :: Text
-newSessionUserText = "/new"
-
-isClearSessionTurn :: Text -> Bool
-isClearSessionTurn text = Text.strip text == clearSessionUserText
-
-isNewSessionTurn :: Text -> Bool
-isNewSessionTurn text = Text.strip text == newSessionUserText
-
--- | Turns that replace the live transcript with their turnItems snapshot
--- (compact) or empty it (/clear, /new).
-isTranscriptResetTurn :: Text -> Bool
-isTranscriptResetTurn text =
-    isCompactSessionTurn text
-        || isClearSessionTurn text
-        || isNewSessionTurn text
 
 hasCompactionCheckpoint :: [ResponseItem] -> Bool
 hasCompactionCheckpoint = any \case
