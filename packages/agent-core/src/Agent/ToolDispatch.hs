@@ -95,6 +95,7 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFormatException :: Text -> SomeException -> Text
     , toolDispatchOnException :: Text -> SomeException -> IO ()
     , toolDispatchOnOutput :: ToolCall -> Text -> IO ()
+    , toolDispatchFinalizeOutput :: ToolCall -> Text -> IO Text
     }
 
 data ToolHandler
@@ -155,9 +156,15 @@ dispatchToolHandler config maybeHandler call = do
             -- propagate.
             _ <- tryAny (config.toolDispatchOnException callName exception)
             pure (config.toolDispatchFormatException callName exception)
+    finalizedOutput <-
+        tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
+            Right output -> pure output
+            Left exception -> do
+                _ <- tryAny (config.toolDispatchOnException callName exception)
+                pure resultOutput
     pure ToolCallResult
         { callId = call.callId
-        , output = resultOutput
+        , output = finalizedOutput
         , callKind = call.callKind
         }
 

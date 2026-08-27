@@ -404,6 +404,7 @@ defaultLoopDispatch = ToolDispatchConfig
         "Tool " <> name <> " crashed: " <> Text.pack (show exception)
     , toolDispatchOnException = \_name (_ :: SomeException) -> pure ()
     , toolDispatchOnOutput = \_call _output -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
     }
 
 runLoop

@@ -78,6 +78,7 @@ library
                     , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
+                    , Agent.Tools.OutputArtifact
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
@@ -199,6 +200,7 @@ test-suite agent-core-test
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
+                    , Agent.Tools.OutputArtifactSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.SecretSpec
                     , Agent.ToolDSLSpec

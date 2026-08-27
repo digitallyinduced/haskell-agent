@@ -90,6 +90,8 @@ import Agent.Loop
     , runLoop
     , runLoopInputs
     )
+import Agent.ToolDispatch (ToolDispatchConfig(..))
+import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
     ( openAiBackendWithRawReasoning
@@ -886,7 +888,8 @@ runCodexSubagent runtime tokenProvider sendToRoot =
                             withCodexTurnStateScope (pure turnState) $
                                 withConnectionRecovery compactingBackend
                     runPreparedChild
-                        runtime env prepared.preparedSession toolRegistry
+                        runtime env prepared.preparedSession
+                        prepared.preparedToolEnv toolRegistry
                         backend onEvent
                         (\config ->
                             runLoopInputs config previous [AgentMessage prompt])
@@ -1041,7 +1044,8 @@ runHttpSubagent runtime dialect provider sendToRoot mkBackend =
                             withConnectionRecovery $
                                 mkBackend childParams
                     runPreparedChild
-                        runtime env prepared.preparedSession toolRegistry
+                        runtime env prepared.preparedSession
+                        prepared.preparedToolEnv toolRegistry
                         backend onEvent
                         (\config ->
                             runLoop
@@ -1162,12 +1166,13 @@ runPreparedChild
     :: SubagentRuntime
     -> SubagentSpawnEnv
     -> SubagentSession
+    -> ToolEnv
     -> ToolRegistry
     -> Backend
     -> (LoopEvent -> IO ())
     -> (LoopConfig -> IO (Either LoopError LoopResult))
     -> IO (Either LoopError LoopResult)
-runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
+runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChild = do
     let config = LoopConfig
             { loopBackend = backend
             , loopBackendState = BackendStateStore
@@ -1175,7 +1180,11 @@ runPreparedChild runtime env session toolRegistry backend onEvent runChild = do
                 , commitBackendState = writeIORef session.subSessionTranscript
                 }
             , loopTools = toolRegistry
-            , loopDispatch = defaultLoopDispatch
+            , loopDispatch =
+                defaultLoopDispatch
+                    { toolDispatchFinalizeOutput =
+                        finalizeToolOutput toolEnv
+                    }
             , loopMaxTurns = runtime.subagentOptions.optMaxTurns
             , loopOnEvent = onEvent
             , loopApprove =

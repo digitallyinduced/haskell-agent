@@ -4,6 +4,7 @@ module Agent.Tools.IO
     , RunningCommand(..)
     , combineCommandOutput
     , commandResultOutput
+    , commandResultArtifacts
     , formatCommandResult
     , displayPathInWorkspace
     , resolveForRead
@@ -40,6 +41,15 @@ import Agent.Tools.FileSystem
     , resolveUnderCwd
     , writeTextFile
     )
+import Agent.Tools.OutputArtifact
+    ( OutputArtifact
+    , OutputArtifactWriter
+    , abortOutputArtifact
+    , appendOutputArtifact
+    , finishOutputArtifact
+    , openOutputArtifact
+    , renderOutputArtifactNotice
+    )
 import System.OsPath (OsPath)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Concurrent (threadDelay)
@@ -69,7 +79,13 @@ import Control.Exception.Safe
     , try
     )
 import Control.Monad (unless, void, when)
-import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
+import Data.IORef
+    ( IORef
+    , atomicModifyIORef'
+    , newIORef
+    , readIORef
+    , writeIORef
+    )
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -101,6 +117,8 @@ data CommandResult = CommandResult
     { commandExitCode :: !(Maybe Int)
     , commandStdout :: !Text
     , commandStderr :: !Text
+    , commandStdoutArtifact :: !(Maybe OutputArtifact)
+    , commandStderrArtifact :: !(Maybe OutputArtifact)
     , commandTimedOut :: !Bool
     , commandCancelled :: !Bool
     } deriving (Eq, Show)
@@ -116,7 +134,21 @@ combineCommandOutput out err
 -- | Combined captured output from a completed command.
 commandResultOutput :: CommandResult -> Text
 commandResultOutput result =
-    combineCommandOutput result.commandStdout result.commandStderr
+    Text.intercalate "\n" . filter (not . Text.null) $
+        [ result.commandStdout
+        , result.commandStderr
+        , commandResultArtifacts result
+        ]
+
+-- | Artifact notices for dialects that retain their own stdout/stderr format.
+commandResultArtifacts :: CommandResult -> Text
+commandResultArtifacts result =
+    Text.intercalate "\n" . filter (not . Text.null) $
+        [ maybe "" (renderOutputArtifactNotice "shell stdout")
+            result.commandStdoutArtifact
+        , maybe "" (renderOutputArtifactNotice "shell stderr")
+            result.commandStderrArtifact
+        ]
 
 -- | Render the stable terminal-tool result format shared by foreground and
 -- background commands.
@@ -228,6 +260,8 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
             { commandExitCode = Just 127
             , commandStdout = ""
             , commandStderr = "Failed to start command: " <> Text.pack (show err)
+            , commandStdoutArtifact = Nothing
+            , commandStderrArtifact = Nothing
             , commandTimedOut = False
             , commandCancelled = False
             }
@@ -247,8 +281,8 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
                     -- fills one pipe cannot deadlock the other.
                     withAsync sampleSnapshots \_sampler -> do
                         (out, err) <- concurrently
-                            (drainHandle env.toolStdoutCap hout stdoutRef Nothing)
-                            (drainHandle env.toolStdoutCap herr stderrRef Nothing)
+                            (drainHandle env "shell stdout" hout stdoutRef Nothing)
+                            (drainHandle env "shell stderr" herr stderrRef Nothing)
                         code <- waitForProcess processHandle
                         emitSnapshot
                         pure (out, err, code)
@@ -293,6 +327,8 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
                                     { commandExitCode = Nothing
                                     , commandStdout = ""
                                     , commandStderr = ""
+                                    , commandStdoutArtifact = Nothing
+                                    , commandStderrArtifact = Nothing
                                     , commandTimedOut = True
                                     , commandCancelled = False
                                     }
@@ -300,8 +336,12 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
                                 closePipes
                                 pure CommandResult
                                     { commandExitCode = Just (exitCodeInt code)
-                                    , commandStdout = renderCapturedBytes out
-                                    , commandStderr = renderCapturedBytes err
+                                    , commandStdout =
+                                        renderCapturedBytes out.drainedCaptured
+                                    , commandStderr =
+                                        renderCapturedBytes err.drainedCaptured
+                                    , commandStdoutArtifact = out.drainedArtifact
+                                    , commandStderrArtifact = err.drainedArtifact
                                     , commandTimedOut = False
                                     , commandCancelled = False
                                     })
@@ -314,6 +354,8 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
                 { commandExitCode = Just 127
                 , commandStdout = ""
                 , commandStderr = "Failed to capture command output"
+                , commandStdoutArtifact = Nothing
+                , commandStderrArtifact = Nothing
                 , commandTimedOut = False
                 , commandCancelled = False
                 }
@@ -321,13 +363,15 @@ runShellCommandStreaming env workdir command timeoutMs onSnapshot =
 -- | Outcomes of racing timeout against completion (cancel is the other race arm).
 data ShellStop
     = StopTimeout
-    | StopDone (CapturedBytes, CapturedBytes, ExitCode)
+    | StopDone (DrainedOutput, DrainedOutput, ExitCode)
 
 cancelledResult :: CommandResult
 cancelledResult = CommandResult
     { commandExitCode = Nothing
     , commandStdout = ""
     , commandStderr = ""
+    , commandStdoutArtifact = Nothing
+    , commandStderrArtifact = Nothing
     , commandTimedOut = False
     , commandCancelled = True
     }
@@ -368,7 +412,7 @@ startShellCommandWithStdin keepStdin env workdir command = do
             , env = processEnv
             }
     try @_ @SomeException
-        (acquireRunningCommand spec env.toolStdoutCap keepStdin) >>= \case
+        (acquireRunningCommand env spec keepStdin) >>= \case
         Left err -> pure $ Left $ "Failed to start command: " <> Text.pack (show err)
         Right running -> pure (Right running)
 
@@ -389,8 +433,8 @@ configuredProcessEnv env = readIORef env.toolSessionTmp >>= \case
             : withoutTemp
             )
 
-acquireRunningCommand :: CreateProcess -> Int -> Bool -> IO RunningCommand
-acquireRunningCommand spec outputCap keepStdin = mask \restore -> do
+acquireRunningCommand :: ToolEnv -> CreateProcess -> Bool -> IO RunningCommand
+acquireRunningCommand env spec keepStdin = mask \restore -> do
     created@(_, _, _, processHandle) <- createProcess spec
     groupId <- getPid processHandle
     case created of
@@ -414,9 +458,11 @@ acquireRunningCommand spec outputCap keepStdin = mask \restore -> do
                         ((out, err), code) <- concurrently
                             (concurrently
                                 (drainHandle
-                                    outputCap hout stdoutRef (Just stdoutRecentRef))
+                                    env "shell stdout" hout stdoutRef
+                                    (Just stdoutRecentRef))
                                 (drainHandle
-                                    outputCap herr stderrRef (Just stderrRecentRef)))
+                                    env "shell stderr" herr stderrRef
+                                    (Just stderrRecentRef)))
                             (waitForProcessPolling processHandle)
                         pure (out, err, code)
                     commandResult <- case result of
@@ -425,15 +471,19 @@ acquireRunningCommand spec outputCap keepStdin = mask \restore -> do
                             let diagnostic =
                                     TextEncoding.encodeUtf8 (Text.pack (show exception))
                             atomicModifyIORef' stderrRef \soFar ->
-                                (appendCapturedBytes outputCap diagnostic soFar, ())
+                                (appendCapturedBytes env.toolStdoutCap diagnostic soFar, ())
                             atomicModifyIORef' stderrRecentRef \soFar ->
-                                (appendRecentBytes outputCap diagnostic soFar, ())
+                                (appendRecentBytes env.toolStdoutCap diagnostic soFar, ())
                             pure (failedCommandResult exception)
                         Right (out, err, code) ->
                             pure CommandResult
                                 { commandExitCode = Just (exitCodeInt code)
-                                , commandStdout = renderCapturedBytes out
-                                , commandStderr = renderCapturedBytes err
+                                , commandStdout =
+                                    renderCapturedBytes out.drainedCaptured
+                                , commandStderr =
+                                    renderCapturedBytes err.drainedCaptured
+                                , commandStdoutArtifact = out.drainedArtifact
+                                , commandStderrArtifact = err.drainedArtifact
                                 , commandTimedOut = False
                                 , commandCancelled = False
                                 }
@@ -534,24 +584,52 @@ failedCommandResult exception = CommandResult
     { commandExitCode = Just 127
     , commandStdout = ""
     , commandStderr = Text.pack (show exception)
+    , commandStdoutArtifact = Nothing
+    , commandStderrArtifact = Nothing
     , commandTimedOut = False
     , commandCancelled = False
     }
 
--- | Read the handle in chunks so a live snapshot can see output before EOF.
+data DrainedOutput = DrainedOutput
+    { drainedCaptured :: !CapturedBytes
+    , drainedArtifact :: !(Maybe OutputArtifact)
+    }
+
+-- | Read a process stream in chunks. The live snapshot remains bounded; once
+-- it overflows, the complete stream is spilled to a session artifact.
 drainHandle
-    :: Int
+    :: ToolEnv
+    -> Text
     -> Handle
     -> IORef CapturedBytes
     -> Maybe (IORef RecentBytes)
-    -> IO CapturedBytes
-drainHandle cap handle ref recentRef = go
+    -> IO DrainedOutput
+drainHandle env _source handle ref recentRef = do
+    writerRef <- newIORef Nothing
+    let cleanup =
+            readIORef writerRef >>= mapM_ (\writer -> do
+                _ <- finishOutputArtifact writer
+                pure ())
+    go writerRef Nothing False `onException` cleanup
   where
-    go = do
+    cap = env.toolStdoutCap
+
+    go writerRef writer disabled = do
         chunk <- BS.hGetSome handle 8192
         if BS.null chunk
-            then readIORef ref
+            then do
+                captured <- readIORef ref
+                artifact <- traverse finishOutputArtifact writer
+                writeIORef writerRef Nothing
+                pure DrainedOutput
+                    { drainedCaptured = captured
+                    , drainedArtifact = artifact
+                    }
             else do
+                before <- readIORef ref
+                (nextWriter, nextDisabled) <-
+                    spillChunk writer disabled before chunk
+                writeIORef writerRef nextWriter
                 atomicModifyIORef' ref \soFar ->
                     (appendCapturedBytes cap chunk soFar, ())
                 mapM_
@@ -559,7 +637,35 @@ drainHandle cap handle ref recentRef = go
                         atomicModifyIORef' recent \soFar ->
                             (appendRecentBytes cap chunk soFar, ()))
                     recentRef
-                go
+                go writerRef nextWriter nextDisabled
+
+    spillChunk
+        :: Maybe OutputArtifactWriter
+        -> Bool
+        -> CapturedBytes
+        -> BS.ByteString
+        -> IO (Maybe OutputArtifactWriter, Bool)
+    spillChunk (Just writer) disabled _ chunk =
+        appendOutputArtifact writer chunk >>= \case
+            Right () -> pure (Just writer, disabled)
+            Left _ -> do
+                abortOutputArtifact writer
+                pure (Nothing, True)
+    spillChunk Nothing True _ _ = pure (Nothing, True)
+    spillChunk Nothing False before chunk
+        | cap <= 0
+            || BS.length before.capturedBytes + BS.length chunk <= cap =
+                pure (Nothing, False)
+        | otherwise =
+            openOutputArtifact env >>= \case
+                Left _ -> pure (Nothing, True)
+                Right writer ->
+                    appendOutputArtifact writer
+                        (before.capturedBytes <> chunk) >>= \case
+                            Right () -> pure (Just writer, False)
+                            Left _ -> do
+                                abortOutputArtifact writer
+                                pure (Nothing, True)
 
 emptyCapturedBytes :: CapturedBytes
 emptyCapturedBytes = CapturedBytes

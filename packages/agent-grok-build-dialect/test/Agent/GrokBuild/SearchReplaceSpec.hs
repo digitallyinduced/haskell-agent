@@ -50,4 +50,5 @@ testConfig = ToolDispatchConfig
     , toolDispatchFormatException = \name _ -> "EX " <> name
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
     }

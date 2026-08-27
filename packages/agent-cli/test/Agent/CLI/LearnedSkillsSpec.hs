@@ -287,6 +287,7 @@ dispatchConfig = ToolDispatchConfig
         name <> ": " <> Text.pack (displayException exception)
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
     }
 
 skill :: Text -> LearnedSkillActivation -> LearnedSkill
