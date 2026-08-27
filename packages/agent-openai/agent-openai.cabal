@@ -72,7 +72,10 @@ library
                     , Agent.OpenAI.CompactClient
                     , Agent.OpenAI.Compaction
                     , Agent.OpenAI.ToolDSL
-    other-modules:    Paths_agent_openai
+    other-modules:    Agent.OpenAI.Compaction.Commands
+                    , Agent.OpenAI.Compaction.Request
+                    , Agent.OpenAI.Models.Types.Enums
+                    , Paths_agent_openai
     autogen-modules:  Paths_agent_openai
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
@@ -158,4 +161,3 @@ test-suite agent-openai-test
                     , http-types
                     , wai
                     , warp
-
