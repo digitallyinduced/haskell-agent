@@ -40,6 +40,7 @@ library
     exposed-modules:  Claude.Agent.SDK
                     , Claude.Agent.SDK.Client
                     , Claude.Agent.SDK.Errors
+                    , Claude.Agent.SDK.Internal.Transport.OutputBuffer
                     , Claude.Agent.SDK.Query
                     , Claude.Agent.SDK.Transport
                     , Claude.Agent.SDK.Types
@@ -63,12 +64,23 @@ library
                     , unix
                     , uuid-types
 
+benchmark output-buffer-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          OutputBuffer.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    base >= 4.17 && < 5
+                    , claude-agent-sdk-haskell
+                    , bytestring
+
 test-suite claude-agent-sdk-haskell-test
     import:           common-opts
     type:             exitcode-stdio-1.0
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Claude.Agent.SDK.ClientSpec
+                    , Claude.Agent.SDK.Internal.Transport.OutputBufferSpec
                     , Claude.Agent.SDK.QuerySpec
                     , Claude.Agent.SDK.TestSupport
     ghc-options:      -threaded

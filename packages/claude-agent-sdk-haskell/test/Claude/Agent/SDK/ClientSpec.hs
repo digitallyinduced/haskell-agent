@@ -179,7 +179,7 @@ spec = describe "ClaudeSDKClient subprocess transport" do
 
     it "rejects structured output records larger than the configured limit" do
         withFakeClaude
-            (oneShotScript [Text.replicate 65 "x"])
+            (oneShotScript [successResult "too large"])
             \directory executable -> do
                 result <-
                     query
@@ -193,6 +193,19 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                         "larger than 64 bytes"
                             `Text.isInfixOf` message
                     _ -> False
+
+    it "assembles one structured record emitted across many subprocess writes" do
+        let reply = Text.replicate 20_000 "x"
+        withFakeClaude
+            (multiWriteScript (successResult reply))
+            \directory executable -> do
+                result <-
+                    query
+                        (testOptions executable directory)
+                        "split output"
+                        (const (pure ()))
+                fmap resultText result
+                    `shouldBe` Right (Just reply)
 
     it "aborts a blocked subprocess output read promptly" do
         withFakeClaude blockedOutputScript \directory executable -> do
@@ -1358,6 +1371,29 @@ successResult result =
         <> "\",\"uuid\":\"result\",\"result\":\""
         <> result
         <> "\"}"
+
+multiWriteScript :: Text -> String
+multiWriteScript record =
+    Text.unpack $
+        Text.unlines $
+            [ "#!/bin/sh"
+            , "IFS= read -r _query"
+            ]
+                <> concatMap
+                    (\chunk ->
+                        [ "printf '%s' " <> shellQuote chunk
+                        , "sleep 0.01"
+                        ])
+                    (textChunks 997 record)
+                <> ["printf '\\n'"]
+
+textChunks :: Int -> Text -> [Text]
+textChunks chunkSize value
+    | Text.null value = []
+    | otherwise =
+        let (chunk, remaining) =
+                Text.splitAt chunkSize value
+         in chunk : textChunks chunkSize remaining
 
 assistantLine :: Text -> Text -> Text
 assistantLine sessionId text =
