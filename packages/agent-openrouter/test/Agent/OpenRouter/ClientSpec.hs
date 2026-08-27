@@ -312,14 +312,8 @@ requestInstructions request =
     either (const Nothing) Just $
         Json.decodeEither
             (Json.object
-                (joinMaybe
-                    <$> Json.atKeyOptional
-                        "instructions"
-                        (Json.nullable Json.text)))
+                (Json.optionalKey "instructions" Json.text))
             (LBS.toStrict request.body)
-  where
-    joinMaybe (Just value) = value
-    joinMaybe Nothing = Nothing
 
 expectRight :: Show e => Either e a -> IO a
 expectRight = \case

@@ -21,7 +21,7 @@ openRouterErrorEnvelopeDecoder :: Json.Decoder OpenRouterErrorEnvelope
 openRouterErrorEnvelopeDecoder = Json.object $
     Json.atKey "error" $ Json.object $
         OpenRouterErrorEnvelope
-            <$> optionalNullable "code" Json.text
+            <$> Json.optionalKey "code" Json.text
             <*> (Maybe.fromMaybe ""
                 <$> firstPresent "message" "msg" Json.text)
 
@@ -82,21 +82,14 @@ decodeOpenRouterError body =
         Right envelope -> Just envelope
         Left _ -> Nothing
 
-optionalNullable
-    :: Text
-    -> Json.Decoder value
-    -> Json.FieldsDecoder (Maybe value)
-optionalNullable key decoder =
-    maybe Nothing id <$> Json.atKeyOptional key (Json.nullable decoder)
-
 firstPresent
     :: Text
     -> Text
     -> Json.Decoder value
     -> Json.FieldsDecoder (Maybe value)
 firstPresent firstKey secondKey decoder = do
-    first <- optionalNullable firstKey decoder
-    second <- optionalNullable secondKey decoder
+    first <- Json.optionalKey firstKey decoder
+    second <- Json.optionalKey secondKey decoder
     pure (first `orElse` second)
 
 errorTypeFromOpenRouter :: Int -> Maybe Text -> ErrorType

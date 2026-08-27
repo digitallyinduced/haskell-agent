@@ -78,37 +78,28 @@ data TranscriptEvent
     deriving (Eq, Show)
 
 transcriptEventDecoder :: Json.Decoder TranscriptEvent
-transcriptEventDecoder = Json.object do
-        Json.atKey "type" Json.text >>= \case
-            ("transcript.created" :: Text) ->
-                pure TranscriptCreated
-            "transcript.partial" ->
-                TranscriptPartial
-                    <$> optionalWithDefault "text" Json.text ""
-                    <*> optionalWithDefault "is_final" Json.bool False
-                    <*> optionalWithDefault "speech_final" Json.bool False
-            "transcript.done" ->
-                TranscriptDone <$> optionalWithDefault "text" Json.text ""
-            "error" ->
-                TranscriptError
-                    <$> optionalWithDefault "message" Json.text "xAI STT error"
-            _ ->
-                pure TranscriptUnknown
+transcriptEventDecoder = Json.discriminatedObject "type" \case
+    "transcript.created" ->
+        pure TranscriptCreated
+    "transcript.partial" ->
+        Json.object $ TranscriptPartial
+            <$> Json.defaultKey "" "text" Json.text
+            <*> Json.defaultKey False "is_final" Json.bool
+            <*> Json.defaultKey False "speech_final" Json.bool
+    "transcript.done" ->
+        Json.object $ TranscriptDone
+            <$> Json.defaultKey "" "text" Json.text
+    "error" ->
+        Json.object $ TranscriptError
+            <$> Json.defaultKey "xAI STT error" "message" Json.text
+    _ ->
+        pure TranscriptUnknown
 
 decodeTranscriptEvent :: LBS.ByteString -> Either String TranscriptEvent
 decodeTranscriptEvent body =
     case Json.decodeEither transcriptEventDecoder (LBS.toStrict body) of
         Left err -> Left (Text.unpack err.jsonErrorMessage)
         Right event -> Right event
-
-optionalWithDefault
-    :: Text
-    -> Json.Decoder value
-    -> value
-    -> Json.FieldsDecoder value
-optionalWithDefault key decoder fallback =
-    maybe fallback (maybe fallback id)
-        <$> Json.atKeyOptional key (Json.nullable decoder)
 
 data TranscriptState = TranscriptState
     { completed :: ![Text]

@@ -16,7 +16,6 @@ import Agent.XAI.Options
     , grokUserAgent
     )
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -40,12 +39,11 @@ grokUsageSnapshotDecoder = Json.object $
             -- omit creditUsagePercent entirely; that represents 0%, not an
             -- unreadable response.
             creditUsagePercent <-
-                fromMaybe 0
-                    <$> optionalNullable "creditUsagePercent" Json.scientific
+                Json.defaultKey 0 "creditUsagePercent" Json.scientific
             (periodType, startsAt, resetsAt) <- Json.atKey "currentPeriod" $
                 Json.object $
                     (,,)
-                        <$> (fromMaybe "" <$> optionalNullable "type" Json.text)
+                        <$> Json.defaultKey "" "type" Json.text
                         <*> Json.atKey "start" Json.utcTime
                         <*> Json.atKey "end" Json.utcTime
             let usedPercent = max 0 (min 100 (floor creditUsagePercent))
@@ -64,16 +62,6 @@ decodeGrokUsage body = case
     Left _ ->
         Left "Grok returned an unreadable usage response."
     Right snapshot -> Right snapshot
-
-optionalNullable
-    :: Text
-    -> Json.Decoder value
-    -> Json.FieldsDecoder (Maybe value)
-optionalNullable key decoder =
-    joinMaybe <$> Json.atKeyOptional key (Json.nullable decoder)
-  where
-    joinMaybe (Just value) = value
-    joinMaybe Nothing = Nothing
 
 -- | The fullscreen composer mirrors Grok Build's weekly reserve label only
 -- when the billing service explicitly reports a weekly period.

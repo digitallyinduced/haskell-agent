@@ -39,11 +39,11 @@ keyInfoDecoder :: Json.Decoder KeyInfo
 keyInfoDecoder = Json.object $
     Json.atKey "data" $ Json.object $
             KeyInfo
-                <$> optionalNullable "label" Json.text
-                <*> optionalNullable "usage" Json.scientific
-                <*> optionalNullable "limit" Json.scientific
-                <*> optionalNullable "limit_remaining" Json.scientific
-                <*> optionalNullable "is_free_tier" Json.bool
+                <$> Json.optionalKey "label" Json.text
+                <*> Json.optionalKey "usage" Json.scientific
+                <*> Json.optionalKey "limit" Json.scientific
+                <*> Json.optionalKey "limit_remaining" Json.scientific
+                <*> Json.optionalKey "is_free_tier" Json.bool
 
 data Credits = Credits
     { credits :: !(Maybe Scientific)
@@ -54,8 +54,8 @@ creditsDecoder :: Json.Decoder Credits
 creditsDecoder = Json.object $
     Json.atKey "data" $ Json.object $
             Credits
-                <$> optionalNullable "total_credits" Json.scientific
-                <*> optionalNullable "total_usage" Json.scientific
+                <$> Json.optionalKey "total_credits" Json.scientific
+                <*> Json.optionalKey "total_usage" Json.scientific
 
 decodeKeyInfo
     :: LBS.ByteString
@@ -74,13 +74,6 @@ decodeCredits body = case Json.decodeEither creditsDecoder (LBS.toStrict body) o
     Left _ ->
         Left "OpenRouter returned an unreadable credits response."
     Right Credits{credits, used} -> Right (credits, used)
-
-optionalNullable
-    :: Text
-    -> Json.Decoder value
-    -> Json.FieldsDecoder (Maybe value)
-optionalNullable key decoder =
-    maybe Nothing id <$> Json.atKeyOptional key (Json.nullable decoder)
 
 fetchOpenRouterUsage :: Text -> IO (Either Text OpenRouterUsage)
 fetchOpenRouterUsage apiKey = do

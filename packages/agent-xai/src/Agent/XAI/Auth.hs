@@ -100,10 +100,9 @@ deviceAuthorizationDecoder = Json.object do
         deviceCode <- Json.atKey "device_code" Json.text
         userCode <- Json.atKey "user_code" Json.text
         verificationUri <- Json.atKey "verification_uri" Json.text
-        verificationUriComplete <- optionalNullable "verification_uri_complete" Json.text
-        pollIntervalSeconds <- max 1 . Maybe.fromMaybe 5
-            <$> optionalNullable "interval" Json.int
-        expiresInSeconds <- optionalNullable "expires_in" Json.int
+        verificationUriComplete <- Json.optionalKey "verification_uri_complete" Json.text
+        pollIntervalSeconds <- max 1 <$> Json.defaultKey 5 "interval" Json.int
+        expiresInSeconds <- Json.optionalKey "expires_in" Json.int
         pure DeviceAuthorization
             { deviceCode
             , userCode
@@ -122,9 +121,9 @@ data OAuthTokens = OAuthTokens
 oAuthTokensDecoder :: Json.Decoder OAuthTokens
 oAuthTokensDecoder = Json.object $ OAuthTokens
     <$> Json.atKey "access_token" Json.text
-    <*> optionalNullable "refresh_token" Json.text
-    <*> optionalNullable "id_token" Json.text
-    <*> optionalNullable "expires_in" Json.int
+    <*> Json.optionalKey "refresh_token" Json.text
+    <*> Json.optionalKey "id_token" Json.text
+    <*> Json.optionalKey "expires_in" Json.int
 
 -- Keep bearer/refresh tokens out of logs.
 instance Show OAuthTokens where
@@ -276,10 +275,10 @@ data JwtClaims = JwtClaims
 
 jwtClaimsDecoder :: Json.Decoder JwtClaims
 jwtClaimsDecoder = Json.object $ JwtClaims
-    <$> optionalNullable "sub" Json.text
-    <*> optionalNullable "principal_id" Json.text
-    <*> optionalNullable "principalId" Json.text
-    <*> optionalNullable "email" Json.text
+    <$> Json.optionalKey "sub" Json.text
+    <*> Json.optionalKey "principal_id" Json.text
+    <*> Json.optionalKey "principalId" Json.text
+    <*> Json.optionalKey "email" Json.text
 
 --------------------------------------------------------------------------------
 -- Small helpers
@@ -312,13 +311,6 @@ decodeResponse decoder label response =
     Left err -> fail
         (label <> " is invalid JSON: " <> Text.unpack err.jsonErrorMessage)
     Right value -> pure value
-
-optionalNullable
-    :: Text
-    -> Json.Decoder value
-    -> Json.FieldsDecoder (Maybe value)
-optionalNullable key decoder =
-    maybe Nothing id <$> Json.atKeyOptional key (Json.nullable decoder)
 
 lbsPreview :: LBS.ByteString -> String
 lbsPreview = Text.unpack . Text.take 300 . Text.decodeUtf8With (\_ _ -> Just '?') . LBS.toStrict
