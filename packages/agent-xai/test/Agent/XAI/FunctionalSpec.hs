@@ -109,8 +109,8 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , name = Nothing
             , namespace = Nothing
             , provider = Nothing
-            , output = rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
-                ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
+            , output = rawJsonFromEncoding $ Aeson.toEncoding $
+                Aeson.String "grok functional tool ok"
             , status = Nothing
             }
         , userMessage "The tool ran. Reply with exactly: done"
