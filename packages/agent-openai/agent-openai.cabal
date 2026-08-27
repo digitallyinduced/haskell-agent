@@ -82,7 +82,6 @@ library
                     , agent-responses-types >= 0.1 && < 0.2
                     , text
                     , bytestring
-                    , base64-bytestring
                     , aeson                 >= 2.0
                     , http-client
                     , http-conduit

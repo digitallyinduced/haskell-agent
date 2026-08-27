@@ -6,12 +6,11 @@ module Agent.OpenAI.Auth.JWT
     , refreshMarginSeconds
     ) where
 
+import Agent.Auth.JWT (decodeJwtPayload)
 import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Auth.Types (AuthState(..))
-import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), addUTCTime, diffUTCTime)
 
@@ -32,18 +31,18 @@ needsRefresh state now =
 -- | Parse the @exp@ claim from a JWT without signature verification.
 parseJwtExp :: Text -> Maybe UTCTime
 parseJwtExp token = do
-    expAt <- decodeJwtClaims (Json.object (Json.atKey "exp" Json.int)) token
+    expAt <- decodeJwtPayload (Json.object (Json.atKey "exp" Json.int)) token
     let epoch = UTCTime (fromGregorian 1970 1 1) 0
     pure $ addUTCTime (fromIntegral expAt) epoch
 
 -- | Derive the ChatGPT account id from an @id_token@ JWT.
 deriveAccountId :: Text -> Maybe Text
 deriveAccountId idTok = do
-    decodeJwtClaims accountIdDecoder idTok
+    decodeJwtPayload accountIdDecoder idTok
 
 deriveEmail :: Text -> Maybe Text
 deriveEmail token = do
-    email <- decodeJwtClaims
+    email <- decodeJwtPayload
         (Json.object (Json.atKey "email" Json.text))
         token
     if Text.null (Text.strip email)
@@ -56,21 +55,3 @@ accountIdDecoder = Json.object $
         Json.object $
             Json.atKey "chatgpt_account_id" Json.text
 
-decodeJwtClaims :: Json.Decoder value -> Text -> Maybe value
-decodeJwtClaims decoder token = do
-    payload <- case Text.splitOn "." token of
-        (_header : encodedPayload : _) -> Just encodedPayload
-        _ -> Nothing
-    bytes <- either (const Nothing) Just $
-        Base64.decode (Text.encodeUtf8 (base64UrlToBase64 payload))
-    either (const Nothing) Just (Json.decodeEither decoder bytes)
-
-base64UrlToBase64 :: Text -> Text
-base64UrlToBase64 input =
-    replaced <> Text.replicate paddingLength "="
-  where
-    replaced = Text.map replace input
-    replace '-' = '+'
-    replace '_' = '/'
-    replace character = character
-    paddingLength = (4 - Text.length replaced `mod` 4) `mod` 4
