@@ -268,6 +268,14 @@ main = hspec do
                 decoded.plannedExtensions
                 `shouldBe` Nothing
 
+        it "captures the complete source for a decoded value" do
+            (_, raw) <- expectRight $
+                Decoder.decode
+                    (Decoder.withRaw plannedDecoder)
+                    "{\"name\":\"Ada\",\"enabled\":true}"
+            rawJsonBytes raw
+                `shouldBe` "{\"name\":\"Ada\",\"enabled\":true}"
+
         it "selects tagged object codecs without a generic object" do
             Decoder.decode taggedDecoder
                 "{\"value\":\"first\",\"type\":\"text\"}"
