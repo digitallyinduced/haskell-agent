@@ -46,8 +46,8 @@ library
                     , Agent.TUI.TextWidth
                     , Agent.TUI.Theme
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
                     , agent-syntax >= 0.1 && < 0.2
-                    , aeson >= 2.0 && < 3
                     , base >= 4.17 && < 5
                     , brick >= 2.9 && < 3
                     , containers >= 0.6 && < 0.8
