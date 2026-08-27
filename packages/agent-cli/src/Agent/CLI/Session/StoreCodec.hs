@@ -65,6 +65,7 @@ toStoredResponseItem = \case
             , storedFunctionCallExtraFields =
                 encodeKnownFields
                     [ ("namespace", Aeson.toJSON <$> call.namespace)
+                    , ("provider", Aeson.toJSON <$> call.provider)
                     , ("encrypted_function_args", Aeson.toJSON <$> call.encryptedFunctionArgs)
                     ]
             }
@@ -80,6 +81,7 @@ toStoredResponseItem = \case
                 encodeKnownFields
                     [ ("name", Aeson.toJSON <$> output.name)
                     , ("namespace", Aeson.toJSON <$> output.namespace)
+                    , ("provider", Aeson.toJSON <$> output.provider)
                     ]
             }
     CustomToolCallItem call ->
@@ -185,11 +187,15 @@ fromStoredResponseItem = \case
             "encrypted_function_args"
             (Hermes.list Hermes.text)
             call.storedFunctionCallExtraFields
+        provider <- decodeOptionalField "stored function-call extra fields"
+            "provider" Hermes.text call.storedFunctionCallExtraFields
         Right $ FunctionCallItem FunctionCall
             { itemId = call.storedFunctionCallProviderItemId
             , callId = call.storedFunctionCallCallId
             , name = call.storedFunctionCallName
             , namespace
+            , provider
+            , provider
             , arguments = call.storedFunctionCallArguments
             , encryptedFunctionArgs
             , status
@@ -205,6 +211,8 @@ fromStoredResponseItem = \case
             "name" Hermes.text output.storedFunctionCallOutputExtraFields
         namespace <- decodeOptionalField "stored function-call-output extra fields"
             "namespace" Hermes.text output.storedFunctionCallOutputExtraFields
+        provider <- decodeOptionalField "stored function-call-output extra fields"
+            "provider" Hermes.text output.storedFunctionCallOutputExtraFields
         Right $ FunctionCallOutputItem FunctionCallOutput
             { itemId = output.storedFunctionCallOutputProviderItemId
             , callId = output.storedFunctionCallOutputCallId

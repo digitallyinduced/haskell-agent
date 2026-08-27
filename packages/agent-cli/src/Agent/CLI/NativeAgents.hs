@@ -6,6 +6,7 @@ module Agent.CLI.NativeAgents
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Json.Decode qualified as Hermes
 import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
 import Agent.Responses.Types
@@ -22,9 +23,6 @@ import Agent.TUI.Model
     , reduceUi
     )
 import qualified Data.Map.Strict as Map
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -123,7 +121,7 @@ restoreNativeAgents items current =
     outputs = Map.fromList
         [ (output.callId, output)
         | FunctionCallOutputItem output <- items
-        , isClaudeNativeItem output.extraFields
+        , output.provider == Just "claude-code"
         ]
     restored = Map.fromList
         [ (call.callId, restoredView call)
@@ -169,12 +167,7 @@ restoreNativeAgents items current =
 isClaudeNativeCall :: FunctionCall -> Bool
 isClaudeNativeCall call =
     Text.toLower call.name `elem` ["agent", "task"]
-        && isClaudeNativeItem call.extraFields
-
-isClaudeNativeItem :: KeyMap.KeyMap Aeson.Value -> Bool
-isClaudeNativeItem fields =
-    KeyMap.lookup "provider" fields
-        == Just (Aeson.String "claude-code")
+        && call.provider == Just "claude-code"
 
 argumentText :: Text -> Text -> Maybe Text
 argumentText key raw = do
@@ -185,12 +178,13 @@ argumentText key raw = do
     let stripped = Text.strip value
     if Text.null stripped then Nothing else Just stripped
 
-renderOutput :: Aeson.Value -> Text
-renderOutput = \case
-    Aeson.String text -> text
-    value ->
-        TextEncoding.decodeUtf8With lenientDecode
-            (LazyByteString.toStrict (Aeson.encode value))
+renderOutput :: RawJson -> Text
+renderOutput value =
+    case Hermes.decodeEither Hermes.text (rawJsonBytes value) of
+        Right text -> text
+        Left _ ->
+            TextEncoding.decodeUtf8With lenientDecode
+                (rawJsonBytes value)
 
 settleRunningNativeAgents
     :: NativeAgentStatus
