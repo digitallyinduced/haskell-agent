@@ -83,7 +83,6 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Prompt
     ( systemPromptForTools )
-import Agent.CLI.Resume (resumeNeedsGeneratedContext)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
@@ -1102,15 +1101,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             markStartupStage startup "Loading skills…"
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
-            let queueInitialContext =
-                    resumeNeedsGeneratedContext initialTurns
-                        || (null initialTurns && isNothing initialPrevious)
             (omitted, _) <- installSkills startupContext
-                queueInitialContext
+                needsInitialContext
                 skills
             reportSkillCatalog (isNothing fullscreen) skills omitted
             learnedSkills <-
-                if queueInitialContext
+                if needsInitialContext
                     then installLearnedSkills
                         startupContext
                         defaultLearnedSkillContextMaxChars

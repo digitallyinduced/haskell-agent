@@ -32,7 +32,6 @@ import Agent.CLI.Session
     ( LegacySubagentTarget
     , Persistence
     , SessionHandle
-    , SessionTurn
     )
 import Agent.CLI.SessionState (SessionState)
 import Agent.CLI.Subagents.Runtime
@@ -116,7 +115,7 @@ data SessionRequest = SessionRequest
     , startupUnavailable :: !(Maybe (STM ApiError))
     , paramsRef :: !(IORef ResponseCreateParams)
     , conversationRef :: !(IORef LiveConversation)
-    , initialTurns :: ![SessionTurn]
+    , needsInitialContext :: !Bool
     , persist :: !Persistence
     , startupWindowTitle :: !Text
     , projectRoot :: !OsPath

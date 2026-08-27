@@ -199,11 +199,14 @@ import Agent.ReasoningEffort
     , reasoningEffortText
     )
 import Agent.CLI.Session.History
-    ( detectGitBranch,
+    ( currentLiveTranscriptGeneration,
+      detectGitBranch,
+      durableTranscriptCheckpoint,
+      evictLiveTranscript,
       foldSessionItems,
       readLiveTranscript,
-      writeLiveTranscript,
-      LiveConversation(liveTranscript, livePreviousResponseId) )
+      replaceLiveConversation,
+      writeLiveTranscript )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionBackend(..),
@@ -426,6 +429,7 @@ import System.IO
     ( hIsTerminalDevice,
       stderr,
       stdin )
+import System.Mem ( performMajorGC )
 import System.OsPath
     ( OsPath,
       decodeFS,
@@ -2191,13 +2195,9 @@ runAgentInitializedWithLock
                 , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
-        atomicModifyIORef' conversationRef \state ->
-            ( state
-                { livePreviousResponseId = initialPrevious
-                , liveTranscript = initialItems
-                }
-            , ()
-            )
+        void $
+            replaceLiveConversation
+                conversationRef initialPrevious initialItems
         contextTokensRef <- newIORef Nothing
         writeIORef subagentForkSource (Just (readLiveTranscript conversationRef))
         let titleHint = case resumed of
@@ -2236,6 +2236,18 @@ runAgentInitializedWithLock
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
+        forM_ resumed \(meta, _) -> do
+            generation <-
+                currentLiveTranscriptGeneration conversationRef
+            evicted <-
+                evictLiveTranscript
+                    conversationRef
+                    generation
+                    (durableTranscriptCheckpoint
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        meta.metaId)
+            when evicted performMajorGC
         let recordCompactionUsage usage =
                 when (usage /= emptyTokenUsage) $
                     mask_ do
@@ -2301,7 +2313,10 @@ runAgentInitializedWithLock
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
-                                , initialTurns
+                                , needsInitialContext =
+                                    resumeNeedsFreshContext
+                                        || (null initialTurns
+                                            && isNothing initialPrevious)
                                 , persist
                                 , startupWindowTitle
                                 , projectRoot
