@@ -127,6 +127,7 @@ import Agent.Provider
     ( Provider(ClaudeCodeProvider, OpenAIProvider),
       providerSlug,
       tokenProviderBillingMode )
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ()
@@ -228,9 +229,10 @@ handleSelection
         params <- readIORef paramsRef
         let message =
                 "effort: "
-                    <> normalizeReasoningEffortForDialect
-                        (dialectId dialect)
-                        (currentEffort params)
+                    <> reasoningEffortText
+                        (normalizeReasoningEffortForDialect
+                            (dialectId dialect)
+                            (currentEffort params))
         displayInfo message $
             Text.putStrLn
                 (roleMuted color (glyphSession <> message))
@@ -296,17 +298,18 @@ handleSelection
     setEffort level = do
         color <- resolveColor stdout
         let supported = reasoningEffortsForDialect (dialectId dialect)
+            levelText = reasoningEffortText level
         if level `elem` supported
             then do
                 setSessionEffort env level
-                displayInfo ("effort set to " <> level) $
+                displayInfo ("effort set to " <> levelText) $
                     Text.putStrLn
                         (roleMuted color
-                            (glyphOk <> "effort set to " <> level))
+                            (glyphOk <> "effort set to " <> levelText))
             else do
                 let message =
                         "effort "
-                            <> level
+                            <> levelText
                             <> " is not supported by the active model"
                 displayError message $
                     Text.hPutStrLn stderr (roleError color message)

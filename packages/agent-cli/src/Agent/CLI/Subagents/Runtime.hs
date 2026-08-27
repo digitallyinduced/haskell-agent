@@ -106,6 +106,7 @@ import Agent.OpenAI.WebSocketClient
     )
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.LoopBackend
     ( statelessResponsesBackendWithRawReasoning
     )
@@ -1146,8 +1147,11 @@ resolveChildModelAndEffort
   where
     model = fromMaybe inheritedModel childModel
     inheritedEffort = case parentParams.reasoning of
-        Just cfg -> fromMaybe (defaultEffortFor provider) cfg.effort
-        Nothing -> defaultEffortFor provider
+        Just cfg ->
+            fromMaybe
+                (reasoningEffortText (defaultEffortFor provider))
+                cfg.effort
+        Nothing -> reasoningEffortText (defaultEffortFor provider)
     defaultChildEffort
         | provider == OpenAIProvider
         , model == "gpt-5.6-luna"

@@ -3,6 +3,7 @@ module Agent.CLI.Session.Interaction
     ( buildPromptState
     , runBtwQuestion
     , setSessionEffort
+    , setSessionEffortText
     , syncFullscreenPrompt
     ) where
 
@@ -51,6 +52,11 @@ import Agent.CLI.TUI.App
     )
 import Agent.Loop (TokenUsage)
 import Agent.Dialect (DialectId, dialectId)
+import Agent.ReasoningEffort
+    ( ReasoningEffort
+    , parseReasoningEffort
+    , reasoningEffortText
+    )
 import Agent.Responses.Types (ResponseCreateParams)
 import Agent.Tools.PlanMode
     ( PlanModeEnv(..)
@@ -70,6 +76,7 @@ import Data.IORef
     )
 import Data.Maybe (isJust)
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 -- | Publish the current session prompt metadata to a retained fullscreen
 -- runtime before replaying a pending turn after a provider rebuild.
@@ -107,10 +114,13 @@ buildPromptState activeDialect params planState policy account accountSelectable
     PromptState
         { promptModel = currentModel params
         , promptEffort =
-            normalizeReasoningEffortForDialect
-                activeDialect
-                (currentEffort params)
-        , promptEffortOptions = reasoningEffortsForDialect activeDialect
+            reasoningEffortText $
+                normalizeReasoningEffortForDialect
+                    activeDialect
+                    (currentEffort params)
+        , promptEffortOptions =
+            map reasoningEffortText
+                (reasoningEffortsForDialect activeDialect)
         , promptMode =
             replModeLabel (replModeFromState planState policy)
         , promptAccount = account
@@ -120,12 +130,13 @@ buildPromptState activeDialect params planState policy account accountSelectable
         , promptAttachments = attachments
         }
 
-setSessionEffort :: SessionEnv -> Text -> IO ()
+setSessionEffort :: SessionEnv -> ReasoningEffort -> IO ()
 setSessionEffort env level = do
     modifyIORef' env.sessionParams (setReasoningEffort level)
+    let levelText = reasoningEffortText level
     case env.sessionFullscreen of
         Just runtime ->
-            emitUiEvent runtime (UiSetPromptEffort level)
+            emitUiEvent runtime (UiSetPromptEffort levelText)
         Nothing -> pure ()
     case env.sessionPersist of
         PersistenceDisabled -> pure ()
@@ -135,17 +146,24 @@ setSessionEffort env level = do
                 PersistencePending pending sessionId tempDir ->
                     writeIORef slotRef
                         (PersistencePending
-                            pending { createEffort = level }
+                            pending { createEffort = levelText }
                             sessionId
                             tempDir)
                 PersistenceActive handle -> do
-                    let meta = handle.sessionMeta { metaEffort = level }
+                    let meta =
+                            handle.sessionMeta { metaEffort = levelText }
                     writeSessionMeta
                         handle.sessionPool
                         handle.sessionMetaPath
                         meta
                     writeIORef slotRef
                         (PersistenceActive handle { sessionMeta = meta })
+
+setSessionEffortText :: SessionEnv -> Text -> IO ()
+setSessionEffortText env level =
+    case parseReasoningEffort level of
+        Left err -> ioError (userError (Text.unpack err))
+        Right effort -> setSessionEffort env effort
 
 runBtwQuestion :: Bool -> SessionEnv -> Text -> IO ()
 runBtwQuestion registerCancel env question = do

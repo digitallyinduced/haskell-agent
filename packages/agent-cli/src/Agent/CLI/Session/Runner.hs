@@ -97,7 +97,10 @@ import Agent.CLI.Session.History
     , writeLiveTranscript
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
-import Agent.CLI.Session.Interaction (runBtwQuestion, setSessionEffort)
+import Agent.CLI.Session.Interaction
+    ( runBtwQuestion
+    , setSessionEffortText
+    )
 import Agent.CLI.Skills
     ( installSkillCatalogWithOmissions, installSkillToolRoots
     , loadSkillsCatalogQuiet, reservedSlashNames
@@ -992,7 +995,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             }
     writeIORef generatedContextReloadRef reloadGeneratedContextSafely
     writeIORef startup.startupRestartEffort \level -> do
-        setSessionEffort env level
+        setSessionEffortText env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
     forM_ fullscreen \runtime ->

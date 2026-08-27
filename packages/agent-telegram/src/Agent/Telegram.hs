@@ -124,6 +124,7 @@ import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider)
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Store.Postgres
     ( Store
     , managedPostgresConfigFromEnv
@@ -583,7 +584,10 @@ runTelegramWithStore store home config token = do
         (die . Text.unpack)
         pure
     let provider = config.telegramProvider
-        effort = fromMaybe (defaultEffortFor provider) config.telegramEffort
+        effort =
+            fromMaybe
+                (reasoningEffortText (defaultEffortFor provider))
+                config.telegramEffort
         root = sessionsRoot home
         gatewayDir = gatewayDirectory home
         statePath = statePathFor home
