@@ -19,6 +19,7 @@ module Agent.Json
     , extensionFieldWasPresent
     , setExtensionsSourceRaw
     , extensionsSourceRaw
+    , clearExtensionsSourceRaw
     ) where
 
 import Agent.Json.Internal (Extensions(..), RawJson(..))
@@ -73,3 +74,7 @@ setExtensionsSourceRaw source (Extensions values present _) =
 
 extensionsSourceRaw :: Extensions -> Maybe RawJson
 extensionsSourceRaw (Extensions _ _ source) = source
+
+clearExtensionsSourceRaw :: Extensions -> Extensions
+clearExtensionsSourceRaw (Extensions values present _) =
+    Extensions values present Nothing
