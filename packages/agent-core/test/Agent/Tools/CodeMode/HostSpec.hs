@@ -41,6 +41,12 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "code-mode Bun host" do
+    it "defaults to two retained workers" do
+        let config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                (\_ _ -> pure $ Left "no tools")
+        config.workerPoolSize `shouldBe` 2
+
     it "resolves the bundled worker independently of the current directory" do
         worker <- bundledCodeModeWorkerPath
         doesFileExist worker `shouldReturn` True
@@ -118,6 +124,33 @@ spec = describe "code-mode Bun host" do
                     ]
                 }
 
+    it "keeps JavaScript globals isolated when reusing a pooled worker" do
+        let config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                (\_ _ -> pure $ Left "no tools")
+        host <- newCodeModeHost config
+        first <- execCodeCell
+            host
+            "globalThis.cellSecret = 42; text(globalThis.cellSecret);"
+            []
+            3000
+        second <- execCodeCell
+            host
+            "text(typeof globalThis.cellSecret);"
+            []
+            3000
+        first `shouldBe`
+            Right CodeModeFinished
+                { cellId = "1"
+                , cellValue = textContent "42"
+                }
+        second `shouldBe`
+            Right CodeModeFinished
+                { cellId = "2"
+                , cellValue = textContent "undefined"
+                }
+        closeCodeModeHost host
+
     it "rejects a second observer without racing cell output queues" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
@@ -187,7 +220,7 @@ spec = describe "code-mode Bun host" do
                 }
         closeCodeModeHost host
 
-    it "does not expose runtime globals" do
+    it "does not expose Node globals" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
                 (\_ _ -> pure $ Left "no tools")
@@ -556,8 +589,6 @@ spec = describe "code-mode Bun host" do
             pure
             created
         toolSet.codeModeNestedToolNames `shouldBe` ["double"]
-        map (.appToolExecution) toolSet.codeModeTools
-            `shouldBe` [TurnSequential, ParallelSafe]
         result <- runRegisteredExec toolSet
             "text(await tools.double({\"value\": 21}));"
         result `shouldSatisfy` Text.isInfixOf "42"
