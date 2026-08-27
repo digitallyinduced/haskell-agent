@@ -79,15 +79,19 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 projected.callKind `shouldBe` ComputerCallKind
                 projected.argumentsEncrypted `shouldBe` True
             Nothing -> expectationFailure "computer call was not projected"
-        let encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
-                ComputerCallOutput
-                    { computerOutputItemId = Nothing
-                    , computerOutputCallId = "ignored"
-                    , screenshotDataUrl = "data:image/png;base64,AA=="
-                    , acknowledgedChecks = []
-                    , computerOutputStatus = Nothing
-                    , computerOutputExtra = KeyMap.empty
-                    }
+        let outputValue = ComputerCallOutput
+                { computerOutputItemId = Nothing
+                , computerOutputCallId = "ignored"
+                , screenshotDataUrl = "data:image/png;base64,AA=="
+                , acknowledgedChecks = []
+                , computerOutputStatus = Nothing
+                , computerOutputExtra = KeyMap.empty
+                }
+            encodedJson = Aeson.toJSON outputValue
+            encoded = TextEncoding.decodeUtf8 $ LBS.toStrict $ Aeson.encode
+                outputValue
+        (jsonField "output" encodedJson >>= jsonField "detail")
+            `shouldBe` Just (Aeson.String "original")
         case toolResultToItem ToolCallResult
                 { callId = "call-1"
                 , output = encoded
