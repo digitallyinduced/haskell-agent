@@ -10,6 +10,7 @@ module Agent.CLI.TUI.App
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , backgroundActivityText
     , completionFlashTransitions
     , conversationScrollbarRenderer
     , choiceRowColumns
