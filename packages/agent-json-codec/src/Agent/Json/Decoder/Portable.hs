@@ -73,6 +73,24 @@ runDecoder decoder initial = case decoder of
         parseObject state fields unknown finish initial
     PlannedObjectDecoder plan ->
         parsePlannedObject plan initial
+    DiscriminatedObjectDecoder discriminator select -> do
+        (tag, _) <-
+            runDecoder
+                (ObjectDecoder
+                    Nothing
+                    [ NamedField
+                        discriminator
+                        TextDecoder
+                        (\value _ -> Right (Just value))
+                    ]
+                    (UnknownField SkipDecoder
+                        (\_ () state -> Right state))
+                    (maybe
+                        (Left
+                            ("missing required field " <> discriminator))
+                        Right))
+                initial
+        runDecoder (select tag) initial
     NullableDecoder inner ->
         let cursor = skipWhitespace initial
         in if literalAt "null" cursor

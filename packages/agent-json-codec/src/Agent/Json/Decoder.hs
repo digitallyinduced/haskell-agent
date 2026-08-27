@@ -30,6 +30,7 @@ module Agent.Json.Decoder
     , skip
     , object
     , objectFields
+    , discriminatedObject
     , field
     , requiredField
     , optionalField
@@ -156,6 +157,15 @@ object = ObjectDecoder
 
 objectFields :: ObjectPlan a -> Decoder a
 objectFields = PlannedObjectDecoder
+
+-- | Select an object decoder from a text discriminator without retaining a
+-- generic object. The portable backend scans the object once for the tag and
+-- then constructs the selected domain value on a second cursor pass.
+discriminatedObject
+    :: Text
+    -> (Text -> Decoder a)
+    -> Decoder a
+discriminatedObject = DiscriminatedObjectDecoder
 
 field
     :: Text

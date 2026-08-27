@@ -31,7 +31,7 @@ decodeIO (DecoderSession environment) decoder bytes =
     case firstNonWhitespace bytes of
         Just byte
             | byte /= openBrace && byte /= openBracket ->
-            pure (DecoderAPI.decode decoder bytes)
+                pure (DecoderAPI.decode decoder bytes)
         _ -> do
             result <- decodeHermesIO
                 (DecoderSession environment)
@@ -86,6 +86,13 @@ toHermes = \case
                     | otherwise ->
                         current <$ validateValue
         either (fail . Text.unpack) pure (finishObjectPlan plan)
+    discriminated@DiscriminatedObjectDecoder{} ->
+        Hermes.withRawJsonByteString \bytes ->
+            case DecoderAPI.decode discriminated (BS.copy bytes) of
+                Left err ->
+                    fail (Text.unpack
+                        (DecoderAPI.renderDecodeError err))
+                Right value -> pure value
     NullableDecoder inner ->
         Hermes.nullable (toHermes inner)
     ByTypeDecoder select -> do

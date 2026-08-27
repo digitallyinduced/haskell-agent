@@ -115,6 +115,18 @@ plannedDecoder =
             <*> Decoder.optionalField "enabled" Decoder.bool
             <*> Decoder.extensionFields
 
+taggedDecoder :: Decoder.Decoder Text
+taggedDecoder =
+    Decoder.discriminatedObject "type" \case
+        "text" ->
+            Decoder.objectFields $
+                Decoder.requiredField "value" Decoder.text
+                    <* Decoder.defaultField () "type" (() <$ Decoder.text)
+        tag ->
+            Decoder.mapEither
+                (const (Left ("unknown tag " <> tag)))
+                Decoder.skip
+
 main :: IO ()
 main = hspec do
     describe "portable direct decoder" do
@@ -207,6 +219,14 @@ main = hspec do
                     "future"
                     planned.plannedExtensions
                 `shouldBe` Just "{\"x\":1}"
+
+        it "selects tagged object codecs without a generic object" do
+            Decoder.decode taggedDecoder
+                "{\"value\":\"first\",\"type\":\"text\"}"
+                `shouldBe` Right "first"
+            Decoder.decode taggedDecoder
+                "{\"type\":\"ignored\",\"type\":\"text\",\"value\":\"last\"}"
+                `shouldBe` Right "last"
 
     describe "direct encoder" do
         it "round-trips domain values without a JSON tree" do

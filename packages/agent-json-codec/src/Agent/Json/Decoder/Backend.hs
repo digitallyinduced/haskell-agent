@@ -39,6 +39,10 @@ data Decoder a where
         -> (state -> Either Text a)
         -> Decoder a
     PlannedObjectDecoder :: ObjectPlan a -> Decoder a
+    DiscriminatedObjectDecoder
+        :: Text
+        -> (Text -> Decoder a)
+        -> Decoder a
     NullableDecoder :: Decoder a -> Decoder (Maybe a)
     ByTypeDecoder :: (JsonType -> Decoder a) -> Decoder a
     RawJsonDecoder :: Decoder RawJson
@@ -160,6 +164,7 @@ objectPlanRequiresRawCapture = \case
         ObjectDecoder _ fields unknown _ ->
             any namedRequiresRaw fields || unknownRequiresRaw unknown
         PlannedObjectDecoder plan -> objectPlanRequiresRawCapture plan
+        DiscriminatedObjectDecoder{} -> True
         NullableDecoder decoder -> decoderRequiresRaw decoder
         ByTypeDecoder select ->
             any (decoderRequiresRaw . select)
