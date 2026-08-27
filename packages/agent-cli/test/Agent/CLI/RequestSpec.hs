@@ -118,6 +118,67 @@ spec = describe "requestParams" do
                         map Just ["lookup", "exec", "existing", "last"]
             _ -> expectationFailure "expected three top-level Lite tools"
 
+    it "preserves interleaving around multiple nested functions namespaces" do
+        let params =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    ""
+                    [ webSearchTool
+                    , namespaceTool "functions" (Just "first") [functionTool "a"]
+                    , namespaceTool "editor" Nothing [functionTool "edit"]
+                    , functionTool "b"
+                    , namespaceTool "functions" (Just "last") [functionTool "c"]
+                    , webSearchTool
+                    ]
+                    "high"
+            tools = additionalToolValues params
+        map toolIdentity tools `shouldBe`
+            [ (Just "web_search", Nothing)
+            , (Just "namespace", Just "functions")
+            , (Just "namespace", Just "editor")
+            , (Just "web_search", Nothing)
+            ]
+        case functionsNamespaceTools tools of
+            values -> map (jsonTextField "name") values
+                `shouldBe` map Just ["a", "b", "c"]
+        case findValue
+                (\value -> toolIdentity value == (Just "namespace", Just "functions"))
+                tools of
+            Just functions ->
+                jsonTextField "description" functions `shouldBe` Just "last"
+            Nothing -> expectationFailure "expected functions namespace"
+
+    it "omits empty functions namespaces and retains non-function tools" do
+        let params =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    ""
+                    [ namespaceTool "functions" (Just "empty") []
+                    , webSearchTool
+                    ]
+                    "high"
+        additionalToolValues params `shouldBe`
+            [Aeson.toJSON webSearchTool]
+
+    it "emits the expected encoded Lite tools JSON" do
+        let params =
+                requestParams
+                    OpenAIProvider
+                    "gpt-5.6-sol"
+                    ""
+                    [ functionTool "first"
+                    , webSearchTool
+                    , customTool "last"
+                    ]
+                    "high"
+            encoded = Aeson.encode (additionalToolValues params)
+            expected =
+                "[{\"type\":\"namespace\",\"name\":\"functions\",\"description\":\"\",\"tools\":[{\"type\":\"function\",\"name\":\"first\",\"strict\":true},{\"type\":\"custom\",\"name\":\"last\"}]},{\"type\":\"web_search\"}]"
+        (Aeson.decode encoded :: Maybe Aeson.Value)
+            `shouldBe` Aeson.decode expected
+
     it "refreshes the Lite prefix without dropping pending input" do
         let pending = userMessage "keep me"
             original = appendInputItem pending $

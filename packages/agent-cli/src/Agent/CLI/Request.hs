@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 -- | Construction of provider-neutral Responses requests.
 module Agent.CLI.Request
     ( requestParams
@@ -13,6 +15,7 @@ import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import Data.List (foldl')
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -197,33 +200,40 @@ updateResponsesLitePrefix instructionText maybeTools existingInput =
 -- namespace; hosted tools and non-default namespaces remain top-level.
 responsesLiteToolValues :: [ResponseTool] -> [Aeson.Value]
 responsesLiteToolValues tools =
-    case groupedValues of
+    case groupedValuesRev of
         [] -> ungroupedValues
         _ ->
             let namespaceValue = Aeson.object
                     [ "type" Aeson..= ("namespace" :: Text)
                     , "name" Aeson..= ("functions" :: Text)
                     , "description" Aeson..= namespaceDescription
-                    , "tools" Aeson..= groupedValues
+                    , "tools" Aeson..= reverse groupedValuesRev
                     ]
                 insertionIndex = fromMaybe 0 firstGroupedPosition
-            in take insertionIndex ungroupedValues
-                <> [namespaceValue]
-                <> drop insertionIndex ungroupedValues
+                (before, after) = splitAt insertionIndex ungroupedValues
+            in before <> (namespaceValue : after)
   where
-    (firstGroupedPosition, groupedValues, namespaceDescription, ungroupedValues) =
-        foldl collect (Nothing, [], "", []) tools
+    (firstGroupedPosition, groupedValuesRev, namespaceDescription, ungroupedValuesRev, _) =
+        foldl' collect (Nothing, [], "", [], 0 :: Int) tools
 
-    collect (firstPosition, grouped, description, ungrouped) tool =
+    collect (!firstPosition, !grouped, !description, !ungrouped, !count) tool =
         case groupedToolValues tool of
             Just (values, nextDescription) ->
-                ( firstPosition <|> Just (length ungrouped)
-                , grouped <> values
+                ( firstPosition <|> Just count
+                , foldl' (flip (:)) grouped values
                 , fromMaybe description nextDescription
                 , ungrouped
+                , count
                 )
             Nothing ->
-                (firstPosition, grouped, description, ungrouped <> [Aeson.toJSON tool])
+                ( firstPosition
+                , grouped
+                , description
+                , Aeson.toJSON tool : ungrouped
+                , count + 1
+                )
+
+    ungroupedValues = reverse ungroupedValuesRev
 
 groupedToolValues :: ResponseTool -> Maybe ([Aeson.Value], Maybe Text)
 groupedToolValues tool = case tool of

@@ -306,6 +306,24 @@ benchmark concurrency-bench
                     , safe-exceptions
                     , time
 
+benchmark responses-lite-tools-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ResponsesLiteTools.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , agent-core
+                    , agent-responses
+                    , agent-responses-types
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , containers
+                    , deepseq
+                    , text
+                    , vector
+
 test-suite agent-cli-test
     import:           common-options
     type:             exitcode-stdio-1.0
