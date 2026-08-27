@@ -1,6 +1,7 @@
 module Agent.Responses.SSESpec (spec) where
 
 import Agent.Error (ApiError(..))
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.SSE
 import qualified Agent.Responses.Hermes as ResponsesHermes
 import Agent.Responses.Types
@@ -61,6 +62,14 @@ spec = describe "Responses SSE decoder" do
             "event: ping\nid: 1\n\n"
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
+
+    it "reuses one Hermes decoder across response stream events" do
+        let payloads = Text.encodeUtf8 <$> [itemJson, completedJson]
+            portable =
+                ResponsesCodec.decodeResponseStreamEvent <$> payloads
+        ResponsesCodec.withResponseStreamEventDecoder \decodeEvent -> do
+            hermes <- mapM decodeEvent payloads
+            hermes `shouldBe` portable
 
     it "exposes strict framed bytes and the optional SSE event type" do
         (decoder, firstFrames) <- expectRight $

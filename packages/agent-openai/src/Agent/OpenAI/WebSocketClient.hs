@@ -666,9 +666,10 @@ receiveWsResponseWithActions
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 receiveWsResponseWithActions modelHint actions onEvent =
-    loop emptyStreamAssemblyState 0 0
+    ResponsesCodec.withResponseStreamEventDecoder \decodeEvent ->
+        loop decodeEvent emptyStreamAssemblyState 0 0
   where
-    loop assembly frames bytes = do
+    loop decodeEvent assembly frames bytes = do
         msgResult <- actions.receiveFrame
         case msgResult of
             Left e ->
@@ -683,8 +684,8 @@ receiveWsResponseWithActions modelHint actions onEvent =
             Right (msgBytes :: LBS.ByteString) -> do
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
-                case ResponsesCodec.decodeResponseStreamEvent
-                        (LBS.toStrict msgBytes) of
+                decoded <- decodeEvent (LBS.toStrict msgBytes)
+                case decoded of
                     Left err -> do
                         -- Keep receiving so one bad frame cannot strand an
                         -- otherwise valid turn, but surface the dropped
@@ -692,7 +693,7 @@ receiveWsResponseWithActions modelHint actions onEvent =
                         -- or tool-call frame can leave the loop in thinking.
                         logStreamStats "json_decode_error" frames' bytes'
                         onEvent (unparsedStreamEvent err msgBytes)
-                        loop assembly frames' bytes'
+                        loop decodeEvent assembly frames' bytes'
                     Right event -> do
                         onEvent event
                         let assembly' = applyStreamEvent assembly event
@@ -728,7 +729,7 @@ receiveWsResponseWithActions modelHint actions onEvent =
 
                             -- Ignore other event variants (added, content
                             -- deltas, and future event types).
-                            _ -> loop assembly' frames' bytes'
+                            _ -> loop decodeEvent assembly' frames' bytes'
 
     finishTerminal label assembly frames bytes event = do
         case finishStreamResponse modelHint assembly event of

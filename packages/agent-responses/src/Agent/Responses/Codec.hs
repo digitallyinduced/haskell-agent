@@ -9,9 +9,11 @@ module Agent.Responses.Codec
     , decodeResponse
     , decodeResponseStreamEvent
     , decodeResponseStreamEventWithType
+    , withResponseStreamEventDecoder
     ) where
 
 import qualified Agent.Json.Decoder as Decoder
+import qualified Agent.Json.Decoder.Hermes as Hermes
 import qualified Agent.Json.Encoder as Encoder
 import qualified Data.ByteString as BS
 import Data.Text (Text)
@@ -40,6 +42,23 @@ decodeResponseStreamEventWithType
     -> Either String ResponseStreamEvent
 decodeResponseStreamEventWithType eventType =
     decodeDirect (responseStreamEventDecoderWithType (Just eventType))
+
+-- | Scope one reusable Hermes environment around a stream of Responses
+-- events. The returned decoder is sequential; callers should create an
+-- independent scope per concurrent stream.
+withResponseStreamEventDecoder
+    :: ((BS.ByteString -> IO (Either String ResponseStreamEvent)) -> IO a)
+    -> IO a
+withResponseStreamEventDecoder action =
+    Hermes.withDecoderSession \session ->
+        action \bytes -> do
+            decoded <-
+                Hermes.decodeIO session responseStreamEventDecoder bytes
+            pure $
+                either
+                    (Left . Text.unpack . Decoder.renderDecodeError)
+                    Right
+                    decoded
 
 decodeDirect :: Decoder.Decoder value -> BS.ByteString -> Either String value
 decodeDirect decoder =

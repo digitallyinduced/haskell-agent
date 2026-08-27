@@ -5,9 +5,21 @@ module Main (main) where
 import qualified Agent.Json.Decoder as Decoder
 import qualified Agent.Json.Decoder.Hermes as Hermes
 import qualified Agent.Json.Encoder as Encoder
+import Agent.Json
+    ( Extensions
+    , extensionsSourceRaw
+    , extensionsToList
+    , rawJsonBytes
+    )
 import Agent.Error (ApiError)
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.SSE
 import qualified Agent.Responses.Hermes as ResponsesHermes
+import Agent.Responses.StreamAssembly
+    ( applyStreamEvent
+    , emptyStreamAssemblyState
+    , finishStreamResponse
+    )
 import Agent.Responses.Types
 import Control.Monad (foldM, forM)
 import qualified Data.Aeson as Aeson
@@ -31,6 +43,8 @@ data Workload
     | AesonSseExtensions
     | DirectRequest
     | AesonRequest
+    | PortableStream
+    | HermesStream
     deriving stock (Eq)
 
 data LegacyEvent = LegacyEvent
@@ -74,26 +88,35 @@ main = do
                     eventCount
                     deltaBytes
                 request = fixtureRequest eventCount deltaBytes
-            validate workload chunks request
+                streamFrames =
+                    fixtureStreamFrames eventCount deltaBytes
+            validate workload chunks streamFrames request
             samples <- forM [1 .. sampleCount] \sampleIndex ->
-                measure
-                    (runWorkload
+                measure $
+                    runWorkload
                         workload
                         chunks
-                        (varyRequest sampleIndex request))
+                        streamFrames
+                        (varyRequest sampleIndex request)
             let median project =
                     sort (map project samples) !! (sampleCount `div` 2)
+                replayDivisor =
+                    if isStreamWorkload workload
+                        then streamReplayCount
+                        else 1
             printf
                 "%s,%d,%d,%d,%.3f,%.3f,%d\n"
                 workloadArg eventCount deltaBytes sampleCount
-                (median (.wallMillis))
-                (median (.cpuMillis))
-                (median (.allocatedBytes))
+                (median (.wallMillis) / fromIntegral replayDivisor)
+                (median (.cpuMillis) / fromIntegral replayDivisor)
+                (median (.allocatedBytes)
+                    `div` fromIntegral replayDivisor)
         _ -> die $
             "usage: responses-hot-path WORKLOAD EVENTS DELTA_BYTES SAMPLES\n"
                 <> "workloads: direct-sse, aeson-sse, "
                 <> "direct-sse-extensions, aeson-sse-extensions, "
-                <> "direct-request, aeson-request"
+                <> "direct-request, aeson-request, "
+                <> "portable-stream, hermes-stream"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
@@ -103,7 +126,14 @@ parseWorkload = \case
     "aeson-sse-extensions" -> pure AesonSseExtensions
     "direct-request" -> pure DirectRequest
     "aeson-request" -> pure AesonRequest
+    "portable-stream" -> pure PortableStream
+    "hermes-stream" -> pure HermesStream
     value -> die ("unknown workload: " <> value)
+
+isStreamWorkload :: Workload -> Bool
+isStreamWorkload PortableStream = True
+isStreamWorkload HermesStream = True
+isStreamWorkload _ = False
 
 positive :: String -> String -> IO Int
 positive label raw = case reads raw of
@@ -113,9 +143,10 @@ positive label raw = case reads raw of
 runWorkload
     :: Workload
     -> [BS.ByteString]
+    -> [BS.ByteString]
     -> ResponseCreateParams
     -> IO Int
-runWorkload workload chunks request =
+runWorkload workload chunks streamFrames request =
     case workload of
         DirectSse -> runDirectSse chunks
         AesonSse -> runAesonSse chunks
@@ -128,6 +159,15 @@ runWorkload workload chunks request =
             pure (checksum
                 (LBS.toStrict
                     (Aeson.encode (legacyRequestValue request))))
+        PortableStream ->
+            runStreamBatch $
+                runTypedStream
+                    (pure . ResponsesCodec.decodeResponseStreamEvent)
+                    streamFrames
+        HermesStream ->
+            runStreamBatch $
+                ResponsesCodec.withResponseStreamEventDecoder \decodeEvent ->
+                    runTypedStream decodeEvent streamFrames
 
 runDirectSse :: [BS.ByteString] -> IO Int
 runDirectSse chunks =
@@ -181,15 +221,115 @@ directStep session (Right (decoder, total)) chunk = do
 checksumEvent :: Int -> ResponseStreamEvent -> Int
 checksumEvent current = \case
     ResponseOutputTextDeltaEvent{..} ->
-        current
-            + maybe 0 id sequenceNumber
-            + maybe 0 Text.length delta
-            + maybe 0 Text.length streamItemId
+        checksumDelta current delta streamItemId sequenceNumber
             + maybe 0 id streamOutputIndex
             + maybe 0 id contentIndex
+    ResponseReasoningSummaryTextDeltaEvent{..} ->
+        checksumDelta current delta streamItemId sequenceNumber
+            + maybe 0 id streamOutputIndex
+            + maybe 0 id summaryIndex
+    ResponseFunctionCallArgumentsDeltaEvent{..} ->
+        checksumDelta current delta streamItemId sequenceNumber
+            + maybe 0 id streamOutputIndex
+    ResponseCustomToolInputDeltaEvent{..} ->
+        checksumDelta current delta streamItemId sequenceNumber
+            + maybe 0 id streamOutputIndex
+            + maybe 0 Text.length streamCallId
+    ResponseCreatedEvent{responseValue} ->
+        checksumResponse current responseValue
+    ResponseInProgressEvent{responseValue} ->
+        checksumResponse current responseValue
+    ResponseCompletedEvent{responseValue} ->
+        checksumResponse current responseValue
+    ResponseDoneEvent{responseValue} ->
+        checksumResponse current responseValue
+    ResponseIncompleteEvent{responseValue} ->
+        checksumResponse current responseValue
+    ResponseFailedEvent{responseValue} ->
+        checksumResponse current responseValue
     event ->
         current
             + maybe 0 id (responseStreamEventSequenceNumber event)
+
+checksumDelta
+    :: Int
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Int
+    -> Int
+checksumDelta current delta itemId sequenceNumber =
+    current
+        + maybe 0 id sequenceNumber
+        + maybe 0 Text.length delta
+        + maybe 0 Text.length itemId
+
+checksumResponse :: Int -> Response -> Int
+checksumResponse current response =
+    current
+        + Text.length response.responseId
+        + Text.length response.model
+        + Text.length response.object
+        + sum (map checksumItem response.output)
+        + maybe 0 checksumExtensions response.metadata
+        + maybe 0 (sum . map checksumTool) response.tools
+        + checksumExtensions response.extraFields
+
+checksumItem :: ResponseItem -> Int
+checksumItem = \case
+    MessageItem message ->
+        maybe 0 Text.length message.messageId
+            + checksumMessageContent message.content
+            + checksumExtensions message.extraFields
+    ReasoningItemValue reasoning ->
+        maybe 0 Text.length reasoning.itemId
+            + sum
+                [ Text.length part.partType
+                    + maybe 0 Text.length part.text
+                | part <- reasoning.summary
+                ]
+            + maybe 0 length reasoning.content
+            + checksumExtensions reasoning.extraFields
+    FunctionCallItem call ->
+        maybe 0 Text.length call.itemId
+            + Text.length call.callId
+            + Text.length call.name
+            + Text.length call.arguments
+            + checksumExtensions call.extraFields
+    CustomToolCallItem call ->
+        maybe 0 Text.length call.itemId
+            + Text.length call.callId
+            + Text.length call.name
+            + Text.length call.input
+            + checksumExtensions call.extraFields
+    _ -> 1
+
+checksumMessageContent :: MessageContent -> Int
+checksumMessageContent = \case
+    MessageContentText value -> Text.length value
+    MessageContentParts parts -> length parts
+
+checksumTool :: ResponseTool -> Int
+checksumTool = \case
+    FunctionToolValue FunctionTool{..} ->
+        Text.length name
+            + maybe 0 Text.length description
+            + maybe 0 (BS.length . rawJsonBytes) parameters
+            + checksumExtensions extraFields
+    KnownResponseTool toolType TaggedObject{..} ->
+        Text.length (responseToolTypeText toolType)
+            + Text.length tag
+            + checksumExtensions fields
+    UnknownResponseTool TaggedObject{..} ->
+        Text.length tag + checksumExtensions fields
+
+checksumExtensions :: Extensions -> Int
+checksumExtensions extensions =
+    maybe 0 (BS.length . rawJsonBytes)
+        (extensionsSourceRaw extensions)
+        + sum
+            [ Text.length key + BS.length (rawJsonBytes value)
+            | (key, value) <- extensionsToList extensions
+            ]
 
 runAesonSse :: [BS.ByteString] -> IO Int
 runAesonSse chunks =
@@ -232,6 +372,52 @@ runAesonSse chunks =
         Aeson.Array values -> length values
         Aeson.Object values -> length values
 
+runTypedStream
+    :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
+    -> [BS.ByteString]
+    -> IO Int
+runTypedStream decodeEvent =
+    go emptyStreamAssemblyState 0
+  where
+    go _ _ [] =
+        error "stream replay ended without a terminal response"
+    go state total (frame : rest) = do
+        event <- decodeEvent frame >>= either error pure
+        let nextState = applyStreamEvent state event
+            nextTotal = checksumEvent total event
+        case event of
+            ResponseCompletedEvent{} ->
+                finish nextState nextTotal event rest
+            ResponseDoneEvent{} ->
+                finish nextState nextTotal event rest
+            ResponseIncompleteEvent{} ->
+                finish nextState nextTotal event rest
+            ResponseFailedEvent{} ->
+                finish nextState nextTotal event rest
+            _ ->
+                go nextState nextTotal rest
+
+    finish state total terminal rest
+        | not (null rest) =
+            error "stream replay has frames after the terminal response"
+        | otherwise =
+            case finishStreamResponse Nothing state terminal of
+                Left err -> error (show err)
+                Right response ->
+                    pure (checksumResponse total response)
+
+runStreamBatch :: IO Int -> IO Int
+runStreamBatch runOne =
+    go streamReplayCount 0
+  where
+    go 0 !total = pure total
+    go remaining !total = do
+        value <- runOne
+        go (remaining - 1) (total + value)
+
+streamReplayCount :: Int
+streamReplayCount = 100
+
 legacyRequestValue :: ResponseCreateParams -> Aeson.Value
 legacyRequestValue request =
     Aeson.object
@@ -273,6 +459,131 @@ fixtureRequest eventCount deltaBytes =
         , maxOutputTokens = Just 2_048
         }
 
+fixtureStreamFrames :: Int -> Int -> [BS.ByteString]
+fixtureStreamFrames eventCount deltaBytes =
+    [lifecycleFrame "response.created" "in_progress" 0]
+        <> [lifecycleFrame "response.in_progress" "in_progress" 1]
+        <> zipWith (itemFrame "response.output_item.added")
+            [2 ..]
+            (items "in_progress")
+        <> zipWith deltaFrame [6 ..] [0 .. eventCount - 1]
+        <> zipWith (itemFrame "response.output_item.done")
+            [eventCount + 6 ..]
+            (items "completed")
+        <> [ lifecycleFrame
+                "response.completed"
+                "completed"
+                (eventCount + 10)
+           ]
+  where
+    lifecycleFrame eventType status sequenceNumber =
+        "{\"type\":\"" <> eventType
+            <> "\",\"response\":"
+            <> lifecycleResponse status
+            <> ",\"sequence_number\":"
+            <> ascii sequenceNumber
+            <> "}"
+
+    lifecycleResponse status =
+        "{\"id\":\"resp_bench\",\"object\":\"response\","
+            <> "\"created_at\":0,\"model\":\"gpt-5.6-luna\","
+            <> "\"status\":\"" <> status <> "\","
+            <> "\"output\":[],\"tools\":["
+            <> namespaceTool "coding" 24_576
+            <> ","
+            <> namespaceTool "system" 8_192
+            <> "],\"vendor\":{\"trace\":true}}"
+
+    namespaceTool name payloadBytes =
+        "{\"type\":\"namespace\",\"name\":\"" <> name
+            <> "\",\"description\":\"benchmark namespace\","
+            <> "\"tools\":[{\"type\":\"function\",\"name\":\"fixture\","
+            <> "\"parameters\":{\"type\":\"object\",\"description\":\""
+            <> BS.replicate payloadBytes 0x78
+            <> "\"}}]}"
+
+    itemFrame eventType sequenceNumber (outputIndex, item) =
+        "{\"type\":\"" <> eventType
+            <> "\",\"sequence_number\":" <> ascii sequenceNumber
+            <> ",\"output_index\":" <> ascii outputIndex
+            <> ",\"item\":" <> item <> "}"
+
+    items status =
+        [ (0, messageItem status)
+        , (1, reasoningItem status)
+        , (2, functionItem status)
+        , (3, customItem status)
+        ]
+
+    messageItem status =
+        "{\"type\":\"message\",\"id\":\"message_1\","
+            <> "\"role\":\"assistant\",\"status\":\"" <> status
+            <> "\",\"content\":[]}"
+
+    reasoningItem status =
+        "{\"type\":\"reasoning\",\"id\":\"reasoning_1\","
+            <> "\"status\":\"" <> status <> "\",\"summary\":[]}"
+
+    functionItem status =
+        let arguments =
+                if status == "in_progress" then "" else "{}"
+        in
+        "{\"type\":\"function_call\",\"id\":\"function_1\","
+            <> "\"call_id\":\"function_1\",\"name\":\"fixture\","
+            <> "\"status\":\"" <> status <> "\",\"arguments\":\""
+            <> arguments <> "\"}"
+
+    customItem status =
+        let input =
+                if status == "in_progress" then "" else "done"
+        in
+        "{\"type\":\"custom_tool_call\",\"id\":\"custom_1\","
+            <> "\"call_id\":\"custom_1\",\"name\":\"fixture\","
+            <> "\"status\":\"" <> status <> "\",\"input\":\""
+            <> input <> "\"}"
+
+    deltaFrame sequenceNumber index =
+        let delta = BS.replicate deltaBytes 0x78
+            common eventType itemId outputIndex =
+                "{\"type\":\"" <> eventType
+                    <> "\",\"sequence_number\":" <> ascii sequenceNumber
+                    <> ",\"item_id\":\"" <> itemId
+                    <> "\",\"output_index\":" <> ascii outputIndex
+        in case index `mod` 10 of
+            value
+                | value < 5 ->
+                    common
+                        "response.reasoning_summary_text.delta"
+                        "reasoning_1"
+                        1
+                        <> ",\"summary_index\":0,\"delta\":\""
+                        <> delta
+                        <> "\"}"
+                | value < 8 ->
+                    common
+                        "response.output_text.delta"
+                        "message_1"
+                        0
+                        <> ",\"content_index\":0,\"delta\":\""
+                        <> delta
+                        <> "\"}"
+                | value == 8 ->
+                    common
+                        "response.function_call_arguments.delta"
+                        "function_1"
+                        2
+                        <> ",\"delta\":\""
+                        <> delta
+                        <> "\"}"
+                | otherwise ->
+                    common
+                        "response.custom_tool_call_input.delta"
+                        "custom_1"
+                        3
+                        <> ",\"call_id\":\"custom_1\",\"delta\":\""
+                        <> delta
+                        <> "\"}"
+
 varyRequest :: Int -> ResponseCreateParams -> ResponseCreateParams
 varyRequest sampleIndex request@ResponseCreateParams{..} =
     ResponseCreateParams
@@ -301,9 +612,10 @@ checksum =
 validate
     :: Workload
     -> [BS.ByteString]
+    -> [BS.ByteString]
     -> ResponseCreateParams
     -> IO ()
-validate workload chunks request =
+validate workload chunks streamFrames request =
     case workload of
         DirectSse -> runDirectSse chunks >> pure ()
         AesonSse -> runAesonSse chunks >> pure ()
@@ -320,6 +632,35 @@ validate workload chunks request =
                 :: Either String Aeson.Value of
                 Left err -> error err
                 Right _ -> pure ()
+        PortableStream ->
+            runTypedStream
+                (pure . ResponsesCodec.decodeResponseStreamEvent)
+                streamFrames
+                >> pure ()
+        HermesStream ->
+            do
+                portableEvents <-
+                    decodeStreamEvents
+                        (pure . ResponsesCodec.decodeResponseStreamEvent)
+                        streamFrames
+                hermesEvents <-
+                    ResponsesCodec.withResponseStreamEventDecoder
+                        \decodeEvent ->
+                            decodeStreamEvents decodeEvent streamFrames
+                if hermesEvents == portableEvents
+                    then
+                        ResponsesCodec.withResponseStreamEventDecoder
+                            \decodeEvent ->
+                                runTypedStream decodeEvent streamFrames
+                                    >> pure ()
+                    else error "Hermes stream differs from portable"
+
+decodeStreamEvents
+    :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
+    -> [BS.ByteString]
+    -> IO [ResponseStreamEvent]
+decodeStreamEvents decodeEvent =
+    mapM \frame -> decodeEvent frame >>= either error pure
 
 measure :: IO Int -> IO Sample
 measure action = do
