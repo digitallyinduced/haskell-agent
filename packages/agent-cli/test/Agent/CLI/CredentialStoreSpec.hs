@@ -1,16 +1,19 @@
 module Agent.CLI.CredentialStoreSpec (spec) where
 
 import Agent.CLI.CredentialStore
+import Agent.Json (RawJson, rawJsonDecoder)
+import qualified Agent.Json.Decode as Json
 import Agent.Provider (BillingMode(..), Provider(..))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (SomeException, bracket, try)
 import Control.Monad (void)
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.=))
+import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Bits ((.&.))
 import Data.List (isInfixOf)
+import qualified Data.Text as Text
 import System.OsPath
     ( OsPath
     , decodeUtf
@@ -155,13 +158,13 @@ spec =
                         Right
                             (MetadataSnapshot
                                 1
-                                (map Aeson.toJSON [updatedAccount, sibling]))
+                                (map rawJsonValue [updatedAccount, sibling]))
                 readSecretsSnapshot home
                     `shouldReturn`
                         Right
                             (SecretsSnapshot
                                 1
-                                (map Aeson.toJSON [updatedSecret, siblingSecret]))
+                                (map rawJsonValue [updatedSecret, siblingSecret]))
 
         it "rejects mismatched metadata and secret ids" $
             withTempHome \_ ->
@@ -202,25 +205,13 @@ siblingSecret = ManagedSecret
 
 data MetadataSnapshot = MetadataSnapshot
     !Int
-    ![Aeson.Value]
+    ![RawJson]
     deriving (Eq, Show)
-
-instance Aeson.FromJSON MetadataSnapshot where
-    parseJSON = Aeson.withObject "Credential metadata" \object ->
-        MetadataSnapshot
-            <$> object .: "version"
-            <*> object .: "accounts"
 
 data SecretsSnapshot = SecretsSnapshot
     !Int
-    ![Aeson.Value]
+    ![RawJson]
     deriving (Eq, Show)
-
-instance Aeson.FromJSON SecretsSnapshot where
-    parseJSON = Aeson.withObject "Credential secrets" \object ->
-        SecretsSnapshot
-            <$> object .: "version"
-            <*> object .: "secrets"
 
 writeStoreFiles
     :: OsPath
@@ -245,13 +236,40 @@ writeStoreFiles home accounts secrets = do
 
 readMetadataSnapshot :: OsPath -> IO (Either String MetadataSnapshot)
 readMetadataSnapshot home =
-    Aeson.eitherDecode
+    decodeSnapshot metadataSnapshotDecoder
         <$> LBS.readFile (toFilePath (managedCredentialsPath home))
 
 readSecretsSnapshot :: OsPath -> IO (Either String SecretsSnapshot)
 readSecretsSnapshot home =
-    Aeson.eitherDecode
+    decodeSnapshot secretsSnapshotDecoder
         <$> LBS.readFile (toFilePath (managedSecretsPath home))
+
+metadataSnapshotDecoder :: Json.Decoder MetadataSnapshot
+metadataSnapshotDecoder =
+    Json.object $
+        MetadataSnapshot
+            <$> Json.atKey "version" Json.int
+            <*> Json.atKey "accounts" (Json.list rawJsonDecoder)
+
+secretsSnapshotDecoder :: Json.Decoder SecretsSnapshot
+secretsSnapshotDecoder =
+    Json.object $
+        SecretsSnapshot
+            <$> Json.atKey "version" Json.int
+            <*> Json.atKey "secrets" (Json.list rawJsonDecoder)
+
+decodeSnapshot
+    :: Json.Decoder a
+    -> LBS.ByteString
+    -> Either String a
+decodeSnapshot decoder bytes =
+    either (Left . Text.unpack . Json.jsonErrorMessage) Right
+        (Json.decodeEither decoder (LBS.toStrict bytes))
+
+rawJsonValue :: Aeson.ToJSON a => a -> RawJson
+rawJsonValue value =
+    either (error . Text.unpack . Json.jsonErrorMessage) id
+        (Json.decodeEither rawJsonDecoder (LBS.toStrict (Aeson.encode value)))
 
 withTempHome :: (OsPath -> IO a) -> IO a
 withTempHome action =
