@@ -233,12 +233,12 @@ parsePlannedObject
     -> Cursor
     -> Either DecodeError (a, Cursor)
 parsePlannedObject initialPlan initial = do
-    opened <- consumeByte openBrace (skipWhitespace initial)
+    opened <- descend =<< consumeByte openBrace (skipWhitespace initial)
     let cursor = skipWhitespace opened
     if peekByte cursor == Just closeBrace
         then do
             finished <- consumeByte closeBrace cursor
-            finishPlan initialPlan finished
+            finishPlan initialPlan (leaveDepth finished)
         else go initialPlan cursor
   where
     go plan cursor = do
@@ -268,7 +268,7 @@ parsePlannedObject initialPlan initial = do
                 consumeByte comma next >>= go updatedPlan . skipWhitespace
             Just byte | byte == closeBrace -> do
                 finished <- consumeByte closeBrace next
-                finishPlan updatedPlan finished
+                finishPlan updatedPlan (leaveDepth finished)
             _ -> failure next "expected ',' or '}'"
 
     finishPlan plan cursor =

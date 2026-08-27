@@ -116,21 +116,26 @@ rawJson =
 
 object :: [Field a] -> Encoder a
 object fields =
-    let reserved =
-            Set.fromList
-                [ key
-                | Field { fieldName = Just key } <- fields
+    Encoder \value ->
+        let known =
+                concat
+                    [ renderField value
+                    | Field
+                        { fieldName = Just _
+                        , renderField
+                        } <- fields
+                    ]
+            emitted = Set.fromList (map fst known)
+            extensions =
+                [ entry
+                | Field
+                    { fieldName = Nothing
+                    , renderField
+                    } <- fields
+                , entry@(key, _) <- renderField value
+                , key `Set.notMember` emitted
                 ]
-        withoutReserved (key, _) = key `Set.notMember` reserved
-    in Encoder \value ->
-        Jsonifier.object $
-            concatMap
-                (\Field { fieldName, renderField } ->
-                    case fieldName of
-                        Just _ -> renderField value
-                        Nothing ->
-                            filter withoutReserved (renderField value))
-                fields
+        in Jsonifier.object (known <> extensions)
 
 objectWithExtensions
     :: (a -> Extensions)

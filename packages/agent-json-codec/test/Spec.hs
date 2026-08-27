@@ -127,6 +127,18 @@ taggedDecoder =
                 (const (Left ("unknown tag " <> tag)))
                 Decoder.skip
 
+plannedNestedDecoder :: Decoder.Decoder ()
+plannedNestedDecoder =
+    Decoder.byType \case
+        Decoder.JsonNull -> Decoder.nullValue ()
+        Decoder.JsonObject ->
+            Decoder.objectFields $
+                Decoder.defaultField
+                    ()
+                    "x"
+                    plannedNestedDecoder
+        _ -> () <$ Decoder.skip
+
 main :: IO ()
 main = hspec do
     describe "portable direct decoder" do
@@ -198,6 +210,16 @@ main = hspec do
                         <> BS.replicate nesting 0x5d
             Decoder.validateRawJson input `shouldSatisfy` isLeft
 
+        it "enforces the depth limit for applicative objects" do
+            let nesting = 1_025
+                input =
+                    BS.concat
+                        (replicate nesting "{\"x\":")
+                        <> "null"
+                        <> BS.replicate nesting 0x7d
+            Decoder.decode plannedNestedDecoder input
+                `shouldSatisfy` isLeft
+
         it "accepts scalar roots" do
             Decoder.decode Decoder.bool "true" `shouldBe` Right True
             Decoder.decode Decoder.text "\"hello\"" `shouldBe` Right "hello"
@@ -258,6 +280,23 @@ main = hspec do
             BS8.count '"' encoded `shouldSatisfy` (> 0)
             Decoder.decode personDecoder encoded
                 `shouldBe` Right value { extensions = emptyExtensions }
+
+        it "retains an extension for an absent optional field" do
+            explicitNull <- expectRight $
+                Decoder.validateRawJson "null"
+            let value = Person
+                    { name = "Ada"
+                    , age = 1
+                    , active = Nothing
+                    , tags = []
+                    , extensions =
+                        insertExtension
+                            "active"
+                            explicitNull
+                            emptyExtensions
+                    }
+                encoded = Encoder.encode personEncoder value
+            encoded `shouldSatisfy` BS8.isInfixOf "\"active\":null"
 
         it "escapes control characters and unicode directly" do
             let value = "quote: \" slash: \\ newline:\n snowman: ☃"
