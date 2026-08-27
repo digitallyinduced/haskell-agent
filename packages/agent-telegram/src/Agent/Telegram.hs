@@ -157,10 +157,10 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forM_, unless, void, when)
+import Agent.Json (rawJsonDecoder)
+import qualified Agent.Json.Decode as Hermes
 import Data.Aeson
-    ( Value(..)
-    , eitherDecode
-    , encode
+    ( encode
     , object
     , (.=)
     )
@@ -472,8 +472,7 @@ setupTelegram options = do
     TelegramClient.telegramRequest client "getMe" (object []) 15 >>= \case
         Left err -> die (Text.unpack err)
         Right response -> case
-                TelegramClient.decodeTelegramResponse response
-                    :: Either Text Value
+                TelegramClient.decodeTelegramResponse rawJsonDecoder response
             of
             Left err -> die (Text.unpack err)
             Right _ -> pure ()
@@ -533,8 +532,10 @@ readSecretLine prompt = do
 
 loadTelegramConfig :: OsPath -> IO TelegramConfig
 loadTelegramConfig home =
-    eitherDecode <$> LBS.readFile (unsafeToFilePath (configPath home)) >>= \case
-        Left err -> die ("could not decode Telegram config: " <> err)
+    Hermes.decodeEither telegramConfigDecoder . LBS.toStrict
+        <$> LBS.readFile (unsafeToFilePath (configPath home)) >>= \case
+        Left err -> die ("could not decode Telegram config: "
+            <> Text.unpack (Hermes.jsonErrorMessage err))
         Right config -> pure config
 
 loadTelegramToken :: OsPath -> IO Text
@@ -1867,9 +1868,10 @@ persistAllowedUserIdsToConfig runtime = do
         exists <- doesFileExist path
         when exists do
             bytes <- LBS.readFile (unsafeToFilePath path)
-            case eitherDecode bytes of
+            case Hermes.decodeEither telegramConfigDecoder (LBS.toStrict bytes) of
                 Left err ->
-                    fail ("could not decode Telegram config: " <> err)
+                    fail ("could not decode Telegram config: "
+                        <> Text.unpack (Hermes.jsonErrorMessage err))
                 Right config ->
                     writeLazyFileAtomically
                         path
@@ -2072,8 +2074,10 @@ loadTelegramState path = do
     exists <- doesFileExist path
     if not exists
         then pure emptyTelegramState
-        else eitherDecode <$> LBS.readFile (unsafeToFilePath path) >>= \case
-            Left err -> fail ("could not decode Telegram state: " <> err)
+        else Hermes.decodeEither telegramStateDecoder . LBS.toStrict
+            <$> LBS.readFile (unsafeToFilePath path) >>= \case
+            Left err -> fail ("could not decode Telegram state: "
+                <> Text.unpack (Hermes.jsonErrorMessage err))
             Right state -> pure state
 
 saveTelegramState :: OsPath -> TelegramState -> IO ()

@@ -26,22 +26,20 @@ module Agent.Telegram.Client
 
 import Agent.Telegram.Markdown (markdownToTelegramHtml)
 import Agent.Telegram.Types
+import Agent.Json (rawJsonDecoder)
+import qualified Agent.Json.Decode as Hermes
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (displayException, tryAny)
-import Control.Monad (when)
+import Control.Monad (join, when)
 import Control.Retry
     ( fullJitterBackoff
     , limitRetries
     , retrying
     )
 import Data.Aeson
-    ( FromJSON(..)
-    , Value
-    , eitherDecode
+    ( Value
     , encode
     , object
-    , withObject
-    , (.:?)
     , (.=)
     )
 import qualified Data.Aeson.Key as Key
@@ -71,9 +69,9 @@ data TelegramFile = TelegramFile
     { telegramFilePath :: !(Maybe Text)
     }
 
-instance FromJSON TelegramFile where
-    parseJSON = withObject "TelegramFile" \o ->
-        TelegramFile <$> o .:? "file_path"
+telegramFileDecoder :: Hermes.Decoder TelegramFile
+telegramFileDecoder = Hermes.object $
+    TelegramFile <$> optionalField "file_path" Hermes.text
 
 telegramRequest
     :: TelegramClient
@@ -166,7 +164,10 @@ runRetrying client request = do
 
 responseFailure :: LBS.ByteString -> Maybe TelegramRequestError
 responseFailure bytes =
-    case eitherDecode bytes :: Either String (TelegramResponse Value) of
+    case Hermes.decodeEither
+            (telegramResponseDecoder rawJsonDecoder)
+            (LBS.toStrict bytes)
+        of
         Left _ -> Nothing
         Right envelope
             | envelope.responseOk -> Nothing
@@ -190,15 +191,15 @@ renderRequestError client err =
     redactToken client.clientToken err.telegramErrorMessage
 
 decodeTelegramResponse
-    :: forall a. FromJSON a
-    => LBS.ByteString
+    :: Hermes.Decoder a
+    -> LBS.ByteString
     -> Either Text a
-decodeTelegramResponse bytes = do
-    envelope <- case
-            eitherDecode bytes
-                :: Either String (TelegramResponse a)
-        of
-        Left err -> Left ("Telegram returned invalid JSON: " <> Text.pack err)
+decodeTelegramResponse decoder bytes = do
+    envelope <- case Hermes.decodeEither
+            (telegramResponseDecoder decoder)
+            (LBS.toStrict bytes) of
+        Left err -> Left
+            ("Telegram returned invalid JSON: " <> Hermes.jsonErrorMessage err)
         Right value -> Right value
     if envelope.responseOk
         then maybe
@@ -216,7 +217,8 @@ getUpdates
 getUpdates client offset =
     telegramRequest client "getUpdates" body 45 >>= \case
         Left err -> pure (Left err)
-        Right response -> pure (decodeTelegramResponse response)
+        Right response ->
+            pure (decodeTelegramResponse (Hermes.list telegramUpdateDecoder) response)
   where
     body = object $
         [ "timeout" .= (30 :: Int)
@@ -240,7 +242,10 @@ getChatAdministrators client chatId =
         (object ["chat_id" .= chatId])
         15 >>= \case
         Left err -> pure (Left err)
-        Right response -> pure (decodeTelegramResponse response)
+        Right response ->
+            pure (decodeTelegramResponse
+                (Hermes.list telegramChatMemberDecoder)
+                response)
 
 leaveChat
     :: TelegramClient
@@ -254,14 +259,15 @@ getTelegramBot client =
     telegramRequest client "getMe" (object []) 15 >>= \case
         Left err -> fail (Text.unpack err)
         Right response ->
-            either (fail . Text.unpack) pure (decodeTelegramResponse response)
+            either (fail . Text.unpack) pure
+                (decodeTelegramResponse telegramUserDecoder response)
 
 getTelegramFilePath :: TelegramClient -> Text -> IO FilePath
 getTelegramFilePath client fileId =
     telegramRequest client "getFile" (object ["file_id" .= fileId]) 30 >>= \case
         Left err -> fail (Text.unpack err)
         Right response ->
-            case decodeTelegramResponse response :: Either Text TelegramFile of
+            case decodeTelegramResponse telegramFileDecoder response of
                 Left err -> fail (Text.unpack err)
                 Right TelegramFile { telegramFilePath = Nothing } ->
                     fail "Telegram getFile response did not contain file_path"
@@ -587,10 +593,10 @@ sanitizeFilename =
 
 decodeSentMessageId :: LBS.ByteString -> Either Text (Maybe Integer)
 decodeSentMessageId response =
-    case decodeTelegramResponse response :: Either Text TelegramMessage of
+    case decodeTelegramResponse telegramMessageDecoder response of
         Right message -> Right (Just message.messageId)
         Left _ ->
-            (() <$ (decodeTelegramResponse response :: Either Text Bool))
+            (() <$ decodeTelegramResponse Hermes.bool response)
                 >> Right Nothing
 
 expectBool :: TelegramClient -> String -> Value -> IO ()
@@ -598,7 +604,7 @@ expectBool client method body =
     telegramRequest client method body 30 >>= \case
         Left err -> fail (Text.unpack err)
         Right response ->
-            case decodeTelegramResponse response :: Either Text Bool of
+            case decodeTelegramResponse Hermes.bool response of
                 Left err -> fail (Text.unpack err)
                 Right _ -> pure ()
 
@@ -607,7 +613,14 @@ requestUnit client method body =
     telegramRequest client method body 30 >>= \case
         Left err -> pure (Left err)
         Right response ->
-            pure (() <$ (decodeTelegramResponse response :: Either Text Value))
+            pure (() <$ decodeTelegramResponse rawJsonDecoder response)
+
+optionalField
+    :: Text
+    -> Hermes.Decoder a
+    -> Hermes.FieldsDecoder (Maybe a)
+optionalField key decoder =
+    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
 
 threadParameters :: TelegramChatKey -> [(Key.Key, Value)]
 threadParameters key =

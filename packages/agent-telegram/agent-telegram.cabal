@@ -50,6 +50,7 @@ library
                     , Agent.Telegram.Voice
     build-depends:    agent-cli >= 0.1 && < 0.2
                     , agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
                     , agent-store >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
@@ -86,6 +87,7 @@ test-suite agent-telegram-test
     main-is:          Spec.hs
     other-modules:    Agent.TelegramSpec
     build-depends:    agent-core
+                    , agent-json
                     , agent-telegram
                     , aeson
                     , base >= 4.17 && < 5

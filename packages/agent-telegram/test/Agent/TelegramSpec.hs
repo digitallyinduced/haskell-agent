@@ -16,6 +16,9 @@ import Agent.Telegram.Types
     , TelegramPendingLeave(..)
     , TelegramPendingMediaTurn(..)
     , TelegramRetryMetadata(..)
+    , telegramConfigDecoder
+    , telegramStateDecoder
+    , telegramUpdateDecoder
     )
 import Data.List (sort)
 import Control.Concurrent
@@ -25,7 +28,8 @@ import Control.Concurrent
     , threadDelay
     )
 import Control.Exception.Safe (finally)
-import Data.Aeson (Value, eitherDecode, encode, object, (.=))
+import qualified Agent.Json.Decode as Hermes
+import Data.Aeson (Value, encode, object, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.IORef
     ( atomicModifyIORef'
@@ -42,6 +46,15 @@ import System.IO.Temp (withSystemTempDirectory)
 import System.OsPath (unsafeEncodeUtf)
 import qualified System.Timeout as Timeout
 import Test.Hspec
+
+decodeWith
+    :: Hermes.Decoder a
+    -> LBS.ByteString
+    -> Either String a
+decodeWith decoder =
+    either (Left . Text.unpack . Hermes.jsonErrorMessage) Right
+        . Hermes.decodeEither decoder
+        . LBS.toStrict
 
 spec :: Spec
 spec = describe "Agent.Telegram" do
@@ -116,7 +129,7 @@ spec = describe "Agent.Telegram" do
 
     describe "Telegram config migration" do
         it "maps legacy yolo booleans onto explicit approval modes" do
-            let decode yolo = eitherDecode
+            let decode yolo = decodeWith telegramConfigDecoder
                     (encode (object
                         [ "provider" .= ("xai" :: String)
                         , "cwd" .= ("/tmp" :: String)
@@ -137,7 +150,7 @@ spec = describe "Agent.Telegram" do
                     ] <> maybe [] (\value -> ["workers" .= value]) workers
                 decode :: Maybe Int -> Either String TelegramConfig
                 decode workers =
-                    eitherDecode (encode (base workers))
+                    decodeWith telegramConfigDecoder (encode (base workers))
             fmap (.telegramWorkerCount) (decode Nothing)
                 `shouldBe` Right defaultTelegramWorkerCount
             fmap (.telegramWorkerCount) (decode (Just (16 :: Int)))
@@ -383,8 +396,17 @@ spec = describe "Agent.Telegram" do
             result `shouldBe` Nothing
 
     describe "Telegram reactions and voice" do
+        it "ignores unknown fields but rejects malformed known fields" do
+            decodeWith telegramUpdateDecoder
+                "{\"update_id\":1,\"future\":{\"nested\":true}}"
+                `shouldBe` Right
+                    (TelegramUpdate 1 Nothing Nothing Nothing Nothing Nothing)
+            decodeWith telegramUpdateDecoder
+                "{\"update_id\":\"not-an-integer\"}"
+                `shouldSatisfy` isLeft
+
         it "turns an inbound reaction into a durable agent message" do
-            let decoded = eitherDecode
+            let decoded = decodeWith telegramUpdateDecoder
                     (LBS.pack
                         "{\"update_id\":20,\"message_reaction\":{\
                         \\"chat\":{\"id\":123,\"type\":\"private\"},\
@@ -409,7 +431,7 @@ spec = describe "Agent.Telegram" do
                     , userLastName = Nothing
                     , userUsername = Just "HarnessBot"
                     }
-                decoded = eitherDecode
+                decoded = decodeWith telegramUpdateDecoder
                     (LBS.pack
                         "{\"update_id\":24,\"callback_query\":{\
                         \\"id\":\"callback-1\",\"from\":{\"id\":456},\
@@ -437,7 +459,7 @@ spec = describe "Agent.Telegram" do
             telegramReactionEmoji "Looks good 👍" `shouldBe` Nothing
 
         it "decodes Telegram voice metadata" do
-            let decoded = eitherDecode
+            let decoded = decodeWith telegramUpdateDecoder
                     (LBS.pack
                         "{\"update_id\":21,\"message\":{\
                         \\"message_id\":78,\"from\":{\"id\":456},\
@@ -465,7 +487,7 @@ spec = describe "Agent.Telegram" do
                 }
             allowedUsers = Set.singleton 456
             classify bytes = do
-                update <- (eitherDecode (LBS.pack bytes)
+                update <- (decodeWith telegramUpdateDecoder (LBS.pack bytes)
                     :: Either String TelegramUpdate)
                     `shouldReturnRight` "Telegram update should decode"
                 pure (classifyTelegramUpdate bot allowedUsers update)
@@ -581,7 +603,7 @@ spec = describe "Agent.Telegram" do
                 , userUsername = Nothing
                 }
             classifyWith respondToAll authorized bytes = do
-                update <- (eitherDecode (LBS.pack bytes)
+                update <- (decodeWith telegramUpdateDecoder (LBS.pack bytes)
                     :: Either String TelegramUpdate)
                     `shouldReturnRight` "Telegram update should decode"
                 pure
@@ -930,7 +952,7 @@ spec = describe "Agent.Telegram" do
                     Nothing
 
         it "records ignored group members so they can be allowed by name" do
-            update <- (eitherDecode
+            update <- (decodeWith telegramUpdateDecoder
                 (LBS.pack
                     "{\"update_id\":54,\"message\":{\
                     \\"message_id\":104,\
@@ -1024,7 +1046,7 @@ spec = describe "Agent.Telegram" do
 
     describe "durable queue state" do
         it "loads state written before pending turns were introduced" do
-            let decoded = eitherDecode
+            let decoded = decodeWith telegramStateDecoder
                     (LBS.pack
                         "{\"nextUpdateId\":12,\"bindings\":[],\"pendingReplies\":[]}")
                     :: Either String TelegramState
@@ -1047,7 +1069,7 @@ spec = describe "Agent.Telegram" do
                     TelegramPendingReply 11 firstKey (Just 77) "reply"
                 secondReply =
                     TelegramPendingReply 8 secondKey (Just 75) "other reply"
-                decoded = eitherDecode
+                decoded = decodeWith telegramStateDecoder
                     (LBS.pack
                         "{\"nextUpdateId\":12,\"bindings\":[{\
                         \\"chat\":{\"chatId\":123},\"sessionId\":\"session-1\"}],\
@@ -1092,7 +1114,7 @@ spec = describe "Agent.Telegram" do
         it "seeds authorized group chats from legacy group bindings" do
             let groupKey = TelegramChatKey (-1001) Nothing
                 privateKey = TelegramChatKey 123 Nothing
-                decoded = eitherDecode
+                decoded = decodeWith telegramStateDecoder
                     (LBS.pack
                         "{\"bindings\":[{\
                         \\"chat\":{\"chatId\":-1001},\"sessionId\":\"group\"},{\
@@ -1105,7 +1127,7 @@ spec = describe "Agent.Telegram" do
             Map.lookup privateKey state.bindings `shouldBe` Just "private"
 
         it "keeps an explicit empty authorized group set" do
-            let decoded = eitherDecode
+            let decoded = decodeWith telegramStateDecoder
                     (LBS.pack
                         "{\"authorizedGroupChats\":[],\"bindings\":[{\
                         \\"chat\":{\"chatId\":-1001},\"sessionId\":\"group\"}]}")
@@ -1116,7 +1138,7 @@ spec = describe "Agent.Telegram" do
 
         it "preserves first-match semantics for duplicate legacy bindings" do
             let key = TelegramChatKey 123 Nothing
-                decoded = eitherDecode
+                decoded = decodeWith telegramStateDecoder
                     (LBS.pack
                         "{\"bindings\":[{\
                         \\"chat\":{\"chatId\":123},\"sessionId\":\"current\"},{\
@@ -1165,8 +1187,7 @@ spec = describe "Agent.Telegram" do
                     , "seenTelegramUsers" .= ([] :: [TelegramUser])
                     , "seenUsersByChat" .= ([] :: [Value])
                     ]
-            (eitherDecode (encode state) :: Either String Value)
-                `shouldBe` Right expected
+            encode state `shouldBe` encode expected
 
         it "persists inbound work and advances the polling offset" do
             let key = TelegramChatKey 123 Nothing
@@ -1267,7 +1288,7 @@ spec = describe "Agent.Telegram" do
                     , retryMetadata = Map.singleton "turn" retry
                     , deliveryCheckpoints = Map.singleton "reply" 2
                     }
-            (eitherDecode (encode state) :: Either String TelegramState)
+            (decodeWith telegramStateDecoder (encode state) :: Either String TelegramState)
                 `shouldBe` Right state
 
         it "checkpoints a voice transcript before running the agent" do
