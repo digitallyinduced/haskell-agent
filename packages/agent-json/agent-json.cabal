@@ -36,6 +36,8 @@ library
     exposed-modules:
         Agent.Json
         Agent.Json.Decode
+    other-modules:
+        Agent.Json.Internal
     build-depends:
         aeson >= 2.0 && < 3
         , base >= 4.17 && < 5

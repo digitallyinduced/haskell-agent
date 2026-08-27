@@ -18,16 +18,17 @@ module Agent.Json.Decode
     , validateRawJson
     ) where
 
-import Agent.Json (RawJson, rawJsonDecoder)
+import Agent.Json (RawJson)
+import Agent.Json.Internal (RawJson(..))
 import Control.Exception.Safe (tryAny)
 import Control.Monad (join)
 import qualified Data.ByteString as BS
 import Data.Hermes as Hermes hiding (decodeEither)
-import qualified Data.Hermes as Hermes
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Word (Word8)
+import System.IO.Unsafe (unsafePerformIO)
 
 newtype JsonError = JsonError { jsonErrorMessage :: Text }
     deriving stock (Eq, Show)
@@ -37,10 +38,10 @@ newtype DecoderSession =
 
 decodeEither :: Hermes.Decoder a -> BS.ByteString -> Either JsonError a
 decodeEither decoder bytes =
-    firstJsonError $
-        Hermes.decodeEither
-            (documentDecoder decoder bytes)
-            (documentBytes bytes)
+    unsafePerformIO $
+        withDecoderSession \session ->
+            decodeIO session decoder bytes
+{-# NOINLINE decodeEither #-}
 
 decodeText :: Hermes.Decoder a -> Text -> Either JsonError a
 decodeText decoder =
@@ -103,12 +104,28 @@ discriminatedObject discriminator select =
         Hermes.liftObjectDecoder (select tag)
 
 validateRawJson :: BS.ByteString -> Either JsonError RawJson
-validateRawJson =
-    decodeEither rawJsonDecoder
+validateRawJson bytes = do
+    () <- decodeEither validateValue bytes
+    let owned = BS.copy bytes
+    owned `seq` pure (RawJson owned)
 
-firstJsonError :: Show error => Either error a -> Either JsonError a
-firstJsonError =
-    either (Left . JsonError . Text.pack . show) Right
+validateValue :: Hermes.Decoder ()
+validateValue =
+    Hermes.getType >>= \case
+        Hermes.VArray ->
+            () <$ Hermes.list validateValue
+        Hermes.VObject ->
+            () <$ Hermes.objectFold ()
+                (\_ () -> validateValue)
+        Hermes.VNumber ->
+            () <$ Hermes.scientific
+        Hermes.VString ->
+            () <$ Hermes.text
+        Hermes.VBoolean ->
+            () <$ Hermes.bool
+        Hermes.VNull -> do
+            nil <- Hermes.isNull
+            if nil then pure () else fail "expected null"
 
 documentDecoder
     :: Hermes.Decoder a

@@ -70,6 +70,15 @@ main = hspec do
             fmap rawJsonBytes result
                 `shouldBe` Right "{\"nested\":[1,true,null]}"
 
+        it "validates complete opaque values" do
+            fmap rawJsonBytes
+                (Json.validateRawJson "{\"nested\":[1,true,null]}")
+                `shouldBe` Right "{\"nested\":[1,true,null]}"
+            Json.validateRawJson "{\"nested\":[1,]}"
+                `shouldSatisfy` isLeft
+            Json.validateRawJson "true false"
+                `shouldSatisfy` isLeft
+
         it "injects raw bytes into Aeson encoding without reparsing" do
             let raw =
                     rawJsonFromEncoding $

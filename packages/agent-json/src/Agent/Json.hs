@@ -12,17 +12,11 @@ module Agent.Json
     ) where
 
 import qualified Data.Aeson.Encoding.Internal as Aeson
+import Agent.Json.Internal (RawJson(..))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Hermes as Hermes
-
-newtype RawJson = RawJson BS.ByteString
-    deriving stock (Eq, Ord)
-
-instance Show RawJson where
-    show (RawJson bytes) =
-        "RawJson <" <> show (BS.length bytes) <> " bytes>"
 
 rawJsonBytes :: RawJson -> BS.ByteString
 rawJsonBytes (RawJson bytes) = bytes
