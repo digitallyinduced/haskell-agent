@@ -14,6 +14,7 @@ module Agent.Loop
     , LoopConfig(..)
     , LoopExecution(..)
     , LoopEvent(..)
+    , NativeAgentStatus(..)
     , LoopError(..)
     , LoopProgress(..)
     , LoopResult(..)
@@ -301,9 +302,29 @@ data LoopEvent
     | TurnStarted
     | TurnFinished TurnOutput
     | ToolStarted ToolCall
+    -- | Replace the metadata for an already-visible in-flight tool call.
+    -- Providers may learn canonical arguments after an early live start.
+    | ToolUpdated ToolCall
     -- | Latest accumulated output snapshot for an in-flight tool call.
     | ToolOutputUpdated Text Text
     | ToolFinished ToolCallResult
+    -- | Remove a provider-retracted tool call from the current attempt.
+    | ToolRetracted Text
+    -- | Discard all UI activity emitted by the current response attempt.
+    -- This is distinct from ending the whole turn: a retry may follow.
+    | ResponseAttemptDiscarded
+    -- | Lifecycle/activity from a provider-managed child agent. These agents
+    -- are display-only unless the provider exposes targeted controls.
+    | NativeAgentStarted Text (Maybe Text) Text (Maybe Text)
+    | NativeAgentOutput Text Text
+    | NativeAgentFinished Text NativeAgentStatus
+    deriving (Eq, Show)
+
+data NativeAgentStatus
+    = NativeAgentRunning
+    | NativeAgentCompleted
+    | NativeAgentFailed
+    | NativeAgentCancelled
     deriving (Eq, Show)
 
 data LoopConfig = LoopConfig

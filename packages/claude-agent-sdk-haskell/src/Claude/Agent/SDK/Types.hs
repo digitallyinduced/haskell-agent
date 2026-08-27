@@ -21,7 +21,10 @@ module Claude.Agent.SDK.Types
     , StreamEvent(..)
     , ConversationResetMessage(..)
     , Message(..)
+    , QueryMessageScope(..)
+    , QueryProgress(..)
     , messageUuid
+    , messageSessionId
     , messageParentToolUseId
     , messageHasParentToolUseId
     ) where
@@ -313,6 +316,16 @@ data Message
     | MessageUnknown !Value
     deriving (Eq, Show)
 
+data QueryMessageScope
+    = QueryTopLevel
+    | QueryNested !(Maybe Text)
+    deriving (Eq, Ord, Show)
+
+data QueryProgress
+    = QueryMessageObserved !QueryMessageScope !Message
+    | QueryMessagesRetracted !(Maybe QueryMessageScope) ![Text]
+    deriving (Eq, Show)
+
 messageUuid :: Message -> Maybe Text
 messageUuid = \case
     MessageUser message -> message.uuid
@@ -326,11 +339,30 @@ messageUuid = \case
         nonEmptyRawText "uuid" object
     MessageUnknown _ -> Nothing
 
+messageSessionId :: Message -> Maybe Text
+messageSessionId = \case
+    MessageUser message -> nonEmptyRawText "session_id" message.raw
+    MessageAssistant message -> message.sessionId
+    MessageSystem message -> message.sessionId
+    MessageResult message -> Just message.sessionId
+    MessageStreamEvent message -> message.sessionId
+    MessageConversationReset message -> message.sessionId
+    MessageControlRequest object -> nonEmptyRawText "session_id" object
+    MessageUnknown (Aeson.Object object) ->
+        nonEmptyRawText "session_id" object
+    MessageUnknown _ -> Nothing
+
 messageParentToolUseId :: Message -> Maybe Text
 messageParentToolUseId = \case
     MessageUser message -> message.parentToolUseId
     MessageAssistant message -> message.parentToolUseId
+    MessageSystem message -> nonEmptyRawText "parent_tool_use_id" message.raw
+    MessageResult message -> nonEmptyRawText "parent_tool_use_id" message.raw
     MessageStreamEvent message -> message.parentToolUseId
+    MessageConversationReset message ->
+        nonEmptyRawText "parent_tool_use_id" message.raw
+    MessageControlRequest object ->
+        nonEmptyRawText "parent_tool_use_id" object
     MessageUnknown (Aeson.Object object) ->
         nonEmptyRawText "parent_tool_use_id" object
     _ -> Nothing

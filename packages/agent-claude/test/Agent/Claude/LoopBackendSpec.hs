@@ -23,7 +23,9 @@ import Agent.Loop
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
-    ( MessageContent(..)
+    ( FunctionCall(..)
+    , FunctionCallOutput(..)
+    , MessageContent(..)
     , ReasoningConfig(..)
     , ResponseContentPart(..)
     , ResponseCreateParams(..)
@@ -160,7 +162,18 @@ spec = do
                         [ "hello"
                         , "fake response"
                         ]
-                length history `shouldBe` 2
+                let persistedCalls =
+                        [ (call.callId, call.name, call.arguments)
+                        | FunctionCallItem call <- history
+                        ]
+                    persistedOutputs =
+                        [ output.callId
+                        | FunctionCallOutputItem output <- history
+                        ]
+                persistedCalls `shouldBe`
+                    [("fake-tool", "Read", "{\"file_path\":\"README.md\"}")]
+                persistedOutputs `shouldBe` ["fake-tool"]
+                length history `shouldBe` 4
 
                 submitted <- readFile fake.promptLog
                 submitted `shouldContain`
@@ -227,6 +240,64 @@ spec = do
                     Just (Right _) -> True
                     _ -> False
                 readIORef observedBeforeResult `shouldReturn` [True]
+
+        it "retracts superseded live tools without committing them" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_RETRACT_TOOL", Just "1")]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        result <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend ->
+                                    submitBackend backend
+                                        Nothing
+                                        [UserMessage "replace the tool"]
+                                        (\event ->
+                                            modifyIORef' events (<> [event]))
+                        result `shouldSatisfy` \case
+                            Just (Right _) -> True
+                            _ -> False
+                        observed <- readIORef events
+                        observed `shouldContain`
+                            [ ToolStarted expectedFakeToolCall
+                            , ToolRetracted "fake-tool"
+                            ]
+                        history <- readIORef transcript
+                        [call | FunctionCallItem call <- history]
+                            `shouldBe` []
+
+        it "starts from partial tool records and enriches canonical arguments" $
+            withFakeClaude \fake ->
+                withEnvironmentVariables
+                    [("FAKE_CLAUDE_PARTIAL_TOOL", Just "1")]
+                    do
+                        transcript <- newIORef []
+                        events <- newIORef []
+                        _ <- timeout 5_000_000 $
+                            withClaudeCodeBackend
+                                (defaultClaudeCodeOptions
+                                    fake.executable
+                                    fake.workingDirectory)
+                                Nothing
+                                (pure defaultResponseCreateParams)
+                                transcript
+                                \backend ->
+                                    submitBackend backend
+                                        Nothing
+                                        [UserMessage "read it"]
+                                        (\event ->
+                                            modifyIORef' events (<> [event]))
+                        observed <- readIORef events
+                        map eventTag observed `shouldContain`
+                            ["start:{}", "update:{\"file_path\":\"README.md\"}"]
 
         it "forwards pasted images as Claude image content blocks" $
             withFakeClaude \fake -> do
@@ -613,6 +684,7 @@ spec = do
                         readIORef events `shouldReturn`
                             [ ToolStarted expectedFakeToolCall
                             , ToolFinished expectedFakeToolResult
+                            , ResponseAttemptDiscarded
                             ]
 
         it "reports malformed structured output" $
@@ -1221,8 +1293,14 @@ fakeClaudeScript promptLog startLog argumentLog =
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"message-start-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"message_start\",\"message\":{\"id\":\"message-%s\"}}}\\n' \"$turn\" \"$session_id\" \"$turn\""
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-a-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"fake \"}}}\\n' \"$turn\" \"$session_id\""
         , "  printf '{\"type\":\"stream_event\",\"uuid\":\"delta-b-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"response\"}}}\\n' \"$turn\" \"$session_id\""
+        , "  if [ \"$FAKE_CLAUDE_PARTIAL_TOOL\" = 1 ]; then"
+        , "    printf '{\"type\":\"stream_event\",\"uuid\":\"partial-tool-%s\",\"session_id\":\"%s\",\"event\":{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"Read\",\"input\":{}}}}\\n' \"$turn\" \"$session_id\""
+        , "  fi"
         , "  tool_name=${FAKE_CLAUDE_TOOL_NAME:-Read}"
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"tool-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"fake-tool\",\"name\":\"%s\",\"input\":{\"file_path\":\"README.md\"}}]}}\\n' \"$turn\" \"$session_id\" \"$tool_name\""
+        , "  if [ \"$FAKE_CLAUDE_RETRACT_TOOL\" = 1 ]; then"
+        , "    printf '{\"type\":\"system\",\"subtype\":\"model_refusal_fallback\",\"uuid\":\"retract-%s\",\"session_id\":\"%s\",\"retracted_message_uuids\":[\"tool-%s\"]}\\n' \"$turn\" \"$session_id\" \"$turn\""
+        , "  fi"
         , "  if [ \"$FAKE_CLAUDE_PAUSE_AFTER_TOOL\" = 1 ]; then sleep 1; fi"
         , "  printf '{\"type\":\"user\",\"uuid\":\"tool-result-%s\",\"session_id\":\"%s\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"fake-tool\",\"content\":\"fake contents\"}]}}\\n' \"$turn\" \"$session_id\""
         , "  printf '{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"session_id\":\"%s\",\"message\":{\"id\":\"message-%s\",\"content\":[{\"type\":\"text\",\"text\":\"fake response\"}]}}\\n' \"$turn\" \"$session_id\" \"$turn\""
@@ -1279,6 +1357,12 @@ expectedFakeToolResult = ToolCallResult
     , output = "fake contents"
     , callKind = FunctionCallKind
     }
+
+eventTag :: LoopEvent -> Text
+eventTag = \case
+    ToolStarted call -> "start:" <> call.arguments
+    ToolUpdated call -> "update:" <> call.arguments
+    _ -> ""
 
 looksLikeUuid :: Text -> Bool
 looksLikeUuid value =

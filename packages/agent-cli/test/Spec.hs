@@ -31,6 +31,7 @@ import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
+import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
@@ -105,6 +106,7 @@ main = hspec do
     McpManagerSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec
+    NativeAgentsSpec.spec
     ModelsSpec.spec
     NotificationSpec.spec
     OptionsSpec.spec

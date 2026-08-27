@@ -2197,6 +2197,9 @@ copyCodeBlock target blockId codeIndex = do
                         <|> selectedBlock state.appUi blockId
                 AgentChild _ ->
                     conversationUiForTarget target state
+                        >>= \ui -> selectedBlock ui blockId
+                AgentNative _ ->
+                    conversationUiForTarget target state
                         >>= \ui -> selectedBlock ui blockId)
                 >>= fencedCodeBlock codeIndex . (.blockBody)
     case code of
@@ -3768,6 +3771,8 @@ applyActiveConversationUiEvent uiEvent = do
             applyLocalUiEvent uiEvent
         target@(AgentChild _) ->
             modify' (applyChildConversationUiEvent target uiEvent)
+        target@(AgentNative _) ->
+            modify' (applyChildConversationUiEvent target uiEvent)
 
 scrollConversationPage :: Direction -> EventM Name AppState ()
 scrollConversationPage direction = do
@@ -4042,6 +4047,9 @@ conversationBlocks target state =
         AgentChild _ ->
             maybe [] (toList . (.uiBlocks))
                 (conversationUiForTarget target state)
+        AgentNative _ ->
+            maybe [] (toList . (.uiBlocks))
+                (conversationUiForTarget target state)
 
 historyBlock :: HistoryWindow -> BlockId -> Maybe UiBlock
 historyBlock window ident =
@@ -4059,6 +4067,9 @@ selectedConversationBlockId target state =
         AgentChild _ ->
             conversationUiForTarget target state
                 >>= (.uiSelectedBlock)
+        AgentNative _ ->
+            conversationUiForTarget target state
+                >>= (.uiSelectedBlock)
 
 selectedConversationBlock
     :: AgentTarget
@@ -4071,6 +4082,8 @@ selectedConversationBlock target state =
                 historyBlock state.appHistoryWindow ident
                     <|> lookupBlock ident state.appUi
             AgentChild _ ->
+                conversationUiForTarget target state >>= lookupBlock ident
+            AgentNative _ ->
                 conversationUiForTarget target state >>= lookupBlock ident
 
 selectConversationBlock
@@ -4102,6 +4115,18 @@ selectConversationBlock target ident = do
                         (applyUiEvent
                             (UiFocusChanged FocusScrollback))
         AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiSelectBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+        AgentNative _ -> do
             modify' \current ->
                 (applyChildConversationUiEvent
                     target
@@ -4145,6 +4170,18 @@ activateConversationBlock target ident = do
                         (applyUiEvent
                             (UiFocusChanged FocusScrollback))
         AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiActivateBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+        AgentNative _ -> do
             modify' \current ->
                 (applyChildConversationUiEvent
                     target
