@@ -61,6 +61,10 @@ library
                     , Agent.CLI.McpStatus
                     , Agent.CLI.Input.Approval
                     , Agent.CLI.Login.Types
+                    , Agent.CLI.Lsp.Capabilities
+                    , Agent.CLI.Lsp.Formatting
+                    , Agent.CLI.Lsp.Path
+                    , Agent.CLI.Lsp.Protocol
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
