@@ -105,12 +105,14 @@ toolCallTitle = toolCallTitleRelative ""
 toolCallTitleRelative :: Text -> ToolCall -> Text
 toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
+    | canonicalToolName call.name == "exec" = "$ exec"
     | otherwise = summarizeToolCallRelative workspace call
 
 -- | Full invocation text that benefits from dedicated code rendering.
 toolCallInput :: ToolCall -> Text
 toolCallInput call = case canonicalToolName call.name of
     "run_ghci" -> jsonTextFieldDefault "expression" call.arguments
+    "exec" -> call.arguments
     _ -> ""
 
 data SearchReplaceAction
@@ -176,6 +178,7 @@ formatSearchReplaceDiffRelative workspace arguments =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
+    "exec" -> completedExecOutput output
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
     "wait_agent" ->
@@ -192,6 +195,18 @@ formatToolOutput call output = case canonicalToolName call.name of
     "todo_write" -> formatTodoList output
     "update_plan" -> formatTodoList output
     _ -> output
+
+-- The exec protocol keeps status and timing metadata for the model. In the
+-- transcript, the invocation itself already communicates successful
+-- completion, so retain only the script's meaningful output.
+completedExecOutput :: Text -> Text
+completedExecOutput output
+    | "Script completed\n" `Text.isPrefixOf` output =
+        case Text.breakOn "\nOutput:\n" output of
+            (_, rest)
+                | Text.null rest -> output
+                | otherwise -> Text.drop (Text.length "\nOutput:\n") rest
+    | otherwise = output
 
 -- | Rewrite workspace-absolute filesystem paths in tool chrome/output without
 -- touching file contents returned by @read_file@.
