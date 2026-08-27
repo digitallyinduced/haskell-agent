@@ -104,6 +104,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -127,6 +128,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
@@ -135,6 +137,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -164,6 +167,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 onStreamEvent ResponseReasoningSummaryPartAddedEvent
                     { streamItemId = Just "reasoning-1"
@@ -180,6 +184,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -382,6 +387,7 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
             }
         events `shouldBe` [TextDelta "hi"]
 

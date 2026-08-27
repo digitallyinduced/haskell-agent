@@ -7,7 +7,6 @@ import Agent.Responses.Types
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -78,6 +77,27 @@ spec = describe "Responses SSE decoder" do
             ]
         eventTypes events
             `shouldBe` [StreamEventUnknown "response.future_event", EventResponseCompleted]
+
+    it "preserves Codex turn state from direct aliases and nested headers" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.output_text.delta"
+                "{\"type\":\"response.output_text.delta\",\"x-codex-turn-state\":\"direct\"}"
+            , sseBlock "response.output_text.done"
+                "{\"type\":\"response.output_text.done\",\"turn_state\":\"alias\"}"
+            , sseBlock "response.reasoning_text.done"
+                "{\"type\":\"response.reasoning_text.done\",\"headers\":{\"x-codex-turn-state\":\"nested\"}}"
+            ]
+        let states =
+                [ turnState
+                | OtherResponseStreamEvent { turnState } <- events
+                ]
+        states `shouldBe` [Just "direct", Just "alias", Just "nested"]
+        case events of
+            first : _ ->
+                Text.decodeUtf8 (LBS.toStrict (Aeson.encode first))
+                    `shouldSatisfy`
+                        Text.isInfixOf "\"x-codex-turn-state\":\"direct\""
+            [] -> expectationFailure "expected turn-state events"
 
     it "decodes provider provenance on function calls and outputs" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""

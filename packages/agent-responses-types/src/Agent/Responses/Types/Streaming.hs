@@ -16,10 +16,7 @@ import Agent.Responses.Types.Common
 import Agent.Responses.Types.Items (ResponseItem, responseItemDecoder)
 import Agent.Responses.Types.Response (Response, responseDecoder)
 import Data.Aeson hiding (TaggedObject)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Hermes as Hermes
-import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -373,6 +370,7 @@ data ResponseStreamEvent
         , streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , summaryIndex      :: !(Maybe Int)
+        , turnState         :: !(Maybe Text)
         }
     deriving stock (Eq, Show)
 
@@ -472,7 +470,7 @@ instance ToJSON ResponseStreamEvent where
                 ]
         OtherResponseStreamEvent
             { otherEventType, sequenceNumber, eventDelta, streamItemId
-            , streamOutputIndex, summaryIndex } ->
+            , streamOutputIndex, summaryIndex, turnState } ->
             objectWith
                 [ Just (field "type" (streamEventTypeText otherEventType))
                 , optionalField "sequence_number" sequenceNumber
@@ -480,6 +478,7 @@ instance ToJSON ResponseStreamEvent where
                 , optionalField "item_id" streamItemId
                 , optionalField "output_index" streamOutputIndex
                 , optionalField "summary_index" summaryIndex
+                , optionalField "x-codex-turn-state" turnState
                 ]
       where
         lifecycleEvent eventType response sequenceNumber = objectWith
@@ -626,13 +625,13 @@ eventDecoder wireType = Hermes.object do
                         , sequenceNumber
 
                         }
-        eventType -> OtherResponseStreamEvent
-            <$> pure eventType
-            <*> pure sequenceNumber
-            <*> optionalAtKey "delta" Hermes.text
-            <*> optionalAtKey "item_id" Hermes.text
-            <*> optionalAtKey "output_index" Hermes.int
-            <*> optionalAtKey "summary_index" Hermes.int
+        eventType -> do
+            eventDelta <- optionalAtKey "delta" Hermes.text
+            streamItemId <- optionalAtKey "item_id" Hermes.text
+            streamOutputIndex <- optionalAtKey "output_index" Hermes.int
+            summaryIndex <- optionalAtKey "summary_index" Hermes.int
+            turnState <- turnStateFieldsDecoder
+            pure OtherResponseStreamEvent { otherEventType = eventType, .. }
   where
     lifecycle constructor sequenceNumber =
         constructor
@@ -679,14 +678,32 @@ decoderForType wireType =
         eventType -> otherEventDecoder eventType
 
 otherEventDecoder :: StreamEventType -> Hermes.Decoder ResponseStreamEvent
-otherEventDecoder eventType = Hermes.object $
-    OtherResponseStreamEvent
-        <$> pure eventType
-        <*> optionalAtKey "sequence_number" Hermes.int
-        <*> optionalAtKey "delta" Hermes.text
-        <*> optionalAtKey "item_id" Hermes.text
-        <*> optionalAtKey "output_index" Hermes.int
-        <*> optionalAtKey "summary_index" Hermes.int
+otherEventDecoder eventType = Hermes.object do
+    sequenceNumber <- optionalAtKey "sequence_number" Hermes.int
+    eventDelta <- optionalAtKey "delta" Hermes.text
+    streamItemId <- optionalAtKey "item_id" Hermes.text
+    streamOutputIndex <- optionalAtKey "output_index" Hermes.int
+    summaryIndex <- optionalAtKey "summary_index" Hermes.int
+    turnState <- turnStateFieldsDecoder
+    pure OtherResponseStreamEvent { otherEventType = eventType, .. }
+
+turnStateFieldsDecoder :: Hermes.FieldsDecoder (Maybe Text)
+turnStateFieldsDecoder = do
+    directHeader <- optionalAtKey "x-codex-turn-state" Hermes.text
+    directAlias <- optionalAtKey "turn_state" Hermes.text
+    nestedHeaders <- optionalAtKey "headers" $ Hermes.object do
+        nestedHeader <- optionalAtKey "x-codex-turn-state" Hermes.text
+        nestedAlias <- optionalAtKey "turn_state" Hermes.text
+        pure (firstJust nestedHeader nestedAlias)
+    pure
+        ( firstJust directHeader
+            (firstJust directAlias (maybe Nothing id nestedHeaders))
+        )
+
+firstJust :: Maybe value -> Maybe value -> Maybe value
+firstJust first second = case first of
+    Just value -> Just value
+    Nothing -> second
 
 codexRateLimitsDecoder :: Hermes.Decoder CodexRateLimits
 codexRateLimitsDecoder = Hermes.object $
