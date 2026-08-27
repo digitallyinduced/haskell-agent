@@ -6,8 +6,6 @@ import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.Types
 import Control.Exception (evaluate)
 import Control.Monad (forM)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.List (sort)
@@ -113,10 +111,8 @@ eventDeltaLength = \case
         maybe 0 Text.length delta
     ResponseCustomToolInputDeltaEvent { delta } ->
         maybe 0 Text.length delta
-    OtherResponseStreamEvent { eventExtraFields } ->
-        case KeyMap.lookup "delta" eventExtraFields of
-            Just (Aeson.String delta) -> Text.length delta
-            _ -> 0
+    OtherResponseStreamEvent { eventDelta } ->
+        maybe 0 Text.length eventDelta
     _ -> 0
 
 makePayload :: Workload -> Int -> Int -> BS.ByteString
