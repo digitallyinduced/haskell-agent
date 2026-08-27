@@ -113,7 +113,8 @@ import Agent.TUI.Markdown
       markdownWidgetWithLinks,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
-    ( conversationIsEmpty,
+    ( blockCodeLanguage,
+      conversationIsEmpty,
       reduceUi,
       visibleTodoList,
       BlockId,
@@ -1651,7 +1652,10 @@ accentCodeBlock
     code
     body =
     accentBlockWithSections state target ui block waveElapsed accent title $
-        [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
+        [ codeWidgetWithSyntaxHighlighting
+            syntaxHighlighter
+            (fromMaybe "text" (blockCodeLanguage block))
+            code
         | not (Text.null (Text.strip code))
         ]
             <> [ terminalTxtWrap body

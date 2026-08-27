@@ -72,6 +72,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , customToolCall
     , functionToolCall
     )
 import Agent.TUI.Model
@@ -105,6 +106,19 @@ spec = do
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.fromList ["haskell", "python"]
+
+        it "requests the JavaScript grammar for exec source" do
+            let conversation =
+                    reduceUi
+                        (UiLoop
+                            (ToolStarted
+                                (customToolCall
+                                    "exec-1"
+                                    "exec"
+                                    "const answer = 42;")))
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.singleton "javascript"
 
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
