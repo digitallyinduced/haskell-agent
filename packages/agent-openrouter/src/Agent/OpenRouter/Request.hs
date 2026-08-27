@@ -46,7 +46,7 @@ buildRequest options request =
 openRouterTool :: ResponseTool -> Maybe ResponseTool
 openRouterTool tool = case tool of
     FunctionToolValue {} -> Just tool
-    KnownResponseTool ToolWebSearch _ -> Just tool
-    KnownResponseTool ToolComputer _ -> Nothing
-    KnownResponseTool ToolComputerUsePreview _ -> Nothing
+    KnownResponseTool ToolWebSearch -> Just tool
+    KnownResponseTool ToolComputer -> Nothing
+    KnownResponseTool ToolComputerUsePreview -> Nothing
     _ -> Just tool

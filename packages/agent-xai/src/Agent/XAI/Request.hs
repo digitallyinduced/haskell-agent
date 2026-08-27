@@ -81,9 +81,9 @@ buildRequest options request =
 
     xaiTool tool = case tool of
         FunctionToolValue {} -> Just tool
-        KnownResponseTool ToolWebSearch _ -> Just hostedWebSearchTool
-        KnownResponseTool ToolXSearch _ -> Just hostedXSearchTool
-        KnownResponseTool ToolComputer _ -> Nothing
+        KnownResponseTool ToolWebSearch -> Just hostedWebSearchTool
+        KnownResponseTool ToolXSearch -> Just hostedXSearchTool
+        KnownResponseTool ToolComputer -> Nothing
         _ -> Just tool
 
 -- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
@@ -103,7 +103,7 @@ withHostedXSearch ResponseCreateParams { tools = existing, .. } =
 
 isHostedXSearch :: ResponseTool -> Bool
 isHostedXSearch = \case
-    KnownResponseTool ToolXSearch _ -> True
+    KnownResponseTool ToolXSearch -> True
     UnknownResponseTool tagged
         | tagged.tag == responseToolTypeText ToolXSearch -> True
     _ -> False

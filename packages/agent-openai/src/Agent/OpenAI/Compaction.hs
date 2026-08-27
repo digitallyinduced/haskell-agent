@@ -400,6 +400,7 @@ sanitizeOversizedToolCall = \case
                 , callId = call.callId
                 , name = call.name
                 , namespace = call.namespace
+                , provider = call.provider
                 , arguments = oversizedFunctionArguments
                 , encryptedFunctionArgs = call.encryptedFunctionArgs
                 , status = call.status
@@ -434,6 +435,7 @@ rewriteOversizedToolOutput = \case
             , callId = output.callId
             , name = output.name
             , namespace = output.namespace
+            , provider = output.provider
             , output = truncatedOutputJson
             , status = output.status
             }

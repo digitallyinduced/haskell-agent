@@ -550,7 +550,7 @@ responseKeepsTurnOpen response =
 
 responseEventTurnState :: ResponseStreamEvent -> Maybe Text
 responseEventTurnState = \case
-    OtherResponseStreamEvent other -> other.turnState
+    OtherResponseStreamEvent{turnState} -> turnState
     _ -> Nothing
 
 addTurnStateToPayload :: Maybe Text -> Aeson.Value -> Aeson.Value
@@ -761,6 +761,7 @@ unparsedStreamEvent err bytes =
         , streamItemId = Nothing
         , streamOutputIndex = Nothing
         , summaryIndex = Nothing
+        , turnState = Nothing
         }
 
 framePreview :: LBS.ByteString -> Text
