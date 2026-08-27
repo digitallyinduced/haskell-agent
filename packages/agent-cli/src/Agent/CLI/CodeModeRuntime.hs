@@ -25,17 +25,28 @@ import Agent.Dialect
     )
 import Agent.OpenAI.Models
     ( ModelInfo(..)
+    , ModelsClientConfig(..)
     , ModelsManagerOptions(..)
     , RefreshStrategy(..)
+    , defaultModelsBaseUrl
     , defaultModelsManagerOptions
     , defaultReasoningEffortForInfo
     , getModelInfo
+    , modelsCacheKeyForCredential
+    , modelsEndpointClient
     , newModelsManager
+    , packageClientVersion
     , reasoningEffortText
     , refreshModelCatalog
     , toolModeForInfo
     )
-import Agent.Provider (Provider(..))
+import Agent.Provider
+    ( BillingMode(..)
+    , Provider(..)
+    , TokenProvider
+    , getNextToken
+    , tokenProviderBillingMode
+    )
 import Agent.ToolDispatch (ToolCall(..))
 import Agent.Tools.CodeMode.Host
     ( ImageDetailVisibility(..)
@@ -104,18 +115,22 @@ data CodeModeSessionRuntime = CodeModeSessionRuntime
     , codeModeClose :: !(IO ())
     }
 
--- | Resolve catalog metadata for the active model without touching the
--- network: bundled catalog overlaid with the local disk cache. Only Codex
--- prompt-style OpenAI sessions consult the catalog, and unknown slugs (which
--- resolve to fallback metadata) yield 'Nothing' so the established prompt and
--- tool behavior is retained.
+-- | Resolve catalog metadata for the active model. With ChatGPT credentials
+-- the live @/models@ catalog is fetched at session start (Codex parity:
+-- five-minute disk cache, five-second request timeout, ETag-conditional
+-- requests, bundled catalog as fallback). Without credentials, the bundled
+-- catalog plus any fresh disk cache is used offline. Only Codex prompt-style
+-- OpenAI sessions consult the catalog, and unknown slugs (which resolve to
+-- fallback metadata) yield 'Nothing' so the established prompt and tool
+-- behavior is retained.
 loadCodexCatalogModelInfo
     :: FilePath
     -> Provider
     -> Dialect
+    -> Maybe TokenProvider
     -> Text
     -> IO (Maybe ModelInfo)
-loadCodexCatalogModelInfo stateDir provider dialect model
+loadCodexCatalogModelInfo stateDir provider dialect tokenProvider model
     | provider /= OpenAIProvider = pure Nothing
     | dialectPromptStyle dialect /= CodexPromptStyle = pure Nothing
     | otherwise =
@@ -126,11 +141,43 @@ loadCodexCatalogModelInfo stateDir provider dialect model
                 | otherwise -> pure (Just info)
   where
     load = do
-        manager <- newModelsManager defaultModelsManagerOptions
+        (options, strategy) <- managerOptionsFor
+        manager <- newModelsManager options
+        _ <- refreshModelCatalog manager strategy
+        getModelInfo manager model
+
+    offline = pure
+        ( defaultModelsManagerOptions
             { cachePath = Just (modelsCacheFilePath stateDir)
             }
-        _ <- refreshModelCatalog manager RefreshOffline
-        getModelInfo manager model
+        , RefreshOffline
+        )
+
+    managerOptionsFor = case tokenProvider of
+        Nothing -> offline
+        Just provider' ->
+            getNextToken provider' Nothing >>= \case
+                Left _ -> offline
+                Right credential -> pure
+                    ( defaultModelsManagerOptions
+                        { endpointClient = Just
+                            (modelsEndpointClient
+                                ModelsClientConfig
+                                    { baseUrl = defaultModelsBaseUrl
+                                    , clientVersion = packageClientVersion
+                                    }
+                                provider')
+                        , cachePath = Just (modelsCacheFilePath stateDir)
+                        , cacheKey =
+                            modelsCacheKeyForCredential
+                                defaultModelsBaseUrl
+                                credential
+                        , remoteCatalogAuthoritative =
+                            tokenProviderBillingMode provider'
+                                == SubscriptionBilled
+                        }
+                    , RefreshOnlineIfUncached
+                    )
 
 -- | Catalog default reasoning effort for a model, as CLI effort text.
 codexCatalogDefaultEffort :: Maybe ModelInfo -> Maybe Text

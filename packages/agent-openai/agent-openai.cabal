@@ -16,11 +16,6 @@ extra-source-files: README.md
                   , CHANGELOG.md
                   , UPSTREAM.md
                   , benchmark/JsonDecoding.md
-data-files:         data/models.json
-                  , data/prompt.md
-                  , data/openai-codex-LICENSE
-                  , data/openai-codex-NOTICE
-
 common common-opts
     default-language: Haskell2010
     default-extensions: OverloadedStrings

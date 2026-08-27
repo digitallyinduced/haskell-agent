@@ -12,7 +12,6 @@ mkDerivation {
   src = ./.;
   isLibrary = true;
   isExecutable = true;
-  enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson agent-core agent-responses agent-responses-types base
     bytestring containers directory exceptions filepath HsOpenSSL

@@ -25,12 +25,26 @@
             let
                 pkgs = import nixpkgs { inherit system; };
 
+                # Codex upstream model catalog and fallback instructions.
+                # Fetched at build time (pinned by content hash) instead of
+                # vendored, mirroring how other third-party dependencies enter
+                # the closure. The runtime additionally refreshes the catalog
+                # from the ChatGPT /models endpoint when credentials permit.
+                codexUpstreamRev = "4f39251a010a8bd7d692d25fb33832ff06f1635a";
+                codexModelsJson = pkgs.fetchurl {
+                    url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/models.json";
+                    hash = "sha256-6w17ml3K8QOJXF+KFMFrJp30bgObN1pVupf2I4VC0u0=";
+                };
+                codexPromptMd = pkgs.fetchurl {
+                    url = "https://raw.githubusercontent.com/openai/codex/${codexUpstreamRev}/codex-rs/models-manager/prompt.md";
+                    hash = "sha256-rIrhB6DXL+NHa0MK+xYepOZ9ouRG13iu/ESCgWBVmAc=";
+                };
+
                 agentOpenaiSource = nix-filter.lib {
                     root = ./packages/agent-openai;
                     include = [
                         "app"
                         "benchmark"
-                        "data"
                         "src"
                         "test"
                         "agent-openai.cabal"
@@ -339,9 +353,17 @@
                         agent-responses = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses/package.nix { }) {
                             src = agentResponsesSource;
                         });
-                        agent-openai = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openai/package.nix { }) {
-                            src = agentOpenaiSource;
-                        });
+                        agent-openai = localPackage (pkgs.haskell.lib.compose.overrideCabal
+                            (old: {
+                                prePatch = (old.prePatch or "") + ''
+                                    mkdir -p data
+                                    cp ${codexModelsJson} data/models.json
+                                    cp ${codexPromptMd} data/prompt.md
+                                '';
+                            })
+                            (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-openai/package.nix { }) {
+                                src = agentOpenaiSource;
+                            }));
                         agent-xai = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-xai/package.nix { }) {
                             src = agentXaiSource;
                         });
@@ -631,6 +653,13 @@
                     shellHook = ''
                         export AGENT_SYNTAX_DIR=${skylightingSyntaxDirectory}
                         export AGENT_POSTGRES_BIN=${pkgs.postgresql_18}/bin
+                        # Development builds embed the nix-fetched Codex catalog
+                        # at compile time; provision it into the checkout.
+                        if [ -d packages/agent-openai ]; then
+                            mkdir -p packages/agent-openai/data
+                            install -m 644 ${codexModelsJson} packages/agent-openai/data/models.json
+                            install -m 644 ${codexPromptMd} packages/agent-openai/data/prompt.md
+                        fi
                     '';
                     nativeBuildInputs =
                         (with haskellPackages; [

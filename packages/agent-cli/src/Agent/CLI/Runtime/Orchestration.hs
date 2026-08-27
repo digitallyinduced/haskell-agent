@@ -2084,7 +2084,12 @@ runAgentInitializedWithLock
         -- catalog selects code_mode_only, the exec/wait tool surface. The
         -- offline lookup never blocks startup on the network.
         codexModelInfo <-
-            loadCodexCatalogModelInfo stateDirectory provider dialect model
+            loadCodexCatalogModelInfo
+                stateDirectory
+                provider
+                dialect
+                (Just loaded.loadedTokenProvider)
+                model
         codeModeRuntime <-
             codeModeSessionRuntimeFor codexModelInfo tools >>= \case
                 Left err -> do
