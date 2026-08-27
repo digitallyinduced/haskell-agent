@@ -1512,20 +1512,20 @@ functionCallItemWithExtras
     -> Text
     -> Aeson.Object
     -> ResponseItem
-functionCallItemWithExtras callId name arguments extraFields =
+functionCallItemWithExtras callId name arguments metadataFields =
     FunctionCallItem FunctionCall
     { itemId = Nothing
     , callId
     , name
-    , namespace = case KeyMap.lookup "namespace" extraFields of
+    , namespace = case KeyMap.lookup "namespace" metadataFields of
         Just (Aeson.String value) -> Just value
         _ -> Nothing
-    , provider = case KeyMap.lookup "provider" extraFields of
+    , provider = case KeyMap.lookup "provider" metadataFields of
         Just (Aeson.String value) -> Just value
         _ -> Nothing
     , arguments
     , encryptedFunctionArgs =
-        case KeyMap.lookup "encrypted_function_args" extraFields of
+        case KeyMap.lookup "encrypted_function_args" metadataFields of
             Just (Aeson.Array _) -> Just []
             _ -> Nothing
     , status = Just ItemCompleted
