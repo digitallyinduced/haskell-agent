@@ -15,10 +15,10 @@ module Agent.CLI.Config
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.CLI.Json (decodeLazy)
-import Agent.Json.Decode qualified as Hermes
+import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.Json.Decode (defaultKey, optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (unless, when)
@@ -138,12 +138,16 @@ useProgressiveMcp strategy oneShot = case strategy of
     McpInitProgressive -> True
     McpInitBlocking -> False
 
-decodeMcpInitStrategy :: Hermes.Decoder McpInitStrategy
-decodeMcpInitStrategy = Hermes.text >>= \case
-    "auto" -> pure McpInitAuto
-    "progressive" -> pure McpInitProgressive
-    "blocking" -> pure McpInitBlocking
-    value -> fail ("unknown MCP initialization strategy: " <> Text.unpack value)
+mcpInitStrategyDecoder :: Hermes.Decoder McpInitStrategy
+mcpInitStrategyDecoder =
+    Hermes.text >>= \case
+        "auto" -> pure McpInitAuto
+        "progressive" -> pure McpInitProgressive
+        "blocking" -> pure McpInitBlocking
+        value ->
+            fail
+                ("unknown MCP initialization strategy: "
+                    <> Text.unpack value)
 
 instance Aeson.ToJSON McpInitStrategy where
     toJSON = Aeson.String . \case
@@ -258,69 +262,89 @@ defaultHarnessConfig = HarnessConfig
     , configMaxConcurrentAgents = Nothing
     }
 
-decodeMcpServerConfig :: Hermes.Decoder McpServerConfig
-decodeMcpServerConfig = Hermes.object $
-    McpServerConfig
-        <$> defaultKey True "enabled" Hermes.bool
-        <*> Hermes.atKey "command" Hermes.text
-        <*> defaultKey [] "args" (Hermes.list Hermes.text)
-        <*> optionalKey "cwd" Hermes.text
-        <*> defaultKey Map.empty "env" (Hermes.objectAsMap pure Hermes.text)
-        <*> defaultKey defaultMcpStartupTimeoutSeconds "startupTimeoutSeconds" Hermes.int
-        <*> defaultKey defaultMcpRequestTimeoutSeconds "requestTimeoutSeconds" Hermes.int
+mcpServerConfigDecoder :: Hermes.Decoder McpServerConfig
+mcpServerConfigDecoder =
+    Hermes.object $
+        McpServerConfig
+            <$> defaultKey True "enabled" Hermes.bool
+            <*> Hermes.atKey "command" Hermes.text
+            <*> defaultKey [] "args" (Hermes.list Hermes.text)
+            <*> optionalKey "cwd" Hermes.text
+            <*> defaultKey Map.empty "env" textMapDecoder
+            <*> defaultKey defaultMcpStartupTimeoutSeconds
+                "startupTimeoutSeconds" Hermes.int
+            <*> defaultKey defaultMcpRequestTimeoutSeconds
+                "requestTimeoutSeconds" Hermes.int
 
-decodeWebFetchConfig :: Hermes.Decoder WebFetchConfig
-decodeWebFetchConfig = Hermes.object $
-    WebFetchConfig
-        <$> defaultKey False "enabled" Hermes.bool
-        <*> defaultKey [] "allowedDomains" (Hermes.list Hermes.text)
-        <*> defaultKey defaultWebFetchTimeoutSeconds "timeoutSeconds" Hermes.int
-        <*> defaultKey defaultWebFetchMaxContentBytes "maxContentBytes" Hermes.int
-        <*> defaultKey defaultWebFetchMaxInlineBytes "maxInlineBytes" Hermes.int
+webFetchConfigDecoder :: Hermes.Decoder WebFetchConfig
+webFetchConfigDecoder =
+    Hermes.object $
+        WebFetchConfig
+            <$> defaultKey False "enabled" Hermes.bool
+            <*> defaultKey [] "allowedDomains" (Hermes.list Hermes.text)
+            <*> defaultKey defaultWebFetchTimeoutSeconds
+                "timeoutSeconds" Hermes.int
+            <*> defaultKey defaultWebFetchMaxContentBytes
+                "maxContentBytes" Hermes.int
+            <*> defaultKey defaultWebFetchMaxInlineBytes
+                "maxInlineBytes" Hermes.int
 
-decodeLspServerConfig :: Hermes.Decoder LspServerConfig
-decodeLspServerConfig = Hermes.object do
-    transport <- defaultKey "stdio" "transport" Hermes.text
-    unless (Text.toLower (Text.strip transport) == "stdio") $
-        fail "LSP transport is unsupported; this host currently supports stdio only"
-    restartOnCrash <- defaultKey False "restartOnCrash" Hermes.bool
-    when restartOnCrash $
-        fail "LSP restartOnCrash=true is unsupported by this host"
-    maxRestarts <- optionalKey "maxRestarts" Hermes.int
-    when (maxRestarts /= Nothing) $
-        fail "LSP maxRestarts is unsupported by this host"
-    LspServerConfig
-        <$> Hermes.atKey "command" Hermes.text
-        <*> defaultKey [] "args" (Hermes.list Hermes.text)
-        <*> defaultKey Map.empty "env" (Hermes.objectAsMap pure Hermes.text)
-        <*> defaultKey Map.empty "extensionToLanguage"
-            (Hermes.objectAsMap pure Hermes.text)
-        <*> optionalKey "initializationOptions" rawJsonDecoder
-        <*> optionalKey "settings" rawJsonDecoder
-        <*> optionalKey "workspaceFolder" Hermes.text
-        <*> defaultKey defaultLspStartupTimeoutMilliseconds
-            "startupTimeoutMilliseconds" Hermes.int
-        <*> defaultKey defaultLspShutdownTimeoutMilliseconds
-            "shutdownTimeoutMilliseconds" Hermes.int
+lspServerConfigDecoder :: Hermes.Decoder LspServerConfig
+lspServerConfigDecoder =
+    Hermes.object do
+        transport <- defaultKey "stdio" "transport" Hermes.text
+        unless (Text.toLower (Text.strip transport) == "stdio") $
+            fail
+                "LSP transport is unsupported; this host currently supports stdio only"
+        restartOnCrash <-
+            defaultKey False "restartOnCrash" Hermes.bool
+        when restartOnCrash $
+            fail
+                "LSP restartOnCrash=true is unsupported by this host"
+        maxRestarts <-
+            optionalKey "maxRestarts" rawJsonDecoder
+        when (maybe False (const True) maxRestarts) $
+            fail
+                "LSP maxRestarts is unsupported by this host"
+        LspServerConfig
+            <$> Hermes.atKey "command" Hermes.text
+            <*> defaultKey [] "args" (Hermes.list Hermes.text)
+            <*> defaultKey Map.empty "env" textMapDecoder
+            <*> defaultKey Map.empty "extensionToLanguage" textMapDecoder
+            <*> optionalKey "initializationOptions" rawJsonDecoder
+            <*> optionalKey "settings" rawJsonDecoder
+            <*> optionalKey "workspaceFolder" Hermes.text
+            <*> defaultKey defaultLspStartupTimeoutMilliseconds
+                "startupTimeoutMilliseconds" Hermes.int
+            <*> defaultKey defaultLspShutdownTimeoutMilliseconds
+                "shutdownTimeoutMilliseconds" Hermes.int
 
-decodeLspConfig :: Hermes.Decoder LspConfig
-decodeLspConfig = Hermes.object $
-    LspConfig
-        <$> defaultKey False "enabled" Hermes.bool
-        <*> defaultKey Map.empty "servers"
-            (Hermes.objectAsMap pure decodeLspServerConfig)
+lspConfigDecoder :: Hermes.Decoder LspConfig
+lspConfigDecoder =
+    Hermes.object $
+        LspConfig
+            <$> defaultKey False "enabled" Hermes.bool
+            <*> defaultKey Map.empty "servers"
+                (Hermes.objectAsMap pure lspServerConfigDecoder)
 
-decodeHarnessConfig :: Hermes.Decoder HarnessConfig
-decodeHarnessConfig = Hermes.object $
-    HarnessConfig
-        <$> defaultKey harnessConfigSchemaVersion "version" Hermes.int
-        <*> defaultKey McpInitAuto "mcpInitStrategy" decodeMcpInitStrategy
-        <*> defaultKey Map.empty "mcpServers"
-            (Hermes.objectAsMap pure decodeMcpServerConfig)
-        <*> defaultKey defaultHarnessConfig.configWebFetch "webFetch"
-            decodeWebFetchConfig
-        <*> defaultKey defaultHarnessConfig.configLsp "lsp" decodeLspConfig
-        <*> optionalKey "maxConcurrentAgents" Hermes.int
+harnessConfigDecoder :: Hermes.Decoder HarnessConfig
+harnessConfigDecoder =
+    Hermes.object $
+        HarnessConfig
+            <$> defaultKey harnessConfigSchemaVersion "version" Hermes.int
+            <*> defaultKey McpInitAuto
+                "mcpInitStrategy" mcpInitStrategyDecoder
+            <*> defaultKey Map.empty "mcpServers"
+                (Hermes.objectAsMap pure mcpServerConfigDecoder)
+            <*> defaultKey defaultHarnessConfig.configWebFetch
+                "webFetch" webFetchConfigDecoder
+            <*> defaultKey defaultHarnessConfig.configLsp
+                "lsp" lspConfigDecoder
+            <*> optionalKey "maxConcurrentAgents" Hermes.int
+
+textMapDecoder :: Hermes.Decoder (Map Text Text)
+textMapDecoder =
+    Hermes.objectAsMap pure Hermes.text
 
 -- | @~/.haskell-agent/config.json@ for a supplied home directory.
 harnessConfigPath :: OsPath -> OsPath
@@ -361,7 +385,7 @@ loadHarnessConfig home = do
                 config <-
                     if isBlankJson bytes
                         then Right defaultHarnessConfig
-                        else case decodeLazy decodeHarnessConfig bytes of
+                        else case decodeLazy harnessConfigDecoder bytes of
                             Left err ->
                                 Left
                                     ( "Invalid "

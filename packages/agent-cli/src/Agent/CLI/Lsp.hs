@@ -13,11 +13,22 @@ import Agent.CLI.Config
     ( LspConfig(..)
     , LspServerConfig(..)
     )
-import Agent.CLI.Json (decodeLazy, valueDecoder)
 import Agent.CLI.FileUri
     ( fileUri
     , fileUriPath
     )
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
+import Agent.Json.Decode
+    ( JsonError(..)
+    , decodeEither
+    , optionalKey
+    )
+import Agent.Json.Decode qualified as Hermes
 import Agent.GrokBuild.Dialect.Lsp
     ( LspOperation(..)
     , LspRequest(..)
@@ -56,8 +67,6 @@ import Control.Monad
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -72,13 +81,11 @@ import Data.IORef
 import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Maybe (fromMaybe)
-import Data.Scientific (toBoundedInteger)
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Text.Encoding.Error (lenientDecode)
-import qualified Data.Vector as Vector
 import System.Directory
     ( canonicalizePath
     , createDirectoryIfMissing
@@ -405,8 +412,7 @@ initializeClient client = do
                     ]
                 , "capabilities" .= clientCapabilities
                 , "initializationOptions"
-                    .= maybe Aeson.Null Aeson.toJSON
-                        client.clientConfig.lspInitializationOptions
+                    .= client.clientConfig.lspInitializationOptions
                 ]
     requestClient
         client
@@ -436,7 +442,7 @@ initializeClient client = do
                                     client.clientConfig.lspStartupTimeoutMilliseconds
                                     "workspace/didChangeConfiguration"
                                     (Aeson.object
-                                        ["settings" .= Aeson.toJSON settings]) >>= \case
+                                        ["settings" .= settings]) >>= \case
                                             Left err ->
                                                 pure
                                                     (Left
@@ -731,12 +737,49 @@ clientForPath clients path =
             && Map.member extension
                 client.clientConfig.lspExtensionToLanguage
 
+data IncomingMessage = IncomingMessage
+    { incomingId :: !(Maybe RawJson)
+    , incomingNumericId :: !(Maybe Int)
+    , incomingMethod :: !(Maybe Text)
+    , incomingParams :: !(Maybe RawJson)
+    , incomingError :: !(Maybe RawJson)
+    , incomingResult :: !(Maybe RawJson)
+    }
+
+incomingMessageDecoder :: Hermes.Decoder IncomingMessage
+incomingMessageDecoder =
+    Hermes.object do
+        identifier <- optionalKey "id" rawJsonDecoder
+        IncomingMessage
+            identifier
+            (identifier >>= either (const Nothing) Just
+                . decodeRawJson Hermes.int)
+            <$> optionalKey "method" Hermes.text
+            <*> optionalKey "params" rawJsonDecoder
+            <*> optionalKey "error" rawJsonDecoder
+            <*> optionalKey "result" rawJsonDecoder
+
+configurationCountDecoder :: Hermes.Decoder Int
+configurationCountDecoder =
+    Hermes.object $
+        maybe 0 length
+            <$> optionalKey "items" (Hermes.list rawJsonDecoder)
+
+decodeRawJson :: Hermes.Decoder a -> RawJson -> Either Text a
+decodeRawJson decoder =
+    either (Left . jsonErrorMessage) Right
+        . decodeEither decoder
+        . rawJsonBytes
+
+nullRawJson :: RawJson
+nullRawJson = rawJsonFromEncoding (Aeson.toEncoding Aeson.Null)
+
 requestClient
     :: LspClient
     -> Int
     -> Text
     -> Aeson.Value
-    -> IO (Either Text Aeson.Value)
+    -> IO (Either Text RawJson)
 requestClient client timeoutMilliseconds method params =
     withMVar client.clientRequestLock \() -> do
         closed <- readIORef client.clientClosed
@@ -789,44 +832,35 @@ requestClient client timeoutMilliseconds method params =
 awaitResponse
     :: LspClient
     -> Int
-    -> IO (Either Text Aeson.Value)
+    -> IO (Either Text RawJson)
 awaitResponse client requestId =
     readMessage client.clientOutput >>= \case
         Left err -> pure (Left err)
-        Right value ->
-            case value of
-                Aeson.Object object
-                    | Just incomingId <- KeyMap.lookup "id" object
-                    , incomingId == Aeson.toJSON requestId ->
-                        pure (decodeResponse object)
-                    | Just (Aeson.String method) <-
-                        KeyMap.lookup "method" object
-                    , Just serverRequestId <- KeyMap.lookup "id" object -> do
-                        answerServerRequest
-                            client method serverRequestId
-                            (fromMaybe Aeson.Null
-                                (KeyMap.lookup "params" object))
-                        awaitResponse client requestId
-                    | otherwise ->
-                        awaitResponse client requestId
-                _ -> awaitResponse client requestId
-
-decodeResponse
-    :: KeyMap.KeyMap Aeson.Value
-    -> Either Text Aeson.Value
-decodeResponse object =
-    case KeyMap.lookup "error" object of
-        Just errorValue ->
-            Left ("LSP server returned an error: " <> compactJson errorValue)
-        Nothing ->
-            Right
-                (fromMaybe Aeson.Null (KeyMap.lookup "result" object))
+        Right message
+            | message.incomingNumericId == Just requestId ->
+                pure case message.incomingError of
+                    Just errorValue ->
+                        Left
+                            ( "LSP server returned an error: "
+                                <> compactJson errorValue
+                            )
+                    Nothing ->
+                        Right
+                            (fromMaybe nullRawJson message.incomingResult)
+            | Just method <- message.incomingMethod
+            , Just serverRequestId <- message.incomingId -> do
+                answerServerRequest
+                    client method serverRequestId
+                    (fromMaybe nullRawJson message.incomingParams)
+                awaitResponse client requestId
+            | otherwise ->
+                awaitResponse client requestId
 
 answerServerRequest
     :: LspClient
     -> Text
-    -> Aeson.Value
-    -> Aeson.Value
+    -> RawJson
+    -> RawJson
     -> IO ()
 answerServerRequest client method requestId params =
     sendMessage client.clientInput $
@@ -872,14 +906,9 @@ answerServerRequest client method requestId params =
             , "result" .= result
             ]
     configurationCount =
-        case params of
-            Aeson.Object object ->
-                case KeyMap.lookup "items" object of
-                    Just (Aeson.Array items) ->
-                        min maxLspConfigurationItems
-                            (Vector.length items)
-                    _ -> 0
-            _ -> 0
+        min maxLspConfigurationItems $
+            either (const 0) id $
+                decodeRawJson configurationCountDecoder params
 
     maxLspConfigurationItems = 256
 
@@ -937,7 +966,7 @@ encodeLspFrame value =
         ("Content-Length: " <> show (BS.length body) <> "\r\n\r\n")
             <> body
 
-readMessage :: Handle -> IO (Either Text Aeson.Value)
+readMessage :: Handle -> IO (Either Text IncomingMessage)
 readMessage handle = do
     headers <- tryAny (readHeaders handle 0 0 Map.empty)
     case headers of
@@ -969,8 +998,8 @@ readMessage handle = do
                                 | BS.length body /= bodyLength ->
                                     Left "LSP response ended before Content-Length"
                                 | otherwise ->
-                                    case decodeLazy valueDecoder (LBS.fromStrict body) of
-                                        Left err ->
+                                    case decodeEither incomingMessageDecoder body of
+                                        Left (JsonError err) ->
                                             Left
                                                 ( "LSP response was invalid JSON: "
                                                     <> err
@@ -1172,7 +1201,7 @@ pathWithin root candidate =
                     `isPrefixOfString` relative
                 ))
 
-formatLspResult :: LspOperation -> Aeson.Value -> Text
+formatLspResult :: LspOperation -> RawJson -> Text
 formatLspResult operation value =
     case operation of
         GoToDefinition -> formatLocations "definition" value
@@ -1182,133 +1211,129 @@ formatLspResult operation value =
         DocumentSymbol -> formatSymbols value
         WorkspaceSymbol -> formatSymbols value
 
-formatLocations :: Text -> Aeson.Value -> Text
+formatLocations :: Text -> RawJson -> Text
 formatLocations label value =
-    case collectLocations value of
-        [] -> "No " <> label <> " found."
-        locations -> Text.intercalate "\n" locations
+    case decodeRawJson locationsDecoder value of
+        Left _ -> compactJson value
+        Right [] -> "No " <> label <> " found."
+        Right locations -> Text.intercalate "\n" locations
 
-collectLocations :: Aeson.Value -> [Text]
-collectLocations = \case
-    Aeson.Array values ->
-        concatMap collectLocations (Vector.toList values)
-    Aeson.Object object ->
-        case locationFromObject object of
-            Just location -> [location]
-            Nothing -> []
-    _ -> []
+locationsDecoder :: Hermes.Decoder [Text]
+locationsDecoder =
+    Hermes.getType >>= \case
+        Hermes.VArray ->
+            concat <$> Hermes.list locationsDecoder
+        Hermes.VObject ->
+            maybeToList <$> locationDecoder
+        _ -> [] <$ rawJsonDecoder
 
-locationFromObject :: KeyMap.KeyMap Aeson.Value -> Maybe Text
-locationFromObject object = do
-    uri <-
-        stringField "uri" object
-            <|> stringField "targetUri" object
-    let range =
-            KeyMap.lookup "range" object
-                <|> KeyMap.lookup "targetSelectionRange" object
-                <|> KeyMap.lookup "targetRange" object
-        (line, character) =
-            fromMaybe (0, 0) (range >>= startPosition)
-        path = maybe uri Text.pack (fileUriPath uri)
-    pure $
-        path
-            <> ":"
-            <> Text.pack (show (line + 1))
-            <> ":"
-            <> Text.pack (show (character + 1))
+locationDecoder :: Hermes.Decoder (Maybe Text)
+locationDecoder =
+    Hermes.object do
+        uriValue <- optionalKey "uri" Hermes.text
+        targetUri <- optionalKey "targetUri" Hermes.text
+        rangeValue <- optionalKey "range" startPositionDecoder
+        selectionRange <-
+            optionalKey "targetSelectionRange" startPositionDecoder
+        targetRange <- optionalKey "targetRange" startPositionDecoder
+        let uri = uriValue <|> targetUri
+            range = rangeValue <|> selectionRange <|> targetRange
+        pure do
+            locationUri <- uri
+            let (line, character) = fromMaybe (0, 0) range
+                path = maybe locationUri Text.pack (fileUriPath locationUri)
+            pure $
+                path
+                    <> ":"
+                    <> Text.pack (show (line + 1))
+                    <> ":"
+                    <> Text.pack (show (character + 1))
 
-startPosition :: Aeson.Value -> Maybe (Int, Int)
-startPosition (Aeson.Object range) = do
-    Aeson.Object start <- KeyMap.lookup "start" range
-    line <- integerField "line" start
-    character <- integerField "character" start
-    pure (line, character)
-startPosition _ = Nothing
+startPositionDecoder :: Hermes.Decoder (Int, Int)
+startPositionDecoder =
+    Hermes.object $
+        Hermes.atKey "start" $
+            Hermes.object $
+                (,)
+                    <$> Hermes.atKey "line" Hermes.int
+                    <*> Hermes.atKey "character" Hermes.int
 
-formatHover :: Aeson.Value -> Text
-formatHover Aeson.Null = "No hover information found."
-formatHover (Aeson.Object object) =
-    maybe
-        (compactJson (Aeson.Object object))
-        formatHoverContents
-        (KeyMap.lookup "contents" object)
-formatHover value = formatHoverContents value
+formatHover :: RawJson -> Text
+formatHover value =
+    either (const (compactJson value)) id $
+        decodeRawJson hoverDecoder value
 
-formatHoverContents :: Aeson.Value -> Text
-formatHoverContents = \case
-    Aeson.String value -> value
-    Aeson.Array values ->
-        Text.intercalate "\n\n"
-            (map formatHoverContents (Vector.toList values))
-    Aeson.Object object ->
-        fromMaybe
-            (compactJson (Aeson.Object object))
-            (stringField "value" object
-                <|> stringField "language" object)
-    Aeson.Null -> "No hover information found."
-    value -> compactJson value
+hoverDecoder :: Hermes.Decoder Text
+hoverDecoder =
+    Hermes.getType >>= \case
+        Hermes.VNull ->
+            "No hover information found." <$ Hermes.isNull
+        Hermes.VString -> Hermes.text
+        Hermes.VArray ->
+            Text.intercalate "\n\n" <$> Hermes.list hoverDecoder
+        Hermes.VObject ->
+            Hermes.withRawJsonByteString \bytes ->
+                pure $
+                    either
+                        (const (Text.decodeUtf8With lenientDecode bytes))
+                        (fromMaybe (Text.decodeUtf8With lenientDecode bytes))
+                        (decodeEither hoverObjectDecoder (BS.copy bytes))
+        _ ->
+            rawTextDecoder
 
-formatSymbols :: Aeson.Value -> Text
+hoverObjectDecoder :: Hermes.Decoder (Maybe Text)
+hoverObjectDecoder =
+    Hermes.object do
+        contents <- optionalKey "contents" hoverDecoder
+        value <- optionalKey "value" Hermes.text
+        language <- optionalKey "language" Hermes.text
+        pure (contents <|> value <|> language)
+
+formatSymbols :: RawJson -> Text
 formatSymbols value =
-    case symbolLines 0 value of
-        [] -> "No symbols found."
-        lines' -> Text.intercalate "\n" lines'
+    case decodeRawJson (symbolLinesDecoder 0) value of
+        Left _ -> compactJson value
+        Right [] -> "No symbols found."
+        Right lines' -> Text.intercalate "\n" lines'
 
-symbolLines :: Int -> Aeson.Value -> [Text]
-symbolLines depth = \case
-    Aeson.Array values ->
-        concatMap (symbolLines depth) (Vector.toList values)
-    Aeson.Object object ->
-        case stringField "name" object of
-            Nothing -> []
-            Just name ->
-                let
-                    location =
-                        KeyMap.lookup "location" object
-                            >>= \case
-                                Aeson.Object locationObject ->
-                                    locationFromObject locationObject
-                                _ -> Nothing
-                    directLocation = locationFromObject object
-                    suffix =
-                        maybe ""
-                            (" — " <>)
-                            (location <|> directLocation)
-                    current =
-                        Text.replicate depth "  "
-                            <> "- "
-                            <> name
-                            <> suffix
-                    children =
-                        maybe []
-                            (symbolLines (depth + 1))
-                            (KeyMap.lookup "children" object)
-                in current : children
-    _ -> []
+symbolLinesDecoder :: Int -> Hermes.Decoder [Text]
+symbolLinesDecoder depth =
+    Hermes.getType >>= \case
+        Hermes.VArray ->
+            concat <$> Hermes.list (symbolLinesDecoder depth)
+        Hermes.VObject ->
+            Hermes.object do
+                name <- optionalKey "name" Hermes.text
+                location <-
+                    optionalKey "location" locationDecoder
+                directLocation <- Hermes.liftObjectDecoder locationDecoder
+                children <-
+                    fromMaybe []
+                        <$> optionalKey "children"
+                            (symbolLinesDecoder (depth + 1))
+                pure case name of
+                    Nothing -> []
+                    Just symbolName ->
+                        let suffix =
+                                maybe ""
+                                    (" — " <>)
+                                    ((location >>= id) <|> directLocation)
+                            current =
+                                Text.replicate depth "  "
+                                    <> "- "
+                                    <> symbolName
+                                    <> suffix
+                        in current : children
+        _ -> [] <$ rawJsonDecoder
 
-stringField
-    :: Text
-    -> KeyMap.KeyMap Aeson.Value
-    -> Maybe Text
-stringField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
+rawTextDecoder :: Hermes.Decoder Text
+rawTextDecoder =
+    Hermes.withRawJsonByteString $
+        pure . Text.decodeUtf8With lenientDecode
 
-integerField
-    :: Text
-    -> KeyMap.KeyMap Aeson.Value
-    -> Maybe Int
-integerField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.Number value) -> toBoundedInteger value
-        _ -> Nothing
-
-compactJson :: Aeson.Value -> Text
+compactJson :: RawJson -> Text
 compactJson =
-    Text.decodeUtf8With lenientDecode
-        . LBS.toStrict
-        . Aeson.encode
+    Text.decodeUtf8With lenientDecode . rawJsonBytes
 
 sanitizeName :: Text -> FilePath
 sanitizeName =
