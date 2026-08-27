@@ -3,14 +3,19 @@
 module Main (main) where
 
 import qualified Agent.Responses.Codec as Codec
+import Agent.Responses.StreamAssembly
+    ( applyStreamEvent
+    , emptyStreamAssemblyState
+    , finishStreamResponse
+    )
 import Agent.Responses.Types
 import Control.Exception (evaluate)
 import Control.Monad (forM)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
+import qualified Data.ByteString.Lazy as LBS
 import Data.List (sort)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
 import System.CPUTime (getCPUTime)
@@ -19,16 +24,11 @@ import System.Exit (die)
 import System.Mem (performGC)
 import Text.Printf (printf)
 
-data Workload
-    = Utf8RoundTrip
-    | DirectBytes
-    | CodingUtf8RoundTrip
-    | CodingDirectBytes
-
 data Sample = Sample
     { wallMillis :: !Double
     , cpuMillis :: !Double
     , allocatedBytes :: !Integer
+    , checksum :: !Int
     }
 
 main :: IO ()
@@ -36,138 +36,223 @@ main = do
     enabled <- getRTSStatsEnabled
     if enabled then pure () else die "run with +RTS -T"
     getArgs >>= \case
-        [workloadArg, eventCountArg, deltaBytesArg, samplesArg] -> do
-            workload <- parseWorkload workloadArg
-            eventCount <- positive "event count" eventCountArg
-            deltaBytes <- positive "delta bytes" deltaBytesArg
-            sampleCount <- positive "sample count" samplesArg
-            let payloads =
-                    [ makePayload workload index deltaBytes
-                    | index <- [1 .. eventCount]
-                    ]
+        ["stream", eventArg, deltaArg, sampleArg] -> do
+            eventCount <- positive "event count" eventArg
+            deltaBytes <- positive "delta bytes" deltaArg
+            sampleCount <- positive "sample count" sampleArg
+            let payloads = streamPayloads eventCount deltaBytes
             _ <- evaluate (sum (map BS.length payloads))
+            Codec.withResponseStreamEventDecoder \decode -> do
+                samples <- forM [1 .. sampleCount] \_ ->
+                    measure (runStream decode payloads)
+                report "stream" eventCount deltaBytes samples
+        ["request", iterationArg, sampleArg] -> do
+            iterations <- positive "iteration count" iterationArg
+            sampleCount <- positive "sample count" sampleArg
             samples <- forM [1 .. sampleCount] \_ ->
-                measure (runWorkload workload payloads)
-            let medianWall = median (map (.wallMillis) samples)
-                medianCPU = median (map (.cpuMillis) samples)
-                medianAllocation = median (map (.allocatedBytes) samples)
-            printf
-                "%s,%d,%d,%d,%.3f,%.3f,%d\n"
-                workloadArg eventCount deltaBytes sampleCount
-                medianWall medianCPU medianAllocation
+                measure (runRequests iterations)
+            report "request" iterations 0 samples
         _ -> die $
-            "usage: responses-json-bench WORKLOAD EVENTS DELTA_BYTES SAMPLES\n"
-                <> "workloads: utf8-round-trip, direct-bytes, "
-                <> "coding-utf8-round-trip, coding-direct-bytes"
-
-parseWorkload :: String -> IO Workload
-parseWorkload = \case
-    "utf8-round-trip" -> pure Utf8RoundTrip
-    "direct-bytes" -> pure DirectBytes
-    "coding-utf8-round-trip" -> pure CodingUtf8RoundTrip
-    "coding-direct-bytes" -> pure CodingDirectBytes
-    other -> die ("unknown workload: " <> other)
+            "usage: responses-json-bench stream EVENTS DELTA_BYTES SAMPLES\n"
+                <> "   or: responses-json-bench request ITERATIONS SAMPLES"
 
 positive :: String -> String -> IO Int
 positive label raw = case reads raw of
     [(value, "")] | value > 0 -> pure value
     _ -> die ("invalid " <> label <> ": " <> raw)
 
-median :: Ord a => [a] -> a
+report :: String -> Int -> Int -> [Sample] -> IO ()
+report mode count bytes samples =
+    printf "%s,%d,%d,%d,%.3f,%.3f,%d,%d\n"
+        mode count bytes (length samples)
+        (median (map (.wallMillis) samples))
+        (median (map (.cpuMillis) samples))
+        (median (map (.allocatedBytes) samples))
+        (median (map (.checksum) samples))
+
+median :: Ord value => [value] -> value
 median values = sort values !! (length values `div` 2)
 
-runWorkload :: Workload -> [BS.ByteString] -> IO Int
-runWorkload workload = go checksumSeed
+runStream
+    :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
+    -> [BS.ByteString]
+    -> IO Int
+runStream decode = go emptyStreamAssemblyState
   where
-    go !checksum [] = pure checksum
-    go !checksum (payload : rest) = do
-        event <- evaluate $ decodePayload $ case workload of
-            Utf8RoundTrip ->
-                TextEncoding.encodeUtf8 (TextEncoding.decodeUtf8 payload)
-            DirectBytes -> payload
-            CodingUtf8RoundTrip ->
-                TextEncoding.encodeUtf8 (TextEncoding.decodeUtf8 payload)
-            CodingDirectBytes -> payload
-        let checksum' =
-                Text.foldl'
-                    (\current character ->
-                        current * 33 + fromEnum character)
-                    (checksum
-                        + maybe 0 id
-                            (responseStreamEventSequenceNumber event)
-                        + eventDeltaLength event)
-                    (streamEventTypeText (responseStreamEventType event))
-        checksum' `seq` go checksum' rest
+    go !_ [] = error "stream has no terminal event"
+    go !state (payload : rest) = do
+        event <- decode payload >>= either error pure
+        let !next = applyStreamEvent state event
+        case event of
+            ResponseCompletedEvent{} -> case finishStreamResponse Nothing next event of
+                Left err -> error (show err)
+                Right response -> evaluate (responseChecksum response)
+            _ -> go next rest
 
-decodePayload :: BS.ByteString -> ResponseStreamEvent
-decodePayload payload =
-    case Codec.decodeResponseStreamEvent payload of
-        Left err -> error err
-        Right event -> event
-
-eventDeltaLength :: ResponseStreamEvent -> Int
-eventDeltaLength = \case
-    ResponseFunctionCallArgumentsDeltaEvent { delta } ->
-        maybe 0 Text.length delta
-    ResponseCustomToolInputDeltaEvent { delta } ->
-        maybe 0 Text.length delta
-    OtherResponseStreamEvent { eventDelta } ->
-        maybe 0 Text.length eventDelta
-    _ -> 0
-
-makePayload :: Workload -> Int -> Int -> BS.ByteString
-makePayload workload sequenceNumber deltaBytes =
-    case workload of
-        Utf8RoundTrip -> makeTextDelta sequenceNumber deltaBytes
-        DirectBytes -> makeTextDelta sequenceNumber deltaBytes
-        CodingUtf8RoundTrip -> makeCodingDelta sequenceNumber deltaBytes
-        CodingDirectBytes -> makeCodingDelta sequenceNumber deltaBytes
-
-makeTextDelta :: Int -> Int -> BS.ByteString
-makeTextDelta sequenceNumber deltaBytes =
-    BS.concat
-        [ "{\"type\":\"response.output_text.delta\""
-        , ",\"sequence_number\":", BS8.pack (show sequenceNumber)
-        , ",\"item_id\":\"msg-", BS8.pack (show sequenceNumber)
-        , "\",\"output_index\":0,\"content_index\":0,\"delta\":\""
-        , BS.replicate deltaBytes 120
-        , "\"}"
-        ]
-
--- A coding turn is mostly reasoning and assistant text, interspersed with
--- function-call arguments and custom tool input such as apply_patch.
-makeCodingDelta :: Int -> Int -> BS.ByteString
-makeCodingDelta sequenceNumber deltaBytes =
-    BS.concat
-        [ "{\"type\":\"", eventType, "\""
-        , ",\"sequence_number\":", number
-        , identityFields
-        , ",\"delta\":\"", BS.replicate deltaBytes 120
-        , "\"}"
-        ]
+runRequests :: Int -> IO Int
+runRequests count = go count checksumSeed
   where
-    number = BS8.pack (show sequenceNumber)
-    (eventType, identityFields) =
-        case sequenceNumber `mod` 10 of
-            value
-                | value < 5 ->
-                    ( "response.reasoning_summary_text.delta"
-                    , ",\"item_id\":\"rs-1\",\"summary_index\":0"
-                    )
-                | value < 8 ->
-                    ( "response.output_text.delta"
-                    , ",\"item_id\":\"msg-1\",\"output_index\":0,\
-                      \\"content_index\":0"
-                    )
-                | value < 9 ->
-                    ( "response.function_call_arguments.delta"
-                    , ",\"item_id\":\"fc-1\",\"output_index\":1"
-                    )
-                | otherwise ->
-                    ( "response.custom_tool_call_input.delta"
-                    , ",\"item_id\":\"ctc-1\",\"call_id\":\"call-1\",\
-                      \\"output_index\":1"
-                    )
+    go 0 !checksum = pure checksum
+    go remaining !checksum = do
+        let bytes = Codec.encodeResponseCreateParams (requestParams remaining)
+            checksum' = LBS.foldl'
+                (\value byte -> value * 33 + fromIntegral byte)
+                checksum bytes
+        checksum' `seq` go (remaining - 1) checksum'
+
+requestParams :: Int -> ResponseCreateParams
+requestParams iteration = defaultResponseCreateParams
+    { model = Just "gpt-5"
+    , instructions = Just "Inspect, edit, test, and report concisely."
+    , input = Just (ResponseInputText
+        ("Fix regression number " <> Text.pack (show iteration) <> "."))
+    , tools = Just
+        [ CustomToolValue CustomTool
+            { name = "apply_patch"
+            , description = Just "Apply a patch to files."
+            , format = Nothing
+            }
+        , FunctionToolValue FunctionTool
+            { name = "shell_command"
+            , description = Just "Run a shell command."
+            , parameters = Nothing
+            , strict = Just True
+            }
+        , NamespaceToolValue NamespaceTool
+            { name = "workspace"
+            , description = Just "Read-only repository operations."
+            , tools =
+                [ FunctionToolValue FunctionTool
+                    { name = "read_file"
+                    , description = Just "Read a file."
+                    , parameters = Nothing
+                    , strict = Just True
+                    }
+                ]
+            }
+        ]
+    }
+
+streamPayloads :: Int -> Int -> [BS.ByteString]
+streamPayloads eventCount deltaBytes =
+    [lifecycle "response.created" "in_progress", lifecycle
+        "response.in_progress" "in_progress"]
+        <> added
+        <> map delta [1 .. eventCount]
+        <> done
+        <> [lifecycle "response.completed" "completed"]
+  where
+    chunk = BS.replicate deltaBytes 120
+    groups = eventCount `div` 10
+    remainder = eventCount `mod` 10
+    full count = BS.replicate (count * deltaBytes) 120
+    reasoningBytes = full (groups * 5 + min remainder 4)
+    outputBytes = full (groups * 3 + max 0 (min remainder 7 - 4))
+    functionBytes = full (groups + if remainder >= 8 then 1 else 0)
+    customBytes = full (groups + if remainder >= 9 then 1 else 0)
+    lifecycle eventType status = BS.concat
+        [ "{\"type\":\"", eventType, "\",\"response\":{\"id\":\"resp-bench\""
+        , ",\"model\":\"gpt-5\",\"status\":\"", status, "\",\"tools\":["
+        , "{\"type\":\"namespace\",\"name\":\"workspace\",\"tools\":["
+        , "{\"type\":\"function\",\"name\":\"search\",\"parameters\":"
+        , largeSchema, "}]}],\"future_namespace\":{\"schema\":"
+        , largeSchema, "},\"usage\":{\"input_tokens\":1200,\"output_tokens\":"
+        , BS8.pack (show eventCount), ",\"total_tokens\":"
+        , BS8.pack (show (1200 + eventCount)), "}}}"
+        ]
+    largeSchema = BS.concat
+        [ "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\","
+        , "\"description\":\"", BS.replicate 8192 115, "\"}}}"
+        ]
+    added =
+        [ itemEvent "added" 0
+            "{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}"
+        , itemEvent "added" 1
+            "{\"type\":\"message\",\"id\":\"msg-1\",\"role\":\"assistant\",\
+            \\"content\":[]}"
+        , itemEvent "added" 2
+            "{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-f\",\
+            \\"name\":\"shell_command\",\"arguments\":\"\"}"
+        , itemEvent "added" 3
+            "{\"type\":\"custom_tool_call\",\"id\":\"ct-1\",\"call_id\":\"call-c\",\
+            \\"name\":\"apply_patch\",\"input\":\"\"}"
+        ]
+    done =
+        [ itemEvent "done" 0 (BS.concat
+            ["{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[{\"type\":\
+             \\"summary_text\",\"text\":\"", reasoningBytes, "\"}]}"])
+        , itemEvent "done" 1 (BS.concat
+            ["{\"type\":\"message\",\"id\":\"msg-1\",\"role\":\"assistant\",\
+             \\"content\":[{\"type\":\"output_text\",\"text\":\"",
+             outputBytes, "\"}]}"])
+        , itemEvent "done" 2 (BS.concat
+            ["{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-f\",\
+             \\"name\":\"shell_command\",\"arguments\":\"", functionBytes, "\"}"])
+        , itemEvent "done" 3 (BS.concat
+            ["{\"type\":\"custom_tool_call\",\"id\":\"ct-1\",\"call_id\":\"call-c\",\
+             \\"name\":\"apply_patch\",\"input\":\"", customBytes, "\"}"])
+        ]
+    itemEvent :: BS.ByteString -> Int -> BS.ByteString -> BS.ByteString
+    itemEvent phase index item = BS.concat
+        [ "{\"type\":\"response.output_item.", phase, "\",\"output_index\":"
+        , BS8.pack (show index), ",\"item\":", item, "}"
+        ]
+    delta sequenceNumber = BS.concat
+        [ "{\"type\":\"", eventType, "\",\"sequence_number\":"
+        , BS8.pack (show sequenceNumber), fields, ",\"delta\":\"", chunk, "\"}"
+        ]
+      where
+        (eventType, fields) = case sequenceNumber `mod` 10 of
+            value | value < 5 ->
+                ("response.reasoning_summary_text.delta",
+                    ",\"item_id\":\"rs-1\",\"output_index\":0,\"summary_index\":0")
+            value | value < 8 ->
+                ("response.output_text.delta",
+                    ",\"item_id\":\"msg-1\",\"output_index\":1,\
+                    \\"content_index\":0")
+            8 -> ("response.function_call_arguments.delta",
+                    ",\"item_id\":\"fc-1\",\"output_index\":2")
+            _ -> ("response.custom_tool_call_input.delta",
+                    ",\"item_id\":\"ct-1\",\"call_id\":\"call-c\",\
+                    \\"output_index\":3")
+
+responseChecksum :: Response -> Int
+responseChecksum response =
+    textChecksum response.responseId
+        + textChecksum response.model
+        + length (show response.status)
+        + sum (map itemChecksum response.output)
+        + maybe 0 (sum . map toolChecksum) response.tools
+        + maybe 0 usageChecksum response.usage
+  where
+    usageChecksum usage =
+        usage.inputTokens + usage.outputTokens + usage.totalTokens
+    itemChecksum = \case
+        MessageItem message -> case message.content of
+            MessageContentText text -> textChecksum text
+            MessageContentParts parts -> sum (map partChecksum parts)
+        FunctionCallItem call ->
+            textChecksum call.name + textChecksum call.arguments
+        CustomToolCallItem call ->
+            textChecksum call.name + textChecksum call.input
+        ReasoningItemValue item ->
+            sum [maybe 0 textChecksum part.text | part <- item.summary]
+        _ -> 1
+    partChecksum = \case
+        OutputTextPart { text } -> textChecksum text
+        _ -> 1
+    toolChecksum = \case
+        FunctionToolValue tool ->
+            textChecksum tool.name + maybe 0 (length . show) tool.parameters
+        CustomToolValue tool ->
+            textChecksum tool.name + maybe 0 (length . show) tool.format
+        NamespaceToolValue tool ->
+            textChecksum tool.name + sum (map toolChecksum tool.tools)
+        _ -> 1
+
+textChecksum :: Text.Text -> Int
+textChecksum = Text.foldl' (\value character -> value * 33 + fromEnum character)
+    checksumSeed
 
 checksumSeed :: Int
 checksumSeed = 5381
@@ -178,15 +263,14 @@ measure action = do
     beforeStats <- getRTSStats
     beforeCPU <- getCPUTime
     beforeWall <- getMonotonicTimeNSec
-    result <- action
-    _ <- evaluate result
+    result <- action >>= evaluate
     afterWall <- getMonotonicTimeNSec
     afterCPU <- getCPUTime
     afterStats <- getRTSStats
     pure Sample
         { wallMillis = fromIntegral (afterWall - beforeWall) / 1.0e6
         , cpuMillis = fromIntegral (afterCPU - beforeCPU) / 1.0e9
-        , allocatedBytes =
-            fromIntegral
-                (afterStats.allocated_bytes - beforeStats.allocated_bytes)
+        , allocatedBytes = fromIntegral
+            (afterStats.allocated_bytes - beforeStats.allocated_bytes)
+        , checksum = result
         }
