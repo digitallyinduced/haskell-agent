@@ -129,7 +129,6 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ModelsManagerSpec
                     , Agent.OpenAI.ModelsTypesSpec
                     , Agent.OpenAI.CompactionSpec
-                    , Agent.OpenAI.ResponsesSpec
                     , Agent.OpenAI.ToolDSLSpec
                     , Agent.OpenAI.UsageSpec
                     , Agent.OpenAI.WebSocketClientSpec

@@ -3,6 +3,8 @@ module Agent.OpenAI.FunctionalSpec where
 import Test.Hspec
 
 import qualified Agent.OpenAI.Auth as Auth
+import Agent.Json (rawJsonFromEncoding)
+import qualified Agent.Json.Decode as Json
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Responses.Types as OpenAI
 import Agent.OpenAI.WebSocketClient (CodexConn, sendWsRequestWithRawEvents, withCodexWs)
@@ -89,7 +91,10 @@ runCodexTurn conn request previousResponseId = do
     eventsRef <- newIORef ([] :: [(Text, Either String OpenAI.ResponseStreamEvent)])
     result <- sendWsRequestWithRawEvents conn request previousResponseId \eventType value ->
         modifyIORef' eventsRef
-            ((eventType, ResponsesCodec.decodeResponseStreamEventWithType eventType value) :)
+            (( eventType
+             , ResponsesCodec.decodeResponseStreamEventWithType eventType
+                (LBS8.toStrict (Aeson.encode value))
+             ) :)
     events <- reverse <$> readIORef eventsRef
     let decodeFailures = [err | (_, Left err) <- events]
         decodedEvents = [event | (_, Right event) <- events]
@@ -158,7 +163,7 @@ echoTextTool =
     OpenAI.FunctionToolValue OpenAI.FunctionTool
         { OpenAI.name = "echo_text"
         , OpenAI.description = Just "Echoes the provided text."
-        , OpenAI.parameters = Just (Aeson.object
+        , OpenAI.parameters = Just (rawJsonFromEncoding (Aeson.toEncoding (Aeson.object
             [ "type" Aeson..= ("object" :: Text)
             , "properties" Aeson..= Aeson.object
                 [ "text" Aeson..= Aeson.object
@@ -167,9 +172,8 @@ echoTextTool =
                     ]
                 ]
             , "required" Aeson..= (["text"] :: [Text])
-            ])
+            ])))
         , OpenAI.strict = Just True
-        , OpenAI.extraFields = mempty
         }
 
 webSearchRequest :: Text -> OpenAI.ResponseCreateParams
@@ -179,7 +183,7 @@ webSearchRequest model =
         , OpenAI.instructions = Just "You are a functional test responder. You must use the web_search tool before answering. Answer exactly with the official domain openai.com."
         , OpenAI.input = Just (OpenAI.ResponseInputText "Use web search to confirm the official OpenAI website domain, then answer exactly with the domain.")
         , OpenAI.tools = Just [OpenAI.KnownResponseTool OpenAI.ToolWebSearch
-            (OpenAI.TaggedObject "web_search" mempty)]
+            (OpenAI.TaggedObject "web_search")]
         , OpenAI.reasoning = Just (reasoning "low")
         , OpenAI.include = Just []
         , OpenAI.promptCacheKey = Just "codex-hs-functional-test-web-search"
@@ -187,10 +191,11 @@ webSearchRequest model =
         }
 
 reasoning :: Text -> OpenAI.ReasoningConfig
-reasoning effort = OpenAI.ReasoningConfig Nothing (Just effort) Nothing Nothing Nothing mempty
+reasoning effort =
+    OpenAI.ReasoningConfig Nothing (Just effort) Nothing Nothing Nothing
 
 lowVerbosity :: OpenAI.ResponseTextConfig
-lowVerbosity = OpenAI.ResponseTextConfig Nothing (Just "low") mempty
+lowVerbosity = OpenAI.ResponseTextConfig Nothing (Just "low")
 
 functionOutput :: Text -> Text -> OpenAI.ResponseItem
 functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCallOutput
@@ -198,17 +203,15 @@ functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCall
     , OpenAI.callId = callId
     , OpenAI.name = Nothing
     , OpenAI.namespace = Nothing
-    , OpenAI.output = Aeson.String output
+    , OpenAI.output =
+        rawJsonFromEncoding (Aeson.toEncoding (Aeson.String output))
     , OpenAI.status = Nothing
-    , OpenAI.extraFields = mempty
     }
 
 functionCallArgumentText :: Text -> Text -> Text
-functionCallArgumentText key arguments = case Aeson.decodeStrict' (TextEncoding.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
+functionCallArgumentText key arguments =
+    either (const "") id $
+        Json.decodeText (Json.object (Json.atKey key Json.text)) arguments
 
 extractAssistantText :: OpenAI.Response -> Maybe Text
 extractAssistantText response = case
@@ -250,11 +253,10 @@ freshOnly now state
 
 parseAuthJson :: LBS8.ByteString -> Maybe AuthFile
 parseAuthJson bytes =
-    case Aeson.eitherDecode bytes of
-        Right (authFiles :: [AuthFile]) -> listToMaybe authFiles
-        Left _ -> case Aeson.eitherDecode bytes of
-            Right (single :: AuthFile) -> Just single
-            Left _ -> Nothing
+    case Json.decodeEither (Json.list authFileDecoder) (LBS8.toStrict bytes) of
+        Right authFiles -> listToMaybe authFiles
+        Left _ -> either (const Nothing) Just
+            (Json.decodeEither authFileDecoder (LBS8.toStrict bytes))
 
 authStateFromFile :: UTCTime -> AuthFile -> Auth.AuthState
 authStateFromFile now AuthFile{tokens = AuthFileTokens{accessToken, refreshToken, accountId, idToken}} =
@@ -275,13 +277,14 @@ data AuthFileTokens = AuthFileTokens
     , idToken :: !(Maybe Text)
     }
 
-instance Aeson.FromJSON AuthFile where
-    parseJSON = Aeson.withObject "AuthFile" \o -> AuthFile <$> o Aeson..: "tokens"
+authFileDecoder :: Json.Decoder AuthFile
+authFileDecoder =
+    Json.object $ AuthFile <$> Json.atKey "tokens" authFileTokensDecoder
 
-instance Aeson.FromJSON AuthFileTokens where
-    parseJSON = Aeson.withObject "AuthFileTokens" \o ->
-        AuthFileTokens
-            <$> o Aeson..: "access_token"
-            <*> o Aeson..: "refresh_token"
-            <*> o Aeson..: "account_id"
-            <*> o Aeson..:? "id_token"
+authFileTokensDecoder :: Json.Decoder AuthFileTokens
+authFileTokensDecoder = Json.object $
+    AuthFileTokens
+        <$> Json.atKey "access_token" Json.text
+        <*> Json.atKey "refresh_token" Json.text
+        <*> Json.atKey "account_id" Json.text
+        <*> Json.atKeyOptional "id_token" Json.text
