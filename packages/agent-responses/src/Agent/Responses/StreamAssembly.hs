@@ -577,14 +577,14 @@ assembledOutput state response =
                 True
 
 -- | Does a response fragment already carry a terminal lifecycle status? Only
--- @completed@/@incomplete@/@failed@ count; a leftover @in_progress@/@queued@
--- status from an earlier streaming frame must be overwritten with the status
--- implied by the terminal event.
+-- @completed@/@incomplete@/@failed@/@cancelled@ count; a leftover
+-- @in_progress@/@queued@ status from an earlier streaming frame must be
+-- overwritten with the status implied by the terminal event.
 fragmentHasTerminalStatus :: Aeson.Object -> Bool
 fragmentHasTerminalStatus object =
     case KeyMap.lookup "status" object of
         Just (Aeson.String status) ->
-            status `elem` ["completed", "incomplete", "failed"]
+            status `elem` ["completed", "incomplete", "failed", "cancelled"]
         _ -> False
 
 responseValueFor :: ResponseStreamEvent -> Maybe Aeson.Value

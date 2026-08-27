@@ -57,6 +57,17 @@ spec = describe "buildStreamResponse" do
         [name | FunctionCallItem FunctionCall { name } <- response.output]
             `shouldBe` ["shell_command"]
 
+    it "preserves a cancelled status carried by response.done" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-cancelled\"}}"
+            , sseBlock "response.done"
+                "{\"type\":\"response.done\",\"response\":{\"status\":\"cancelled\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        response.status `shouldBe` ResponseCancelled
+
     it "assembles minimal created and completed lifecycle fragments" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
