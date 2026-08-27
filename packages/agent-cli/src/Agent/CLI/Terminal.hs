@@ -246,14 +246,15 @@ kittySuperVCsiBodies = kittyModifiedCsiBodies 'v' 9
 -- | CSI bodies emitted by Kitty's keyboard protocol for the Esc key. The
 -- disambiguate flag re-encodes Esc as @CSI 27 u@ so it is distinguishable
 -- from a sequence introducer; terminals may add the encoded modifier field
--- (1 = none) and an explicit key-press event, and modified presses such as
--- Shift+Esc carry higher modifier values. Every variant must decode to Esc:
+-- (1 = none) and an explicit key-press event. The protocol's eight modifier
+-- bits (including Hyper, Meta, Caps Lock, and Num Lock) make 256 the highest
+-- encoded value. Every variant must decode to Esc:
 -- an unmapped body leaks its payload into the composer as literal text
 -- (observed as prompts beginning with @[27u@).
 kittyEscapeCsiBodies :: [String]
 kittyEscapeCsiBodies =
     [ "27" <> modifier <> event <> "u"
-    | modifier <- "" : [";" <> show encoded | encoded <- [1 .. 16 :: Int]]
+    | modifier <- "" : [";" <> show encoded | encoded <- [1 .. 256 :: Int]]
     , event <- ["", ":1"]
     , not (null modifier) || event /= ":1"
     ]

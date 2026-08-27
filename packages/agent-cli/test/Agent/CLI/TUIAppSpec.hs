@@ -291,7 +291,14 @@ spec = do
             mapM_
                 (\body -> mappings `shouldContain`
                     [(Nothing, "\ESC[" <> body, V.EvKey V.KEsc [])])
-                ["27u", "27;1u", "27;1:1u", "27;2u", "27;5:1u"]
+                [ "27u"
+                , "27;1u"
+                , "27;1:1u"
+                , "27;2u"
+                , "27;5:1u"
+                , "27;65u"
+                , "27;256:1u"
+                ]
 
         it "maps enhanced-keyboard sequences before Vty decodes them" do
             let mappings = V.configInputMap fullscreenVtyConfig
