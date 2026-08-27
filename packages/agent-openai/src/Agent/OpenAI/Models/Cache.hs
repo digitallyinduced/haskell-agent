@@ -14,10 +14,9 @@ import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Models.Types (ModelInfo, modelInfoDecoder)
 import Control.Monad (join)
 import Control.Exception.Safe (SomeException, try)
-import Data.Aeson (Object)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock
@@ -49,7 +48,7 @@ data ModelsCacheEntry = ModelsCacheEntry
     , clientVersion :: !(Maybe Text)
     , cacheKey :: !(Maybe ModelsCacheKey)
     , models :: ![ModelInfo]
-    , catalogExtraFields :: !Object
+    , catalogGeneration :: !(Maybe Scientific)
     } deriving (Eq, Show)
 
 instance Aeson.ToJSON ModelsCacheEntry where
@@ -59,7 +58,7 @@ instance Aeson.ToJSON ModelsCacheEntry where
         , "client_version" Aeson..= entry.clientVersion
         , "cache_key" Aeson..= entry.cacheKey
         , "models" Aeson..= entry.models
-        , "catalog_extra_fields" Aeson..= entry.catalogExtraFields
+        , "catalog_generation" Aeson..= entry.catalogGeneration
         ]
 
 newtype ModelsCacheError = ModelsCacheError
@@ -156,10 +155,7 @@ modelsCacheEntryDecoder = Json.object do
     clientVersion <- optionalField "client_version" Json.text
     cacheKey <- optionalField "cache_key" modelsCacheKeyDecoder
     models <- Json.atKey "models" (Json.list modelInfoDecoder)
-    catalogExtraFields <-
-        maybe mempty id <$> Json.atKeyOptional
-            "catalog_extra_fields"
-            catalogExtraFieldsDecoder
+    catalogGeneration <- optionalField "catalog_generation" Json.scientific
     pure ModelsCacheEntry
         { .. }
 
@@ -184,11 +180,3 @@ defaultField
     -> Json.FieldsDecoder value
 defaultField key decoder fallback =
     maybe fallback id <$> optionalField key decoder
-
-catalogExtraFieldsDecoder :: Json.Decoder Object
-catalogExtraFieldsDecoder = Json.object do
-    catalogGeneration <-
-        optionalField "catalog_generation" Json.scientific
-    pure $ maybe mempty
-        (KeyMap.singleton "catalog_generation" . Aeson.Number)
-        catalogGeneration

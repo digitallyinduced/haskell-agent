@@ -1,11 +1,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 
--- | Forward-compatible metadata returned by the Codex @/models@ endpoint.
+-- | Metadata returned by the Codex @/models@ endpoint.
 --
--- Unknown enum values are retained in @Other@ constructors and unknown model
--- fields are preserved in 'extraFields'.  This lets a newer service catalog be
--- cached and round-tripped by an older client without making model discovery
--- unusable.
+-- Unknown enum values are retained in @Other@ constructors. Unknown object
+-- fields are ignored.
 module Agent.OpenAI.Models.Types
     ( ReasoningEffort(..)
     , reasoningEffortText
@@ -75,16 +73,15 @@ import Control.Applicative ((<|>))
 import qualified Agent.Json.Decode as Json
 import Control.Monad (join)
 import Data.Aeson
-    ( Object
-    , ToJSON(..)
-    , Value(..)
+    ( ToJSON(..)
     , object
     , (.=)
     )
 import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Data.Aeson.Types (Pair)
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (fromMaybe)
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Language.Haskell.TH.Syntax
@@ -119,7 +116,7 @@ reasoningEffortText = \case
     ReasoningEffortOther value -> value
 
 instance ToJSON ReasoningEffort where
-    toJSON = String . reasoningEffortText
+    toJSON = toJSON . reasoningEffortText
 
 data ReasoningSummary
     = ReasoningSummaryNone
@@ -138,7 +135,7 @@ reasoningSummaryText = \case
     ReasoningSummaryOther value -> value
 
 instance ToJSON ReasoningSummary where
-    toJSON = String . reasoningSummaryText
+    toJSON = toJSON . reasoningSummaryText
 
 data Verbosity
     = VerbosityLow
@@ -155,7 +152,7 @@ verbosityText = \case
     VerbosityOther value -> value
 
 instance ToJSON Verbosity where
-    toJSON = String . verbosityText
+    toJSON = toJSON . verbosityText
 
 data InputModality
     = InputModalityText
@@ -172,7 +169,7 @@ inputModalityText = \case
     InputModalityOther value -> value
 
 instance ToJSON InputModality where
-    toJSON = String . inputModalityText
+    toJSON = toJSON . inputModalityText
 
 defaultInputModalities :: [InputModality]
 defaultInputModalities = [InputModalityText, InputModalityImage]
@@ -192,7 +189,7 @@ modelVisibilityText = \case
     ModelVisibilityOther value -> value
 
 instance ToJSON ModelVisibility where
-    toJSON = String . modelVisibilityText
+    toJSON = toJSON . modelVisibilityText
 
 data ShellToolType
     = ShellToolUnifiedExec
@@ -207,7 +204,7 @@ shellToolTypeText = \case
     ShellToolOther value -> value
 
 instance ToJSON ShellToolType where
-    toJSON = String . shellToolTypeText
+    toJSON = toJSON . shellToolTypeText
 
 data ApplyPatchToolType
     = ApplyPatchFreeform
@@ -220,7 +217,7 @@ applyPatchToolTypeText = \case
     ApplyPatchOther value -> value
 
 instance ToJSON ApplyPatchToolType where
-    toJSON = String . applyPatchToolTypeText
+    toJSON = toJSON . applyPatchToolTypeText
 
 data WebSearchToolType
     = WebSearchText
@@ -235,7 +232,7 @@ webSearchToolTypeText = \case
     WebSearchOther value -> value
 
 instance ToJSON WebSearchToolType where
-    toJSON = String . webSearchToolTypeText
+    toJSON = toJSON . webSearchToolTypeText
 
 data TruncationMode
     = TruncationBytes
@@ -250,7 +247,7 @@ truncationModeText = \case
     TruncationOther value -> value
 
 instance ToJSON TruncationMode where
-    toJSON = String . truncationModeText
+    toJSON = toJSON . truncationModeText
 
 data ToolMode
     = ToolModeDirect
@@ -267,7 +264,7 @@ toolModeText = \case
     ToolModeOther value -> value
 
 instance ToJSON ToolMode where
-    toJSON = String . toolModeText
+    toJSON = toJSON . toolModeText
 
 data MultiAgentVersion
     = MultiAgentDisabled
@@ -284,7 +281,7 @@ multiAgentVersionText = \case
     MultiAgentVersionOther value -> value
 
 instance ToJSON MultiAgentVersion where
-    toJSON = String . multiAgentVersionText
+    toJSON = toJSON . multiAgentVersionText
 
 data ReasoningEffortPreset = ReasoningEffortPreset
     { effort :: !ReasoningEffort
@@ -477,23 +474,18 @@ data ModelMessages = ModelMessages
     , permissions :: !(Maybe PermissionMessages)
     , multiAgent :: !(Maybe MultiAgentMessages)
     , tokenBudget :: !(Maybe ModelTokenBudgetConfig)
-    , guardianV2 :: !(Maybe Value)
-    , extraFields :: !Object
     } deriving (Eq, Show)
 
 instance ToJSON ModelMessages where
-    toJSON messages = objectWithExtra messages.extraFields $
-        catMaybes
-            [ jsonField "instructions_template" messages.instructionsTemplate
-            , jsonField "instructions_variables" messages.instructionsVariables
-            , jsonField "approvals" messages.approvals
-            , jsonField "collaboration_modes" messages.collaborationModes
-            , jsonField "auto_review" messages.autoReview
-            , jsonField "permissions" messages.permissions
-            , jsonField "multi_agent" messages.multiAgent
-            , jsonField "token_budget" messages.tokenBudget
-            , jsonField "guardian_v2" messages.guardianV2
-            ]
+    toJSON messages = object $
+        maybeField "instructions_template" messages.instructionsTemplate
+        <> maybeField "instructions_variables" messages.instructionsVariables
+        <> maybeField "approvals" messages.approvals
+        <> maybeField "collaboration_modes" messages.collaborationModes
+        <> maybeField "auto_review" messages.autoReview
+        <> maybeField "permissions" messages.permissions
+        <> maybeField "multi_agent" messages.multiAgent
+        <> maybeField "token_budget" messages.tokenBudget
 
 data ModelPersonality
     = ModelPersonalityDefault
@@ -535,7 +527,6 @@ data ModelInfo = ModelInfo
     , supportedReasoningLevels :: ![ReasoningEffortPreset]
     , shellType :: !ShellToolType
     , visibility :: !ModelVisibility
-    , minimalClientVersion :: !(Maybe Value)
     , supportedInApi :: !Bool
     , availabilityNux :: !(Maybe ModelAvailabilityNux)
     , upgrade :: !(Maybe ModelInfoUpgrade)
@@ -551,64 +542,16 @@ data ModelInfo = ModelInfo
     , supportsReasoningSummaries :: !Bool
     , baseInstructions :: !(Maybe Text)
     , usedFallbackModelMetadata :: !Bool
-    , extraFields :: !Object
     } deriving (Eq, Show)
 
 instance ToJSON ModelInfo where
-    toJSON info = objectWithExtra info.extraFields $
-        [ ("slug", toJSON info.slug)
-        , ("display_name", toJSON info.displayName)
-        , ("prefer_websockets", toJSON info.preferWebSockets)
-        , ("support_verbosity", toJSON info.supportVerbosity)
-        , ("web_search_tool_type", toJSON info.webSearchToolType)
-        , ("input_modalities", toJSON info.inputModalities)
-        , ("supports_image_detail_original", toJSON info.supportsImageDetailOriginal)
-        , ("truncation_policy", toJSON info.truncationPolicy)
-        , ("supports_parallel_tool_calls", toJSON info.supportsParallelToolCalls)
-        , ("use_responses_lite", toJSON info.useResponsesLite)
-        , ("include_skills_usage_instructions", toJSON info.includeSkillsUsageInstructions)
-        , ("include_apps_usage_instructions", toJSON info.includeAppsUsageInstructions)
-        , ("include_plugin_usage_instructions", toJSON info.includePluginUsageInstructions)
-        , ("node_repl_auto_review_required", toJSON info.nodeReplAutoReviewRequired)
-        , ("node_repl_disabled", toJSON info.nodeReplDisabled)
-        , ("effective_context_window_percent", toJSON info.effectiveContextWindowPercent)
-        , ("default_reasoning_summary", toJSON info.defaultReasoningSummary)
-        , ("supported_reasoning_levels", toJSON info.supportedReasoningLevels)
-        , ("shell_type", toJSON info.shellType)
-        , ("visibility", toJSON info.visibility)
-        , ("supported_in_api", toJSON info.supportedInApi)
-        , ("priority", toJSON info.priority)
-        , ("experimental_supported_tools", toJSON info.experimentalSupportedTools)
-        , ("available_in_plans", toJSON info.availableInPlans)
-        , ("supports_search_tool", toJSON info.supportsSearchTool)
-        , ("service_tiers", toJSON info.serviceTiers)
-        , ("additional_speed_tiers", toJSON info.additionalSpeedTiers)
-        , ("supports_reasoning_summary_parameter", toJSON info.supportsReasoningSummaryParameter)
-        , ("supports_reasoning_summaries", toJSON info.supportsReasoningSummaries)
-        ] <> catMaybes
-            [ jsonField "description" info.description
-            , jsonField "default_verbosity" info.defaultVerbosity
-            , jsonField "apply_patch_tool_type" info.applyPatchToolType
-            , jsonField "tool_mode" info.toolMode
-            , jsonField "multi_agent_version" info.multiAgentVersion
-            , jsonField "auto_review_model_override" info.autoReviewModelOverride
-            , jsonField "model_specialty" info.modelSpecialty
-            , jsonField "context_window" info.contextWindow
-            , jsonField "max_context_window" info.maxContextWindow
-            , jsonField "auto_compact_token_limit" info.autoCompactTokenLimit
-            , jsonField "comp_hash" info.compHash
-            , jsonField "default_reasoning_level" info.defaultReasoningLevel
-            , jsonField "minimal_client_version" info.minimalClientVersion
-            , jsonField "availability_nux" info.availabilityNux
-            , jsonField "upgrade" info.upgrade
-            , jsonField "model_messages" info.modelMessages
-            , jsonField "default_service_tier" info.defaultServiceTier
-            , jsonField "base_instructions" info.baseInstructions
-            ]
+    toJSON info = object $
+        modelInfoFields info
+        <> maybeField "base_instructions" info.baseInstructions
 
 data ModelsResponse = ModelsResponse
     { models :: ![ModelInfo]
-    , extraFields :: !Object
+    , catalogGeneration :: !(Maybe Scientific)
     } deriving (Eq, Show)
 
 -- | Decode the Codex model catalog directly with Hermes. Unknown fields are
@@ -620,9 +563,7 @@ modelsResponseDecoder = Json.object do
         optionalField "catalog_generation" Json.scientific
     pure ModelsResponse
         { models
-        , extraFields = maybe KeyMap.empty
-            (KeyMap.singleton "catalog_generation" . Number)
-            catalogGeneration
+        , catalogGeneration
         }
 
 modelInfoDecoder :: Json.Decoder ModelInfo
@@ -682,9 +623,6 @@ modelInfoDecoder = Json.object do
         fieldDefault "shell_type" shellToolTypeDecoder ShellToolUnifiedExec
     visibility <-
         fieldDefault "visibility" modelVisibilityDecoder ModelVisibilityNone
-    -- These values are only advisory/opaque metadata and are not interpreted
-    -- by the client. Known operational fields above remain fully decoded.
-    let minimalClientVersion = Nothing
     supportedInApi <- fieldDefault "supported_in_api" Json.bool True
     availabilityNux <-
         optionalField "availability_nux" modelAvailabilityNuxDecoder
@@ -718,7 +656,6 @@ modelInfoDecoder = Json.object do
         Just _ -> pure ()
     pure ModelInfo
         { usedFallbackModelMetadata = False
-        , extraFields = KeyMap.empty
         , ..
         }
 
@@ -909,10 +846,7 @@ modelMessagesDecoder = Json.object do
     multiAgent <- optionalField "multi_agent" multiAgentMessagesDecoder
     tokenBudget <- optionalField "token_budget" modelTokenBudgetConfigDecoder
     pure ModelMessages
-        { guardianV2 = Nothing
-        , extraFields = KeyMap.empty
-        , ..
-        }
+        { .. }
 
 optionalField
     :: Text
@@ -940,13 +874,9 @@ nonEmptyTextEnum label constructor = Json.withText \value ->
         else pure (constructor value)
 
 instance ToJSON ModelsResponse where
-    toJSON response =
-        objectWithExtra response.extraFields
-            [ ( "models"
-              , toJSON
-                    (map modelInfoWithLegacyBaseInstructions response.models)
-              )
-            ]
+    toJSON response = object $
+        [ "models" .= map ModelInfoWithLegacyBaseInstructions response.models ]
+        <> maybeField "catalog_generation" response.catalogGeneration
 
 data ModelPreset = ModelPreset
     { presetId :: !Text
@@ -1142,7 +1072,6 @@ fallbackModelInfo requested = ModelInfo
     , supportedReasoningLevels = []
     , shellType = ShellToolUnifiedExec
     , visibility = ModelVisibilityNone
-    , minimalClientVersion = Nothing
     , supportedInApi = True
     , availabilityNux = Nothing
     , upgrade = Nothing
@@ -1158,7 +1087,6 @@ fallbackModelInfo requested = ModelInfo
     , supportsReasoningSummaries = False
     , baseInstructions = Nothing
     , usedFallbackModelMetadata = True
-    , extraFields = KeyMap.empty
     }
 
 -- | The upstream Codex fallback instructions for unknown model slugs.
@@ -1175,7 +1103,8 @@ fallbackModelInstructions =
 mergeModelCatalogs :: ModelsResponse -> ModelsResponse -> ModelsResponse
 mergeModelCatalogs bundled remote = ModelsResponse
     { models = foldl' overlay bundled.models remote.models
-    , extraFields = KeyMap.union remote.extraFields bundled.extraFields
+    , catalogGeneration =
+        remote.catalogGeneration <|> bundled.catalogGeneration
     }
   where
     overlay current replacement =
@@ -1198,8 +1127,6 @@ legacyModelMessages instructions = ModelMessages
     , permissions = Nothing
     , multiAgent = Nothing
     , tokenBudget = Nothing
-    , guardianV2 = Nothing
-    , extraFields = KeyMap.empty
     }
 
 promoteLegacyInstructions
@@ -1227,104 +1154,75 @@ toPresetUpgrade source upgrade = ModelUpgrade
     , retirementAt = upgrade.retirementAt
     }
 
-modelMessageFieldNames :: [Text]
-modelMessageFieldNames =
-    [ "instructions_template"
-    , "instructions_variables"
-    , "approvals"
-    , "collaboration_modes"
-    , "auto_review"
-    , "permissions"
-    , "multi_agent"
-    , "token_budget"
-    , "guardian_v2"
-    ]
-
-modelInfoFieldNames :: [Text]
-modelInfoFieldNames =
-    [ "slug"
-    , "display_name"
-    , "description"
-    , "prefer_websockets"
-    , "support_verbosity"
-    , "default_verbosity"
-    , "apply_patch_tool_type"
-    , "web_search_tool_type"
-    , "input_modalities"
-    , "supports_image_detail_original"
-    , "truncation_policy"
-    , "supports_parallel_tool_calls"
-    , "tool_mode"
-    , "multi_agent_version"
-    , "use_responses_lite"
-    , "include_skills_usage_instructions"
-    , "include_apps_usage_instructions"
-    , "include_plugin_usage_instructions"
-    , "node_repl_auto_review_required"
-    , "node_repl_disabled"
-    , "auto_review_model_override"
-    , "model_specialty"
-    , "context_window"
-    , "max_context_window"
-    , "auto_compact_token_limit"
-    , "comp_hash"
-    , "effective_context_window_percent"
-    , "default_reasoning_summary"
-    , "default_reasoning_level"
-    , "supported_reasoning_levels"
-    , "shell_type"
-    , "visibility"
-    , "minimal_client_version"
-    , "supported_in_api"
-    , "availability_nux"
-    , "upgrade"
-    , "priority"
-    , "model_messages"
-    , "experimental_supported_tools"
-    , "available_in_plans"
-    , "supports_search_tool"
-    , "default_service_tier"
-    , "service_tiers"
-    , "additional_speed_tiers"
-    , "supports_reasoning_summary_parameter"
-    , "supports_reasoning_summaries"
-    , "base_instructions"
-    ]
-
-removeFields :: [Text] -> Object -> Object
-removeFields fields value =
-    foldl' (\current name -> KeyMap.delete (Key.fromText name) current) value fields
-
-objectWithExtra :: Object -> [(Text, Value)] -> Value
-objectWithExtra extras fields =
-    Object $ foldl'
-        (\current (name, value) ->
-            KeyMap.insert (Key.fromText name) value current)
-        extras
-        fields
-
 -- | Upstream's ModelsResponse codec emits the deprecated top-level
 -- @base_instructions@ field alongside every model, even when the canonical
 -- @model_messages.instructions_template@ field is present. This is required
 -- for older Codex clients that still read the legacy field.
-modelInfoWithLegacyBaseInstructions :: ModelInfo -> Value
-modelInfoWithLegacyBaseInstructions info =
-    case toJSON info of
-        Object fields ->
-            Object
-                (KeyMap.insert
-                    (Key.fromText "base_instructions")
-                    (String
-                        (renderModelInstructions
-                            ModelPersonalityDefault
-                            info))
-                    fields)
-        value -> value
+newtype ModelInfoWithLegacyBaseInstructions =
+    ModelInfoWithLegacyBaseInstructions ModelInfo
 
-jsonField :: ToJSON value => Text -> Maybe value -> Maybe (Text, Value)
-jsonField name = fmap (name,) . fmap toJSON
+instance ToJSON ModelInfoWithLegacyBaseInstructions where
+    toJSON (ModelInfoWithLegacyBaseInstructions info) =
+        object $
+            modelInfoFields info
+            <> [ "base_instructions"
+                 .= renderModelInstructions ModelPersonalityDefault info
+               ]
 
-maybeField :: ToJSON value => Text -> Maybe value -> [(Key.Key, Value)]
+modelInfoFields :: ModelInfo -> [Pair]
+modelInfoFields info =
+    [ "slug" .= info.slug
+    , "display_name" .= info.displayName
+    , "prefer_websockets" .= info.preferWebSockets
+    , "support_verbosity" .= info.supportVerbosity
+    , "web_search_tool_type" .= info.webSearchToolType
+    , "input_modalities" .= info.inputModalities
+    , "supports_image_detail_original" .= info.supportsImageDetailOriginal
+    , "truncation_policy" .= info.truncationPolicy
+    , "supports_parallel_tool_calls" .= info.supportsParallelToolCalls
+    , "use_responses_lite" .= info.useResponsesLite
+    , "include_skills_usage_instructions"
+        .= info.includeSkillsUsageInstructions
+    , "include_apps_usage_instructions" .= info.includeAppsUsageInstructions
+    , "include_plugin_usage_instructions"
+        .= info.includePluginUsageInstructions
+    , "node_repl_auto_review_required" .= info.nodeReplAutoReviewRequired
+    , "node_repl_disabled" .= info.nodeReplDisabled
+    , "effective_context_window_percent"
+        .= info.effectiveContextWindowPercent
+    , "default_reasoning_summary" .= info.defaultReasoningSummary
+    , "supported_reasoning_levels" .= info.supportedReasoningLevels
+    , "shell_type" .= info.shellType
+    , "visibility" .= info.visibility
+    , "supported_in_api" .= info.supportedInApi
+    , "priority" .= info.priority
+    , "experimental_supported_tools" .= info.experimentalSupportedTools
+    , "available_in_plans" .= info.availableInPlans
+    , "supports_search_tool" .= info.supportsSearchTool
+    , "service_tiers" .= info.serviceTiers
+    , "additional_speed_tiers" .= info.additionalSpeedTiers
+    , "supports_reasoning_summary_parameter"
+        .= info.supportsReasoningSummaryParameter
+    , "supports_reasoning_summaries" .= info.supportsReasoningSummaries
+    ]
+    <> maybeField "description" info.description
+    <> maybeField "default_verbosity" info.defaultVerbosity
+    <> maybeField "apply_patch_tool_type" info.applyPatchToolType
+    <> maybeField "tool_mode" info.toolMode
+    <> maybeField "multi_agent_version" info.multiAgentVersion
+    <> maybeField "auto_review_model_override" info.autoReviewModelOverride
+    <> maybeField "model_specialty" info.modelSpecialty
+    <> maybeField "context_window" info.contextWindow
+    <> maybeField "max_context_window" info.maxContextWindow
+    <> maybeField "auto_compact_token_limit" info.autoCompactTokenLimit
+    <> maybeField "comp_hash" info.compHash
+    <> maybeField "default_reasoning_level" info.defaultReasoningLevel
+    <> maybeField "availability_nux" info.availabilityNux
+    <> maybeField "upgrade" info.upgrade
+    <> maybeField "model_messages" info.modelMessages
+    <> maybeField "default_service_tier" info.defaultServiceTier
+
+maybeField :: ToJSON value => Text -> Maybe value -> [Pair]
 maybeField name = maybe [] (\value -> [Key.fromText name .= value])
 
 findIndexBy :: (value -> Bool) -> [value] -> Maybe Int

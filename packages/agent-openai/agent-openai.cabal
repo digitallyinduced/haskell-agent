@@ -96,6 +96,7 @@ library
                     , safe-exceptions
                     , containers
                     , vector
+                    , scientific
                     , time
                     , directory
                     , filepath
