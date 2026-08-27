@@ -14,6 +14,7 @@ module Agent.Responses.LoopBackend
     , runawayToolArgumentWarningChars
     , streamOutputObserved
     , hasRecoverableIncompleteOutput
+    , responseNeedsLoopContinuation
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
@@ -405,30 +406,59 @@ responseToTurnOutput response = TurnOutput
     , assistantText = assistantTextFromResponse response
     , tokenUsage = responseTokenUsage response
     , completion = case response.status of
-        ResponseIncomplete -> TurnIncomplete
-            { incompleteReason =
-                maybe "unknown" (.reason) response.incompleteDetails
-            , incompleteReasoningTokens =
-                response.usage
-                    >>= (.outputTokensDetails)
-                    >>= (.reasoningTokens)
-            }
+        ResponseIncomplete
+            | hasContinuableReasoningOnlyOutput response -> TurnCompleted
+            | otherwise -> TurnIncomplete
+                { incompleteReason =
+                    maybe "unknown" (.reason) response.incompleteDetails
+                , incompleteReasoningTokens =
+                    response.usage
+                        >>= (.outputTokensDetails)
+                        >>= (.reasoningTokens)
+                }
         _ -> TurnCompleted
     }
 
--- | An incomplete response can still finish the turn when it already contains
--- executable tool calls or assistant text, or when it is a continuable
--- reasoning-only stop. @max_output_tokens@ during reasoning is handed to the
--- loop as an empty completion so it can continue the chain. Reasons such as
--- @content_filter@ stay transport failures, as do completely empty incomplete
--- responses, so a replay-safe fallback can still run.
+-- | Whether this successful response requires an empty continuation on its
+-- committed response chain.
+responseNeedsLoopContinuation :: Response -> Bool
+responseNeedsLoopContinuation response = case response.status of
+    ResponseCompleted ->
+        not (responseHasToolCalls response)
+            && not (responseHasVisibleAssistantText response)
+    ResponseIncomplete -> hasContinuableReasoningOnlyOutput response
+    _ -> False
+
+-- | Whether the transport should retain an incomplete response instead of
+-- converting it to an 'ApiError'. Partial tool/text output is retained so the
+-- committed response can be reported without replaying it, but remains
+-- 'TurnIncomplete'. A reasoning-only @max_output_tokens@ stop instead becomes
+-- an empty completion so the loop can continue the response chain. Reasons
+-- such as @content_filter@ stay transport failures, as do completely empty
+-- incomplete responses, so a replay-safe fallback can still run.
 hasRecoverableIncompleteOutput :: Response -> Bool
 hasRecoverableIncompleteOutput response =
-    not (null (mapMaybe responseItemToToolCall response.output))
-        || maybe False (not . Text.null . Text.strip)
-            (assistantTextFromResponse response)
-        || (any isReasoningOutput response.output
-            && isContinuableIncompleteReason response)
+    responseHasToolCalls response
+        || responseHasVisibleAssistantText response
+        || hasContinuableReasoningOnlyOutput response
+
+-- A reasoning-only max-output stop is an intermediate model sample. Mark it
+-- completed at the loop boundary so the core loop continues from its committed
+-- response id. Partial text or tool calls remain terminal incomplete output:
+-- executing either could act on a truncated response.
+hasContinuableReasoningOnlyOutput :: Response -> Bool
+hasContinuableReasoningOnlyOutput response =
+    not (null response.output)
+        && all isReasoningOutput response.output
+        && isContinuableIncompleteReason response
+
+responseHasToolCalls :: Response -> Bool
+responseHasToolCalls =
+    not . null . mapMaybe responseItemToToolCall . (.output)
+
+responseHasVisibleAssistantText :: Response -> Bool
+responseHasVisibleAssistantText =
+    maybe False (not . Text.null . Text.strip) . assistantTextFromResponse
 
 isReasoningOutput :: ResponseItem -> Bool
 isReasoningOutput = \case
