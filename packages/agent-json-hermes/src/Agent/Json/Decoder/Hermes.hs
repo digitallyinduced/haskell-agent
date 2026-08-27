@@ -22,7 +22,6 @@ import qualified Data.Text as Text
 import Data.Text (Text)
 import Data.Word (Word8)
 import Control.Exception.Safe (tryAny)
-import Control.Monad (foldM)
 
 newtype DecoderSession =
     DecoderSession Hermes.HermesEnv
@@ -37,64 +36,10 @@ decodeIO
     -> BS.ByteString
     -> IO (Either DecoderAPI.DecodeError a)
 decodeIO (DecoderSession environment) decoder bytes =
-    case decoderRequiresRawCapture decoder of
-        True ->
+    case firstNonWhitespace bytes of
+        Just byte
+            | byte /= openBrace && byte /= openBracket ->
             pure (DecoderAPI.decode decoder bytes)
-<<<<<<< ours
-        False -> case firstNonWhitespace bytes of
-            Just byte
-                | byte /= openBrace && byte /= openBracket ->
-                    pure (DecoderAPI.decode decoder bytes)
-            _ -> do
-                result <- tryAny $
-                    Hermes.parseByteStringIO
-                        environment
-                        (toHermes decoder)
-                        bytes
-                pure $ case result of
-                    Left _ ->
-                        DecoderAPI.decode decoder bytes
-                    Right value -> Right value
-
-decoderRequiresRawCapture :: Decoder a -> Bool
-decoderRequiresRawCapture = \case
-    NullDecoder _ -> False
-    BoolDecoder -> False
-    TextDecoder -> False
-    ScientificDecoder -> False
-    ArrayDecoder elementDecoder ->
-        decoderRequiresRawCapture elementDecoder
-    ObjectDecoder _ fields unknown _ ->
-        any namedFieldRequiresRawCapture fields
-            || unknownFieldRequiresRawCapture unknown
-    PlannedObjectDecoder _ ->
-        -- Hermes 0.8 cannot apply heterogeneous planned fields in one pass.
-        -- Keep the portable direct interpreter until the dependent fold lands.
-        True
-    NullableDecoder inner ->
-        decoderRequiresRawCapture inner
-    ByTypeDecoder select ->
-        any (decoderRequiresRawCapture . select)
-            [ JsonNull
-            , JsonBoolean
-            , JsonNumber
-            , JsonString
-            , JsonArray
-            , JsonObject
-            ]
-    RawJsonDecoder -> True
-    SkipDecoder -> False
-    MapDecoder _ inner ->
-        decoderRequiresRawCapture inner
-
-namedFieldRequiresRawCapture :: NamedField state -> Bool
-namedFieldRequiresRawCapture (NamedField _ decoder _) =
-    decoderRequiresRawCapture decoder
-
-unknownFieldRequiresRawCapture :: UnknownField state -> Bool
-unknownFieldRequiresRawCapture (UnknownField decoder _) =
-    decoderRequiresRawCapture decoder
-=======
         _ -> do
             result <- decodeHermesIO
                 (DecoderSession environment)
@@ -120,7 +65,6 @@ decodeHermesIO (DecoderSession environment) decoder bytes = do
                 []
                 (Text.pack (show err)))
         Right value -> Right value
->>>>>>> theirs
 
 toHermes :: Decoder a -> Hermes.Decoder a
 toHermes = \case
@@ -133,30 +77,30 @@ toHermes = \case
     ArrayDecoder elementDecoder ->
         Hermes.list (toHermes elementDecoder)
     ObjectDecoder initialState fields unknown finish -> do
-        updates <-
-            Hermes.objectAsKeyValues
-                (\key -> hermesObjectField key fields unknown)
-                (pure ())
-        state <-
-            foldM
-                (\current (update, ()) ->
-                    either (fail . Text.unpack) pure (update current))
-                initialState
-                updates
+        state <- Hermes.objectFold initialState
+            \key current ->
+                hermesObjectField key current fields unknown
         either (fail . Text.unpack) pure (finish state)
-    PlannedObjectDecoder _ ->
-        fail "planned objects require the portable direct backend"
+    PlannedObjectDecoder initialPlan -> do
+        plan <- Hermes.objectFold initialPlan \key current ->
+            case matchPlannedField key current of
+                Just (PlannedFieldMatch decoder rebuild) ->
+                    rebuild <$> toHermes decoder
+                Nothing
+                    | objectPlanCapturesExtensions current ->
+                        (\raw ->
+                            capturePlannedExtension key raw current)
+                            <$> toHermes RawJsonDecoder
+                    | otherwise ->
+                        current <$ validateValue
+        either (fail . Text.unpack) pure (finishObjectPlan plan)
     NullableDecoder inner ->
         Hermes.nullable (toHermes inner)
     ByTypeDecoder select -> do
         valueType <- hermesJsonType
         toHermes (select valueType)
     RawJsonDecoder ->
-<<<<<<< ours
-        fail "RawJson requires the portable direct backend"
-=======
         rawJsonValue
->>>>>>> theirs
     SkipDecoder ->
         validateValue
     MapDecoder transform inner -> do
@@ -165,19 +109,24 @@ toHermes = \case
 
 hermesObjectField
     :: Text.Text
+    -> state
     -> [NamedField state]
     -> UnknownField state
-    -> Hermes.Decoder (state -> Either Text.Text state)
-hermesObjectField key fields unknown =
+    -> Hermes.Decoder state
+hermesObjectField key current fields unknown =
     case fields of
         [] -> case unknown of
-            UnknownField decoder update ->
-                update key <$> toHermes decoder
+            UnknownField decoder update -> do
+                value <- toHermes decoder
+                either (fail . Text.unpack) pure
+                    (update key value current)
         NamedField name decoder update : rest
-            | name == key ->
-                update <$> toHermes decoder
+            | name == key -> do
+                value <- toHermes decoder
+                either (fail . Text.unpack) pure
+                    (update value current)
             | otherwise ->
-                hermesObjectField key rest unknown
+                hermesObjectField key current rest unknown
 
 validateValue :: Hermes.Decoder ()
 validateValue =
@@ -185,9 +134,8 @@ validateValue =
         Hermes.VArray ->
             () <$ Hermes.list validateValue
         Hermes.VObject ->
-            () <$ Hermes.objectAsKeyValues
-                (const validateValue)
-                (pure ())
+            () <$ Hermes.objectFold ()
+                (\_ () -> validateValue)
         Hermes.VNumber ->
             () <$ Hermes.scientific
         Hermes.VString ->
