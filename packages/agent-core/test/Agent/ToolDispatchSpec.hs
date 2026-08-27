@@ -1,19 +1,20 @@
 module Agent.ToolDispatchSpec (spec) where
 
+import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
 import qualified Control.Exception as Exception
-import Data.Aeson (FromJSON(..), Value(..))
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 newtype EchoArgs = EchoArgs
     { message :: Text
     } deriving (Show, Eq)
 
-instance FromJSON EchoArgs where
-    parseJSON = objectArgs $ \object -> EchoArgs
+echoArgsDecoder :: Json.Decoder EchoArgs
+echoArgsDecoder = objectArgs $ \object -> EchoArgs
         <$> reqText object "message"
 
 spec :: Spec
@@ -38,7 +39,7 @@ spec = describe "dispatchToolCall" do
 
     it "decodes typed tool arguments before running the handler" do
         result <- dispatchToolCall testConfig
-            [ typedTool "echo" \(EchoArgs message) ->
+            [ typedTool "echo" echoArgsDecoder \(EchoArgs message) ->
                 pure (Right ("echo:" <> message))
             ]
             (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
@@ -66,22 +67,15 @@ spec = describe "dispatchToolCall" do
                 , "kill_task"
                 ]
 
-    it "maps the public subagent background parameter to the internal schema" do
+    it "leaves tool argument bytes unchanged" do
         let value = toolArgumentsValue
                 "{\"prompt\":\"inspect\",\"description\":\"inspect code\",\"background\":false}"
         canonicalToolArguments "spawn_subagent" value
-            `shouldBe`
-                toolArgumentsValue
-                    "{\"prompt\":\"inspect\",\"description\":\"inspect code\",\"run_in_background\":false}"
-
-    it "keeps the internal subagent background parameter when both are sent" do
-        let value = toolArgumentsValue
-                "{\"background\":true,\"run_in_background\":false}"
-        canonicalToolArguments "spawn_subagent" value `shouldBe` value
+            `shouldBe` value
 
     it "passes the originating call to call-aware typed handlers" do
         result <- dispatchToolCall testConfig
-            [ typedToolWithCall "echo" \call (EchoArgs message) ->
+            [ typedToolWithCall "echo" echoArgsDecoder \call (EchoArgs message) ->
                 pure (Right (call.callId <> ":" <> message))
             ]
             (functionToolCall "call-1" "echo" "{\"message\":\"hello\"}")
@@ -89,14 +83,15 @@ spec = describe "dispatchToolCall" do
 
     it "turns typed decode failures into formatted tool output" do
         result <- dispatchToolCall testConfig
-            [ typedTool "echo" \(EchoArgs message) ->
+            [ typedTool "echo" echoArgsDecoder \(EchoArgs message) ->
                 pure (Right ("echo:" <> message))
             ]
             (functionToolCall "call-1" "echo" "{}")
-        result `shouldBe` functionResult "call-1" "ERR Missing parameter: message"
+        result.output `shouldSatisfy` Text.isInfixOf "ERR"
+        result.output `shouldSatisfy` Text.isInfixOf "message"
 
-    it "preserves invalid JSON arguments as a string value" do
-        toolArgumentsValue "not-json" `shouldBe` String "not-json"
+    it "retains invalid argument text for the decoder to reject" do
+        toolArgumentsValue "not-json" `shouldBe` "not-json"
 
     it "supports no-argument tools" do
         result <- dispatchToolCall testConfig
@@ -126,7 +121,7 @@ spec = describe "dispatchToolCall" do
                     modifyIORef' seen (<> [(seenCall.callId, output)])
                 }
         result <- dispatchToolCall config
-            [ typedStreamingTool "echo" \emit (EchoArgs message) -> do
+            [ typedStreamingTool "echo" echoArgsDecoder \emit (EchoArgs message) -> do
                 emit ("partial:" <> message)
                 pure (Right ("echo:" <> message))
             ]

@@ -1,5 +1,6 @@
 module Agent.Tools.FileSystem.Grep (grepTool) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -23,7 +24,6 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Control.Applicative ((<|>))
-import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -59,8 +59,8 @@ data GrepArgs = GrepArgs
     , outputMode :: GrepOutputMode
     }
 
-instance FromJSON GrepArgs where
-    parseJSON = objectArgs \object -> do
+grepArgsDecoder :: Decoder GrepArgs
+grepArgsDecoder = objectArgs \object -> do
         modeText <- optText object "output_mode"
         GrepArgs
             <$> reqText object "pattern"
@@ -107,7 +107,7 @@ grepTool env = withToolResourceClaims (grepClaims env) $
     ]
     True
     ParallelSafe
-    (typedTool "grep" (runGrep env))
+    (typedTool "grep" grepArgsDecoder (runGrep env))
 
 grepClaims
     :: ToolEnv
@@ -115,7 +115,7 @@ grepClaims
     -> IO (Either Text [ToolResourceClaim])
 grepClaims env call =
     case
-        decodeToolArguments (toolArgumentsValue call.arguments)
+        decodeToolArguments grepArgsDecoder (toolArgumentsValue call.arguments)
             :: Either Text GrepArgs
     of
         Left err -> pure (Left err)

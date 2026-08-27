@@ -34,11 +34,13 @@ module Agent.Loop
     , liveTokensPerSecond
     , runLoop
     , tokensPerSecond
+    , tokenUsageDecoder
     , runLoopInputs
     , runLoopInputsDetailed
     ) where
 
 import Agent.Cancel (CancelFlag, isCancelled, waitCancel)
+import qualified Agent.Json.Decode as Json
 import Agent.Error (ApiError)
 import Agent.InterAgentMessage (InterAgentMessage)
 import Agent.Responses.Types (ResponseItem)
@@ -101,7 +103,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (void)
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (ToJSON(..), object, (.=))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
@@ -184,12 +186,12 @@ instance ToJSON TokenUsage where
         , "cached" .= usage.cachedTokens
         ]
 
-instance FromJSON TokenUsage where
-    parseJSON = withObject "TokenUsage" \o ->
+tokenUsageDecoder :: Json.Decoder TokenUsage
+tokenUsageDecoder = Json.object $
         TokenUsage
-            <$> o .: "input"
-            <*> o .: "output"
-            <*> (o .:? "cached" .!= 0)
+            <$> Json.atKey "input" Json.int
+            <*> Json.atKey "output" Json.int
+            <*> (maybe 0 id <$> Json.atKeyOptional "cached" Json.int)
 
 addTokenUsage :: TokenUsage -> TokenUsage -> TokenUsage
 addTokenUsage a b = TokenUsage

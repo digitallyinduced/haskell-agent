@@ -15,21 +15,14 @@ module Agent.Tools.CodeMode.Protocol
     , encodeToolSuccess
     ) where
 
+import qualified Agent.Json.Decode as Json
 import Data.Aeson
-    ( FromJSON(..)
-    , Object
-    , ToJSON(..)
+    ( ToJSON(..)
     , Value(..)
-    , eitherDecodeStrict'
     , encode
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
-import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson.Key as Key
@@ -38,6 +31,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Vector as Vector
 
 data CodeModeToolMetadata = CodeModeToolMetadata
     { toolMetadataName :: !Text
@@ -81,99 +75,80 @@ data ProtocolMessage
         }
     deriving (Eq, Show)
 
-instance FromJSON ProtocolMessage where
-    parseJSON = withObject "code-mode protocol message" \message -> do
-        ensureOnly ["jsonrpc", "method", "id", "params", "result", "error", "partial_result", "stored_value_writes"] message
-        version <- message .: "jsonrpc"
+protocolMessageDecoder :: Json.Decoder ProtocolMessage
+protocolMessageDecoder = Json.object do
+        version <- Json.atKey "jsonrpc" Json.text
         if (version :: Text) /= "2.0"
             then fail "unsupported jsonrpc version"
-            else parseBody message
+            else parseBody
       where
-        parseBody message = do
-            method <- message .:? "method"
+        parseBody = do
+            method <- Json.atKeyOptional "method" Json.text
             case (method :: Maybe Text) of
-                Just "ready" -> do
-                    ensureOnly ["jsonrpc", "method"] message
-                    pure WorkerReady
+                Just "ready" -> pure WorkerReady
                 Just "tool/call" -> do
-                    ensureOnly ["jsonrpc", "method", "id", "params"] message
-                    requestId <- message .: "id"
-                    params <- message .: "params"
-                    invocation <- withObject "tool/call params" (\paramsObject -> do
-                        ensureOnly ["name", "arguments"] paramsObject
-                        parseJSON (Object paramsObject)) params
+                    requestId <- Json.atKey "id" Json.text
+                    invocation <- Json.atKey "params" toolInvocationDecoder
                     pure $ WorkerToolInvocation invocation
                         { invocationId = requestId }
-                Just "yield" -> do
-                    ensureOnly ["jsonrpc", "method", "params"] message
-                    params <- message .: "params"
-                    withObject "yield params" (\paramsObject -> do
-                        ensureOnly ["value"] paramsObject
-                        WorkerYielded <$> paramsObject .: "value") params
-                Just "notify" -> do
-                    ensureOnly ["jsonrpc", "method", "params"] message
-                    params <- message .: "params"
-                    withObject "notify params" (\paramsObject -> do
-                        ensureOnly ["text"] paramsObject
-                        WorkerNotification <$> paramsObject .: "text") params
-                Just "content" -> do
-                    ensureOnly ["jsonrpc", "method", "params"] message
-                    params <- message .: "params"
-                    withObject "content params" (\paramsObject -> do
-                        ensureOnly ["value"] paramsObject
-                        WorkerContent <$> paramsObject .: "value") params
+                Just "yield" ->
+                    Json.atKey "params" $
+                        Json.object (WorkerYielded <$> Json.atKey "value" aesonValueDecoder)
+                Just "notify" ->
+                    Json.atKey "params" $
+                        Json.object (WorkerNotification <$> Json.atKey "text" Json.text)
+                Just "content" ->
+                    Json.atKey "params" $
+                        Json.object (WorkerContent <$> Json.atKey "value" aesonValueDecoder)
                 Just unknown ->
                     fail $ "unsupported worker method: " <> show unknown
                 Nothing -> do
-                    ensureOnly
-                        ["jsonrpc", "id", "result", "error", "partial_result", "stored_value_writes"]
-                        message
-                    requestId <- message .: "id"
-                    result <- message .:? "result"
-                    err <- message .:? "error"
+                    requestId <- Json.atKey "id" Json.text
+                    result <- Json.atKeyOptional "result" aesonValueDecoder
+                    err <- Json.atKeyOptional "error" errorDecoder
+                    writes <- maybe Map.empty id
+                        <$> Json.atKeyOptional "stored_value_writes"
+                            (Json.objectAsMap pure aesonValueDecoder)
                     case (result, err) of
                         (Just value, Nothing) ->
-                            WorkerExecSucceeded
-                                <$> pure requestId
-                                <*> pure value
-                                <*> message .:? "stored_value_writes"
-                                    .!= Map.empty
-                        (Nothing, Just errorObject) ->
-                            WorkerExecFailed requestId
-                                <$> parseError errorObject
-                                <*> message .:? "partial_result"
-                                    .!= object
-                                        [ "content" .= ([] :: [Value]) ]
-                                <*> message .:? "stored_value_writes"
-                                    .!= Map.empty
+                            pure (WorkerExecSucceeded requestId value writes)
+                        (Nothing, Just message) -> do
+                            partial <- maybe (object ["content" .= ([] :: [Value])]) id
+                                <$> Json.atKeyOptional "partial_result" aesonValueDecoder
+                            pure (WorkerExecFailed requestId message partial writes)
                         _ -> fail "response must contain exactly one of result or error"
 
-        parseError = withObject "JSON-RPC error" \errorObject -> do
-            ensureOnly ["code", "message"] errorObject
-            (_ :: Int) <- errorObject .: "code"
-            errorObject .: "message"
+        errorDecoder = Json.object do
+            (_ :: Int) <- Json.atKey "code" Json.int
+            Json.atKey "message" Json.text
 
-instance FromJSON ToolInvocation where
-    parseJSON = withObject "tool invocation" \params ->
+toolInvocationDecoder :: Json.Decoder ToolInvocation
+toolInvocationDecoder = Json.object $
         ToolInvocation
             <$> pure ""
-            <*> params .: "name"
-            <*> params .: "arguments"
-
-ensureOnly :: [Text] -> Object -> Parser ()
-ensureOnly allowed object =
-    case
-        [ Key.toText key
-        | key <- KeyMap.keys object
-        , Key.toText key `notElem` allowed
-        ]
-    of
-        [] -> pure ()
-        unknown : _ ->
-            fail $ "unexpected field `" <> Text.unpack unknown <> "`"
+            <*> Json.atKey "name" Json.text
+            <*> Json.atKey "arguments" aesonValueDecoder
 
 decodeProtocolMessage :: BS.ByteString -> Either String ProtocolMessage
-decodeProtocolMessage = eitherDecodeStrict'
+decodeProtocolMessage =
+    either (Left . Text.unpack . (.jsonErrorMessage)) Right
+        . Json.decodeEither protocolMessageDecoder
+
+-- Code mode deliberately transports arbitrary JavaScript values. Decode that
+-- dynamic protocol leaf with Hermes, while keeping Aeson only as the in-memory
+-- representation used by the existing evaluator and encoder.
+aesonValueDecoder :: Json.Decoder Value
+aesonValueDecoder = Json.withType \case
+    Json.VArray -> Array . Vector.fromList <$> Json.list aesonValueDecoder
+    Json.VObject ->
+        Object . KeyMap.fromList
+            <$> Json.objectAsKeyValues
+                (pure . Key.fromText)
+                aesonValueDecoder
+    Json.VNumber -> Number <$> Json.scientific
+    Json.VString -> String <$> Json.text
+    Json.VBoolean -> Bool <$> Json.bool
+    Json.VNull -> pure Null
 
 encodeExecRequest :: Text -> Text -> [Text] -> BS.ByteString
 encodeExecRequest requestId source toolNames =

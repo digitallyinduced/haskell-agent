@@ -1,6 +1,7 @@
 -- | Provider-neutral credential acquisition and account failover.
 module Agent.Provider
     ( BillingMode(..)
+    , billingModeDecoder
     , TokenProvider
     , tokenProviderBillingMode
     , tokenProvider
@@ -26,6 +27,7 @@ import Agent.Error
     , apiErrorRetryAfter
     , credentialExhaustionReasonFromApiError
     )
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Maybe (fromMaybe)
@@ -78,8 +80,8 @@ instance Aeson.ToJSON BillingMode where
         SubscriptionBilled -> "subscription"
         ApiBilled -> "api_credits"
 
-instance Aeson.FromJSON BillingMode where
-    parseJSON = Aeson.withText "BillingMode" \case
+billingModeDecoder :: Json.Decoder BillingMode
+billingModeDecoder = Json.withText \case
         "subscription" -> pure SubscriptionBilled
         "api_credits" -> pure ApiBilled
         other -> fail ("unknown billing mode: " <> show other)

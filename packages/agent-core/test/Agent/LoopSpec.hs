@@ -1,5 +1,6 @@
 module Agent.LoopSpec (spec) where
 
+import qualified Agent.Json.Decode as Json
 import Agent.Cancel (newCancelFlag, requestCancel)
 import Agent.Error (ApiError(..))
 import Agent.Loop
@@ -33,7 +34,6 @@ import Control.Concurrent.MVar
     , tryReadMVar
     )
 import qualified Control.Exception as Exception
-import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -1139,7 +1139,7 @@ spec = describe "runLoop" do
         config0 <- testConfig backend
         let config = config0
                 { loopTools = registryFromHandlers
-                    [ typedStreamingTool "stream" \emit EchoArgs{message} -> do
+                    [ typedStreamingTool "stream" echoArgsDecoder \emit EchoArgs{message} -> do
                         emit ("partial:" <> message)
                         pure (Right ("complete:" <> message))
                     ]
@@ -1493,7 +1493,7 @@ testConfig backend = do
             , commitBackendState = writeIORef state
             }
         , loopTools = registryFromHandlers
-            [ typedTool "echo" $ \EchoArgs { message } ->
+            [ typedTool "echo" echoArgsDecoder $ \EchoArgs { message } ->
                 pure (Right ("echo:" <> message))
             ]
         , loopDispatch = defaultLoopDispatch
@@ -1547,8 +1547,8 @@ concurrencyProbeMicros = 5000000
 
 data EchoArgs = EchoArgs { message :: Text }
 
-instance FromJSON EchoArgs where
-    parseJSON = objectArgs $ \object -> EchoArgs <$> reqText object "message"
+echoArgsDecoder :: Json.Decoder EchoArgs
+echoArgsDecoder = objectArgs $ \object -> EchoArgs <$> reqText object "message"
 
 functionResult :: Text -> Text -> ToolCallResult
 functionResult callId output = ToolCallResult

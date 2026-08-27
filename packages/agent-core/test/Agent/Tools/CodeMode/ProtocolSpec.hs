@@ -38,17 +38,13 @@ spec = describe "code-mode worker protocol" do
                 Left _ -> True
                 Right _ -> False
 
-    it "rejects unknown protocol fields at every message boundary" do
+    it "ignores unknown protocol fields at every message boundary" do
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"ready\",\"unexpected\":true}"
-            `shouldSatisfy` \case
-                Left _ -> True
-                Right _ -> False
+            `shouldBe` Right WorkerReady
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"content\",\"params\":{\"value\":null,\"unexpected\":true}}"
-            `shouldSatisfy` \case
-                Left _ -> True
-                Right _ -> False
+            `shouldBe` Right (WorkerContent Aeson.Null)
 
     it "decodes content, yield, and notification messages" do
         decodeProtocolMessage

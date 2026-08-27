@@ -36,6 +36,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
+import qualified Data.Aeson.Key as Key
 import Agent.ToolDispatch (typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
@@ -84,19 +85,14 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forM, unless, void, when)
+import qualified Agent.Json.Decode as Json
 import Data.Aeson
-    ( FromJSON(..)
-    , Value(..)
+    ( Value(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -752,17 +748,24 @@ data McpTool = McpTool
     , discoveredReadOnly :: !Bool
     }
 
-instance FromJSON McpTool where
-    parseJSON = withObject "MCP tool" \fields -> do
-        annotations <- fields .:? "annotations" .!= object []
-        readOnly <- withObject "MCP tool annotations"
-            (\values -> values .:? "readOnlyHint" .!= False)
-            annotations
-        McpTool
-            <$> fields .: "name"
-            <*> fields .:? "description" .!= ""
-            <*> fields .:? "inputSchema" .!= emptyInputSchema
-            <*> pure readOnly
+mcpToolFromValue :: Value -> Either Text McpTool
+mcpToolFromValue (Object fields) = do
+    discoveredName <- case KeyMap.lookup "name" fields of
+        Just (String value) -> Right value
+        _ -> Left "MCP tool omitted string name"
+    let discoveredDescription = case KeyMap.lookup "description" fields of
+            Just (String value) -> value
+            _ -> ""
+        discoveredInputSchema =
+            maybe emptyInputSchema id (KeyMap.lookup "inputSchema" fields)
+        discoveredReadOnly = case KeyMap.lookup "annotations" fields of
+            Just (Object annotations) ->
+                case KeyMap.lookup "readOnlyHint" annotations of
+                    Just (Bool value) -> value
+                    _ -> False
+            _ -> False
+    Right McpTool{..}
+mcpToolFromValue _ = Left "MCP tool must be an object"
 
 emptyInputSchema :: Value
 emptyInputSchema = object
@@ -1082,7 +1085,7 @@ mcpSearchTool fleet = AppTool
             ]
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_search" \arguments -> do
+    , appToolHandler = typedTool "mcp_search" aesonValueDecoder \arguments -> do
         entries <- readTVarIO fleet.mcpFleetCatalog
         statuses <- mcpFleetStatuses fleet
         let (query, server, limit) = searchArguments arguments
@@ -1146,7 +1149,7 @@ grokSearchTool fleet = AppTool
         , "required" .= (["query"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "search_tool" \arguments ->
+    , appToolHandler = typedTool "search_tool" aesonValueDecoder \arguments ->
         case grokSearchArguments arguments of
             Left err -> pure (Left err)
             Right (query, limit) -> do
@@ -1357,7 +1360,7 @@ mcpCallTool fleet = AppTool
         , "required" .= (["name"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_call" \arguments ->
+    , appToolHandler = typedTool "mcp_call" aesonValueDecoder \arguments ->
         case callArguments arguments of
             Left err -> pure (Left err)
             Right (name, toolArguments) -> do
@@ -1398,7 +1401,7 @@ grokUseTool fleet = AppTool
         , "required" .= (["tool_name", "tool_input"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "use_tool" \arguments ->
+    , appToolHandler = typedTool "use_tool" aesonValueDecoder \arguments ->
         case grokCallArguments arguments of
             Left err -> pure (Left err)
             Right (name, toolArguments) -> do
@@ -1501,6 +1504,20 @@ grokCallArguments (Object fields) =
                     "use_tool tool_name must be a qualified server__tool name returned by search_tool"
         _ -> Left "use_tool requires a non-empty tool_name"
 grokCallArguments _ = Left "use_tool arguments must be an object"
+
+-- MCP schemas and tool arguments are intentionally dynamic. Hermes performs
+-- the wire decode; Aeson Value remains only the existing in-memory tree used
+-- by request construction and schema rendering.
+aesonValueDecoder :: Json.Decoder Value
+aesonValueDecoder = Json.withType \case
+    Json.VArray -> Array . Vector.fromList <$> Json.list aesonValueDecoder
+    Json.VObject ->
+        Object . KeyMap.fromList
+            <$> Json.objectAsKeyValues (pure . Key.fromText) aesonValueDecoder
+    Json.VNumber -> Number <$> Json.scientific
+    Json.VString -> String <$> Json.text
+    Json.VBoolean -> Bool <$> Json.bool
+    Json.VNull -> pure Null
 
 statusJson :: McpServerStatus -> Value
 statusJson status = object
@@ -1732,8 +1749,8 @@ discoverMcpTools client = go Nothing [] []
         requestMcp client timeoutMicros "tools/list" parameters >>= \case
             Left err -> ioError (userError (Text.unpack err))
             Right result ->
-                case AesonTypes.parseEither parsePage result of
-                    Left err -> ioError (userError ("invalid tools/list response: " <> err))
+                case parsePage result of
+                    Left err -> ioError (userError ("invalid tools/list response: " <> Text.unpack err))
                     Right (pageTools, nextCursor) -> do
                         let (readOnlyTools, skipped) =
                                 foldr classify ([], []) pageTools
@@ -1759,11 +1776,15 @@ discoverMcpTools client = go Nothing [] []
         | tool.discoveredReadOnly = (tool : allowed, skipped)
         | otherwise = (allowed, tool : skipped)
 
-    parsePage :: Value -> AesonTypes.Parser ([McpTool], Maybe Value)
-    parsePage = withObject "tools/list result" \fields ->
-        (,)
-            <$> fields .:? "tools" .!= []
-            <*> fields .:? "nextCursor"
+    parsePage :: Value -> Either Text ([McpTool], Maybe Value)
+    parsePage (Object fields) = do
+        tools <- case KeyMap.lookup "tools" fields of
+            Nothing -> Right []
+            Just (Array values) ->
+                traverse mcpToolFromValue (Vector.toList values)
+            Just _ -> Left "tools must be an array"
+        pure (tools, KeyMap.lookup "nextCursor" fields)
+    parsePage _ = Left "tools/list result must be an object"
 
 appToolFor :: McpClient -> McpTool -> AppTool
 appToolFor client tool = AppTool
@@ -1771,7 +1792,7 @@ appToolFor client tool = AppTool
     , appToolDescription = tool.discoveredDescription
     , appToolSchema = RawJsonFunctionSchema tool.discoveredInputSchema
     , appToolHandler =
-        typedTool qualifiedName \arguments -> do
+        typedTool qualifiedName aesonValueDecoder \arguments -> do
             callDiscoveredTool client tool arguments
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
@@ -1907,10 +1928,10 @@ readerLoop output pending failure =
     loop = do
         line <- BS8.hGetLine output
         unless (BS.null line) $
-            case Aeson.eitherDecodeStrict' line of
+            case Json.decodeEither aesonValueDecoder line of
                 Left err ->
                     failPending pending failure
-                        ("Invalid MCP JSON response: " <> Text.pack err)
+                        ("Invalid MCP JSON response: " <> err.jsonErrorMessage)
                 Right value ->
                     routeResponse pending value
         loop

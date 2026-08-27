@@ -95,6 +95,7 @@ library
     autogen-modules:  Paths_agent_core
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , aeson >= 2.0
@@ -164,6 +165,7 @@ benchmark loop-events-bench
     main-is:          LoopEvents.hs
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
+                    , agent-json
                     , aeson
                     , base >= 4.14 && < 5
                     , text
@@ -230,6 +232,7 @@ test-suite agent-core-test
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json
                     , agent-responses-types
                     , aeson
                     , async

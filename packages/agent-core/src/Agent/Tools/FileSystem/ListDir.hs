@@ -5,6 +5,7 @@ module Agent.Tools.FileSystem.ListDir
     , renderTree
     ) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -32,7 +33,6 @@ import Agent.Tools.Types
     , jsonTool
     , withToolResourceClaims
     )
-import Data.Aeson (FromJSON(..))
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -42,8 +42,8 @@ import System.OsPath (OsPath, takeExtension, (</>))
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
 
-instance FromJSON ListDirArgs where
-    parseJSON = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
+listDirArgsDecoder :: Decoder ListDirArgs
+listDirArgsDecoder = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
 
 listDirTool :: ToolEnv -> AppTool
 listDirTool env = withToolResourceClaims (listDirClaims env) $
@@ -53,7 +53,7 @@ listDirTool env = withToolResourceClaims (listDirClaims env) $
     ]
     True
     ParallelSafe
-    (typedTool "list_dir" (runListDir env))
+    (typedTool "list_dir" listDirArgsDecoder (runListDir env))
 
 listDirClaims
     :: ToolEnv
@@ -61,7 +61,7 @@ listDirClaims
     -> IO (Either Text [ToolResourceClaim])
 listDirClaims env call =
     case
-        decodeToolArguments (toolArgumentsValue call.arguments)
+        decodeToolArguments listDirArgsDecoder (toolArgumentsValue call.arguments)
             :: Either Text ListDirArgs
     of
         Left err -> pure (Left err)

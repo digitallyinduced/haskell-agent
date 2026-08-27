@@ -9,6 +9,7 @@ module Agent.ToolDispatch
     , typedTool
     , typedToolWithCall
     , typedStreamingTool
+    , streamingTextTool
     , noArgsTool
     , functionToolCall
     , customToolCall
@@ -21,19 +22,14 @@ module Agent.ToolDispatch
     , decodeToolArguments
     ) where
 
-import Agent.ToolArgs (stripAesonPrefix)
 import Agent.Dialect (grokBuildCanonicalToolName)
+import Agent.Json.Decode (Decoder)
+import qualified Agent.Json.Decode as Json
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (SomeException, tryAny)
-import Data.Aeson (FromJSON, Value(..))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (parseEither)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 
 -- | How the originating model turn encoded this call. Adapters need this to
 -- emit @function_call_output@ versus @custom_tool_call_output@.
@@ -99,25 +95,34 @@ data ToolDispatchConfig = ToolDispatchConfig
     }
 
 data ToolHandler
-    = forall args. FromJSON args => TypedTool Text (args -> IO (Either Text Text))
-    | forall args. FromJSON args => TypedToolWithCall Text (ToolCall -> args -> IO (Either Text Text))
-    | forall args. FromJSON args => TypedStreamingTool Text ((Text -> IO ()) -> args -> IO (Either Text Text))
+    = forall args. TypedTool Text (Decoder args) (args -> IO (Either Text Text))
+    | forall args. TypedToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text Text))
+    | forall args. TypedStreamingTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text Text))
+    | StreamingTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
-typedTool :: FromJSON args => Text -> (args -> IO (Either Text Text)) -> ToolHandler
+typedTool :: Text -> Decoder args -> (args -> IO (Either Text Text)) -> ToolHandler
 typedTool = TypedTool
 
-typedToolWithCall :: FromJSON args => Text -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
+typedToolWithCall :: Text -> Decoder args -> (ToolCall -> args -> IO (Either Text Text)) -> ToolHandler
 typedToolWithCall = TypedToolWithCall
 
 -- | A typed tool that can publish accumulated output snapshots while running.
 -- The final result remains authoritative.
 typedStreamingTool
-    :: FromJSON args
-    => Text
+    :: Text
+    -> Decoder args
     -> ((Text -> IO ()) -> args -> IO (Either Text Text))
     -> ToolHandler
 typedStreamingTool = TypedStreamingTool
+
+-- | A streaming freeform tool. Its input is not JSON, so no JSON decoder is
+-- involved.
+streamingTextTool
+    :: Text
+    -> ((Text -> IO ()) -> Text -> IO (Either Text Text))
+    -> ToolHandler
+streamingTextTool = StreamingTextTool
 
 noArgsTool :: Text -> IO (Either Text Text) -> ToolHandler
 noArgsTool = NoArgsTool
@@ -135,9 +140,7 @@ dispatchToolHandler
     -> IO ToolCallResult
 dispatchToolHandler config maybeHandler call = do
     let callName = call.name
-        input =
-            canonicalToolArguments call.name
-                (toolArgumentsValue call.arguments)
+        input = canonicalToolArguments call.name call.arguments
         runTool = case maybeHandler of
             Just handler ->
                 runHandler
@@ -168,17 +171,14 @@ dispatchToolHandler config maybeHandler call = do
         , callKind = call.callKind
         }
 
-toolArgumentsValue :: Text -> Value
-toolArgumentsValue arguments =
-    case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 arguments) of
-        Right value -> value
-        Left _ -> String arguments
+toolArgumentsValue :: Text -> Text
+toolArgumentsValue = id
 
-decodeToolArguments :: FromJSON args => Value -> Either Text args
-decodeToolArguments value =
-    case parseEither Aeson.parseJSON value of
+decodeToolArguments :: Decoder args -> Text -> Either Text args
+decodeToolArguments decoder value =
+    case Json.decodeText decoder value of
         Right args -> Right args
-        Left err -> Left (stripAesonPrefix (Text.pack err))
+        Left err -> Left err.jsonErrorMessage
 
 findHandler :: Text -> [ToolHandler] -> Maybe ToolHandler
 findHandler name handlers =
@@ -212,24 +212,8 @@ canonicalToolName name
 -- | Project current public Grok Build parameter names back onto the stable
 -- internal handler contract. Keep this beside 'canonicalToolName' so every
 -- dispatch path applies the same compatibility mapping.
-canonicalToolArguments :: Text -> Value -> Value
-canonicalToolArguments name value
-    | canonicalToolName name == "task" =
-        renameObjectKey "background" "run_in_background" value
-    | otherwise = value
-
-renameObjectKey :: Text -> Text -> Value -> Value
-renameObjectKey source target (Object object)
-    | KeyMap.member targetKey object = Object object
-    | Just field <- KeyMap.lookup sourceKey object =
-        Object $
-            KeyMap.insert targetKey field
-                (KeyMap.delete sourceKey object)
-    | otherwise = Object object
-  where
-    sourceKey = Key.fromText source
-    targetKey = Key.fromText target
-renameObjectKey _ _ value = value
+canonicalToolArguments :: Text -> Text -> Text
+canonicalToolArguments _ = id
 
 multiAgentBareNames :: [Text]
 multiAgentBareNames =
@@ -247,28 +231,30 @@ multiAgentBareNames =
 
 handlerName :: ToolHandler -> Text
 handlerName = \case
-    TypedTool name _ -> name
-    TypedToolWithCall name _ -> name
-    TypedStreamingTool name _ -> name
+    TypedTool name _ _ -> name
+    TypedToolWithCall name _ _ -> name
+    TypedStreamingTool name _ _ -> name
+    StreamingTextTool name _ -> name
     NoArgsTool name _ -> name
 
 runHandler
     :: (Text -> IO ())
     -> ToolCall
-    -> Value
+    -> Text
     -> ToolHandler
     -> IO (Either Text Text)
 runHandler emitOutput call value = \case
-    TypedTool _ run -> decodeAndRun value run
-    TypedToolWithCall _ run -> decodeAndRun value (run call)
-    TypedStreamingTool _ run -> decodeAndRun value (run emitOutput)
+    TypedTool _ decoder run -> decodeAndRun decoder value run
+    TypedToolWithCall _ decoder run -> decodeAndRun decoder value (run call)
+    TypedStreamingTool _ decoder run -> decodeAndRun decoder value (run emitOutput)
+    StreamingTextTool _ run -> run emitOutput value
     NoArgsTool _ run ->
         run
 
 decodeAndRun
-    :: FromJSON args
-    => Value
+    :: Decoder args
+    -> Text
     -> (args -> IO (Either Text Text))
     -> IO (Either Text Text)
-decodeAndRun value run =
-    either (pure . Left) run (decodeToolArguments value)
+decodeAndRun decoder value run =
+    either (pure . Left) run (decodeToolArguments decoder value)
