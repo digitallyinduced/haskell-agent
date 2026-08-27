@@ -150,6 +150,7 @@ import Agent.CLI.Terminal
     , kittyAltCsiBodies
     , kittyCtrlCsiBodies
     , kittyCtrlUnderscoreCsiBodies
+    , kittyEscapeCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -890,12 +891,23 @@ fullscreenVtyConfig =
     V.defaultConfig
         { V.configPreferredColorMode = Just V.FullColor
         , V.configInputMap =
+            -- The Esc key itself: with the Kitty disambiguate flag pushed the
+            -- terminal sends Esc as @CSI 27 u@. Vty has no CSI-u table, so an
+            -- unmapped body decodes as bare Esc followed by its payload as
+            -- typed text — cancelling a turn then left "[27u" in the composer
+            -- (and in the next prompt sent to the model).
             [ ( Nothing
               , "\ESC[" <> body
-              , V.EvKey V.KEnter [V.MShift]
+              , V.EvKey V.KEsc []
               )
-            | body <- shiftEnterCsiBodies
+            | body <- kittyEscapeCsiBodies
             ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey V.KEnter [V.MShift]
+                 )
+               | body <- shiftEnterCsiBodies
+               ]
             <> [ ( Nothing
                  , "\ESC[" <> body
                  , V.EvKey (V.KChar character) [V.MCtrl]
