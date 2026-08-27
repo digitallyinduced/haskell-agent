@@ -96,8 +96,10 @@ isMultiAgentTool :: AppTool -> Bool
 isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
-schemaFromAppTool dialect tool =
-    case tool.appToolSchema of
+schemaFromAppTool dialect tool
+    | tool.appToolName == "computer" =
+        Just (knownResponseTool ToolComputer KeyMap.empty)
+    | otherwise = case tool.appToolSchema of
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas ->

@@ -109,6 +109,10 @@ toStoredResponseItem = \case
             , storedCustomToolCallOutputExtraFields =
                 encodeObject output.extraFields
             }
+    ComputerCallItem item ->
+        storedTypedKnownItem "computer_call" item
+    ComputerCallOutputItem item ->
+        storedTypedKnownItem "computer_call_output" item
     ReasoningItemValue reasoning ->
         StoredReasoningItem StoredReasoning
             { storedReasoningProviderItemId = reasoning.itemId

@@ -151,6 +151,7 @@ formatSearchReplaceDiff arguments =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
+    "computer" -> "Screenshot captured"
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
     "wait_agent" ->

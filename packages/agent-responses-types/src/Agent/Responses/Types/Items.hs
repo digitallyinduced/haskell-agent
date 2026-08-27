@@ -10,6 +10,11 @@ module Agent.Responses.Types.Items
     , FunctionCallOutput(..)
     , CustomToolCall(..)
     , CustomToolCallOutput(..)
+    , ComputerAction(..)
+    , ComputerPoint(..)
+    , SafetyCheck(..)
+    , ComputerCall(..)
+    , ComputerCallOutput(..)
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
     , ItemReference(..)
@@ -366,6 +371,224 @@ instance FromJSON CustomToolCallOutput where
             <*> pure
                 (without
                     ["type", "id", "call_id", "name", "output", "status"] o)
+
+-- | A point in the screen coordinate space used by the Responses computer
+-- tool. Coordinates are intentionally integers: providers reject fractional
+-- input and native executors can pass these values without rounding.
+data ComputerPoint = ComputerPoint
+    { pointX :: !Int
+    , pointY :: !Int
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerPoint where
+    toJSON ComputerPoint { pointX, pointY } =
+        object ["x" .= pointX, "y" .= pointY]
+
+instance FromJSON ComputerPoint where
+    parseJSON = withObject "ComputerPoint" $ \o ->
+        ComputerPoint <$> o .: "x" <*> o .: "y"
+
+-- | Actions emitted by a provider-native computer-use tool.
+--
+-- The unknown constructor is deliberately lossless. Providers occasionally
+-- add actions before the API client is updated; retaining those items allows
+-- a session to be resumed instead of making its transcript undecodable.
+data ComputerAction
+    = ScreenshotAction
+    | ClickAction
+        { clickX      :: !Int
+        , clickY      :: !Int
+        , clickButton :: !Text
+        }
+    | DoubleClickAction
+        { doubleClickX :: !Int
+        , doubleClickY :: !Int
+        }
+    | TypeAction !Text
+    | KeypressAction ![Text]
+    | ScrollAction
+        { scrollX  :: !Int
+        , scrollY  :: !Int
+        , scrollDx :: !Int
+        , scrollDy :: !Int
+        }
+    | MoveAction
+        { moveX :: !Int
+        , moveY :: !Int
+        }
+    | WaitAction !Int
+    | DragAction ![ComputerPoint]
+    | UnknownComputerAction !TaggedObject
+    deriving stock (Eq, Show)
+
+instance ToJSON ComputerAction where
+    toJSON = \case
+        ScreenshotAction -> object ["type" .= ("screenshot" :: Text)]
+        ClickAction { clickX, clickY, clickButton } ->
+            object
+                [ "type" .= ("click" :: Text)
+                , "x" .= clickX
+                , "y" .= clickY
+                , "button" .= clickButton
+                ]
+        DoubleClickAction { doubleClickX, doubleClickY } ->
+            object
+                [ "type" .= ("double_click" :: Text)
+                , "x" .= doubleClickX
+                , "y" .= doubleClickY
+                ]
+        TypeAction value -> object
+            [ "type" .= ("type" :: Text), "text" .= value ]
+        KeypressAction keys -> object
+            [ "type" .= ("keypress" :: Text), "keys" .= keys ]
+        ScrollAction { scrollX, scrollY, scrollDx, scrollDy } ->
+            object
+                [ "type" .= ("scroll" :: Text)
+                , "x" .= scrollX
+                , "y" .= scrollY
+                , "scroll_x" .= scrollDx
+                , "scroll_y" .= scrollDy
+                ]
+        MoveAction { moveX, moveY } ->
+            object
+                [ "type" .= ("move" :: Text)
+                , "x" .= moveX
+                , "y" .= moveY
+                ]
+        WaitAction milliseconds -> object
+            [ "type" .= ("wait" :: Text), "ms" .= milliseconds ]
+        DragAction path -> object
+            [ "type" .= ("drag" :: Text), "path" .= path ]
+        UnknownComputerAction value -> toJSON value
+
+instance FromJSON ComputerAction where
+    parseJSON value = withObject "ComputerAction" (\o -> do
+        tag <- o .: "type"
+        case tag of
+            "screenshot" -> pure ScreenshotAction
+            "click" -> ClickAction
+                <$> o .: "x" <*> o .: "y" <*> o .:? "button" .!= "left"
+            "double_click" -> DoubleClickAction <$> o .: "x" <*> o .: "y"
+            "type" -> TypeAction <$> o .: "text"
+            "keypress" -> KeypressAction <$> o .: "keys"
+            "scroll" -> ScrollAction
+                <$> o .: "x" <*> o .: "y"
+                <*> o .:? "scroll_x" .!= 0
+                <*> o .:? "scroll_y" .!= 0
+            "move" -> MoveAction <$> o .: "x" <*> o .: "y"
+            "wait" -> WaitAction <$> o .:? "ms" .!= 1000
+            "drag" -> DragAction <$> o .:? "path" .!= []
+            _ -> pure (UnknownComputerAction TaggedObject
+                { tag
+                , fields = without ["type"] o
+                })) value
+
+data SafetyCheck = SafetyCheck
+    { safetyCheckId      :: !Text
+    , safetyCheckCode    :: !(Maybe Text)
+    , safetyCheckMessage :: !(Maybe Text)
+    , safetyCheckExtra   :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON SafetyCheck where
+    toJSON SafetyCheck
+        { safetyCheckId, safetyCheckCode, safetyCheckMessage, safetyCheckExtra } =
+            objectWith safetyCheckExtra
+                [ Just (field "id" safetyCheckId)
+                , optionalField "code" safetyCheckCode
+                , optionalField "message" safetyCheckMessage
+                ]
+
+instance FromJSON SafetyCheck where
+    parseJSON = withObject "SafetyCheck" $ \o -> SafetyCheck
+        <$> o .: "id"
+        <*> o .:? "code"
+        <*> o .:? "message"
+        <*> pure (without ["id", "code", "message"] o)
+
+data ComputerCall = ComputerCall
+    { computerCallItemId    :: !(Maybe Text)
+    , computerCallId        :: !Text
+    , computerActions       :: ![ComputerAction]
+    , pendingSafetyChecks   :: ![SafetyCheck]
+    , computerCallStatus    :: !(Maybe ItemStatus)
+    , computerCallExtra     :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerCall where
+    toJSON ComputerCall
+        { computerCallItemId, computerCallId, computerActions
+        , pendingSafetyChecks, computerCallStatus, computerCallExtra } =
+            objectWith computerCallExtra
+                [ Just (field "type" ("computer_call" :: Text))
+                , optionalField "id" computerCallItemId
+                , Just (field "call_id" computerCallId)
+                , Just (field "actions" computerActions)
+                , optionalField "pending_safety_checks"
+                    (nonEmpty pendingSafetyChecks)
+                , optionalField "status" computerCallStatus
+                ]
+      where
+        nonEmpty [] = Nothing
+        nonEmpty values = Just values
+
+instance FromJSON ComputerCall where
+    parseJSON = withObject "ComputerCall" $ \o -> ComputerCall
+        <$> o .:? "id"
+        <*> o .: "call_id"
+        <*> o .:? "actions" .!= []
+        <*> o .:? "pending_safety_checks" .!= []
+        <*> o .:? "status"
+        <*> pure (without
+            [ "type", "id", "call_id", "actions", "pending_safety_checks"
+            , "status"
+            ] o)
+
+data ComputerCallOutput = ComputerCallOutput
+    { computerOutputItemId   :: !(Maybe Text)
+    , computerOutputCallId   :: !Text
+    , screenshotDataUrl      :: !Text
+    , acknowledgedChecks     :: ![SafetyCheck]
+    , computerOutputStatus   :: !(Maybe ItemStatus)
+    , computerOutputExtra    :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerCallOutput where
+    toJSON ComputerCallOutput
+        { computerOutputItemId, computerOutputCallId, screenshotDataUrl
+        , acknowledgedChecks, computerOutputStatus, computerOutputExtra } =
+            objectWith computerOutputExtra
+                [ Just (field "type" ("computer_call_output" :: Text))
+                , optionalField "id" computerOutputItemId
+                , Just (field "call_id" computerOutputCallId)
+                , Just (field "output" (object
+                    [ "type" .= ("computer_screenshot" :: Text)
+                    , "image_url" .= screenshotDataUrl
+                    , "detail" .= ("original" :: Text)
+                    ]))
+                , optionalField "acknowledged_safety_checks"
+                    (nonEmpty acknowledgedChecks)
+                , optionalField "status" computerOutputStatus
+                ]
+      where
+        nonEmpty [] = Nothing
+        nonEmpty values = Just values
+
+instance FromJSON ComputerCallOutput where
+    parseJSON = withObject "ComputerCallOutput" $ \o -> do
+        outputValue <- o .:? "output" .!= Aeson.Null
+        image <- withObject "Computer screenshot output" (.: "image_url")
+            outputValue
+        ComputerCallOutput
+            <$> o .:? "id"
+            <*> o .: "call_id"
+            <*> pure image
+            <*> o .:? "acknowledged_safety_checks" .!= []
+            <*> o .:? "status"
+            <*> pure (without
+                [ "type", "id", "call_id", "output"
+                , "acknowledged_safety_checks", "status"
+                ] o)
 
 data ReasoningSummaryPart = ReasoningSummaryPart
     { partType    :: !Text
@@ -813,6 +1036,8 @@ data ResponseItem
     | FunctionCallOutputItem !FunctionCallOutput
     | CustomToolCallItem !CustomToolCall
     | CustomToolCallOutputItem !CustomToolCallOutput
+    | ComputerCallItem !ComputerCall
+    | ComputerCallOutputItem !ComputerCallOutput
     | ReasoningItemValue !ReasoningItem
     | ItemReferenceValue !ItemReference
     | AgentMessageItem !ResponseAgentMessage
@@ -836,6 +1061,8 @@ instance ToJSON ResponseItem where
         FunctionCallOutputItem value -> toJSON value
         CustomToolCallItem value -> toJSON value
         CustomToolCallOutputItem value -> toJSON value
+        ComputerCallItem value -> toJSON value
+        ComputerCallOutputItem value -> toJSON value
         ReasoningItemValue value -> toJSON value
         ItemReferenceValue value -> toJSON value
         AgentMessageItem value -> toJSON value
@@ -862,6 +1089,8 @@ instance FromJSON ResponseItem where
             ItemCustomToolCall -> CustomToolCallItem <$> parseJSON value
             ItemCustomToolCallOutput ->
                 CustomToolCallOutputItem <$> parseJSON value
+            ItemComputerCall -> ComputerCallItem <$> parseJSON value
+            ItemComputerCallOutput -> ComputerCallOutputItem <$> parseJSON value
             ItemReasoning -> ReasoningItemValue <$> parseJSON value
             ItemReferenceType -> ItemReferenceValue <$> parseJSON value
             ItemAgentMessage -> AgentMessageItem <$> parseJSON value

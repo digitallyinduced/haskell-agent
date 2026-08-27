@@ -26,11 +26,13 @@ import Agent.CLI.Auth
       probeLoadedAuthCredential,
       staticCredentialProvider )
 import Agent.CLI.Clipboard ()
+import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Command ()
 import Agent.CLI.Compaction
     ( installLiveCompactOutcome,
       runProviderCompactWith,
       runResponsesCompactWithContextWindow )
+import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),
@@ -91,7 +93,7 @@ import Agent.CLI.Options
                  optYolo, optMaxConcurrentAgents, optCompactThreshold,
                  optShowRawReasoning, optProvider, optModel, optWorktree, optEffort,
                  optPrompt, optPromptFile, optManagedTurnFile,
-                 optScreenMode, optGhci, optBash, optResume, optCwd),
+                 optScreenMode, optGhci, optBash, optComputerUse, optResume, optCwd),
       ScreenMode(ScreenMinimal) )
 import Agent.CLI.PendingInputs ( withPendingInputs )
 import Agent.CLI.Permission (PermissionChoice(..))
@@ -1930,6 +1932,11 @@ runAgentInitializedWithLock
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
         nativeAppTools =
             maybe [] (.nativeTools) startup.startupNativeHooks
+        computerTools =
+            [ ComputerUse.computerUseTool
+            | options.optComputerUse
+            , provider == OpenAIProvider
+            ]
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -1939,6 +1946,7 @@ runAgentInitializedWithLock
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
                 ++ nativeAppTools
+                ++ computerTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
@@ -1949,6 +1957,7 @@ runAgentInitializedWithLock
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
                 ++ nativeAppTools
+                ++ computerTools
         planMode = coding.codingPlanMode
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
