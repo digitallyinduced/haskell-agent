@@ -6,6 +6,7 @@ import Agent.CLI.ProviderTransition
 import Agent.Dialect (DialectId(..))
 import Agent.Provider (BillingMode(..), Provider(..))
 import Agent.Tools.PlanMode (PlanModeState(..))
+import qualified Data.Set as Set
 import Data.Text (Text)
 import Test.Hspec
 
@@ -69,7 +70,7 @@ transition sessionId pending = ProviderTransition
     , transitionAccountId = Nothing
     , transitionSessionId = sessionId
     , transitionPendingTurn = pending
-    , transitionUnavailableProviders = [XAIProvider]
+    , transitionUnavailableProviders = Set.singleton XAIProvider
     , transitionCause = AutomaticFallback
     , transitionAutomaticBilling = Just SubscriptionBilled
     }

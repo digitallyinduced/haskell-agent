@@ -12,6 +12,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Web
 build-type:         Simple
 extra-source-files: README.md
+                  , benchmark/JsonDecoding.md
 
 common common-opts
     default-language: Haskell2010
@@ -88,7 +89,21 @@ test-suite agent-responses-test
                     , agent-responses-types
                     , aeson >= 2.0
                     , bytestring
+                    , containers
                     , hspec
                     , QuickCheck >= 2.14 && < 2.16
                     , retry
+                    , text
+
+benchmark responses-json-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          JsonDecoding.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    aeson >= 2.0
+                    , agent-responses
+                    , agent-responses-types
+                    , base >= 4.14 && < 5
+                    , bytestring
                     , text

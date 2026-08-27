@@ -9,6 +9,7 @@ module Agent.Tools.MultiAgents
     , multiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
+    , spawnSharedSubagent
     ) where
 
 import Agent.Subagents
@@ -109,6 +110,8 @@ data MultiAgentContext = MultiAgentContext
     , multiSendToRoot :: !(Maybe (InterAgentMessage -> IO (Either Text Text)))
       -- | Optional provider/billing-specific guidance for model overrides.
     , multiSpawnModelGuidance :: !(Maybe Text)
+      -- | When set, spawn_subagent may only use these model slugs (or inherit).
+    , multiAllowedChildModels :: !(Maybe [Text])
     }
 
 multiAgentNamespace :: Text
@@ -231,6 +234,35 @@ runSpawn ctx workspace call args
             Left err -> pure (Left err)
             Right (childCwd, worktree) ->
                 restore (spawnInWorkspace ctx call args childCwd worktree)
+
+-- | Spawn a tracked child in the caller's shared workspace.
+--
+-- This is the programmatic counterpart of @spawn_agent@: hosts may use it
+-- from another built-in tool without round-tripping through the JSON tool
+-- dispatcher.  Validation, model sanitization, preparation hooks, task-path
+-- accounting, and lifecycle ownership remain exactly the same as for the
+-- public collaboration tool.
+spawnSharedSubagent
+    :: MultiAgentContext
+    -> ToolCall
+    -> Text
+    -> Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text Text)
+spawnSharedSubagent ctx call taskName message model reasoningEffort forkTurns =
+    runSpawn
+        ctx
+        SharedWorkspace
+        call
+        SpawnAgentArgs
+            { taskName
+            , message
+            , model
+            , reasoningEffort
+            , forkTurns
+            }
 
 spawnToolName :: SpawnWorkspace -> Text
 spawnToolName = \case

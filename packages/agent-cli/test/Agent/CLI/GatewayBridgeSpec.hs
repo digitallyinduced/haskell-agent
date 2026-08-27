@@ -10,7 +10,7 @@ import Agent.ToolDispatch
     , dispatchToolCall
     , functionToolCall
     )
-import Agent.Tools.Types (appToolHandlers)
+import Agent.Tools.Types (AppTool(..), appToolHandlers)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (bracket)
@@ -53,6 +53,13 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     result <- wait running
                     result.output `shouldBe` "sent"
 
+    it "advertises Telegram allowlist tools on the managed gateway bridge" $
+        withBridgeRequest \request -> do
+            let names = map (.appToolName) (managedGatewayTools request)
+            names `shouldContain` ["allow_telegram_user"]
+            names `shouldContain` ["deny_telegram_user"]
+            names `shouldContain` ["list_telegram_users"]
+
     it "uses the bridge for mutating-tool approval choices" $
         withBridgeRequest \request -> do
             let call = functionToolCall
@@ -71,9 +78,13 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     }
                 wait running `shouldReturn` Just PermissionAllowOnce
 
-    it "publishes redacted activity rather than streamed content" $
+    it "publishes accumulated reasoning summaries and response text" $
         withBridgeRequest \request -> do
-            publishManagedLoopEvent request (TextDelta "secret response text")
+            publish <- newManagedLoopEventPublisher request
+            publish (ReasoningDelta "Checking ")
+            publish (ReasoningDelta "the files")
+            publish (TextDelta "Found ")
+            publish (TextDelta "the issue.")
             bytes <- LBS.readFile
                 (unsafeToFilePath (managedBridgeActivityPath request))
             activity <- case
@@ -84,6 +95,8 @@ spec = describe "Agent.CLI.GatewayBridge" do
                 Right value -> pure value
             activity.managedActivityKind `shouldBe` "writing"
             activity.managedActivityMessage `shouldBe` "Writing reply…"
+            activity.managedActivityReasoning `shouldBe` "Checking the files"
+            activity.managedActivityResponse `shouldBe` "Found the issue."
 
 withBridgeRequest :: (ManagedTurnRequest -> IO a) -> IO a
 withBridgeRequest action =

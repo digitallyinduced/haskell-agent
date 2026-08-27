@@ -46,6 +46,7 @@ library
                     , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Provider.Options
+                    , Agent.ReasoningEffort
                     , Agent.Loop
                     , Agent.MCP
                     , Agent.JsonText
@@ -77,9 +78,11 @@ library
                     , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
+                    , Agent.Tools.OutputArtifact
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
+                    , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     hs-source-dirs:   src
@@ -142,6 +145,7 @@ benchmark tool-scheduling-bench
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
                     , base >= 4.14 && < 5
+                    , filepath
                     , text
 
 benchmark loop-events-bench
@@ -191,9 +195,12 @@ test-suite agent-core-test
                     , Agent.ToolDispatchSpec
                     , Agent.Tools.DangerousSpec
                     , Agent.Tools.FileSystem.GrepSpec
+                    , Agent.Tools.FileSystem.ListDirSpec
+                    , Agent.Tools.FileSystem.ReadFileSpec
                     , Agent.Tools.GhciSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
+                    , Agent.Tools.OutputArtifactSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.SecretSpec
                     , Agent.ToolDSLSpec
@@ -208,6 +215,7 @@ test-suite agent-core-test
                     , filepath
                     , containers
                     , hspec
+                    , QuickCheck >= 2.14 && < 2.16
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
                     , stm

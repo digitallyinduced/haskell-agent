@@ -16,7 +16,7 @@ import Agent.CLI.Notification
 import Agent.CLI.Options (ApprovalAnswer(..), parseApprovalAnswer)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (glyphWarn, roleMuted, roleSuccess, roleWarn)
-import Agent.TUI.Presentation (permissionToolCallPrompt)
+import Agent.TUI.Presentation (permissionToolCallPromptRelative)
 import Agent.ToolDispatch (ToolCall)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -99,10 +99,10 @@ renderRow color selected label =
 -- | TTY card; non-TTY keeps cooked @y/n/a/A@. Uppercase @A@, @all@, or
 -- @yolo@ enables project-wide auto-approval; lowercase @a@ remembers only the
 -- current tool for this session.
-promptPermission :: Bool -> ToolCall -> IO (Maybe PermissionChoice)
-promptPermission color call = do
+promptPermission :: Bool -> Text -> ToolCall -> IO (Maybe PermissionChoice)
+promptPermission color workspace call = do
     isTty <- hIsTerminalDevice stdin
-    let summary = permissionToolCallPrompt call
+    let summary = permissionToolCallPromptRelative workspace call
     if not isTty
         then cooked color summary
         else do

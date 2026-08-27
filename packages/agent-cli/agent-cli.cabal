@@ -47,6 +47,7 @@ library
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
+                    , Agent.CLI.Command.Types
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -56,12 +57,21 @@ library
                     , Agent.CLI.PrivateFileLock
                     , Agent.CLI.Runtime
                     , Agent.CLI.Runtime.Internal
+                    , Agent.CLI.Runtime.Orchestration
+                    , Agent.CLI.Runtime.Orchestration.Background
+                    , Agent.CLI.Runtime.Orchestration.Concurrent
+                    , Agent.CLI.Runtime.Orchestration.Restart
+                    , Agent.CLI.Runtime.Orchestration.Startup
+                    , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
                     , Agent.CLI.Runtime.Recap
                     , Agent.CLI.Runtime.Repl
                     , Agent.CLI.Runtime.Repl.Attachments
                     , Agent.CLI.Runtime.Repl.Commands
+                    , Agent.CLI.Runtime.Repl.Selection
+                    , Agent.CLI.Runtime.Repl.Session
+                    , Agent.CLI.Runtime.Repl.Workflow
                     , Agent.CLI.Runtime.Types
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
@@ -79,6 +89,7 @@ library
                     , Agent.CLI.TUI.Composer.Edit
                     , Agent.CLI.TUI.LambdaArt
                     , Agent.CLI.TUI.Motion
+                    , Agent.CLI.TUI.Render
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AccountSelection
@@ -125,6 +136,7 @@ library
                     , Agent.CLI.McpManager
                     , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
+                    , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
@@ -172,6 +184,7 @@ library
                     , Agent.CLI.TurnState
                     , Agent.CLI.Usage
                     , Agent.CLI.WebFetch
+                    , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
@@ -330,6 +343,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NativeAgentsSpec
                     , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec
@@ -431,6 +445,16 @@ benchmark clipboard-latency-bench
                     , directory
                     , filepath
                     , safe-exceptions
+                    , text
+
+benchmark composer-paste-latency-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ComposerPasteLatency.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
                     , text
 
 benchmark transcript-scrolling-bench

@@ -76,6 +76,43 @@ spec = describe "Agent.Tools.MultiAgents" do
                 ]
         closeSubagentRegistry registry
 
+    it "exposes the shared-workspace spawn helper for host tools" do
+        prepared <- newEmptyTMVarIO
+        registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
+            (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
+            (\_ _ -> pure ())
+        let context = (rootContext registry Nothing)
+                { multiPrepareSpawn = Just
+                    (\agentId options ->
+                        atomically (putTMVar prepared (agentId, options)))
+                }
+            call = ToolCall
+                { callId = "host-tool"
+                , name = "analyze_tool_output"
+                , arguments = "{}"
+                , callKind = FunctionCallKind
+                , argumentsEncrypted = False
+                }
+        result <- spawnSharedSubagent
+            context
+            call
+            "artifact_analysis"
+            "inspect the artifact"
+            (Just "gpt-5.6-luna")
+            (Just "high")
+            (Just "none")
+        result `shouldSatisfy` isRightResult
+        (agentId, options) <- atomically (takeTMVar prepared)
+        path <- getTaskPath registry agentId
+        taskPathText <$> path
+            `shouldBe` Just "/root/artifact_analysis"
+        options `shouldBe` CollaborationSpawnOptions
+            { collaborationModel = Just "gpt-5.6-luna"
+            , collaborationReasoningEffort = Just "high"
+            , collaborationForkTurns = Just "none"
+            }
+        closeSubagentRegistry registry
+
     it "spawns canonical paths through depth four and rejects depth five" do
         registry <- newSubagentRegistry defaultSubagentConfig (fromFilePath "/tmp")
             (\env _ _ _ -> pure (resultWithText env.subId.unSubagentId))
@@ -396,6 +433,7 @@ spec = describe "Agent.Tools.MultiAgents" do
                 , multiPrepareSpawn = Nothing
                 , multiSendToRoot = Just deliverRoot
                 , multiSpawnModelGuidance = Nothing
+                , multiAllowedChildModels = Nothing
                 }
         result <- dispatchToolCall defaultLoopDispatch
             (appToolHandlers (multiAgentTools context))
@@ -413,6 +451,10 @@ isReadOnly :: ApprovalRule -> Bool
 isReadOnly AlwaysReadOnly = True
 isReadOnly _ = False
 
+isRightResult :: Either a b -> Bool
+isRightResult (Right _) = True
+isRightResult _ = False
+
 rootContext
     :: SubagentRegistry
     -> Maybe (InterAgentMessage -> IO (Either Text Text))
@@ -429,6 +471,7 @@ rootContext registry sendToRoot = MultiAgentContext
     , multiPrepareSpawn = Nothing
     , multiSendToRoot = sendToRoot
     , multiSpawnModelGuidance = Nothing
+    , multiAllowedChildModels = Nothing
     }
 
 childContext :: SubagentRegistry -> SubagentId -> Int -> IO MultiAgentContext

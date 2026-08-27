@@ -6,6 +6,7 @@ module Agent.Responses.StreamAssembly
     , emptyStreamAssemblyState
     , applyStreamEvent
     , finishStreamResponse
+    , finishAssembledIncomplete
     , buildStreamResponse
     , buildStreamResponseWithModel
     , assembleDoneResponse
@@ -23,7 +24,8 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Map.Strict as Map
+import qualified Data.IntMap.Strict as IntMap
+import Data.IntMap.Strict (IntMap)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -62,13 +64,13 @@ data ItemProgress = ItemProgress
 -- indexed so an @output_item.done@ replaces its earlier @added@ form.
 data StreamAssemblyState = StreamAssemblyState
     { responseObject :: !Aeson.Object
-    , outputItems    :: !(Map.Map Int ItemProgress)
+    , outputItems    :: !(IntMap ItemProgress)
     }
 
 emptyStreamAssemblyState :: StreamAssemblyState
 emptyStreamAssemblyState = StreamAssemblyState
     { responseObject = KeyMap.empty
-    , outputItems = Map.empty
+    , outputItems = IntMap.empty
     }
 
 applyStreamEvent :: StreamAssemblyState -> ResponseStreamEvent -> StreamAssemblyState
@@ -110,6 +112,26 @@ applyStreamEvent state event = case event of
                         (setInput finalInput)
                         state
                 _ -> state
+    ResponseFunctionCallArgumentsDeltaEvent
+        { delta, streamItemId, streamOutputIndex } ->
+            case ( delta
+                 , resolveOutputIndex streamOutputIndex [streamItemId] state
+                 ) of
+                (Just argumentsDelta, Just outputIndex) ->
+                    updateFunctionCallArguments outputIndex
+                        streamItemId
+                        (appendArguments argumentsDelta)
+                        state
+                _ -> state
+    ResponseFunctionCallArgumentsDoneEvent
+        { arguments, functionName, streamItemId, streamOutputIndex } ->
+            case resolveOutputIndex streamOutputIndex [streamItemId] state of
+                Just outputIndex ->
+                    updateFunctionCallArguments outputIndex
+                        streamItemId
+                        (setArguments arguments functionName)
+                        state
+                Nothing -> state
     ResponseReasoningSummaryPartAddedEvent
         { streamItemId, streamOutputIndex, summaryIndex, partValue } ->
             case ( summaryIndex
@@ -176,9 +198,16 @@ finishStreamResponse modelHint state terminalEvent = do
             "Cannot assemble a non-terminal response event"
             (jsonPreview terminalEvent)
     let terminalFragment = responseValueFor terminalEvent
+        -- Only trust a status carried by the terminal fragment when it is
+        -- itself a terminal status. The socket-death recovery path
+        -- (finishAssembledIncomplete) feeds the accumulated stream object back
+        -- in as the fragment, and that object still holds the non-terminal
+        -- "in_progress"/"queued" status copied from the response.created frame.
+        -- Preserving it there would leak a running status into a finished
+        -- response and make a dropped connection look like a completed turn.
         withStatus = case terminalFragment of
             Just (Aeson.Object object)
-                | KeyMap.member "status" object -> state.responseObject
+                | fragmentHasTerminalStatus object -> state.responseObject
             _ -> KeyMap.insert "status" (Aeson.String terminalStatus)
                     state.responseObject
         withDefaults =
@@ -201,6 +230,20 @@ finishStreamResponse modelHint state terminalEvent = do
         _ -> Left $ JsonDecodeError
             "Streamed response did not contain a response id"
             (jsonPreview assembled)
+
+-- | Assemble the current stream state as an incomplete response. Used when the
+-- provider emits @response.incomplete@ or the socket dies after output items
+-- were already collected.
+finishAssembledIncomplete
+    :: Maybe Text
+    -> StreamAssemblyState
+    -> Either ApiError Response
+finishAssembledIncomplete modelHint state =
+    finishStreamResponse modelHint state
+        (ResponseIncompleteEvent
+            (Aeson.Object state.responseObject)
+            Nothing
+            KeyMap.empty)
 
 -- | Build a response without a request-model hint. This remains the shared
 -- entry point used by provider SSE transports.
@@ -340,7 +383,7 @@ updateItem
 updateItem outputIndex done newValue state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . mergeProgress)
                 outputIndex
                 state.outputItems
@@ -384,8 +427,8 @@ resolveOutputIndex explicitIndex identities state =
 
 findIdentityIndex :: Text -> StreamAssemblyState -> Maybe Int
 findIdentityIndex wanted state =
-    fst <$> Map.lookupMin
-        (Map.filter (matchesIdentity wanted . (.itemValue)) state.outputItems)
+    fst <$> IntMap.lookupMin
+        (IntMap.filter (matchesIdentity wanted . (.itemValue)) state.outputItems)
   where
     matchesIdentity wanted = \case
         Aeson.Object object ->
@@ -405,8 +448,8 @@ findPendingItemIndex value state =
     case wantedType of
         Nothing -> Nothing
         Just _ ->
-            fst <$> Map.lookupMin
-                (Map.filter matchesPending state.outputItems)
+            fst <$> IntMap.lookupMin
+                (IntMap.filter matchesPending state.outputItems)
   where
     wantedType = objectTextField "type" value
     matchesPending progress =
@@ -415,7 +458,7 @@ findPendingItemIndex value state =
 
 nextOutputIndex :: StreamAssemblyState -> Int
 nextOutputIndex state =
-    maybe 0 ((+ 1) . fst) (Map.lookupMax state.outputItems)
+    maybe 0 ((+ 1) . fst) (IntMap.lookupMax state.outputItems)
 
 itemIdentities :: Aeson.Value -> [Text]
 itemIdentities = \case
@@ -447,7 +490,7 @@ updateCustomToolInput
 updateCustomToolInput outputIndex itemId callId updateInput state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . updateProgress)
                 outputIndex
                 state.outputItems
@@ -483,7 +526,7 @@ updateReasoningSummary
 updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
     state
         { outputItems =
-            Map.alter
+            IntMap.alter
                 (Just . updateProgress)
                 outputIndex
                 state.outputItems
@@ -511,12 +554,12 @@ updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
 
 assembledOutput :: StreamAssemblyState -> Aeson.Object -> [Aeson.Value]
 assembledOutput state response =
-    map (.itemValue) . Map.elems $
-        Map.unionWith combine
+    map (.itemValue) . IntMap.elems $
+        IntMap.unionWith combine
             state.outputItems
             terminalItems
   where
-    terminalItems = Map.fromList
+    terminalItems = IntMap.fromList
         [ (index, ItemProgress value True)
         | (index, value) <- zip [0 ..] finalItems
         ]
@@ -532,6 +575,17 @@ assembledOutput state response =
             ItemProgress
                 (mergeObjects streamed.itemValue terminal.itemValue)
                 True
+
+-- | Does a response fragment already carry a terminal lifecycle status? Only
+-- @completed@/@incomplete@/@failed@/@cancelled@ count; a leftover
+-- @in_progress@/@queued@ status from an earlier streaming frame must be
+-- overwritten with the status implied by the terminal event.
+fragmentHasTerminalStatus :: Aeson.Object -> Bool
+fragmentHasTerminalStatus object =
+    case KeyMap.lookup "status" object of
+        Just (Aeson.String status) ->
+            status `elem` ["completed", "incomplete", "failed", "cancelled"]
+        _ -> False
 
 responseValueFor :: ResponseStreamEvent -> Maybe Aeson.Value
 responseValueFor = \case
@@ -562,6 +616,49 @@ appendInput delta object =
 setInput :: Text -> Aeson.Object -> Aeson.Object
 setInput input =
     KeyMap.insert "input" (Aeson.String input)
+
+updateFunctionCallArguments
+    :: Int
+    -> Maybe Text
+    -> (Aeson.Object -> Aeson.Object)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateFunctionCallArguments outputIndex itemId updateArgs state =
+    state
+        { outputItems =
+            IntMap.alter
+                (Just . updateProgress)
+                outputIndex
+                state.outputItems
+        }
+  where
+    baseObject =
+        maybe id
+            (KeyMap.insert "id" . Aeson.String)
+            itemId
+        $ KeyMap.fromList
+            [ ("type", Aeson.String "function_call")
+            , ("arguments", Aeson.String "")
+            ]
+    updateProgress Nothing =
+        ItemProgress (Aeson.Object (updateArgs baseObject)) False
+    updateProgress (Just progress) =
+        progress
+            { itemValue = case progress.itemValue of
+                Aeson.Object object -> Aeson.Object (updateArgs object)
+                _ -> Aeson.Object (updateArgs baseObject)
+            }
+
+appendArguments :: Text -> Aeson.Object -> Aeson.Object
+appendArguments delta object =
+    let current = fromMaybe "" (textField "arguments" object)
+    in KeyMap.insert "arguments" (Aeson.String (current <> delta)) object
+
+setArguments :: Maybe Text -> Maybe Text -> Aeson.Object -> Aeson.Object
+setArguments arguments functionName object =
+    maybe id (KeyMap.insert "name" . Aeson.String) functionName $
+        maybe id (KeyMap.insert "arguments" . Aeson.String) arguments
+            object
 
 setObjectText :: Text -> Aeson.Value -> Aeson.Value
 setObjectText text = \case

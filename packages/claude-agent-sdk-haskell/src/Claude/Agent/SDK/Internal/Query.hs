@@ -3,6 +3,7 @@ module Claude.Agent.SDK.Internal.Query
     ( QueryAccumulator
     , emptyQueryAccumulator
     , consumeQueryMessage
+    , consumeQueryMessageWithProgress
     , canonicalMessages
     ) where
 
@@ -12,6 +13,8 @@ import Claude.Agent.SDK.Types
     , ContentBlock(..)
     , Message(..)
     , MessageOrigin(..)
+    , QueryMessageScope(..)
+    , QueryProgress(..)
     , ResultMessage(..)
     , SystemMessage(..)
     , UserMessage(..)
@@ -44,12 +47,14 @@ data MessageBuffer = MessageBuffer
 data QueryAccumulator = QueryAccumulator
     { ownBuffer :: !MessageBuffer
     , foreignBuffer :: !(Maybe MessageBuffer)
+    , progressSeenIds :: !(Set (MessageScope, Text))
     } deriving (Eq, Show)
 
 emptyQueryAccumulator :: QueryAccumulator
 emptyQueryAccumulator = QueryAccumulator
     { ownBuffer = emptyMessageBuffer
     , foreignBuffer = Nothing
+    , progressSeenIds = Set.empty
     }
 
 emptyMessageBuffer :: MessageBuffer
@@ -98,6 +103,142 @@ consumeQueryMessage accumulator message =
                 Right (accumulator, Nothing)
             | otherwise ->
                 consumeOwnMessage accumulator message
+
+-- | Consume a message and report live progress only when it belongs to the
+-- submitted human turn. Autonomous/background records remain transactional
+-- and invisible to the observer.
+consumeQueryMessageWithProgress
+    :: QueryAccumulator
+    -> Message
+    -> Either
+        ClaudeSDKError
+        ( QueryAccumulator
+        , [QueryProgress]
+        , Maybe ([Message], ResultMessage)
+        )
+consumeQueryMessageWithProgress accumulator message = do
+    (next, completed) <- consumeQueryMessage accumulator message
+    let progress = observedProgress accumulator message
+        nextWithProgress = next
+            { progressSeenIds = applyProgressSeen
+                accumulator.progressSeenIds
+                progress
+            }
+    pure (nextWithProgress, progress, completed)
+
+observedProgress :: QueryAccumulator -> Message -> [QueryProgress]
+observedProgress accumulator message
+    | not (belongsToOwnTurn accumulator message) = []
+    | not (messageWouldBeObserved accumulator message) =
+        retractionsFor accumulator message
+    | otherwise =
+        retractionsFor accumulator message
+            <> [QueryMessageObserved (publicScope message) message]
+
+applyProgressSeen
+    :: Set (MessageScope, Text)
+    -> [QueryProgress]
+    -> Set (MessageScope, Text)
+applyProgressSeen = foldl' step
+  where
+    step seen = \case
+        QueryMessageObserved _ message ->
+            maybe seen
+                (\identifier ->
+                    Set.insert (messageScope message, identifier) seen)
+                (messageUuid message)
+        QueryMessagesRetracted scope identifiers ->
+            case scope of
+                Nothing ->
+                    Set.filter
+                        (\(_, identifier) -> identifier `notElem` identifiers)
+                        seen
+                Just public ->
+                    let internal = case public of
+                            QueryTopLevel -> TopLevelScope
+                            QueryNested parent -> NestedScope parent
+                    in foldl'
+                        (\current identifier ->
+                            Set.delete (internal, identifier) current)
+                        seen
+                        identifiers
+
+belongsToOwnTurn :: QueryAccumulator -> Message -> Bool
+belongsToOwnTurn accumulator message =
+    case accumulator.foreignBuffer of
+        Nothing ->
+            messageHasParentToolUseId message
+                || not (beginsForeignTurn message)
+                    && not (isForeignResult message)
+        Just _
+            | messageHasParentToolUseId message -> False
+            | MessageSystem SystemMessage{subtype = "init"} <- message -> True
+            | MessageUser UserMessage{origin} <- message ->
+                isExplicitHumanOrigin origin
+            | MessageResult result <- message ->
+                isHumanOrigin result.origin
+            | otherwise -> False
+  where
+    isForeignResult = \case
+        MessageResult result -> not (isHumanOrigin result.origin)
+        _ -> False
+
+messageWouldBeObserved :: QueryAccumulator -> Message -> Bool
+messageWouldBeObserved accumulator message =
+    case message of
+        MessageResult{} -> messageHasParentToolUseId message
+        MessageConversationReset{} -> False
+        MessageControlRequest{} -> False
+        MessageAssistant AssistantMessage{error = Just _} -> False
+        MessageStreamEvent{} -> not (alreadySeen accumulator.ownBuffer message)
+        _ -> not (alreadySeen accumulator.ownBuffer message)
+  where
+    alreadySeen current candidate =
+        case messageUuid candidate of
+            Nothing -> False
+            Just identifier ->
+                Set.member
+                    (messageScope candidate, identifier)
+                    accumulator.progressSeenIds
+                    || Set.member identifier current.globallyRetractedIds
+                    || Set.member
+                        (messageScope candidate, identifier)
+                        current.retractedIds
+
+retractionsFor :: QueryAccumulator -> Message -> [QueryProgress]
+retractionsFor accumulator = \case
+    MessageAssistant assistant
+        | let identifiers =
+                filter
+                    (\identifier ->
+                        Set.member
+                            ( messageScope (MessageAssistant assistant)
+                            , identifier
+                            )
+                            accumulator.progressSeenIds)
+                    assistant.supersedes
+        , not (null identifiers) ->
+            [ QueryMessagesRetracted
+                (Just (publicScope (MessageAssistant assistant)))
+                identifiers
+            ]
+    MessageSystem system
+        | let identifiers =
+                filter
+                    (\identifier ->
+                        any
+                            ((== identifier) . snd)
+                            accumulator.progressSeenIds)
+                    system.retractedMessageUuids
+        , system.subtype == "model_refusal_fallback"
+        , not (null identifiers) ->
+            [QueryMessagesRetracted Nothing identifiers]
+    _ -> []
+
+publicScope :: Message -> QueryMessageScope
+publicScope message = case messageScope message of
+    TopLevelScope -> QueryTopLevel
+    NestedScope parent -> QueryNested parent
 
 consumeOwnMessage
     :: QueryAccumulator

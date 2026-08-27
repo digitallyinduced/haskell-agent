@@ -1,3 +1,7 @@
+-- This module coordinates IO and Brick events; optimizing its large state
+-- machine costs considerably more than it benefits this non-rendering path.
+{-# OPTIONS_GHC -O0 -Wno-unused-imports #-}
+
 -- | Retained fullscreen terminal application and its session bridge.
 module Agent.CLI.TUI.App
     ( FullscreenInputBuffer
@@ -48,7 +52,9 @@ module Agent.CLI.TUI.App
     , requestFullscreenSecret
     , requestFullscreenText
     , runFullscreen
+    , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
+    , beginFullscreenLiveHistory
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
     , setFullscreenHistorySource
@@ -57,8 +63,12 @@ module Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , wrapFullscreenKeyboardVty
+    , withTrackedVtyBuilder
     , setFullscreenImagePreviews
     , setFullscreenWindowTitle
+    , applyStoredFullscreenWindowTitle
+    , turnCompletionRequiresRedraw
+    , syntaxLanguagesForBlocks
     , uiEventRestartsMotionSchedule
     , applyTextPromptEdit
     , maskedSecretText
@@ -70,7 +80,12 @@ module Agent.CLI.TUI.App
 import Agent.CLI.Clipboard
     ( formatImageSize
     )
-import Agent.CLI.Dictation (insertDictation)
+import Agent.CLI.Dictation
+    ( DictationControl(..)
+    , DictationResult(..)
+    , dictateWith
+    , insertDictation
+    )
 import Agent.CLI.Secret (sanitizeSecretPromptText)
 import Agent.CLI.Artifact (fencedCodeBlock)
 import Agent.CLI.Input
@@ -87,6 +102,7 @@ import Agent.CLI.AgentViewport
     , agentDisplayName
     , agentEntryTreeLabelWithGlyphModel
     , agentStatusGlyph
+    , lookupAgentEntry
     )
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.ImagePreview
@@ -100,6 +116,7 @@ import Agent.CLI.Command
     ( SkillCommand
     , SlashCatalog(..)
     , defaultSlashCatalog
+    , slashCatalogWithSkills
     )
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.CLI.Resume
@@ -124,12 +141,15 @@ import Agent.CLI.Resume
     )
 import Agent.CLI.Render (formatElapsed)
 import Agent.CLI.Style (motionGlyphSet)
+import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.Status (formatTokenUsage)
 import Agent.CLI.Timestamp (currentShortMessageTimestamp)
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , detectTerminalCapabilities
-    , kittyCtrlVCsiBodies
+    , kittyAltCsiBodies
+    , kittyCtrlCsiBodies
+    , kittyCtrlUnderscoreCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -150,9 +170,13 @@ import Agent.CLI.TUI.History
     , applyHistoryPage
     , clearHistoryRequest
     , emptyHistoryWindow
+    , historyWindowBlock
+    , historyWindowOlderAvailable
     , historyWindowRequest
+    , unarchivedLiveStart
     , historyWindowSetAnchors
     , markHistoryRequest
+    , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.LambdaArt
     ( lambdaArtWidget
@@ -169,8 +193,30 @@ import Agent.CLI.TUI.Motion
     , motionModeForTerminalFocus
     , nativeProgressKeepaliveDue
     , nextMotionSchedule
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     , userActionPending
+    )
+import Agent.CLI.TUI.Render
+    ( agentEntryWindow
+    , agentPaneEntryLimit
+    , agentPaneVisible
+    , applyChildConversationUiEvent
+    , choiceRowColumns
+    , conversationUiForTarget
+    , conversationScrollbarRenderer
+    , drawApp
+    , fullscreenBounds
+    , fullscreenSurface
+    , onboardingVisibleRowIndices
+    , normalizeTextOverlayInsertion
+    , maskedSecretText
+    , quickStartRows
+    , quickStartVisible
+    , repositoryHeaderText
+    , resumeSearchCursorColumn
+    , selectedAgentConversation
+    , textOverlayDisplayText
     )
 import Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
@@ -180,11 +226,16 @@ import Agent.CLI.TUI.ImagePreview
     , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
+    , sameNativePreviewLayout
     )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting
     , markdownWidgetWithLinks
     , markdownWidgetWithSyntaxHighlightingAndLinks
+    )
+import Agent.TUI.FencedCode
+    ( FencedBlock(..)
+    , fencedBlocks
     )
 import Agent.TUI.TextWidth
     ( clampGraphemeCursor
@@ -194,7 +245,9 @@ import Agent.TUI.TextWidth
     )
 import Agent.Syntax
     ( SyntaxHighlighter
-    , loadSyntaxHighlighter
+    , loadSyntaxLanguage
+    , newSyntaxHighlighter
+    , resolveFenceLanguage
     )
 import qualified Agent.CLI.TUI.Scroll as Scroll
 import qualified Agent.CLI.TUI.Transcript as Transcript
@@ -210,13 +263,7 @@ import Agent.TUI.Motion
     , waitingIndicator
     )
 import Agent.TUI.Presentation
-    ( TodoDisplayLine(..)
-    , TodoDisplayStatus(..)
-    , liveTodoPanelLines
-    , parseTodoList
-    , permissionToolCallPrompt
-    , todoStatusGlyph
-    )
+    ( permissionToolCallPromptRelative )
 import Agent.Loop (ImageAttachment(..), LoopEvent(..))
 import Agent.ToolDispatch (ToolCall(..))
 import Brick
@@ -238,6 +285,7 @@ import Control.Concurrent.STM
     ( STM
     , atomically
     , check
+    , flushTQueue
     , newEmptyTMVarIO
     , newTQueueIO
     , newTVarIO
@@ -259,7 +307,7 @@ import Agent.CLI.Recap
     )
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.State.Strict (modify')
-import Control.Exception.Safe (finally, onException, throwIO, tryAny)
+import Control.Exception.Safe (finally, mask, onException, throwIO, tryAny)
 import Control.Exception (AsyncException(UserInterrupt))
 import Data.Char (isControl, isSpace)
 import Data.Foldable (toList)
@@ -320,7 +368,7 @@ newFullscreenRuntime
     -> UiState
     -> IO FullscreenRuntime
 newFullscreenRuntime =
-    newFullscreenRuntimeWithSyntaxLoader loadSyntaxHighlighter
+    newFullscreenRuntimeWithSyntaxLoader newSyntaxHighlighter
 
 newFullscreenRuntimeWithSyntaxLoader
     :: IO (Either Text SyntaxHighlighter)
@@ -360,16 +408,24 @@ newFullscreenRuntimeWithSyntaxLoader
         motionSchedule <- newTVarIO (MotionNone, 1000000, 0)
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO
+        syntaxRequests <- newTQueueIO
+        syntaxHighlighter <-
+            newIORef (SyntaxHighlighterUnloaded 0)
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
+        dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
+        submittedImagePlacements <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
         imagePreviewProtocol <- detectImagePreviewProtocol stdout
         imagePreviewInTmux <- isJust <$> lookupEnv "TMUX"
+        colorFgBg <- lookupEnv "COLORFGBG"
+        windowTitle <- newIORef Nothing
         sessionActions <- newIORef FullscreenSessionActions
             { sessionCancel = cancelAction
+            , sessionSteer = const (pure ())
             , sessionBtw = const (pure ())
             , sessionRecap = pure ()
             , sessionRestartEffort = restartEffortAction
@@ -383,6 +439,9 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeInput = inputBuffer
             , runtimeCancel =
                 readIORef sessionActions >>= (.sessionCancel)
+            , runtimeSteer = \text ->
+                readIORef sessionActions >>= \actions ->
+                    actions.sessionSteer text
             , runtimeBtw = \question ->
                 readIORef sessionActions >>= \actions ->
                     actions.sessionBtw question
@@ -395,6 +454,7 @@ newFullscreenRuntimeWithSyntaxLoader
                 readIORef sessionActions >>= (.sessionCtrlC)
             , runtimeCopy = copyAction
             , runtimeSetWindowTitle = setWindowTitle
+            , runtimeWindowTitle = windowTitle
             , runtimeNativeProgress = nativeProgress
             , runtimeAgentSnapshot =
                 readIORef sessionActions >>= (.sessionAgentSnapshot)
@@ -406,6 +466,7 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeMotionTickQueued = motionTickQueued
             , runtimeMotionMode = motionMode
             , runtimeImagePreviews = imagePreviews
+            , runtimeSubmittedImagePlacements = submittedImagePlacements
             , runtimeImagePreviewRevision = imagePreviewRevision
             , runtimeImagePreviewVisible = imagePreviewVisible
             , runtimeImagePreviewIdBase = imagePreviewIdBase
@@ -413,18 +474,23 @@ newFullscreenRuntimeWithSyntaxLoader
                 imagePreviewProtocol == PreviewKitty
                     && not imagePreviewInTmux
             , runtimeColor = color
+            , runtimeWaveTrough = Theme.waveTroughFromColorFgBg colorFgBg
             , runtimeLoadSyntaxHighlighter = syntaxLoader
             , runtimeSyntaxLoadFinished = syntaxLoadFinished
+            , runtimeSyntaxRequests = syntaxRequests
+            , runtimeSyntaxHighlighter = syntaxHighlighter
             , runtimeInitial = initial
             , runtimeSessionActions = sessionActions
             , runtimeHistoryRequests = historyRequests
             , runtimeHistorySource = historySource
             , runtimeHistoryGeneration = historyGeneration
+            , runtimeDictationJobs = dictationJobs
             }
 
 setFullscreenSessionActions
     :: FullscreenRuntime
     -> IO ()
+    -> (Text -> IO ())
     -> (Text -> IO ())
     -> IO ()
     -> (Text -> IO ())
@@ -435,6 +501,7 @@ setFullscreenSessionActions
 setFullscreenSessionActions
     runtime
     cancelAction
+    steerAction
     btwAction
     recapAction
     restartEffortAction
@@ -443,6 +510,7 @@ setFullscreenSessionActions
     agentSelect =
         writeIORef runtime.runtimeSessionActions FullscreenSessionActions
             { sessionCancel = cancelAction
+            , sessionSteer = steerAction
             , sessionBtw = btwAction
             , sessionRecap = recapAction
             , sessionRestartEffort = restartEffortAction
@@ -497,6 +565,13 @@ clearFullscreenHistorySource runtime = do
             , historyPageHasNewer = False
             })
 
+beginFullscreenLiveHistory :: FullscreenRuntime -> IO ()
+beginFullscreenLiveHistory runtime = do
+    source <- readIORef runtime.runtimeHistorySource
+    case source of
+        Nothing -> pure ()
+        Just _ -> enqueueAppEvent runtime AppHistoryLiveStarted
+
 commitFullscreenHistoryTurn
     :: FullscreenRuntime
     -> HistoryTurn
@@ -533,17 +608,92 @@ resetFullscreenHistory runtime initialPage = do
 
 loadSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
 loadSyntaxHighlighterForRuntime runtime = do
-    startedAt <- getMonotonicTimeNSec
-    result <- tryAny runtime.runtimeLoadSyntaxHighlighter
-    finishedAt <- getMonotonicTimeNSec
-    let highlighter = case result of
-            Left _ -> Nothing
-            Right loaded -> either (const Nothing) Just loaded
-    enqueueAppEvent runtime (AppSyntaxHighlighterLoaded highlighter)
-    void $
-        tryAny $
-            runtime.runtimeSyntaxLoadFinished
-                (nanosecondsToNominalDiffTime (finishedAt - startedAt))
+    readIORef runtime.runtimeSyntaxHighlighter >>= \case
+        SyntaxHighlighterInactive _ -> pure ()
+        state -> do
+            let generation = syntaxHighlighterGeneration state
+            startedAt <- getMonotonicTimeNSec
+            result <- tryAny runtime.runtimeLoadSyntaxHighlighter
+            finishedAt <- getMonotonicTimeNSec
+            let highlighter = case result of
+                    Left _ -> Nothing
+                    Right loaded -> either (const Nothing) Just loaded
+            published <-
+                publishSyntaxHighlighter runtime generation highlighter
+            when published $
+                enqueueAppEvent runtime AppSyntaxHighlighterChanged
+            void $
+                tryAny $
+                    runtime.runtimeSyntaxLoadFinished
+                        (nanosecondsToNominalDiffTime
+                            (finishedAt - startedAt))
+
+runSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
+runSyntaxHighlighterForRuntime runtime = do
+    loadSyntaxHighlighterForRuntime runtime
+    forever do
+        languages <-
+            atomically $
+                (:) <$> readTQueue runtime.runtimeSyntaxRequests
+                    <*> flushTQueue runtime.runtimeSyntaxRequests
+        ensureSyntaxHighlighterForRuntime runtime
+        readIORef runtime.runtimeSyntaxHighlighter >>= \case
+            SyntaxHighlighterInactive _ -> pure ()
+            SyntaxHighlighterUnloaded _ -> pure ()
+            SyntaxHighlighterActive _ Nothing -> pure ()
+            SyntaxHighlighterActive generation (Just highlighter) -> do
+                (changed, loaded) <-
+                    foldSyntaxRequests highlighter languages
+                when changed do
+                    published <-
+                        publishSyntaxHighlighter
+                            runtime
+                            generation
+                            (Just loaded)
+                    when published $
+                        enqueueAppEvent
+                            runtime
+                            AppSyntaxHighlighterChanged
+  where
+    foldSyntaxRequests current = \case
+        [] -> pure (False, current)
+        language : remaining ->
+            tryAny (loadSyntaxLanguage current language) >>= \case
+                Left _ -> foldSyntaxRequests current remaining
+                Right (Left _) -> foldSyntaxRequests current remaining
+                Right (Right loaded) -> do
+                    (_, final) <- foldSyntaxRequests loaded remaining
+                    pure (True, final)
+
+ensureSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
+ensureSyntaxHighlighterForRuntime runtime =
+    readIORef runtime.runtimeSyntaxHighlighter >>= \case
+        SyntaxHighlighterUnloaded _ ->
+            loadSyntaxHighlighterForRuntime runtime
+        SyntaxHighlighterActive{} -> pure ()
+        SyntaxHighlighterInactive _ -> pure ()
+
+publishSyntaxHighlighter
+    :: FullscreenRuntime
+    -> Word64
+    -> Maybe SyntaxHighlighter
+    -> IO Bool
+publishSyntaxHighlighter runtime generation highlighter =
+    atomicModifyIORef' runtime.runtimeSyntaxHighlighter \case
+        SyntaxHighlighterUnloaded current
+            | current == generation ->
+                (SyntaxHighlighterActive current highlighter, True)
+        SyntaxHighlighterActive current _
+            | current == generation ->
+                (SyntaxHighlighterActive current highlighter, True)
+        current ->
+            (current, False)
+
+syntaxHighlighterGeneration :: SyntaxHighlighterState -> Word64
+syntaxHighlighterGeneration = \case
+    SyntaxHighlighterUnloaded generation -> generation
+    SyntaxHighlighterActive generation _ -> generation
+    SyntaxHighlighterInactive generation -> generation
 
 nanosecondsToNominalDiffTime :: Word64 -> NominalDiffTime
 nanosecondsToNominalDiffTime nanoseconds =
@@ -554,8 +704,21 @@ emitUiEvent runtime event =
     enqueueAppEvent runtime (AppUi event)
 
 setFullscreenWindowTitle :: FullscreenRuntime -> Text -> IO ()
-setFullscreenWindowTitle runtime =
-    enqueueAppEvent runtime . AppSetWindowTitle
+setFullscreenWindowTitle runtime title = do
+    writeIORef runtime.runtimeWindowTitle (Just title)
+    enqueueAppEvent runtime (AppSetWindowTitle title)
+
+-- | Brick/Vty owns the terminal, so titles must go through Vty output
+-- rather than stdout OSC writes. Use UTF-8 OSC bytes; Vty's title setter
+-- Latin-1 packs the string and garbles braille spinner frames.
+applyStoredFullscreenWindowTitle :: FullscreenRuntime -> V.Output -> IO ()
+applyStoredFullscreenWindowTitle runtime output =
+    readIORef runtime.runtimeWindowTitle
+        >>= mapM_ (writeOutputWindowTitle output)
+
+writeOutputWindowTitle :: V.Output -> Text -> IO ()
+writeOutputWindowTitle output title =
+    V.outputByteBuffer output (oscWindowTitleBytes title)
 
 setFullscreenImagePreviews
     :: FullscreenRuntime
@@ -566,26 +729,44 @@ setFullscreenImagePreviews runtime images = do
     prepared <-
         if map fst previous == images
             then pure previous
-            else do
-                let next =
-                        mapMaybe
-                            (\image ->
-                                case prepareTuiImagePreview image of
-                                    Left _ -> Nothing
-                                    Right preview -> Just (image, preview))
-                            images
-                -- ANSI previews force the sampled image during Brick drawing.
-                -- Build that sample here on the model worker instead of
-                -- stalling the Brick event/render thread.
-                unless runtime.runtimeNativeImagePreviews $
-                    mapM_
-                        (\(_, preview) ->
-                            void $
-                                pure $!
-                                    pixelAt preview.previewSample 0 0)
-                        next
-                pure next
+            else prepareFullscreenImagePreviews runtime images
     enqueueAppEvent runtime (AppSetImagePreviews prepared)
+
+-- | Move pending composer previews into the next submitted user message.
+commitFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO ()
+commitFullscreenImagePreviews runtime images = do
+    previous <- readIORef runtime.runtimeImagePreviews
+    prepared <-
+        if map fst previous == images
+            then pure previous
+            else prepareFullscreenImagePreviews runtime images
+    -- Unsupported terminals render only the compact image summary. Native
+    -- terminals retain the encoded attachment for a viewport-aware placement.
+    enqueueAppEvent runtime (AppCommitImagePreviews prepared)
+
+prepareFullscreenImagePreviews
+    :: FullscreenRuntime
+    -> [ImageAttachment]
+    -> IO [(ImageAttachment, TuiImagePreview)]
+prepareFullscreenImagePreviews runtime images = do
+    let prepared =
+            mapMaybe
+                (\image ->
+                    case prepareTuiImagePreview image of
+                        Left _ -> Nothing
+                        Right preview -> Just (image, preview))
+                images
+    -- ANSI previews force the sampled image during Brick drawing. Build that
+    -- sample here on the model worker instead of stalling the render thread.
+    unless runtime.runtimeNativeImagePreviews $
+        mapM_
+            (\(_, preview) ->
+                void $ pure $! pixelAt preview.previewSample 0 0)
+            prepared
+    pure prepared
 
 hasQueuedFullscreenInput :: FullscreenRuntime -> IO Bool
 hasQueuedFullscreenInput runtime =
@@ -665,10 +846,9 @@ readFullscreenLineOrWithModels
         runtime skills modelIds prompt initial wake = do
     readFullscreenLineOrWithCatalog
         runtime
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
         prompt
         initial
         wake
@@ -718,13 +898,29 @@ fullscreenVtyConfig =
             ]
             <> [ ( Nothing
                  , "\ESC[" <> body
-                 , V.EvKey (V.KChar 'v') [modifier]
+                 , V.EvKey (V.KChar character) [V.MCtrl]
                  )
-               | (modifier, bodies) <-
-                    [ (V.MCtrl, kittyCtrlVCsiBodies)
-                    , (V.MMeta, kittySuperVCsiBodies)
-                    ]
-               , body <- bodies
+               | character <- ['a'..'z']
+               , body <- kittyCtrlCsiBodies character
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar 'v') [V.MMeta]
+                 )
+               | body <- kittySuperVCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar '_') [V.MCtrl]
+                 )
+               | body <- kittyCtrlUnderscoreCsiBodies
+               ]
+            <> [ ( Nothing
+                 , "\ESC[" <> body
+                 , V.EvKey (V.KChar character) [V.MMeta]
+                 )
+               | character <- ['b', 'd', 'f']
+               , body <- kittyAltCsiBodies character
                ]
         }
 
@@ -749,13 +945,33 @@ wrapFullscreenKeyboardVty enabled vty
         V.outputByteBuffer (V.outputIface vty)
             . TextEncoding.encodeUtf8
 
+-- | Run an action with a Vty builder while retaining ownership of the most
+-- recently built handle. Brick replaces its Vty during 'suspendAndResume',
+-- but its exception cleanup can still target the original handle. Shutting
+-- down the latest handle here ensures terminal modes are restored on exit.
+withTrackedVtyBuilder
+    :: IO V.Vty
+    -> (IO V.Vty -> IO a)
+    -> IO a
+withTrackedVtyBuilder build action = do
+    latestVty <- newIORef Nothing
+    let trackedBuild =
+            mask \restore -> do
+                vty <- restore build
+                writeIORef latestVty (Just vty)
+                pure vty
+        shutdownLatest =
+            readIORef latestVty >>= maybe (pure ()) V.shutdown
+    action trackedBuild `finally` shutdownLatest
+
 requestFullscreenPermission
     :: FullscreenRuntime
+    -> Text
     -> ToolCall
     -> IO (Maybe PermissionChoice)
-requestFullscreenPermission runtime call = do
+requestFullscreenPermission runtime workspace call = do
     reply <- newEmptyTMVarIO
-    let summary = permissionToolCallPrompt call
+    let summary = permissionToolCallPromptRelative workspace call
     enqueueAppEvent runtime (AppAskPermission summary reply)
     atomically (readTMVar reply)
 
@@ -850,79 +1066,95 @@ runFullscreen runtime workerAction = do
     (initialAgent, initialAgents) <- runtime.runtimeAgentSnapshot
     initialClock <- getMonotonicTimeNSec
     terminal <- detectTerminalCapabilities stdout
-    let buildVty = do
+    let makeVty = do
             vty <- Vty.mkVty fullscreenVtyConfig
-            let output = V.outputIface vty
-            -- Without this mode terminals paste image clipboard fallbacks
-            -- (paths, URLs, or other text representations) as ordinary key
-            -- events, so the composer renders them as text. Vty turns the
-            -- bracketed sequence into one EvPaste that we can classify.
-            when (V.supportsMode output V.BracketedPaste) $
-                V.setMode output V.BracketedPaste True
-            when (V.supportsMode output V.Mouse) $
-                V.setMode output V.Mouse True
-            when (V.supportsMode output V.Focus) $
-                V.setMode output V.Focus True
-            -- Vty deliberately leaves OSC 8 output disabled by default even
-            -- when rendered attributes contain URLs.
-            when (V.supportsMode output V.Hyperlink) $
-                V.setMode output V.Hyperlink True
-            when (V.supportsMode output V.Focus) $
-                V.setMode output V.Focus True
-            wrapNativePreviewVty runtime vty
-                >>= wrapFullscreenKeyboardVty terminal.terminalKittyKeyboard
-    initialVty <- buildVty
-    let
-        initialState =
-            initialFullscreenAppState
-                runtime
-                history
-                initialAgent
-                initialAgents
-                initialClock
-        (initialDemand, initialDelay) =
-            appMotionTiming initialState
-    atomically $
-        writeTVar
-            runtime.runtimeMotionSchedule
-            (initialDemand, initialDelay, 0)
-    withAsync workerAction \worker ->
-        withAsync uiTicker \_uiTicker ->
-            withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
-                withAsync (eventPump runtime) \_eventPump ->
-                    withAsync (recapTicker runtime) \_recapTicker ->
-                        withAsync
-                            historyLoader
-                            \_historyLoader ->
+            let setupVty = do
+                    let output = V.outputIface vty
+                    -- Without this mode terminals paste image clipboard
+                    -- fallbacks (paths, URLs, or other text representations)
+                    -- as ordinary key events, so the composer renders them as
+                    -- text. Vty turns the bracketed sequence into one EvPaste
+                    -- that we can classify.
+                    when (V.supportsMode output V.BracketedPaste) $
+                        V.setMode output V.BracketedPaste True
+                    when (V.supportsMode output V.Mouse) $
+                        V.setMode output V.Mouse True
+                    when (V.supportsMode output V.Focus) $
+                        V.setMode output V.Focus True
+                    -- Vty deliberately leaves OSC 8 output disabled by
+                    -- default even when rendered attributes contain URLs.
+                    when (V.supportsMode output V.Hyperlink) $
+                        V.setMode output V.Hyperlink True
+                    when (V.supportsMode output V.Focus) $
+                        V.setMode output V.Focus True
+                    wrapped <-
+                        wrapNativePreviewVty runtime vty
+                            >>= wrapFullscreenKeyboardVty
+                                terminal.terminalKittyKeyboard
+                    applyStoredFullscreenWindowTitle
+                        runtime
+                        (V.outputIface wrapped)
+                    pure wrapped
+            setupVty `onException` V.shutdown vty
+    withTrackedVtyBuilder makeVty \buildVty -> do
+        initialVty <- buildVty
+        let
+            initialState =
+                initialFullscreenAppState
+                    runtime
+                    history
+                    initialAgent
+                    initialAgents
+                    initialClock
+            (initialDemand, initialDelay) =
+                appMotionTiming initialState
+        atomically $
+            writeTVar
+                runtime.runtimeMotionSchedule
+                (initialDemand, initialDelay, 0)
+        withAsync workerAction \worker ->
+            withAsync uiTicker \_uiTicker ->
+                withAsync (agentTicker (initialAgent, initialAgents)) \_agentTicker ->
+                    withAsync (eventPump runtime) \_eventPump ->
+                        withAsync (recapTicker runtime) \_recapTicker ->
                             withAsync
-                                (loadSyntaxHighlighterForRuntime runtime)
-                                \_syntaxLoader ->
+                                historyLoader
+                                \_historyLoader ->
+                                withAsync
+                                    dictationWorker
+                                    \_dictationWorker ->
                                     withAsync
-                                        (void (waitCatch worker)
-                                            >> enqueueAppEvent runtime AppStop)
-                                        \_notifier -> do
-                                            finalState <-
-                                                customMain
-                                                    initialVty
-                                                    buildVty
-                                                    (Just runtime.runtimeEvents)
-                                                    fullscreenApp
-                                                    initialState
-                                                `finally`
-                                                    runtime.runtimeNativeProgress False
-                                            when (not finalState.appWorkerStopped) $
-                                                atomically $
-                                                    Composer.appendFullscreenInput
-                                                        runtime.runtimeInput
-                                                        FullscreenInput
-                                                            { fullscreenInputLine =
-                                                                ReplEof
-                                                            , fullscreenInputQueued =
-                                                                False
-                                                            , fullscreenInputDisplay =
-                                                                Nothing
-                                                            }
-                                            wait worker
+                                        (runSyntaxHighlighterForRuntime runtime)
+                                        \_syntaxLoader ->
+                                            withAsync
+                                                (void (waitCatch worker)
+                                                    >> enqueueAppEvent runtime AppStop)
+                                                \_notifier -> do
+                                                    finalState <-
+                                                        customMain
+                                                            initialVty
+                                                            buildVty
+                                                            (Just runtime.runtimeEvents)
+                                                            fullscreenApp
+                                                            initialState
+                                                        `finally`
+                                                            runtime.runtimeNativeProgress False
+                                                    mapM_
+                                                        (`Composer.requestDictationStop` True)
+                                                        finalState.appDictation
+                                                    when (not finalState.appWorkerStopped) $
+                                                        atomically $
+                                                            Composer.appendFullscreenInput
+                                                                runtime.runtimeInput
+                                                                FullscreenInput
+                                                                    { fullscreenInputLine =
+                                                                        ReplEof
+                                                                    , fullscreenInputQueued =
+                                                                        False
+                                                                    , fullscreenInputDisplay =
+                                                                        Nothing
+                                                                    }
+                                                    wait worker
   where
     recapTicker _runtime = forever do
         threadDelay 20_000_000
@@ -1001,6 +1233,21 @@ runFullscreen runtime workerAction = do
             (AppHistoryLoaded request normalized)
         historyLoader
 
+    dictationWorker = forever do
+        job <- atomically (readTQueue runtime.runtimeDictationJobs)
+        result <-
+            dictateWith
+                DictationControl
+                    { dictationWaitForStop = job.dictationJobWaitForStop
+                    , dictationOnTranscript =
+                        enqueueAppEvent runtime . AppDictationPartial
+                    }
+        enqueueAppEvent runtime $
+            AppDictationFinished $
+                case result of
+                    DictationTranscript transcript -> Right transcript
+                    DictationFailed message -> Left message
+
 -- | Construct the retained application state shared by the live entry point
 -- and renderer tests. Generated tests should start from the same defaults as
 -- a real fullscreen session instead of assembling an approximate state.
@@ -1041,8 +1288,12 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appHistoryIndex = Nothing
         , appHistoryDraft = ""
         , appKillBuffer = ""
+        , appKillChain = False
+        , appUndo = []
+        , appDictation = Nothing
         , appSlashCatalog = defaultSlashCatalog
         , appImagePreviews = []
+        , appSubmittedImagePreviews = Map.empty
         , appAgentSelected = initialAgent
         , appAgentEntries = initialAgents
         , appAgentHover = Nothing
@@ -1062,6 +1313,7 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appClockNanos = initialClock
         , appNativeProgressKeepaliveBucket = 0
         , appSyntaxHighlighter = Nothing
+        , appSyntaxRequested = Set.empty
         , appTerminalFocus = TerminalFocusUnknown
         }
 
@@ -1159,9 +1411,11 @@ commitLiveHistoryTurn durableTurn commit state =
             case state.appHistoryLiveStart of
                 Just index -> index
                 Nothing
-                    | commit == HistoryCommitAppend ->
-                        Seq.length state.appUi.uiBlocks
-                    | otherwise -> 0
+                    | commit == HistoryCommitReset -> 0
+                    | otherwise ->
+                        unarchivedLiveStart
+                            state.appUi.uiBlocks
+                            durableTurn.historyTurnBlocks
         (nextBlockId, remappedBlocks) =
             remapHistoryBlocks
                 state.appNextHistoryBlockId
@@ -1170,19 +1424,14 @@ commitLiveHistoryTurn durableTurn commit state =
             durableTurn { historyTurnBlocks = remappedBlocks }
         baseWindow =
             case commit of
-                HistoryCommitAppend -> state.appHistoryWindow
-                HistoryCommitReplace ->
-                    emptyHistoryWindow
-                        state.appHistoryWindow.historyWindowGeneration
-                        historyWindowTurnBudget
-                        historyWindowBlockBudget
-                        historyWindowByteBudget
                 HistoryCommitReset ->
                     emptyHistoryWindow
                         state.appHistoryWindow.historyWindowGeneration
                         historyWindowTurnBudget
                         historyWindowBlockBudget
                         historyWindowByteBudget
+                _ ->
+                    state.appHistoryWindow
         replacementPage =
             HistoryPage
                 { historyPageGeneration =
@@ -1197,13 +1446,13 @@ commitLiveHistoryTurn durableTurn commit state =
                 }
         window =
             case commit of
-                HistoryCommitAppend ->
-                    appendHistoryTurn remappedTurn baseWindow
-                _ ->
+                HistoryCommitReset ->
                     either
                         (const baseWindow)
                         id
                         (applyHistoryPage replacementPage baseWindow)
+                _ ->
+                    appendHistoryTurn remappedTurn baseWindow
         ui = truncateUiBlocks start state.appUi
     in state
         { appUi = ui
@@ -1356,12 +1605,20 @@ wrapNativePreviewVty runtime vty
                         if visible
                             then readIORef runtime.runtimeImagePreviews
                             else pure []
-                    let placements =
-                            nativePreviewPlacements
-                                runtime.runtimeImagePreviewIdBase
-                                terminalColumns
-                                terminalRows
-                                previews
+                    submitted <-
+                        if visible
+                            then
+                                readIORef
+                                    runtime.runtimeSubmittedImagePlacements
+                            else pure []
+                    let placements
+                            | null previews = submitted
+                            | otherwise =
+                                nativePreviewPlacements
+                                    runtime.runtimeImagePreviewIdBase
+                                    terminalColumns
+                                    terminalRows
+                                    previews
                         oldImageIds = case previous of
                             Just (_, _, imageIds) -> imageIds
                             Nothing -> []
@@ -1507,6 +1764,8 @@ appendExactAppEvent event pending =
                 rest |> PendingEvent (AppAgentSnapshot selected entries)
         (rest :> PendingEvent (AppSetWindowTitle _), AppSetWindowTitle title) ->
             rest |> PendingEvent (AppSetWindowTitle title)
+        (rest :> PendingEvent (AppDictationPartial _), AppDictationPartial text) ->
+            rest |> PendingEvent (AppDictationPartial text)
         _ ->
             pending |> PendingEvent event
 
@@ -1938,6 +2197,9 @@ copyCodeBlock target blockId codeIndex = do
                         <|> selectedBlock state.appUi blockId
                 AgentChild _ ->
                     conversationUiForTarget target state
+                        >>= \ui -> selectedBlock ui blockId
+                AgentNative _ ->
+                    conversationUiForTarget target state
                         >>= \ui -> selectedBlock ui blockId)
                 >>= fencedCodeBlock codeIndex . (.blockBody)
     case code of
@@ -2113,1873 +2375,32 @@ fullscreenApp = App
             else Theme.monochrome
     }
 
-drawApp :: AppState -> [Widget Name]
-drawApp state =
-    map fullscreenBounds $
-        case state.appResume of
-            Just resume ->
-                drawResume state resume : dimmedMainLayers
-            Nothing ->
-                case (state.appTextPrompt, state.appChoice, state.appUi.uiPermission) of
-                    (Just prompt, _, _) ->
-                        drawTextPrompt state prompt : dimmedMainLayers
-                    (Nothing, Just choice, _) ->
-                        drawChoice state choice : dimmedMainLayers
-                    (Nothing, Nothing, Just permission) ->
-                        drawPermission state permission : dimmedMainLayers
-                    (Nothing, Nothing, Nothing) -> interactiveLayers
-  where
-    mainLayers = stickyPromptLayers state <> [drawMain state]
-    interactiveLayers =
-        agentPopoverLayers state
-            <> imagePreviewLayers
-                state.appRuntime.runtimeNativeImagePreviews
-                state.appImagePreviews
-            <> mainLayers
-    dimmedMainLayers = map (forceAttr Theme.dimAttr) mainLayers
-
-terminalTxt :: Text -> Widget n
-terminalTxt = txt . displayTerminalText
-
-terminalTxtWrap :: Text -> Widget n
-terminalTxtWrap = txtWrap . displayTerminalText
-
-drawMain :: AppState -> Widget Name
-drawMain state =
-    fullscreenSurface $
-        withAttr Theme.baseAttr $
-            vBox
-                [ drawHeader state
-                , drawWorkspace state
-                , drawNotice state
-                , Composer.drawQueuedInputs state.appUi
-                , Composer.drawSlashMenu state
-                , drawFollowStatus state.appUi
-                , drawLiveTodos (activeConversationUi state)
-                , drawPromptActivity state
-                , Composer.drawComposer state
-                , drawFooter state
-                ]
-
--- | Crop a top-level layer to the terminal without filling its unused cells.
--- Overlay layers must remain transparent, but custom widgets can otherwise
--- return images (and cursors) outside the render context and make Vty wrap
--- terminal rows.
-fullscreenBounds :: Widget n -> Widget n
-fullscreenBounds widget =
-    B.Widget B.Greedy B.Greedy do
-        context <- B.getContext
-        result <- B.render widget
-        let width = max 0 context.availWidth
-            height = max 0 context.availHeight
-            cursorInBounds cursor =
-                let Location (column, row) = cursor.cursorLocation
-                in column >= 0
-                    && column < width
-                    && row >= 0
-                    && row < height
-        pure
-            result
-                { B.image = V.crop width height result.image
-                , B.cursors = filter cursorInBounds result.cursors
-                }
-
--- | Bound the retained main layer to the terminal and explicitly paint every
--- cell. Some terminals can retain cells from an older, wider layout when a
--- later Brick image is narrower; an over-wide image can instead trigger
--- terminal-side wrapping and shift subsequent rows. Keeping the backing layer
--- exactly the render-context size prevents both failure modes.
-fullscreenSurface :: Widget n -> Widget n
-fullscreenSurface widget =
-    B.Widget B.Greedy B.Greedy do
-        context <- B.getContext
-        base <- B.lookupAttrName Theme.baseAttr
-        result <- B.render widget
-        let width = max 0 context.availWidth
-            height = max 0 context.availHeight
-            cropped = V.crop width height result.image
-            widthPadded =
-                padImageRight
-                    base
-                    (width - V.imageWidth cropped)
-                    cropped
-            padded =
-                padImageBottom
-                    base
-                    width
-                    (height - V.imageHeight widthPadded)
-                    widthPadded
-        pure result { B.image = padded }
-
-padImageRight :: V.Attr -> Int -> V.Image -> V.Image
-padImageRight attr amount image
-    | amount <= 0 || V.imageHeight image <= 0 = image
-    | otherwise =
-        V.horizCat
-            [ image
-            , V.charFill attr ' ' amount (V.imageHeight image)
-            ]
-
-padImageBottom :: V.Attr -> Int -> Int -> V.Image -> V.Image
-padImageBottom attr width amount image
-    | amount <= 0 || width <= 0 = image
-    | otherwise =
-        V.vertCat
-            [ image
-            , V.charFill attr ' ' width amount
-            ]
-
-imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]
-imagePreviewLayers native previews =
-    case takeLast 3 previews of
-        [] -> []
-        shown -> [centerLayer (drawImagePreviews native shown)]
-  where
-    takeLast count values =
-        drop (max 0 (length values - count)) values
-
-drawImagePreviews :: Bool -> [TuiImagePreview] -> Widget Name
-drawImagePreviews native previews =
-    Widget Fixed Fixed do
-        context <- getContext
-        let maxWidth = viewportPreviewSize context.availWidth
-            maxHeight = viewportPreviewSize context.availHeight
-            visible =
-                drop
-                    (max
-                        0
-                        (length previews - previewCountForWidth maxWidth))
-                    previews
-            gaps = max 0 (length visible - 1) * previewGap
-            previewWidth =
-                max 1 ((maxWidth - gaps) `div` max 1 (length visible))
-            previewHeight = max 1 (maxHeight - 1)
-            content =
-                hBox $
-                    intersperse
-                        (hLimit previewGap (fill ' '))
-                        (map (drawPreview previewWidth previewHeight) visible)
-        render $
-            hLimit maxWidth $
-                vLimit maxHeight content
-  where
-    previewGap = 2
-
-    drawPreview maxWidth maxHeight preview =
-        hLimit maxWidth $
-            vBox
-                [ hCenter $
-                    if native
-                        then nativeImagePlaceholder maxWidth maxHeight preview
-                        else renderTuiImagePreview maxWidth maxHeight preview
-                , hCenter $
-                    withAttr Theme.mutedAttr $
-                        terminalTxt $
-                            "🖼 "
-                                <> preview.previewMime
-                                <> " · "
-                                <> Text.pack (show preview.previewSourceWidth)
-                                <> "×"
-                                <> Text.pack (show preview.previewSourceHeight)
-                                <> " · "
-                                <> formatImageSize preview.previewBytes
-                ]
-
-    nativeImagePlaceholder maxWidth maxHeight preview =
-        let (width, height) =
-                previewCellSize maxWidth maxHeight preview
-        in hLimit width $
-            vLimit height $
-                fill ' '
-
-viewportPreviewSize :: Int -> Int
-viewportPreviewSize available =
-    max 1 (available * 3 `div` 5)
-
-drawWorkspace :: AppState -> Widget Name
-drawWorkspace state =
-    Widget Greedy Greedy do
-        context <- getContext
-        render $
-            padTop (Pad 1) $
-                hBox $
-                    [drawConversationPane state]
-                        <> if not
-                            (agentPaneVisible
-                                context.availWidth
-                                context.availHeight
-                                state.appAgentEntries)
-                            then []
-                            else
-                                [ hLimitPercent 40 $
-                                    hLimit agentPaneWidth $
-                                        padLeft (Pad 1) $
-                                            drawAgentPane
-                                                state
-                                                (agentPaneEntryLimit
-                                                    context.availHeight)
-                                                state.appAgentSelected
-                                                ((.agentHoverTarget)
-                                                    <$> state.appAgentHover)
-                                                state.appAgentEntries
-                                ]
-
-drawConversationPane :: AppState -> Widget Name
-drawConversationPane state =
-    case selectedChildEntry state of
-        Just entry ->
-            withVScrollBarRenderer conversationScrollbarRenderer $
-                withVScrollBars OnRight $
-                    viewport ConversationViewport Vertical $
-                        padLeftRight 2 (drawAgentConversation state entry)
-        Nothing
-            | conversationIsEmpty state.appUi
-                && Seq.null
-                    state.appHistoryWindow.historyWindowTurns ->
-                padLeftRight 2 $
-                    vBox
-                        [ drawTranscript state
-                        , drawEmptyConversation state
-                        ]
-            | otherwise ->
-                vBox $
-                    historyRangeWidgets state
-                        <> [ withVScrollBarRenderer
-                                conversationScrollbarRenderer $
-                                withVScrollBars OnRight $
-                                    viewport ConversationViewport Vertical $
-                                        padLeftRight 2
-                                            (drawTranscript state)
-                           ]
-
-selectedChildEntry :: AppState -> Maybe AgentEntry
-selectedChildEntry state =
-    selectedAgentConversation
-        state.appAgentSelected
-        state.appAgentEntries
-
-selectedAgentConversation
-    :: AgentTarget
-    -> [AgentEntry]
-    -> Maybe AgentEntry
-selectedAgentConversation selected entries = case selected of
-    AgentRoot -> Nothing
-    target ->
-        find ((== target) . (.agentTarget)) entries
-
-conversationUiForTarget :: AgentTarget -> AppState -> Maybe UiState
-conversationUiForTarget target state = case target of
-    AgentRoot -> Just state.appUi
-    AgentChild _ ->
-        (.agentConversation)
-            <$> find
-                ((== target) . (.agentTarget))
-                state.appAgentEntries
-
-activeConversationUi :: AppState -> UiState
-activeConversationUi state =
-    fromMaybe state.appUi $
-        conversationUiForTarget state.appAgentSelected state
-
-applyChildConversationUiEvent
-    :: AgentTarget
-    -> UiEvent
-    -> AppState
-    -> AppState
-applyChildConversationUiEvent target uiEvent state =
-    state
-        { appAgentEntries =
-            map updateEntry state.appAgentEntries
-        }
-  where
-    updateEntry entry
-        | entry.agentTarget == target =
-            entry
-                { agentConversation =
-                    reduceUi uiEvent entry.agentConversation
-                }
-        | otherwise = entry
-
-drawAgentConversation :: AppState -> AgentEntry -> Widget Name
-drawAgentConversation state entry =
-    vBox
-        [ withAttr Theme.headingAttr $
-            terminalTxt ("Viewing " <> entry.agentPath)
-        , withAttr Theme.mutedAttr $
-            terminalTxt
-                (entry.agentStatus
-                    <> " · input is sent to /root")
-        , padTop (Pad 1) $
-            if Seq.null entry.agentConversation.uiBlocks
-                then
-                    withAttr Theme.mutedAttr $
-                        terminalTxt "(no transcript yet)"
-                else
-                    drawConversationBlocks
-                        state
-                        entry.agentTarget
-                        entry.agentConversation
-        ]
-
--- Brick's default scrollbar uses a full block for the thumb and a blank
--- space for the trough. During rapid viewport reflow, some terminals can
--- leave the old full-block cells behind because the replacement trough is
--- visually identical to the surrounding background. A visible one-column
--- trough makes every old thumb position get explicitly repainted.
-conversationScrollbarRenderer :: VScrollbarRenderer n
-conversationScrollbarRenderer =
-    VScrollbarRenderer
-        { renderVScrollbar =
-            withAttr Theme.mutedAttr (fill '┃')
-        , renderVScrollbarTrough =
-            withAttr Theme.borderAttr (fill '│')
-        , renderVScrollbarHandleBefore = emptyWidget
-        , renderVScrollbarHandleAfter = emptyWidget
-        , scrollbarWidthAllocation = 1
-        }
-
-agentPaneWidth :: Int
-agentPaneWidth = 42
-
-agentPaneMinScreenWidth :: Int
-agentPaneMinScreenWidth = 72
-
-agentPaneMinAvailableHeight :: Int
-agentPaneMinAvailableHeight = 10
-
-agentPaneVisible :: Int -> Int -> [AgentEntry] -> Bool
-agentPaneVisible width height entries =
-    width >= agentPaneMinScreenWidth
-        && height >= agentPaneMinAvailableHeight
-        && length entries > 1
-
-agentPaneEntryLimit :: Int -> Int
-agentPaneEntryLimit availableHeight =
-    -- Reserve the outer top pad, four pane chrome rows (border and padding),
-    -- and two possible truncation indicators above and below.
-    max 1 (min 12 (availableHeight - 7))
-
-drawAgentPane
-    :: AppState
-    -> Int
-    -> AgentTarget
-    -> Maybe AgentTarget
-    -> [AgentEntry]
-    -> Widget Name
-drawAgentPane state entryLimit selected hovered entries =
-    clickable AgentPane $
-        withAttr Theme.borderAttr $
-            withBorderStyle unicodeRounded $
-                borderWithLabel
-                    (txt
-                        (" Agents · "
-                            <> Text.pack (show childCount)
-                            <> " ")) $
-                    padAll 1 $
-                        vBox agentRows
-  where
-    ordered = sortOn (.agentPath) entries
-    childCount =
-        length
-            [ ()
-            | entry <- ordered
-            , entry.agentTarget /= AgentRoot
-            ]
-    (hiddenBefore, shownEntries, hiddenAfter) =
-        agentEntryWindow entryLimit selected ordered
-    agentRows =
-        [ drawHidden hiddenBefore "above"
-        | hiddenBefore > 0
-        ]
-            <> map drawEntry shownEntries
-            <> [ drawHidden hiddenAfter "below"
-               | hiddenAfter > 0
-               ]
-    drawHidden count direction =
-        withAttr Theme.mutedAttr $
-            txt
-                ("  … "
-                    <> Text.pack (show count)
-                    <> " "
-                    <> direction)
-    drawEntry entry =
-        let
-            index =
-                maybe 0 id $
-                    findIndex ((== entry.agentTarget) . (.agentTarget)) ordered
-            marker =
-                if entry.agentTarget == selected then "› " else "  "
-            statusGlyph
-                | isBackgroundAgentActive entry =
-                    quietIndicator
-                        motionGlyphSet
-                        state.appRuntime.runtimeMotionMode
-                        state.appMotionElapsedMillis
-                | otherwise =
-                    agentStatusGlyph entry.agentStatus
-            row = hBox
-                [ terminalTxt
-                    (marker
-                        <> agentEntryTreeLabelWithGlyphModel
-                            statusGlyph
-                            ordered
-                            index
-                            entry)
-                , fill ' '
-                ]
-            styled =
-                if hovered == Just entry.agentTarget
-                    then withAttr Theme.controlLinkHoverAttr row
-                    else if entry.agentTarget == selected
-                        then withAttr Theme.successAttr row
-                        else row
-        in clickable (AgentRow entry.agentTarget) (vLimit 1 styled)
-
-agentPopoverLayers :: AppState -> [Widget Name]
-agentPopoverLayers state =
-    case (length state.appAgentEntries > 1, state.appAgentHover) of
-        (False, _) -> []
-        (_, Nothing) -> []
-        (True, Just hover) ->
-            case find
-                ((== hover.agentHoverTarget) . (.agentTarget))
-                state.appAgentEntries of
-                Nothing -> []
-                Just entry -> [positionAgentPopover state hover entry]
-
-agentPopoverPreferredWidth :: Int
-agentPopoverPreferredWidth = 40
-
-agentPopoverMinWidth :: Int
-agentPopoverMinWidth = 24
-
-agentPopoverHeight :: Int
-agentPopoverHeight = 9
-
-agentPopoverGap :: Int
-agentPopoverGap = 1
-
-positionAgentPopover :: AppState -> AgentHover -> AgentEntry -> Widget Name
-positionAgentPopover state hover entry =
-    Widget Fixed Fixed do
-        context <- getContext
-        let screenWidth = max 0 context.availWidth
-            screenHeight = max 0 context.availHeight
-            Location (_, anchorY) = hover.agentHoverUpperLeft
-            Location (paneX, _) = hover.agentHoverPaneUpperLeft
-            paneRight = paneX + max 1 hover.agentHoverPaneWidth
-            leftAvailable = max 0 (paneX - agentPopoverGap)
-            rightAvailable =
-                max 0 (screenWidth - paneRight - agentPopoverGap)
-            placeLeft =
-                leftAvailable >= agentPopoverMinWidth
-                    || leftAvailable >= rightAvailable
-            available =
-                if placeLeft then leftAvailable else rightAvailable
-            width = min agentPopoverPreferredWidth available
-            height = min agentPopoverHeight screenHeight
-            x
-                | placeLeft =
-                    max 0 (paneX - agentPopoverGap - width)
-                | otherwise =
-                    min
-                        (max 0 (screenWidth - width - agentPopoverGap))
-                        paneRight
-            y = max 0 (min anchorY (screenHeight - height))
-        if screenWidth < agentPaneMinScreenWidth
-            || width < agentPopoverMinWidth
-            || height < 5
-            then render emptyWidget
-            else
-                render $
-                    translateBy (Location (x, y)) $
-                        drawAgentPopover state placeLeft width height entry
-
-drawAgentPopover :: AppState -> Bool -> Int -> Int -> AgentEntry -> Widget Name
-drawAgentPopover state placeLeft width height entry =
-    clickable (AgentPopover entry.agentTarget) surface
-  where
-    surface
-        | placeLeft = hBox [popover, bridge]
-        | otherwise = hBox [bridge, popover]
-    bridge =
-        hLimit agentPopoverGap $
-            vLimit height (fill ' ')
-    popover =
-        hLimit width $
-            vLimit height $
-                withAttr Theme.baseAttr $
-                    overrideAttr Border.borderAttr Theme.borderActiveAttr $
-                        withBorderStyle unicodeRounded $
-                            borderWithLabel
-                                (withAttr Theme.headingAttr $
-                                    terminalTxt
-                                        (" "
-                                            <> truncateDisplayText
-                                                (max 1 (width - 6))
-                                                (agentDisplayName entry.agentPath)
-                                            <> " ")) $
-                                padAll 1 $
-                                    vBox
-                                        ( intersperse
-                                            (vLimit 1 (fill ' '))
-                                            (map
-                                                (drawAgentStep
-                                                    state
-                                                    (max 1 (width - 4)))
-                                                steps)
-                                            <> [fill ' ']
-                                        )
-    steps =
-        case take 2 entry.agentSteps of
-            [] ->
-                [ AgentStep
-                    { agentStepState = AgentStepInfo
-                    , agentStepTitle = "No recent activity"
-                    , agentStepDetail = Just entry.agentStatus
-                    }
-                ]
-            recent -> recent
-
-drawAgentStep :: AppState -> Int -> AgentStep -> Widget Name
-drawAgentStep state width step =
-    vLimit 2 $
-        vBox
-            [ hBox
-                [ withAttr (agentStepAttr step.agentStepState) $
-                    txt (agentStepGlyph state step.agentStepState)
-                , txt " "
-                , withAttr Theme.assistantAttr $
-                    terminalTxt
-                        (truncateDisplayText
-                            (max 1 (width - 2))
-                            step.agentStepTitle)
-                ]
-            , padLeft (Pad 2) $
-                withAttr Theme.mutedAttr $
-                    terminalTxt
-                        (truncateDisplayText
-                            (max 1 (width - 2))
-                            (fromMaybe
-                                (agentStepStateLabel step.agentStepState)
-                                step.agentStepDetail))
-            ]
-
-agentStepGlyph :: AppState -> AgentStepState -> Text
-agentStepGlyph state = \case
-    AgentStepRunning ->
-        quietIndicator
-            motionGlyphSet
-            state.appRuntime.runtimeMotionMode
-            state.appMotionElapsedMillis
-    AgentStepCompleted -> "✓"
-    AgentStepFailed -> "✕"
-    AgentStepInfo -> "◆"
-
-agentStepStateLabel :: AgentStepState -> Text
-agentStepStateLabel = \case
-    AgentStepRunning -> "running"
-    AgentStepCompleted -> "completed"
-    AgentStepFailed -> "failed"
-    AgentStepInfo -> "recent activity"
-
-agentStepAttr :: AgentStepState -> AttrName
-agentStepAttr = \case
-    AgentStepRunning -> Theme.thinkingAttr
-    AgentStepCompleted -> Theme.successAttr
-    AgentStepFailed -> Theme.errorAttr
-    AgentStepInfo -> Theme.toolAttr
-
-agentEntryWindow
-    :: Int
-    -> AgentTarget
-    -> [AgentEntry]
-    -> (Int, [AgentEntry], Int)
-agentEntryWindow count selected entries
-    | count <= 0 = (0, [], length entries)
-    | length entries <= count = (0, entries, 0)
-    | otherwise =
-        ( start
-        , take count (drop start entries)
-        , length entries - start - count
-        )
-  where
-    selectedIndex =
-        maybe 0 id $
-            findIndex ((== selected) . (.agentTarget)) entries
-    start =
-        max 0 $
-            min
-                (selectedIndex - count `div` 2)
-                (length entries - count)
-
-drawHeader :: AppState -> Widget Name
-drawHeader state =
-    withAttr Theme.headerAttr $
-        padLeftRight 2 $
-            hBox
-                [ hLimitPercent 68 (drawRepositoryHeader state.appUi)
-                , vLimit 1 (fill ' ')
-                , drawHeaderRight state
-                ]
-
-drawRepositoryHeader :: UiState -> Widget Name
-drawRepositoryHeader state
-    | Text.null state.uiBranch =
-        withAttr Theme.mutedAttr (terminalTxt state.uiCwd)
-    | otherwise =
-        hBox
-            [ txt "\xE0A0 "
-            , withAttr Theme.mutedAttr $
-                terminalTxt
-                    (repositoryHeaderText state.uiBranch state.uiCwd)
-            ]
-
-repositoryHeaderText :: Text -> Text -> Text
-repositoryHeaderText branch cwd =
-    Text.intercalate "  " $
-        filter (not . Text.null) [branch, cwd]
-
-drawHeaderRight :: AppState -> Widget Name
-drawHeaderRight state =
-    withAttr Theme.mutedAttr $
-        terminalTxt (formatTokenUsage state.appUi.uiPrompt.promptUsage)
-
-drawLiveTodos :: UiState -> Widget Name
-drawLiveTodos ui =
-    case liveTodoPanelLines 8 (visibleTodoList ui) of
-        [] -> emptyWidget
-        lines_ ->
-            padLeftRight 2 $
-                vBox (map (vLimit 1 . drawLiveTodoLine) lines_)
-
-drawLiveTodoLine :: Text -> Widget Name
-drawLiveTodoLine line =
-    Widget Fixed Fixed do
-        context <- getContext
-        let truncated = truncateDisplayText context.availWidth line
-            painted
-                | "… +" `Text.isPrefixOf` line =
-                    withAttr Theme.mutedAttr (terminalTxt truncated)
-                | otherwise =
-                    withAttr
-                        (todoStatusAttr (todoLineStatusFromText line))
-                        (terminalTxt truncated)
-        render painted
-
-todoLineStatusFromText :: Text -> TodoDisplayStatus
-todoLineStatusFromText line
-    | "▶" `Text.isPrefixOf` line = TodoDisplayInProgress
-    | "✓" `Text.isPrefixOf` line = TodoDisplayCompleted
-    | "✗" `Text.isPrefixOf` line = TodoDisplayCancelled
-    | otherwise = TodoDisplayPending
-
-drawPromptActivity :: AppState -> Widget Name
-drawPromptActivity state =
-    padLeftRight 2 $
-        hBox
-            [ activityWidget
-            , withAttr Theme.mutedAttr (terminalTxt elapsed)
-            ]
-  where
-    ui = state.appUi
-    waiting = userActionPending state
-    background = hasBackgroundActivity state.appAgentEntries
-    mode = state.appRuntime.runtimeMotionMode
-    motionMillis = state.appMotionElapsedMillis
-    activityWidget
-        | waiting =
-            hBox
-                [ withAttr (waitingIndicatorAttr state) $
-                    txt (waitingIndicator motionGlyphSet mode motionMillis)
-                , withAttr Theme.thinkingAttr (txt " Waiting for you")
-                ]
-        | otherwise =
-            withAttr activityAttr (terminalTxt activity)
-    activityAttr
-        | ui.uiRunning = Theme.thinkingAttr
-        | ui.uiCompletionRemainingMillis > 0 = Theme.successAttr
-        | background = Theme.toolAttr
-        | otherwise = Theme.mutedAttr
-    activity
-        | ui.uiRunning =
-            foregroundIndicator motionGlyphSet mode motionMillis
-                <> " "
-                <> ui.uiActivity
-        | ui.uiCompletionRemainingMillis > 0 =
-            ui.uiActivity
-        | background =
-            backgroundIndicator motionGlyphSet mode motionMillis
-                <> " Background work"
-        | otherwise =
-            ui.uiActivity
-    elapsed =
-        if ui.uiRunning
-            then " · "
-                <> formatElapsed
-                    (fromIntegral ui.uiElapsedMillis / 1000)
-            else ""
-
-waitingIndicatorAttr :: AppState -> AttrName
-waitingIndicatorAttr state =
-    case waitingIndicator
-        motionGlyphSet
-        state.appRuntime.runtimeMotionMode
-        state.appMotionElapsedMillis of
-        "◇" -> Theme.waitingDimAttr
-        "." -> Theme.waitingDimAttr
-        "◈" -> Theme.waitingMidAttr
-        "*" -> Theme.waitingMidAttr
-        _ -> Theme.thinkingAttr
-
-drawTranscript :: AppState -> Widget Name
-drawTranscript state =
-    vBox $
-        [ vBox $
-            olderGap
-                <> map
-                    (drawBlock state AgentRoot state.appUi)
-                    historicalBlocks
-                <> newerGap
-                <> [drawConversationBlocks state AgentRoot state.appUi]
-        ]
-            <> conversationReserveWidgets anchor
-  where
-    historicalBlocks =
-        concatMap
-            (toList . (.historyTurnBlocks))
-            (toList state.appHistoryWindow.historyWindowTurns)
-    olderGap =
-        historyGapWidget
-            HistoryOlder
-            state.appHistoryWindow.historyWindowHasOlder
-            state.appHistoryWindow.historyWindowPending
-    newerGap =
-        historyGapWidget
-            HistoryNewer
-            state.appHistoryWindow.historyWindowHasNewer
-            state.appHistoryWindow.historyWindowPending
-    anchor = state.appConversationAnchor
-
--- | Cache completed transcript blocks in moderately sized groups.
---
--- A Brick viewport must still lay out its complete child to determine the
--- scroll range. Per-block caching avoids repeated Markdown parsing, but a
--- redraw still has to combine one image per retained block. Grouping stable
--- blocks means ordinary scrolling traverses roughly one cached image per 32
--- blocks instead. Only full chunks are cached: Brick retains cache entries
--- until explicit invalidation, so caching the growing final chunk under a new
--- last-block key for every append would retain all of those obsolete images.
--- The final partial/live/animated group remains uncached.
-drawTranscriptChunk
-    :: AppState
-    -> AgentTarget
-    -> UiState
-    -> Seq UiBlock
-    -> Widget Name
-drawTranscriptChunk state target ui blocks =
-    case
-        Transcript.transcriptChunkCacheKey
-            (cacheableBlock state target ui)
-            dynamicBlockIds
-            blocks of
-        Just (firstBlockId, lastBlockId) ->
-            cached
-                (ConversationChunkCache
-                    target
-                    firstBlockId
-                    lastBlockId)
-                rendered
-        Nothing -> rendered
-  where
-    rendered =
-        vBox (map (drawBlock state target ui) (toList blocks))
-    dynamicBlockIds =
-        [ blockId
-        | state.appUi.uiFocus == FocusScrollback
-        , state.appAgentSelected == target
-        , blockId <- maybeToList ui.uiSelectedBlock
-        ]
-            <> [ blockId
-               | Just (CodeCopy hoveredTarget blockId _) <-
-                    [state.appHoveredControl]
-               , hoveredTarget == target
-               ]
-
-drawConversationBlocks
-    :: AppState
-    -> AgentTarget
-    -> UiState
-    -> Widget Name
-drawConversationBlocks state target ui =
-    vBox $
-        map
-            (drawTranscriptChunk state target ui)
-            (Transcript.transcriptChunks ui.uiBlocks)
-
-historyRangeWidgets :: AppState -> [Widget Name]
-historyRangeWidgets state =
-    case historyRangeText state.appHistoryWindow of
-        Nothing -> []
-        Just range ->
-            [ padLeftRight 2 $
-                withAttr Theme.mutedAttr $
-                    hCenter (txt range)
-            ]
-
-historyRangeText :: HistoryWindow -> Maybe Text
-historyRangeText window = do
-    firstTurn <- window.historyWindowTurns Seq.!? 0
-    lastTurn <-
-        window.historyWindowTurns
-            Seq.!? (Seq.length window.historyWindowTurns - 1)
-    let HistoryCursor generationStart =
-            window.historyWindowGenerationStart
-        HistoryCursor firstCursor = firstTurn.historyTurnCursor
-        HistoryCursor lastCursor = lastTurn.historyTurnCursor
-        total = window.historyWindowTotalTurns
-        firstPosition = max 1 (firstCursor - generationStart + 1)
-        lastPosition = max firstPosition (lastCursor - generationStart + 1)
-        virtualized =
-            window.historyWindowHasOlder
-                || window.historyWindowHasNewer
-                || fromIntegral (Seq.length window.historyWindowTurns) < total
-        available =
-            [ label
-            | (isAvailable, label) <-
-                [ (window.historyWindowHasOlder, "older")
-                , (window.historyWindowHasNewer, "newer")
-                ]
-            , isAvailable
-            ]
-        suffix =
-            case available of
-                [] -> ""
-                labels ->
-                    " · "
-                        <> Text.intercalate "/" labels
-                        <> " load on scroll"
-    if total <= 0 || not virtualized
-        then Nothing
-        else
-            Just $
-                "Turns "
-                    <> showText firstPosition
-                    <> "–"
-                    <> showText (min total lastPosition)
-                    <> " of "
-                    <> showText total
-                    <> suffix
-
-historyGapWidget
-    :: HistoryDirection
-    -> Bool
-    -> Set.Set HistoryDirection
-    -> [Widget Name]
-historyGapWidget direction available pending
-    | not available = []
-    | otherwise =
-        [ padTopBottom 1 $
-            withAttr Theme.mutedAttr $
-                hCenter $
-                    txt $
-                        if direction `Set.member` pending
-                            then "… loading " <> directionLabel <> " turns …"
-                            else
-                                "… "
-                                    <> directionLabel
-                                    <> " persisted turns are unloaded …"
-        ]
-  where
-    directionLabel = case direction of
-        HistoryOlder -> "older"
-        HistoryNewer -> "newer"
-
-showText :: Show a => a -> Text
-showText = Text.pack . show
-
-stickyPromptLayers :: AppState -> [Widget Name]
-stickyPromptLayers state =
-    case (state.appAgentSelected, state.appConversationAnchor) of
-        (AgentRoot, Just anchor)
-            | Scroll.conversationAnchorSticky anchor ->
-                [ translateBy (Location (0, 2)) $
-                    hLimitPercent conversationWidth $
-                        padLeftRight 2 $
-                            withAttr Theme.userAttr $
-                                vLimit 5 $
-                                    padAll 1 $
-                                        terminalTxtWrap
-                                            (stickyPromptPreview
-                                                anchor.anchorText)
-                ]
-        _ -> []
-  where
-    conversationWidth =
-        if length state.appAgentEntries <= 1 then 100 else 68
-
-stickyPromptPreview :: Text -> Text
-stickyPromptPreview text =
-    case splitAt 3 (Text.lines text) of
-        (shown, []) -> Text.intercalate "\n" shown
-        (shown, _ : _) ->
-            Text.intercalate "\n" (take 2 shown <> ["…"])
-
-conversationReserveWidgets
-    :: Maybe Scroll.ConversationAnchor
-    -> [Widget Name]
-conversationReserveWidgets = \case
-    Just anchor
-        | anchor.anchorReserveRows > 0 ->
-            [ reportExtent ConversationReserve $
-                vLimit anchor.anchorReserveRows (fill ' ')
-            ]
-    _ -> []
-
-drawEmptyConversation :: AppState -> Widget Name
-drawEmptyConversation state =
-    B.Widget B.Greedy B.Greedy do
-        context <- B.getContext
-        let width = context.availWidth
-            height = context.availHeight
-        B.render $
-            if quickStartVisible width height
-                then
-                    center $
-                        vBox
-                            [ vLimit
-                                (max 8 (height - quickStartReservedRows))
-                                (hCenter (lambdaArtWidget frame))
-                            , hCenter (drawQuickStartPanel state)
-                            ]
-                else center (lambdaArtWidget frame)
-  where
-    frame
-        | userActionPending state = 0
-        | otherwise = case state.appRuntime.runtimeMotionMode of
-            MotionFull -> state.appMotionElapsedMillis `div` 160
-            MotionReduced -> 0
-            MotionOff -> 0
-
-quickStartReservedRows :: Int
-quickStartReservedRows = 9
-
-quickStartVisible :: Int -> Int -> Bool
-quickStartVisible width height =
-    width >= 48 && height >= 20
-
-quickStartRows :: [(Name, Text, Text)]
-quickStartRows =
-    [ (QuickStartWorktree, "New worktree", "/worktree")
-    , (QuickStartResume, "Resume session", "/resume")
-    , (QuickStartCommands, "Browse commands", "/")
-    , (QuickStartModel, "Manage models", "/model")
-    ]
-
-drawQuickStartPanel :: AppState -> Widget Name
-drawQuickStartPanel state =
-    hLimit 44 $
-        vBox
-            [ withAttr Theme.headingAttr $
-                hCenter (txt "What would you like to do?")
-            , padTop (Pad 1) $
-                vBox (map drawQuickStartRow quickStartRows)
-            , padTop (Pad 1) $
-                withAttr Theme.mutedAttr $
-                    hCenter (txt "Tip: Type / to browse commands and skills.")
-            ]
-  where
-    drawQuickStartRow (name, label, command) =
-        clickable name $
-            case Composer.controlInteractionAttr state name of
-                Just attr -> forceAttr attr row
-                Nothing -> row
-      where
-        row =
-            hBox
-                [ withAttr Theme.controlLinkAttr (txt ("  " <> label))
-                , vLimit 1 (fill ' ')
-                , withAttr Theme.mutedAttr (txt command)
-                , txt "  "
-                ]
-
-drawBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Widget Name
-drawBlock state target ui block =
-    let selected =
-            ui.uiSelectedBlock == Just block.blockId
-                || (target == AgentRoot
-                    && state.appHistorySelectedBlock == Just block.blockId)
-        highlighted =
-            selected
-                && state.appUi.uiFocus == FocusScrollback
-                && state.appAgentSelected == target
-        content = case block.blockKind of
-            BlockUser ->
-                withAttr Theme.userAttr $
-                    padAll 1 $
-                        timestampedMessage block.blockTimestamp
-                            (terminalTxtWrap block.blockBody)
-            BlockAssistant ->
-                padLeft (Pad 3) $
-                    padRight (Pad 1) $
-                        timestampedMessage block.blockTimestamp $
-                            withAttr Theme.assistantAttr
-                                (markdownWidgetWithSyntaxHighlightingAndLinks
-                                    state.appSyntaxHighlighter
-                                    MarkdownLink
-                                    (\codeIndex ->
-                                        cached
-                                            (CodeBlockCache
-                                                target
-                                                block.blockId
-                                                codeIndex))
-                                    (codeBlockHeader
-                                        state
-                                        target
-                                        block.blockId)
-                                    block.blockBody)
-            BlockThinking ->
-                accentMarkdownBlock (thinkingBlockAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    (visibleBody block)
-            BlockTool ->
-                accentBlock (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
-                    (visibleBody block)
-            BlockTodo ->
-                accentBlockWithSections (statusAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    (todoBodyWidgets block)
-            BlockShell ->
-                accentCodeBlock
-                    state.appSyntaxHighlighter
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block <> block.blockTitle)
-                    block.blockDetail
-                    (visibleShellBody block)
-            BlockEdit ->
-                accentBlock (statusAttr state target block)
-                    (blockStateGlyph state target block
-                        <> block.blockTitle
-                        <> detailSuffix block)
-                    (visibleBody block)
-            BlockSystem ->
-                withAttr Theme.mutedAttr
-                    (terminalTxtWrap block.blockBody)
-            BlockRecap ->
-                accentBlock
-                    (statusAttr state target block)
-                    (blockStateGlyph state target block <> "Recap")
-                    (visibleBody block)
-            BlockError ->
-                withAttr Theme.errorAttr
-                    (terminalTxtWrap block.blockBody)
-        framed =
-            if highlighted
-                then withAttr Theme.selectedAttr content
-                else content
-        rendered =
-            clickable (ConversationBlock target block.blockId) $
-                padBottom (Pad 1) $
-                    hBox
-                        [ withAttr
-                            (if highlighted
-                                then Theme.borderActiveAttr
-                                else Theme.mutedAttr)
-                            (txt (if highlighted then "❯ " else "  "))
-                        , framed
-                        ]
-    in if cacheableBlock state target ui block
-        then cached
-            (ConversationBlockCache
-                target
-                block.blockId
-                highlighted
-                block.blockExpanded
-                (codeCopyCacheState state target block.blockId))
-            rendered
-        else rendered
-
-timestampedMessage :: Text -> Widget Name -> Widget Name
-timestampedMessage timestamp body
-    | Text.null timestamp = body
-    | otherwise =
-        hBox
-            [ padRight Max body
-            , withAttr Theme.mutedAttr
-                (terminalTxt ("  " <> timestamp))
-            ]
-
-codeBlockHeader
-    :: AppState
-    -> AgentTarget
-    -> BlockId
-    -> Int
-    -> Text
-    -> Widget Name
-codeBlockHeader state target blockId codeIndex language =
-    hBox
-        [ if Text.null language
-            then emptyWidget
-            else withAttr Theme.mutedAttr (terminalTxt language)
-        , vLimit 1 (fill ' ')
-        , clickable name $
-            withAttr
-                (Composer.controlAttr state name Theme.controlLinkAttr)
-                (txt " Copy ")
-        ]
-  where
-    name = CodeCopy target blockId codeIndex
-
-codeCopyCacheState
-    :: AppState
-    -> AgentTarget
-    -> BlockId
-    -> Maybe (Int, Bool)
-codeCopyCacheState state target blockId =
-    case state.appHoveredControl of
-        Just (CodeCopy hoveredTarget hoveredBlock codeIndex)
-            | hoveredTarget == target
-            , hoveredBlock == blockId ->
-                Just
-                    ( codeIndex
-                    , state.appPressedControl
-                        == Just (CodeCopy target blockId codeIndex)
-                    )
-        _ -> Nothing
-
-cacheableBlock :: AppState -> AgentTarget -> UiState -> UiBlock -> Bool
-cacheableBlock state target ui block =
-    block.blockState
-        `notElem` [BlockStreaming, BlockRunning]
-        && maybe
-            True
-            ((/= block.blockId) . (.retryCountdownBlockId))
-            ui.uiRetryCountdown
-        && not (blockFlashing state target block)
-
-blockStateGlyph :: AppState -> AgentTarget -> UiBlock -> Text
-blockStateGlyph state target block = case block.blockState of
-    BlockRunning -> liveGlyph
-    BlockStreaming -> liveGlyph
-    BlockComplete -> "✓ "
-    BlockFailed -> "✗ "
-    BlockDenied -> "⊘ "
-    BlockCancelled -> "⊘ "
-  where
-    liveGlyph
-        | target == AgentRoot
-        , userActionPending state =
-            waitingIndicator
-                motionGlyphSet
-                MotionOff
-                state.appMotionElapsedMillis
-                <> " "
-        | otherwise =
-            foregroundIndicator
-                motionGlyphSet
-                state.appRuntime.runtimeMotionMode
-                state.appMotionElapsedMillis
-                <> " "
-
-accentBlock :: AttrName -> Text -> Text -> Widget Name
-accentBlock accent title body =
-    accentBlockWithSections accent title $
-        if Text.null (Text.strip body)
-            then []
-            else [terminalTxtWrap body]
-
-accentMarkdownBlock :: AttrName -> Text -> Text -> Widget Name
-accentMarkdownBlock accent title body =
-    accentBlockWithSections accent title $
-        if Text.null (Text.strip body)
-            then []
-            else [markdownWidgetWithLinks MarkdownLink body]
-
-accentCodeBlock
-    :: Maybe SyntaxHighlighter
-    -> AttrName
-    -> Text
-    -> Text
-    -> Text
-    -> Widget Name
-accentCodeBlock syntaxHighlighter accent title code body =
-    accentBlockWithSections accent title $
-        [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
-        | not (Text.null (Text.strip code))
-        ]
-            <> [ terminalTxtWrap body
-               | not (Text.null (Text.strip body))
-               ]
-
-accentBlockWithSections
-    :: AttrName
-    -> Text
-    -> [Widget Name]
-    -> Widget Name
-accentBlockWithSections accent title sections =
-    hBox
-        [ withAttr accent (txt "❙")
-        , padLeft (Pad 2) $
-            vBox $
-                [withAttr accent (terminalTxtWrap title)]
-                    <> map (padTop (Pad 1)) sections
-        ]
-
-visibleBody :: UiBlock -> Text
-visibleBody block
-    | block.blockExpanded = block.blockBody
-    | otherwise = truncatedLines 3 block.blockBody
-
-todoBodyWidgets :: UiBlock -> [Widget Name]
-todoBodyWidgets block =
-    let parsed = parseTodoList block.blockBody
-        (shown, hidden)
-            | block.blockExpanded = (parsed, 0)
-            | otherwise =
-                let visible = take 3 parsed
-                in (visible, length parsed - length visible)
-        rows = map todoLineWidget shown
-        overflow
-            | hidden > 0 =
-                [ withAttr Theme.mutedAttr
-                    (txt ("… +" <> Text.pack (show hidden) <> " lines"))
-                ]
-            | otherwise = []
-    in case rows <> overflow of
-        [] -> []
-        widgets -> [vBox widgets]
-
-todoLineWidget :: TodoDisplayLine -> Widget Name
-todoLineWidget line =
-    withAttr (todoStatusAttr line.todoLineStatus)
-        (txtWrap (todoStatusGlyph line.todoLineStatus <> " " <> line.todoLineText))
-
-todoStatusAttr :: TodoDisplayStatus -> AttrName
-todoStatusAttr = \case
-    TodoDisplayPending -> Theme.todoPendingAttr
-    TodoDisplayInProgress -> Theme.todoInProgressAttr
-    TodoDisplayCompleted -> Theme.todoCompletedAttr
-    TodoDisplayCancelled -> Theme.todoCancelledAttr
-
-truncatedLines :: Int -> Text -> Text
-truncatedLines shownCount body =
-    let rows = Text.lines body
-        shown = take shownCount rows
-        hidden = length rows - length shown
-    in Text.unlines shown
-        <> if hidden > 0
-            then "… +" <> Text.pack (show hidden) <> " lines"
-            else ""
-
-visibleShellBody :: UiBlock -> Text
-visibleShellBody block
-    | block.blockExpanded = block.blockBody
-    | otherwise =
-        let rows = Text.lines block.blockBody
-            shown
-                | length rows <= 5 = rows
-                | otherwise = take 2 rows <> ["…"] <> drop (length rows - 3) rows
-        in Text.unlines shown
-
-detailSuffix :: UiBlock -> Text
-detailSuffix block
-    | Text.null (Text.strip block.blockDetail) = ""
-    | otherwise = "  " <> block.blockDetail
-
-statusAttr :: AppState -> AgentTarget -> UiBlock -> AttrName
-statusAttr state target block
-    | blockFlashing state target block
-    , block.blockState == BlockComplete =
-        Theme.completionFlashAttr
-    | otherwise = case block.blockState of
-        BlockFailed -> Theme.errorAttr
-        BlockCancelled -> Theme.mutedAttr
-        BlockDenied -> Theme.errorAttr
-        BlockComplete -> Theme.successAttr
-        BlockRunning -> Theme.toolAttr
-        BlockStreaming -> Theme.thinkingAttr
-
-thinkingBlockAttr :: AppState -> AgentTarget -> UiBlock -> AttrName
-thinkingBlockAttr state target block
-    | blockFlashing state target block
-    , block.blockState == BlockComplete =
-        Theme.completionFlashAttr
-    | otherwise =
-        Theme.thinkingAttr
-
-blockFlashing :: AppState -> AgentTarget -> UiBlock -> Bool
-blockFlashing state target block =
-    target == AgentRoot
-        && Map.member block.blockId state.appCompletionFlashes
-
-drawNotice :: AppState -> Widget Name
-drawNotice state = case state.appUi.uiNotice of
-    Nothing -> emptyWidget
-    Just notice ->
-        let (attr, prefix) = noticePresentation state notice.noticeKind
-        in withAttr attr $
-            padLeftRight 2
-                (terminalTxtWrap (prefix <> notice.noticeText))
-
-noticePresentation :: AppState -> NoticeKind -> (AttrName, Text)
-noticePresentation state = \case
-    NoticeInfo -> (Theme.footerAttr, "• ")
-    NoticeSuccess -> (Theme.successAttr, "✓ ")
-    NoticeWarning -> (Theme.thinkingAttr, "⚠ ")
-    NoticeProgress ->
-        ( Theme.thinkingAttr
-        , foregroundIndicator
-            motionGlyphSet
-            (if userActionPending state
-                then MotionOff
-                else state.appRuntime.runtimeMotionMode)
-            state.appMotionElapsedMillis
-            <> " "
-        )
-    NoticeError -> (Theme.errorAttr, "✗ ")
-
-drawFollowStatus :: UiState -> Widget Name
-drawFollowStatus state
-    | state.uiFollow = emptyWidget
-    | otherwise =
-        withAttr Theme.thinkingAttr $
-            padLeftRight 2 $
-                txt "↓ Live output paused · End to resume"
-
-drawFooter :: AppState -> Widget Name
-drawFooter state =
-    withAttr Theme.footerAttr $
-        padLeftRight 2 $
-            txt footer
-  where
-    footer = case (state.appTextPrompt, state.appChoice, state.appUi.uiFocus) of
-        (Just _, _, _) ->
-            if state.appUi.uiRunning
-                then "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc close  │  Ctrl+C cancel turn"
-                else "Enter submit  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Esc cancel"
-        (Nothing, Just _, _) ->
-            if state.appUi.uiRunning
-                then "↑↓ select  │  Enter choose  │  Esc close  │  Ctrl+C cancel turn"
-                else "↑↓ select  │  Enter choose  │  Esc cancel"
-        (Nothing, Nothing, focus) ->
-                case focus of
-                    FocusPermission ->
-                        "↑↓ select  │  Enter choose  │  Esc deny"
-                    FocusScrollback ->
-                        "↑↓ blocks  │  Ctrl+J/K lines  │  PgUp/PgDn pages  │  wheel scroll  │  Tab/Space prompt"
-                    FocusComposer
-                        | not state.appUi.uiAwaitingInput ->
-                            "Enter queue  │  Ctrl+R dictate  │  Ctrl+Enter/Ctrl+O send now  │  Esc/Ctrl+C cancel  │  Tab scrollback"
-                        | otherwise ->
-                            "Enter send  │  Ctrl+R dictate  │  Shift+Enter newline  │  PgUp/PgDn scroll  │  Tab scrollback"
-
-drawPermission :: AppState -> PermissionOverlay -> Widget Name
-drawPermission state permission =
-    centerLayer $
-        hLimitPercent 78 $
-            overrideAttr Border.borderAttr Theme.borderActiveAttr $
-                withBorderStyle unicodeRounded $
-                    borderWithLabel
-                        (waitingOverlayLabel state "Permission") $
-                        padAll 1 $
-                            vBox
-                                [ terminalTxtWrap
-                                    permission.permissionSummary
-                                , padTop (Pad 1) $
-                                    vBox $
-                                        zipWith
-                                            (permissionRow permission.permissionIndex)
-                                            [0 ..]
-                                            [ "Allow once"
-                                            , "Always approve all tools for this project"
-                                            , "Always allow this tool this session"
-                                            , "Deny"
-                                            ]
-                                ]
-
-permissionRow :: Int -> Int -> Text -> Widget Name
-permissionRow selected index label =
-    let prefix = if selected == index then "› " else "  "
-        widget = terminalTxt (prefix <> label)
-        styled =
-            if selected == index
-                then withAttr Theme.selectedAttr widget
-                else widget
-    in clickable (PermissionRow index) styled
-
-drawResume :: AppState -> ResumeOverlay -> Widget Name
-drawResume state overlay =
-    centerLayer $
-        hLimitPercent 82 $
-            vLimitPercent 82 $
-                overrideAttr Border.borderAttr Theme.borderActiveAttr $
-                    withBorderStyle unicodeRounded $
-                        borderWithLabel
-                            (waitingOverlayLabel state "Resume session") $
-                            vBox
-                                [ padLeftRight 1 (resumeHeader browser)
-                                , Border.hBorder
-                                , withVScrollBarRenderer conversationScrollbarRenderer $
-                                    withVScrollBars OnRight $
-                                        viewport ResumeViewport Vertical $
-                                            padLeftRight 1 (resumeList browser)
-                                , Border.hBorder
-                                , padLeftRight 1 (resumeFooter browser)
-                                ]
-  where
-    browser = overlay.resumeOverlayBrowser
-
-resumeHeader :: ResumeBrowser -> Widget Name
-resumeHeader browser =
-    hBox
-        [ search
-        , vLimit 1 (fill ' ')
-        , withAttr Theme.mutedAttr $
-            terminalTxt
-                (resumeSourceLabel browser.resumeBrowserSource <> "  f")
-        ]
-  where
-    prefix
-        | browser.resumeBrowserSearching = "search: "
-        | Text.null browser.resumeBrowserQuery = "/ to search"
-        | otherwise = "search: "
-    search
-        | browser.resumeBrowserSearching =
-            showCursor
-                ResumeSearchCursor
-                (Location
-                    (resumeSearchCursorColumn
-                        prefix
-                        browser.resumeBrowserQuery, 0))
-                (terminalTxt
-                    (prefix <> browser.resumeBrowserQuery <> " "))
-        | Text.null browser.resumeBrowserQuery =
-            withAttr Theme.mutedAttr (terminalTxt prefix)
-        | otherwise =
-            terminalTxt (prefix <> browser.resumeBrowserQuery)
-
-resumeSearchCursorColumn :: Text -> Text -> Int
-resumeSearchCursorColumn prefix query =
-    terminalTextWidth prefix + terminalTextWidth query
-
-resumeList :: ResumeBrowser -> Widget Name
-resumeList browser =
-    case visibleResumeBrowser browser of
-        [] ->
-            padTop (Pad 1) $
-                withAttr Theme.mutedAttr (txt "  No matches")
-        _ : _ ->
-            vBox $
-                intersperse (txt "") $
-                    map (resumeGroup browser selectedId) groups
-  where
-    entries = visibleResumeBrowser browser
-    groups
-        | isJust browser.resumeBrowserAppliedQuery =
-            [("search results", entries)]
-        | otherwise = groupResumeEntries entries
-    selectedId = (.resumeId) <$> selectedResumeBrowser browser
-
-resumeGroup
-    :: ResumeBrowser
-    -> Maybe Text
-    -> (Text, [ResumeEntry])
-    -> Widget Name
-resumeGroup browser selectedId (project, entries) =
-    vBox
-        [ hBox
-            [ withAttr Theme.mutedAttr $
-                terminalTxt (" " <> project <> " ")
-            , withAttr Theme.mutedAttr (vLimit 1 (fill '─'))
-            ]
-        , vBox (map (resumeRow browser selectedId) entries)
-        ]
-
-resumeRow :: ResumeBrowser -> Maybe Text -> ResumeEntry -> Widget Name
-resumeRow browser selectedId entry =
-    clickable (ResumeRow entry.resumeId) $
-        if selected
-            then forceAttr Theme.selectedAttr body
-            else body
-  where
-    selected = selectedId == Just entry.resumeId
-    expanded = browser.resumeBrowserExpanded == Just entry.resumeId
-    marker
-        | expanded = "◆ "
-        | otherwise = "› "
-    summary =
-        hBox
-            [ hLimitPercent 78
-                (terminalTxt (marker <> entry.resumeTitle))
-            , vLimit 1 (fill ' ')
-            , withAttr Theme.mutedAttr $
-                txt (resumeRelativeAge browser.resumeBrowserNow entry.resumeUpdatedAt)
-            ]
-    body
-        | expanded =
-            vBox
-                [ summary
-                , padLeft (Pad 4) $
-                    vBox $
-                        [ resumeDetail "ID" entry.resumeId
-                        , resumeDetail "CWD" entry.resumeCwd
-                        , resumeDetail "Model" entry.resumeModel
-                        , resumeDetail
-                            "Created"
-                            (resumeAbsoluteTime entry.resumeCreatedAt)
-                        , resumeDetail
-                            "Updated"
-                            (resumeAbsoluteTime entry.resumeUpdatedAt)
-                        , resumeDetail
-                            "Source"
-                            ("local · " <> entry.resumeProvider)
-                        , resumeDetail
-                            "Messages"
-                            (Text.pack (show entry.resumeMessageCount))
-                        , resumeDetail
-                            "Turns"
-                            ( Text.pack (show entry.resumeTurnCount)
-                                <> "    Tools  "
-                                <> Text.pack (show entry.resumeToolCount)
-                            )
-                        ]
-                            <> maybe
-                                []
-                                (\recap -> [resumeDetail "Recap" recap])
-                                (nonEmptyResumeText entry.resumeRecap)
-                            <> maybe
-                                []
-                                (\summaryLine ->
-                                    [resumeDetail "Last turn" summaryLine])
-                                (nonEmptyResumeText entry.resumeLastTurnSummary)
-                            <>
-                        [ resumeDetail
-                            "Prompt"
-                            (if Text.null entry.resumePrompt
-                                then "(none)"
-                                else entry.resumePrompt)
-                        ]
-                ]
-        | otherwise =
-            case entry.resumeMatch of
-                Nothing -> summary
-                Just match ->
-                    vBox
-                        [ summary
-                        , padLeft (Pad 4) $
-                            withAttr Theme.mutedAttr (txtWrap match)
-                        ]
-
-resumeDetail :: Text -> Text -> Widget Name
-resumeDetail label value =
-    hBox
-        [ withAttr Theme.mutedAttr (txt (Text.justifyLeft 12 ' ' label))
-        , terminalTxtWrap value
-        ]
-
-nonEmptyResumeText :: Maybe Text -> Maybe Text
-nonEmptyResumeText =
-    fmap Text.strip >=> \text ->
-        if Text.null text then Nothing else Just text
-
-resumeAbsoluteTime :: UTCTime -> Text
-resumeAbsoluteTime =
-    Text.pack . formatTime defaultTimeLocale "%b %e, %Y %H:%M UTC"
-
-resumeFooter :: ResumeBrowser -> Widget Name
-resumeFooter browser =
-    withAttr attr (terminalTxt footer)
-  where
-    hasRows = not (null (visibleResumeBrowser browser))
-    (attr, footer) =
-        case browser.resumeBrowserNotice of
-            Just notice -> (Theme.errorAttr, notice)
-            Nothing
-                | isJust browser.resumeBrowserDeletePending ->
-                    (Theme.thinkingAttr, "y confirm delete  │  n cancel")
-                | browser.resumeBrowserSearching ->
-                    (Theme.footerAttr, "type to search  │  Enter run  │  Esc close  │  ↑↓ nav")
-                | not hasRows ->
-                    (Theme.footerAttr, "f filter  │  / search  │  Esc cancel")
-                | otherwise ->
-                    ( Theme.footerAttr
-                    , "↑↓ nav  │  Enter resume  │  e expand  │  / search  │  f filter  │  d delete  │  Esc cancel"
-                    )
-
-drawChoice :: AppState -> ChoiceOverlay -> Widget Name
-drawChoice appState choice = case choice.choicePresentation of
-    ChoiceDialog -> drawDialogChoice appState choice
-    ChoiceOnboarding -> drawOnboardingChoice appState choice
-
-drawDialogChoice :: AppState -> ChoiceOverlay -> Widget Name
-drawDialogChoice appState choice =
-    centerLayer $
-        hLimitPercent 82 $
-            vLimitPercent 78 $
-                overrideAttr Border.borderAttr Theme.borderActiveAttr $
-                    withBorderStyle unicodeRounded $
-                        borderWithLabel
-                            (waitingOverlayLabel appState choice.choiceTitle) $
-                            padAll 1 $
-                                vBox
-                                    [ if Text.null (Text.strip choice.choiceBody)
-                                        then emptyWidget
-                                        else padBottom (Pad 1) $
-                                            vLimitPercent 65 $
-                                                viewport OverlayViewport Vertical $
-                                                    markdownWidgetWithLinks
-                                                        MarkdownLink
-                                                        choice.choiceBody
-                                    , vBox $
-                                        zipWith
-                                            (choiceRow
-                                                appState
-                                                choice.choiceIndex)
-                                            [start ..]
-                                            rows
-                                    ]
-  where
-    count = length choice.choiceRows
-    start =
-        max 0 (min choice.choiceIndex (max 0 (count - 14)))
-    rows = take 14 (drop start choice.choiceRows)
-
-drawOnboardingChoice :: AppState -> ChoiceOverlay -> Widget Name
-drawOnboardingChoice appState choice =
-    Widget Greedy Greedy do
-        context <- getContext
-        render $
-            withAttr Theme.baseAttr $
-                padRight Max $
-                    padBottom Max $
-                        padLeft (Pad 3) $
-                            vBox
-                                [ onboardingRow context.availWidth sourceIndex
-                                | sourceIndex <-
-                                    onboardingVisibleRowIndices
-                                        context.availHeight
-                                        choice.choiceIndex
-                                        (length choice.choiceRows)
-                                ]
-  where
-    choiceStart = 8
-    choiceEnd = choiceStart + length choice.choiceRows
-    onboardingRow width sourceIndex
-        | sourceIndex >= choiceStart
-        , sourceIndex < choiceEnd =
-            case drop (sourceIndex - choiceStart) choice.choiceRows of
-                row : _ ->
-                    onboardingChoiceRow
-                        appState
-                        width
-                        choice.choiceIndex
-                        (sourceIndex - choiceStart)
-                        row
-                [] -> emptyWidget
-        | otherwise =
-            vLimit 1 $
-                case sourceIndex of
-                    0 -> withAttr Theme.headingAttr
-                        (terminalTxt choice.choiceTitle)
-                    2 -> terminalTxtWrap choice.choiceBody
-                    3 ->
-                        withAttr Theme.mutedAttr $
-                            txt "Choose a sign-in option below, or add your own API key."
-                    5 ->
-                        withAttr Theme.mutedAttr $
-                            txt "You can change this anytime with /login."
-                    7 -> withAttr Theme.strongAttr (txt "Get started")
-                    12 ->
-                        withAttr Theme.mutedAttr $
-                            txt "Credentials are stored locally on this computer."
-                    15 ->
-                        withAttr Theme.mutedAttr $
-                            txt "Esc to exit · Explore all commands with /help"
-                    _ -> txt " "
-
-onboardingChoiceRow
-    :: AppState
-    -> Int
-    -> Int
-    -> Int
-    -> (Text, Text)
-    -> Widget Name
-onboardingChoiceRow appState width selected index (label, detail) =
-    clickable name interactive
-  where
-    prefix = if selected == index then "› " else "  "
-    name = ChoiceRow index
-    showDetail = width >= 72 && not (Text.null detail)
-    row =
-        vLimit 1 $
-            if showDetail
-                then hBox
-                    [ hLimit 36 $
-                        padRight Max (terminalTxt (prefix <> label))
-                    , withAttr Theme.mutedAttr (terminalTxt detail)
-                    ]
-                else terminalTxt (prefix <> label)
-    styled =
-        if selected == index
-            then withAttr Theme.selectedAttr row
-            else row
-    interactive = case Composer.controlInteractionAttr appState name of
-        Nothing -> styled
-        Just attr -> forceAttr attr row
-
--- | Project the 18-row onboarding surface into a short terminal while keeping
--- the selected action and all setup paths visible before explanatory copy.
-onboardingVisibleRowIndices :: Int -> Int -> Int -> [Int]
-onboardingVisibleRowIndices availableHeight selected choiceCount
-    | availableHeight <= 0 = []
-    | availableHeight >= onboardingRowCount =
-        [0 .. onboardingRowCount - 1]
-    | otherwise =
-        sort $
-            take availableHeight $
-                nub $
-                    [ choiceStart + clampedSelected
-                    , choiceStart + max 0 (choiceCount - 1)
-                    ]
-                        <> [choiceStart .. choiceStart + choiceCount - 1]
-                        <> [7, 12, 15, 5, 0, 2, 3, 1, 4, 6, 13, 14, 16, 17]
-  where
-    onboardingRowCount = 18
-    choiceStart = 8
-    clampedSelected =
-        max 0 (min (max 0 (choiceCount - 1)) selected)
-
-waitingOverlayLabel :: AppState -> Text -> Widget Name
-waitingOverlayLabel state label =
-    hBox
-        [ txt " "
-        , withAttr (waitingIndicatorAttr state) $
-            txt
-                (waitingIndicator
-                    motionGlyphSet
-                    state.appRuntime.runtimeMotionMode
-                    state.appMotionElapsedMillis)
-        , terminalTxt (" " <> label <> " ")
-        ]
-
-drawTextPrompt :: AppState -> TextOverlay -> Widget Name
-drawTextPrompt state prompt =
-    centerLayer $
-        hLimitPercent 82 $
-            vLimitPercent 78 $
-                overrideAttr Border.borderAttr Theme.borderAttr $
-                    withBorderStyle unicodeRounded $
-                        borderWithLabel
-                            (waitingOverlayLabel state prompt.textTitle) $
-                            padAll 1 $
-                                vBox
-                                    [ if Text.null (Text.strip prompt.textBody)
-                                        then emptyWidget
-                                        else padBottom (Pad 1) $
-                                            vLimitPercent 60 $
-                                                viewport OverlayViewport Vertical $
-                                                    markdownWidgetWithLinks
-                                                        MarkdownLink
-                                                        prompt.textBody
-                                    , overrideAttr Border.borderAttr Theme.borderActiveAttr $
-                                        withBorderStyle unicodeRounded $
-                                            borderWithLabel (txt " Answer ") $
-                                                padLeftRight 1 $
-                                                    hBox
-                                                        [ renderTextDraft prompt
-                                                        , vLimit 1 (fill ' ')
-                                                        ]
-                                    ]
-
-renderTextDraft :: TextOverlay -> Widget Name
-renderTextDraft prompt =
-    let displayDraft = textOverlayDisplayText prompt
-        content =
-            if Text.null displayDraft
-                then withAttr Theme.mutedAttr (txt " ")
-                else terminalTxt displayDraft
-        (row, column) =
-            Composer.draftCursorLocation displayDraft prompt.textCursor
-    in showCursor OverlayCursor (Location (column, row)) content
-
--- | Replace every code point with one fixed-width masking glyph.
-maskedSecretText :: Text -> Text
-maskedSecretText value =
-    Text.replicate (Text.length value) "•"
-
--- | Text that may be painted for an overlay draft.
-textOverlayDisplayText :: TextOverlay -> Text
-textOverlayDisplayText prompt = case prompt.textInputMode of
-    TextInputPlain -> prompt.textDraft
-    TextInputSecret -> maskedSecretText prompt.textDraft
-
--- | Secret prompts are deliberately single-line. Plain overlays preserve
--- multiline input, while secret pastes stop before the first line ending.
-normalizeTextOverlayInsertion :: TextInputMode -> Text -> Text
-normalizeTextOverlayInsertion = \case
-    TextInputPlain -> id
-    TextInputSecret -> Text.takeWhile \character ->
-        character /= '\n' && character /= '\r'
-
-choiceRow :: AppState -> Int -> Int -> (Text, Text) -> Widget Name
-choiceRow appState selected index (label, detail) =
-    let prefix = if selected == index then "› " else "  "
-        name = ChoiceRow index
-        row =
-            Widget Greedy Fixed do
-                context <- getContext
-                let (shownLabel, shownDetail) =
-                        choiceRowColumns
-                            context.availWidth
-                            (prefix <> label)
-                            detail
-                render $
-                    hBox
-                        [ terminalTxt shownLabel
-                        , vLimit 1 (fill ' ')
-                        , withAttr Theme.mutedAttr
-                            (terminalTxt shownDetail)
-                        ]
-        styled =
-            if selected == index
-                then withAttr Theme.selectedAttr row
-                else row
-        interactive = case Composer.controlInteractionAttr appState name of
-            Nothing -> styled
-            Just attr -> forceAttr attr row
-    in clickable name interactive
-
--- | Fit a choice label and its right-aligned detail into one terminal row.
--- When both do not fit, the label gets roughly two thirds of the available
--- cells and the detail gets the rest; short columns donate their unused space.
-choiceRowColumns :: Int -> Text -> Text -> (Text, Text)
-choiceRowColumns width label detail
-    | width <= 0 = ("", "")
-    | Text.null detail = (truncateDisplayText width label, "")
-    | labelWidth + choiceRowGap + detailWidth <= width = (label, detail)
-    | width <= choiceRowGap + 1 = (truncateDisplayText width label, "")
-    | otherwise =
-        ( truncateDisplayText labelBudget label
-        , truncateDisplayText detailBudget detail
-        )
-  where
-    choiceRowGap = 2
-    labelWidth = terminalTextWidth label
-    detailWidth = terminalTextWidth detail
-    contentBudget = width - choiceRowGap
-    preferredDetailBudget =
-        min detailWidth (max 1 (contentBudget `div` 3))
-    labelBudget =
-        min labelWidth (contentBudget - preferredDetailBudget)
-    detailBudget =
-        min detailWidth (contentBudget - labelBudget)
-
 handleUiEvents :: NonEmpty UiEvent -> EventM Name AppState ()
 handleUiEvents uiEvents = do
-    initial <- get
+    stored <- get
+    viewportBounds <-
+        if stored.appAgentSelected == AgentRoot
+            then
+                lookupViewport ConversationViewport >>= \case
+                    Just (VP _ top (_, height) (_, contentHeight)) ->
+                        pure (Just (top, height, contentHeight))
+                    Nothing ->
+                        pure Nothing
+            else pure Nothing
+    let reconciledFollow =
+            if stored.appAgentSelected == AgentRoot
+                then
+                    Scroll.reconcileConversationFollow
+                        stored.appUi.uiFollow
+                        viewportBounds
+                else stored.appUi.uiFollow
+        initial =
+            stored
+                { appUi =
+                    stored.appUi
+                        { uiFollow = reconciledFollow
+                        }
+                }
     timestamp <- liftIO currentShortMessageTimestamp
     renderedContentHeight <-
         if any isSubmittedPrompt uiEvents
@@ -3992,6 +2413,8 @@ handleUiEvents uiEvents = do
                 (initial, Nothing, False, False)
                 uiEvents
     put final
+    when (any (== UiConversationCleared) uiEvents) $
+        clearSubmittedImagePlacements final.appRuntime
     case nativeProgress of
         Nothing -> pure ()
         Just active ->
@@ -4072,6 +2495,7 @@ applyConversationUiEvent renderedContentHeight uiEvent state =
                 , appHistorySelectedBlock = Nothing
                 , appHistoryLiveStart = Nothing
                 , appNextHistoryBlockId = -1
+                , appSubmittedImagePreviews = Map.empty
                 }
         _ -> state
 
@@ -4199,23 +2623,48 @@ advanceAppClockNow = do
 noteTerminalFocusLost :: EventM Name AppState ()
 noteTerminalFocusLost = do
     now <- liftIO getMonotonicTimeNSec
+    state <- get
+    liftIO $
+        atomicModifyIORef'
+            state.appRuntime.runtimeSyntaxHighlighter
+            \syntaxState ->
+                ( SyntaxHighlighterInactive
+                    (syntaxHighlighterGeneration syntaxState + 1)
+                , ()
+                )
+    liftIO $ atomically $ void $ flushTQueue
+        state.appRuntime.runtimeSyntaxRequests
     modify' \state ->
         state
             { appTerminalFocus = TerminalUnfocused
             , appFocusLostAt = Just now
             , appAutoRecapShownThisAway = False
             , appLastAutoRecapAttemptAt = Nothing
+            , appSyntaxHighlighter = Nothing
+            , appSyntaxRequested = Set.empty
             }
+    invalidateCache
 
 noteTerminalFocusGained :: EventM Name AppState ()
 noteTerminalFocusGained = do
     maybeRequestAutoRecap
+    state <- get
+    liftIO $
+        atomicModifyIORef'
+            state.appRuntime.runtimeSyntaxHighlighter
+            \case
+                SyntaxHighlighterInactive generation ->
+                    (SyntaxHighlighterUnloaded generation, ())
+                active ->
+                    (active, ())
     modify' \state ->
         state
             { appTerminalFocus = TerminalFocused
             , appFocusLostAt = Nothing
             , appMotionScheduleReset = True
+            , appSyntaxRequested = Set.empty
             }
+    requestVisibleSyntaxLanguages
     invalidateCache
     getVtyHandle >>= liftIO . V.refresh
 
@@ -4278,8 +2727,10 @@ refreshNativeProgressKeepalive = do
 handleEvent :: BrickEvent Name AppEvent -> EventM Name AppState ()
 handleEvent event = do
     advanceAppClockNow
+    stateBeforeEvent <- get
     when (isMotionTick event) refreshNativeProgressKeepalive
     handleEventInner event
+    when (eventMayExposeSyntax event) requestVisibleSyntaxLanguages
     state <- get
     let visible =
             isNothing state.appTextPrompt
@@ -4299,12 +2750,102 @@ handleEvent event = do
                 (+ 1)
     syncMotionDemand
     stateAfterMotionSync <- get
-    when (stateAfterMotionSync.appTerminalFocus == TerminalUnfocused) $
+    when
+        ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
+            && not
+                (turnCompletionRequiresRedraw
+                    stateBeforeEvent.appUi
+                    stateAfterMotionSync.appUi)
+        ) $
         continueWithoutRedraw
   where
     isMotionTick = \case
         AppEvent AppMotionTick -> True
         _ -> False
+
+eventMayExposeSyntax :: BrickEvent Name AppEvent -> Bool
+eventMayExposeSyntax = \case
+    AppEvent (AppUi uiEvent) ->
+        uiEventMayExposeSyntax uiEvent
+    AppEvent (AppUiBatch uiEvents) ->
+        any uiEventMayExposeSyntax uiEvents
+    AppEvent AppSyntaxHighlighterChanged -> True
+    AppEvent (AppHistoryReset _) -> True
+    AppEvent (AppHistoryLoaded _ _) -> True
+    AppEvent (AppHistoryCommitted _ _ _) -> True
+    AppEvent AppHistoryLiveStarted -> True
+    AppEvent (AppAgentSnapshot _ _) -> True
+    _ -> False
+
+uiEventMayExposeSyntax :: UiEvent -> Bool
+uiEventMayExposeSyntax = \case
+    UiLoop (TextDelta delta) ->
+        Text.isInfixOf "```" delta
+            || Text.isInfixOf "~~~" delta
+    UiLoop (ReasoningDelta _) -> False
+    UiLoop (ActivityUpdated _) -> False
+    UiLoop (WarningRaised _) -> False
+    UiLoop (ToolOutputUpdated _ _) -> False
+    UiSetDraft _ _ -> False
+    UiSetPrompt _ -> False
+    UiSetPromptEffort _ -> False
+    UiSetPromptLimitStatus _ -> False
+    UiSetAwaitingInput _ -> False
+    UiSetRepository _ _ _ -> False
+    UiSetNotice _ -> False
+    UiMoveSelection _ -> False
+    UiSelectBlock _ -> False
+    UiActivateBlock _ -> False
+    UiToggleSelected -> False
+    UiFocusChanged _ -> False
+    UiPermissionShown _ -> False
+    UiPermissionMoved _ -> False
+    UiPermissionHidden -> False
+    UiSetFollow _ -> False
+    _ -> True
+
+requestVisibleSyntaxLanguages :: EventM Name AppState ()
+requestVisibleSyntaxLanguages = do
+    state <- get
+    let
+        languages =
+            syntaxLanguagesForBlocks (visibleConversationBlocks state)
+        missing =
+            Set.difference languages state.appSyntaxRequested
+    when
+        ( state.appTerminalFocus /= TerminalUnfocused
+            && not (Set.null missing)
+        ) do
+        liftIO $
+            atomically $
+                mapM_
+                    (writeTQueue state.appRuntime.runtimeSyntaxRequests)
+                    (Set.toList missing)
+        modify' \current ->
+            current
+                { appSyntaxRequested =
+                    Set.union current.appSyntaxRequested missing
+                }
+
+visibleConversationBlocks :: AppState -> [UiBlock]
+visibleConversationBlocks state =
+    conversationBlocks state.appAgentSelected state
+
+syntaxLanguagesForBlocks :: [UiBlock] -> Set.Set Text
+syntaxLanguagesForBlocks =
+    Set.fromList . concatMap syntaxLanguagesForBlock
+
+syntaxLanguagesForBlock :: UiBlock -> [Text]
+syntaxLanguagesForBlock block =
+    case block.blockKind of
+        BlockAssistant ->
+            mapMaybe
+                (resolveFenceLanguage . (.fencedInfo))
+                (fencedBlocks block.blockBody)
+        BlockShell
+            | not (Text.null (Text.strip block.blockDetail)) ->
+                ["haskell"]
+        _ -> []
 
 syncMotionDemand :: EventM Name AppState ()
 syncMotionDemand = do
@@ -4343,7 +2884,16 @@ handleEventInner event = case event of
     AppEvent AppRecapPoll ->
         maybeRequestAutoRecap
     AppEvent AppStop -> do
-        modify' \state -> state { appWorkerStopped = True }
+        state <- get
+        liftIO $
+            mapM_
+                (`Composer.requestDictationStop` True)
+                state.appDictation
+        modify' \current ->
+            current
+                { appWorkerStopped = True
+                , appDictation = Nothing
+                }
         halt
     AppEvent (AppSetSlashCatalog catalog) -> do
         state <- get
@@ -4360,9 +2910,7 @@ handleEventInner event = case event of
             then pure ()
             else
                 let catalog =
-                        state.appSlashCatalog
-                            { slashCatalogSkills = skills
-                            }
+                        slashCatalogWithSkills skills state.appSlashCatalog
                 in modify' \current -> current
                     { appSlashCatalog = catalog
                     , appSlashIndex = 0
@@ -4401,34 +2949,82 @@ handleEventInner event = case event of
                 current
                     { appImagePreviews = map snd prepared
                     }
-    AppEvent (AppDictationFinished result) ->
-        case result of
-            Left message ->
-                applyLocalUiEvent $
-                    UiSetNotice $
-                        Just $
-                            warningNotice ("Dictation failed: " <> message)
-            Right transcript -> do
-                state <- get
-                let ui = state.appUi
-                    (draft, cursor) =
-                        insertDictation ui.uiDraft ui.uiCursor transcript
-                applyLocalUiEvent (UiSetDraft draft cursor)
-                applyLocalUiEvent $
-                    UiSetNotice $
-                        Just $
-                            successNotice "Dictation inserted."
-    AppEvent (AppSetWindowTitle title) -> do
+    AppEvent (AppCommitImagePreviews prepared) -> do
         state <- get
-        liftIO (state.appRuntime.runtimeSetWindowTitle title)
+        let previews = map snd prepared
+            nextBlockId = BlockId state.appUi.uiNextBlockId
+            submitted =
+                if null previews
+                    then Map.delete
+                        nextBlockId
+                        state.appSubmittedImagePreviews
+                    else Map.insert
+                        nextBlockId
+                        previews
+                        state.appSubmittedImagePreviews
+        liftIO do
+            writeIORef state.appRuntime.runtimeImagePreviews []
+            modifyIORef'
+                state.appRuntime.runtimeImagePreviewRevision
+                (+ 1)
+        modify' \current ->
+            current
+                { appImagePreviews = []
+                , appSubmittedImagePreviews = submitted
+                }
+        queueConversationReflow
+    AppEvent (AppDictationPartial text) -> do
+        state <- get
+        when (isJust state.appDictation) $
+            applyLocalUiEvent
+                (UiSetNotice (Just (Composer.dictationProgressNotice text)))
+    AppEvent (AppDictationFinished result) -> do
+        state <- get
+        aborted <-
+            case state.appDictation of
+                Just session ->
+                    liftIO (readIORef session.dictationAbort)
+                Nothing ->
+                    pure False
+        modify' \current -> current { appDictation = Nothing }
+        if aborted
+            then applyLocalUiEvent $
+                UiSetNotice $
+                    Just (infoNotice "Dictation cancelled.")
+            else case result of
+                Left message ->
+                    applyLocalUiEvent $
+                        UiSetNotice $
+                            Just $
+                                warningNotice ("Dictation failed: " <> message)
+                Right transcript -> do
+                    let ui = state.appUi
+                        (draft, cursor) =
+                            insertDictation ui.uiDraft ui.uiCursor transcript
+                    applyLocalUiEvent (UiSetDraft draft cursor)
+                    applyLocalUiEvent $
+                        UiSetNotice $
+                            Just $
+                                successNotice "Dictation inserted."
+    AppEvent (AppSetWindowTitle title) -> do
+        vty <- getVtyHandle
+        liftIO (writeOutputWindowTitle (V.outputIface vty) title)
         modify' \current -> current { appWindowTitle = Just title }
-    AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
-        case highlighter of
-            Nothing -> pure ()
-            Just loaded -> do
-                modify' \current ->
-                    current { appSyntaxHighlighter = Just loaded }
-                invalidateCache
+    AppEvent AppSyntaxHighlighterChanged -> do
+        state <- get
+        when (state.appTerminalFocus /= TerminalUnfocused) do
+            highlighter <-
+                liftIO $
+                    readIORef state.appRuntime.runtimeSyntaxHighlighter
+            modify' \current ->
+                current
+                    { appSyntaxHighlighter =
+                        case highlighter of
+                            SyntaxHighlighterActive _ loaded -> loaded
+                            SyntaxHighlighterUnloaded _ -> Nothing
+                            SyntaxHighlighterInactive _ -> Nothing
+                    }
+            invalidateCache
     AppEvent (AppHistoryReset page) -> do
         modify' (resetHistoryPage page)
         invalidateCache
@@ -4461,6 +3057,15 @@ handleEventInner event = case event of
                         makeVisible
                             (ConversationBlock AgentRoot blockId)
                 queueConversationReflow
+    AppEvent AppHistoryLiveStarted ->
+        modify' \state ->
+            state
+                { appHistoryLiveStart =
+                    case state.appHistoryLiveStart of
+                        Just start -> Just start
+                        Nothing ->
+                            Just (Seq.length state.appUi.uiBlocks)
+                }
     AppEvent (AppHistoryCommitted generation turn commit) -> do
         state <- get
         let currentGeneration =
@@ -4492,13 +3097,9 @@ handleEventInner event = case event of
                     AgentRoot -> False
                     target ->
                         fmap (.agentConversation)
-                            (find
-                                ((== target) . (.agentTarget))
-                                state.appAgentEntries)
+                            (lookupAgentEntry target state.appAgentEntries)
                             /= fmap (.agentConversation)
-                                (find
-                                    ((== target) . (.agentTarget))
-                                    mergedEntries)
+                                (lookupAgentEntry target mergedEntries)
         if state.appAgentSelected == normalized
             && state.appAgentEntries == mergedEntries
             then pure ()
@@ -4516,12 +3117,10 @@ handleEventInner event = case event of
                                 then Nothing
                                 else
                                     current.appAgentHover >>= \hover ->
-                                        if any
-                                            ((== hover.agentHoverTarget)
-                                                . (.agentTarget))
-                                            mergedEntries
-                                            then Just hover
-                                            else Nothing
+                                        hover <$
+                                            lookupAgentEntry
+                                                hover.agentHoverTarget
+                                                mergedEntries
                         }
                 when selectedConversationChanged invalidateCache
                 if selectionChanged
@@ -4547,6 +3146,13 @@ handleEventInner event = case event of
         modify' \state ->
             state { appConversationReflowQueued = False }
         reflowConversation
+        state <- get
+        liftIO $
+            enqueueAppEvent
+                state.appRuntime
+                AppSyncSubmittedImagePlacements
+    AppEvent AppSyncSubmittedImagePlacements ->
+        syncSubmittedImagePlacements
     AppEvent (AppAskPermission summary reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
@@ -4860,30 +3466,34 @@ handleCtrlC = do
     pure decision
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
-handleNormalKey event
-    | Bridge.isSendNowKey event =
-        Composer.handleComposerKey
-            applyLocalUiEventWith
-            handleCtrlC
-            scrollConversationPage
-            event
-    | otherwise = do
-        case event of
-            V.EvMouseDown _ _ V.BScrollUp _ ->
-                scrollConversationBy (-mouseScrollLines)
-            V.EvMouseDown _ _ V.BScrollDown _ ->
-                scrollConversationBy mouseScrollLines
-            _ -> do
-                state <- get
-                case state.appUi.uiFocus of
-                    FocusScrollback -> handleScrollbackKey event
-                    FocusComposer ->
-                        Composer.handleComposerKey
-                            applyLocalUiEventWith
-                            handleCtrlC
-                            scrollConversationPage
-                            event
-                    FocusPermission -> pure ()
+handleNormalKey event = do
+    state <- get
+    case state.appDictation of
+        Just session ->
+            Composer.handleDictationKey handleCtrlC session event
+        Nothing
+            | Bridge.isSendNowKey event ->
+                Composer.handleComposerKey
+                    applyLocalUiEventWith
+                    handleCtrlC
+                    scrollConversationPage
+                    event
+            | otherwise ->
+                case event of
+                    V.EvMouseDown _ _ V.BScrollUp _ ->
+                        scrollConversationBy (-mouseScrollLines)
+                    V.EvMouseDown _ _ V.BScrollDown _ ->
+                        scrollConversationBy mouseScrollLines
+                    _ ->
+                        case state.appUi.uiFocus of
+                            FocusScrollback -> handleScrollbackKey event
+                            FocusComposer ->
+                                Composer.handleComposerKey
+                                    applyLocalUiEventWith
+                                    handleCtrlC
+                                    scrollConversationPage
+                                    event
+                            FocusPermission -> pure ()
 
 rememberAgentHover :: AgentTarget -> EventM Name AppState ()
 rememberAgentHover target = do
@@ -4938,6 +3548,7 @@ selectAgentView target = do
     when (state.appAgentSelected /= target) do
         modify' \current ->
             current { appAgentSelected = target }
+        requestVisibleSyntaxLanguages
         resumeConversationFollow
 
 isAgentHoverSurface :: Name -> Bool
@@ -4962,9 +3573,7 @@ preserveAgentConversationView selected previous =
     preserve incoming
         | incoming.agentTarget /= selected = incoming
         | otherwise =
-            case find
-                ((== incoming.agentTarget) . (.agentTarget))
-                previous of
+            case lookupAgentEntry incoming.agentTarget previous of
                 Nothing -> incoming
                 Just old ->
                     incoming
@@ -5162,6 +3771,8 @@ applyActiveConversationUiEvent uiEvent = do
             applyLocalUiEvent uiEvent
         target@(AgentChild _) ->
             modify' (applyChildConversationUiEvent target uiEvent)
+        target@(AgentNative _) ->
+            modify' (applyChildConversationUiEvent target uiEvent)
 
 scrollConversationPage :: Direction -> EventM Name AppState ()
 scrollConversationPage direction = do
@@ -5199,7 +3810,12 @@ scrollConversationBy amount = do
                 pure (Just (top, height, contentHeight))
             Nothing ->
                 pure Nothing
-    case Scroll.conversationScrollGesture amount viewportBounds of
+    case
+        Scroll.conversationScrollGesture
+            (state.appAgentSelected == AgentRoot
+                && historyWindowOlderAvailable state.appHistoryWindow)
+            amount
+            viewportBounds of
         Scroll.IgnoreConversationScroll ->
             pure ()
         Scroll.PauseAndScrollConversation -> do
@@ -5305,6 +3921,107 @@ reflowConversation = do
                             vScrollToEnd
                                 (viewportScroll ConversationViewport)
 
+syncSubmittedImagePlacements :: EventM Name AppState ()
+syncSubmittedImagePlacements = do
+    state <- get
+    when state.appRuntime.runtimeNativeImagePreviews do
+        let submitted =
+                [ (blockId, index, preview)
+                | (blockId, previews) <-
+                    Map.toAscList state.appSubmittedImagePreviews
+                , (index, preview) <- zip [0 ..] previews
+                ]
+        viewportExtent <- lookupExtent ConversationViewportExtent
+        placements <-
+            case viewportExtent of
+                Nothing -> pure []
+                Just viewportBounds ->
+                    fmap concat $
+                        sequence
+                            [ placementFor
+                                state
+                                viewportBounds
+                                ordinal
+                                blockId
+                                index
+                                preview
+                            | (ordinal, (blockId, index, preview)) <-
+                                zip [0 ..] submitted
+                            ]
+        previous <-
+            liftIO $
+                readIORef
+                    state.appRuntime.runtimeSubmittedImagePlacements
+        when (not (sameNativePreviewLayout previous placements)) $
+            liftIO do
+                writeIORef
+                    state.appRuntime.runtimeSubmittedImagePlacements
+                    placements
+                modifyIORef'
+                    state.appRuntime.runtimeImagePreviewRevision
+                    (+ 1)
+
+placementFor
+    :: AppState
+    -> Extent Name
+    -> Int
+    -> BlockId
+    -> Int
+    -> TuiImagePreview
+    -> EventM Name AppState [NativePreviewPlacement]
+placementFor state viewportBounds ordinal blockId index preview =
+    lookupExtent (ConversationImage blockId index) >>= \case
+        Just imageBounds
+            | extentInside viewportBounds imageBounds ->
+                let Location (column, row) = imageBounds.extentUpperLeft
+                    (columns, rows) = imageBounds.extentSize
+                    imageId =
+                        submittedImageId
+                            state.appRuntime.runtimeImagePreviewIdBase
+                            ordinal
+                in pure
+                    [ NativePreviewPlacement
+                        { nativePreviewImageId = imageId
+                        , nativePreviewRow = row
+                        , nativePreviewColumn = column
+                        , nativePreviewColumns = columns
+                        , nativePreviewRows = rows
+                        , nativePreviewAttachment =
+                            preview.previewKittyAttachment
+                        }
+                    ]
+        _ -> pure []
+
+extentInside :: Extent Name -> Extent Name -> Bool
+extentInside outer inner =
+    innerColumn >= outerColumn
+        && innerRow >= outerRow
+        && innerColumn + innerWidth <= outerColumn + outerWidth
+        && innerRow + innerHeight <= outerRow + outerHeight
+        && innerWidth > 0
+        && innerHeight > 0
+  where
+    Location (outerColumn, outerRow) = outer.extentUpperLeft
+    (outerWidth, outerHeight) = outer.extentSize
+    Location (innerColumn, innerRow) = inner.extentUpperLeft
+    (innerWidth, innerHeight) = inner.extentSize
+
+submittedImageId :: Int -> Int -> Int
+submittedImageId imageIdBase ordinal =
+    fromInteger $
+        ((toInteger imageIdBase + 2 + toInteger ordinal)
+            `mod` 4_294_967_295)
+            + 1
+
+clearSubmittedImagePlacements :: FullscreenRuntime -> EventM Name AppState ()
+clearSubmittedImagePlacements runtime = do
+    previous <-
+        liftIO $ readIORef runtime.runtimeSubmittedImagePlacements
+    when (not (null previous)) $
+        liftIO do
+            writeIORef runtime.runtimeSubmittedImagePlacements []
+            modifyIORef' runtime.runtimeImagePreviewRevision (+ 1)
+
 conversationRenderedReserveRows :: EventM Name AppState Int
 conversationRenderedReserveRows =
     lookupExtent ConversationReserve >>= \case
@@ -5317,8 +4034,7 @@ isSubmittedPrompt = \case
     _ -> False
 
 selectedBlock :: UiState -> BlockId -> Maybe UiBlock
-selectedBlock state ident =
-    find ((== ident) . (.blockId)) (toList state.uiBlocks)
+selectedBlock state ident = lookupBlock ident state
 
 conversationBlocks :: AgentTarget -> AppState -> [UiBlock]
 conversationBlocks target state =
@@ -5331,13 +4047,13 @@ conversationBlocks target state =
         AgentChild _ ->
             maybe [] (toList . (.uiBlocks))
                 (conversationUiForTarget target state)
+        AgentNative _ ->
+            maybe [] (toList . (.uiBlocks))
+                (conversationUiForTarget target state)
 
 historyBlock :: HistoryWindow -> BlockId -> Maybe UiBlock
 historyBlock window ident =
-    find ((== ident) . (.blockId)) $
-        concatMap
-            (toList . (.historyTurnBlocks))
-            (toList window.historyWindowTurns)
+    historyWindowBlock ident window
 
 selectedConversationBlockId
     :: AgentTarget
@@ -5351,6 +4067,9 @@ selectedConversationBlockId target state =
         AgentChild _ ->
             conversationUiForTarget target state
                 >>= (.uiSelectedBlock)
+        AgentNative _ ->
+            conversationUiForTarget target state
+                >>= (.uiSelectedBlock)
 
 selectedConversationBlock
     :: AgentTarget
@@ -5358,8 +4077,14 @@ selectedConversationBlock
     -> Maybe UiBlock
 selectedConversationBlock target state =
     selectedConversationBlockId target state >>= \ident ->
-        find ((== ident) . (.blockId))
-            (conversationBlocks target state)
+        case target of
+            AgentRoot ->
+                historyBlock state.appHistoryWindow ident
+                    <|> lookupBlock ident state.appUi
+            AgentChild _ ->
+                conversationUiForTarget target state >>= lookupBlock ident
+            AgentNative _ ->
+                conversationUiForTarget target state >>= lookupBlock ident
 
 selectConversationBlock
     :: AgentTarget
@@ -5390,6 +4115,18 @@ selectConversationBlock target ident = do
                         (applyUiEvent
                             (UiFocusChanged FocusScrollback))
         AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiSelectBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+        AgentNative _ -> do
             modify' \current ->
                 (applyChildConversationUiEvent
                     target
@@ -5444,6 +4181,18 @@ activateConversationBlock target ident = do
                             (UiFocusChanged FocusScrollback)
                             current.appUi
                     }
+        AgentNative _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiActivateBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
     queueConversationReflow
 
 mapHistoryBlock
@@ -5452,18 +4201,17 @@ mapHistoryBlock
     -> HistoryWindow
     -> HistoryWindow
 mapHistoryBlock ident update window =
-    window
-        { historyWindowTurns =
-            fmap
-                (\turn ->
-                    turn
-                        { historyTurnBlocks =
-                            fmap
-                                (\block ->
-                                    if block.blockId == ident
-                                        then update block
-                                        else block)
-                                turn.historyTurnBlocks
-                        })
-                window.historyWindowTurns
-        }
+    setHistoryWindowTurns
+        (fmap
+            (\turn ->
+                turn
+                    { historyTurnBlocks =
+                        fmap
+                            (\block ->
+                                if block.blockId == ident
+                                    then update block
+                                    else block)
+                            turn.historyTurnBlocks
+                    })
+            window.historyWindowTurns)
+        window

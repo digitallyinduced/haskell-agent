@@ -26,11 +26,13 @@ import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
+import Agent.CLI.ProviderTransition (PendingTurn)
 import Agent.Skills (SkillCatalog, SkillInvocation)
 import Agent.Subagents (RootTurnId)
 import Agent.Tools.PlanMode (PlanModeEnv)
 import Agent.Store.Postgres.Connection (StorePool)
 import Data.IORef (IORef)
+import Data.Set (Set)
 import Data.Text (Text)
 import Control.Concurrent.STM (STM)
 
@@ -44,7 +46,7 @@ data SessionEnv = SessionEnv
     , sessionConnection :: !Text
     , sessionModelCatalog :: !ModelCatalog
     , sessionDialect :: !Dialect
-    , sessionUnavailableProviders :: !(IORef [Provider])
+    , sessionUnavailableProviders :: !(IORef (Set Provider))
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionConversation :: !(IORef LiveConversation)
     , sessionParams :: !(IORef ResponseCreateParams)
@@ -76,6 +78,7 @@ data SessionEnv = SessionEnv
     , sessionPreviewId :: !(IORef Int)
     , sessionInterrupt :: !InterruptState
     , sessionRestartEffort :: !(IORef (Maybe Text))
+    , sessionLastFailedTurn :: !(IORef (Maybe PendingTurn))
     , sessionStoreRoot :: !(IORef (Maybe OsPath))
     , sessionUsage :: !(IORef TokenUsage)
     , sessionAccount :: !(IORef Text)
@@ -88,6 +91,8 @@ data SessionEnv = SessionEnv
     , sessionTerminal :: !TerminalCapabilities
     , sessionFullscreen :: !(Maybe FullscreenRuntime)
     , sessionSetWindowTitle :: !(Text -> IO ())
+    , sessionBeginWindowTitleBusy :: !(IO ())
+    , sessionEndWindowTitleBusy :: !(IO ())
     , sessionAgentViewport :: !(Maybe AgentViewportEnv)
     , sessionBeginSubagentTurn :: !(IO (Maybe RootTurnId))
     , sessionFinishSubagentTurn :: !(Maybe RootTurnId -> IO ())

@@ -1,4 +1,8 @@
-module Agent.Tools.FileSystem.ReadFile (readFileTool) where
+module Agent.Tools.FileSystem.ReadFile
+    ( readFileTool
+    , ReadFileArgs(..)
+    , formatReadFile
+    ) where
 
 import Agent.OsPath (fromText)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
@@ -9,7 +13,7 @@ import Agent.ToolDispatch
     , toolArgumentsValue
     , typedTool
     )
-import Agent.Tools.IO (readTextFile, resolveForRead)
+import Agent.Tools.IO (displayPathInWorkspace, readTextFile, resolveForRead)
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -50,9 +54,9 @@ readFileTool env = withToolResourceClaims (readFileClaims env) $
     [ PropertySchema "target_file" PropertyString True $ Just
         "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
     , PropertySchema "offset" PropertyInteger False $ Just
-        "The line number to start reading from. Only provide if the file is too large to read at once."
+        "The 1-based line number to start reading from. Negative values count from the end of the file (-1 is the last line). Only provide if the file is too large to read at once."
     , PropertySchema "limit" PropertyInteger False $ Just
-        "The number of lines to read. Only provide if the file is too large to read at once."
+        "The number of lines to read, starting at offset. Must be a positive integer. Only provide if the file is too large to read at once."
     ]
     True
     ParallelSafe
@@ -80,6 +84,7 @@ readFileDescription =
     \\n\
     \- The target_file parameter can be relative to the workspace or an absolute path in an allowed filesystem root\n\
     \- By default, it reads up to 1000 lines starting from the beginning of the file\n\
+    \- offset is 1-based. Negative offsets count from the end of the file (-1 is the last line).\n\
     \- Line numbers (1-based) appear as anchors in the format LINE_NUMBER\8594LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line"
 
 maxReadLines :: Int
@@ -96,7 +101,9 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
             pure $ Left
                 "PDF rendering is not available. Use an explicit terminal conversion tool if available, or convert the file to text first."
         | otherwise -> doesFileExist path >>= \case
-            False -> pure $ Left $ "File not found: " <> args.targetFile
+            False -> do
+                display <- displayPathInWorkspace env path
+                pure $ Left $ "File not found: " <> display
             True -> readTextFile path >>= \case
                 Left err -> pure (Left err)
                 Right content -> do
@@ -105,33 +112,43 @@ runReadFile env args = resolveForRead env (fromText args.targetFile) >>= \case
 
 formatReadFile :: Text -> ReadFileArgs -> Either Text Text
 formatReadFile content args =
-    let allLines = Text.splitOn "\n" content
-        total = length allLines
-        start = resolveReadStartLine content args.offset
-        window = drop (start - 1) allLines
-        takeCount = min maxReadLines (fromMaybe maxReadLines args.limit)
-        taken = take takeCount window
-        numbered = formatNumbered start taken
-        tokens = estimateTokens numbered
-        rangeSpecified = args.offset /= Nothing || args.limit /= Nothing
-    in if start > total && total > 0
-        then Right $ "Offset " <> Text.pack (show start)
-            <> " is beyond the end of the file ("
-            <> Text.pack (show total) <> " lines)."
-        else if tokens > maxReadTokens
-            then Left (tokenLimitMessage tokens rangeSpecified args)
-            else Right numbered
+    case args.limit of
+        Just n | n <= 0 ->
+            Left "limit must be a positive integer"
+        _ ->
+            let allLines = readFileLines content
+                total = length allLines
+                start = resolveReadStartLine total args.offset
+                window = drop (start - 1) allLines
+                takeCount = min maxReadLines (fromMaybe maxReadLines args.limit)
+                taken = take takeCount window
+                numbered = formatNumbered start taken
+                tokens = estimateTokens numbered
+                rangeSpecified = args.offset /= Nothing || args.limit /= Nothing
+            in if start > total && total > 0
+                then Right $ "Offset " <> Text.pack (show start)
+                    <> " is beyond the end of the file ("
+                    <> Text.pack (show total) <> " lines)."
+                else if tokens > maxReadTokens
+                    then Left (tokenLimitMessage tokens rangeSpecified args)
+                    else Right numbered
 
-resolveReadStartLine :: Text -> Maybe Int -> Int
-resolveReadStartLine content offset = case fromMaybe 1 offset of
+-- | Split into display lines without treating a POSIX trailing newline as an
+-- extra empty line.
+readFileLines :: Text -> [Text]
+readFileLines content =
+    let fields = Text.splitOn "\n" content
+    in if Text.isSuffixOf "\n" content
+        then case reverse fields of
+            "" : rest -> reverse rest
+            _ -> fields
+        else fields
+
+resolveReadStartLine :: Int -> Maybe Int -> Int
+resolveReadStartLine totalLines offset = case fromMaybe 1 offset of
     0 -> 1
     n | n > 0 -> n
-    n ->
-        let totalFields = length (Text.splitOn "\n" content)
-            extra
-                | not (Text.null content) && not (Text.isSuffixOf "\n" content) = 1
-                | otherwise = 0
-        in max 1 (totalFields + extra + n + 1)
+    n -> max 1 (totalLines + n + 1)
 
 estimateTokens :: Text -> Int
 estimateTokens text = max 1 (Text.length text `div` 4)

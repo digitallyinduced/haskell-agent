@@ -36,6 +36,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 request = withRequestInput baseParams [legacySummary]
@@ -51,6 +52,7 @@ spec = do
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -72,26 +74,41 @@ spec = do
                     , messageContent = EncryptedInterAgentContent "gAAAAA-ciphertext"
                     }
             case turnInputsToItems [AgentMessage message] of
-                [item] -> Aeson.toJSON item `shouldBe` Aeson.object
-                    [ "type" Aeson..= ("agent_message" :: Text)
-                    , "author" Aeson..= ("/root" :: Text)
-                    , "recipient" Aeson..= ("/root/worker" :: Text)
-                    , "content" Aeson..=
-                        [ Aeson.object
-                            [ "type" Aeson..= ("input_text" :: Text)
-                            , "text" Aeson..=
-                                ("Message Type: NEW_TASK\n\
-                                \Task name: /root/worker\n\
-                                \Sender: /root\n\
-                                \Payload:\n" :: Text)
-                            ]
-                        , Aeson.object
-                            [ "type" Aeson..= ("encrypted_content" :: Text)
-                            , "encrypted_content" Aeson..=
-                                ("gAAAAA-ciphertext" :: Text)
+                [item@(AgentMessageItem encoded)] -> do
+                    encoded.author `shouldBe` Just "/root"
+                    encoded.recipient `shouldBe` Just "/root/worker"
+                    encoded.content `shouldBe`
+                        [ InputTextPart
+                            "Message Type: NEW_TASK\n\
+                            \Task name: /root/worker\n\
+                            \Sender: /root\n\
+                            \Payload:\n"
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart "gAAAAA-ciphertext" KeyMap.empty
+                        ]
+                    Aeson.fromJSON (Aeson.toJSON item)
+                        `shouldBe` Aeson.Success item
+                    Aeson.toJSON item `shouldBe` Aeson.object
+                        [ "type" Aeson..= ("agent_message" :: Text)
+                        , "author" Aeson..= ("/root" :: Text)
+                        , "recipient" Aeson..= ("/root/worker" :: Text)
+                        , "content" Aeson..=
+                            [ Aeson.object
+                                [ "type" Aeson..= ("input_text" :: Text)
+                                , "text" Aeson..=
+                                    ("Message Type: NEW_TASK\n\
+                                    \Task name: /root/worker\n\
+                                    \Sender: /root\n\
+                                    \Payload:\n" :: Text)
+                                ]
+                            , Aeson.object
+                                [ "type" Aeson..= ("encrypted_content" :: Text)
+                                , "encrypted_content" Aeson..=
+                                    ("gAAAAA-ciphertext" :: Text)
+                                ]
                             ]
                         ]
-                    ]
                 other ->
                     expectationFailure ("expected one agent_message, got " <> show other)
 
@@ -218,6 +235,30 @@ spec = do
                 , cachedTokens = 80
                 }
 
+        it "preserves incomplete reason and hidden reasoning usage" do
+            let response =
+                    (testResponseWithUsage "resp-incomplete" []
+                        (Aeson.object
+                            [ "input_tokens" Aeson..= (120 :: Int)
+                            , "output_tokens" Aeson..= (32768 :: Int)
+                            , "total_tokens" Aeson..= (32888 :: Int)
+                            , "output_tokens_details" Aeson..= Aeson.object
+                                [ "reasoning_tokens" Aeson..= (32000 :: Int)
+                                ]
+                            ]))
+                        { status = ResponseIncomplete
+                        , incompleteDetails = Just IncompleteDetails
+                            { reason = "max_output_tokens"
+                            , extraFields = KeyMap.empty
+                            }
+                        }
+                turn = responseToTurnOutput response
+            turn.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "max_output_tokens"
+                , incompleteReasoningTokens = Just 32000
+                }
+            turn.tokenUsage.outputTokens `shouldBe` 32768
+
     describe "streamEventToLoopEvent" do
         it "maps output and summary deltas but hides raw reasoning" do
             streamEventToLoopEvent (deltaEvent EventOutputTextDelta "hello")
@@ -239,6 +280,35 @@ spec = do
                     Just
                         (ActivityUpdated
                             "Warning: unsupported provider event response.future.done")
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown "response.future.done"
+                    , sequenceNumber = Just 42
+                    , eventExtraFields =
+                        KeyMap.singleton "delta" (Aeson.String "partial")
+                    })
+                `shouldBe`
+                    Just
+                        (ActivityUpdated
+                            "Warning: unsupported provider event response.future.done: {\"delta\":\"partial\"}")
+
+        it "surfaces unparsed websocket frames as warnings without marking output" do
+            let event = OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown unparsedStreamEventTypeText
+                    , sequenceNumber = Nothing
+                    , eventExtraFields = KeyMap.fromList
+                        [ (Key.fromText "error", Aeson.String "key \"call_id\" not found")
+                        , (Key.fromText "payload", Aeson.String "{\"type\":\"response.output_item.added\"}")
+                        ]
+                    }
+            streamEventToLoopEvent event
+                `shouldBe`
+                    Just
+                        (WarningRaised
+                            "Codex websocket dropped an unparsed frame: key \"call_id\" not found payload={\"type\":\"response.output_item.added\"}")
+            streamOutputObserved event `shouldBe` False
 
         it "surfaces low Codex usage as a persistent warning" do
             streamEventToLoopEvent
@@ -318,6 +388,12 @@ spec = do
                 `shouldBe` True
             streamOutputObserved
                 (ResponseIncompleteEvent (Aeson.object []) Nothing KeyMap.empty)
+                `shouldBe` False
+            streamOutputObserved
+                (ResponseIncompleteEvent
+                    (Aeson.object ["output" Aeson..= [Aeson.object []]])
+                    Nothing
+                    KeyMap.empty)
                 `shouldBe` True
 
         it "treats failed lifecycle events as output only when output is present" do
@@ -1340,7 +1416,9 @@ functionCallItemWithExtras callId name arguments extraFields =
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , arguments
+    , encryptedFunctionArgs = Nothing
     , status = Just ItemCompleted
     , extraFields
     }
@@ -1350,6 +1428,7 @@ customCallItem callId name input = CustomToolCallItem CustomToolCall
     { itemId = Nothing
     , callId
     , name
+    , namespace = Nothing
     , input
     , status = Just ItemCompleted
     , extraFields = KeyMap.empty
@@ -1362,13 +1441,15 @@ assistantItem text = MessageItem ResponseMessage
     , role = RoleAssistant
     , status = Just ItemCompleted
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
 compactionItem :: Text -> ResponseItem
-compactionItem _ = KnownResponseItem ItemCompaction TaggedObject
-    { tag = "compaction"
-    , fields = KeyMap.empty
+compactionItem _ = CompactionItemValue CompactionItem
+    { itemId = Nothing
+    , encryptedContent = Nothing
+    , extraFields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent

@@ -1,8 +1,18 @@
 module Agent.CLI.StyleSpec (spec) where
 
 import Agent.CLI.Style
+import Agent.CLI.WindowTitle
+    ( WindowTitleController(..)
+    , busyWindowTitle
+    , newWindowTitleController
+    , oscWindowTitleBytes
+    )
+import Agent.TUI.Motion (MotionMode(..))
+import Data.IORef (modifyIORef', newIORef, readIORef)
 import System.OsPath (unsafeEncodeUtf)
+import qualified Data.ByteString as ByteString
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
 
 fromFilePath = unsafeEncodeUtf
@@ -73,3 +83,58 @@ spec = do
         it "ignores untitled placeholders" do
             cliWindowTitle (fromFilePath "/tmp/haskell-agent") (Just "untitled")
                 `shouldBe` "New session"
+
+    describe "WindowTitleController" do
+        it "prefixes busy titles with a spinner frame" do
+            busyWindowTitle "⠋" "fix the title"
+                `shouldBe` "⠋ fix the title"
+
+        it "UTF-8 encodes braille spinner frames in OSC window titles" do
+            let bytes = oscWindowTitleBytes (busyWindowTitle "⠋" "fix the title")
+            bytes
+                `shouldBe`
+                    TextEncoding.encodeUtf8 "\ESC]2;⠋ fix the title\a"
+            ByteString.isInfixOf (ByteString.pack [0xE2, 0xA0, 0x8B]) bytes
+                `shouldBe` True
+            ByteString.elem 0x0B bytes `shouldBe` False
+
+        it "strips OSC terminators from window titles" do
+            oscWindowTitleBytes "hi\a there\ESC"
+                `shouldBe`
+                    TextEncoding.encodeUtf8 "\ESC]2;hi there\a"
+
+        it "coordinates busy, renamed, and restored titles" do
+            written <- newIORef []
+            let firstFrame = case spinnerFrames of
+                    frame : _ -> frame
+                    [] -> "*"
+            controller <- newWindowTitleController
+                MotionOff
+                "initial"
+                id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleSet "renamed"
+            controller.windowTitleEndBusy
+            actual <- readIORef written
+            actual
+                `shouldBe`
+                [ firstFrame <> " initial"
+                , firstFrame <> " renamed"
+                , "renamed"
+                ]
+
+        it "keeps reduced-motion busy titles static" do
+            written <- newIORef []
+            let firstFrame = case spinnerFrames of
+                    frame : _ -> frame
+                    [] -> "*"
+            controller <- newWindowTitleController
+                MotionReduced
+                "initial"
+                id
+                (\title -> modifyIORef' written (<> [title]))
+            controller.windowTitleBeginBusy
+            controller.windowTitleWorker
+            actual <- readIORef written
+            actual `shouldBe` [firstFrame <> " initial"]

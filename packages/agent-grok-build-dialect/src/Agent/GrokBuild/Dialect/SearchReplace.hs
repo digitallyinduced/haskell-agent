@@ -1,13 +1,33 @@
 module Agent.GrokBuild.Dialect.SearchReplace (searchReplaceTool) where
 
 import Agent.OsPath (fromText)
-import System.OsPath (OsPath)
+import System.OsPath
+    ( OsPath
+    , equalFilePath
+    , takeDirectory
+    , takeFileName
+    )
 import Agent.ToolArgs (objectArgs, optBool, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , decodeToolArguments
+    , toolArgumentsValue
+    , typedTool
+    )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
-import Agent.Tools.IO (readTextFile, resolveUnderCwd, writeTextFile)
+import Agent.Tools.IO
+    ( displayPathInWorkspace
+    , readTextFile
+    , resolveUnderCwd
+    , writeTextFile
+    )
+import Agent.Tools.Scheduling
+    ( ToolAccess(..)
+    , ToolResource(..)
+    , ToolResourceClaim(..)
+    )
 import Agent.Tools.PlanMode
     ( PlanModeEnv
     , isPlanFileEditTarget
@@ -20,6 +40,7 @@ import Agent.Tools.Types
     ( AppTool
     , ToolEnv(..)
     , ToolExecutionPolicy(..)
+    , withToolResourceClaims
     )
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
@@ -34,7 +55,6 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesFileExist)
-import System.OsPath (equalFilePath)
 
 data SearchReplaceArgs = SearchReplaceArgs
     { filePath :: Text
@@ -51,7 +71,9 @@ instance FromJSON SearchReplaceArgs where
         <*> (fromMaybe False <$> optBool object "replace_all")
 
 searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
-searchReplaceTool env planMode = jsonTool "search_replace" searchReplaceDescription
+searchReplaceTool env planMode =
+    withToolResourceClaims (searchReplaceResourceClaims env) $
+    jsonTool "search_replace" searchReplaceDescription
     [ PropertySchema "file_path" PropertyString True $ Just
         "The path to the file to modify. Relative paths are resolved within the workspace. Absolute paths are accepted only when they resolve within the workspace."
     , PropertySchema "old_string" PropertyString True $ Just
@@ -64,6 +86,37 @@ searchReplaceTool env planMode = jsonTool "search_replace" searchReplaceDescript
     False
     TurnSequential
     (typedTool "search_replace" (runSearchReplace env planMode))
+
+searchReplaceResourceClaims
+    :: ToolEnv
+    -> ToolCall
+    -> IO (Either Text [ToolResourceClaim])
+searchReplaceResourceClaims env call =
+    case
+        decodeToolArguments (toolArgumentsValue call.arguments)
+            :: Either Text SearchReplaceArgs
+    of
+        Left err -> pure (Left err)
+        Right args ->
+            resolveUnderCwd env (fromText args.filePath)
+                >>= pure . fmap claimsForResolved
+
+claimsForResolved :: OsPath -> [ToolResourceClaim]
+claimsForResolved resolved
+    | isGitIgnorePolicyPath resolved =
+        [ToolResourceClaim ToolWrite ToolAllPaths]
+    | otherwise =
+        [ToolResourceClaim ToolWrite (ToolPath resolved)]
+
+-- | Ignore-policy edits change what later replacements may write, so they
+-- conflict with every filesystem claim rather than only the ignore file path.
+isGitIgnorePolicyPath :: OsPath -> Bool
+isGitIgnorePolicyPath path =
+    takeFileName path == fromText ".gitignore"
+        || (takeFileName path == fromText "exclude"
+            && takeFileName (takeDirectory path) == fromText "info"
+            && takeFileName (takeDirectory (takeDirectory path))
+                == fromText ".git")
 
 searchReplaceDescription :: Text
 searchReplaceDescription =
@@ -102,26 +155,23 @@ runSearchReplaceBody env args
 
 createNewFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 createNewFile env args = do
-    path <- resolvePath env args.filePath
-    gitignoreGuard env path args.filePath
+    (path, display) <- resolveDisplayPath env args.filePath
+    gitignoreGuard env path display
     exists <- lift (doesFileExist path)
     when exists do
         existing <- ExceptT (readTextFile path)
         unless (Text.null existing) $
             throwE "An empty old_string cannot overwrite an existing non-empty file."
-    writeCreated path
-  where
-    writeCreated path = do
-        ExceptT (writeTextFile path args.newString)
-        pure ("The file " <> args.filePath <> " has been created successfully.")
+    ExceptT (writeTextFile path args.newString)
+    pure ("The file " <> display <> " has been created successfully.")
 
 replaceInFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 replaceInFile env args = do
-    path <- resolvePath env args.filePath
-    gitignoreGuard env path args.filePath
+    (path, display) <- resolveDisplayPath env args.filePath
+    gitignoreGuard env path display
     exists <- lift (doesFileExist path)
     unless exists $
-        throwE ("File not found: " <> args.filePath)
+        throwE ("File not found: " <> display)
     content <- ExceptT (readTextFile path)
     let count = countOccurrences args.oldString content
     when (count == 0) $
@@ -135,14 +185,20 @@ replaceInFile env args = do
     ExceptT (writeTextFile path updated)
     pure $
         if args.replaceAll && count > 1
-            then "The file " <> args.filePath
+            then "The file " <> display
                 <> " has been updated. All occurrences were successfully replaced."
-            else "The file " <> args.filePath
+            else "The file " <> display
                 <> " has been updated successfully."
 
 resolvePath :: ToolEnv -> Text -> ExceptT Text IO OsPath
 resolvePath env path =
     ExceptT (resolveUnderCwd env (fromText path))
+
+resolveDisplayPath :: ToolEnv -> Text -> ExceptT Text IO (OsPath, Text)
+resolveDisplayPath env requested = do
+    path <- resolvePath env requested
+    display <- lift (displayPathInWorkspace env path)
+    pure (path, display)
 
 gitignoreGuard :: ToolEnv -> OsPath -> Text -> ExceptT Text IO ()
 gitignoreGuard env path display = do

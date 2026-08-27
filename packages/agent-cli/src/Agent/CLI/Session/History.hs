@@ -21,7 +21,8 @@ import Agent.CLI.Session
     )
 import Agent.Loop (ImageAttachment)
 import Agent.OpenAI.Compaction
-    ( isTranscriptResetTurn
+    ( isCompactSessionTurn
+    , isTranscriptResetTurn
     )
 import Agent.Responses.Types (ResponseItem)
 import Agent.Tools.PlanMode
@@ -155,10 +156,20 @@ hydrateUiHistory :: [SessionTurn] -> UiState
 hydrateUiHistory = foldl' addTurn initialUiState
   where
     addTurn state turn
+        | isCompactSessionTurn turn.turnUserText =
+            addCompactTurn state turn
         | isTranscriptResetTurn turn.turnUserText =
             addResetTurn state turn
         | otherwise =
             addRegularTurn state turn
+
+    -- Compaction replaces the model's inference context, not the transcript
+    -- presented to the user. Keep earlier blocks scrollable and append the
+    -- compaction summary as the live UI does.
+    addCompactTurn state turn =
+        case turn.turnAssistantText of
+            Nothing -> state
+            Just text -> reduceUi (UiSystemMessage text) state
 
     addResetTurn state turn =
         let cleared = reduceUi UiConversationCleared state

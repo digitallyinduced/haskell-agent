@@ -19,12 +19,14 @@ module Agent.TUI.Model
     , conversationIsEmpty
     , deleteToLineStart
     , deleteToLineEnd
+    , deleteWordAfter
     , deleteWordBefore
     , lineEndCursor
     , lineStartCursor
     , moveWordLeft
     , moveWordRight
     , reduceUi
+    , lookupBlock
     , selectedBlockIndex
     , timestampNewMessageBlocks
     , progressNotice
@@ -32,19 +34,20 @@ module Agent.TUI.Model
     , visibleTodoList
     , uiNextDeadlineMillis
     , uiNeedsTick
+    , uiTokensPerSecond
     , warningNotice
     , advanceUiTime
     ) where
 
 import Agent.TUI.Presentation
     ( TodoDisplayLine
-    , formatSearchReplaceDiff
-    , formatToolOutput
+    , formatSearchReplaceDiffRelative
+    , formatToolOutputRelative
     , todoListFromToolOutput
     , todoListHasInProgress
     , todoListHasOpenWork
     , toolCallInput
-    , toolCallTitle
+    , toolCallTitleRelative
     )
 import Agent.TUI.TextWidth (clampGraphemeCursor)
 import Agent.TUI.Motion
@@ -53,15 +56,18 @@ import Agent.TUI.Motion
     )
 import Agent.Loop
     ( LoopEvent(..)
-    , TokenUsage
+    , TokenUsage(..)
     , TurnOutput(..)
     , emptyTokenUsage
+    , generationTokensPerSecond
+    , liveTokensPerSecond
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallResult(..)
     , canonicalToolName
     )
+import Control.Applicative ((<|>))
 import qualified Data.Foldable as Foldable
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
@@ -155,6 +161,7 @@ data PromptLimitStatus = PromptLimitStatus
 data PromptState = PromptState
     { promptModel :: !Text
     , promptEffort :: !Text
+    , promptEffortOptions :: ![Text]
     , promptMode :: !Text
     , promptAccount :: !Text
     , promptAccountSelectable :: !Bool
@@ -181,6 +188,7 @@ data UiState = UiState
     , uiPrompt :: !PromptState
     , uiBranch :: !Text
     , uiCwd :: !Text
+    , uiWorkspaceRoot :: !Text
     , uiPermission :: !(Maybe PermissionOverlay)
     , uiNotice :: !(Maybe UiNotice)
     , uiRetryCountdown :: !(Maybe RetryCountdown)
@@ -191,6 +199,10 @@ data UiState = UiState
     , uiAttemptStartBlock :: !Int
     , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
     , uiTodos :: ![TodoDisplayLine]
+    , uiGenerating :: !Bool
+    , uiGenerationChars :: !Int
+    , uiGenerationMillis :: !Int
+    , uiLastTokensPerSecond :: !(Maybe Double)
     }
     deriving (Eq, Show)
 
@@ -198,6 +210,7 @@ data UiEvent
     = UiLoop !LoopEvent
     | UiUserSubmitted !Text
     | UiDraftSubmitted
+    | UiInputSteered !Text
     | UiInputQueued !Text
     | UiInputPromoted !Text
     | UiQueuedInputStarted
@@ -206,7 +219,7 @@ data UiEvent
     | UiSetPromptEffort !Text
     | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
     | UiSetAwaitingInput !Bool
-    | UiSetRepository !Text !Text
+    | UiSetRepository !Text !Text !Text
     | UiSetNotice !(Maybe UiNotice)
     | UiMoveSelection !Int
     | UiSelectBlock !BlockId
@@ -249,6 +262,7 @@ initialUiState = UiState
     , uiPrompt = PromptState
         { promptModel = ""
         , promptEffort = ""
+        , promptEffortOptions = []
         , promptMode = "ask"
         , promptAccount = ""
         , promptAccountSelectable = False
@@ -258,6 +272,7 @@ initialUiState = UiState
         }
     , uiBranch = ""
     , uiCwd = ""
+    , uiWorkspaceRoot = ""
     , uiPermission = Nothing
     , uiNotice = Nothing
     , uiRetryCountdown = Nothing
@@ -268,6 +283,10 @@ initialUiState = UiState
     , uiAttemptStartBlock = 0
     , uiToolCalls = Map.empty
     , uiTodos = []
+    , uiGenerating = False
+    , uiGenerationChars = 0
+    , uiGenerationMillis = 0
+    , uiLastTokensPerSecond = Nothing
     }
 
 -- | Checklist shown above the prompt during a turn, or while an item is still
@@ -308,6 +327,16 @@ reduceUi event state = case event of
             , uiNotice = Nothing
             , uiNoticeElapsedMillis = 0
             }
+    UiInputSteered text ->
+        appendBlock BlockUser "You" text "" BlockComplete Nothing
+            state
+                { uiDraft = ""
+                , uiCursor = 0
+                , uiFollow = True
+                , uiNotice =
+                    Just (progressNotice "Steering the current turn…")
+                , uiNoticeElapsedMillis = 0
+                }
     UiInputQueued text ->
         state
             { uiDraft = ""
@@ -354,13 +383,15 @@ reduceUi event state = case event of
         (if awaiting then finalizeStreams state else state)
             { uiAwaitingInput = awaiting
             , uiRunning = if awaiting then False else state.uiRunning
+            , uiGenerating =
+                if awaiting then False else state.uiGenerating
             , uiActivity =
                 if awaiting && state.uiCompletionRemainingMillis == 0
                     then "Ready"
                     else state.uiActivity
             }
-    UiSetRepository branch cwd ->
-        state { uiBranch = branch, uiCwd = cwd }
+    UiSetRepository branch cwd workspace ->
+        state { uiBranch = branch, uiCwd = cwd, uiWorkspaceRoot = workspace }
     UiSetNotice notice ->
         state { uiNotice = notice, uiNoticeElapsedMillis = 0 }
     UiMoveSelection delta ->
@@ -460,6 +491,10 @@ reduceUi event state = case event of
             , uiToolCalls = Map.empty
             , uiRetryCountdown = Nothing
             , uiTodos = []
+            , uiGenerating = False
+            , uiGenerationChars = 0
+            , uiGenerationMillis = 0
+            , uiLastTokensPerSecond = Nothing
             }
     UiSetFollow follow ->
         state
@@ -493,6 +528,7 @@ reduceUi event state = case event of
             , uiBlockIndices =
                 Map.filter (< Seq.length blocks) state.uiBlockIndices
             , uiRunning = False
+            , uiGenerating = False
             , uiActivity = "Restarting…"
             , uiNotice =
                 Just (progressNotice "Restarting current turn…")
@@ -528,6 +564,10 @@ advanceUiTime rawElapsedMillis state =
             if state.uiRunning
                 then state.uiElapsedMillis + elapsedMillis
                 else state.uiElapsedMillis
+        , uiGenerationMillis =
+            if state.uiGenerating
+                then state.uiGenerationMillis + elapsedMillis
+                else state.uiGenerationMillis
         , uiActivity =
             if state.uiCompletionRemainingMillis > 0
                 && completionRemainingMillis == 0
@@ -537,6 +577,44 @@ advanceUiTime rawElapsedMillis state =
         , uiNotice = notice
         , uiNoticeElapsedMillis =
             if notice == Nothing then 0 else noticeElapsedMillis
+        }
+
+-- | Live generation speed while the model is streaming; otherwise the last
+-- completed model response.
+uiTokensPerSecond :: UiState -> Maybe Double
+uiTokensPerSecond state
+    | state.uiGenerating =
+        liveTokensPerSecond
+            state.uiGenerationChars
+            state.uiGenerationMillis
+            <|> state.uiLastTokensPerSecond
+    | otherwise = state.uiLastTokensPerSecond
+
+resetGeneration :: UiState -> UiState
+resetGeneration state =
+    state
+        { uiGenerating = True
+        , uiGenerationChars = 0
+        , uiGenerationMillis = 0
+        }
+
+appendGenerationChars :: Text -> UiState -> UiState
+appendGenerationChars delta state =
+    state
+        { uiGenerationChars =
+            state.uiGenerationChars + Text.length delta
+        }
+
+snapshotGenerationRate :: TokenUsage -> UiState -> UiState
+snapshotGenerationRate usage state =
+    state
+        { uiGenerating = False
+        , uiLastTokensPerSecond =
+            generationTokensPerSecond
+                usage.outputTokens
+                state.uiGenerationChars
+                state.uiGenerationMillis
+                <|> state.uiLastTokensPerSecond
         }
 
 uiNeedsTick :: UiState -> Bool
@@ -651,24 +729,31 @@ millisecondsUntilNextDisplayedSecond remainingMillis =
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
     TurnStarted ->
-        state
-            { uiRunning = True
-            , uiAwaitingInput = False
-            , uiActivity = "Thinking…"
-            , uiNotice = Nothing
-            , uiNoticeElapsedMillis = 0
-            , uiElapsedMillis = 0
-            , uiCompletionRemainingMillis = 0
-            , uiTurnStartBlock = Seq.length state.uiBlocks
-            , uiAttemptStartBlock = Seq.length state.uiBlocks
-            , uiToolCalls = Map.empty
-            }
+        resetGeneration
+            state
+                { uiRunning = True
+                , uiAwaitingInput = False
+                , uiActivity = "Thinking…"
+                , uiNotice = Nothing
+                , uiNoticeElapsedMillis = 0
+                , uiElapsedMillis = 0
+                , uiCompletionRemainingMillis = 0
+                , uiTurnStartBlock = Seq.length state.uiBlocks
+                , uiAttemptStartBlock = Seq.length state.uiBlocks
+                , uiToolCalls = Map.empty
+                }
     ReasoningDelta delta ->
-        appendOrExtend BlockThinking "Thought" delta BlockStreaming state
-            { uiActivity = "Thinking…" }
+        appendOrExtend BlockThinking "Thought" delta BlockStreaming $
+            appendGenerationChars delta state
+                { uiActivity = "Thinking…"
+                , uiGenerating = True
+                }
     TextDelta delta ->
-        appendOrExtend BlockAssistant "Assistant" delta BlockStreaming state
-            { uiActivity = "Writing…" }
+        appendOrExtend BlockAssistant "Assistant" delta BlockStreaming $
+            appendGenerationChars delta state
+                { uiActivity = "Writing…"
+                , uiGenerating = True
+                }
     ActivityUpdated activity ->
         state { uiActivity = activity }
     WarningRaised warning ->
@@ -677,20 +762,24 @@ reduceLoop event state = case event of
             , uiNoticeElapsedMillis = 0
             }
     ResponseRestarted message ->
-        let finalized = finalizeStreams state
-        in finalized
-            { uiRunning = True
-            , uiActivity = "Retrying response…"
-            , uiNotice = Just (warningNotice message)
-            , uiNoticeElapsedMillis = 0
-            , uiAttemptStartBlock = Seq.length finalized.uiBlocks
-            }
+        let finalized =
+                finalizeAttempt BlockFailed (finalizeStreams state)
+        in resetGeneration
+            finalized
+                { uiRunning = True
+                , uiActivity = "Retrying response…"
+                , uiNotice = Just (warningNotice message)
+                , uiNoticeElapsedMillis = 0
+                , uiAttemptStartBlock = Seq.length finalized.uiBlocks
+                , uiToolCalls = Map.empty
+                }
     ToolStarted call
         | isTodoTool call.name ->
             state
                 { uiRunning = True
+                , uiGenerating = False
                 , uiAwaitingInput = False
-                , uiActivity = toolCallTitle call
+                , uiActivity = toolCallTitleRelative state.uiWorkspaceRoot call
                 , uiToolCalls =
                     Map.insert
                         call.callId
@@ -700,17 +789,20 @@ reduceLoop event state = case event of
         | otherwise ->
             let
                 kind = toolBlockKind call.name
-                title = toolCallTitle call
+                title = toolCallTitleRelative state.uiWorkspaceRoot call
                 blockIndex = Seq.length state.uiBlocks
                 body = case canonicalToolName call.name of
                     "search_replace" ->
-                        formatSearchReplaceDiff call.arguments
+                        formatSearchReplaceDiffRelative
+                            state.uiWorkspaceRoot
+                            call.arguments
                     _ -> ""
                 detail = toolCallInput call
             in appendBlock kind title body detail
                 BlockRunning (Just call.callId)
                 state
                     { uiRunning = True
+                    , uiGenerating = False
                     , uiAwaitingInput = False
                     , uiActivity = title
                     , uiToolCalls =
@@ -719,6 +811,8 @@ reduceLoop event state = case event of
                             (blockIndex, call)
                             state.uiToolCalls
                     }
+    ToolUpdated call ->
+        updateToolCall call state
     ToolOutputUpdated callId output ->
         updateToolOutput callId output state
     ToolFinished result ->
@@ -727,7 +821,12 @@ reduceLoop event state = case event of
                 Nothing -> result
                 Just (_, call) ->
                     result
-                        { output = formatToolOutput call result.output }
+                        { output =
+                            formatToolOutputRelative
+                                state.uiWorkspaceRoot
+                                call
+                                result.output
+                        }
             todos =
                 case activeCall of
                     Just (_, call)
@@ -750,6 +849,16 @@ reduceLoop event state = case event of
                 | blockIndex < Seq.length state.uiBlocks ->
                     completeTool blockIndex displayed next
             Just _ -> next
+    ToolRetracted callId ->
+        retractToolCall callId state
+    ResponseAttemptDiscarded ->
+        discardResponseAttempt state
+    NativeAgentStarted{} ->
+        state
+    NativeAgentOutput{} ->
+        state
+    NativeAgentFinished{} ->
+        state
     TurnFinished output ->
         let finalized = finalizeStreams state
             continuing = not (null output.toolCalls)
@@ -763,7 +872,7 @@ reduceLoop event state = case event of
                         appendBlock BlockAssistant "Assistant" text ""
                             BlockComplete Nothing finalized
                 _ -> finalized
-        in withFallback
+        in snapshotGenerationRate output.tokenUsage withFallback
             { uiRunning = continuing
             , uiActivity =
                 if continuing
@@ -824,14 +933,21 @@ selectedIndexFor selected remaining =
 removeBlockAt :: Int -> UiState -> UiState
 removeBlockAt index state =
     let remaining = Seq.deleteAt index state.uiBlocks
-        selected =
-            listToMaybe
-                [ block.blockId
-                | idx <- [min index (max 0 (Seq.length remaining - 1))]
-                , idx >= 0
-                , idx < Seq.length remaining
-                , let block = Seq.index remaining idx
-                ]
+        selected
+            | Just selectedId <- state.uiSelectedBlock
+            , any ((== selectedId) . (.blockId)) remaining =
+                Just selectedId
+            | otherwise =
+                listToMaybe
+                    [ block.blockId
+                    | idx <- [min index (max 0 (Seq.length remaining - 1))]
+                    , idx >= 0
+                    , idx < Seq.length remaining
+                    , let block = Seq.index remaining idx
+                    ]
+        adjustIndex oldIndex
+            | oldIndex > index = oldIndex - 1
+            | otherwise = oldIndex
     in state
         { uiBlocks = remaining
         , uiSelectedBlock = selected
@@ -841,6 +957,15 @@ removeBlockAt index state =
                 [ (block.blockId, idx)
                 | (idx, block) <- zip [0 ..] (Foldable.toList remaining)
                 ]
+        , uiToolCalls =
+            Map.mapMaybe
+                (\(blockIndex, call) ->
+                    if blockIndex == index
+                        then Nothing
+                        else Just (adjustIndex blockIndex, call))
+                state.uiToolCalls
+        , uiTurnStartBlock = adjustIndex state.uiTurnStartBlock
+        , uiAttemptStartBlock = adjustIndex state.uiAttemptStartBlock
         }
 
 appendBlock
@@ -909,6 +1034,101 @@ completeTool blockIndex result state =
                 state.uiBlocks
         }
 
+finalizeAttempt :: BlockState -> UiState -> UiState
+finalizeAttempt terminalState state =
+    state
+        { uiBlocks =
+            Seq.mapWithIndex
+                (\index block ->
+                    if index >= state.uiAttemptStartBlock
+                        && block.blockState == BlockRunning
+                        then block { blockState = terminalState }
+                        else block)
+                state.uiBlocks
+        }
+
+updateToolCall :: ToolCall -> UiState -> UiState
+updateToolCall call state =
+    case Map.lookup call.callId state.uiToolCalls of
+        Nothing -> state
+        Just (blockIndex, previous) ->
+            let title =
+                    toolCallTitleRelative state.uiWorkspaceRoot call
+                body = case canonicalToolName call.name of
+                    "search_replace" ->
+                        formatSearchReplaceDiffRelative
+                            state.uiWorkspaceRoot
+                            call.arguments
+                    _ -> ""
+                blocks
+                    | isTodoTool previous.name = state.uiBlocks
+                    | otherwise =
+                        Seq.adjust
+                            (\block ->
+                                if block.blockCallId == Just call.callId
+                                    then block
+                                        { blockKind = toolBlockKind call.name
+                                        , blockTitle = title
+                                        , blockBody =
+                                            if Text.null body
+                                                then block.blockBody
+                                                else body
+                                        , blockDetail = toolCallInput call
+                                        }
+                                    else block)
+                            blockIndex
+                            state.uiBlocks
+            in state
+                { uiBlocks = blocks
+                , uiActivity = title
+                , uiToolCalls =
+                    Map.insert
+                        call.callId
+                        (blockIndex, call)
+                        state.uiToolCalls
+                }
+
+retractToolCall :: Text -> UiState -> UiState
+retractToolCall callId state =
+    case Map.lookup callId state.uiToolCalls of
+        Nothing ->
+            case Seq.findIndexL
+                ((== Just callId) . (.blockCallId))
+                state.uiBlocks of
+                Just blockIndex -> removeBlockAt blockIndex state
+                Nothing -> state
+        Just (_, call)
+            | isTodoTool call.name ->
+                state
+                    { uiToolCalls = Map.delete callId state.uiToolCalls }
+        Just (blockIndex, _) ->
+            case Seq.lookup blockIndex state.uiBlocks of
+                Just block
+                    | block.blockCallId == Just callId ->
+                        removeBlockAt blockIndex state
+                _ ->
+                    state
+                        { uiToolCalls =
+                            Map.delete callId state.uiToolCalls }
+
+discardResponseAttempt :: UiState -> UiState
+discardResponseAttempt state =
+    let boundary =
+            min (Seq.length state.uiBlocks) state.uiAttemptStartBlock
+        blocks = Seq.take boundary state.uiBlocks
+        selected =
+            selectionAfterTruncate blocks state.uiSelectedBlockIndex
+    in state
+        { uiBlocks = blocks
+        , uiSelectedBlock = (.blockId) . snd <$> selected
+        , uiSelectedBlockIndex = fst <$> selected
+        , uiBlockIndices =
+            Map.filter (< boundary) state.uiBlockIndices
+        , uiToolCalls =
+            Map.filter ((< boundary) . fst) state.uiToolCalls
+        , uiGenerating = False
+        }
+
 updateToolOutput :: Text -> Text -> UiState -> UiState
 updateToolOutput callId output state =
     case Map.lookup callId state.uiToolCalls of
@@ -939,6 +1159,13 @@ finalizeTurn terminalState state =
                         else block)
                 state.uiBlocks
         , uiRunning = False
+        , uiGenerating = False
+        , uiLastTokensPerSecond =
+            state.uiLastTokensPerSecond
+                <|> generationTokensPerSecond
+                    0
+                    state.uiGenerationChars
+                    state.uiGenerationMillis
         , uiActivity =
             if terminalState == BlockComplete
                 then "Finished"
@@ -955,6 +1182,7 @@ finalizeTurn terminalState state =
             Just notice
                 | notice.noticeKind == NoticeProgress -> 0
             _ -> state.uiNoticeElapsedMillis
+        , uiToolCalls = Map.empty
         }
 
 infoNotice, successNotice, warningNotice, progressNotice, errorNotice
@@ -1018,18 +1246,27 @@ moveSelection delta state =
 
 selectBlock :: BlockId -> UiState -> UiState
 selectBlock ident state =
-    case Map.lookup ident state.uiBlockIndices of
+    case lookupBlockIndex ident state of
         Nothing -> state
-        Just index -> case Seq.lookup index state.uiBlocks of
-            Just block
-                | block.blockId == ident ->
-                    state
-                        { uiSelectedBlock = Just ident
-                        , uiSelectedBlockIndex = Just index
-                        , uiFollow =
-                            index == Seq.length state.uiBlocks - 1
-                        }
-            _ -> state
+        Just (index, _) ->
+            state
+                { uiSelectedBlock = Just ident
+                , uiSelectedBlockIndex = Just index
+                , uiFollow =
+                    index == Seq.length state.uiBlocks - 1
+                }
+
+lookupBlock :: BlockId -> UiState -> Maybe UiBlock
+lookupBlock ident state =
+    snd <$> lookupBlockIndex ident state
+
+lookupBlockIndex :: BlockId -> UiState -> Maybe (Int, UiBlock)
+lookupBlockIndex ident state = do
+    index <- Map.lookup ident state.uiBlockIndices
+    block <- Seq.lookup index state.uiBlocks
+    if block.blockId == ident
+        then Just (index, block)
+        else Nothing
 
 selectedBlockIndex :: UiState -> Int
 selectedBlockIndex state =
@@ -1053,6 +1290,16 @@ deleteWordBefore text cursor =
                 Text.drop 1 after
             | otherwise = after
     in (kept <> after', Text.length kept)
+
+-- | Delete whitespace and the next non-whitespace word after the cursor.
+deleteWordAfter :: Text -> Int -> (Text, Int)
+deleteWordAfter text cursor =
+    let cursor' = max 0 (min (Text.length text) cursor)
+        before = Text.take cursor' text
+        after = Text.drop cursor' text
+        withoutSpace = Text.dropWhile isSpace after
+        remaining = Text.dropWhile (not . isSpace) withoutSpace
+    in (before <> remaining, cursor')
 
 -- | Delete from the cursor to the beginning of its logical line.
 deleteToLineStart :: Text -> Int -> (Text, Int)

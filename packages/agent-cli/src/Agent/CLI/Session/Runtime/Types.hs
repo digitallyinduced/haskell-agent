@@ -72,6 +72,7 @@ import Control.Concurrent.STM (STM)
 import Control.Exception.Safe (Exception)
 import Data.IORef (IORef)
 import Data.Map.Strict (Map)
+import Data.Set (Set)
 import Data.Text (Text)
 import Data.Time.Clock
     ( NominalDiffTime
@@ -107,18 +108,20 @@ data SessionRequest = SessionRequest
     , databaseScopes :: !DatabaseScopes
     , promptRequest :: !(Maybe ManagedTurnRequest)
     , pendingTurn :: !(Maybe PendingTurn)
-    , unavailableProviders :: ![Provider]
+    , unavailableProviders :: !(Set Provider)
     , startupUnavailable :: !(Maybe (STM ApiError))
     , paramsRef :: !(IORef ResponseCreateParams)
     , conversationRef :: !(IORef LiveConversation)
     , initialTurns :: ![SessionTurn]
     , persist :: !Persistence
+    , startupWindowTitle :: !Text
     , projectRoot :: !OsPath
     , home :: !OsPath
     , cwd :: !OsPath
     , tokenProvider :: !(Maybe TokenProvider)
     , openAiPool :: !(Maybe OpenAI.Pool)
     , startupContext :: !(IORef (Maybe Text))
+    , generatedContextReloadRef :: !(IORef (IO ()))
     , skillsRef :: !(IORef SkillCatalog)
     , skillInvocationsRef :: !(IORef [SkillInvocation])
     , escPaused :: !(IORef Bool)

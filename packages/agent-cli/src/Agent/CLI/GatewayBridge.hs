@@ -4,7 +4,7 @@ module Agent.CLI.GatewayBridge
     , ManagedBridgeResponse(..)
     , ManagedActivity(..)
     , managedGatewayTools
-    , publishManagedLoopEvent
+    , newManagedLoopEventPublisher
     , requestManagedApproval
     , managedBridgeRequestsDirectory
     , managedBridgeResponsesDirectory
@@ -18,6 +18,12 @@ import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.Loop (LoopEvent(..))
 import Agent.OsPath (unsafeToFilePath)
+import Agent.TextBuffer
+    ( TextBuffer
+    , appendTextBuffer
+    , emptyTextBuffer
+    , textBufferToText
+    )
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
@@ -49,6 +55,7 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Maybe (fromMaybe)
+import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -119,6 +126,8 @@ data ManagedActivity = ManagedActivity
     { managedActivityVersion :: !Int
     , managedActivityKind :: !Text
     , managedActivityMessage :: !Text
+    , managedActivityReasoning :: !Text
+    , managedActivityResponse :: !Text
     , managedActivityUpdatedAt :: !UTCTime
     } deriving (Eq, Show)
 
@@ -127,6 +136,8 @@ instance ToJSON ManagedActivity where
         [ "version" .= activity.managedActivityVersion
         , "kind" .= activity.managedActivityKind
         , "message" .= activity.managedActivityMessage
+        , "reasoning" .= activity.managedActivityReasoning
+        , "response" .= activity.managedActivityResponse
         , "updated_at" .= activity.managedActivityUpdatedAt
         ]
 
@@ -136,6 +147,8 @@ instance FromJSON ManagedActivity where
             <$> (o .:? "version" .!= bridgeSchemaVersion)
             <*> o .: "kind"
             <*> o .: "message"
+            <*> (o .:? "reasoning" .!= "")
+            <*> (o .:? "response" .!= "")
             <*> o .: "updated_at"
 
 managedGatewayTools :: ManagedTurnRequest -> [AppTool]
@@ -157,6 +170,9 @@ managedGatewayTools request =
                 "send_voice"
             , reactTool
             , choiceTool
+            , allowUserTool
+            , denyUserTool
+            , listUsersTool
             ]
   where
     sendPathTool name description kind =
@@ -202,6 +218,44 @@ managedGatewayTools request =
             TurnSequential
             (typedToolWithCall "ask_telegram_choice" \call args ->
                 bridgeTool request call "ask_choice" (toChoicePayload args))
+
+    allowUserTool =
+        jsonTool
+            "allow_telegram_user"
+            "Allow another Telegram user to talk to this bot. Use this when an already-allowed user asks to accept messages from someone in the current group. Identify them by name, @username, or numeric user id. Omit query to allow the user this message replies to."
+            [ PropertySchema "query" PropertyString False
+                (Just "Name, @username, or numeric Telegram user id.")
+            , PropertySchema "user_id" PropertyInteger False
+                (Just "Numeric Telegram user id when already known.")
+            ]
+            True
+            TurnSequential
+            (typedToolWithCall "allow_telegram_user" \call args ->
+                bridgeTool request call "allow_user" (toAllowlistPayload args))
+
+    denyUserTool =
+        jsonTool
+            "deny_telegram_user"
+            "Remove a Telegram user from the allowlist so this bot stops accepting their messages."
+            [ PropertySchema "query" PropertyString False
+                (Just "Name, @username, or numeric Telegram user id.")
+            , PropertySchema "user_id" PropertyInteger False
+                (Just "Numeric Telegram user id when already known.")
+            ]
+            True
+            TurnSequential
+            (typedToolWithCall "deny_telegram_user" \call args ->
+                bridgeTool request call "deny_user" (toAllowlistPayload args))
+
+    listUsersTool =
+        jsonTool
+            "list_telegram_users"
+            "List Telegram users currently allowed to talk to this bot, plus people recently seen in this chat so you can allow someone by name without knowing their numeric id."
+            []
+            True
+            TurnSequential
+            (typedToolWithCall "list_telegram_users" \call (_ :: Value) ->
+                bridgeTool request call "list_users" (object []))
 
 data SendPathArgs = SendPathArgs
     { sendPath :: !Text
@@ -255,6 +309,23 @@ toChoicePayload args = object
     , "options" .= args.choiceOptions
     ]
 
+data AllowlistArgs = AllowlistArgs
+    { allowlistQuery :: !(Maybe Text)
+    , allowlistUserId :: !(Maybe Int)
+    }
+
+instance FromJSON AllowlistArgs where
+    parseJSON = objectArgs \input ->
+        AllowlistArgs
+            <$> optText input "query"
+            <*> optInt input "user_id"
+
+toAllowlistPayload :: AllowlistArgs -> Value
+toAllowlistPayload args = object
+    [ "query" .= args.allowlistQuery
+    , "user_id" .= args.allowlistUserId
+    ]
+
 bridgeTool
     :: ManagedTurnRequest
     -> ToolCall
@@ -290,36 +361,117 @@ requestManagedApproval request call =
             Right (String "deny") -> pure (Just PermissionDeny)
             _ -> pure Nothing
 
-publishManagedLoopEvent :: ManagedTurnRequest -> LoopEvent -> IO ()
-publishManagedLoopEvent request event =
-    case request.managedTurnBridgeDirectory of
-        Nothing -> pure ()
-        Just _ -> do
-            now <- getCurrentTime
-            let (kind, message) = activityFor event
-            void $ try @_ @SomeException $
-                writeLazyFileAtomically
-                    (managedBridgeActivityPath request)
-                    0o600
-                    (encode ManagedActivity
-                        { managedActivityVersion = bridgeSchemaVersion
-                        , managedActivityKind = kind
-                        , managedActivityMessage = message
-                        , managedActivityUpdatedAt = now
-                        })
-  where
-    activityFor = \case
-        TurnStarted -> ("thinking", "Thinking…")
-        ReasoningDelta _ -> ("thinking", "Thinking…")
-        TextDelta _ -> ("writing", "Writing reply…")
-        ActivityUpdated message -> ("activity", nonEmpty "Working…" message)
-        WarningRaised message -> ("warning", nonEmpty "Warning" message)
-        ResponseRestarted _ -> ("retrying", "Retrying response…")
-        ToolStarted call -> ("tool", "Running " <> call.name <> "…")
-        ToolOutputUpdated name _ -> ("tool", "Running " <> name <> "…")
-        ToolFinished _ -> ("thinking", "Thinking…")
-        TurnFinished _ -> ("finished", "Finishing…")
+data ManagedActivityAccumulator = ManagedActivityAccumulator
+    { accumulatorKind :: !Text
+    , accumulatorMessage :: !Text
+    , accumulatorReasoning :: !TextBuffer
+    , accumulatorResponse :: !TextBuffer
+    }
 
+newManagedLoopEventPublisher
+    :: ManagedTurnRequest
+    -> IO (LoopEvent -> IO ())
+newManagedLoopEventPublisher request =
+    case request.managedTurnBridgeDirectory of
+        Nothing -> pure (const (pure ()))
+        Just _ -> do
+            stateRef <- newIORef emptyManagedActivityAccumulator
+            pure \event -> do
+                state <- updateManagedActivity event <$> readIORef stateRef
+                writeIORef stateRef state
+                now <- getCurrentTime
+                void $ try @_ @SomeException $
+                    writeLazyFileAtomically
+                        (managedBridgeActivityPath request)
+                        0o600
+                        (encode ManagedActivity
+                            { managedActivityVersion = bridgeSchemaVersion
+                            , managedActivityKind = state.accumulatorKind
+                            , managedActivityMessage = state.accumulatorMessage
+                            , managedActivityReasoning =
+                                textBufferToText state.accumulatorReasoning
+                            , managedActivityResponse =
+                                textBufferToText state.accumulatorResponse
+                            , managedActivityUpdatedAt = now
+                            })
+
+emptyManagedActivityAccumulator :: ManagedActivityAccumulator
+emptyManagedActivityAccumulator = ManagedActivityAccumulator
+    { accumulatorKind = "thinking"
+    , accumulatorMessage = "Thinking…"
+    , accumulatorReasoning = emptyTextBuffer
+    , accumulatorResponse = emptyTextBuffer
+    }
+
+updateManagedActivity
+    :: LoopEvent
+    -> ManagedActivityAccumulator
+    -> ManagedActivityAccumulator
+updateManagedActivity event state =
+    case event of
+        TurnStarted -> emptyManagedActivityAccumulator
+        ReasoningDelta delta ->
+            state
+                { accumulatorKind = "thinking"
+                , accumulatorMessage = "Thinking…"
+                , accumulatorReasoning =
+                    appendTextBuffer delta state.accumulatorReasoning
+                }
+        TextDelta delta ->
+            state
+                { accumulatorKind = "writing"
+                , accumulatorMessage = "Writing reply…"
+                , accumulatorResponse =
+                    appendTextBuffer delta state.accumulatorResponse
+                }
+        ActivityUpdated message ->
+            state
+                { accumulatorKind = "activity"
+                , accumulatorMessage = nonEmpty "Working…" message
+                }
+        WarningRaised message ->
+            state
+                { accumulatorKind = "warning"
+                , accumulatorMessage = nonEmpty "Warning" message
+                }
+        ResponseRestarted _ ->
+            emptyManagedActivityAccumulator
+                { accumulatorKind = "retrying"
+                , accumulatorMessage = "Retrying response…"
+                }
+        ToolStarted call ->
+            state
+                { accumulatorKind = "tool"
+                , accumulatorMessage = "Running " <> call.name <> "…"
+                }
+        ToolOutputUpdated name _ ->
+            state
+                { accumulatorKind = "tool"
+                , accumulatorMessage = "Running " <> name <> "…"
+                }
+        ToolFinished _ ->
+            state
+                { accumulatorKind = "thinking"
+                , accumulatorMessage = "Thinking…"
+                }
+        ToolUpdated _ ->
+            state
+        ToolRetracted _ ->
+            state
+        ResponseAttemptDiscarded ->
+            emptyManagedActivityAccumulator
+        NativeAgentStarted{} ->
+            state
+        NativeAgentOutput{} ->
+            state
+        NativeAgentFinished{} ->
+            state
+        TurnFinished _ ->
+            state
+                { accumulatorKind = "finished"
+                , accumulatorMessage = "Finishing…"
+                }
+  where
     nonEmpty fallback value
         | Text.null (Text.strip value) = fallback
         | otherwise = Text.strip value

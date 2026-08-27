@@ -17,6 +17,7 @@ import Agent.Dialect
     , PromptStyle(..)
     , dialectPromptStyle
     )
+import Agent.CLI.Tools (hostedSearchToolNames)
 import Agent.GrokBuild.Dialect.Prompt
     ( codingGrokPromptTools
     , grokSystemPrompt
@@ -24,6 +25,8 @@ import Agent.GrokBuild.Dialect.Prompt
     )
 import Agent.OsPath (toText)
 import Agent.Provider (BillingMode(..), Provider(..))
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Calendar (Day)
@@ -68,7 +71,7 @@ systemPrompt dialect cwd sessionTmp today isNonInteractive =
             claudeCodeSystemPrompt cwd today
 
 -- | Render a child prompt against the final filtered application-tool set.
--- @web_search@ is server-side and remains available independently.
+-- Hosted search tools are server-side and remain available independently.
 systemPromptForTools
     :: Dialect
     -> [Text]
@@ -89,20 +92,21 @@ systemPromptForTools
             , timeContextGuidance
             ]
   where
-    available = "web_search" : toolNames
+    availableNames = hostedSearchToolNames dialect ++ toolNames
+    available = Set.fromList availableNames
     base = case dialectPromptStyle dialect of
         GrokBuildPromptStyle ->
             grokSystemPromptForTools
                 codingGrokPromptTools
-                available
+                availableNames
                 cwd
                 today
                 isNonInteractive
         CodexPromptStyle ->
-            codexSystemPromptForTools available cwd today
+            codexSystemPromptForTools availableNames cwd today
         GenericResponsesPromptStyle ->
             genericSystemPromptForTools
-                available
+                availableNames
                 cwd
                 today
                 isNonInteractive
@@ -124,9 +128,9 @@ sessionTempGuidance = \case
 
 -- | Keep sensitive values outside model-visible text and tool arguments when
 -- the host exposes the dedicated secret-entry capability.
-secretInputGuidance :: [Text] -> Text
+secretInputGuidance :: Set Text -> Text
 secretInputGuidance available
-    | "ask_secret" `notElem` available = ""
+    | "ask_secret" `Set.notMember` available = ""
     | otherwise =
         Text.unlines
             [ "Secret handling:"
@@ -136,9 +140,9 @@ secretInputGuidance available
             , "- Never read, print, summarize, or otherwise expose the secret file contents."
             ]
 
-learnedSkillGuidance :: [Text] -> Text
+learnedSkillGuidance :: Set Text -> Text
 learnedSkillGuidance available
-    | "skill_search" `notElem` available = ""
+    | "skill_search" `Set.notMember` available = ""
     | otherwise =
         Text.unlines
             [ "Learned skills:"
@@ -173,10 +177,10 @@ ghciGuidanceForDialect dialect =
         GenericResponsesPromptStyle -> ghciGuidance
         ClaudeCodePromptStyle -> ""
 
-ghciGuidanceForTools :: Dialect -> [Text] -> Text
+ghciGuidanceForTools :: Dialect -> Set Text -> Text
 ghciGuidanceForTools dialect available
     | dialectPromptStyle dialect == ClaudeCodePromptStyle = ""
-    | "run_ghci" `notElem` available = ""
+    | "run_ghci" `Set.notMember` available = ""
     | otherwise =
         Text.unlines $
             [ "Prefer ghci for scripting."

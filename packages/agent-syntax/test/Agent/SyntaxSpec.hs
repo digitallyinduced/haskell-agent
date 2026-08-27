@@ -19,10 +19,16 @@ spec = describe "syntax highlighting" do
         it "resolves Grok line-range file paths by extension" do
             resolveFenceLanguage "12:40:src/Agent/TUI/Markdown.hs"
                 `shouldBe` Just "haskell"
+            resolveFenceLanguage "src/Agent/TUI/Markdown.hs"
+                `shouldBe` Just "haskell"
+            resolveFenceLanguage "src\\Agent\\TUI\\Markdown.hs"
+                `shouldBe` Just "haskell"
             resolveFenceLanguage "1:8:flake.nix"
                 `shouldBe` Just "nix"
             resolveFenceLanguage "1:8:Dockerfile"
                 `shouldBe` Just "dockerfile"
+            resolveFenceLanguage "asp.net"
+                `shouldBe` Just "asp.net"
 
         it "keeps unknown languages available for a recoverable lookup failure" do
             resolveFenceLanguage "made-up-language"
@@ -65,6 +71,49 @@ spec = describe "syntax highlighting" do
             , ("yml", "answer: 42")
             , ("zig", "pub fn main() void {}")
             ]
+
+    it "loads only a requested syntax and its include dependencies" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        emptyHighlighter <-
+            requireLoaded =<< newSyntaxHighlighterFrom syntaxDirectory
+        highlightCode emptyHighlighter "haskell" "main = pure ()"
+            `shouldSatisfy` isLeft
+        haskellHighlighter <-
+            requireLoaded
+                =<< loadSyntaxLanguage emptyHighlighter "haskell"
+        highlightCode haskellHighlighter "haskell" "main = pure ()"
+            `shouldSatisfy` either (const False) (not . null)
+        -- Haskell embeds JavaScript quasiquotes, so that dependency is loaded.
+        highlightCode haskellHighlighter "javascript" "const answer = 42"
+            `shouldSatisfy` either (const False) (not . null)
+        -- An unrelated definition remains absent until it is requested.
+        highlightCode haskellHighlighter "python" "print('hello')"
+            `shouldSatisfy` isLeft
+
+    it "resolves alternative syntax names without eagerly parsing all XML" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        emptyHighlighter <-
+            requireLoaded =<< newSyntaxHighlighterFrom syntaxDirectory
+        csharpHighlighter <-
+            requireLoaded
+                =<< loadSyntaxLanguage emptyHighlighter "csharp"
+        highlightCode csharpHighlighter "cs" "class Program {}"
+            `shouldSatisfy` either (const False) (not . null)
+
+    it "loads dependencies referenced by context switches and keyword lists" do
+        syntaxDirectory <- sourceSyntaxDirectory
+        emptyHighlighter <-
+            requireLoaded =<< newSyntaxHighlighterFrom syntaxDirectory
+        dockerHighlighter <-
+            requireLoaded
+                =<< loadSyntaxLanguage emptyHighlighter "dockerfile"
+        highlightCode dockerHighlighter "bash" "printf '%s\\n' hello"
+            `shouldSatisfy` either (const False) (not . null)
+        groovyHighlighter <-
+            requireLoaded
+                =<< loadSyntaxLanguage dockerHighlighter "groovy"
+        highlightCode groovyHighlighter "java" "class Main {}"
+            `shouldSatisfy` either (const False) (not . null)
 
     it "preserves source text including Unicode, blank lines, and a trailing newline" do
         highlighter <- requireHighlighter
@@ -116,9 +165,12 @@ spec = describe "syntax highlighting" do
 requireHighlighter :: IO SyntaxHighlighter
 requireHighlighter = do
     syntaxDirectory <- sourceSyntaxDirectory
-    loadSyntaxHighlighterFrom syntaxDirectory >>= \case
-        Left message -> expectationFailure (Text.unpack message) >> fail "unreachable"
-        Right highlighter -> pure highlighter
+    requireLoaded =<< loadSyntaxHighlighterFrom syntaxDirectory
+
+requireLoaded :: Either Text SyntaxHighlighter -> IO SyntaxHighlighter
+requireLoaded = \case
+    Left message -> expectationFailure (Text.unpack message) >> fail "unreachable"
+    Right highlighter -> pure highlighter
 
 sourceSyntaxDirectory :: IO FilePath
 sourceSyntaxDirectory =

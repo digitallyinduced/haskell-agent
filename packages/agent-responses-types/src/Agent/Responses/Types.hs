@@ -22,6 +22,19 @@ module Agent.Responses.Types
     , parseResponseItemType
     , responseItemTypeText
     , ResponseMessage(..)
+    , ResponseAgentMessage(..)
+    , InternalChatMetadata(..)
+    , AdditionalToolsItem(..)
+    , LocalShellCall(..)
+    , LocalShellAction(..)
+    , ToolSearchCall(..)
+    , ToolSearchOutput(..)
+    , WebSearchCall(..)
+    , WebSearchAction(..)
+    , ImageGenerationCall(..)
+    , CompactionItem(..)
+    , CompactionTriggerItem(..)
+    , ContextCompactionItem(..)
     , ResponseRole(..)
     , MessageContent(..)
     , ResponseContentPart(..)
@@ -39,6 +52,7 @@ module Agent.Responses.Types
     , ResponseTool(..)
     , ResponseToolType(..)
     , responseToolTypeText
+    , knownResponseTool
     , FunctionTool(..)
 
       -- * Response
@@ -57,6 +71,7 @@ module Agent.Responses.Types
     , responseStreamEventSequenceNumber
     , streamEventTypeText
     , parseStreamEventWithType
+    , unparsedStreamEventTypeText
     ) where
 
 import Agent.Responses.Types.Common

@@ -54,10 +54,37 @@ have to be.
   and execution policies are the current foundation for deeper work with
   LLMs, ADTs, type checkers, effect systems, and program verification.
 
-The harness also includes the capabilities expected of a modern coding agent:
-persistent sessions, subagents, worktrees, skills, plan mode, multimodal input,
-web search, and interactive terminal interfaces. Those are important product
-features, but not the core differentiation.
+## Features
+
+- **Choice of models and billing:** use OpenAI/Codex, xAI/Grok, OpenRouter, or
+  Claude Code through subscriptions or API keys, and add local or hosted
+  Responses-compatible models through the user model catalog.
+- **Interactive terminal workflow:** choose between fullscreen and inline
+  interfaces with streaming Markdown, live todo progress, one-shot operation,
+  and image attachments from files or the clipboard.
+- **PostgreSQL-backed memory and portable sessions:** persist conversations and
+  scoped learned guidance, resume or search past work, compact long histories,
+  and switch supported providers without losing the pending turn or durable
+  session state.
+- **Efficient long-running agents:** page persisted history on demand and
+  virtualize TUI scrolling to bound memory and rendering work as conversations
+  grow.
+- **Parallel agents and isolated work:** delegate to persisted subagents with a
+  configurable concurrency limit and create fresh sessions in managed Git
+  worktrees.
+- **Built-in coding tools:** run shell commands, opt into a persistent GHCi
+  workspace, search the web, and connect local MCP servers. Approval policies
+  keep mutating operations under user control.
+- **Guided agent workflows:** use plan mode, reusable skills, and scoped learned
+  guidance for repeatable tasks and project or user preferences.
+- **Multimodal input and live voice dictation:** attach images and files, or
+  press `Ctrl+R` on macOS to stream microphone audio to xAI and insert the live
+  transcript into the prompt.
+- **Telegram access:** run a durable, allowlisted Telegram gateway with
+  per-conversation sessions, multimodal messages, approvals, retries, and
+  bounded concurrent processing.
+
+These are important product features, but not the core differentiation.
 
 ## Install
 
@@ -135,8 +162,12 @@ Never paste the bot token into an agent conversation.
 
 Only messages from allowlisted Telegram users are handled. Repeat
 `--allowed-user` during setup, or manage the local allowlist later with
-`agent-telegram users list|add ID|remove ID`; running gateways must be restarted
-after an allowlist change. Private chats work directly. In groups and
+`agent-telegram users list|add ID|remove ID`. CLI allowlist edits still require
+a gateway restart. In a group, an already-allowed member can grant someone else
+immediately by telling the bot to accept them, or with `/allow` by name,
+`@username`, or by replying to one of their messages. `/users` lists the
+allowlist and people the bot has already seen in that chat; `/deny` removes
+someone. Private chats work directly. In groups and
 supergroups, mention the bot, use a command addressed to its username (for
 example `/new@your_bot`), or reply to one of its messages. Ambient group traffic
 and messages from non-allowlisted members are ignored by default. Pass
@@ -146,12 +177,21 @@ would be useful; otherwise it stays silent. Telegram must also deliver ambient
 messages to the bot: use BotFather's `/setprivacy` command to disable privacy
 mode for that bot, then remove and re-add the bot to existing groups if needed.
 
+The bot only stays in a group or channel if an allowlisted user who is also a
+Telegram administrator of that chat added it. Anyone else adding it causes the
+bot to leave immediately. Anonymous-admin adds are accepted only when an
+allowlisted user is already an administrator of that chat. Existing groups that
+already have a saved session are kept after upgrading; to authorize another
+group, add the bot as an allowed admin or mention it there.
+
 Each private chat, group, and forum topic is mapped to its own persisted agent
 session under `~/.haskell-agent`; `/new` starts a fresh session, `/session`
 shows the current session ID, `/status` reports queued/retrying/failed work,
 and `/retry` requeues the latest failed turn. Group replies include the
 sender's identity in the agent prompt and are posted as replies to the
-triggering Telegram message.
+triggering Telegram message. The agent can also list, allow, and deny Telegram
+users through gateway-scoped tools, so you can say “also accept messages from
+Hendi” without looking up a numeric user ID.
 
 The default approval mode asks through Telegram inline buttons when a mutating
 tool is requested. `--deny-mutations` disables those tools and `--yolo`
@@ -218,6 +258,7 @@ Responses API at `POST /v1/responses` can be configured as:
       "connection": "ollama",
       "model": "qwen2.5-coder:32b",
       "dialect": "generic-responses",
+      "context_window": 32768,
       "label": "local"
     }
   ]
@@ -227,6 +268,10 @@ Responses API at `POST /v1/responses` can be configured as:
 Select it with `agent-cli --model qwen-local` or from `/model`. For an
 authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
 that variable. Omit `"api_key_optional": true` when the key is required.
+Set `context_window` to the model endpoint's documented token limit so
+`/compact` can bound both its summary request and the installed snapshot.
+Inference still works when this metadata is absent, but `/compact` refuses to
+guess a portable model's limit.
 
 Supported dialects are:
 
@@ -261,10 +306,12 @@ Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
 
 ### Voice dictation
 
-Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop.
-On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM directly to
-`wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
-Audio is sent while you speak, and xAI's partial transcript is displayed live.
+Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop
+(or `Esc` to cancel). Recording stays in the TUI; it does not suspend or close
+the session. On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM
+directly to `wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
+Audio is sent while you speak, and xAI's partial transcript is displayed live in the
+status notice.
 Dictation uses the same configured Grok OAuth subscription or managed xAI
 API-key credential as the xAI provider; it does not run an external app server. Set
 `XAI_STT_LANGUAGE` to a supported language code to override the default `en`.

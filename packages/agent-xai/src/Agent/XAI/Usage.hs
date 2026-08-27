@@ -9,6 +9,11 @@ module Agent.XAI.Usage
 
 import Control.Exception.Safe (tryAny)
 import Agent.Provider (Credential(..))
+import Agent.XAI.Options
+    ( defaultGrokClientVersion
+    , grokTokenAuthValue
+    , grokUserAgent
+    )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.:), (.:?))
 import Data.Aeson.Types (Parser)
@@ -105,13 +110,17 @@ fetchGrokUsageFrom endpoint credential =
             $ setRequestHeader
                 "Authorization"
                 ["Bearer " <> Text.encodeUtf8 credential.accessToken]
-            $ setRequestHeader "X-XAI-Token-Auth" ["xai-grok-cli"]
+            $ setRequestHeader "X-XAI-Token-Auth"
+                [Text.encodeUtf8 grokTokenAuthValue]
             $ setRequestHeader
                 "x-userid"
                 [Text.encodeUtf8 credential.accountId]
             $ setRequestHeader "Accept" ["application/json"]
             $ setRequestHeader "x-grok-client-mode" ["shell"]
-            $ setRequestHeader "x-grok-client-version" ["0.2.118"]
+            $ setRequestHeader "x-grok-client-version"
+                [Text.encodeUtf8 defaultGrokClientVersion]
+            $ setRequestHeader "User-Agent"
+                [Text.encodeUtf8 (grokUserAgent defaultGrokClientVersion)]
             $ setRequestResponseTimeout
                 (HttpClient.responseTimeoutMicro (30 * 1_000_000))
                 request

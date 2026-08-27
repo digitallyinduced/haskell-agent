@@ -196,6 +196,8 @@ functionOutput :: Text -> Text -> OpenAI.ResponseItem
 functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCallOutput
     { OpenAI.itemId = Nothing
     , OpenAI.callId = callId
+    , OpenAI.name = Nothing
+    , OpenAI.namespace = Nothing
     , OpenAI.output = Aeson.String output
     , OpenAI.status = Nothing
     , OpenAI.extraFields = mempty

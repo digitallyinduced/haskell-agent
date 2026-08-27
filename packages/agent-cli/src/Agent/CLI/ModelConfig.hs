@@ -11,6 +11,8 @@ module Agent.CLI.ModelConfig
     , ResponsesConnection(..)
     , builtinConnectionId
     , catalogConnection
+    , catalogContextWindowFor
+    , catalogContextWindowForTransport
     , catalogDefaultForProvider
     , catalogModelById
     , catalogModelsForConnection
@@ -45,7 +47,6 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Data.Foldable (traverse_)
-import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
@@ -82,6 +83,7 @@ data CatalogModel = CatalogModel
     , catalogModelConnectionId :: !Text
     , catalogModelWireId :: !Text
     , catalogModelDialect :: !DialectId
+    , catalogModelContextWindow :: !(Maybe Int)
     , catalogModelLabel :: !(Maybe Text)
     , catalogModelDefault :: !Bool
     , catalogModelFallbackPriority :: !(Maybe Int)
@@ -91,6 +93,7 @@ data CatalogModel = CatalogModel
 data ModelCatalog = ModelCatalog
     { catalogConnections :: !(Map Text ModelConnection)
     , catalogModels :: ![CatalogModel]
+    , catalogModelsById :: !(Map Text CatalogModel)
     }
     deriving (Eq, Show)
 
@@ -116,6 +119,7 @@ data ModelFile = ModelFile
     , modelFileConnection :: !Text
     , modelFileWireId :: !(Maybe Text)
     , modelFileDialect :: !Text
+    , modelFileContextWindow :: !(Maybe Int)
     , modelFileLabel :: !(Maybe Text)
     , modelFileDefault :: !Bool
     , modelFileFallbackPriority :: !(Maybe Int)
@@ -146,6 +150,7 @@ instance FromJSON ModelFile where
             <*> object .: "connection"
             <*> object .:? "model"
             <*> object .: "dialect"
+            <*> object .:? "context_window"
             <*> object .:? "label"
             <*> object .:? "default" .!= False
             <*> object .:? "fallback_priority"
@@ -161,9 +166,47 @@ catalogConnection :: ModelCatalog -> Text -> Maybe ModelConnection
 catalogConnection catalog connectionId =
     Map.lookup connectionId catalog.catalogConnections
 
+catalogContextWindowFor :: ModelCatalog -> Text -> Text -> Maybe Int
+catalogContextWindowFor catalog connectionId modelId = do
+    model <- catalogModelById catalog modelId
+    if model.catalogModelConnectionId == connectionId
+        then model.catalogModelContextWindow
+        else Nothing
+
+-- | Resolve the selected model's context window against the model actually
+-- sent to the provider. Environment-backed model maps may redirect a stable
+-- catalog id to another configured wire model; in that case, using the source
+-- model's limit could permit an oversized request.
+catalogContextWindowForTransport
+    :: ModelCatalog
+    -> Text
+    -> Text
+    -> Text
+    -> Maybe Int
+catalogContextWindowForTransport catalog connectionId modelId wireModelId = do
+    selected <- catalogModelById catalog modelId
+    if selected.catalogModelConnectionId /= connectionId
+        then Nothing
+        else
+            let effective
+                    | selected.catalogModelWireId == wireModelId =
+                        Just selected
+                    | otherwise =
+                        Map.lookup wireModelId
+                            (Map.fromList
+                                [ ( candidate.catalogModelWireId
+                                  , candidate
+                                  )
+                                | candidate <-
+                                    catalogModelsForConnection
+                                        connectionId
+                                        catalog
+                                ])
+            in effective >>= (.catalogModelContextWindow)
+
 catalogModelById :: ModelCatalog -> Text -> Maybe CatalogModel
 catalogModelById catalog modelId =
-    find ((== modelId) . (.catalogModelId)) catalog.catalogModels
+    Map.lookup modelId catalog.catalogModelsById
 
 catalogModelsForConnection :: Text -> ModelCatalog -> [CatalogModel]
 catalogModelsForConnection wanted =
@@ -176,8 +219,13 @@ connectionBuiltinProvider connection = case connection.connectionKind of
 
 catalogDefaultForProvider :: ModelCatalog -> Provider -> Maybe CatalogModel
 catalogDefaultForProvider catalog provider =
-    find (.catalogModelDefault) $
-        catalogModelsForConnection (builtinConnectionId provider) catalog
+    case
+        [ model
+        | model <- catalogModelsForConnection (builtinConnectionId provider) catalog
+        , model.catalogModelDefault
+        ] of
+        model : _ -> Just model
+        [] -> Nothing
 
 -- | Decode and validate one standalone file. This is mainly useful for tests;
 -- normal startup should use 'mergeModelConfigs' so defaults can be overlaid.
@@ -331,6 +379,11 @@ validateConfig source config = do
     pure ModelCatalog
         { catalogConnections = connections
         , catalogModels = models
+        , catalogModelsById =
+            Map.fromList
+                [ (model.catalogModelId, model)
+                | model <- models
+                ]
         }
   where
     validateConnection connectionId raw = do
@@ -429,11 +482,18 @@ validateConfig source config = do
                 Left ("model " <> modelId
                     <> " fallback_priority must not be negative"))
             raw.modelFileFallbackPriority
+        traverse_
+            (\contextWindow -> when (contextWindow <= 0) $
+                Left ("model " <> modelId
+                    <> " context_window must be positive"))
+            raw.modelFileContextWindow
         pure CatalogModel
             { catalogModelId = modelId
             , catalogModelConnectionId = connectionId
             , catalogModelWireId = wireId
             , catalogModelDialect = dialect
+            , catalogModelContextWindow =
+                raw.modelFileContextWindow
             , catalogModelLabel =
                 nonEmptyText =<< raw.modelFileLabel
             , catalogModelDefault = raw.modelFileDefault

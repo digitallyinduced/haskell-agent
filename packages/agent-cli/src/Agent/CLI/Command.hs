@@ -19,6 +19,7 @@ module Agent.CLI.Command
     , lookupSlashCommandIn
     , loopScheduleInstruction
     , mkSlashCatalog
+    , slashCatalogWithSkills
     , parseReplLine
     , parseReplLineWithCatalog
     , parseReplLineWithSkills
@@ -38,9 +39,18 @@ module Agent.CLI.Command
     , workflowInstruction
     ) where
 
-import Agent.CLI.Options (parseEffort, reasoningEfforts)
+import Agent.CLI.Options
+    ( parseEffort
+    , reasoningEffortsForDialect
+    )
+import Agent.CLI.Command.Types
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Dialect (DialectId(..))
+import Agent.ReasoningEffort
+    ( ReasoningEffort(..)
+    , parseReasoningEffort
+    , reasoningEffortText
+    )
 import Agent.Responses.Types
 
 import qualified Data.Aeson as Aeson
@@ -48,7 +58,9 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isAlphaNum, isDigit, isSpace)
-import Data.List (find, isPrefixOf, sortOn)
+import Data.List (isPrefixOf, sortOn)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Ord (Down(..))
 import Data.Set (Set)
@@ -56,115 +68,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Text.Encoding (decodeUtf8)
-
-data ReplAction
-    = ReplQuit
-    | ReplReload
-    | ReplPrompt Text
-    | ReplExpandedPrompt !Text !Text
-      -- ^ Original user-visible text and the model-visible expansion.
-    | ReplShowEffort
-    | ReplSetEffort Text
-    | ReplShowModel
-    | ReplSetModel Text
-    | ReplToggleAlwaysApprove
-    | ReplPlan (Maybe Text)
-    -- ^ Enter plan mode. @Just@ starts a turn with that description.
-    | ReplBtw Text
-    -- ^ Ask an isolated one-shot question over the current context.
-    | ReplRecap
-    -- ^ Generate a display-only "where was I" recap of the current session.
-    | ReplShowSession
-    | ReplShowSessionInfo
-    | ReplAfk (Maybe Text)
-    -- ^ Hand the active session to tmux, optionally on @host:path@.
-    | ReplWorktree
-    | ReplRename Text
-    | ReplRenameAuto
-    | ReplLogin
-    | ReplReloadAuth
-    | ReplPaste !Bool !Text
-    | ReplClearAttachments
-    | ReplShowAttachments
-    | ReplCopyLast
-    | ReplCopyCode Int
-    | ReplCopyDiff
-    | ReplCopyPath
-    | ReplCopySession
-    | ReplShowTerminal
-    | ReplAgents
-    | ReplShowAgentLimit
-    | ReplSetAgentLimit Int
-    | ReplMcp
-    | ReplGoalStatus
-    | ReplGoalPause
-    | ReplGoalResume
-    | ReplGoalClear
-    | ReplGoalSet !Text !Text !(Maybe Int) !Text
-      -- ^ Original text, objective, optional token budget, and expansion.
-    | ReplWorkflowRuns
-    | ReplWorkflowManage !Text !(Maybe Text)
-      -- ^ Operation and optional run id/display name.
-    | ReplSkills !Bool
-    | ReplShowShell
-    | ReplSetShell !ShellMode
-    | ReplInvokeSkill !Text !Text
-    | ReplHelp (Maybe Text)
-    -- ^ @Nothing@ lists every command; @Just@ is a canonical name without @/@.
-    | ReplResume (Maybe Text)
-    -- ^ @Nothing@ opens the session picker; @Just@ is a session id.
-    | ReplSearch !Text
-    -- ^ Search persisted conversation turns and open matching sessions.
-    | ReplCompact (Maybe Text)
-    -- ^ Optional focus note for what to keep while compacting history.
-    | ReplClear
-      -- ^ Soft-reset live transcript; keep the same session id.
-    | ReplNew
-      -- ^ Start a fresh persisted session id with empty history.
-    | ReplUsage
-    | ReplCommandError Text
-    deriving (Eq, Show)
-
-data ShellMode
-    = ShellGhci
-    | ShellBash
-    | ShellBoth
-    | ShellNone
-    deriving (Eq, Show)
-
-data SkillCommand = SkillCommand
-    { skillCommandName :: !Text
-    , skillCommandSummary :: !Text
-    , skillCommandArgumentHint :: !(Maybe Text)
-    , skillCommandSource :: !Text
-    }
-    deriving (Eq, Show)
-
--- | One REPL slash command. @slashName@ is the canonical name without a
--- leading @/@; aliases are also stored without @/@.
-data SlashCommand = SlashCommand
-    { slashName :: !Text
-    , slashAliases :: ![Text]
-    , slashUsage :: !Text
-    , slashSummary :: !Text
-    , slashTakesArguments :: !Bool
-    , slashDialects :: !(Maybe [DialectId])
-    , slashRequiredTools :: ![Text]
-    }
-    deriving (Eq, Show)
-
--- | Session-scoped slash-command capabilities and presentation data.
---
--- Tool-backed commands are filtered when the catalog is built, so the same
--- catalog must be used for parsing, help, and both completion UIs.
-data SlashCatalog = SlashCatalog
-    { slashCatalogDialect :: !DialectId
-    , slashCatalogToolNames :: !(Set Text)
-    , slashCatalogCommands :: ![SlashCommand]
-    , slashCatalogSkills :: ![SkillCommand]
-    , slashCatalogModelIds :: ![Text]
-    }
-    deriving (Eq, Show)
 
 slashCommands :: [SlashCommand]
 slashCommands =
@@ -174,6 +77,7 @@ slashCommands =
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
+    , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
     , cmd "session" [] "/session" "Print the current session id" False
     , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
     , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
@@ -248,14 +152,59 @@ mkSlashCatalog dialect toolNames skills modelIds =
     let tools =
             Set.fromList
                 (map (Text.toLower . Text.strip) toolNames)
+        commands =
+            filter
+                (commandAvailable dialect tools)
+                (map (commandForDialect dialect) slashCommands)
     in SlashCatalog
         { slashCatalogDialect = dialect
         , slashCatalogToolNames = tools
-        , slashCatalogCommands =
-            filter (commandAvailable dialect tools) slashCommands
+        , slashCatalogCommands = commands
+        , slashCatalogCommandByName = indexSlashCommands commands
         , slashCatalogSkills = skills
+        , slashCatalogSkillByName = indexSkillCommands skills
         , slashCatalogModelIds = modelIds
         }
+
+commandForDialect :: DialectId -> SlashCommand -> SlashCommand
+commandForDialect dialect command
+    | command.slashName == "effort" =
+        command
+            { slashUsage =
+                "/effort ["
+                    <> Text.intercalate
+                        "|"
+                        (map reasoningEffortText
+                            (reasoningEffortsForDialect dialect))
+                    <> "]"
+            }
+    | otherwise = command
+
+slashCatalogWithSkills :: [SkillCommand] -> SlashCatalog -> SlashCatalog
+slashCatalogWithSkills skills catalog =
+    catalog
+        { slashCatalogSkills = skills
+        , slashCatalogSkillByName = indexSkillCommands skills
+        }
+
+indexSlashCommands :: [SlashCommand] -> Map Text SlashCommand
+indexSlashCommands commands =
+    Map.fromList
+        [ (name, command)
+        | command <- commands
+        , name <- command.slashName : command.slashAliases
+        ]
+
+indexSkillCommands :: [SkillCommand] -> Map Text SkillCommand
+indexSkillCommands skills =
+    Map.fromList
+        [ (Text.toLower skill.skillCommandName, skill)
+        | skill <- skills
+        ]
+
+normalizeSlashName :: Text -> Text
+normalizeSlashName raw =
+    Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
 
 commandAvailable :: DialectId -> Set Text -> SlashCommand -> Bool
 commandAvailable dialect tools command =
@@ -269,14 +218,12 @@ lookupSlashCommand =
     lookupSlashCommandFrom slashCommands
 
 lookupSlashCommandIn :: SlashCatalog -> Text -> Maybe SlashCommand
-lookupSlashCommandIn catalog =
-    lookupSlashCommandFrom catalog.slashCatalogCommands
+lookupSlashCommandIn catalog raw =
+    Map.lookup (normalizeSlashName raw) catalog.slashCatalogCommandByName
 
 lookupSlashCommandFrom :: [SlashCommand] -> Text -> Maybe SlashCommand
 lookupSlashCommandFrom commands raw =
-    let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
-    in find (\cmd -> cmd.slashName == name || name `elem` cmd.slashAliases)
-        commands
+    Map.lookup (normalizeSlashName raw) (indexSlashCommands commands)
 
 parseReplLine :: Text -> ReplAction
 parseReplLine =
@@ -285,9 +232,7 @@ parseReplLine =
 parseReplLineWithSkills :: [SkillCommand] -> Text -> ReplAction
 parseReplLineWithSkills skills =
     parseReplLineWithCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 parseReplLineWithCatalog :: SlashCatalog -> Text -> ReplAction
 parseReplLineWithCatalog catalog raw =
@@ -321,7 +266,7 @@ parseSlash :: SlashCatalog -> Text -> Text -> ReplAction
 parseSlash catalog raw line = case Text.words line of
     [] -> unknownCommand "/"
     command : args -> case lookupSlashCommandIn catalog command of
-        Nothing -> case lookupSkillCommand catalog.slashCatalogSkills command of
+        Nothing -> case lookupSkillCommandIn catalog command of
             Just skill ->
                 ReplInvokeSkill
                     skill.skillCommandName
@@ -346,6 +291,10 @@ parseSlash catalog raw line = case Text.words line of
                 if null args
                     then ReplRecap
                     else ReplCommandError "usage: /recap"
+            "retry" ->
+                if null args
+                    then ReplRetry
+                    else ReplCommandError "usage: /retry"
             "session" ->
                 if null args
                     then ReplShowSession
@@ -471,17 +420,16 @@ unknownCommand :: Text -> ReplAction
 unknownCommand command =
     ReplCommandError ("unknown command: " <> command <> " (try /help)")
 
-lookupSkillCommand :: [SkillCommand] -> Text -> Maybe SkillCommand
-lookupSkillCommand skills raw =
-    let name = Text.toLower (Text.dropWhile (== '/') (Text.strip raw))
-    in find ((== name) . Text.toLower . (.skillCommandName)) skills
+lookupSkillCommandIn :: SlashCatalog -> Text -> Maybe SkillCommand
+lookupSkillCommandIn catalog raw =
+    Map.lookup (normalizeSlashName raw) catalog.slashCatalogSkillByName
 
 parseHelpCommand :: SlashCatalog -> [Text] -> ReplAction
 parseHelpCommand catalog = \case
     [] -> ReplHelp Nothing
     [name] -> case lookupSlashCommandIn catalog name of
         Just spec -> ReplHelp (Just spec.slashName)
-        Nothing -> case lookupSkillCommand catalog.slashCatalogSkills name of
+        Nothing -> case lookupSkillCommandIn catalog name of
             Just skill -> ReplHelp (Just skill.skillCommandName)
             Nothing -> unknownCommand name
     _ -> ReplCommandError "usage: /help [NAME]"
@@ -735,7 +683,10 @@ parseModelCommand = \case
     _ -> ReplCommandError "usage: /model [NAME]"
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
-setReasoningEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
+setReasoningEffort
+    :: ReasoningEffort
+    -> ResponseCreateParams
+    -> ResponseCreateParams
 setReasoningEffort level ResponseCreateParams{..} =
     ResponseCreateParams
         { reasoning = Just updated
@@ -743,19 +694,23 @@ setReasoningEffort level ResponseCreateParams{..} =
         }
   where
     updated = case reasoning of
-        Just ReasoningConfig{..} -> ReasoningConfig { effort = Just level, .. }
+        Just ReasoningConfig{..} ->
+            ReasoningConfig { effort = Just (reasoningEffortText level), .. }
         Nothing -> ReasoningConfig
             { context = Nothing
-            , effort = Just level
+            , effort = Just (reasoningEffortText level)
             , generateSummary = Nothing
             , reasoningMode = Nothing
             , summary = Nothing
             , extraFields = KeyMap.empty
             }
 
-currentEffort :: ResponseCreateParams -> Text
+currentEffort :: ResponseCreateParams -> ReasoningEffort
 currentEffort params =
-    fromMaybe "low" (params.reasoning >>= (.effort))
+    fromMaybe EffortLow $
+        params.reasoning
+            >>= (.effort)
+            >>= either (const Nothing) Just . parseReasoningEffort
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 setModel :: Text -> ResponseCreateParams -> ResponseCreateParams
@@ -777,9 +732,7 @@ formatSlashHelp color =
 formatSlashHelpWithSkills :: Bool -> [SkillCommand] -> Maybe Text -> Text
 formatSlashHelpWithSkills color skills =
     formatSlashHelpWithCatalog color
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 formatSlashHelpWithCatalog
     :: Bool
@@ -796,7 +749,7 @@ formatSlashHelpWithCatalog color catalog = \case
     Just name ->
         case lookupSlashCommandIn catalog name of
             Just spec -> formatSlashHelpRow color spec
-            Nothing -> case lookupSkillCommand catalog.slashCatalogSkills name of
+            Nothing -> case lookupSkillCommandIn catalog name of
                 Just skill -> formatSkillHelpRow color skill
                 Nothing -> roleMuted color ("unknown command: " <> name <> " (try /help)")
 
@@ -852,9 +805,7 @@ slashCompletionCandidatesWithSkills
     -> [String]
 slashCompletionCandidatesWithSkills skills =
     slashCompletionCandidatesWithCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 slashCompletionCandidatesWithSkillsAndModels
     :: [SkillCommand]
@@ -865,10 +816,9 @@ slashCompletionCandidatesWithSkillsAndModels
 slashCompletionCandidatesWithSkillsAndModels
         skills modelIds =
     slashCompletionCandidatesWithCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
 
 slashCompletionCandidatesWithCatalog
     :: SlashCatalog
@@ -915,7 +865,9 @@ completeSlashArgs catalog cmd word =
 argCompletions :: SlashCatalog -> SlashCommand -> [Text]
 argCompletions catalog spec = case spec.slashName of
     "agents" -> ["limit"]
-    "effort" -> reasoningEfforts
+    "effort" ->
+        map reasoningEffortText
+            (reasoningEffortsForDialect catalog.slashCatalogDialect)
     "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]
     "help" ->
@@ -926,24 +878,6 @@ argCompletions catalog spec = case spec.slashName of
     "goal" -> ["status", "pause", "resume", "clear"]
     "workflow" -> ["runs"]
     _ -> []
-
--- | One row in the live slash-command dropdown.
-data SlashSuggestion = SlashSuggestion
-    { slashSuggestionDisplay :: !Text
-    , slashSuggestionReplacement :: !Text
-    , slashSuggestionSummary :: !Text
-    , slashSuggestionTakesArguments :: !Bool
-    , slashSuggestionMatchPositions :: ![Int]
-    }
-    deriving (Eq, Show)
-
--- | Current live slash menu and the character range replaced on acceptance.
-data SlashMenu = SlashMenu
-    { slashMenuReplaceStart :: !Int
-    , slashMenuReplaceEnd :: !Int
-    , slashMenuSuggestions :: ![SlashSuggestion]
-    }
-    deriving (Eq, Show)
 
 -- | Derive a live menu from a leading slash command at the cursor.
 slashMenuFor :: Text -> Int -> Maybe SlashMenu
@@ -960,9 +894,7 @@ slashMenuForWithModels modelIds =
 slashMenuForWithSkills :: [SkillCommand] -> Text -> Int -> Maybe SlashMenu
 slashMenuForWithSkills skills =
     slashMenuForCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            }
+        (slashCatalogWithSkills skills defaultSlashCatalog)
 
 slashMenuForWithSkillsAndModels
     :: [SkillCommand]
@@ -972,10 +904,9 @@ slashMenuForWithSkillsAndModels
     -> Maybe SlashMenu
 slashMenuForWithSkillsAndModels skills modelIds =
     slashMenuForCatalog
-        defaultSlashCatalog
-            { slashCatalogSkills = skills
-            , slashCatalogModelIds = modelIds
-            }
+        ((slashCatalogWithSkills skills defaultSlashCatalog)
+            { slashCatalogModelIds = modelIds
+            })
 
 slashMenuForCatalog
     :: SlashCatalog

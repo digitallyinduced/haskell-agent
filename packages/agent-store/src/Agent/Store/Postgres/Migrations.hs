@@ -30,7 +30,10 @@ import Agent.Store.Postgres.Hasql (mkStatement)
 
 import Agent.Store.Postgres.Connection
 import Agent.Store.Postgres.Scope (customSchemaStatements)
-import Agent.Store.Postgres.Session (sessionSchemaStatements)
+import Agent.Store.Postgres.Session
+    ( sessionSchemaStatements
+    , sessionSearchIndexStatements
+    )
 import Agent.Store.Postgres.Skill
     ( learnedSkillRuntimeGrantStatements
     , learnedSkillSchemaStatements
@@ -149,6 +152,29 @@ coreMigrations =
         , migrationName = "session transcript effects and paging"
         , migrationStatements =
             [migrateSessionTranscriptEffectsStatement]
+        }
+    , Migration
+        { migrationVersion = 9
+        , migrationName = "trigram indexes for conversation search"
+        , migrationStatements = sessionSearchIndexStatements
+        }
+    , Migration
+        { migrationVersion = 10
+        , migrationName = "binary session attachments"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS file_data_mime_type text"
+            , "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS file_data_bytes bytea"
+            , "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS image_mime_type text"
+            , "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS image_bytes bytea"
+            ]
         }
     ]
 

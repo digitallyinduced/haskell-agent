@@ -69,6 +69,21 @@ spec = describe "runLoop" do
         (mempty <> usage, usage <> mempty)
             `shouldBe` (usage, usage)
 
+    it "estimates tokens from streamed characters and reports tokens/sec" do
+        estimateTokensFromChars 0 `shouldBe` 0
+        estimateTokensFromChars 1 `shouldBe` 1
+        estimateTokensFromChars 4 `shouldBe` 1
+        estimateTokensFromChars 16 `shouldBe` 4
+        tokensPerSecond 0 1000 `shouldBe` Nothing
+        tokensPerSecond 100 0 `shouldBe` Nothing
+        tokensPerSecond 100 1000 `shouldBe` Just 100
+        tokensPerSecond 40 2000 `shouldBe` Just 20
+        generationTokensPerSecond 80 16 1000 `shouldBe` Just 80
+        generationTokensPerSecond 0 16 1000 `shouldBe` Just 4
+        liveTokensPerSecond 16 (liveTokenRateMinMillis - 1) `shouldBe` Nothing
+        liveTokensPerSecond 16 liveTokenRateMinMillis
+            `shouldBe` tokensPerSecond 4 liveTokenRateMinMillis
+
     it "threads previous_response_id and sends only CompletedTool on the follow-up" do
         submissions <- newIORef []
         backend <- scriptedBackend submissions
@@ -804,6 +819,9 @@ spec = describe "runLoop" do
                 denied.output `shouldBe` "Tool call rejected by user."
             other -> expectationFailure ("unexpected submissions: " <> show other)
 
+    it "defaults to a 2000-turn budget" do
+        defaultLoopMaxTurns `shouldBe` 2000
+
     it "returns LoopMaxTurns when the model keeps calling tools" do
         backend <- endlessToolsBackend
         config0 <- testConfig backend
@@ -1246,12 +1264,14 @@ spec = describe "runLoop" do
                 , toolCalls = [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
                 , assistantText = Just "calling"
                 , tokenUsage = TokenUsage 10 4 2
+                , completion = TurnCompleted
                 }
             , Right TurnOutput
                 { responseId = "resp-2"
                 , toolCalls = []
                 , assistantText = Just "done"
                 , tokenUsage = TokenUsage 12 6 0
+                , completion = TurnCompleted
                 }
             ]
         config <- testConfig backend
@@ -1262,6 +1282,201 @@ spec = describe "runLoop" do
             , turnsUsed = 2
             , tokenUsage = TokenUsage 22 10 2
             }
+
+    it "continues after a reasoning-only completion until the model answers" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "done"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        seen `shouldBe`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [])
+            ]
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-1" [] Nothing)
+            , TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-2" [] (Just "done"))
+            ]
+
+    it "continues after whitespace-only assistant text" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] (Just "  \n")
+            , Right $ emptyTurnOutput "resp-2" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "done"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        seen `shouldBe`
+            [ (Nothing, [UserMessage "hello"])
+            , (Just "resp-1", [])
+            ]
+
+    it "can call tools after a reasoning-only continuation" do
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2"
+                [functionToolCall "c1" "echo" "{\"message\":\"hi\"}"]
+                Nothing
+            , Right $ emptyTurnOutput "resp-3" [] (Just "done")
+            ]
+        config <- testConfig backend
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-3"
+            , finalText = Just "done"
+            , turnsUsed = 3
+            , tokenUsage = emptyTokenUsage
+            }
+        seen <- readIORef submissions
+        case seen of
+            [ (Nothing, [UserMessage "hello"])
+                , (Just "resp-1", [])
+                , (Just "resp-2", [CompletedTool echoed])
+                ] ->
+                    echoed.output `shouldBe` "echo:hi"
+            other -> expectationFailure ("unexpected submissions: " <> show other)
+
+    it "stops after repeated empty completions and warns" do
+        events <- newIORef []
+        submissions <- newIORef []
+        backend <- scriptedBackend submissions
+            [ Right $ emptyTurnOutput "resp-1" [] Nothing
+            , Right $ emptyTurnOutput "resp-2" [] Nothing
+            , Right $ emptyTurnOutput "resp-3" [] Nothing
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \event -> modifyIORef' events (event :)
+                }
+        result <- runLoop config Nothing "hello"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-3"
+            , finalText = Nothing
+            , turnsUsed = 3
+            , tokenUsage = emptyTokenUsage
+            }
+        length <$> readIORef submissions `shouldReturn` 3
+        reverse <$> readIORef events `shouldReturn`
+            [ TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-1" [] Nothing)
+            , TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-2" [] Nothing)
+            , TurnStarted
+            , TurnFinished (emptyTurnOutput "resp-3" [] Nothing)
+            , WarningRaised
+                "The model produced no assistant text or tool calls after reasoning; stopping."
+            ]
+
+    it "injects pending steering at the next committed model boundary" do
+        submissions <- newIORef []
+        pending <- newIORef []
+        baseBackend <- scriptedBackend submissions
+            [ Right (emptyTurnOutput "resp-1" [] (Just "initial answer"))
+            , Right (emptyTurnOutput "resp-2" [] (Just "revised answer"))
+            ]
+        calls <- newIORef (0 :: Int)
+        let backend = Backend \state previous inputs onEvent -> do
+                call <- atomicModifyIORef' calls \count ->
+                    (count + 1, count)
+                if call == 0
+                    then writeIORef pending ["use the existing schema"]
+                    else pure ()
+                baseBackend.submitTurn state previous inputs onEvent
+        config0 <- testConfig backend
+        let config = config0
+                { loopReadSteering =
+                    map UserMessage <$> readIORef pending
+                , loopCommitSteering = \count ->
+                    atomicModifyIORef' pending \messages ->
+                        (drop count messages, ())
+                }
+        result <- runLoop config Nothing "start"
+        result `shouldBe` Right LoopResult
+            { finalResponseId = "resp-2"
+            , finalText = Just "revised answer"
+            , turnsUsed = 2
+            , tokenUsage = emptyTokenUsage
+            }
+        readIORef submissions `shouldReturn`
+            [ (Nothing, [UserMessage "start"])
+            , (Just "resp-1", [UserMessage "use the existing schema"])
+            ]
+        readIORef pending `shouldReturn` []
+
+    it "commits terminal incomplete responses without running their tools" do
+        submissions <- newIORef []
+        calls <- newIORef ([] :: [Text])
+        pending <- newIORef ["keep this guidance"]
+        backend <- scriptedBackend submissions
+            [ Right TurnOutput
+                { responseId = "resp-incomplete"
+                , toolCalls =
+                    [functionToolCall "c1" "echo" "{\"message\":\"unsafe\"}"]
+                , assistantText = Just "partial"
+                , tokenUsage = TokenUsage 120 32768 0
+                , completion = TurnIncomplete
+                    { incompleteReason = "max_output_tokens"
+                    , incompleteReasoningTokens = Just 32000
+                    }
+                }
+            ]
+        config0 <- testConfig backend
+        let config = config0
+                { loopOnEvent = \case
+                    ToolStarted call -> modifyIORef' calls (<> [call.callId])
+                    _ -> pure ()
+                , loopReadSteering = map UserMessage <$> readIORef pending
+                , loopCommitSteering = \count ->
+                    atomicModifyIORef' pending \messages ->
+                        (drop count messages, ())
+                }
+        execution <- runLoopInputsDetailed config Nothing [UserMessage "hello"]
+        execution.executionProgress `shouldBe` ResponseCommitted
+        execution.executionResult `shouldBe`
+            Left
+                (LoopIncomplete TurnOutput
+                    { responseId = "resp-incomplete"
+                    , toolCalls =
+                        [functionToolCall
+                            "c1" "echo" "{\"message\":\"unsafe\"}"]
+                    , assistantText = Just "partial"
+                    , tokenUsage = TokenUsage 120 32768 0
+                    , completion = TurnIncomplete
+                        { incompleteReason = "max_output_tokens"
+                        , incompleteReasoningTokens = Just 32000
+                        }
+                    })
+        readIORef calls `shouldReturn` []
+        readIORef submissions `shouldReturn`
+            [ (Nothing
+              , [ UserMessage "hello"
+                , UserMessage "keep this guidance"
+                ])
+            ]
+        readIORef pending `shouldReturn` ["keep this guidance"]
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -1285,6 +1500,8 @@ testConfig backend = do
         , loopMaxTurns = defaultLoopMaxTurns
         , loopOnEvent = \_ -> pure ()
         , loopApprove = \_ -> pure (Right True)
+        , loopReadSteering = pure []
+        , loopCommitSteering = \_ -> pure ()
         , loopCancel = cancel
         }
 

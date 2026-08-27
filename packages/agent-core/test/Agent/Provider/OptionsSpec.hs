@@ -2,6 +2,7 @@ module Agent.Provider.OptionsSpec (spec) where
 
 import Agent.Provider.Options
 import Control.Exception.Safe (bracket)
+import qualified Data.Map.Strict as Map
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
@@ -11,9 +12,10 @@ spec = describe "Agent.Provider.Options" do
         it "parses valid entries, trims whitespace, and skips malformed ones" do
             parseModelOverrides "local = remote,broken,=missing,also=,x=y=z"
                 `shouldBe`
-                    [ ("local", "remote")
-                    , ("x", "y=z")
-                    ]
+                    Map.fromList
+                        [ ("local", "remote")
+                        , ("x", "y=z")
+                        ]
 
     describe "environment lookup" do
         it "distinguishes empty, invalid, and valid values" $

@@ -30,7 +30,9 @@ spec = do
                     { itemId = Nothing
                     , callId = "call-1"
                     , name = "shell_command"
+                    , namespace = Nothing
                     , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
                     , extraFields = KeyMap.empty
                     }
@@ -86,6 +88,17 @@ spec = do
         field "prompt_cache_retention" payload `shouldBe` Nothing
         field "previous_response_id" payload
             `shouldBe` Just (Aeson.String "previous-1")
+
+    it "forces parallel_tool_calls false on Responses Lite requests" do
+        let request = withParallelToolCalls (Just True) sampleRequest
+            payload = buildWsPayloadWithOptions
+                defaultCodexWsOptions request Nothing
+        field "parallel_tool_calls" payload `shouldBe` Just (Aeson.Bool False)
+
+        let generic = withModel (Just "gpt-generic") request
+        field "parallel_tool_calls"
+            (buildWsPayloadWithOptions defaultCodexWsOptions generic Nothing)
+            `shouldBe` Just (Aeson.Bool True)
 
     it "strips Responses Lite content_item_kinds from the wire payload" do
         let payload = buildWsPayloadWithOptions
@@ -210,10 +223,34 @@ spec = do
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
             , lifecycleFrame "response.completed" (Aeson.object [])
             ]
-            [EventResponseCreated, EventResponseCompleted]
+            [ StreamEventUnknown unparsedStreamEventTypeText
+            , EventResponseCreated
+            , EventResponseCompleted
+            ]
             \response -> response.output `shouldBe` []
 
-    it "rejects response.incomplete with the server reason" do
+    it "surfaces unparsed function_call items and still completes the turn" do
+        testPartialTerminalResponse
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.added" :: Text)
+                , "output_index" Aeson..= (0 :: Int)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("function_call" :: Text)
+                    , "id" Aeson..= ("fc-1" :: Text)
+                    , "status" Aeson..= ("in_progress" :: Text)
+                    ]
+                ]
+            , lifecycleFrame "response.completed" (Aeson.object [])
+            ]
+            [ EventResponseCreated
+            , StreamEventUnknown unparsedStreamEventTypeText
+            , EventResponseCompleted
+            ]
+            \response -> response.output `shouldBe` []
+
+    it "returns response.incomplete with the server reason" do
         frames <- newIORef
             [ lifecycleFrame "response.created"
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
@@ -247,7 +284,9 @@ spec = do
             (Just "gpt-test") actions onEvent
 
         result `shouldBe` Left
-            (ConnectionError "response.incomplete: max_output_tokens")
+            (ProviderError ApiErrorType
+                "response.incomplete: max_output_tokens"
+                Nothing)
         readIORef callbackTypes `shouldReturn`
             [EventResponseCreated, EventResponseIncomplete]
         readIORef receiveCount `shouldReturn` 2
@@ -255,6 +294,202 @@ spec = do
         readIORef invalidations `shouldReturn`
             ["WebSocket response incomplete"]
         readIORef frames `shouldReturn` []
+
+    it "keeps an incomplete response that already contains a function call" do
+        frames <- newIORef
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("function_call" :: Text)
+                    , "call_id" Aeson..= ("call-test" :: Text)
+                    , "name" Aeson..= ("shell_command" :: Text)
+                    , "arguments" Aeson..= ("{}" :: Text)
+                    ]
+                ]
+            , lifecycleFrame "response.incomplete"
+                (Aeson.object
+                    [ "incomplete_details" Aeson..= Aeson.object
+                        [ "reason" Aeson..=
+                            ("max_output_tokens" :: Text)
+                        ]
+                    ])
+            ]
+        receiveCount <- newIORef (0 :: Int)
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        callbackTypes <- newIORef ([] :: [StreamEventType])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = do
+                    modifyIORef' receiveCount (+ 1)
+                    atomicModifyIORef' frames \case
+                        frame : rest -> (rest, Right frame)
+                        [] -> error "unexpected receive after terminal event"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+            onEvent event =
+                modifyIORef' callbackTypes
+                    (<> [responseStreamEventType event])
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions onEvent
+
+        case result of
+            Right response -> do
+                response.responseId `shouldBe` "resp-test"
+                response.status `shouldBe` ResponseIncomplete
+                [name | FunctionCallItem FunctionCall { name } <- response.output]
+                    `shouldBe` ["shell_command"]
+            other -> expectationFailure ("expected incomplete response, got " <> show other)
+        readIORef callbackTypes `shouldReturn`
+            [EventResponseCreated, EventOutputItemDone, EventResponseIncomplete]
+        readIORef completeCount `shouldReturn` 1
+        readIORef invalidations `shouldReturn` []
+
+    it "keeps an incomplete response that already contains reasoning" do
+        frames <- newIORef
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("reasoning" :: Text)
+                    , "id" Aeson..= ("rs-1" :: Text)
+                    , "summary" Aeson..= ([] :: [Aeson.Value])
+                    ]
+                ]
+            , lifecycleFrame "response.incomplete"
+                (Aeson.object
+                    [ "incomplete_details" Aeson..= Aeson.object
+                        [ "reason" Aeson..=
+                            ("max_output_tokens" :: Text)
+                        ]
+                    ])
+            ]
+        receiveCount <- newIORef (0 :: Int)
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        callbackTypes <- newIORef ([] :: [StreamEventType])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = do
+                    modifyIORef' receiveCount (+ 1)
+                    atomicModifyIORef' frames \case
+                        frame : rest -> (rest, Right frame)
+                        [] -> error "unexpected receive after terminal event"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+            onEvent event =
+                modifyIORef' callbackTypes
+                    (<> [responseStreamEventType event])
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions onEvent
+
+        case result of
+            Right response -> do
+                response.responseId `shouldBe` "resp-test"
+                response.status `shouldBe` ResponseIncomplete
+                [itemId | ReasoningItemValue ReasoningItem { itemId } <- response.output]
+                    `shouldBe` [Just "rs-1"]
+            other -> expectationFailure ("expected incomplete response, got " <> show other)
+        readIORef callbackTypes `shouldReturn`
+            [EventResponseCreated, EventOutputItemDone, EventResponseIncomplete]
+        readIORef completeCount `shouldReturn` 1
+        readIORef invalidations `shouldReturn` []
+
+    it "rejects content-filtered incomplete reasoning instead of recovering it" do
+        frames <- newIORef
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("reasoning" :: Text)
+                    , "id" Aeson..= ("rs-1" :: Text)
+                    , "summary" Aeson..= ([] :: [Aeson.Value])
+                    ]
+                ]
+            , lifecycleFrame "response.incomplete"
+                (Aeson.object
+                    [ "incomplete_details" Aeson..= Aeson.object
+                        [ "reason" Aeson..=
+                            ("content_filter" :: Text)
+                        ]
+                    ])
+            ]
+        receiveCount <- newIORef (0 :: Int)
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        callbackTypes <- newIORef ([] :: [StreamEventType])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = do
+                    modifyIORef' receiveCount (+ 1)
+                    atomicModifyIORef' frames \case
+                        frame : rest -> (rest, Right frame)
+                        [] -> error "unexpected receive after terminal event"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+            onEvent event =
+                modifyIORef' callbackTypes
+                    (<> [responseStreamEventType event])
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions onEvent
+
+        result `shouldBe` Left
+            (ProviderError ApiErrorType
+                "response.incomplete: content_filter"
+                Nothing)
+        readIORef callbackTypes `shouldReturn`
+            [EventResponseCreated, EventOutputItemDone, EventResponseIncomplete]
+        readIORef completeCount `shouldReturn` 0
+        readIORef invalidations `shouldReturn`
+            ["WebSocket response incomplete"]
+
+    it "recovers assembled tool calls when the socket dies after output_item.done" do
+        remaining <- newIORef
+            [ Right $ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Right $ Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.done" :: Text)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("function_call" :: Text)
+                    , "call_id" Aeson..= ("call-test" :: Text)
+                    , "name" Aeson..= ("shell_command" :: Text)
+                    , "arguments" Aeson..= ("{}" :: Text)
+                    ]
+                ]
+            , Left (ConnectionError "WebSocket receive idle timeout")
+            ]
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = atomicModifyIORef' remaining \case
+                    next : rest -> (rest, next)
+                    [] -> error "unexpected receive after frames were exhausted"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions (const (pure ()))
+
+        case result of
+            Right response -> do
+                response.responseId `shouldBe` "resp-test"
+                [name | FunctionCallItem FunctionCall { name } <- response.output]
+                    `shouldBe` ["shell_command"]
+            other -> expectationFailure ("expected recovered response, got " <> show other)
+        readIORef completeCount `shouldReturn` 1
+        readIORef invalidations `shouldReturn` []
 
 testPartialTerminalResponse
     :: [LBS.ByteString]
@@ -324,12 +559,14 @@ sampleLitePrefixRequest = sampleRequest
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
-            , extraFields = KeyMap.singleton
-                (Key.fromText "internal_chat_message_metadata_passthrough")
-                (Aeson.object
-                    [ "content_item_kinds"
-                        Aeson..= (["model.base_instructions"] :: [Text])
-                    ])
+            , passthrough = Just InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Just ["model.base_instructions"]
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            , extraFields = KeyMap.empty
             }
         ])
     }
@@ -357,6 +594,11 @@ withPromptCacheRetention
 withPromptCacheRetention nextRetention
         ResponseCreateParams { promptCacheRetention = _, .. } =
     ResponseCreateParams { promptCacheRetention = nextRetention, .. }
+
+withParallelToolCalls
+    :: Maybe Bool -> ResponseCreateParams -> ResponseCreateParams
+withParallelToolCalls nextValue ResponseCreateParams { parallelToolCalls = _, .. } =
+    ResponseCreateParams { parallelToolCalls = nextValue, .. }
 
 withModel :: Maybe Text -> ResponseCreateParams -> ResponseCreateParams
 withModel nextModel ResponseCreateParams { model = _, .. } =

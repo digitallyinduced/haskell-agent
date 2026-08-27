@@ -39,6 +39,7 @@ import Agent.Error
 import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.OpenAI.Error (isPreviousResponseIdError, mkOpenAIError)
 import Agent.OpenAI.Features (remoteCompactionV2Feature)
+import Agent.OpenAI.Http (rejectFailedCodexResponse)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.Responses.StreamAssembly
@@ -46,6 +47,7 @@ import Agent.Responses.StreamAssembly
     , applyStreamEvent
     , emptyStreamAssemblyState
     , failedStreamResponseMessage
+    , finishAssembledIncomplete
     , finishStreamResponse
     , responseFailureFromState
     )
@@ -648,18 +650,26 @@ receiveWsResponseWithActions modelHint actions onEvent =
     loop assembly frames bytes = do
         msgResult <- actions.receiveFrame
         case msgResult of
-            Left e -> do
-                logStreamStats "connection_error" frames bytes
-                pure $ Left e
+            Left e ->
+                case recoverAssembledResponse modelHint assembly of
+                    Just response -> do
+                        logStreamStats "recovered_incomplete" frames bytes
+                        actions.completeRequest
+                        pure (Right response)
+                    Nothing -> do
+                        logStreamStats "connection_error" frames bytes
+                        pure (Left e)
             Right (msgBytes :: LBS.ByteString) -> do
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
                 case ResponsesCodec.decodeResponseStreamEvent msgBytes of
-                    Left _err -> do
-                        -- Codex treats an unrecognised or malformed event as
-                        -- forward-compatible noise. Keep receiving so one
-                        -- bad frame cannot strand an otherwise valid turn.
+                    Left err -> do
+                        -- Keep receiving so one bad frame cannot strand an
+                        -- otherwise valid turn, but surface the dropped
+                        -- payload. Silent decode failures are how a terminal
+                        -- or tool-call frame can leave the loop in thinking.
                         logStreamStats "json_decode_error" frames' bytes'
+                        onEvent (unparsedStreamEvent err msgBytes)
                         loop assembly frames' bytes'
                     Right event -> do
                         onEvent event
@@ -684,15 +694,7 @@ receiveWsResponseWithActions modelHint actions onEvent =
                                 finishTerminal "done" assembly' frames' bytes' event
 
                             ResponseIncompleteEvent{} ->
-                                do
-                                    logStreamStats "incomplete" frames' bytes'
-                                    actions.invalidateRequest
-                                        "WebSocket response incomplete"
-                                    pure $ Left
-                                        (failedResponseError
-                                            ((responseFailureFromState assembly')
-                                                { failureStatus =
-                                                    Just "incomplete" }))
+                                finishIncomplete assembly' frames' bytes' event
 
                             ResponseFailedEvent{} -> do
                                 logStreamStats "response_failed" frames' bytes'
@@ -711,6 +713,31 @@ receiveWsResponseWithActions modelHint actions onEvent =
         actions.completeRequest
         pure (finishStreamResponse modelHint assembly event)
 
+    finishIncomplete assembly frames bytes event =
+        case finishStreamResponse modelHint assembly event of
+            Right response ->
+                case rejectFailedCodexResponse response of
+                    Right accepted -> do
+                        logStreamStats "incomplete" frames bytes
+                        actions.completeRequest
+                        pure (Right accepted)
+                    Left err -> do
+                        logStreamStats "incomplete" frames bytes
+                        actions.invalidateRequest "WebSocket response incomplete"
+                        pure (Left err)
+            Left err -> do
+                logStreamStats "incomplete" frames bytes
+                actions.invalidateRequest "WebSocket response incomplete"
+                pure (Left err)
+
+    recoverAssembledResponse modelHint assembly =
+        case finishAssembledIncomplete modelHint assembly of
+            Right response ->
+                case rejectFailedCodexResponse response of
+                    Right accepted -> Just accepted
+                    Left _ -> Nothing
+            Left _ -> Nothing
+
     logStreamStats :: Text -> Int -> Int64 -> IO ()
     logStreamStats _label _frames _bytes = pure ()
 
@@ -726,6 +753,23 @@ receiveWsResponseWithActions modelHint actions onEvent =
                     (failedStreamResponseMessage failure)
                     failure.failureErrorCode
                     Nothing
+
+unparsedStreamEvent :: String -> LBS.ByteString -> ResponseStreamEvent
+unparsedStreamEvent err bytes =
+    OtherResponseStreamEvent
+        { otherEventType = StreamEventUnknown unparsedStreamEventTypeText
+        , sequenceNumber = Nothing
+        , eventExtraFields = KeyMap.fromList
+            [ (Key.fromText "error", Aeson.String (Text.pack err))
+            , (Key.fromText "payload", Aeson.String (framePreview bytes))
+            ]
+        }
+
+framePreview :: LBS.ByteString -> Text
+framePreview =
+    Text.take 2000
+        . Text.decodeUtf8Lenient
+        . LBS.toStrict
 
 -- | Parse a server @type: error@ event into a structured 'ApiError'.
 --

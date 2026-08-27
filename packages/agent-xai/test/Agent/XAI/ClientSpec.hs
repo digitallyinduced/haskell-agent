@@ -45,7 +45,15 @@ spec = do
             [request] <- readIORef recorded
             request.path `shouldBe` "/v1/responses"
             lookup "Authorization" request.headers `shouldBe` Just "Bearer token-a"
-            lookup "X-XAI-Token-Auth" request.headers `shouldBe` Just "xai-grok-cli"
+            lookup "X-XAI-Token-Auth" request.headers `shouldBe` Just grokTokenAuthValue
+            lookup "x-authenticateresponse" request.headers
+                `shouldBe` Just grokAuthenticateResponseValue
+            lookup "x-grok-client-identifier" request.headers
+                `shouldBe` Just grokClientIdentifier
+            lookup "x-grok-client-version" request.headers
+                `shouldBe` Just defaultGrokClientVersion
+            lookup "User-Agent" request.headers
+                `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
             (inputRoles <$> requestBodyObject request) `shouldBe` Just ["system", "user"]
@@ -83,6 +91,25 @@ spec = do
                             seen `shouldBe` Just ()
                             stopped <- timeout 2_000_000 (cancel worker)
                             stopped `shouldBe` Just ()
+
+        it "aborts a stalled streaming body instead of hanging forever" do
+            recorded <- newIORef []
+            serverRelease <- newEmptyMVar
+            let handler _ = pure (stalledStreamingResponse serverRelease)
+            (withMockGrokTimeout 1 recorded handler \options -> do
+                result <- timeout 5_000_000 $
+                    createResponseWith options
+                        (xaiCredential "token-a")
+                        (helloRequest "hi")
+                case result of
+                    Nothing ->
+                        expectationFailure
+                            "client hung on a stalled stream despite the timeout"
+                    Just (Left (ConnectionError _)) -> pure ()
+                    Just other ->
+                        expectationFailure
+                            ("expected a ConnectionError, got " <> show other))
+                `finally` putMVar serverRelease ()
 
     describe "retry boundaries" do
         it "reports a terminal stream failure after one request" do
@@ -265,11 +292,19 @@ withMockGrok
     -> (RecordedRequest -> IO Wai.Response)
     -> (ClientOptions -> IO a)
     -> IO a
-withMockGrok recorded handler action =
+withMockGrok = withMockGrokTimeout 10
+
+withMockGrokTimeout
+    :: Int
+    -> IORef [RecordedRequest]
+    -> (RecordedRequest -> IO Wai.Response)
+    -> (ClientOptions -> IO a)
+    -> IO a
+withMockGrokTimeout timeoutSecs recorded handler action =
     Warp.testWithApplication (pure app) \port ->
         action defaultClientOptions
             { baseUrl = "http://127.0.0.1:" <> show port <> "/v1"
-            , requestTimeoutSeconds = 10
+            , requestTimeoutSeconds = timeoutSecs
             }
   where
     app waiRequest respond = do
@@ -307,6 +342,19 @@ streamingResponse callbackSeen serverSawCallback =
             writeIORef serverSawCallback (maybe False (const True) seen)
             writeSse write (completedEvent "resp-stream" [])
             flush
+
+-- | Sends response headers and one SSE event, then stalls forever (until the
+-- test releases it). Models a connection that dies without FIN/RST mid-stream:
+-- headers arrive, so http-client's responseTimeout is satisfied, and only the
+-- body-read timeout can rescue the turn.
+stalledStreamingResponse :: MVar () -> Wai.Response
+stalledStreamingResponse release =
+    Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \write flush -> do
+            writeSse write (outputItemDone (assistantMessage "partial"))
+            flush
+            readMVar release
 
 cancellableStreamingResponse :: MVar () -> MVar () -> Wai.Response
 cancellableStreamingResponse callbackSeen serverRelease =

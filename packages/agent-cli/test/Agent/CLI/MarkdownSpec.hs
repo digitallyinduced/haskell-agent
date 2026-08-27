@@ -2,13 +2,23 @@ module Agent.CLI.MarkdownSpec (spec) where
 
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Markdown
-    ( renderMarkdown
+    ( MarkdownFragmentSplit(..)
+    , renderMarkdown
     , renderMarkdownFragment
     , splitMarkdownFragment
     )
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (prop)
+import Test.QuickCheck
+    ( Gen
+    , counterexample
+    , elements
+    , forAll
+    , listOf1
+    , (===)
+    )
 
 stripAnsi :: Text -> Text
 stripAnsi text = case Text.break (== '\ESC') text of
@@ -18,6 +28,28 @@ stripAnsi text = case Text.break (== '\ESC') text of
             let afterEsc = Text.drop 1 rest
                 dropped = Text.drop 1 (Text.dropWhile (/= 'm') afterEsc)
             in before <> stripAnsi dropped
+
+osc8Payload :: Text -> Text -> Maybe Text
+osc8Payload url output = do
+    let opener = "\ESC]8;;" <> url <> "\ESC\\"
+        afterOpener = snd (Text.breakOn opener output)
+    if Text.null afterOpener
+        then Nothing
+        else
+            let payload =
+                    Text.drop (Text.length opener) afterOpener
+                (linked, closer) =
+                    Text.breakOn "\ESC]8;;\ESC\\" payload
+            in if Text.null closer then Nothing else Just linked
+
+safeLink :: Gen (Text, Text)
+safeLink = do
+    label <- Text.pack <$> listOf1 (elements safeLabelCharacters)
+    path <- Text.pack <$> listOf1 (elements safePathCharacters)
+    pure (label, "https://example.test/" <> path)
+  where
+    safeLabelCharacters = ['a' .. 'z'] <> ['A' .. 'Z'] <> ['0' .. '9']
+    safePathCharacters = safeLabelCharacters <> "-_/"
 
 spec :: Spec
 spec = do
@@ -139,6 +171,21 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf url
             out `shouldSatisfy` Text.isInfixOf "\ESC]8;;\ESC\\"
 
+        it "keeps a link's displayed URL suffix inside its OSC 8 hyperlink" do
+            let url = "https://github.com/digitallyinduced/haskell-agent/pull/537"
+                out = renderMarkdown True ("Merged PR [#537](" <> url <> ").")
+            stripAnsi <$> osc8Payload url out
+                `shouldBe` Just ("#537 (" <> url <> ")")
+
+        prop "keeps every generated displayed link inside its OSC 8 span" $
+            forAll safeLink \(label, url) ->
+                let out =
+                        renderMarkdown True
+                            ("[" <> label <> "](" <> url <> ")")
+                    expected = label <> " (" <> url <> ")"
+                in counterexample (show out) $
+                    (stripAnsi <$> osc8Payload url out) === Just expected
+
         it "restores heading styling after nested code" do
             let out = renderMarkdown True "# before `code` after"
                 afterCode = snd (Text.breakOn "code" out)
@@ -224,41 +271,59 @@ spec = do
 
     describe "splitMarkdownFragment" do
         it "holds a bold span until its closing delimiter arrives" do
-            let (ready1, pending1, context1) =
-                    splitMarkdownFragment Nothing "say **"
-                (ready2, pending2, context2) =
-                    splitMarkdownFragment context1 (pending1 <> "hello")
-                (ready3, pending3, _context3) =
-                    splitMarkdownFragment context2 (pending2 <> "** there")
-                out = renderMarkdownFragment True context2 ready3
-            ready1 `shouldBe` "say "
-            pending1 `shouldBe` "**"
-            ready2 `shouldBe` ""
-            pending2 `shouldBe` "**hello"
-            pending3 `shouldBe` ""
+            let split1 = splitMarkdownFragment Nothing "say **"
+                split2 =
+                    splitMarkdownFragment
+                        split1.markdownPrevChar
+                        (split1.markdownPending <> "hello")
+                split3 =
+                    splitMarkdownFragment
+                        split2.markdownPrevChar
+                        (split2.markdownPending <> "** there")
+                out =
+                    renderMarkdownFragment
+                        True
+                        split2.markdownPrevChar
+                        split3.markdownReady
+            split1.markdownReady `shouldBe` "say "
+            split1.markdownPending `shouldBe` "**"
+            split2.markdownReady `shouldBe` ""
+            split2.markdownPending `shouldBe` "**hello"
+            split3.markdownPending `shouldBe` ""
             stripAnsi out `shouldBe` "hello there"
 
         it "handles a bold delimiter split one star at a time" do
-            let (ready1, pending1, context1) =
-                    splitMarkdownFragment Nothing "*"
-                (ready2, pending2, context2) =
-                    splitMarkdownFragment context1 (pending1 <> "*a*")
-                (ready3, pending3, _context3) =
-                    splitMarkdownFragment context2 (pending2 <> "*")
-            ready1 `shouldBe` ""
-            ready2 `shouldBe` ""
-            pending3 `shouldBe` ""
-            stripAnsi (renderMarkdownFragment True context2 ready3)
+            let split1 = splitMarkdownFragment Nothing "*"
+                split2 =
+                    splitMarkdownFragment
+                        split1.markdownPrevChar
+                        (split1.markdownPending <> "*a*")
+                split3 =
+                    splitMarkdownFragment
+                        split2.markdownPrevChar
+                        (split2.markdownPending <> "*")
+            split1.markdownReady `shouldBe` ""
+            split2.markdownReady `shouldBe` ""
+            split3.markdownPending `shouldBe` ""
+            stripAnsi
+                (renderMarkdownFragment
+                    True
+                    split2.markdownPrevChar
+                    split3.markdownReady)
                 `shouldBe` "a"
 
         it "does not turn a chunked snake_case identifier into emphasis" do
-            let (ready1, pending1, context1) =
-                    splitMarkdownFragment Nothing "snake"
-                (ready2, pending2, _context2) =
-                    splitMarkdownFragment context1 (pending1 <> "_case_name")
-            pending2 `shouldBe` ""
-            renderMarkdownFragment True Nothing ready1
-                <> renderMarkdownFragment True context1 ready2
+            let split1 = splitMarkdownFragment Nothing "snake"
+                split2 =
+                    splitMarkdownFragment
+                        split1.markdownPrevChar
+                        (split1.markdownPending <> "_case_name")
+            split2.markdownPending `shouldBe` ""
+            renderMarkdownFragment True Nothing split1.markdownReady
+                <> renderMarkdownFragment
+                    True
+                    split1.markdownPrevChar
+                    split2.markdownReady
                 `shouldBe` "snake_case_name"
 
 allEqual :: Eq a => [a] -> Bool

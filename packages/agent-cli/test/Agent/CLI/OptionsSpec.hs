@@ -1,8 +1,11 @@
 module Agent.CLI.OptionsSpec (spec) where
 
 import Agent.CLI.Options
+import Agent.Dialect (DialectId(..))
+import Agent.Loop (defaultLoopMaxTurns)
 import System.OsPath (unsafeEncodeUtf)
 import Agent.Provider (Provider(..))
+import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.TUI.Motion (MotionMode(..))
 import Test.Hspec
 
@@ -41,7 +44,7 @@ spec = do
                     , optMaxTurns = 3
                     , optMaxConcurrentAgents = Just 64
                     , optCompactThreshold = Just 1200
-                    , optEffort = Just "high"
+                    , optEffort = Just EffortHigh
                     , optPrompt = Just "hello"
                     })
 
@@ -57,13 +60,13 @@ spec = do
 
         it "accepts none, xhigh, and max effort" do
             parseArgs ["--effort", "none"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "none" })
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just EffortNone })
             parseArgs ["--effort", "xhigh"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "xhigh" })
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just EffortXHigh })
             parseArgs ["--effort", "max"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "max" })
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just EffortMax })
             parseArgs ["--effort", "HIGH"]
-                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just "high" })
+                `shouldBe` Right (RunAgent defaultCliOptions { optEffort = Just EffortHigh })
 
         it "keeps raw OpenAI reasoning hidden unless explicitly requested" do
             defaultCliOptions.optShowRawReasoning `shouldBe` False
@@ -107,7 +110,7 @@ spec = do
                 ]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optModel = Just "second"
-                    , optEffort = Just "high"
+                    , optEffort = Just EffortHigh
                     })
 
         it "applies approval flags in command-line order" do
@@ -135,6 +138,14 @@ spec = do
             parseArgs ["--managed-turn-file", "turn.json"]
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optManagedTurnFile = Just (fromFilePath "turn.json") })
+
+        it "defaults max turns from agent-core and requires a positive override" do
+            defaultCliOptions.optMaxTurns `shouldBe` defaultLoopMaxTurns
+            defaultLoopMaxTurns `shouldBe` 2000
+            parseArgs ["--max-turns", "0"] `shouldSatisfy` isLeft
+            parseArgs ["--max-turns", "-1"] `shouldSatisfy` isLeft
+            parseArgs ["--max-turns", "nope"] `shouldSatisfy` isLeft
+            usage `shouldContain` ("default: " <> show defaultLoopMaxTurns)
 
         it "requires a positive concurrent agent limit" do
             parseArgs ["--max-concurrent-agents", "0"] `shouldSatisfy` isLeft
@@ -316,10 +327,31 @@ spec = do
 
     describe "defaultEffortFor" do
         it "uses provider-specific effort defaults" do
-            defaultEffortFor XAIProvider `shouldBe` "high"
-            defaultEffortFor OpenAIProvider `shouldBe` "medium"
-            defaultEffortFor OpenRouterProvider `shouldBe` "medium"
-            defaultEffortFor ClaudeCodeProvider `shouldBe` "xhigh"
+            defaultEffortFor XAIProvider `shouldBe` EffortHigh
+            defaultEffortFor OpenAIProvider `shouldBe` EffortMedium
+            defaultEffortFor OpenRouterProvider `shouldBe` EffortMedium
+            defaultEffortFor ClaudeCodeProvider `shouldBe` EffortXHigh
+
+    describe "reasoningEffortsForDialect" do
+        it "does not offer OpenAI max effort to Grok models" do
+            reasoningEffortsForDialect GrokBuildDialect
+                `shouldBe`
+                    [ EffortNone
+                    , EffortLow
+                    , EffortMedium
+                    , EffortHigh
+                    , EffortXHigh
+                    ]
+            reasoningEffortsForDialect CodexDialect
+                `shouldBe` reasoningEfforts
+
+        it "maps inherited max effort to high for Grok models" do
+            normalizeReasoningEffortForDialect GrokBuildDialect EffortMax
+                `shouldBe` EffortHigh
+            normalizeReasoningEffortForDialect GrokBuildDialect EffortXHigh
+                `shouldBe` EffortXHigh
+            normalizeReasoningEffortForDialect CodexDialect EffortMax
+                `shouldBe` EffortMax
 
     describe "isOneShot" do
         it "is true for text, prompt-file, and managed-turn-file input" do

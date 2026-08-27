@@ -12,6 +12,7 @@ module Agent.CLI.Login
     , discoverLoginAccounts
     , discoverSelectableLoginAccounts
     , formatLoginAccounts
+    , formatCurrencyAmount
     , initialLoginState
     , loginAccountSelectionId
     , refreshLoginAccount
@@ -30,6 +31,8 @@ import Agent.CLI.Auth
     , openaiAuthStateFromJson
     , xaiOAuthClientId
     )
+import Agent.CLI.Auth.Grok (refreshGrokLoginPayload)
+import Agent.Error (ApiError)
 import Agent.CLI.CredentialStore
     ( ManagedAuthKind(..)
     , ManagedCredential(..)
@@ -85,8 +88,9 @@ import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad (join, void)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (nubBy)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Containers.ListUtils (nubOrdOn)
+import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Scientific (Scientific, FPFormat(Fixed), formatScientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -296,11 +300,10 @@ replaceAt index replacement accounts =
 discoverLoginAccounts :: IO [LoginAccount]
 discoverLoginAccounts = do
     accounts <- discoverLoginAccountSources
-    pure (nubBy sameAccount accounts)
+    pure (nubOrdOn loginAccountKey accounts)
   where
-    sameAccount left right =
-        left.loginProvider == right.loginProvider
-            && left.loginAccountId == right.loginAccountId
+    loginAccountKey account =
+        (account.loginProvider, account.loginAccountId)
 
 -- | Accounts that can be selected in a live session. Unlike the login
 -- dashboard, disabled managed entries do not shadow usable external sources,
@@ -308,10 +311,7 @@ discoverLoginAccounts = do
 discoverSelectableLoginAccounts :: IO [LoginAccount]
 discoverSelectableLoginAccounts = do
     accounts <- filter (.loginEnabled) <$> discoverLoginAccountSources
-    pure (nubBy sameSelection accounts)
-  where
-    sameSelection left right =
-        loginAccountSelectionId left == loginAccountSelectionId right
+    pure (nubOrdOn loginAccountSelectionId accounts)
 
 loginAccountSelectionId :: LoginAccount -> Text
 loginAccountSelectionId account =
@@ -827,6 +827,35 @@ openAIAccountEmail auth =
     (auth.idToken >>= OpenAI.deriveEmail)
         <|> OpenAI.deriveEmail auth.accessToken
 
+prepareGrokLoginAccount :: LoginAccount -> IO (Either ApiError LoginAccount)
+prepareGrokLoginAccount account
+    | account.loginAuthKind /= ManagedGrokAuthJson =
+        pure (Right account)
+    | Text.null account.loginSecretPayload =
+        pure (Right account)
+    | otherwise =
+        refreshGrokLoginPayload
+            account.loginManagedId
+            grokFilePath
+            account.loginSecretPayload
+            >>= \case
+                Left err -> pure (Left err)
+                Right (state, payload) ->
+                    pure $ Right account
+                        { loginAccessToken = state.grokAccessToken
+                        , loginSecretPayload = payload
+                        , loginAccountId =
+                            fromMaybe account.loginAccountId
+                                (XAIAuth.accountIdFromAccessToken
+                                    state.grokAccessToken)
+                        }
+  where
+    grokFilePath
+        | isJust account.loginManagedId = Nothing
+        | account.loginSource == "environment" = Nothing
+        | otherwise =
+            Just (unsafeEncodeUtf (Text.unpack account.loginSource))
+
 refreshLoginAccount :: LoginAccount -> IO LoginAccount
 refreshLoginAccount account
     | Text.null account.loginAccessToken = pure case account.loginUsage of
@@ -863,32 +892,41 @@ refreshLoginAccount account
                                         (openAIUsage snapshot)
                                 }
         XAIProvider ->
-            XAI.fetchGrokUsage Credential
-                { accessToken = account.loginAccessToken
-                , accountId = account.loginAccountId
-                , leaseId = Nothing
-                , provider = XAIProvider
-                } >>= \case
-                Left err ->
-                    pure account
-                        { loginUsage = UsageUnavailable err }
-                Right snapshot ->
+            prepareGrokLoginAccount account >>= \case
+                Left err -> do
+                    now <- getCurrentTime
                     pure account
                         { loginUsage =
-                            UsageAvailable AccountUsage
-                                { usagePlan = Nothing
-                                , usageWindows =
-                                    [ UsageWindow
-                                        { windowName = "current period"
-                                        , usedPercent = snapshot.usedPercent
-                                        , windowSeconds = snapshot.windowSeconds
-                                        , resetsAt = snapshot.resetsAt
-                                        }
-                                    ]
-                                , creditsRemaining = Nothing
-                                , creditsUsed = Nothing
-                                }
+                            UsageUnavailable (formatApiErrorInlineAt now err)
                         }
+                Right prepared ->
+                    XAI.fetchGrokUsage Credential
+                        { accessToken = prepared.loginAccessToken
+                        , accountId = prepared.loginAccountId
+                        , leaseId = Nothing
+                        , provider = XAIProvider
+                        } >>= \case
+                        Left err ->
+                            pure prepared
+                                { loginUsage = UsageUnavailable err }
+                        Right snapshot ->
+                            pure prepared
+                                { loginUsage =
+                                    UsageAvailable AccountUsage
+                                        { usagePlan = Nothing
+                                        , usageWindows =
+                                            [ UsageWindow
+                                                { windowName = "current period"
+                                                , usedPercent = snapshot.usedPercent
+                                                , windowSeconds =
+                                                    snapshot.windowSeconds
+                                                , resetsAt = snapshot.resetsAt
+                                                }
+                                            ]
+                                        , creditsRemaining = Nothing
+                                        , creditsUsed = Nothing
+                                        }
+                                }
         OpenRouterProvider ->
             OpenRouter.fetchOpenRouterUsage account.loginAccessToken >>= \case
                 Left err ->
@@ -923,7 +961,11 @@ refreshLoginAccount account
                         "Use `claude auth status` for Claude Code subscription auth."
                 }
   where
-    formatAmount = fmap (("$" <>) . Text.pack . show)
+    formatAmount = fmap formatCurrencyAmount
+
+formatCurrencyAmount :: Scientific -> Text
+formatCurrencyAmount =
+    ("$" <>) . Text.pack . formatScientific Fixed (Just 2)
 
 openAIUsage :: OpenAI.UsageSnapshot -> AccountUsage
 openAIUsage snapshot = AccountUsage

@@ -10,13 +10,19 @@ import Agent.Responses.Request
     , mapResponseTools
     , selectConfiguredModel
     )
+import Agent.ReasoningEffort
+    ( ReasoningEffort(..)
+    , parseReasoningEffort
+    )
+import Agent.XAI.ReasoningEffort
+    ( grokReasoningEffort
+    , grokReasoningEffortText
+    )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
-import qualified Data.Aeson as Aeson
-import Data.Aeson.Key (fromText)
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Foldable (toList)
-import Data.Maybe (mapMaybe)
+import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -38,8 +44,9 @@ mapModel options model =
 -- never stored server-side.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
-    mapResponseTools xaiTool $
-        forceStatelessStreaming defaultResponseCreateParams
+    withHostedXSearch $
+        mapResponseTools xaiTool $
+            forceStatelessStreaming defaultResponseCreateParams
             { model = Just $
                 selectConfiguredModel
                     options.modelOverrides
@@ -70,6 +77,7 @@ buildRequest options request =
                     , role = RoleSystem
                     , status = Nothing
                     , phase = Nothing
+                    , passthrough = Nothing
                     , extraFields = KeyMap.empty
                     }
                 ]
@@ -77,24 +85,47 @@ buildRequest options request =
 
     xaiTool tool = case tool of
         FunctionToolValue {} -> Just tool
-        KnownResponseTool ToolWebSearch _ -> Just (KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            , fields = KeyMap.empty
-            })
+        KnownResponseTool ToolWebSearch _ -> Just hostedWebSearchTool
+        KnownResponseTool ToolXSearch _ -> Just hostedXSearchTool
         KnownResponseTool ToolComputer _ -> Nothing
         _ -> Just tool
 
+-- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
+-- requests. Keep a single empty-fields entry even when the caller omitted
+-- tools or already listed web search.
+withHostedXSearch :: ResponseCreateParams -> ResponseCreateParams
+withHostedXSearch ResponseCreateParams { tools = existing, .. } =
+    ResponseCreateParams
+        { tools = Just (current <> extra)
+        , ..
+        }
+  where
+    current = Maybe.fromMaybe [] existing
+    extra
+        | any isHostedXSearch current = []
+        | otherwise = [hostedXSearchTool]
+
+isHostedXSearch :: ResponseTool -> Bool
+isHostedXSearch = \case
+    KnownResponseTool ToolXSearch _ -> True
+    UnknownResponseTool tagged
+        | tagged.tag == responseToolTypeText ToolXSearch -> True
+    _ -> False
+
+hostedWebSearchTool :: ResponseTool
+hostedWebSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+
+hostedXSearchTool :: ResponseTool
+hostedXSearchTool = knownResponseTool ToolXSearch KeyMap.empty
+
 xaiReasoningEffort :: Maybe Text -> Text
-xaiReasoningEffort = \case
-    Nothing -> "high"
-    Just "low" -> "low"
-    Just "none" -> "low"
-    Just "minimal" -> "low"
-    Just "medium" -> "medium"
-    Just "high" -> "high"
-    Just "xhigh" -> "high"
-    Just "max" -> "high"
-    _ -> "high"
+xaiReasoningEffort value =
+    grokReasoningEffortText . grokReasoningEffort $
+        case value of
+            Nothing -> EffortHigh
+            Just "minimal" -> EffortLow
+            Just raw ->
+                either (const EffortHigh) id (parseReasoningEffort raw)
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
 requestInputItems request = case request.input of
@@ -106,6 +137,7 @@ requestInputItems request = case request.input of
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = KeyMap.empty
             }
         ]
@@ -116,46 +148,103 @@ requestInputItems request = case request.input of
 -- user switches to Grok, whose Responses union does not recognize that tag.
 -- Preserve the readable collaboration context as an ordinary user message.
 normalizeInputItem :: ResponseItem -> ResponseItem
-normalizeInputItem = \case
-    KnownResponseItem ItemAgentMessage tagged ->
-        MessageItem ResponseMessage
-            { messageId = Nothing
-            , content = MessageContentParts
-                [InputTextPart (agentMessageText tagged) Nothing KeyMap.empty]
-            , role = RoleUser
-            , status = Nothing
-            , phase = Nothing
-            , extraFields = KeyMap.empty
+normalizeInputItem =
+    stripItemStatus . \case
+        AgentMessageItem message ->
+            MessageItem ResponseMessage
+                { messageId = Nothing
+                , content = MessageContentParts
+                    [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
+                , role = RoleUser
+                , status = Nothing
+                , phase = Nothing
+                , passthrough = Nothing
+                , extraFields = KeyMap.empty
+                }
+        item -> item
+
+-- The Grok proxy rejects OpenAI item @status@ as an unknown parameter
+-- (@input[n].status@). Strip it from every input item at the wire boundary.
+stripItemStatus :: ResponseItem -> ResponseItem
+stripItemStatus = \case
+    MessageItem message ->
+        MessageItem message
+            { status = Nothing
+            , extraFields = withoutStatusFields message.extraFields
+            }
+    FunctionCallItem call ->
+        FunctionCallItem call
+            { status = Nothing
+            , extraFields = withoutStatusFields call.extraFields
+            }
+    FunctionCallOutputItem output ->
+        FunctionCallOutputItem output
+            { status = Nothing
+            , extraFields = withoutStatusFields output.extraFields
+            }
+    CustomToolCallItem call ->
+        CustomToolCallItem call
+            { status = Nothing
+            , extraFields = withoutStatusFields call.extraFields
+            }
+    CustomToolCallOutputItem output ->
+        CustomToolCallOutputItem output
+            { status = Nothing
+            , extraFields = withoutStatusFields output.extraFields
+            }
+    ReasoningItemValue item ->
+        ReasoningItemValue item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    LocalShellCallItem item ->
+        LocalShellCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    ToolSearchCallItem item ->
+        ToolSearchCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    ToolSearchOutputItem item ->
+        ToolSearchOutputItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    WebSearchCallItem item ->
+        WebSearchCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    ImageGenerationCallItem item ->
+        ImageGenerationCallItem item
+            { status = Nothing
+            , extraFields = withoutStatusFields item.extraFields
+            }
+    KnownResponseItem itemType tagged ->
+        KnownResponseItem itemType tagged
+            { fields = withoutStatusFields tagged.fields
+            }
+    UnknownResponseItem tagged ->
+        UnknownResponseItem tagged
+            { fields = withoutStatusFields tagged.fields
             }
     item -> item
 
-agentMessageText :: TaggedObject -> Text
-agentMessageText tagged =
-    case KeyMap.lookup (fromText "content") tagged.fields of
-        Just (Aeson.Array parts)
-            | not (null texts) -> Text.intercalate "\n" texts
-          where
-            texts = mapMaybe contentPartText (toList parts)
-        _ -> fallback
-  where
-    fallback = case
-        ( textField "author" tagged.fields
-        , textField "recipient" tagged.fields
-        ) of
-        (Just author, Just recipient) ->
-            "Agent message from " <> author <> " to " <> recipient
-        (Just author, Nothing) -> "Agent message from " <> author
-        (Nothing, Just recipient) -> "Agent message to " <> recipient
-        (Nothing, Nothing) -> "Agent message"
+withoutStatusFields = KeyMap.delete (Key.fromText "status")
 
-contentPartText :: Aeson.Value -> Maybe Text
-contentPartText = \case
-    Aeson.Object object
-        | textField "type" object == Just "input_text" ->
-            textField "text" object
-    _ -> Nothing
-
-textField :: Text -> Aeson.Object -> Maybe Text
-textField name object = case KeyMap.lookup (fromText name) object of
-    Just (Aeson.String value) -> Just value
-    _ -> Nothing
+agentMessageText :: ResponseAgentMessage -> Text
+agentMessageText message =
+    case
+        [ text
+        | InputTextPart { text } <- message.content
+        ]
+    of
+        texts@(_ : _) -> Text.intercalate "\n" texts
+        [] -> case (message.author, message.recipient) of
+            (Just author, Just recipient) ->
+                "Agent message from " <> author <> " to " <> recipient
+            (Just author, Nothing) -> "Agent message from " <> author
+            (Nothing, Just recipient) -> "Agent message to " <> recipient
+            (Nothing, Nothing) -> "Agent message"

@@ -12,7 +12,11 @@ module Agent.CLI.TUI.Bridge
     , trimHistory
     ) where
 
-import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentTarget(..)
+    , lookupAgentEntry
+    )
 import Agent.TUI.Model (UiEvent(..), UiState(..))
 import Agent.Loop (LoopEvent(..))
 import Data.Text (Text)
@@ -104,10 +108,14 @@ historyMove delta entries currentIndex currentText savedDraft
 -- | Interruptive submission while a turn is active. Modified Enter is the
 -- primary chord; Ctrl-O is a terminal-safe fallback for environments that
 -- cannot distinguish Ctrl-Enter from Enter.
+-- | Modifier lists are matched with 'elem' because enhanced keyboard
+-- protocols may report additional modifier bits alongside Ctrl. Shift+Enter
+-- keeps its newline meaning even when Ctrl is also reported.
 isSendNowKey :: V.Event -> Bool
 isSendNowKey = \case
-    V.EvKey V.KEnter [V.MCtrl] -> True
-    V.EvKey (V.KChar 'o') [V.MCtrl] -> True
+    V.EvKey V.KEnter modifiers ->
+        V.MCtrl `elem` modifiers && V.MShift `notElem` modifiers
+    V.EvKey (V.KChar 'o') modifiers -> V.MCtrl `elem` modifiers
     _ -> False
 
 normalizeAgentSelection
@@ -115,8 +123,9 @@ normalizeAgentSelection
     -> [AgentEntry]
     -> AgentTarget
 normalizeAgentSelection selected entries
-    | any ((== selected) . (.agentTarget)) entries = selected
-    | otherwise = AgentRoot
+    | selected == AgentRoot = selected
+    | otherwise =
+        maybe AgentRoot (const selected) (lookupAgentEntry selected entries)
 
 -- | Normalize the current shared selection against an available target set.
 reconcileAgentSelection

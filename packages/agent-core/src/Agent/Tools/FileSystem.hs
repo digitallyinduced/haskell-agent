@@ -1,6 +1,7 @@
 -- | Workspace-confined filesystem helpers for coding tools.
 module Agent.Tools.FileSystem
     ( deleteTextFile
+    , displayPathInWorkspace
     , listDirectoryEntries
     , readTextFile
     , renameTextFile
@@ -11,7 +12,7 @@ module Agent.Tools.FileSystem
 
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Concurrent (mapConcurrentlyBounded)
-import Agent.OsPath (toText, unsafeToFilePath)
+import Agent.OsPath (relativeDisplayPath, toText, unsafeToFilePath)
 import Agent.Tools.Types (ToolEnv(..))
 import Control.Exception.Safe (SomeException, try, tryIO)
 import Data.Text (Text)
@@ -119,6 +120,13 @@ isInside root path
             && case splitDirectories relative of
                 (first : _) | first == unsafeEncodeUtf ".." -> False
                 _ -> True
+
+-- | Present a resolved filesystem path relative to the tool workspace.
+displayPathInWorkspace :: ToolEnv -> OsPath -> IO Text
+displayPathInWorkspace env path =
+    try @_ @SomeException (canonicalizePath env.toolCwd) >>= \case
+        Right cwd -> pure (relativeDisplayPath cwd path)
+        Left _ -> pure (relativeDisplayPath env.toolCwd path)
 
 readTextFile :: OsPath -> IO (Either Text Text)
 readTextFile path =

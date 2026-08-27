@@ -30,7 +30,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson.Types (parseEither)
-import Data.List (find)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -95,6 +95,7 @@ data ToolDispatchConfig = ToolDispatchConfig
     , toolDispatchFormatException :: Text -> SomeException -> Text
     , toolDispatchOnException :: Text -> SomeException -> IO ()
     , toolDispatchOnOutput :: ToolCall -> Text -> IO ()
+    , toolDispatchFinalizeOutput :: ToolCall -> Text -> IO Text
     }
 
 data ToolHandler
@@ -155,9 +156,15 @@ dispatchToolHandler config maybeHandler call = do
             -- propagate.
             _ <- tryAny (config.toolDispatchOnException callName exception)
             pure (config.toolDispatchFormatException callName exception)
+    finalizedOutput <-
+        tryAny (config.toolDispatchFinalizeOutput call resultOutput) >>= \case
+            Right output -> pure output
+            Left exception -> do
+                _ <- tryAny (config.toolDispatchOnException callName exception)
+                pure resultOutput
     pure ToolCallResult
         { callId = call.callId
-        , output = resultOutput
+        , output = finalizedOutput
         , callKind = call.callKind
         }
 
@@ -175,8 +182,13 @@ decodeToolArguments value =
 
 findHandler :: Text -> [ToolHandler] -> Maybe ToolHandler
 findHandler name handlers =
-    find ((== name) . handlerName) handlers
-        <|> find ((== canonicalToolName name) . handlerName) handlers
+    Map.lookup name byName <|> Map.lookup (canonicalToolName name) byName
+  where
+    byName =
+        Map.fromList
+            [ (handlerName handler, handler)
+            | handler <- handlers
+            ]
 
 -- | Codex namespaced tools may arrive as @collaboration.spawn_agent@ or
 -- legacy @multi_agent_v1.spawn_agent@ (and concatenated Display forms).

@@ -16,6 +16,8 @@ module Agent.CLI
     , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
+    , formatTokensPerSecond
+    , formatUsageWithRate
     , learnAboutUserOnboardingPrompt
     , run
     , withRestoredCurrentDirectory
@@ -45,4 +47,6 @@ import Agent.CLI.Runtime.Types (DevResult(..))
 import Agent.CLI.Status
     ( formatReplStatusLine
     , formatTokenUsage
+    , formatTokensPerSecond
+    , formatUsageWithRate
     )

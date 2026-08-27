@@ -7,6 +7,7 @@ module Agent.CLI.Turn
     , grokFrameLastUserInput
     , grokUserQuery
     , restorePlanStateAfterIncomplete
+    , retryCheckpointedTurn
     , runOneTurn
     ) where
 
@@ -43,6 +44,7 @@ import Agent.CLI.Render
     , renderAssistantText
     , renderPrintedText
     , resetRenderPrintedText
+    , stateLastTokensPerSecond
     , stateStartedAt
     )
 import Agent.CLI.Session
@@ -74,7 +76,7 @@ import Agent.CLI.SessionTitle
     , takeSessionTitleResults
     , titleRefreshIndex
     )
-import Agent.CLI.Status (formatTokenUsage)
+import Agent.CLI.Status (formatUsageWithRate)
 import Agent.CLI.Style
     ( cliWindowTitle
     , glyphSession
@@ -110,6 +112,7 @@ import Agent.Loop
     , LoopProgress(..)
     , LoopResult(..)
     , TurnInput(..)
+    , TurnOutput(..)
     , addTokenUsage
     , runLoopInputsDetailed
     )
@@ -131,7 +134,7 @@ import Agent.Tools.PlanMode
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
-import Control.Exception.Safe (onException, tryAny)
+import Control.Exception.Safe (bracket_, onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
     , readIORef
@@ -157,7 +160,31 @@ import System.Process
 import System.Timeout (timeout)
 
 runOneTurn :: SessionEnv -> Text -> [TurnInput] -> IO TurnResult
-runOneTurn env@SessionEnv
+runOneTurn = runOneTurnWithContext True
+
+-- | Retry after a failed turn whose exact prepared inputs are already
+-- checkpointed in the live transcript. Per-turn plan/startup context must not
+-- be generated again.
+retryCheckpointedTurn :: SessionEnv -> IO TurnResult
+retryCheckpointedTurn env = runOneTurnWithContext False env "" []
+
+runOneTurnWithContext
+    :: Bool
+    -> SessionEnv
+    -> Text
+    -> [TurnInput]
+    -> IO TurnResult
+runOneTurnWithContext includeTurnContext env promptText inputs = do
+    -- A newly submitted turn supersedes any older retry candidate. If this
+    -- attempt fails, finishTurn installs its own PendingTurn afterwards.
+    writeIORef env.sessionLastFailedTurn Nothing
+    bracket_
+        env.sessionBeginWindowTitleBusy
+        env.sessionEndWindowTitleBusy
+        (runOneTurnBusy includeTurnContext env promptText inputs)
+
+runOneTurnBusy :: Bool -> SessionEnv -> Text -> [TurnInput] -> IO TurnResult
+runOneTurnBusy includeTurnContext env@SessionEnv
     { sessionLoop = config
     , sessionRender = render
     , sessionConversation = conversationRef
@@ -222,18 +249,27 @@ runOneTurn env@SessionEnv
         PersistenceDisabled -> pure ()
     prev <- readLivePreviousResponseId conversationRef
     beforeItems <- readLiveTranscript conversationRef
-    pendingStartup <- atomicModifyIORef' startupContext \pendingCtx -> (Nothing, pendingCtx)
-    planActive <- isPlanModeActive planMode
-    planPath <- planFilePath planMode
-    let planReminder =
-            if planActive
-                then Just $
-                    planModeReminder
-                        (case env.sessionProvider of
-                            OpenAIProvider -> CompleteWithProposedPlan
-                            _ -> CompleteWithExitTool)
-                        planPath
-                else Nothing
+    pendingStartup <-
+        if includeTurnContext
+            then atomicModifyIORef' startupContext \pendingCtx ->
+                (Nothing, pendingCtx)
+            else pure Nothing
+    planReminder <-
+        if includeTurnContext
+            then do
+                planActive <- isPlanModeActive planMode
+                planPath <- planFilePath planMode
+                pure $
+                    if planActive
+                        then Just $
+                            planModeReminder
+                                (case env.sessionProvider of
+                                    OpenAIProvider -> CompleteWithProposedPlan
+                                    _ -> CompleteWithExitTool)
+                                planPath
+                        else Nothing
+            else pure Nothing
+    let
         turnInputs0 =
             turnInputsWithContext planReminder pendingStartup inputs
     stampedInputs <- stampTurnInputs turnInputs0
@@ -291,7 +327,9 @@ runOneTurn env@SessionEnv
     let elapsedDetail extra = case startedAt of
             Nothing -> extra
             Just t0 -> extra <> " · " <> formatElapsed (realToFrac (diffUTCTime finishedAt t0))
-        persistIncomplete retainedItems errorText = case persist of
+        persistIncomplete
+            :: [ResponseItem] -> Text -> Maybe TurnOutput -> IO ()
+        persistIncomplete retainedItems errorText maybeTurn = case persist of
             PersistenceDisabled -> pure ()
             PersistenceEnabled slotRef -> do
                 now <- getCurrentTime
@@ -301,12 +339,12 @@ runOneTurn env@SessionEnv
                 let turn = SessionTurn
                         { turnAt = now
                         , turnUserText = promptText
-                        , turnAssistantText = Nothing
+                        , turnAssistantText = maybeTurn >>= (.assistantText)
                         , turnError = Just errorText
-                        , turnResponseId = Nothing
+                        , turnResponseId = (.responseId) <$> maybeTurn
                         , turnEffect = TranscriptAppend
                         , turnItems = retainedItems
-                        , turnUsage = Nothing
+                        , turnUsage = (.tokenUsage) <$> maybeTurn
                         }
                 (handle', turnIndex) <-
                     appendTurnWithMetaUpdateIndexed handle turn \meta ->
@@ -357,7 +395,7 @@ runOneTurn env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete (inputOnlyTurnItems prepared) "cancelled"
+            persistIncomplete (inputOnlyTurnItems prepared) "cancelled" Nothing
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -408,9 +446,30 @@ runOneTurn env@SessionEnv
                                 (formatLoopErrorColoredAt color finishedAt err)
                             putTextLn stderrHandle
                                 (formatTurnStatus color "error" (elapsedDetail model))
+                    let maybeIncompleteTurn = case err of
+                            LoopIncomplete turn -> Just turn
+                            _ -> Nothing
+                    forM_ maybeIncompleteTurn \turn ->
+                        atomicModifyIORef' usageRef \current ->
+                            (addTokenUsage current turn.tokenUsage, ())
+                    -- Keep the live and resumed model transcript aligned:
+                    -- terminal failures checkpoint only the prepared input.
+                    -- Partial assistant text, response id, usage, and the
+                    -- incomplete reason remain available in turn metadata.
                     persistIncomplete (inputOnlyTurnItems prepared)
                         (formatLoopErrorPersistedAt finishedAt err)
-                    pure TurnFailed
+                        maybeIncompleteTurn
+                    planState <- readIORef planMode.planStateRef
+                    pure $ TurnFailed PendingTurn
+                        { pendingPromptText = promptText
+                        -- ConversationFailed checkpoints the exact stamped
+                        -- inputs (including attachments) in the live
+                        -- transcript. Do not retain a second potentially
+                        -- large copy here.
+                        , pendingInputs = []
+                        , pendingExitAfter = False
+                        , pendingPlanState = planState
+                        }
         (Nothing, Right loopResult) -> do
             finishTerminal (isNothing fullscreen)
                 stdoutHandle terminal wallStarted finishedAt 0
@@ -426,9 +485,12 @@ runOneTurn env@SessionEnv
                         assistantText))
             do
                 model <- readIORef render.renderModelRef
+                tokenRate <-
+                    stateLastTokensPerSecond <$> readIORef render.renderState
                 let turns = Text.pack (show loopResult.turnsUsed)
                     unit = if loopResult.turnsUsed == 1 then " turn" else " turns"
-                    usageDetail = formatTokenUsage loopResult.tokenUsage
+                    usageDetail =
+                        formatUsageWithRate loopResult.tokenUsage tokenRate
                     extra =
                         if Text.null usageDetail
                             then model <> " · " <> turns <> unit
@@ -491,7 +553,10 @@ runOneTurn env@SessionEnv
                             (sessionHistoryTurn turnIndex turn)
                             (case effect of
                                 TranscriptAppend -> HistoryCommitAppend
-                                TranscriptReplace -> HistoryCommitReplace
+                                -- Compaction replaces model context, not the
+                                -- on-screen transcript. Keep earlier turns
+                                -- scrollable and archive the compact summary.
+                                TranscriptReplace -> HistoryCommitAppend
                                 TranscriptReset -> HistoryCommitReset)
                     when
                         ( not countedMeta.metaTitleIsManual

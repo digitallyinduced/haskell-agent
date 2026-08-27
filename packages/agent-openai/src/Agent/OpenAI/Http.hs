@@ -2,12 +2,15 @@ module Agent.OpenAI.Http
     ( postCodexJson
     , decodeCodexHttpBody
     , decodeCodexHttpBodyWithModel
+    , decodeCodexHttpBodyBytes
+    , decodeCodexHttpBodyBytesWithModel
     , rejectFailedCodexResponse
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
 import Agent.OpenAI.Error (mkOpenAIError)
-import Agent.Responses.SSE (parseSseEvents)
+import Agent.Responses.SSE (parseSseEventsBytes)
+import Agent.Responses.LoopBackend (hasRecoverableIncompleteOutput)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , StreamAssemblyConfig(..)
@@ -20,6 +23,7 @@ import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -105,30 +109,45 @@ decodeCodexHttpBodyWithModel
     :: Maybe Text
     -> Text
     -> Either ApiError OpenAI.Response
-decodeCodexHttpBodyWithModel modelHint bodyText
-    | looksLikeSse bodyText = do
-        events <- parseSseEvents bodyText
-        buildStreamResponseWithModel streamConfig modelHint events
+decodeCodexHttpBodyWithModel modelHint =
+    decodeCodexHttpBodyBytesWithModel modelHint . Text.encodeUtf8
+
+-- | Decode a complete buffered Codex response from its original wire bytes.
+decodeCodexHttpBodyBytes :: BS.ByteString -> Either ApiError OpenAI.Response
+decodeCodexHttpBodyBytes = decodeCodexHttpBodyBytesWithModel Nothing
+
+-- | Decode a complete buffered Codex response from its original wire bytes
+-- while retaining the request model for incomplete response fragments.
+decodeCodexHttpBodyBytesWithModel
+    :: Maybe Text
+    -> BS.ByteString
+    -> Either ApiError OpenAI.Response
+decodeCodexHttpBodyBytesWithModel modelHint bodyBytes
+    | looksLikeSseBytes bodyBytes = do
+        events <- parseSseEventsBytes bodyBytes
+        response <- buildStreamResponseWithModel streamConfig modelHint events
+        rejectFailedCodexResponse response
     | otherwise =
-        case decodeJsonResponseBody bodyText of
-            Just jsonValue -> decodeResponseValue jsonValue bodyText
+        case decodeJsonResponseBodyBytes bodyBytes of
+            Just jsonValue -> decodeResponseValue jsonValue bodyBytes
             Nothing -> Left (JsonDecodeError
                 "Invalid Codex Responses body"
-                (Text.take 2000 bodyText))
+                (bodyPreview bodyBytes))
 
-decodeJsonResponseBody :: Text -> Maybe Aeson.Value
-decodeJsonResponseBody bodyText =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 (Text.strip bodyText)) of
+decodeJsonResponseBodyBytes :: BS.ByteString -> Maybe Aeson.Value
+decodeJsonResponseBodyBytes bodyBytes =
+    case Aeson.eitherDecodeStrict' bodyBytes of
         Right (Aeson.Object object)
             | Just inner <- KeyMap.lookup "response" object -> Just inner
             | otherwise -> Just (Aeson.Object object)
         _ -> Nothing
 
-decodeResponseValue :: Aeson.Value -> Text -> Either ApiError OpenAI.Response
-decodeResponseValue jsonValue bodyText =
+decodeResponseValue :: Aeson.Value -> BS.ByteString -> Either ApiError OpenAI.Response
+decodeResponseValue jsonValue bodyBytes =
     case Aeson.fromJSON jsonValue of
         Aeson.Success response -> rejectFailedCodexResponse response
-        Aeson.Error err -> Left (JsonDecodeError (Text.pack err) (Text.take 2000 bodyText))
+        Aeson.Error err ->
+            Left (JsonDecodeError (Text.pack err) (bodyPreview bodyBytes))
 
 -- | The Responses endpoint can return HTTP 200 with a terminal
 -- @status: "failed"@ payload. Normalize that wire shape into the same typed
@@ -138,7 +157,9 @@ rejectFailedCodexResponse :: OpenAI.Response -> Either ApiError OpenAI.Response
 rejectFailedCodexResponse response =
     case response.status of
         OpenAI.ResponseFailed -> Left (terminalResponseError response)
-        OpenAI.ResponseIncomplete -> Left (terminalResponseError response)
+        OpenAI.ResponseIncomplete
+            | hasRecoverableIncompleteOutput response -> Right response
+            | otherwise -> Left (terminalResponseError response)
         _ -> Right response
 
 streamConfig :: StreamAssemblyConfig
@@ -155,7 +176,7 @@ streamConfig = StreamAssemblyConfig
             streamError.code
             streamError.retryAfter
     , classifyFailedResponse = failedStreamResponseError
-    , incompleteAsFailure = True
+    , incompleteAsFailure = False
     }
 
 failedStreamResponseError :: ResponseFailure -> ApiError
@@ -187,10 +208,14 @@ terminalResponseError response =
                 (failedResponseMessage response)
                 Nothing
 
-looksLikeSse :: Text -> Bool
-looksLikeSse bodyText =
+looksLikeSseBytes :: BS.ByteString -> Bool
+looksLikeSseBytes bodyBytes =
     any
         (\line ->
-            Text.isPrefixOf "event:" line
-                || Text.isPrefixOf "data:" line)
-        (Text.lines bodyText)
+            "event:" `BS.isPrefixOf` line
+                || "data:" `BS.isPrefixOf` line)
+        (BS8.lines bodyBytes)
+
+bodyPreview :: BS.ByteString -> Text
+bodyPreview =
+    Text.take 2000 . Text.decodeUtf8Lenient

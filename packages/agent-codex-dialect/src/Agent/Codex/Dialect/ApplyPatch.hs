@@ -10,13 +10,14 @@ module Agent.Codex.Dialect.ApplyPatch
     , applyPatchGrammar
     ) where
 
+import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.Tools.IO
     ( deleteTextFile
     , readTextFile
     , resolveUnderCwd
     , writeTextFile
     )
-import Agent.Tools.Types (ToolEnv)
+import Agent.Tools.Types (ToolEnv(..))
 import Control.Monad (unless)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except
@@ -26,8 +27,11 @@ import Control.Monad.Trans.Except
     , runExceptT
     , throwE
     )
+import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
+import Data.Sequence (Seq)
+import qualified Data.Sequence as Seq
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (doesFileExist)
@@ -227,7 +231,7 @@ prepareHunks env hunks = go hunks Map.empty [] [] [] []
     go [] _ actions added modified deleted =
         pure
             ( reverse actions
-            , summary added modified deleted
+            , summary env.toolCwd added modified deleted
             )
     go (hunk : rest) files actions added modified deleted = case hunk of
         AddFile path contents -> do
@@ -261,7 +265,7 @@ prepareHunks env hunks = go hunks Map.empty [] [] [] []
                             <> Text.pack path
                             <> "': "
                             <> err
-                Right lines_ -> pure lines_
+                Right lines_ -> pure (toList lines_)
             let newContents = joinFileLines newLines original
             case moveTo of
                 Nothing ->
@@ -318,63 +322,61 @@ resolvePath :: ToolEnv -> FilePath -> ExceptT Text IO OsPath
 resolvePath env path =
     ExceptT (resolveUnderCwd env (unsafeEncodeUtf path))
 
-applyChunks :: [UpdateChunk] -> [Text] -> Either Text [Text]
-applyChunks chunks start = foldl applyOne (Right start) chunks
+applyChunks :: [UpdateChunk] -> [Text] -> Either Text (Seq Text)
+applyChunks chunks start =
+    foldl applyOne (Right (Seq.fromList start)) chunks
   where
     applyOne (Left err) _ = Left err
     applyOne (Right lines_) chunk = applyChunk chunk lines_
 
-applyChunk :: UpdateChunk -> [Text] -> Either Text [Text]
+applyChunk :: UpdateChunk -> Seq Text -> Either Text (Seq Text)
 applyChunk chunk fileLines =
     let afterContext = case chunk.chunkContext of
             Nothing -> 0
             Just ctx ->
-                fromMaybe (length fileLines)
-                    (findIndexEqual ctx fileLines)
+                fromMaybe (Seq.length fileLines)
+                    (Seq.elemIndexL ctx fileLines)
         searchFrom = case chunk.chunkContext of
             Nothing -> 0
             Just _ -> afterContext + 1
-    in if null chunk.chunkOld
+        oldLines = Seq.fromList chunk.chunkOld
+        newLines = Seq.fromList chunk.chunkNew
+    in if Seq.null oldLines
         then
             let insertAt
                     | chunk.chunkEof || chunk.chunkContext == Nothing =
-                        length fileLines
+                        Seq.length fileLines
                     | otherwise = searchFrom
-            in Right (insertAtPos insertAt chunk.chunkNew fileLines)
-        else case findSequence chunk.chunkOld fileLines searchFrom of
+            in Right (insertAtPos insertAt newLines fileLines)
+        else case findSequence oldLines fileLines searchFrom of
             Nothing ->
                 -- Retry from the start when the @@ context did not pin a unique site.
-                case findSequence chunk.chunkOld fileLines 0 of
+                case findSequence oldLines fileLines 0 of
                     Nothing -> Left "Failed to find expected lines in the file to update"
-                    Just idx -> Right (replaceAt idx (length chunk.chunkOld) chunk.chunkNew fileLines)
+                    Just idx ->
+                        Right (replaceAt idx (Seq.length oldLines) newLines fileLines)
             Just idx ->
-                Right (replaceAt idx (length chunk.chunkOld) chunk.chunkNew fileLines)
+                Right (replaceAt idx (Seq.length oldLines) newLines fileLines)
 
-findIndexEqual :: Text -> [Text] -> Maybe Int
-findIndexEqual needle = go 0
-  where
-    go _ [] = Nothing
-    go i (x : xs)
-        | x == needle = Just i
-        | otherwise = go (i + 1) xs
-
-findSequence :: [Text] -> [Text] -> Int -> Maybe Int
+findSequence :: Seq Text -> Seq Text -> Int -> Maybe Int
 findSequence needle haystack from
-    | null needle = Just from
+    | Seq.null needle = Just from
     | otherwise = go from
   where
+    needleLength = Seq.length needle
+    haystackLength = Seq.length haystack
     go i
-        | i > length haystack - length needle = Nothing
-        | take (length needle) (drop i haystack) == needle = Just i
+        | i > haystackLength - needleLength = Nothing
+        | Seq.take needleLength (Seq.drop i haystack) == needle = Just i
         | otherwise = go (i + 1)
 
-replaceAt :: Int -> Int -> [Text] -> [Text] -> [Text]
+replaceAt :: Int -> Int -> Seq Text -> Seq Text -> Seq Text
 replaceAt idx count newLines fileLines =
-    take idx fileLines ++ newLines ++ drop (idx + count) fileLines
+    Seq.take idx fileLines <> newLines <> Seq.drop (idx + count) fileLines
 
-insertAtPos :: Int -> [Text] -> [Text] -> [Text]
+insertAtPos :: Int -> Seq Text -> Seq Text -> Seq Text
 insertAtPos idx newLines fileLines =
-    take idx fileLines ++ newLines ++ drop idx fileLines
+    Seq.take idx fileLines <> newLines <> Seq.drop idx fileLines
 
 joinFileLines :: [Text] -> Text -> Text
 joinFileLines newLines original
@@ -383,10 +385,13 @@ joinFileLines newLines original
     | otherwise =
         Text.intercalate "\n" newLines
 
-summary :: [FilePath] -> [FilePath] -> [FilePath] -> Text
-summary added modified deleted =
+summary :: OsPath -> [FilePath] -> [FilePath] -> [FilePath] -> Text
+summary workspace added modified deleted =
     Text.unlines $
         "Success. Updated the following files:"
-            : [ "A " <> Text.pack p | p <- reverse added ]
-            ++ [ "M " <> Text.pack p | p <- reverse modified ]
-            ++ [ "D " <> Text.pack p | p <- reverse deleted ]
+            : [ "A " <> display p | p <- reverse added ]
+            ++ [ "M " <> display p | p <- reverse modified ]
+            ++ [ "D " <> display p | p <- reverse deleted ]
+  where
+    display path =
+        relativeDisplayPath workspace (fromText (Text.pack path))

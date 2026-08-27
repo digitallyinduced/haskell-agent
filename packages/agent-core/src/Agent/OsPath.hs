@@ -5,6 +5,8 @@
 module Agent.OsPath
     ( directoryChain
     , fromText
+    , normalizeLexically
+    , relativeDisplayPath
     , toText
     , unsafeToFilePath
     ) where
@@ -12,7 +14,18 @@ module Agent.OsPath
 import Control.Exception.Safe (impureThrow)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import System.OsPath (OsPath, decodeUtf, takeDirectory)
+import System.OsPath
+    ( OsPath
+    , decodeUtf
+    , dropTrailingPathSeparator
+    , isAbsolute
+    , joinPath
+    , makeRelative
+    , normalise
+    , splitDirectories
+    , takeDirectory
+    , (</>)
+    )
 import qualified System.OsPath as OsPath
 
 -- | Directories from @root@ through @cwd@, inclusive.
@@ -30,6 +43,61 @@ directoryChain root cwd =
         | otherwise = (dir :) <$> walk parent
       where
         parent = takeDirectory dir
+
+-- | Resolve @.@ and @..@ without touching the filesystem.
+--
+-- Use only for lexical display or containment. Symlinks can make a normalized
+-- spelling name a different target than the OS would resolve.
+normalizeLexically :: OsPath -> OsPath
+normalizeLexically path =
+    case foldl' step [] (splitDirectories (normalise path)) of
+        [] -> dot
+        components -> dropTrailingPathSeparator (joinPath components)
+  where
+    step acc component
+        | component == dot = acc
+        | component == dotdot =
+            case acc of
+                [] -> [dotdot]
+                [root] | isAbsolute root -> acc
+                prefix
+                    | last prefix == dotdot -> prefix <> [dotdot]
+                    | otherwise -> init prefix
+        | otherwise = acc <> [component]
+
+-- | Present @path@ relative to @workspace@ when it is inside that tree.
+-- Already-relative paths are rewritten through the workspace so @src/../a@
+-- becomes @a@. Paths outside the workspace stay absolute after normalization.
+relativeDisplayPath :: OsPath -> OsPath -> Text
+relativeDisplayPath workspace path
+    | Text.null (toText path) = ""
+    | Text.null (toText workspace) = toText (normalizeLexically path)
+    | otherwise =
+        let root = dropTrailingPathSeparator (normalizeLexically workspace)
+            candidate = normalizeLexically path
+            absolute =
+                normalizeLexically $
+                    if isAbsolute candidate then candidate else root </> candidate
+            relative = makeRelative root absolute
+        in if isInsideRelative relative
+            then
+                if isDot relative
+                    then "."
+                    else toText relative
+            else toText absolute
+  where
+    isDot rel = rel == dot || Text.null (toText rel)
+    isInsideRelative rel =
+        not (isAbsolute rel)
+            && case splitDirectories rel of
+                first : _ | first == dotdot -> False
+                _ -> True
+
+dot :: OsPath
+dot = fromText "."
+
+dotdot :: OsPath
+dotdot = fromText ".."
 
 -- | Pure UTF encoding for path values that originate as Unicode text.
 fromText :: Text -> OsPath

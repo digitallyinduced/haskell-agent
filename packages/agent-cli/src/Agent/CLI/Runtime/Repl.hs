@@ -20,6 +20,7 @@ import Agent.CLI.Auth ()
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort, currentModel, mkSlashCatalog )
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
 import Agent.CLI.Connectivity ()
@@ -53,7 +54,10 @@ import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition ( PendingTurn, TurnResult )
 import Agent.CLI.Recap ()
-import Agent.CLI.Render ( RenderConfig(renderLock) )
+import Agent.CLI.Render
+    ( RenderConfig(..)
+    , stateLastTokensPerSecond
+    )
 import Agent.CLI.ReplMode
     ( replModeFromState, ReplMode(ReplModeAlwaysApprove) )
 import Agent.CLI.Request ()
@@ -62,7 +66,9 @@ import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl.Commands
     ( handleReplLine, preparePromptSkillInputs )
 import Agent.CLI.Runtime.Types
-    ( PendingTurnPresentation, RunResult(RunSwitchProvider) )
+    ( PendingTurnPresentation
+    , RunResult(RunSwitchProvider)
+    )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session ()
 import Agent.CLI.Session.Attachments ()
@@ -118,7 +124,7 @@ import Agent.Error ()
 import Agent.GrokBuild.Dialect.Goal ()
 import Agent.GrokBuild.Dialect.Runtime ()
 import Agent.GrokBuild.Dialect.Workflow ()
-import Agent.Loop ()
+import Agent.Loop ( emptyTokenUsage )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ( fetchUsage )
 import Agent.OpenAI.WebSocketClient ()
@@ -181,7 +187,7 @@ import qualified Agent.OpenRouter.Usage as OpenRouterUsage
     ( fetchOpenRouterUsage )
 import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle
-    ( finishTurn, runPendingTurn )
+    ( finishTurn, retryFailedTurn, runPendingTurn )
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
 import qualified Data.Set as Set ()
 import qualified Data.Text as Text ( null, strip, pack )
@@ -265,6 +271,7 @@ replWithDraft env@SessionEnv
             setFullscreenImagePreviews runtime pendingAttachments
             let promptState =
                     buildPromptState
+                        (dialectId dialect)
                         params
                         planState
                         policy
@@ -311,12 +318,18 @@ replWithDraft env@SessionEnv
                     when (not (Text.null panel)) (Text.putStrLn panel)
             -- Status sits on the line above λ in minimal mode.
             withSynchronizedOutput terminal stdout do
+                savedRate <-
+                    stateLastTokensPerSecond <$> readIORef render.renderState
+                let tokenRate
+                        | usage == emptyTokenUsage = Nothing
+                        | otherwise = savedRate
                 Text.putStrLn $ formatReplStatusLine stdoutColor termCols
                     (currentModel params)
-                    (currentEffort params)
+                    (reasoningEffortText (currentEffort params))
                     idleMode
                     account
                     usage
+                    tokenRate
                 hFlush stdout
             let modeTag
                     | planActive = roleWarn stdoutColor "[plan] "
@@ -363,6 +376,7 @@ replWithDraft env@SessionEnv
                 env
                 (replWithDraft env)
                 (finishTurn env)
+                (SessionLifecycle.retryFailedTurn sessionContinuation env)
                 slashCatalog
                 skillInvocations
                 stdoutColor

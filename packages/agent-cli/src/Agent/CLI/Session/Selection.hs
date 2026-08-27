@@ -122,7 +122,8 @@ handleResume databasePool fullscreen maybeId persist = do
     case maybeId of
         Just sessionId -> resume sessionId
         Nothing -> do
-            sessions <- listSessions databasePool root
+            (sessions, warnings) <- listSessions databasePool root
+            mapM_ reportError warnings
             currentId <- currentSessionId persist
             pickResumeChoice
                 databasePool fullscreen color root currentId sessions >>= \case
@@ -152,7 +153,8 @@ handleConversationSearch databasePool fullscreen query persist = do
                         (roleMuted color (glyphSession <> message))
                 Just runtime ->
                     emitUiEvent runtime (UiSystemMessage message)
-    sessions <- listSessions databasePool root
+    (sessions, warnings) <- listSessions databasePool root
+    mapM_ reportError warnings
     searchResumeEntries databasePool sessions query >>= \case
         Left err -> do
             reportError err

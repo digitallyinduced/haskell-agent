@@ -14,6 +14,7 @@ import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,7 +25,7 @@ spec = do
     describe "mapModel" do
         it "prefers exact overrides, passes grok names through, and falls back otherwise" do
             let options = defaultClientOptions
-                    { modelOverrides = [("gpt-5.6-sol", "grok-4.6-mini")]
+                    { modelOverrides = Map.fromList [("gpt-5.6-sol", "grok-4.6-mini")]
                     , defaultModel = "grok-4.6"
                     }
             mapModel options "gpt-5.6-sol" `shouldBe` "grok-4.6-mini"
@@ -78,23 +79,59 @@ spec = do
             input <- expectArray (KeyMap.lookup "input" object)
             length input `shouldBe` 1
 
+        it "omits OpenAI item status fields the Grok proxy rejects" do
+            let call = FunctionCallItem FunctionCall
+                    { itemId = Just "fc_1"
+                    , callId = "call-1"
+                    , name = "shell_command"
+                    , namespace = Nothing
+                    , arguments = "{}"
+                    , encryptedFunctionArgs = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields =
+                        KeyMap.singleton "status" (Aeson.String "completed")
+                    }
+                message = MessageItem ResponseMessage
+                    { messageId = Just "msg_1"
+                    , content = MessageContentParts
+                        [InputTextPart "hello" Nothing KeyMap.empty]
+                    , role = RoleUser
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields =
+                        KeyMap.singleton "status" (Aeson.String "completed")
+                    }
+                request = setInstructions Nothing $
+                    setInput
+                        (Just (ResponseInputItems [message, call]))
+                        sampleRequest
+                value = requestValue defaultClientOptions request
+            object <- expectObject value
+            input <- expectArray (KeyMap.lookup "input" object)
+            itemObjects <- traverse expectObject input
+            map (KeyMap.lookup "status") itemObjects `shouldBe` [Nothing, Nothing]
+            map (KeyMap.lookup "type") itemObjects `shouldBe`
+                [ Just (Aeson.String "message")
+                , Just (Aeson.String "function_call")
+                ]
+
         it "flattens resumed OpenAI agent messages into Grok user messages" do
-            let agentMessage = KnownResponseItem ItemAgentMessage TaggedObject
-                    { tag = "agent_message"
-                    , fields = KeyMap.fromList
-                        [ ("author", Aeson.String "researcher")
-                        , ("recipient", Aeson.String "root")
-                        , ("content", Aeson.toJSON
-                            [ Aeson.object
-                                [ "type" .= ("input_text" :: Text)
-                                , "text" .= ("Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it." :: Text)
-                                ]
-                            , Aeson.object
-                                [ "type" .= ("encrypted_content" :: Text)
-                                , "encrypted_content" .= ("opaque-provider-payload" :: Text)
-                                ]
-                            ])
+            let agentMessage = AgentMessageItem ResponseAgentMessage
+                    { messageId = Nothing
+                    , author = Just "researcher"
+                    , recipient = Just "root"
+                    , content =
+                        [ InputTextPart
+                            "Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it."
+                            Nothing
+                            KeyMap.empty
+                        , EncryptedContentPart
+                            "opaque-provider-payload"
+                            KeyMap.empty
                         ]
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
                     }
                 request = setInstructions Nothing $
                     setInput
@@ -124,6 +161,7 @@ spec = do
             map (KeyMap.lookup "type") toolObjects `shouldBe`
                 [ Just (Aeson.String "function")
                 , Just (Aeson.String "web_search")
+                , Just (Aeson.String "x_search")
                 ]
             -- external_web_access is a ChatGPT knob the proxy does not know.
             Maybe.mapMaybe (KeyMap.lookup "external_web_access") toolObjects `shouldBe` []
@@ -134,7 +172,24 @@ spec = do
             object <- expectObject value
             KeyMap.lookup "include" object `shouldBe` Nothing
 
-        it "clamps reasoning efforts grok does not offer" do
+        it "serializes hosted tools from ResponseToolType, not a tag string" do
+            let mismatched = KnownResponseTool ToolXSearch TaggedObject
+                    { tag = "web_search"
+                    , fields = KeyMap.empty
+                    }
+            Aeson.toJSON mismatched `shouldBe` Aeson.object
+                ["type" .= ("x_search" :: Text)]
+
+        it "injects hosted x_search when the caller omitted it" do
+            let value = requestValue defaultClientOptions
+                    (setTools (Just []) sampleRequest)
+            object <- expectObject value
+            tools <- expectArray (KeyMap.lookup "tools" object)
+            toolObjects <- traverse expectObject tools
+            map (KeyMap.lookup "type") toolObjects `shouldBe`
+                [Just (Aeson.String "x_search")]
+
+        it "maps OpenAI-only efforts down and passes grok-4.6 xhigh through" do
             let effortOf request = do
                     object <- expectObject (requestValue defaultClientOptions request)
                     reasoning <- expectObject =<< maybe
@@ -151,7 +206,7 @@ spec = do
             effortOf (withEffort "low" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "low"))
             effortOf (withEffort "xhigh" sampleRequest)
-                >>= (`shouldBe` Just (Aeson.String "high"))
+                >>= (`shouldBe` Just (Aeson.String "xhigh"))
             effortOf (withEffort "max" sampleRequest)
                 >>= (`shouldBe` Just (Aeson.String "high"))
             -- Unset effort defaults to high for Grok.
@@ -303,6 +358,7 @@ sampleRequest = defaultResponseCreateParams
             , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = mempty
             }
         ])
@@ -314,14 +370,9 @@ sampleRequest = defaultResponseCreateParams
             , strict = Nothing
             , extraFields = mempty
             }
-        , KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            , fields = KeyMap.singleton "external_web_access" (Aeson.Bool True)
-            }
-        , KnownResponseTool ToolComputer TaggedObject
-            { tag = "computer"
-            , fields = mempty
-            }
+        , knownResponseTool ToolWebSearch
+            (KeyMap.singleton "external_web_access" (Aeson.Bool True))
+        , knownResponseTool ToolComputer mempty
         ]
     , reasoning = Just (reasoningConfig "high")
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
@@ -361,6 +412,10 @@ setModel newModel ResponseCreateParams { model = _, .. } =
 setInput :: Maybe ResponseInput -> ResponseCreateParams -> ResponseCreateParams
 setInput newInput ResponseCreateParams { input = _, .. } =
     ResponseCreateParams { input = newInput, .. }
+
+setTools :: Maybe [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
+setTools newTools ResponseCreateParams { tools = _, .. } =
+    ResponseCreateParams { tools = newTools, .. }
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

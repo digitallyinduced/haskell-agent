@@ -6,6 +6,7 @@ module Agent.Responses.Types.Streaming
     , responseStreamEventSequenceNumber
     , streamEventTypeText
     , parseStreamEventWithType
+    , unparsedStreamEventTypeText
     ) where
 
 import Agent.Responses.Types.Common
@@ -150,6 +151,12 @@ streamEventTypeText = \case
     EventResponseMetadata -> "response.metadata"
     EventResponsesApiWebSocketTiming -> "responsesapi.websocket_timing"
     StreamEventUnknown value -> value
+
+-- | Synthetic event type used when a WebSocket frame cannot be decoded.
+-- This is not a provider wire type; the receiver invents it so dropped
+-- frames remain visible in the agent loop.
+unparsedStreamEventTypeText :: Text
+unparsedStreamEventTypeText = "websocket.unparsed_frame"
 
 parseStreamEventType :: Text -> StreamEventType
 parseStreamEventType value = case value of

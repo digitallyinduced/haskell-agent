@@ -3,6 +3,7 @@ module Agent.CLI.CommandSpec (spec) where
 import Agent.CLI.Command
 import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
+import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.Responses.Types
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf)
@@ -22,6 +23,11 @@ spec = do
         it "treats :reload as a GHCi reload request" do
             parseReplLine ":reload" `shouldBe` ReplReload
             parseReplLine "  :reload  " `shouldBe` ReplReload
+
+        it "parses exact-turn retry" do
+            parseReplLine "/retry" `shouldBe` ReplRetry
+            parseReplLine "/retry now"
+                `shouldBe` ReplCommandError "usage: /retry"
 
         it "sends ordinary lines to the model" do
             parseReplLine "list the files" `shouldBe` ReplPrompt "list the files"
@@ -48,11 +54,11 @@ spec = do
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
 
         it "sets a valid effort level" do
-            parseReplLine "/effort none" `shouldBe` ReplSetEffort "none"
-            parseReplLine "/effort high" `shouldBe` ReplSetEffort "high"
-            parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort "xhigh"
-            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort "max"
-            parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
+            parseReplLine "/effort none" `shouldBe` ReplSetEffort EffortNone
+            parseReplLine "/effort high" `shouldBe` ReplSetEffort EffortHigh
+            parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort EffortXHigh
+            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort EffortMax
+            parseReplLine "/effort medium" `shouldBe` ReplSetEffort EffortMedium
 
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
@@ -284,6 +290,7 @@ spec = do
                     , "plan"
                     , "btw"
                     , "recap"
+                    , "retry"
                     , "session"
                     , "session-info"
                     , "afk"
@@ -351,6 +358,15 @@ spec = do
             slashCompletionCandidates "troffe/" "h" `shouldBe` ["high"]
             slashCompletionCandidates "troffe/" "m" `shouldBe` ["medium", "max"]
             slashCompletionCandidates "troffe/" "n" `shouldBe` ["none"]
+            let grokCatalog = mkSlashCatalog GrokBuildDialect [] [] []
+            slashCompletionCandidatesWithCatalog
+                grokCatalog
+                "troffe/"
+                "m"
+                `shouldBe` ["medium"]
+            fmap (.slashUsage) (lookupSlashCommandIn grokCatalog "effort")
+                `shouldBe`
+                    Just "/effort [none|low|medium|high|xhigh]"
             slashCompletionCandidatesWithModels
                 ["grok-4.6", "grok-4.5", "grok-4.5-mini", "qwen-local"]
                 "m/"
@@ -649,8 +665,9 @@ spec = do
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do
-            let updated = setReasoningEffort "high" defaultResponseCreateParams
-            currentEffort updated `shouldBe` "high"
+            let updated =
+                    setReasoningEffort EffortHigh defaultResponseCreateParams
+            currentEffort updated `shouldBe` EffortHigh
             fmap (.effort) updated.reasoning `shouldBe` Just (Just "high")
 
         it "preserves other reasoning fields" do
@@ -666,8 +683,8 @@ spec = do
                             }
                         , ..
                         }
-                updated = setReasoningEffort "xhigh" original
-            currentEffort updated `shouldBe` "xhigh"
+                updated = setReasoningEffort EffortXHigh original
+            currentEffort updated `shouldBe` EffortXHigh
             case updated.reasoning of
                 Just config -> do
                     config.context `shouldBe` Just "256k"
@@ -677,7 +694,7 @@ spec = do
 
     describe "currentEffort" do
         it "defaults to low when reasoning is missing" do
-            currentEffort defaultResponseCreateParams `shouldBe` "low"
+            currentEffort defaultResponseCreateParams `shouldBe` EffortLow
 
     describe "setModel" do
         it "writes the model onto request params" do

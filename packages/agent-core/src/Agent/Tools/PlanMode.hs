@@ -47,6 +47,7 @@ import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import Data.Aeson (FromJSON(..), withObject)
 import Data.IORef
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -458,6 +459,8 @@ runAskUserQuestion env args
                 Right answer -> pure (Right (question.question, answer))
         | otherwise = do
             let choices = map formatOption question.options
+                labelsByChoice =
+                    Map.fromList (zip choices (map (.label) question.options))
             answer <- env.planHooks.planAskQuestion question.question choices
             pure $ case answer of
                 Nothing -> Left "No answer from user."
@@ -466,9 +469,7 @@ runAskUserQuestion env args
                 Just text ->
                     Right
                         ( question.question
-                        , fromMaybe text
-                            (lookup text
-                                (zip choices (map (.label) question.options)))
+                        , fromMaybe text (Map.lookup text labelsByChoice)
                         )
 
     askMultiple :: AskUserQuestion -> IO (Either Text Text)
@@ -478,6 +479,8 @@ runAskUserQuestion env args
         doneChoice = "Done selecting"
         choose selected remaining = do
             let displayed = map formatOption remaining
+                labelsByDisplayed =
+                    Map.fromList (zip displayed (map (.label) remaining))
                 choices = displayed <> [doneChoice]
                 prompt
                     | null selected = question.question
@@ -496,7 +499,7 @@ runAskUserQuestion env args
                             else pure
                                 (Right (Text.intercalate ", " (reverse selected)))
                     | Just label <-
-                        lookup raw (zip displayed (map (.label) remaining)) ->
+                        Map.lookup raw labelsByDisplayed ->
                             choose
                                 (label : selected)
                                 [ option

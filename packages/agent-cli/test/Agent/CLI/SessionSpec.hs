@@ -10,6 +10,7 @@ import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.Store.SessionItem
 import Agent.Store.Postgres
     ( Store
     , closeStore
@@ -57,6 +58,7 @@ import Test.QuickCheck
     , oneof
     , resize
     , sized
+    , suchThatMap
     , vectorOf
     , (===)
     )
@@ -108,6 +110,7 @@ storedContentPartRoundTrip (StoredRoundTripContentPart part) =
         , role = RoleAssistant
         , status = Just ItemCompleted
         , phase = Just "final"
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -121,6 +124,10 @@ genResponseItem =
         , CustomToolCallOutputItem <$> genCustomToolCallOutput
         , ReasoningItemValue <$> genReasoningItem
         , ItemReferenceValue <$> genItemReference
+        , AgentMessageItem <$> genResponseAgentMessage
+        , AdditionalToolsItemValue <$> genAdditionalToolsItem
+        , CompactionTriggerItemValue <$> genCompactionTriggerItem
+        , CompactionItemValue <$> genCompactionItem
         , do
             tagged <- genTaggedObject "known-item-"
             pure (KnownResponseItem (parseResponseItemType tagged.tag) tagged)
@@ -135,7 +142,75 @@ genResponseMessage =
         <*> genResponseRole
         <*> genMaybe genItemStatus
         <*> genMaybe genText
-        <*> genJsonObject
+        <*> pure Nothing
+        <*> fmap
+            (withoutReservedKeys
+                ["internal_chat_message_metadata_passthrough"])
+            genJsonObject
+
+genResponseAgentMessage :: Gen ResponseAgentMessage
+genResponseAgentMessage =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        ResponseAgentMessage
+            <$> genMaybe genText
+            <*> genMaybe genText
+            <*> genMaybe genText
+            <*> genSmallList genContentPart
+            <*> pure Nothing
+            <*> fmap
+                (withoutReservedKeys
+                    [ "type", "id", "author", "recipient", "content"
+                    , "internal_chat_message_metadata_passthrough"
+                    ])
+                genJsonObject
+
+jsonRoundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a) => a -> Maybe a
+jsonRoundTrip value =
+    case Aeson.fromJSON (Aeson.toJSON value) of
+        Aeson.Success decoded -> Just decoded
+        Aeson.Error _ -> Nothing
+
+withoutReservedKeys :: [Text.Text] -> Aeson.Object -> Aeson.Object
+withoutReservedKeys names object =
+    foldl
+        (flip (KeyMap.delete . Key.fromText))
+        object
+        names
+
+genAdditionalToolsItem :: Gen AdditionalToolsItem
+genAdditionalToolsItem =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        AdditionalToolsItem
+            <$> genMaybe genText
+            <*> genText
+            <*> genSmallList genJsonValue
+            <*> fmap
+                (withoutReservedKeys ["type", "id", "role", "tools"])
+                genJsonObject
+
+genCompactionTriggerItem :: Gen CompactionTriggerItem
+genCompactionTriggerItem =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        CompactionTriggerItem
+            <$> fmap (withoutReservedKeys ["type"]) genJsonObject
+
+genCompactionItem :: Gen CompactionItem
+genCompactionItem =
+    suchThatMap generate jsonRoundTrip
+  where
+    generate =
+        CompactionItem
+            <$> genMaybe genText
+            <*> genMaybe genText
+            <*> fmap
+                (withoutReservedKeys ["type", "id", "encrypted_content"])
+                genJsonObject
 
 genMessageContent :: Gen MessageContent
 genMessageContent =
@@ -150,18 +225,26 @@ genFunctionCall =
         <$> genMaybe genText
         <*> genText
         <*> genText
+        <*> genMaybe genText
         <*> genText
+        <*> genMaybe (genSmallList genText)
         <*> genMaybe genItemStatus
-        <*> genJsonObject
+        <*> fmap
+            (withoutReservedKeys ["namespace", "encrypted_function_args"])
+            genJsonObject
 
 genFunctionCallOutput :: Gen FunctionCallOutput
 genFunctionCallOutput =
     FunctionCallOutput
         <$> genMaybe genText
         <*> genText
+        <*> genMaybe genText
+        <*> genMaybe genText
         <*> genJsonValue
         <*> genMaybe genItemStatus
-        <*> genJsonObject
+        <*> fmap
+            (withoutReservedKeys ["name", "namespace"])
+            genJsonObject
 
 genCustomToolCall :: Gen CustomToolCall
 genCustomToolCall =
@@ -169,9 +252,10 @@ genCustomToolCall =
         <$> genMaybe genText
         <*> genText
         <*> genText
+        <*> genMaybe genText
         <*> genText
         <*> genMaybe genItemStatus
-        <*> genJsonObject
+        <*> fmap (withoutReservedKeys ["namespace"]) genJsonObject
 
 genCustomToolCallOutput :: Gen CustomToolCallOutput
 genCustomToolCallOutput =
@@ -242,6 +326,12 @@ genContentPart =
             <$> genText
             <*> genJsonObject
         , SummaryTextPart
+            <$> genText
+            <*> genJsonObject
+        , EncryptedContentPart
+            <$> genText
+            <*> genJsonObject
+        , PlainTextPart
             <$> genText
             <*> genJsonObject
         , UnknownContentPart <$> genTaggedObject "unknown-content-"
@@ -348,7 +438,7 @@ responseItemKinds :: [String]
 responseItemKinds =
     [ "message", "function call", "function output"
     , "custom call", "custom output", "reasoning"
-    , "reference", "known tagged", "unknown tagged"
+    , "reference", "agent message", "known tagged", "unknown tagged"
     ]
 
 responseItemKind :: ResponseItem -> String
@@ -360,6 +450,16 @@ responseItemKind = \case
     CustomToolCallOutputItem{} -> "custom output"
     ReasoningItemValue{} -> "reasoning"
     ItemReferenceValue{} -> "reference"
+    AgentMessageItem{} -> "agent message"
+    AdditionalToolsItemValue{} -> "additional tools"
+    LocalShellCallItem{} -> "local shell"
+    ToolSearchCallItem{} -> "tool search call"
+    ToolSearchOutputItem{} -> "tool search output"
+    WebSearchCallItem{} -> "web search"
+    ImageGenerationCallItem{} -> "image generation"
+    CompactionItemValue{} -> "compaction"
+    CompactionTriggerItemValue{} -> "compaction trigger"
+    ContextCompactionItemValue{} -> "context compaction"
     KnownResponseItem{} -> "known tagged"
     UnknownResponseItem{} -> "unknown tagged"
 
@@ -367,7 +467,8 @@ contentPartKinds :: [String]
 contentPartKinds =
     [ "input text", "input image", "input file"
     , "input audio", "output text", "refusal"
-    , "reasoning text", "summary text", "unknown content"
+    , "reasoning text", "summary text", "encrypted content"
+    , "unknown content"
     ]
 
 contentPartKind :: ResponseContentPart -> String
@@ -380,11 +481,93 @@ contentPartKind = \case
     RefusalPart{} -> "refusal"
     ReasoningTextPart{} -> "reasoning text"
     SummaryTextPart{} -> "summary text"
+    EncryptedContentPart{} -> "encrypted content"
+    PlainTextPart{} -> "plain text"
     UnknownContentPart{} -> "unknown content"
 
 spec :: Spec
 spec = describe "Agent.CLI.Session" do
     describe "pure compatibility helpers" do
+        it "stores inline image and file payloads as binary data" do
+            let imageUrl = "data:image/png;base64,cG5nLWJ5dGVz"
+                fileData = "data:text/plain;base64,ZmlsZS1ieXRlcw=="
+                item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputImagePart
+                            Nothing
+                            Nothing
+                            (Just imageUrl)
+                            Nothing
+                            KeyMap.empty
+                        , InputFilePart
+                            Nothing
+                            (Just fileData)
+                            Nothing
+                            Nothing
+                            (Just "notes.txt")
+                            Nothing
+                            KeyMap.empty
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+            case toStoredResponseItem item of
+                StoredMessageItem StoredMessage
+                    { storedMessageContent =
+                        StoredMessageParts [imagePart, filePart]
+                    } -> do
+                        imagePart.storedContentPartImageUrl
+                            `shouldBe` Nothing
+                        imagePart.storedContentPartImageBinary
+                            `shouldBe` Just StoredBinaryData
+                                { storedBinaryDataMimeType = "image/png"
+                                , storedBinaryDataBytes = "png-bytes"
+                                }
+                        filePart.storedContentPartFileData
+                            `shouldBe` Nothing
+                        filePart.storedContentPartFileBinary
+                            `shouldBe` Just StoredBinaryData
+                                { storedBinaryDataMimeType = "text/plain"
+                                , storedBinaryDataBytes = "file-bytes"
+                                }
+                stored ->
+                    expectationFailure
+                        ("unexpected stored item: " <> show stored)
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
+        it "keeps hosted and malformed attachment URLs as text" do
+            let item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputImagePart
+                            Nothing
+                            Nothing
+                            (Just "https://example.com/image.png")
+                            Nothing
+                            KeyMap.empty
+                        , InputFilePart
+                            Nothing
+                            (Just "data:text/plain;base64,not base64")
+                            Nothing
+                            Nothing
+                            Nothing
+                            Nothing
+                            KeyMap.empty
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
         it "keeps the legacy artifact root and safe ids" do
             sessionsRoot (fromFilePath "/home/marc")
                 `shouldBe` fromFilePath "/home/marc/.haskell-agent/sessions"
@@ -411,6 +594,7 @@ spec = describe "Agent.CLI.Session" do
                         , role = RoleAssistant
                         , status = Just ItemCompleted
                         , phase = Nothing
+                        , passthrough = Nothing
                         , extraFields =
                             KeyMap.singleton
                                 "provider_extension"
@@ -452,19 +636,24 @@ spec = describe "Agent.CLI.Session" do
                         , role = RoleDeveloper
                         , status = Just ItemInProgress
                         , phase = Just "commentary"
+                        , passthrough = Nothing
                         , extraFields = KeyMap.empty
                         }
                     , FunctionCallItem FunctionCall
                         { itemId = Just "call-item"
                         , callId = "call-1"
                         , name = "shell"
+                        , namespace = Nothing
                         , arguments = "{\"command\":\"pwd\"}"
+                        , encryptedFunctionArgs = Nothing
                         , status = Just ItemCompleted
                         , extraFields = KeyMap.empty
                         }
                     , FunctionCallOutputItem FunctionCallOutput
                         { itemId = Just "output-item"
                         , callId = "call-1"
+                        , name = Nothing
+                        , namespace = Nothing
                         , output =
                             Aeson.object
                                 ["stdout" Aeson..= ("/tmp/project" :: Text.Text)]
@@ -475,6 +664,7 @@ spec = describe "Agent.CLI.Session" do
                         { itemId = Nothing
                         , callId = "custom-1"
                         , name = "apply_patch"
+                        , namespace = Nothing
                         , input = "*** Begin Patch"
                         , status = Nothing
                         , extraFields = KeyMap.empty
@@ -511,9 +701,26 @@ spec = describe "Agent.CLI.Session" do
                         { itemId = "call-item"
                         , extraFields = KeyMap.empty
                         }
-                    , KnownResponseItem ItemCompactionTrigger TaggedObject
-                        { tag = "compaction_trigger"
-                        , fields = KeyMap.empty
+                    , AgentMessageItem ResponseAgentMessage
+                        { messageId = Nothing
+                        , author = Just "researcher"
+                        , recipient = Just "root"
+                        , content =
+                            [ InputTextPart
+                                { text = "Found it."
+                                , promptCacheBreakpoint = Nothing
+                                , extraFields = KeyMap.empty
+                                }
+                            , EncryptedContentPart
+                                { encryptedContent = "opaque-provider-payload"
+                                , extraFields = KeyMap.empty
+                                }
+                            ]
+                        , passthrough = Nothing
+                        , extraFields = KeyMap.empty
+                        }
+                    , CompactionTriggerItemValue CompactionTriggerItem
+                        { extraFields = KeyMap.empty
                         }
                     , UnknownResponseItem TaggedObject
                         { tag = "provider_item"
@@ -589,6 +796,7 @@ spec = describe "Agent.CLI.Session" do
                         , role = RoleUser
                         , status = Nothing
                         , phase = Nothing
+                        , passthrough = Nothing
                         , extraFields = KeyMap.empty
                         }
                     normalTurn = SessionTurn
@@ -642,8 +850,9 @@ spec = describe "Agent.CLI.Session" do
                                     (final.sessionMeta.metaId, [normalTurn, compactTurn])
                                 ]
 
-                listed <- listSessions pool root
+                (listed, warnings) <- listSessions pool root
                 map (.metaId) listed `shouldBe` [handle.sessionMeta.metaId]
+                warnings `shouldBe` []
                 deleteSession pool root handle.sessionMeta.metaId
                     `shouldReturn` Right ()
                 doesDirectoryExist handle.sessionDir `shouldReturn` False

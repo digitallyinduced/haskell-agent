@@ -12,13 +12,22 @@ module Agent.CLI.Options
     , parseApprovalAnswer
     , parseArgs
     , parseEffort
+    , normalizeReasoningEffortForDialect
     , reasoningEfforts
+    , reasoningEffortsForDialect
     , resolveApprovalPolicy
     , usage
     ) where
 
 import System.OsPath (OsPath, unsafeEncodeUtf)
+import Agent.Dialect (DialectId(..))
+import Agent.Loop (defaultLoopMaxTurns)
 import Agent.Provider (Provider(..), parseProvider)
+import Agent.ReasoningEffort
+    ( ReasoningEffort(..)
+    , parseReasoningEffort
+    )
+import qualified Agent.ReasoningEffort as ReasoningEffort
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Foldable (asum)
 import qualified Data.List as List
@@ -97,7 +106,7 @@ data CliOptions = CliOptions
       -- 'defaultMaxConcurrent'.
     , optCompactThreshold :: !(Maybe Int)
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
-    , optEffort :: !(Maybe Text)
+    , optEffort :: !(Maybe ReasoningEffort)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optShowRawReasoning :: !Bool
       -- ^ Show raw OpenAI reasoning text instead of summaries only.
@@ -127,7 +136,7 @@ defaultCliOptions = CliOptions
     , optYolo = False
     , optNoYolo = False
     , optManagedDenyMutations = False
-    , optMaxTurns = 500
+    , optMaxTurns = defaultLoopMaxTurns
     , optMaxConcurrentAgents = Nothing
     , optCompactThreshold = Nothing
     , optEffort = Nothing
@@ -146,12 +155,12 @@ defaultCliOptions = CliOptions
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
-defaultEffortFor :: Provider -> Text
+defaultEffortFor :: Provider -> ReasoningEffort
 defaultEffortFor = \case
-    XAIProvider -> "high"
-    OpenAIProvider -> "medium"
-    OpenRouterProvider -> "medium"
-    ClaudeCodeProvider -> "xhigh"
+    XAIProvider -> EffortHigh
+    OpenAIProvider -> EffortMedium
+    OpenRouterProvider -> EffortMedium
+    ClaudeCodeProvider -> EffortXHigh
 
 isOneShot :: CliOptions -> Bool
 isOneShot options =
@@ -286,7 +295,7 @@ optionUpdateParser = asum
     [ optionUpdate "provider" "NAME"
         "Provider: openai, xai, openrouter, or claude-code"
         providerReader (\value options -> options { optProvider = Just value })
-    , optionUpdate "model" "NAME" "Override the saved/default model"
+    , optionUpdate "model" "NAME" "Override the saved last model"
         textReader (\value options -> options { optModel = Just value })
     , optionUpdate "cwd" "DIR" "Working directory for tools"
         pathReader (\value options -> options { optCwd = Just value })
@@ -419,7 +428,7 @@ positiveIntReader :: String -> Options.ReadM Int
 positiveIntReader flag =
     Options.eitherReader (parseInt flag)
 
-effortReader :: Options.ReadM Text
+effortReader :: Options.ReadM ReasoningEffort
 effortReader =
     Options.eitherReader (parseEffort . Text.pack)
 
@@ -461,19 +470,30 @@ parseMotionMode raw = case Text.toLower (Text.pack raw) of
     "off" -> Right MotionOff
     _ -> Left ("--motion expects full, reduced, or off (got " <> raw <> ")")
 
-reasoningEfforts :: [Text]
-reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
+reasoningEfforts :: [ReasoningEffort]
+reasoningEfforts = ReasoningEffort.reasoningEfforts
 
-parseEffort :: Text -> Either String Text
-parseEffort raw =
-    let effort = Text.toLower (Text.strip raw)
-    in if effort `elem` reasoningEfforts
-        then Right effort
-        else Left
-            ( "effort must be none, low, medium, high, xhigh, or max (got "
-                <> Text.unpack effort
-                <> ")"
-            )
+-- | Efforts exposed by the active model-facing protocol. Grok accepts
+-- @xhigh@ but rejects the OpenAI-only @max@ value.
+reasoningEffortsForDialect :: DialectId -> [ReasoningEffort]
+reasoningEffortsForDialect = \case
+    GrokBuildDialect -> filter (/= EffortMax) reasoningEfforts
+    _ -> reasoningEfforts
+
+-- | Replace an effort unsupported by the active model-facing protocol with
+-- its closest supported value. This also cleans up resumed sessions and
+-- provider switches that inherited an effort from another dialect.
+normalizeReasoningEffortForDialect
+    :: DialectId
+    -> ReasoningEffort
+    -> ReasoningEffort
+normalizeReasoningEffortForDialect dialect effort
+    | effort `elem` reasoningEffortsForDialect dialect = effort
+    | dialect == GrokBuildDialect = EffortHigh
+    | otherwise = effort
+
+parseEffort :: Text -> Either String ReasoningEffort
+parseEffort = either (Left . Text.unpack) Right . parseReasoningEffort
 
 usage :: String
 usage = unlines
@@ -487,7 +507,7 @@ usage = unlines
     , "      --prompt-file FILE  Read the one-shot prompt from a file"
     , "      --provider NAME     openai, xai, openrouter, or claude-code"
     , "                          (default: detect from API/OAuth auth)"
-    , "      --model NAME        Override the project's saved/default model"
+    , "      --model NAME        Override the saved last model"
     , "      --cwd DIR           Working directory for tools (default: current)"
     , "      --worktree          Create a new git worktree under ~/.haskell-agent/worktrees"
     , "      --resume ID         Resume a persisted session from ~/.haskell-agent/sessions"
@@ -505,7 +525,8 @@ usage = unlines
     , "      --motion MODE       Animation policy: full, reduced, or off"
     , "      --yolo              Auto-approve every tool"
     , "      --no-yolo           Never auto-approve; deny mutating tools without a TTY"
-    , "      --max-turns N       Stop after N model turns (default: 500)"
+    , "      --max-turns N       Stop after N model turns (default: "
+        <> show defaultLoopMaxTurns <> ")"
     , "      --max-concurrent-agents N"
     , "                          Concurrent subagent cap (default: 32;"
     , "                          project settings, then ~/.haskell-agent/config.json)"
@@ -525,8 +546,8 @@ usage = unlines
     , "reasoning effort. /model (alias /m) opens the model picker; /model NAME"
     , "sets it. /help [NAME] lists slash commands. Tab completes / commands."
     , "Shift+Tab cycles idle mode: ask (normal) → plan → always-approve → ask."
-    , "In fullscreen mode the composer stays editable during a turn; Enter queues"
-    , "the draft as the next input, and queued inputs run in submission order."
+    , "In fullscreen mode the composer stays editable during a turn; Enter steers"
+    , "the active turn at its next model boundary without cancelling current work."
     , "Ctrl+Enter sends the current draft next by cancelling the active turn;"
     , "Ctrl+O is the fallback when the terminal cannot distinguish Ctrl+Enter."
     , "With an empty composer, send-now promotes the oldest queued prompt."

@@ -10,6 +10,7 @@ module Agent.Telegram.Client
     , downloadTelegramFile
     , sendTypingAction
     , sendThinkingDraft
+    , sendStreamingDraft
     , setMessageReaction
     , sendRichMessage
     , sendMessageWithKeyboard
@@ -18,6 +19,8 @@ module Agent.Telegram.Client
     , sendTelegramDocument
     , sendTelegramPhoto
     , sendTelegramVoice
+    , getChatAdministrators
+    , leaveChat
     , redactToken
     ) where
 
@@ -222,10 +225,29 @@ getUpdates client offset =
               , "edited_message"
               , "message_reaction"
               , "callback_query"
+              , "my_chat_member"
               ] :: [Text]
             )
         ]
             <> maybe [] (\value -> ["offset" .= value]) offset
+
+getChatAdministrators
+    :: TelegramClient
+    -> Integer
+    -> IO (Either Text [TelegramChatMember])
+getChatAdministrators client chatId =
+    telegramRequest client "getChatAdministrators"
+        (object ["chat_id" .= chatId])
+        15 >>= \case
+        Left err -> pure (Left err)
+        Right response -> pure (decodeTelegramResponse response)
+
+leaveChat
+    :: TelegramClient
+    -> Integer
+    -> IO (Either Text ())
+leaveChat client chatId =
+    requestUnit client "leaveChat" (object ["chat_id" .= chatId])
 
 getTelegramBot :: TelegramClient -> IO TelegramUser
 getTelegramBot client =
@@ -278,6 +300,20 @@ sendTypingAction client key =
         object $
             [ "chat_id" .= key.chatId
             , "action" .= ("typing" :: Text)
+            ]
+                <> threadParameters key
+
+sendStreamingDraft
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Text
+    -> IO ()
+sendStreamingDraft client key html =
+    expectBool client "sendRichMessageDraft" $
+        object $
+            [ "chat_id" .= key.chatId
+            , "draft_id" .= (1 :: Int)
+            , "rich_message" .= object ["html" .= html]
             ]
                 <> threadParameters key
 

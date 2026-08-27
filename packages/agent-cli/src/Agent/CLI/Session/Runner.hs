@@ -11,12 +11,19 @@ import Agent.CLI.AgentViewport
     , AgentStep
     , AgentTarget(..)
     , AgentViewportEnv(..)
-    , agentStepsForStatus
+    , agentStepsForStatusRelative
     , formatAgentStatus
     , responseItemPreviewLines
-    , responseItemStepPreviews
-    , responseItemsToUiState
+    , responseItemStepPreviewsRelative
+    , responseItemsToUiStateRelative
     )
+import Agent.CLI.NativeAgents
+    ( NativeAgentView(..)
+    , applyNativeAgentEvent
+    , nativeAgentEntries
+    , restoreNativeAgents
+    )
+import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import Agent.CLI.SessionTitle
     ( SessionTitleEvent(..)
     , SessionTitleFailure(..)
@@ -30,7 +37,7 @@ import Agent.CLI.ManagedTurn
     , managedTurnInputs
     )
 import Agent.CLI.GatewayBridge
-    ( publishManagedLoopEvent
+    ( newManagedLoopEventPublisher
     , requestManagedApproval
     )
 import Agent.CLI.Approval
@@ -43,6 +50,7 @@ import Agent.CLI.Recap
     , RecapRequest(..)
     )
 import Agent.CLI.CancelWatch (withStdinPaused)
+import Agent.CLI.Clipboard (loadImagesFromPastedText)
 import Agent.CLI.Command
 import Agent.CLI.LearnedSkills
     ( defaultLearnedSkillContextMaxChars
@@ -70,6 +78,7 @@ import Agent.CLI.Project
     )
 import Agent.CLI.Prompt
     ( systemPromptForTools )
+import Agent.CLI.Resume (resumeNeedsGeneratedContext)
 import Agent.CLI.ProviderTransition
     ( PendingTurn(..)
     , TurnResult(..)
@@ -79,9 +88,13 @@ import Agent.CLI.Render
     ( RenderConfig(..)
     , RenderState(..)
     , beginRenderTurn
+    , clearRenderTokenRate
+    , countGenerationChars
     , emptyRenderState
     , putTextLn
+    , recordRenderTurnRate
     , renderEvent
+    , resetRenderGeneration
     )
 import Agent.CLI.Session
 import Agent.CLI.Session.History
@@ -91,12 +104,18 @@ import Agent.CLI.Session.History
     , writeLiveTranscript
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
-import Agent.CLI.Session.Interaction (runBtwQuestion, setSessionEffort)
+import Agent.CLI.Session.Interaction
+    ( runBtwQuestion
+    , setSessionEffortText
+    )
 import Agent.CLI.Skills
     ( installSkillCatalogWithOmissions, installSkillToolRoots
     , loadSkillsCatalogQuiet, reservedSlashNames
     )
-import Agent.CLI.StartupContext (loadAgentsContext)
+import Agent.CLI.StartupContext
+    ( AgentsContextNotice(..)
+    , loadAgentsContext
+    )
 import Agent.CLI.Startup.Auth
     ( learnAboutUserOnboardingPrompt
     , markStartupStage
@@ -107,13 +126,25 @@ import Agent.CLI.Subagents.Runtime
     , lookupOrCreateSubagentSession
     , persistAndEvictSubagentSessionWithStatus
     )
-import Agent.CLI.Style (glyphSession, glyphWarn, roleMuted, roleWarn, cliWindowTitle, setCliWindowTitle)
+import Agent.CLI.Style
+    ( cliWindowTitle
+    , glyphSession
+    , glyphWarn
+    , roleMuted
+    , roleWarn
+    , setCliWindowTitle
+    )
 import Agent.CLI.Terminal
     ( TerminalCapabilities(..)
     , resolveColor
     )
 import Agent.CLI.Request (setRequestInstructionsAndTools)
-import Agent.CLI.Tools (requireToolRegistry, schemasFromAppTools)
+import Agent.CLI.Tools
+    ( hostedSearchToolNames
+    , requireToolRegistry
+    , schemasFromAppTools
+    )
+import Agent.CLI.Error (formatException)
 import Agent.CLI.Dialects
     ( filterBashTools
     , filterGhciTools
@@ -136,6 +167,10 @@ import Agent.TUI.Model
     , reduceUi
     )
 import Agent.TUI.Motion (nativeProgressAnimationEnabled)
+import Agent.CLI.WindowTitle
+    ( WindowTitleController(..)
+    , newWindowTitleController
+    )
 import Agent.CLI.Turn (applyPendingSessionTitles, runOneTurn)
 import Agent.Cancel (requestCancel)
 import Agent.Loop
@@ -164,7 +199,11 @@ import Agent.Subagents
     , subagentConfig
     )
 import Agent.Subagents.TaskPath (taskPathText)
-import Agent.ToolDispatch (ToolCall(..), canonicalToolName)
+import Agent.ToolDispatch
+    ( ToolCall(..)
+    , ToolDispatchConfig(..)
+    , canonicalToolName
+    )
 import Agent.Tools.MultiAgents
     ( MultiAgentContext(..)
     , multiAgentToolNames
@@ -229,10 +268,28 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
       useColor = startup.startupUseColor
       stderrTty = startup.startupStderrTty
       stdoutTty = startup.startupStdoutTty
-      setWindowTitle title =
+      writeWindowTitle title =
           case fullscreen of
               Just runtime -> setFullscreenWindowTitle runtime title
               Nothing -> setCliWindowTitle stdoutTty stdoutHandle title
+      withIoLock action = withMVar ioLock (const action)
+      reportSessionError message =
+          case fullscreen of
+              Just runtime ->
+                  emitUiEvent runtime (UiErrorMessage message)
+              Nothing -> do
+                  color <- resolveColor stderrHandle
+                  putTextLn stderrHandle
+                      (roleWarn color (glyphWarn <> message))
+  windowTitle <- newWindowTitleController
+      options.optMotionMode
+      startupWindowTitle
+      withIoLock
+      writeWindowTitle
+  let setWindowTitle = windowTitle.windowTitleSet
+      beginWindowTitleBusy = windowTitle.windowTitleBeginBusy
+      endWindowTitleBusy = windowTitle.windowTitleEndBusy
+      windowTitleWorker = windowTitle.windowTitleWorker
       showTitleEvent = \case
         SessionTitleGenerated SessionTitleResult{..} ->
           case persist of
@@ -242,10 +299,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       PersistenceActive handle
                           | handle.sessionMeta.metaId == resultSessionId
                           , not handle.sessionMeta.metaTitleIsManual ->
-                              withMVar ioLock \_ ->
-                                  setWindowTitle
-                                      (cliWindowTitle handle.sessionMeta.metaCwd
-                                          (Just resultTitle))
+                              setWindowTitle
+                                  (cliWindowTitle handle.sessionMeta.metaCwd
+                                      (Just resultTitle))
                       _ -> pure ()
         SessionTitleFailed SessionTitleFailure{..} ->
           case persist of
@@ -271,6 +327,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                       _ -> pure ()
   withSessionTitleManager btwBackend (readIORef paramsRef) showTitleEvent \titleManager -> do
     toolRegistry <- requireToolRegistry allTools
+    steeringRef <- newIORef []
     let previewIdRef = startup.startupSessionState.sessionPreviewId
     spinnerRef <- newIORef Nothing
     renderStateRef <- newIORef emptyRenderState
@@ -280,8 +337,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     unavailableProvidersRef <- newIORef unavailableProviders
     startupUnavailableRef <- newIORef startupUnavailable
     restartEffortRef <- newIORef Nothing
+    lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
+    nativeAgentsRef <- newIORef (Map.empty :: Map.Map Text NativeAgentView)
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
     let cachedAgentSteps target variant items build = do
             transcriptName <- makeStableName items
@@ -305,6 +364,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     pure steps
         loadAgentSnapshot includeSummaries = do
             rootItems <- readLiveTranscript conversationRef
+            nativeAgents <-
+                atomicModifyIORef' nativeAgentsRef \current ->
+                    let restored = restoreNativeAgents rootItems current
+                    in (restored, restored)
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
@@ -313,6 +376,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         : [ AgentChild agentId
                           | (_, agentId, _) <- agents
                           ]
+                        <> map (\view -> AgentNative view.nativeAgentId)
+                            (Map.elems nativeAgents)
             selected <-
                 atomicModifyIORef' selectedAgent \current ->
                     let reconciled =
@@ -331,6 +396,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 responseItemPreviewLines 12 items
                             | otherwise ->
                                 []
+                        AgentNative nativeId ->
+                            maybe [] (.nativeAgentTranscript)
+                                (Map.lookup nativeId nativeAgents)
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
@@ -338,10 +406,14 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     | includeSummaries = initialUiState
                     | target /= selected = initialUiState
                     | target == AgentRoot = initialUiState
+                    | AgentNative nativeId <- target =
+                        maybe initialUiState (.nativeAgentConversation)
+                            (Map.lookup nativeId nativeAgents)
                     | otherwise =
                         settleConversation items status $
-                            responseItemsToUiState
+                            responseItemsToUiStateRelative
                                 options.optShowRawReasoning
+                                (toText cwd)
                                 items
                 settleConversation items status conversation =
                     case status of
@@ -387,7 +459,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         AgentRoot
                         Nothing
                         rootItems
-                        (responseItemStepPreviews 2)
+                        (responseItemStepPreviewsRelative (toText cwd) 2)
             let rootEntry = AgentEntry
                     { agentTarget = AgentRoot
                     , agentPath = "/root"
@@ -404,7 +476,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     conversationFor
                     sessions)
                 agents
-            pure (selected, rootEntry : children)
+            let nativeEntries = nativeAgentEntries nativeAgents
+            pure (selected, rootEntry : children <> nativeEntries)
           where
             materializeChild
                     transcriptLines
@@ -419,7 +492,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     target
                     (Just status)
                     items
-                    (agentStepsForStatus 2 status)
+                    (agentStepsForStatusRelative (toText cwd) 2 status)
                 let transcript =
                         transcriptLines target items
                             <> case status of
@@ -460,11 +533,16 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 releaseSelectedAgent previous
             case target of
                 AgentRoot -> pure ()
+                AgentNative _ -> pure ()
                 AgentChild agentId -> do
                     session <-
                         (Just <$>
                             hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure Nothing
+                            `catchAny` \err -> do
+                                reportSessionError
+                                    ("failed to load selected agent: "
+                                        <> formatException err)
+                                pure Nothing
                     forM_ session \selectedSession -> do
                         withMVar selectedSession.subSessionHydrated \_ ->
                             writeIORef selectedSession.subSessionPinned True
@@ -472,10 +550,14 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         -- refill the same stable object now that it is pinned.
                         void
                             (hydrateSelectedAgent agentId)
-                            `catchAny` \_ -> pure ()
+                            `catchAny` \err ->
+                                reportSessionError
+                                    ("failed to pin selected agent: "
+                                        <> formatException err)
             writeIORef selectedAgent target
         releaseSelectedAgent = \case
             AgentRoot -> pure ()
+            AgentNative _ -> pure ()
             AgentChild agentId -> do
                 sessions <- readIORef subagentSessions
                 forM_ (Map.lookup agentId sessions) \session -> do
@@ -528,24 +610,12 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                     <> Text.pack (show omitted)
                                     <> " omitted from model context due to the context budget")
                         pure learnedSkills
-        sessionReset = do
-            resetLiveConversationWith
-                resetBackendState
-                conversationRef
-                planMode
-            writeIORef usageRef emptyTokenUsage
-            writeIORef lastAssistantRef Nothing
-            writeIORef pendingNotices []
-            writeIORef subagentSessions Map.empty
-            writeIORef selectedAgent AgentRoot
-            writeIORef agentStepCache Map.empty
-            case multiCtx of
-                Just ctx -> resetSubagentRegistry ctx.multiRegistry
-                Nothing -> pure ()
+        reloadGeneratedContext = do
             freshAgents <-
                 loadAgentsContext
                     stderrHandle
                     fullscreen
+                    SuppressAgentsContextLoaded
                     options
                     dialect
                     home
@@ -561,6 +631,22 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 defaultLearnedSkillContextMaxChars
             fresh <- readIORef freshAgents
             writeIORef startupContext fresh
+        sessionReset = do
+            resetLiveConversationWith
+                resetBackendState
+                conversationRef
+                planMode
+            writeIORef usageRef emptyTokenUsage
+            modifyIORef' renderStateRef clearRenderTokenRate
+            writeIORef lastAssistantRef Nothing
+            writeIORef pendingNotices []
+            writeIORef subagentSessions Map.empty
+            writeIORef selectedAgent AgentRoot
+            writeIORef agentStepCache Map.empty
+            case multiCtx of
+                Just ctx -> resetSubagentRegistry ctx.multiRegistry
+                Nothing -> pure ()
+            reloadGeneratedContext
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
@@ -629,6 +715,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         emitUiEvent runtime
                             (UiSystemMessage (formatSkillOmission omitted))
     policyRef <- newIORef policy
+    managedLoopPublisher <-
+        maybe
+            (pure (const (pure ())))
+            newManagedLoopEventPublisher
+            promptRequest
     -- Mirror plan session dir into the subagent store root for this session.
     let syncStore = do
             sessionDir <- readIORef planMode.planSessionDir
@@ -654,24 +745,31 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     && nativeProgressAnimationEnabled
                         options.optMotionMode
             , renderMotionMode = options.optMotionMode
+            , renderWorkspace = toText cwd
             }
         emitLoop event = do
-            forM_ promptRequest \request ->
-                publishManagedLoopEvent request event
+            atomicModifyIORef' nativeAgentsRef \current ->
+                (applyNativeAgentEvent event current, ())
+            managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
                 Just runtime -> do
-                    case event of
-                        TurnStarted -> do
-                            now <- getCurrentTime
-                            modifyIORef' renderStateRef (beginRenderTurn now)
-                        TextDelta _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{statePrintedText = True})
-                        ToolStarted _ ->
-                            modifyIORef' renderStateRef
-                                (\state -> state{stateActivity = "Running tool…"})
-                        _ -> pure ()
+                    now <- getCurrentTime
+                    modifyIORef' renderStateRef \state ->
+                        case event of
+                            TurnStarted -> beginRenderTurn now state
+                            TextDelta delta ->
+                                countGenerationChars delta
+                                    state{statePrintedText = True}
+                            ReasoningDelta delta ->
+                                countGenerationChars delta state
+                            ResponseRestarted _ ->
+                                resetRenderGeneration now state
+                            ToolStarted _ ->
+                                state{stateActivity = "Running tool…"}
+                            TurnFinished turn ->
+                                recordRenderTurnRate now turn state
+                            _ -> state
                     emitUiEvent runtime (UiLoop event)
         shellToolAllowed call = do
             ghciEnabled <- readIORef ghciEnabledRef
@@ -699,10 +797,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             withStdinPaused escPaused $
                                 approveToolDecision
                                     policyRef allowedToolsRef toolRegistry planMode
-                                    projectRoot call
+                                    projectRoot cwd call
                         Just runtime ->
                             approveToolDecisionWithReporterAndPersistence
-                                (requestFullscreenPermission runtime)
+                                (requestFullscreenPermission runtime (toText cwd))
                                 (\case
                                     ApprovalWarning _ -> pure ()
                                     ApprovalSuccess message ->
@@ -723,7 +821,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 , commitBackendState = writeLiveTranscript conversationRef
                 }
             , loopTools = toolRegistry
-            , loopDispatch = defaultLoopDispatch
+            , loopDispatch =
+                defaultLoopDispatch
+                    { toolDispatchFinalizeOutput = finalizeToolOutput toolEnv }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->
@@ -733,6 +833,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                             ("Tool " <> call.name
                                 <> " is disabled by the current /shell setting."))
                     True -> approveRegisteredTool call
+            , loopReadSteering =
+                readIORef steeringRef
+            , loopCommitSteering = \count ->
+                atomicModifyIORef' steeringRef \pending ->
+                    (drop count pending, ())
             , loopCancel = toolEnv.toolCancel
             }
         beginSubagentTurn = do
@@ -791,7 +896,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure $
                 case dialectToolLayout dialect of
                     NoHostToolLayout -> []
-                    _ -> "web_search" : projectedNames
+                    _ -> hostedSearchToolNames dialect ++ projectedNames
         shellModeFlags = \case
             ShellGhci -> (True, False)
             ShellBash -> (False, True)
@@ -846,11 +951,22 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     btwRequests <- newChan
     recapRequests <- newChan
     let
+        reloadGeneratedContextSafely =
+            reloadGeneratedContext `catchAny` \err ->
+                reportSessionError
+                    ("failed to reload generated context: "
+                        <> formatException err)
+        compactRunnerWithContext focus = do
+            result <- compactRunner focus
+            case result of
+                Left _ -> pure ()
+                Right _ -> reloadGeneratedContextSafely
+            pure result
         env = SessionEnv
             { sessionLoop = config
             , sessionBtwBackend = btwBackend
             , sessionQueueRecap = writeChan recapRequests
-            , sessionCompact = compactRunner
+            , sessionCompact = compactRunnerWithContext
             , sessionRender = render
             , sessionProvider = provider
             , sessionConnection = connectionId
@@ -889,6 +1005,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionPreviewId = previewIdRef
             , sessionInterrupt = interrupt
             , sessionRestartEffort = restartEffortRef
+            , sessionLastFailedTurn = lastFailedTurnRef
             , sessionStoreRoot = storeRoot
             , sessionUsage = usageRef
             , sessionAccount = accountRef
@@ -900,6 +1017,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
             , sessionSetWindowTitle = setWindowTitle
+            , sessionBeginWindowTitleBusy = beginWindowTitleBusy
+            , sessionEndWindowTitleBusy = endWindowTitleBusy
             , sessionAgentViewport = Just agentViewport
             , sessionBeginSubagentTurn = beginSubagentTurn
             , sessionFinishSubagentTurn = finishSubagentTurn
@@ -909,14 +1028,32 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
+    writeIORef generatedContextReloadRef reloadGeneratedContextSafely
     writeIORef startup.startupRestartEffort \level -> do
-        setSessionEffort env level
+        setSessionEffortText env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
     forM_ fullscreen \runtime ->
         setFullscreenSessionActions
             runtime
             (requestCancel toolEnv.toolCancel)
+            (\text -> do
+                images <- loadImagesFromPastedText text
+                let input = case images of
+                        Just attached@(_:_) ->
+                            UserMultimodal
+                                { userText = "Image attached."
+                                , userImages = attached
+                                }
+                        _ -> UserMessage text
+                callbacks.runnerPreparePromptSkillInputs
+                    env text [input] >>= \case
+                        Left err ->
+                            emitUiEvent runtime (UiErrorMessage err)
+                        Right inputs -> do
+                            atomicModifyIORef' steeringRef \pending ->
+                                (pending <> inputs, ())
+                            emitUiEvent runtime (UiInputSteered text))
             (writeChan btwRequests)
             (writeChan recapRequests (RecapSession RecapAuto))
             (\level ->
@@ -930,7 +1067,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             skills <- loadSkillsCatalogQuiet
                 options home projectRoot cwd
             let queueInitialContext =
-                    null initialTurns && not (isJust initialPrevious)
+                    resumeNeedsGeneratedContext initialTurns
+                        || (null initialTurns && isNothing initialPrevious)
             (omitted, _) <- installSkills startupContext
                 queueInitialContext
                 skills
@@ -1002,12 +1140,13 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 RecapSession kind -> callbacks.runnerRunSessionRecap False env kind
                 RecapTurnSummary -> callbacks.runnerRunSessionTurnSummary env
             recapWorker
-    result <- case fullscreen of
-        Just _ ->
-            withAsync btwWorker \_ ->
+    result <- withAsync windowTitleWorker \_ ->
+        case fullscreen of
+            Just _ ->
+                withAsync btwWorker \_ ->
+                    withAsync recapWorker (const sessionAction)
+            Nothing ->
                 withAsync recapWorker (const sessionAction)
-        Nothing ->
-            withAsync recapWorker (const sessionAction)
     _ <- waitForSessionTitleResults 5000000 titleManager
     applyPendingSessionTitles env
     pure result

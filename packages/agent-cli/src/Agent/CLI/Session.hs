@@ -112,7 +112,7 @@ import Data.Bits (xor)
 import Data.Int (Int64)
 import Data.IORef
 import Data.Functor ((<&>))
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -121,6 +121,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime, nominalDiffTimeToSeconds)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Word (Word64)
+import qualified Data.Vector as Vector
 import Numeric (showHex)
 import System.Directory.OsPath
     ( createDirectory
@@ -899,7 +900,7 @@ loadSessionTurnPage root pool sessionId loader = runExceptT do
         (\storedTurn -> do
             turn <- fromStoredTurn storedTurn.storedTurn
             pure (storedTurn.storedTurnIndex, turn))
-        stored.sessionPageTurns
+        (Vector.toList stored.sessionPageTurns)
     pure SessionTurnPage
         { pageTurns = turns
         , pageGenerationStart = stored.sessionPageGenerationStart
@@ -1072,14 +1073,35 @@ sessionTempDirForId root sessionId
                 </> unsafeEncodeUtf (Text.unpack sessionId))
     | otherwise = Left "invalid session id"
 
-listSessions :: StorePool -> OsPath -> IO [SessionMeta]
+listSessions :: StorePool -> OsPath -> IO ([SessionMeta], [Text])
 listSessions pool _root = do
     Store.listSessionMetadata pool >>= \case
         Left err ->
             fail
                 ("could not list PostgreSQL sessions: "
                     <> Text.unpack (renderStoreError err))
-        Right values -> pure (catMaybes (map decodeMetaQuiet values))
+        Right values ->
+            let decoded = map decodeListedSessionMeta values
+            in pure
+                ( [meta | Right meta <- decoded]
+                , [err | Left err <- decoded]
+                )
+
+-- | Decode one persisted session for listing. Corrupt or incompatible
+-- metadata becomes an error string instead of disappearing from the picker.
+decodeListedSessionMeta :: Store.SessionMetadata -> Either Text SessionMeta
+decodeListedSessionMeta value = do
+    meta <- fromStoredMetadata value
+    unless (meta.metaVersion == sessionSchemaVersion) $
+        Left $
+            "unsupported session schema version "
+                <> Text.pack (show meta.metaVersion)
+                <> " for session "
+                <> meta.metaId
+                <> " (expected "
+                <> Text.pack (show sessionSchemaVersion)
+                <> ")"
+    pure meta
 
 writeSessionMeta :: StorePool -> OsPath -> SessionMeta -> IO ()
 writeSessionMeta pool _path meta = do
@@ -1286,7 +1308,10 @@ decodeStoredSession
 decodeStoredSession sessionId stored = do
     meta <- except (fromStoredMetadata stored.storedMetadata)
     validateSessionMeta sessionId meta
-    turns <- except $ mapM (fromStoredTurn . (.storedTurn)) stored.storedTurns
+    turns <- except $
+        traverse
+            (fromStoredTurn . (.storedTurn))
+            (Vector.toList stored.storedTurns)
     pure (meta, turns)
 
 toStoredMetadata :: SessionMeta -> Store.SessionMetadata
@@ -1450,12 +1475,6 @@ fromStoredUsage usage = TokenUsage
     , outputTokens = fromIntegral usage.sessionUsageOutputTokens
     , cachedTokens = fromIntegral usage.sessionUsageCachedTokens
     }
-
-decodeMetaQuiet :: Store.SessionMetadata -> Maybe SessionMeta
-decodeMetaQuiet value =
-    case fromStoredMetadata value of
-        Right meta | meta.metaVersion == sessionSchemaVersion -> Just meta
-        _ -> Nothing
 
 validateSessionMeta :: Text -> SessionMeta -> ExceptT Text IO ()
 validateSessionMeta sessionId meta = do

@@ -10,8 +10,10 @@ import Agent.Telegram.Types
     , TelegramMedia(..)
     , TelegramMediaKind(..)
     , TelegramCallbackBinding(..)
+    , TelegramChatMember(..)
     , TelegramDeadLetter(..)
     , TelegramPendingCallback(..)
+    , TelegramPendingLeave(..)
     , TelegramPendingMediaTurn(..)
     , TelegramRetryMetadata(..)
     )
@@ -43,6 +45,26 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.Telegram" do
+    describe "telegramAgentPrompt" do
+        it "injects Telegram streaming and brevity guidance" do
+            let prompt = telegramAgentPrompt "Inspect the failing tests"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "shown to the user as a live Telegram draft"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Keep messages concise and conversational"
+            prompt `shouldSatisfy`
+                Text.isPrefixOf "Inspect the failing tests"
+
+    describe "telegramActivityDraftHtml" do
+        it "shows escaped reasoning summaries and streamed answer text" do
+            Bridge.telegramActivityDraftHtml
+                "Writing reply…"
+                "Checking <files>"
+                "Found & fixed\nDone"
+                `shouldBe`
+                "<tg-thinking>Checking &lt;files&gt;</tg-thinking>\
+                \<p>Found &amp; fixed<br>Done</p>"
+
     describe "parseTelegramArgs" do
         it "runs the configured gateway by default" do
             parseTelegramArgs [] `shouldBe` Right TelegramRun
@@ -220,6 +242,43 @@ spec = describe "Agent.Telegram" do
             observed <- readIORef maximumActive
             observed `shouldSatisfy` (\value -> value > 1 && value <= 4)
 
+        it "does not retry JSON files that fail to decode" do
+            decoded <- newIORef []
+            let decode name = do
+                    modifyIORef' decoded (name :)
+                    pure Nothing
+                dispatch _ =
+                    fail "undecodable requests must not be dispatched"
+            seen <-
+                Bridge.processBridgeRequestBatch
+                    Set.empty
+                    ["bad.json", "ignored.tmp"]
+                    decode
+                    dispatch
+            seen `shouldBe` Set.fromList ["bad.json"]
+            _ <-
+                Bridge.processBridgeRequestBatch
+                    seen
+                    ["bad.json"]
+                    decode
+                    dispatch
+            readIORef decoded `shouldReturn` ["bad.json"]
+
+        it "propagates bridge polling failures to the managed turn" do
+            started <- newEmptyMVar
+            Bridge.withTelegramBridgeUsing
+                (do
+                    putMVar started ()
+                    fail "bridge listing failed")
+                (takeMVar started >> threadDelay 2_000_000)
+                `shouldThrow` anyException
+
+        it "keeps the managed turn running while the bridge polls" do
+            Bridge.withTelegramBridgeUsing
+                (threadDelay 10_000_000)
+                (pure (41 + 1 :: Int))
+                `shouldReturn` 42
+
     describe "splitTelegramText" do
         it "keeps messages within the requested limit" do
             splitTelegramText 4 "abcdefghij"
@@ -269,6 +328,30 @@ spec = describe "Agent.Telegram" do
             markdownToTelegramHtml "before\n```haskell\nx < y && **raw**\n```\nafter"
                 `shouldBe`
                     "before<br><pre>x &lt; y &amp;&amp; **raw**\n</pre><br>after"
+
+        it "renders ATX headings with native bold entities" do
+            markdownToTelegramHtml
+                "# Summary\n#### Details with *emphasis*\nnot# a heading"
+                `shouldBe`
+                    "<b>Summary</b><br>\
+                    \<b>Details with <i>emphasis</i></b><br>\
+                    \not# a heading"
+
+        it "renders Markdown tables as aligned preformatted text" do
+            markdownToTelegramHtml
+                "| Metric | Before | Current | Change |\n\
+                \|:---|---:|---:|:---:|\n\
+                \| Clicks | 2,026 | 3,487 | **+72%** |\n\
+                \| Views & visits | 77 | 169 | +119% |"
+                `shouldBe`
+                    "<pre>Metric         | Before | Current | Change\n\
+                    \---------------+--------+---------+-------\n\
+                    \Clicks         |  2,026 |   3,487 |  +72% \n\
+                    \Views &amp; visits |     77 |     169 | +119% </pre>"
+
+        it "does not mistake ordinary pipe-separated text for a table" do
+            markdownToTelegramHtml "one | two\nstill | text"
+                `shouldBe` "one | two<br>still | text"
 
         it "leaves unmatched delimiters literal" do
             markdownToTelegramHtml "unfinished **bold and `code"
@@ -459,7 +542,8 @@ spec = describe "Agent.Telegram" do
                         , pendingMediaChat = TelegramChatKey (-1001) Nothing
                         , pendingMediaUserId = 456
                         , pendingMediaText =
-                            "[Telegram group message from Marc, user 456]\n\
+                            "[Replying to Telegram message 77 from user 999]\n\
+                            \[Telegram group message from Marc, user 456]\n\
                             \[Document: report.pdf]"
                         , pendingMediaAttachments =
                             [ TelegramMedia
@@ -488,18 +572,24 @@ spec = describe "Agent.Telegram" do
                 , userUsername = Just "HarnessBot"
                 }
             allowedUsers = Set.singleton 456
-            classify bytes = do
-                update <- (eitherDecode (LBS.pack bytes)
-                    :: Either String TelegramUpdate)
-                    `shouldReturnRight` "Telegram update should decode"
-                pure (classifyTelegramUpdate bot allowedUsers update)
-            classifyAll bytes = do
+            authorizedGroups = Set.singleton (-1001)
+            allowedUser = TelegramUser
+                { userId = 456
+                , userIsBot = False
+                , userFirstName = Just "Marc"
+                , userLastName = Nothing
+                , userUsername = Nothing
+                }
+            classifyWith respondToAll authorized bytes = do
                 update <- (eitherDecode (LBS.pack bytes)
                     :: Either String TelegramUpdate)
                     `shouldReturnRight` "Telegram update should decode"
                 pure
                     (classifyTelegramUpdateWithMode
-                        bot allowedUsers True update)
+                        bot allowedUsers authorized respondToAll update)
+            classify = classifyWith False Set.empty
+            classifyAuthorized = classifyWith False authorizedGroups
+            classifyAll = classifyWith True authorizedGroups
 
         it "routes an allowed mention into the shared group session" do
             action <- classify
@@ -559,7 +649,8 @@ spec = describe "Agent.Telegram" do
                 QueueTurn
                     83
                     (TelegramChatKey (-1001) Nothing)
-                    "[Telegram group message from Marc, user 456]\ncontinue"
+                    "[Replying to Telegram message 70 from @HarnessBot, user 999]\n\
+                    \[Telegram group message from Marc, user 456]\ncontinue"
                     Nothing
 
             commandAction <- classify
@@ -591,24 +682,25 @@ spec = describe "Agent.Telegram" do
                 QueueTurn
                     85
                     (TelegramChatKey (-1002) (Just 7))
-                    "[Telegram group message from Marc, user 456]\n\
+                    "[Replying to Telegram message 71 from @HarnessBot, user 999]\n\
+                    \[Telegram group message from Marc, user 456]\n\
                     \[Voice message]"
                     (Just (TelegramVoice "voice-file" 4 Nothing Nothing))
 
-        it "ignores ambient group traffic, other bots' commands, and blocked users" do
+        it "leaves unauthorized groups on ambient traffic, other bots' commands, and blocked users" do
             ambient <- classify
                 "{\"update_id\":27,\"message\":{\
                 \\"message_id\":85,\"from\":{\"id\":456},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"hello everyone\"}}"
-            ambient `shouldBe` IgnoreUpdate
+            ambient `shouldBe` LeaveUnauthorizedGroup (-1001)
 
             otherBot <- classify
                 "{\"update_id\":28,\"message\":{\
                 \\"message_id\":86,\"from\":{\"id\":456},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"/new@OtherBot\"}}"
-            otherBot `shouldBe` IgnoreUpdate
+            otherBot `shouldBe` LeaveUnauthorizedGroup (-1001)
 
             repliedOtherBot <- classify
                 "{\"update_id\":29,\"message\":{\
@@ -618,13 +710,27 @@ spec = describe "Agent.Telegram" do
                 \\"reply_to_message\":{\"message_id\":70,\
                 \\"from\":{\"id\":999,\"is_bot\":true},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
-            repliedOtherBot `shouldBe` IgnoreUpdate
+            repliedOtherBot `shouldBe` LeaveUnauthorizedGroup (-1001)
 
             blocked <- classify
                 "{\"update_id\":30,\"message\":{\
                 \\"message_id\":88,\"from\":{\"id\":123},\
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"@HarnessBot hello\"}}"
+            blocked `shouldBe` LeaveUnauthorizedGroup (-1001)
+
+        it "ignores ambient group traffic, other bots' commands, and blocked users in authorized groups" do
+            ambient <- classifyAuthorized
+                "{\"update_id\":27,\"message\":{\"message_id\":85,\"from\":{\"id\":456},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"hello everyone\"}}"
+            ambient `shouldBe` IgnoreUpdate
+            otherBot <- classifyAuthorized
+                "{\"update_id\":28,\"message\":{\"message_id\":86,\"from\":{\"id\":456},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"/new@OtherBot\"}}"
+            otherBot `shouldBe` IgnoreUpdate
+            repliedOtherBot <- classifyAuthorized
+                "{\"update_id\":29,\"message\":{\"message_id\":87,\"from\":{\"id\":456},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"/new@OtherBot\",\"reply_to_message\":{\"message_id\":70,\"from\":{\"id\":999,\"is_bot\":true},\"chat\":{\"id\":-1001,\"type\":\"group\"}}}}"
+            repliedOtherBot `shouldBe` IgnoreUpdate
+            blocked <- classifyAuthorized
+                "{\"update_id\":30,\"message\":{\"message_id\":88,\"from\":{\"id\":123},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"@HarnessBot hello\"}}"
             blocked `shouldBe` IgnoreUpdate
 
         it "suppresses the ambient no-reply marker but not normal replies" do
@@ -677,6 +783,244 @@ spec = describe "Agent.Telegram" do
                 \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
                 \\"text\":\"/new@OtherBot\"}}"
             otherBot `shouldBe` IgnoreUpdate
+
+        it "rejects group joins from people who are not allowed admins" do
+            foreigner <- classify
+                "{\"update_id\":40,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"from\":{\"id\":123,\"first_name\":\"Eve\"},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"}}}"
+            foreigner `shouldBe` LeaveUnauthorizedGroup (-1001)
+
+            addedByAdmin <- classify
+                "{\"update_id\":41,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"supergroup\"},\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"}}}"
+            addedByAdmin `shouldBe` ReviewGroupJoin (-1001) allowedUser
+                { userFirstName = Just "Marc" }
+
+            alreadyAuthorized <- classifyAuthorized
+                "{\"update_id\":42,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"from\":{\"id\":123},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"}}}"
+            alreadyAuthorized `shouldBe` IgnoreUpdate
+
+            removed <- classifyAuthorized
+                "{\"update_id\":43,\"my_chat_member\":{\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"from\":{\"id\":123},\
+                \\"old_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"member\"},\
+                \\"new_chat_member\":{\"user\":{\"id\":999,\"is_bot\":true},\
+                \\"status\":\"left\"}}}"
+            removed `shouldBe` RevokeGroupChat (-1001)
+
+            serviceAdd <- classify
+                "{\"update_id\":44,\"message\":{\
+                \\"message_id\":91,\"from\":{\"id\":123},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"new_chat_members\":[{\"id\":999,\"is_bot\":true,\
+                \\"username\":\"HarnessBot\"}]}}"
+            serviceAdd `shouldBe` LeaveUnauthorizedGroup (-1001)
+
+        it "authorizes a group only when an allowed user is a chat administrator" do
+            let admin =
+                    TelegramChatMember allowedUser "administrator" Nothing
+                member =
+                    TelegramChatMember allowedUser "member" Nothing
+                foreignAdmin = TelegramChatMember
+                    TelegramUser
+                        { userId = 123
+                        , userIsBot = False
+                        , userFirstName = Just "Eve"
+                        , userLastName = Nothing
+                        , userUsername = Nothing
+                        }
+                    "administrator"
+                    Nothing
+                anonymous = TelegramUser
+                    { userId = telegramAnonymousAdminUserId
+                    , userIsBot = True
+                    , userFirstName = Just "Group"
+                    , userLastName = Nothing
+                    , userUsername = Just "GroupAnonymousBot"
+                    }
+            groupJoinAuthorized allowedUsers allowedUser [admin]
+                `shouldBe` True
+            groupJoinAuthorized allowedUsers allowedUser [member]
+                `shouldBe` False
+            groupJoinAuthorized allowedUsers allowedUser [foreignAdmin]
+                `shouldBe` False
+            groupJoinAuthorized allowedUsers anonymous [admin]
+                `shouldBe` True
+            groupJoinAuthorized allowedUsers anonymous [foreignAdmin]
+                `shouldBe` False
+            isAnonymousAdmin anonymous `shouldBe` True
+            isAnonymousAdmin allowedUser `shouldBe` False
+
+        it "rewrites a reply /allow command into the other member's user id" do
+            action <- classifyAuthorized
+                "{\"update_id\":51,\"message\":{\
+                \\"message_id\":101,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/allow\",\
+                \\"reply_to_message\":{\"message_id\":100,\
+                \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"hello\"}}}"
+            action `shouldBe`
+                QueueTurn
+                    101
+                    (TelegramChatKey (-1001) Nothing)
+                    "/allow 789"
+                    Nothing
+
+        it "keeps a named /allow command so the gateway can resolve it later" do
+            action <- classifyAuthorized
+                "{\"update_id\":52,\"message\":{\
+                \\"message_id\":102,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"/allow Hendi\"}}"
+            action `shouldBe`
+                QueueTurn
+                    102
+                    (TelegramChatKey (-1001) Nothing)
+                    "/allow Hendi"
+                    Nothing
+
+        it "includes reply identity and mentions in the agent prompt" do
+            action <- classifyAuthorized
+                "{\"update_id\":53,\"message\":{\
+                \\"message_id\":103,\
+                \\"from\":{\"id\":456,\"first_name\":\"Marc\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"@HarnessBot also accept messages from Hendi\",\
+                \\"entities\":[{\"offset\":0,\"length\":12,\"type\":\"mention\"},\
+                \{\"offset\":38,\"length\":5,\"type\":\"text_mention\",\
+                \\"user\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"}}],\
+                \\"reply_to_message\":{\"message_id\":100,\
+                \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"can I use the bot?\"}}}"
+            action `shouldBe`
+                QueueTurn
+                    103
+                    (TelegramChatKey (-1001) Nothing)
+                    "[Replying to Telegram message 100 from Hendi, @hendi, user 789: \
+                    \can I use the bot?]\n\
+                    \[Telegram mentions: Hendi, @hendi, user 789]\n\
+                    \[Telegram group message from Marc, user 456]\n\
+                    \also accept messages from Hendi"
+                    Nothing
+
+        it "records ignored group members so they can be allowed by name" do
+            update <- (eitherDecode
+                (LBS.pack
+                    "{\"update_id\":54,\"message\":{\
+                    \\"message_id\":104,\
+                    \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                    \\"username\":\"hendi\"},\
+                    \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                    \\"text\":\"hello everyone\"}}")
+                :: Either String TelegramUpdate)
+                `shouldReturnRight` "ignored group update should decode"
+            classifyAuthorized
+                "{\"update_id\":54,\"message\":{\
+                \\"message_id\":104,\
+                \\"from\":{\"id\":789,\"first_name\":\"Hendi\",\
+                \\"username\":\"hendi\"},\
+                \\"chat\":{\"id\":-1001,\"type\":\"group\"},\
+                \\"text\":\"hello everyone\"}}"
+                >>= (`shouldBe` IgnoreUpdate)
+            let state = recordSeenTelegramUsers update emptyTelegramState
+                hendi = TelegramUser
+                    { userId = 789
+                    , userIsBot = False
+                    , userFirstName = Just "Hendi"
+                    , userLastName = Nothing
+                    , userUsername = Just "hendi"
+                    }
+            Map.lookup 789 state.seenTelegramUsers `shouldBe` Just hendi
+            Map.lookup (-1001) state.seenUsersByChat
+                `shouldBe` Just (Set.singleton 789)
+            resolveTelegramUser state (-1001) Nothing "Hendi"
+                `shouldBe` ResolvedTelegramUser hendi
+            resolveTelegramUser state (-1001) Nothing "@hendi"
+                `shouldBe` ResolvedTelegramUser hendi
+            telegramReplyUserIdFromPrompt
+                "[Replying to Telegram message 100 from Hendi, @hendi, user 789: hi]\n\
+                \please allow them"
+                `shouldBe` Just 789
+
+        it "authorizes a group after an allowed user targets the bot there" do
+            let key = TelegramChatKey (-1001) Nothing
+                state = storeUpdateAction
+                    22
+                    (QueueTurn 80 key "@HarnessBot hello" Nothing)
+                    emptyTelegramState
+            state.authorizedGroupChatIds `shouldBe` Set.singleton (-1001)
+            nextPendingAction key state `shouldBe`
+                Just
+                    (RunPendingTurn
+                        (TelegramPendingTurn 22 80 key "@HarnessBot hello" Nothing))
+
+        it "queues a leave and drops other work for unauthorized groups" do
+            let key = TelegramChatKey (-1001) Nothing
+                turn = TelegramPendingTurn 10 77 key "hello" Nothing
+                seeded = emptyTelegramState
+                    { authorizedGroupChatIds = Set.singleton (-1001)
+                    , pendingQueues =
+                        Map.singleton key (Map.singleton 10 (RunPendingTurn turn))
+                    }
+                state = storeUpdateAction
+                    40
+                    (LeaveUnauthorizedGroup (-1001))
+                    seeded
+            state.authorizedGroupChatIds `shouldBe` Set.empty
+            nextPendingAction key state `shouldBe`
+                Just
+                    (LeaveUnauthorizedChat
+                        (TelegramPendingLeave 40 key))
+
+        it "keeps every update when a batch is applied in ascending id order" do
+            -- pollForever must process a getUpdates batch in ascending
+            -- update_id order: storeUpdateAction advances the offset
+            -- monotonically, so applying a higher-id update first makes
+            -- updateAlreadyStored drop the lower-id one. Two messages live in
+            -- different chats (ids 100 and 101) so no per-chat batching hides
+            -- the effect.
+            let keyA = TelegramChatKey 100100 Nothing
+                keyB = TelegramChatKey 200200 Nothing
+                apply uid messageId key =
+                    storeUpdateAction uid (QueueTurn messageId key "hi" Nothing)
+                ascending =
+                    apply 101 20 keyB (apply 100 10 keyA emptyTelegramState)
+                reordered =
+                    apply 100 10 keyA (apply 101 20 keyB emptyTelegramState)
+            -- Ascending order keeps both messages.
+            Map.member keyA ascending.pendingQueues `shouldBe` True
+            Map.member keyB ascending.pendingQueues `shouldBe` True
+            -- Processing the higher id first silently drops the lower-id
+            -- message: the bug the poll-loop sort prevents.
+            Map.member keyB reordered.pendingQueues `shouldBe` True
+            Map.member keyA reordered.pendingQueues `shouldBe` False
+            reordered.nextUpdateId `shouldBe` Just 102
 
     describe "durable queue state" do
         it "loads state written before pending turns were introduced" do
@@ -745,6 +1089,31 @@ spec = describe "Agent.Telegram" do
                         , (9, RunPendingTurn secondTurn)
                         ])
 
+        it "seeds authorized group chats from legacy group bindings" do
+            let groupKey = TelegramChatKey (-1001) Nothing
+                privateKey = TelegramChatKey 123 Nothing
+                decoded = eitherDecode
+                    (LBS.pack
+                        "{\"bindings\":[{\
+                        \\"chat\":{\"chatId\":-1001},\"sessionId\":\"group\"},{\
+                        \\"chat\":{\"chatId\":123},\"sessionId\":\"private\"}]}")
+                    :: Either String TelegramState
+            state <- decoded `shouldReturnRight`
+                "legacy Telegram bindings should decode"
+            state.authorizedGroupChatIds `shouldBe` Set.singleton (-1001)
+            Map.lookup groupKey state.bindings `shouldBe` Just "group"
+            Map.lookup privateKey state.bindings `shouldBe` Just "private"
+
+        it "keeps an explicit empty authorized group set" do
+            let decoded = eitherDecode
+                    (LBS.pack
+                        "{\"authorizedGroupChats\":[],\"bindings\":[{\
+                        \\"chat\":{\"chatId\":-1001},\"sessionId\":\"group\"}]}")
+                    :: Either String TelegramState
+            state <- decoded `shouldReturnRight`
+                "explicit authorized group chats should decode"
+            state.authorizedGroupChatIds `shouldBe` Set.empty
+
         it "preserves first-match semantics for duplicate legacy bindings" do
             let key = TelegramChatKey 123 Nothing
                 decoded = eitherDecode
@@ -782,6 +1151,7 @@ spec = describe "Agent.Telegram" do
                     , "pendingTurns" .= [turn]
                     , "pendingReplies" .= [reply]
                     , "pendingMediaTurns" .= ([] :: [TelegramPendingMediaTurn])
+                    , "pendingLeaves" .= ([] :: [TelegramPendingLeave])
                     , "pendingCallbacks" .= ([] :: [TelegramPendingCallback])
                     , "callbackBindings" .= ([] :: [TelegramCallbackBinding])
                     , "retryMetadata" .=
@@ -790,6 +1160,10 @@ spec = describe "Agent.Telegram" do
                         ([] :: [(Text.Text, Int)])
                     , "deadLetters" .= ([] :: [TelegramDeadLetter])
                     , "outboundMessages" .= ([] :: [Value])
+                    , "authorizedGroupChats" .= ([] :: [Integer])
+                    , "allowedUserIds" .= ([] :: [Integer])
+                    , "seenTelegramUsers" .= ([] :: [TelegramUser])
+                    , "seenUsersByChat" .= ([] :: [Value])
                     ]
             (eitherDecode (encode state) :: Either String Value)
                 `shouldBe` Right expected
@@ -830,13 +1204,55 @@ spec = describe "Agent.Telegram" do
                     first
             nextPendingAction key second `shouldBe`
                 Just
+                    (RunPendingTurn
+                        (TelegramPendingTurn
+                            11
+                            78
+                            key
+                            "first\n\n---\n\nsecond"
+                            Nothing))
+
+        it "coalesces a later photo into a managed media turn" do
+            let key = TelegramChatKey 123 Nothing
+                photo =
+                    TelegramMedia
+                        { telegramMediaKind = TelegramMediaPhoto
+                        , telegramMediaFile =
+                            Just TelegramFileMedia
+                                { fileMediaFileId = "large"
+                                , fileMediaName = Nothing
+                                , fileMediaMimeType = Just "image/jpeg"
+                                , fileMediaFileSize = Just 1024
+                                , fileMediaDuration = Nothing
+                                }
+                        , telegramMediaDescription = "[Photo]"
+                        }
+                first = storeUpdateAction
+                    10
+                    (QueueTurn 77 key "first" Nothing)
+                    emptyTelegramState
+                second = storeUpdateAction
+                    11
+                    (QueueMediaTurn TelegramPendingMediaTurn
+                        { pendingMediaUpdateId = 11
+                        , pendingMediaMessageId = 78
+                        , pendingMediaChat = key
+                        , pendingMediaUserId = 456
+                        , pendingMediaText = "second"
+                        , pendingMediaAttachments = [photo]
+                        , pendingMediaEdited = False
+                        , pendingMediaGroupId = Nothing
+                        })
+                    first
+            nextPendingAction key second `shouldBe`
+                Just
                     (RunPendingMediaTurn TelegramPendingMediaTurn
                         { pendingMediaUpdateId = 11
                         , pendingMediaMessageId = 78
                         , pendingMediaChat = key
-                        , pendingMediaUserId = 0
+                        , pendingMediaUserId = 456
                         , pendingMediaText = "first\n\n---\n\nsecond"
-                        , pendingMediaAttachments = []
+                        , pendingMediaAttachments = [photo]
                         , pendingMediaEdited = False
                         , pendingMediaGroupId = Nothing
                         })

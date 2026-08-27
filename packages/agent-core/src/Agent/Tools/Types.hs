@@ -107,6 +107,9 @@ data ToolEnv = ToolEnv
       -- Kept separate so catalog refreshes can replace them without
       -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
+    , toolOutputInlineCap :: !Int
+    , toolOutputPreviewCap :: !Int
+    , toolOutputArtifactCap :: !Int
     , toolStdoutCap :: !Int
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
@@ -123,7 +126,10 @@ defaultToolEnv cwd = do
         , toolAllowedRoots = allowedRoots
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
-        , toolStdoutCap = 100000
+        , toolOutputInlineCap = 50 * 1024
+        , toolOutputPreviewCap = 8 * 1024
+        , toolOutputArtifactCap = 64 * 1024 * 1024
+        , toolStdoutCap = 16 * 1024
         , toolCancel = cancel
         }
 

@@ -2,6 +2,7 @@
 module Agent.CLI.Session.Lifecycle
     ( SessionContinuation(..)
     , finishTurn
+    , retryFailedTurn
     , runPendingTurn
     ) where
 
@@ -31,7 +32,7 @@ import Agent.CLI.Runtime.Types
     , StartupFailure(..)
     )
 import Agent.CLI.Session.Interaction
-    ( setSessionEffort
+    ( setSessionEffortText
     , syncFullscreenPrompt
     )
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
@@ -45,7 +46,7 @@ import Agent.CLI.TUI.App
     ( emitUiEvent
     , hasQueuedFullscreenInput
     )
-import Agent.CLI.Turn (runOneTurn)
+import Agent.CLI.Turn (retryCheckpointedTurn, runOneTurn)
 import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.TUI.Model (UiEvent(..))
 import Control.Exception.Safe (throwIO)
@@ -54,6 +55,7 @@ import Data.IORef
     ( readIORef
     , writeIORef
     )
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime)
@@ -72,6 +74,28 @@ runPendingTurn
     -> IO RunResult
 runPendingTurn continuation presentation =
     runPendingTurnWithCooldownRetry continuation True presentation
+
+-- | Retry a failed turn from its retained input checkpoint. The original
+-- inputs are already present in the live transcript after a terminal failure;
+-- submitting them again would duplicate the user message and attachments.
+retryFailedTurn
+    :: SessionContinuation
+    -> SessionEnv
+    -> PendingTurn
+    -> IO RunResult
+retryFailedTurn continuation env pending = do
+    writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
+    syncFullscreenPrompt env
+    case env.sessionFullscreen of
+        Nothing -> pure ()
+        Just runtime -> emitUiEvent runtime UiTurnRestarted
+    writeIORef env.sessionLastFailedTurn Nothing
+    -- The failed turn already owns the persisted/displayed user prompt.
+    -- Keep the retry turn's user text empty so session history does not show
+    -- the same prompt twice.
+    result <- retryCheckpointedTurn env
+    finishTurnWithCooldownRetry
+        continuation True env pending.pendingExitAfter result
 
 runPendingTurnWithCooldownRetry
     :: SessionContinuation
@@ -94,6 +118,7 @@ runPendingTurnWithCooldownRetry
                 emitUiEvent runtime UiTurnRestarted
             ContinuePendingTurn ->
                 pure ()
+    writeIORef env.sessionLastFailedTurn Nothing
     result <- runOneTurn env pending.pendingPromptText pending.pendingInputs
     finishTurnWithCooldownRetry
         continuation allowCooldownRetry env pending.pendingExitAfter result
@@ -117,7 +142,7 @@ finishTurnWithCooldownRetry
 finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \case
     TurnSucceeded -> do
         env.sessionQueueRecap RecapTurnSummary
-        writeIORef env.sessionUnavailableProviders []
+        writeIORef env.sessionUnavailableProviders Set.empty
         selectionId <- readIORef env.sessionAccountSelectionId
         accountId <- readIORef env.sessionAccountId
         when
@@ -141,7 +166,9 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
         if exitAfter
             then pure RunQuit
             else continuation.resumeSession env
-    TurnFailed ->
+    TurnFailed pending -> do
+        writeIORef env.sessionLastFailedTurn
+            (Just (setPendingExitAfter exitAfter pending))
         if exitAfter
             then
                 if env.sessionBackground
@@ -153,7 +180,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                     Just _ -> pure ()
                 continueAfterTurn continuation env
     TurnRestartRequested level pending -> do
-        setSessionEffort env level
+        setSessionEffortText env level
         writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
         case env.sessionFullscreen of
             Just runtime ->

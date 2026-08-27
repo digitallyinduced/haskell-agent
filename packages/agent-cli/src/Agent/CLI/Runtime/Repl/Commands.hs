@@ -4,14 +4,9 @@ module Agent.CLI.Runtime.Repl.Commands
     , preparePromptSkillInputs
     ) where
 
-import Agent.CLI.AccountPicker
-    ( AccountPickerOption(..),
-      accountPickerMatches,
-      accountPickerRow,
-      loadAllAccountPickerOptions )
+import Agent.CLI.AccountPicker ()
 import Agent.CLI.AccountSelection ()
-import Agent.CLI.Afk
-    ( AfkTarget(..), handoffLocal, handoffRemote, parseAfkTarget )
+import Agent.CLI.Afk ()
 import Agent.CLI.AgentSessions ()
 import Agent.CLI.AgentViewport
     ( AgentViewportEnv(viewportSelect, viewportEntries,
@@ -19,10 +14,9 @@ import Agent.CLI.AgentViewport
 import Agent.CLI.Approval ( toggleAlwaysApprove )
 import Agent.CLI.Artifact ( fencedCodeBlock, lastDiffBlock )
 import Agent.CLI.Auth ()
+import Agent.CLI.Clipboard ( loadImagesFromPastedText )
 import Agent.CLI.Command
-    ( currentEffort,
-      currentModel,
-      formatSlashHelpWithCatalog,
+    ( formatSlashHelpWithCatalog,
       parseReplLineWithCatalog,
       ReplAction(ReplCommandError, ReplQuit, ReplReload, ReplPrompt,
                  ReplExpandedPrompt, ReplInvokeSkill, ReplSkills, ReplShowShell,
@@ -33,12 +27,12 @@ import Agent.CLI.Command
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
                  ReplSetModel, ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
-                 ReplBtw, ReplRecap, ReplResume, ReplSearch, ReplClear, ReplNew,
+                 ReplBtw, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
                  ReplHelp),
       ShellMode(ShellNone, ShellGhci, ShellBash, ShellBoth),
-      SlashCatalog(slashCatalogToolNames) )
+      SlashCatalog )
 import Agent.CLI.Compaction
     ( CompactOutcome(compactSummary, compactBeforeTokens,
                      compactAfterTokens, compactHistory) )
@@ -47,7 +41,7 @@ import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
 import Agent.CLI.Database.Store ()
 import Agent.CLI.Dialects ()
-import Agent.CLI.Error ( formatApiErrorInlineAt )
+import Agent.CLI.Error ()
 import Agent.CLI.GatewayBridge ()
 import Agent.CLI.Input
     ( formatPasteChip,
@@ -58,20 +52,13 @@ import Agent.CLI.Input
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
-import Agent.CLI.Login ( connectProviderAccount, runLoginManager )
+import Agent.CLI.Login ( runLoginManager )
 import Agent.CLI.Lsp ()
 import Agent.CLI.ManagedTurn ()
 import Agent.CLI.McpManager ( runMcpManager )
 import Agent.CLI.McpStatus ()
 import Agent.CLI.ModelConfig ()
-import Agent.CLI.Models
-    ( modelTargetRequiresRebuild,
-      rawModelOption,
-      resolveConfiguredModel,
-      resolveModelOptionDialect,
-      ModelOption(modelTarget),
-      ModelTarget(targetDialect, ModelTarget, targetProvider,
-                  targetConnectionId, targetModelId, targetWireModelId) )
+import Agent.CLI.Models ()
 import Agent.CLI.Options ( ApprovalPolicy )
 import Agent.CLI.PendingInputs ()
 import Agent.CLI.Plan ()
@@ -81,16 +68,16 @@ import Agent.CLI.Prompt ()
 import Agent.CLI.PromptHooks ()
 import Agent.CLI.Provider.OpenAI ()
 import Agent.CLI.Provider.Switch
-    ( applyModelChange,
-      reloadAuth,
+    ( reloadAuth,
       reportProviderUnavailable,
-      requestAccountProviderSwitch,
-      requestAutomaticProviderFallback,
-      requestModelTargetSwitch )
+      requestAutomaticProviderFallback )
 import Agent.CLI.ProviderAvailability ()
 import Agent.CLI.ProviderFallback ()
 import Agent.CLI.ProviderTransition
-    ( ProviderTransition, TurnResult(TurnProviderUnavailable) )
+    ( PendingTurn
+    , ProviderTransition
+    , TurnResult(TurnProviderUnavailable)
+    )
 import Agent.CLI.Recap ( RecapKind(..), RecapRequest(..) )
 import Agent.CLI.Render
     ( RenderConfig(..),
@@ -101,132 +88,82 @@ import Agent.CLI.Render
       resetRenderPrintedText )
 import Agent.CLI.ReplMode ( replModeLabel )
 import Agent.CLI.Request ()
-import Agent.CLI.Runtime.HistorySource
-    ( reloadFullscreenHistoryForHandle )
+import Agent.CLI.Runtime.HistorySource ()
 import Agent.CLI.Runtime.Persistence ()
 import Agent.CLI.Runtime.Recap ( runSessionRecap )
 import Agent.CLI.Runtime.Repl.Attachments
-    ( AttachmentContext(..)
-    , attachImagesFromPrompt
-    , clearAttachments
-    , handleClipboardPaste
-    , handleClipboardPasteOrText
-    , pasteAttachments
-    , showAttachments
-    )
+    ( handleAttachmentAction, handleClipboardInput )
+import Agent.CLI.Runtime.Repl.Selection
+    ( handleSelectionAction, handleSelectionInput )
+import Agent.CLI.Runtime.Repl.Session ( handleSessionAction )
+import Agent.CLI.Runtime.Repl.Workflow ( handleWorkflowAction )
 import Agent.CLI.Runtime.Types
-    ( RunResult(RunRestart, RunSwitchProvider, RunSwitchWorktree,
-                RunReload, RunQuit) )
+    ( RunResult(RunRestart, RunSwitchProvider, RunReload, RunQuit) )
 import Agent.CLI.Secret ()
 import Agent.CLI.Session
-    ( appendTurnKeepTitleIndexed,
+    ( TranscriptEffect(TranscriptReplace),
       appendTurnWithMetaUpdateIndexed,
-      createSession,
       ensureSession,
-      loadSession,
-      removeSessionTemp,
-      resetSessionTitleToAuto,
-      sessionConversationText,
-      sessionsRoot,
-      setManualSessionTitle,
-      writeSessionMeta,
       Persistence(..),
-      PersistenceState(PersistenceActive, PersistencePending),
-      SessionCreate(createCwd, SessionCreate, createPool, createEffort,
-                    createTarget, createTitleHint, createTitleIsManual, createRoot),
-      SessionHandle(sessionMeta, sessionPool, sessionMetaPath,
-                    sessionTempDir, sessionDir),
-      SessionMeta(metaId, metaLastResponseId, metaUpdatedAt,
-                  metaInputTokens, metaOutputTokens, metaCachedTokens, metaLastRecap,
-                  metaLastTurnSummary, metaLastRecapMainTurns, metaTransportModel,
-                  metaCwd, metaTitle),
-      SessionTransfer(transferTurns, SessionTransfer, transferMeta),
+      PersistenceState(PersistenceActive),
+      SessionHandle(sessionMeta, sessionDir),
+      SessionMeta(metaId, metaLastResponseId),
       SessionTurn(turnUsage, SessionTurn, turnAt, turnUserText,
                   turnAssistantText, turnError, turnResponseId, turnEffect,
-                  turnItems),
-      TranscriptEffect(TranscriptReplace, TranscriptReset) )
+                  turnItems) )
+import Agent.CLI.Session.Attachments ( queueAttachedImages )
 import Agent.CLI.Session.Choices
-    ( accountUsageText,
-      atMay,
-      effortChoice,
-      modelChoice,
-      showAccountUsage )
+    ( accountUsageText, showAccountUsage )
 import Agent.CLI.Session.History
     ( modifyLiveAttachments, readLiveAttachments )
-import Agent.CLI.Session.Interaction
-    ( runBtwQuestion, setSessionEffort )
+import Agent.CLI.Session.Interaction ( runBtwQuestion )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types ()
 import Agent.CLI.Session.Selection
-    ( currentSessionId,
-      handleConversationSearch,
-      handleResume,
-      pickAgentChoice )
+    ( currentSessionId, pickAgentChoice )
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ( SessionEnv(..) )
 import Agent.CLI.SessionLock ()
 import Agent.CLI.SessionState ()
-import Agent.CLI.SessionTitle
-    ( invalidateSessionTitles, requestSessionTitle )
+import Agent.CLI.SessionTitle ()
 import Agent.CLI.Skills ( formatSkillsListing )
 import Agent.CLI.Startup.Auth ()
 import Agent.CLI.Startup.Format ()
 import Agent.CLI.StartupContext ()
-import Agent.CLI.Status
-    ( applyReplMode, cycleReplInteraction, formatTokenUsage )
+import Agent.CLI.Status ( applyReplMode, cycleReplInteraction )
 import Agent.CLI.Style
-    ( cliWindowTitle,
-      glyphOk,
-      glyphSession,
-      roleError,
-      roleMuted,
-      roleSuccess )
+    ( glyphOk, glyphSession, roleError, roleMuted, roleSuccess )
 import Agent.CLI.Subagents.Runtime ()
 import Agent.CLI.TUI.App
     ( FullscreenRuntime,
+      beginFullscreenLiveHistory,
+      commitFullscreenImagePreviews,
       commitFullscreenHistoryTurn,
       emitUiEvent,
-      requestFullscreenChoiceWithBody,
       setFullscreenImagePreviews,
       withFullscreenSuspended )
-import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
-import Agent.CLI.TUI.Types (HistoryCommit(..))
+import Agent.CLI.TUI.SessionHistory ( sessionHistoryTurn )
+import Agent.CLI.TUI.Types ( HistoryCommit(..) )
 import Agent.CLI.Terminal
     ( copyTerminalClipboard, formatTerminalCapabilities, resolveColor )
 import Agent.CLI.Tools ()
 import Agent.CLI.Turn ( runOneTurn )
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch ()
-import Agent.CLI.Worktree ( createWorktree, worktreeRoot )
+import Agent.CLI.Worktree ()
 import Agent.Cancel ()
 import Agent.Claude ()
-import Agent.Dialect ( dialectId, dialectSlug )
+import Agent.Dialect ()
 import Agent.Error ()
-import Agent.GrokBuild.Dialect.Goal
-    ( activateGoal,
-      clearGoal,
-      formatGoalSnapshot,
-      pauseGoal,
-      readGoal,
-      resumeGoal )
-import Agent.GrokBuild.Dialect.Runtime ( GrokRuntimeControl(..) )
-import Agent.GrokBuild.Dialect.Workflow
-    ( formatWorkflowRuns, workflowRunSnapshots )
 import Agent.Loop
     ( TurnInput(UserMessage, UserMultimodal, userText, userImages),
       LoopEvent(ActivityUpdated) )
-import Agent.OpenAI.Compaction
-    ( clearSessionUserText,
-      compactSessionUserText,
-      newSessionUserText )
+import Agent.OpenAI.Compaction ( compactSessionUserText )
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ( toText )
-import Agent.Provider
-    ( Provider(ClaudeCodeProvider, OpenAIProvider),
-      providerSlug,
-      tokenProviderBillingMode )
+import Agent.Provider ( Provider(ClaudeCodeProvider) )
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ()
@@ -243,8 +180,8 @@ import Agent.Subagents.TaskPath ()
 import Agent.TUI.Model
     ( infoNotice,
       progressNotice,
-      UiEvent(UiUserSubmitted, UiRecapStarted, UiConversationCleared,
-              UiSetNotice, UiErrorMessage, UiSystemMessage) )
+      UiEvent(UiUserSubmitted, UiRecapStarted, UiSetNotice, UiErrorMessage,
+              UiSystemMessage) )
 import Agent.TUI.Motion ()
 import Agent.ToolDispatch ()
 import Agent.Tools.MultiAgents ()
@@ -264,9 +201,9 @@ import Control.Concurrent.STM ()
 import Control.Exception ( AsyncException(UserInterrupt) )
 import Control.Exception.Safe ( finally, throwIO )
 import Control.Monad ( when, forM_ )
-import Data.IORef ( newIORef, readIORef, writeIORef )
-import Data.List ( findIndex )
-import Data.Maybe ( isNothing, fromMaybe, listToMaybe )
+import Data.IORef ( atomicModifyIORef', newIORef, readIORef, writeIORef )
+import Data.List ()
+import Data.Maybe ( isNothing )
 import Data.Text ( Text )
 import Data.Time.Clock ( getCurrentTime )
 import System.Console.ANSI ()
@@ -275,7 +212,7 @@ import System.Directory.OsPath ()
 import System.Environment ()
 import System.Exit ()
 import System.IO ( stdout, hFlush, stderr )
-import System.OsPath ( takeDirectory )
+import System.OsPath ()
 import System.Posix.Files ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
@@ -287,9 +224,9 @@ import qualified Agent.OpenRouter.Usage as OpenRouterUsage ()
 import qualified Agent.Provider as Provider ()
 import qualified Agent.CLI.Session.Lifecycle as SessionLifecycle ()
 import qualified Agent.CLI.Session.Runner as SessionRunner ()
-import qualified Data.Set as Set ( toAscList )
+import qualified Data.Set as Set ()
 import qualified Data.Text as Text
-    ( intercalate, null, strip, unlines, pack )
+    ( null, strip, pack )
 import qualified Data.Text.IO as Text ( putStrLn, hPutStrLn )
 import qualified Agent.XAI.Options as XAI ()
 import qualified Agent.XAI.Usage as XAIUsage ()
@@ -298,6 +235,7 @@ handleReplLine
     :: SessionEnv
     -> (Text -> IO RunResult)
     -> (Bool -> TurnResult -> IO RunResult)
+    -> (PendingTurn -> IO RunResult)
     -> SlashCatalog
     -> [SkillInvocation]
     -> Bool
@@ -311,13 +249,8 @@ handleReplLine
             , sessionRender = render
             , sessionConversation = conversationRef
             , sessionProvider = provider
-            , sessionConnection = connectionId
-            , sessionModelCatalog = catalog
-            , sessionDialect = dialect
-            , sessionParams = paramsRef
             , sessionPolicy = policyRef
             , sessionPersist = persist
-            , sessionDatabasePool = databasePool
             , sessionPlanMode = planMode
             , sessionProjectRoot = projectRoot
             , sessionCwd = cwd
@@ -326,22 +259,15 @@ handleReplLine
             , sessionSkills = skillsRef
             , sessionSkillInvocations = skillInvocationsRef
             , sessionRefreshSkills = refreshSkills
-            , sessionGrokRuntime = grokRuntime
-            , sessionDraft = draftRef
-            , sessionStoreRoot = storeRoot
-            , sessionUsage = usageRef
-            , sessionAccountId = accountIdRef
-            , sessionAccountSelectionId = selectionRef
-            , sessionSelectAccount = selectAccount
+            , sessionPreviewId = previewIdRef
             , sessionLastAssistant = lastAssistantRef
             , sessionTerminal = terminal
             , sessionFullscreen = fullscreen
-            , sessionSetWindowTitle = setWindowTitle
             , sessionAgentViewport = agentViewport
-            , sessionReset = sessionReset
             }
         continueWith
         finishTurn
+        retryPendingTurn
         slashCatalog
         skillInvocations
         stdoutColor
@@ -380,27 +306,16 @@ handleReplLine
                     putStr "\ESC[2A\r\ESC[J"
                     hFlush stdout
             continueWith keptDraft
-    ReplClipboardPaste keptDraft clipboardPasteImages ->
-        handleClipboardPaste
-            attachmentContext
-            stdoutColor
-            keptDraft
-            clipboardPasteImages
-    ReplClipboardPasteOrText keptDraft pasted pastedDraft ->
-        handleClipboardPasteOrText
-            attachmentContext
-            stdoutColor
-            keptDraft
-            pasted
-            pastedDraft
-    ReplChooseModel keptDraft -> do
-        writeIORef draftRef keptDraft
-        chooseModel (continueWith keptDraft)
-    ReplChooseEffort keptDraft ->
-        chooseEffort (continueWith keptDraft)
-    ReplChooseAccount keptDraft -> do
-        writeIORef draftRef keptDraft
-        chooseAccount (continueWith keptDraft)
+    action@(ReplClipboardPaste _ _) ->
+        handleClipboardInput env continueWith stdoutColor action
+    action@(ReplClipboardPasteOrText _ _ _) ->
+        handleClipboardInput env continueWith stdoutColor action
+    action@(ReplChooseModel keptDraft) ->
+        handleSelectionInput env (continueWith keptDraft) action
+    action@(ReplChooseEffort keptDraft) ->
+        handleSelectionInput env (continueWith keptDraft) action
+    action@(ReplChooseAccount keptDraft) ->
+        handleSelectionInput env (continueWith keptDraft) action
     ReplPasted pasted ->
         submitLine slashCatalog skillInvocations
             continue stdoutColor True pasted
@@ -428,17 +343,25 @@ handleReplLine
                         -- rather than bitmap bytes. Treat a prompt that is
                         -- only image path(s) as an attach + in-terminal preview,
                         -- matching Grok Build's paste chip.
-                        attached <-
-                            attachImagesFromPrompt
-                                attachmentContext
-                                color
-                                text
-                        if attached
-                            then continue
-                            else do
+                        pastedImages <- loadImagesFromPastedText text
+                        case pastedImages of
+                            Just images@(_:_) -> do
+                                message <- queueAttachedImages
+                                    conversationRef
+                                    previewIdRef
+                                    color
+                                    (isNothing fullscreen)
+                                    images
+                                syncFullscreenImagePreviews
+                                displayInfo message $
+                                    Text.putStrLn
+                                        (roleMuted color
+                                            (glyphOk <> message))
+                                continue
+                            _ -> do
                                 pendingImages <- modifyLiveAttachments conversationRef \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
-                                    setFullscreenImagePreviews runtime []
+                                    commitFullscreenImagePreviews runtime pendingImages
                                 resetRenderPrintedText render
                                 let turnInputs =
                                         if null pendingImages
@@ -475,7 +398,7 @@ handleReplLine
                                     modifyLiveAttachments conversationRef
                                         \imgs -> ([], imgs)
                                 forM_ fullscreen \runtime ->
-                                    setFullscreenImagePreviews runtime []
+                                    commitFullscreenImagePreviews runtime pendingImages
                                 let userText =
                                         if Text.null arguments
                                             then "Use the "
@@ -525,15 +448,9 @@ handleReplLine
                             Text.putStrLn
                                 (roleMuted color (glyphOk <> message))
                         continue
-                    ReplPaste pasteImmediate pasteCaption ->
-                        pasteAttachments
-                            attachmentContext
-                            pasteImmediate
-                            pasteCaption
-                    ReplShowAttachments ->
-                        showAttachments attachmentContext
-                    ReplClearAttachments ->
-                        clearAttachments attachmentContext
+                    action@ReplPaste{} -> handleAttachmentAction env finishTurn continue action
+                    action@ReplShowAttachments -> handleAttachmentAction env finishTurn continue action
+                    action@ReplClearAttachments -> handleAttachmentAction env finishTurn continue action
                     ReplShowAgentLimit -> do
                         limit <- env.sessionConcurrentLimit
                         let message =
@@ -577,150 +494,13 @@ handleReplLine
                             then requestMcpRestart
                                 fullscreen persist
                             else continue
-                    ReplGoalStatus -> do
-                        color <- resolveColor stdout
-                        case grokRuntime of
-                            Nothing ->
-                                displayError
-                                    "goal commands are unavailable in this session" $
-                                    Text.hPutStrLn stderr
-                                        (roleError color
-                                            "goal commands are unavailable in this session")
-                            Just control ->
-                                readGoal control.grokGoalRuntime >>= \case
-                                    Nothing ->
-                                        displayInfo "No goal is active." $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    "No goal is active.")
-                                    Just goal -> do
-                                        let message =
-                                                formatGoalSnapshot goal
-                                        displayInfo message $
-                                            Text.putStrLn
-                                                (roleMuted color message)
-                        continue
-                    ReplGoalPause -> do
-                        color <- resolveColor stderr
-                        case grokRuntime of
-                            Nothing ->
-                                displayError
-                                    "goal commands are unavailable in this session" $
-                                    Text.hPutStrLn stderr
-                                        (roleError color
-                                            "goal commands are unavailable in this session")
-                            Just control ->
-                                pauseGoal control.grokGoalRuntime >>= \case
-                                    Left err ->
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
-                                    Right goal -> do
-                                        let message =
-                                                "Goal paused.\n"
-                                                    <> formatGoalSnapshot goal
-                                        displayInfo message $
-                                            Text.hPutStrLn stderr
-                                                (roleMuted color message)
-                        continue
-                    ReplGoalResume -> do
-                        color <- resolveColor stderr
-                        case grokRuntime of
-                            Nothing ->
-                                displayError
-                                    "goal commands are unavailable in this session" $
-                                    Text.hPutStrLn stderr
-                                        (roleError color
-                                            "goal commands are unavailable in this session")
-                            Just control ->
-                                resumeGoal control.grokGoalRuntime >>= \case
-                                    Left err ->
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
-                                    Right goal -> do
-                                        let message =
-                                                "Goal resumed.\n"
-                                                    <> formatGoalSnapshot goal
-                                        displayInfo message $
-                                            Text.hPutStrLn stderr
-                                                (roleMuted color message)
-                        continue
-                    ReplGoalClear -> do
-                        color <- resolveColor stderr
-                        case grokRuntime of
-                            Nothing ->
-                                displayError
-                                    "goal commands are unavailable in this session" $
-                                    Text.hPutStrLn stderr
-                                        (roleError color
-                                            "goal commands are unavailable in this session")
-                            Just control -> do
-                                cleared <-
-                                    clearGoal control.grokGoalRuntime
-                                let message =
-                                        if cleared
-                                            then "Goal cleared."
-                                            else "No goal was active."
-                                displayInfo message $
-                                    Text.hPutStrLn stderr
-                                        (roleMuted color message)
-                        continue
-                    ReplGoalSet original objective budget expanded ->
-                        case grokRuntime of
-                            Nothing -> do
-                                color <- resolveColor stderr
-                                let err =
-                                        "goal commands are unavailable in this session"
-                                displayError err $
-                                    Text.hPutStrLn stderr
-                                        (roleError color err)
-                                continue
-                            Just control ->
-                                activateGoal
-                                    control.grokGoalRuntime
-                                    objective
-                                    budget >>= \case
-                                        Left err -> do
-                                            color <- resolveColor stderr
-                                            displayError err $
-                                                Text.hPutStrLn stderr
-                                                    (roleError color err)
-                                            continue
-                                        Right _ ->
-                                            submitExpandedTurn
-                                                continue
-                                                color
-                                                original
-                                                expanded
-                    ReplWorkflowRuns -> do
-                        color <- resolveColor stdout
-                        case grokRuntime >>= (.grokWorkflowRuntime) of
-                            Nothing ->
-                                displayError
-                                    "workflow commands are unavailable in this session" $
-                                    Text.hPutStrLn stderr
-                                        (roleError color
-                                            "workflow commands are unavailable in this session")
-                            Just runtime -> do
-                                runs <- workflowRunSnapshots runtime
-                                let message = formatWorkflowRuns runs
-                                displayInfo message $
-                                    Text.putStrLn
-                                        (roleMuted color message)
-                        continue
-                    ReplWorkflowManage operation target -> do
-                        color <- resolveColor stderr
-                        let err =
-                                "workflow_management_unsupported: /workflow "
-                                    <> operation
-                                    <> maybe "" (" " <>) target
-                                    <> " is not supported by this host; use /workflow runs to inspect tracked runs."
-                        displayError err $
-                            Text.hPutStrLn stderr
-                                (roleError color err)
-                        continue
-
+                    action@ReplGoalStatus -> handleWorkflowAction env submitExpandedTurn color continue action
+                    action@ReplGoalPause -> handleWorkflowAction env submitExpandedTurn color continue action
+                    action@ReplGoalResume -> handleWorkflowAction env submitExpandedTurn color continue action
+                    action@ReplGoalClear -> handleWorkflowAction env submitExpandedTurn color continue action
+                    action@ReplGoalSet{} -> handleWorkflowAction env submitExpandedTurn color continue action
+                    action@ReplWorkflowRuns -> handleWorkflowAction env submitExpandedTurn color continue action
+                    action@ReplWorkflowManage{} -> handleWorkflowAction env submitExpandedTurn color continue action
                     ReplCopyLast -> do
                         answer <- readIORef lastAssistantRef
                         copyCommand
@@ -762,54 +542,10 @@ handleReplLine
                         displayInfo message $
                             Text.putStrLn (roleMuted color message)
                         continue
-                    ReplShowEffort -> do
-                        color <- resolveColor stdout
-                        params <- readIORef paramsRef
-                        let message = "effort: " <> currentEffort params
-                        displayInfo message $
-                            Text.putStrLn
-                                (roleMuted color (glyphSession <> message))
-                        continue
-                    ReplSetEffort level -> do
-                        setEffort level
-                        continue
-                    ReplShowModel -> do
-                        chooseModel continue
-                    ReplSetModel name -> do
-                        color <- resolveColor stdout
-                        let rawChoice = rawModelOption provider name
-                        choice <-
-                            resolveModelOptionDialect $
-                                fromMaybe
-                                    (rawChoice
-                                        { modelTarget =
-                                            rawChoice.modelTarget
-                                                { targetConnectionId = connectionId
-                                                , targetDialect = dialectId dialect
-                                                }
-                                        })
-                                    (resolveConfiguredModel catalog name)
-                        if modelTargetRequiresRebuild
-                                connectionId provider (dialectId dialect) choice
-                            then
-                                requestModelTargetSwitch
-                                    fullscreen choice persist >>= \case
-                                    Left err -> do
-                                        displayError err $
-                                            Text.hPutStrLn stderr
-                                                (roleError color err)
-                                        continue
-                                    Right result -> pure result
-                            else do
-                                message <- applyModelChange
-                                    projectRoot provider connectionId name
-                                    choice.modelTarget.targetWireModelId
-                                    choice.modelTarget.targetDialect
-                                    paramsRef render conversationRef persist
-                                displayInfo message $
-                                    Text.putStrLn
-                                        (roleMuted color (glyphOk <> message))
-                                continue
+                    action@ReplShowEffort -> handleSelectionAction env continue action
+                    action@ReplSetEffort{} -> handleSelectionAction env continue action
+                    action@ReplShowModel -> handleSelectionAction env continue action
+                    action@ReplSetModel{} -> handleSelectionAction env continue action
                     ReplToggleAlwaysApprove
                         | provider == ClaudeCodeProvider -> do
                             let message =
@@ -835,10 +571,7 @@ handleReplLine
                                     Text.hPutStrLn stderr (roleError color err)
                                 continue
                             Right outcome -> do
-                                fullscreenEvent UiConversationCleared
-                                fullscreenEvent
-                                    (UiSystemMessage outcome.compactSummary)
-                                let message =
+                                let statsMessage =
                                         "compacted "
                                             <> Text.pack
                                                 (show outcome.compactBeforeTokens)
@@ -849,13 +582,17 @@ handleReplLine
                                             <> Text.pack
                                                 (show (length outcome.compactHistory))
                                             <> " items)"
-                                displayInfo message $
-                                    Text.hPutStrLn stderr
-                                        (roleMuted color
-                                            (glyphSession <> message))
                                 case persist of
-                                    PersistenceDisabled -> pure ()
+                                    PersistenceDisabled ->
+                                        fullscreenEvent
+                                            (UiSystemMessage
+                                                outcome.compactSummary)
                                     PersistenceEnabled slotRef -> do
+                                        forM_ fullscreen
+                                            beginFullscreenLiveHistory
+                                        fullscreenEvent
+                                            (UiSystemMessage
+                                                outcome.compactSummary)
                                         now <- getCurrentTime
                                         handle <- ensureSession slotRef
                                         let turn = SessionTurn
@@ -883,7 +620,11 @@ handleReplLine
                                             commitFullscreenHistoryTurn
                                                 runtime
                                                 (sessionHistoryTurn turnIndex turn)
-                                                HistoryCommitReplace
+                                                HistoryCommitAppend
+                                displayInfo statsMessage $
+                                    Text.hPutStrLn stderr
+                                        (roleMuted color
+                                            (glyphSession <> statsMessage))
                                 continue
                     ReplPlan _
                         | provider == ClaudeCodeProvider -> do
@@ -910,423 +651,27 @@ handleReplLine
                             Nothing -> do
                                 runSessionRecap True env RecapManual
                                 continue
-                    ReplResume maybeId -> do
-                        handleResume databasePool fullscreen maybeId persist >>= \case
-                            Nothing -> continue
-                            Just result -> pure result
-                    ReplSearch query -> do
-                        handleConversationSearch
-                            databasePool fullscreen query persist >>= \case
-                                Nothing -> continue
-                                Just result -> pure result
-                    ReplClear -> do
-                        sessionReset
-                        fullscreenEvent UiConversationCleared
-                        color <- resolveColor stderr
-                        message <- case persist of
-                            PersistenceDisabled ->
-                                pure "conversation cleared"
-                            PersistenceEnabled slotRef -> do
-                                now <- getCurrentTime
-                                slot <- readIORef slotRef
-                                case slot of
-                                    PersistencePending _ _ _ ->
-                                        pure "conversation cleared"
-                                    PersistenceActive handle -> do
-                                        let turn = SessionTurn
-                                                { turnAt = now
-                                                , turnUserText = clearSessionUserText
-                                                , turnAssistantText =
-                                                    Just "Conversation cleared."
-                                                , turnError = Nothing
-                                                , turnResponseId = Nothing
-                                                , turnEffect = TranscriptReset
-                                                , turnItems = []
-                                                , turnUsage = Nothing
-                                                }
-                                        (handle', turnIndex) <-
-                                            appendTurnKeepTitleIndexed handle turn
-                                        let meta = handle'.sessionMeta
-                                                { metaLastResponseId = Nothing
-                                                , metaUpdatedAt = now
-                                                , metaInputTokens = 0
-                                                , metaOutputTokens = 0
-                                                , metaCachedTokens = 0
-                                                , metaLastRecap = Nothing
-                                                , metaLastTurnSummary = Nothing
-                                                , metaLastRecapMainTurns = 0
-                                                }
-                                        writeSessionMeta
-                                            handle'.sessionPool
-                                            handle'.sessionMetaPath
-                                            meta
-                                        writeIORef slotRef
-                                            (PersistenceActive handle'{sessionMeta = meta})
-                                        forM_ fullscreen \runtime ->
-                                            commitFullscreenHistoryTurn
-                                                runtime
-                                                (sessionHistoryTurn turnIndex turn)
-                                                HistoryCommitReset
-                                        pure
-                                            ("conversation cleared (session "
-                                                <> meta.metaId
-                                                <> ")")
-                        displayInfo message $
-                            Text.hPutStrLn stderr
-                                (roleMuted color (glyphOk <> message))
-                        continue
-                    ReplNew -> do
-                        sessionReset
-                        fullscreenEvent UiConversationCleared
-                        color <- resolveColor stderr
-                        case persist of
-                            PersistenceDisabled -> do
-                                displayInfo "started a fresh conversation" $
-                                    Text.hPutStrLn stderr
-                                        (roleMuted color
-                                            (glyphOk
-                                                <> "started a fresh conversation"))
-                                continue
-                            PersistenceEnabled slotRef -> do
-                                params <- readIORef paramsRef
-                                slot <- readIORef slotRef
-                                let model = currentModel params
-                                    effort = currentEffort params
-                                    create = case slot of
-                                        PersistencePending pending _ _ ->
-                                            pending
-                                                { createTarget =
-                                                    pending.createTarget
-                                                        { targetModelId = model }
-                                                , createEffort = effort
-                                                , createTitleHint = Nothing
-                                                , createTitleIsManual = False
-                                                }
-                                        PersistenceActive handle ->
-                                            SessionCreate
-                                                { createPool = handle.sessionPool
-                                                , createRoot =
-                                                    takeDirectory handle.sessionDir
-                                                , createTarget = ModelTarget
-                                                    { targetProvider = provider
-                                                    , targetConnectionId =
-                                                        connectionId
-                                                    , targetModelId = model
-                                                    , targetWireModelId =
-                                                        fromMaybe
-                                                            model
-                                                            handle.sessionMeta.metaTransportModel
-                                                    , targetDialect =
-                                                        dialectId dialect
-                                                    }
-                                                , createCwd =
-                                                    handle.sessionMeta.metaCwd
-                                                , createEffort = effort
-                                                , createTitleHint = Nothing
-                                                , createTitleIsManual = False
-                                                }
-                                handle <- createSession create
-                                case slot of
-                                    PersistencePending pending sessionId _ -> do
-                                        _ <- removeSessionTemp
-                                            pending.createRoot
-                                            sessionId
-                                        pure ()
-                                    PersistenceActive _ -> pure ()
-                                now <- getCurrentTime
-                                let turn = SessionTurn
-                                        { turnAt = now
-                                        , turnUserText = newSessionUserText
-                                        , turnAssistantText =
-                                            Just "Started a new session."
-                                        , turnError = Nothing
-                                        , turnResponseId = Nothing
-                                        , turnEffect = TranscriptReset
-                                        , turnItems = []
-                                        , turnUsage = Nothing
-                                        }
-                                (handle', _) <-
-                                    appendTurnKeepTitleIndexed handle turn
-                                let meta = handle'.sessionMeta
-                                env.sessionOnPersisted handle'
-                                env.sessionSetTempDir handle'.sessionTempDir
-                                writeIORef slotRef
-                                    (PersistenceActive handle')
-                                writeIORef env.sessionTitleTurnCount 0
-                                writeIORef planMode.planSessionDir
-                                    (Just handle'.sessionDir)
-                                writeIORef storeRoot (Just handle'.sessionDir)
-                                forM_ fullscreen \runtime ->
-                                    reloadFullscreenHistoryForHandle
-                                        runtime
-                                        handle'
-                                setWindowTitle
-                                    (cliWindowTitle meta.metaCwd
-                                        (Just meta.metaTitle))
-                                let message = "new session: " <> meta.metaId
-                                displayInfo message $
-                                    Text.hPutStrLn stderr
-                                        (roleMuted color
-                                            (glyphOk <> message))
-                                continue
-                    ReplShowSession -> do
-                        color <- resolveColor stdout
-                        case persist of
-                            PersistenceDisabled ->
-                                displayInfo "session: (not persisted)" $
-                                    Text.putStrLn
-                                        (roleMuted color
-                                            "session: (not persisted)")
-                            PersistenceEnabled slotRef -> do
-                                slot <- readIORef slotRef
-                                case slot of
-                                    PersistencePending _ _ _ ->
-                                        displayInfo
-                                            "session: (pending until first turn)" $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    "session: (pending until first turn)")
-                                    PersistenceActive handle ->
-                                        let message =
-                                                "session: "
-                                                    <> handle.sessionMeta.metaId
-                                        in displayInfo message $
-                                            Text.putStrLn
-                                                (roleMuted color
-                                                    (glyphSession <> message))
-                        continue
-                    ReplShowSessionInfo -> do
-                        color <- resolveColor stdout
-                        params <- readIORef paramsRef
-                        usage <- readIORef usageRef
-                        shellMode <- env.sessionShellMode
-                        (persistenceState, sessionId, sessionTitle) <-
-                            case persist of
-                                PersistenceDisabled ->
-                                    pure ("not_persisted", Nothing, Nothing)
-                                PersistenceEnabled slotRef -> do
-                                    slot <- readIORef slotRef
-                                    pure $ case slot of
-                                        PersistencePending _ pendingId _ ->
-                                            ("pending", Just pendingId, Nothing)
-                                        PersistenceActive handle ->
-                                            ( "active"
-                                            , Just handle.sessionMeta.metaId
-                                            , Just handle.sessionMeta.metaTitle
-                                            )
-                        let toolNames =
-                                Set.toAscList
-                                    slashCatalog.slashCatalogToolNames
-                            usageText =
-                                let formatted = formatTokenUsage usage
-                                in if Text.null formatted
-                                    then "0 in · 0 out"
-                                    else formatted
-                            message = Text.unlines $
-                                [ "session: "
-                                    <> fromMaybe "(not persisted)" sessionId
-                                , "state: " <> persistenceState
-                                ]
-                                    <> maybe
-                                        []
-                                        (\title -> ["title: " <> title])
-                                        sessionTitle
-                                    <> [ "provider: " <> providerSlug provider
-                                       , "connection: " <> connectionId
-                                       , "model: " <> currentModel params
-                                       , "dialect: "
-                                            <> dialectSlug
-                                                (dialectId dialect)
-                                       , "effort: " <> currentEffort params
-                                       , "cwd: " <> toText cwd
-                                       , "shell: "
-                                            <> shellModeText shellMode
-                                       , "tokens: " <> usageText
-                                       , "tools: "
-                                            <> if null toolNames
-                                                then "(none)"
-                                                else
-                                                    Text.intercalate
-                                                        ", "
-                                                        toolNames
-                                       ]
-                        displayInfo message $
-                            Text.putStrLn (roleMuted color message)
-                        continue
-                    ReplAfk rawTarget -> do
-                        let failAfk err = do
-                                color <- resolveColor stderr
-                                displayError err $
-                                    putTextLn stderr (roleError color err)
-                                continue
-                            finishAfk message = do
-                                color <- resolveColor stderr
-                                displayInfo message $
-                                    putTextLn stderr
-                                        (roleMuted color (glyphOk <> message))
-                                pure RunQuit
-                        case parseAfkTarget rawTarget of
-                            Left err -> failAfk err
-                            Right target -> case persist of
-                                PersistenceDisabled ->
-                                    failAfk "/afk requires a persisted interactive session"
-                                PersistenceEnabled slotRef ->
-                                    readIORef slotRef >>= \case
-                                        PersistencePending _ _ _ ->
-                                            failAfk
-                                                "/afk is available after the first persisted turn"
-                                        PersistenceActive handle ->
-                                            case target of
-                                                AfkLocal ->
-                                                    handoffLocal
-                                                        handle.sessionMeta.metaId
-                                                        cwd >>= \case
-                                                            Left err -> failAfk err
-                                                            Right message ->
-                                                                finishAfk message
-                                                AfkRemote host path ->
-                                                    loadSession
-                                                        databasePool
-                                                        (sessionsRoot env.sessionHome)
-                                                        handle.sessionMeta.metaId
-                                                        >>= \case
-                                                            Left err -> failAfk err
-                                                            Right (meta, turns) ->
-                                                                handoffRemote
-                                                                    host
-                                                                    path
-                                                                    handle.sessionDir
-                                                                    SessionTransfer
-                                                                        { transferMeta = meta
-                                                                        , transferTurns = turns
-                                                                        }
-                                                                    >>= \case
-                                                                        Left err -> failAfk err
-                                                                        Right message ->
-                                                                            finishAfk message
-                    ReplWorktree -> do
-                        result <- withReplActivity "Creating worktree…" $
-                            createWorktree cwd (worktreeRoot env.sessionHome)
-                        case result of
-                            Left err -> do
-                                color <- resolveColor stderr
-                                displayError err $
-                                    putTextLn stderr (roleError color err)
-                                continue
-                            Right path -> do
-                                color <- resolveColor stderr
-                                params <- readIORef paramsRef
-                                let message = "worktree: " <> toText path
-                                displayInfo message $
-                                    putTextLn stderr
-                                        (roleMuted color
-                                            (glyphSession <> message))
-                                pure
-                                    (RunSwitchWorktree
-                                        path
-                                        provider
-                                        (currentModel params)
-                                        (currentEffort params))
-                    ReplRename title -> do
-                        color <- resolveColor stderr
-                        case persist of
-                            PersistenceDisabled ->
-                                displayError
-                                    "cannot rename a session that is not persisted" $
-                                    putTextLn stderr
-                                        (roleError color
-                                            "cannot rename a session that is not persisted")
-                            PersistenceEnabled slotRef ->
-                                readIORef slotRef >>= \case
-                                    PersistencePending pending sessionId tempDir -> do
-                                        writeIORef slotRef
-                                            (PersistencePending
-                                                pending
-                                                    { createTitleHint = Just title
-                                                    , createTitleIsManual = True
-                                                    }
-                                                sessionId
-                                                tempDir)
-                                        setWindowTitle
-                                            (cliWindowTitle pending.createCwd
-                                                (Just title))
-                                        let message = "session title: " <> title
-                                        displayInfo message $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk <> message))
-                                    PersistenceActive handle -> do
-                                        invalidateSessionTitles
-                                            env.sessionTitleManager
-                                            handle.sessionMeta.metaId
-                                        updated <- setManualSessionTitle title handle
-                                        writeIORef slotRef (PersistenceActive updated)
-                                        setWindowTitle
-                                            (cliWindowTitle updated.sessionMeta.metaCwd
-                                                (Just updated.sessionMeta.metaTitle))
-                                        let message =
-                                                "session title: "
-                                                    <> updated.sessionMeta.metaTitle
-                                        displayInfo message $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk <> message))
-                        continue
-                    ReplRenameAuto -> do
-                        color <- resolveColor stderr
-                        case persist of
-                            PersistenceDisabled ->
-                                displayError
-                                    "cannot rename a session that is not persisted" $
-                                    putTextLn stderr
-                                        (roleError color
-                                            "cannot rename a session that is not persisted")
-                            PersistenceEnabled slotRef ->
-                                readIORef slotRef >>= \case
-                                    PersistencePending pending sessionId tempDir -> do
-                                        writeIORef slotRef
-                                            (PersistencePending
-                                                pending
-                                                    { createTitleHint = Nothing
-                                                    , createTitleIsManual = False
-                                                    }
-                                                sessionId
-                                                tempDir)
-                                        setWindowTitle
-                                            (cliWindowTitle pending.createCwd Nothing)
-                                        displayInfo
-                                            "automatic session titles enabled" $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk
-                                                        <> "automatic session titles enabled"))
-                                    PersistenceActive handle -> do
-                                        invalidateSessionTitles
-                                            env.sessionTitleManager
-                                            handle.sessionMeta.metaId
-                                        updated <- resetSessionTitleToAuto handle
-                                        writeIORef slotRef (PersistenceActive updated)
-                                        loadSession
-                                            updated.sessionPool
-                                            (takeDirectory updated.sessionDir)
-                                            updated.sessionMeta.metaId
-                                            >>= \case
-                                                Left _ -> pure ()
-                                                Right (_, turns) -> do
-                                                    let source =
-                                                            sessionConversationText turns
-                                                    requestSessionTitle
-                                                        env.sessionTitleManager
-                                                        updated.sessionMeta.metaId
-                                                        1
-                                                        source
-                                        displayInfo
-                                            "automatic session titles enabled" $
-                                            putTextLn stderr
-                                                (roleMuted color
-                                                    (glyphOk
-                                                        <> "automatic session titles enabled"))
-                        continue
+                    ReplRetry ->
+                        atomicModifyIORef'
+                            env.sessionLastFailedTurn
+                            (\pending -> (Nothing, pending))
+                            >>= \case
+                                Just pending -> retryPendingTurn pending
+                                Nothing -> do
+                                    displayInfo
+                                        "No failed turn is available to retry."
+                                        (pure ())
+                                    continue
+                    action@ReplResume{} -> handleSessionAction env slashCatalog continue action
+                    action@ReplSearch{} -> handleSessionAction env slashCatalog continue action
+                    action@ReplClear -> handleSessionAction env slashCatalog continue action
+                    action@ReplNew -> handleSessionAction env slashCatalog continue action
+                    action@ReplShowSession -> handleSessionAction env slashCatalog continue action
+                    action@ReplShowSessionInfo -> handleSessionAction env slashCatalog continue action
+                    action@ReplAfk{} -> handleSessionAction env slashCatalog continue action
+                    action@ReplWorktree -> handleSessionAction env slashCatalog continue action
+                    action@ReplRename{} -> handleSessionAction env slashCatalog continue action
+                    action@ReplRenameAuto -> handleSessionAction env slashCatalog continue action
                     ReplLogin -> do
                         color <- resolveColor stderr
                         legacy (runLoginManager color)
@@ -1370,7 +715,7 @@ handleReplLine
         pendingImages <-
             modifyLiveAttachments conversationRef \imgs -> ([], imgs)
         forM_ fullscreen \runtime ->
-            setFullscreenImagePreviews runtime []
+            commitFullscreenImagePreviews runtime pendingImages
         let turnInputs =
                 if null pendingImages
                     then [UserMessage expanded]
@@ -1391,29 +736,22 @@ handleReplLine
                 result <- runOneTurn env original skillInputs
                 finishTurn False result
     continue = continueWith ""
-    attachmentContext =
-        AttachmentContext
-            { attachmentSession = env
-            , attachmentContinueWith = continueWith
-            , attachmentFinishTurn = finishTurn
-            }
     legacy action = case fullscreen of
         Nothing -> action
         Just runtime -> withFullscreenSuspended runtime action
     fullscreenEvent event = case fullscreen of
         Nothing -> pure ()
         Just runtime -> emitUiEvent runtime event
+    syncFullscreenImagePreviews =
+        forM_ fullscreen \runtime ->
+            readLiveAttachments conversationRef
+                >>= setFullscreenImagePreviews runtime
     displayInfo message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiSystemMessage message)
     displayError message minimalAction = case fullscreen of
         Nothing -> minimalAction
         Just runtime -> emitUiEvent runtime (UiErrorMessage message)
-    shellModeText = \case
-        ShellGhci -> "ghci"
-        ShellBash -> "bash"
-        ShellBoth -> "ghci + bash"
-        ShellNone -> "none"
     withReplActivity message action = do
         case fullscreen of
             Nothing ->
@@ -1425,228 +763,6 @@ handleReplLine
             case fullscreen of
                 Nothing -> clearThinking render
                 Just runtime -> emitUiEvent runtime (UiSetNotice Nothing)
-    setEffort level = do
-        color <- resolveColor stdout
-        setSessionEffort env level
-        displayInfo ("effort set to " <> level) $
-            Text.putStrLn
-                (roleMuted color
-                    (glyphOk <> "effort set to " <> level))
-    chooseEffort next = do
-        params <- readIORef paramsRef
-        effortChoice fullscreen (currentEffort params) >>= \case
-            Nothing -> next
-            Just level -> setEffort level >> next
-    chooseModel next = do
-        color <- resolveColor stderr
-        params <- readIORef paramsRef
-        let current = currentModel params
-        modelChoice
-            catalog fullscreen color connectionId provider current
-                (dialectId dialect) >>= \case
-            Nothing -> next
-            Just rawChoice -> do
-                choice <- resolveModelOptionDialect rawChoice
-                if choice.modelTarget.targetProvider == provider
-                    && choice.modelTarget.targetConnectionId == connectionId
-                    && choice.modelTarget.targetModelId == current
-                    && choice.modelTarget.targetDialect == dialectId dialect
-                  then do
-                    let message =
-                            "model: "
-                                <> connectionId
-                                <> "/"
-                                <> choice.modelTarget.targetModelId
-                    displayInfo message $
-                        Text.putStrLn
-                            (roleMuted color
-                                (glyphSession <> message))
-                    next
-                  else if not
-                        (modelTargetRequiresRebuild
-                            connectionId provider (dialectId dialect) choice)
-                  then do
-                    message <- applyModelChange
-                        projectRoot provider connectionId
-                        choice.modelTarget.targetModelId
-                        choice.modelTarget.targetWireModelId
-                        choice.modelTarget.targetDialect
-                        paramsRef render conversationRef persist
-                    displayInfo message $
-                        Text.putStrLn
-                            (roleMuted color
-                                (glyphOk <> message))
-                    next
-                  else
-                    requestModelTargetSwitch fullscreen choice persist >>= \case
-                        Left err -> do
-                            displayError err $
-                                Text.hPutStrLn stderr
-                                    (roleError color err)
-                            next
-                        Right result -> pure result
-    chooseAccount next =
-        case fullscreen of
-            Just runtime -> do
-                currentSelectionId <- readIORef selectionRef
-                currentAccountId <- readIORef accountIdRef
-                options <- withReplActivity
-                    "Loading account usage…"
-                    (loadAllAccountPickerOptions provider)
-                let initial =
-                        fromMaybe 0 $
-                            findIndex
-                                (accountPickerMatches
-                                    provider
-                                    currentSelectionId
-                                    currentAccountId)
-                                options
-                requestFullscreenChoiceWithBody
-                    runtime
-                    "Accounts"
-                    "Choose any account. Switching provider also switches to its default model."
-                    initial
-                    (map
-                        (accountPickerRow
-                            provider
-                            currentSelectionId
-                            currentAccountId)
-                        options)
-                    >>= \case
-                        Just index
-                            | Just option <- atMay index options ->
-                                case option of
-                                    AccountPickerAccount
-                                        selectedProvider
-                                        selectedBilling
-                                        selectedSelectionId
-                                        selectedAccountId
-                                        selectedLabel
-                                        _
-                                            -- Claude exposes display metadata,
-                                            -- not a stable account identity.
-                                            -- Revalidate and restart even when
-                                            -- the synthetic id still matches.
-                                            | selectedProvider == provider
-                                            , selectedProvider
-                                                /= ClaudeCodeProvider
-                                            , selectedAccountId
-                                                == currentAccountId ->
-                                                displayInfo
-                                                    ("account: " <> selectedLabel)
-                                                    (pure ())
-                                                    >> next
-                                            | otherwise ->
-                                                chooseSelectedAccount
-                                                    selectedProvider
-                                                    selectedBilling
-                                                    selectedSelectionId
-                                                    selectedAccountId
-                                                    selectedLabel
-                                    AccountPickerConnect selectedProvider -> do
-                                        color <- resolveColor stderr
-                                        connected <-
-                                            withFullscreenSuspended runtime $
-                                                connectProviderAccount
-                                                    color
-                                                    selectedProvider
-                                        case connected of
-                                            Nothing -> next
-                                            Just selectedAccountId -> do
-                                                refreshed <-
-                                                    loadAllAccountPickerOptions
-                                                        provider
-                                                case listToMaybe
-                                                        [ account
-                                                        | account@(AccountPickerAccount
-                                                            accountProvider
-                                                            _
-                                                            _
-                                                            accountId
-                                                            _
-                                                            _) <- refreshed
-                                                        , accountProvider
-                                                            == selectedProvider
-                                                        , accountId
-                                                            == selectedAccountId
-                                                        ] of
-                                                    Just
-                                                        (AccountPickerAccount
-                                                            accountProvider
-                                                            billing
-                                                            selectionId
-                                                            accountId
-                                                            label
-                                                            _) ->
-                                                        chooseSelectedAccount
-                                                            accountProvider
-                                                            billing
-                                                            selectionId
-                                                            accountId
-                                                            label
-                                                    _ -> do
-                                                        displayError
-                                                            "Connected account could not be loaded."
-                                                            (pure ())
-                                                        next
-                        _ -> next
-              where
-                currentBilling =
-                    tokenProviderBillingMode
-                        <$> tokenProvider
-                chooseSelectedAccount
-                    selectedProvider
-                    selectedBilling
-                    selectedSelectionId
-                    selectedAccountId
-                    selectedLabel
-                        | selectedProvider == provider
-                        , Just selectedBilling == currentBilling
-                        , Just select <- selectAccount =
-                            let liveSelectionId =
-                                    case selectedProvider of
-                                        OpenAIProvider -> selectedAccountId
-                                        _ -> selectedSelectionId
-                            in select liveSelectionId >>= \case
-                                Left err -> do
-                                    now <- getCurrentTime
-                                    let message =
-                                            "could not select account: "
-                                                <> formatApiErrorInlineAt
-                                                    now
-                                                    err
-                                    displayError message (pure ())
-                                    next
-                                Right label -> do
-                                    displayInfo
-                                        ("account switched to " <> label)
-                                        (pure ())
-                                    next
-                        | otherwise =
-                            readIORef paramsRef >>= \params ->
-                                requestAccountProviderSwitch
-                                    catalog fullscreen provider connectionId
-                                    (currentModel params) (dialectId dialect)
-                                    selectedProvider selectedSelectionId
-                                    selectedAccountId persist >>= \case
-                                        Left err -> do
-                                            displayError err (pure ())
-                                            next
-                                        Right result -> do
-                                            displayInfo
-                                                ("switching to "
-                                                    <> selectedLabel
-                                                    <> " ("
-                                                    <> providerSlug
-                                                        selectedProvider
-                                                    <> ")")
-                                                (pure ())
-                                            pure result
-            Nothing -> do
-                displayError
-                    "Account switching is unavailable for this session."
-                    (pure ())
-                next
     copyCommand label missing payload = case payload of
         Nothing ->
             displayError missing do

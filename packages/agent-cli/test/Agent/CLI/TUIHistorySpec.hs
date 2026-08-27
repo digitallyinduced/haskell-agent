@@ -1,3 +1,5 @@
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 
 module Agent.CLI.TUIHistorySpec (spec) where
@@ -18,7 +20,10 @@ import Agent.TUI.Model
     , BlockState(..)
     , BlockKind(..)
     , UiBlock(..)
+    , UiEvent(..)
+    , UiState(..)
     , initialUiState
+    , reduceUi
     )
 import qualified Data.Sequence as Seq
 import Data.Int (Int64)
@@ -110,6 +115,34 @@ spec = describe "bounded fullscreen history window" do
         historyWindowLoadedBlocks merged `shouldBe` 7
         historyWindowRequest HistoryOlder requested
             `shouldBe` Nothing
+
+    it "keeps older persisted turns requestable after appending a compaction summary" do
+        let generation = HistoryGeneration 3
+            initial = emptyHistoryWindow generation 200 400 1_000_000
+            recent =
+                HistoryPage
+                    { historyPageGeneration = generation
+                    , historyPageDirection = HistoryNewer
+                    , historyPageTurns =
+                        Seq.fromList [turn 10 1, turn 11 1, turn 12 1]
+                    , historyPageGenerationStart = HistoryCursor 0
+                    , historyPageTotalTurns = 13
+                    , historyPageHasOlder = True
+                    , historyPageHasNewer = False
+                    }
+        window <- expectRight (applyHistoryPage recent initial)
+        let compacted = appendHistoryTurn (turn 13 1) window
+        historyWindowCursors compacted
+            `shouldBe` Seq.fromList (map HistoryCursor [10, 11, 12, 13])
+        compacted.historyWindowTotalTurns `shouldBe` 14
+        historyWindowOlderAvailable compacted `shouldBe` True
+        historyWindowRequest HistoryOlder compacted
+            `shouldBe`
+                Just HistoryRequest
+                    { historyRequestGeneration = generation
+                    , historyRequestDirection = HistoryOlder
+                    , historyRequestCursor = Just (HistoryCursor 10)
+                    }
 
     it "resets a non-tail window before archiving a new latest turn" do
         let generation = HistoryGeneration 7
@@ -267,7 +300,7 @@ spec = describe "bounded fullscreen history window" do
             `shouldBe` Seq.singleton (HistoryCursor 2)
         historyWindowLoadedBytes window `shouldSatisfy` (<= 180)
 
-    it "projects reasoning, tool calls, outputs, and assistant text" do
+    it "omits persisted reasoning while projecting tool and assistant history" do
         let projected =
                 sessionHistoryTurn
                     (12 :: Int)
@@ -280,7 +313,9 @@ spec = describe "bounded fullscreen history window" do
                             , summary =
                                 [ ReasoningSummaryPart
                                     { partType = "summary_text"
-                                    , text = Just "Checked the schema"
+                                    , text =
+                                        Just
+                                            "Don't mention skills. Brief summary for the user."
                                     , extraFields = KeyMap.empty
                                     }
                                 ]
@@ -293,13 +328,17 @@ spec = describe "bounded fullscreen history window" do
                             { itemId = Nothing
                             , callId = "call-1"
                             , name = "shell_command"
+                            , namespace = Nothing
                             , arguments = "{\"command\":\"pwd\"}"
+                            , encryptedFunctionArgs = Nothing
                             , status = Nothing
                             , extraFields = KeyMap.empty
                             }
                         , FunctionCallOutputItem FunctionCallOutput
                             { itemId = Nothing
                             , callId = "call-1"
+                            , name = Nothing
+                            , namespace = Nothing
                             , output = Aeson.String "/tmp/project"
                             , status = Nothing
                             , extraFields = KeyMap.empty
@@ -310,13 +349,15 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks
             `shouldBe`
                 [ BlockUser
-                , BlockThinking
                 , BlockShell
                 , BlockAssistant
                 ]
         map (.blockBody) blocks
             `shouldSatisfy`
                 any (Text.isInfixOf "/tmp/project")
+        map (.blockBody) blocks
+            `shouldSatisfy`
+                all (not . Text.isInfixOf "Don't mention skills")
 
     it "does not rematerialise the compacted prefix of replacement turns" do
         let projected =
@@ -333,6 +374,64 @@ spec = describe "bounded fullscreen history window" do
         map (.blockKind) blocks `shouldBe` [BlockUser, BlockAssistant]
         map (.blockBody) blocks
             `shouldBe` ["current prompt", "current answer"]
+
+    it "keeps mid-turn steering in durable history" do
+        let projected =
+                sessionHistoryTurn
+                    (21 :: Int)
+                    (sessionTurn
+                        TranscriptAppend
+                        "inspect the repository"
+                        [ userMessage "generated skill context"
+                        , userMessage "inspect the repository"
+                        , assistantMessage "I will inspect it."
+                        , userMessage "# Skill instructions: parser\nhidden"
+                        , userMessage "focus on the parser"
+                        , assistantMessage "Done"
+                        ])
+            blocks = toList projected.historyTurnBlocks
+        map (.blockKind) blocks
+            `shouldBe`
+                [ BlockUser
+                , BlockAssistant
+                , BlockUser
+                , BlockAssistant
+                ]
+        map (.blockBody) blocks
+            `shouldBe`
+                [ "inspect the repository"
+                , "I will inspect it."
+                , "focus on the parser"
+                , "Done"
+                ]
+
+    it "drops a live compact summary that was rendered without a user turn" do
+        let asked =
+                reduceUi (UiAssistantHistory "answer") $
+                    reduceUi (UiUserSubmitted "question") initialUiState
+            live =
+                reduceUi
+                    (UiSystemMessage "Earlier conversation summary")
+                    asked
+            durable =
+                sessionHistoryTurn
+                    (30 :: Int)
+                    ((sessionTurn TranscriptReplace "/compact" [])
+                        { turnAssistantText =
+                            Just "Earlier conversation summary"
+                        })
+        unarchivedLiveStart live.uiBlocks durable.historyTurnBlocks
+            `shouldBe` Seq.length asked.uiBlocks
+
+    it "keeps live blocks when the durable turn is not already on screen" do
+        let live =
+                reduceUi (UiUserSubmitted "question") initialUiState
+            durable =
+                sessionHistoryTurn
+                    (1 :: Int)
+                    (sessionTurn TranscriptAppend "other" [])
+        unarchivedLiveStart live.uiBlocks durable.historyTurnBlocks
+            `shouldBe` Seq.length live.uiBlocks
 
     it "renders manual compaction as a single checkpoint summary" do
         let turnValue =
@@ -406,6 +505,7 @@ userMessage text =
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 
@@ -417,6 +517,7 @@ assistantMessage text =
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
+        , passthrough = Nothing
         , extraFields = KeyMap.empty
         }
 

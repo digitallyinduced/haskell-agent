@@ -50,6 +50,50 @@ spec = describe "Agent.CLI.Project" do
             projectSettingsPath (fromFilePath "/tmp/repo")
                 `shouldBe` fromFilePath "/tmp/repo/.haskell-agent/settings.json"
 
+    describe "userSettingsPath" do
+        it "is <home>/.haskell-agent/settings.json" do
+            userSettingsPath (fromFilePath "/Users/marc")
+                `shouldBe` fromFilePath "/Users/marc/.haskell-agent/settings.json"
+
+    describe "withInheritedLastModel" do
+        it "inherits the user last model when the checkout has none" do
+            let userModel =
+                    ProjectModel
+                        { projectModelTarget =
+                            target XAIProvider "xai"
+                                "grok-4.6" "grok-4.6" GrokBuildDialect
+                        }
+                user = defaultProjectSettings
+                    { settingsLastModel = Just userModel }
+                project = defaultProjectSettings
+                    { settingsAutoApprove = True }
+                merged = withInheritedLastModel project user
+            merged.settingsLastModel `shouldBe` Just userModel
+            merged.settingsAutoApprove `shouldBe` True
+
+        it "keeps a checkout last model instead of the user default" do
+            let checkoutModel =
+                    ProjectModel
+                        { projectModelTarget =
+                            target OpenAIProvider "openai"
+                                "gpt-5.6-sol" "gpt-5.6-sol" CodexDialect
+                        }
+                userModel =
+                    ProjectModel
+                        { projectModelTarget =
+                            target XAIProvider "xai"
+                                "grok-4.6" "grok-4.6" GrokBuildDialect
+                        }
+                user = defaultProjectSettings
+                    { settingsLastModel = Just userModel }
+                project = defaultProjectSettings
+                    { settingsLastModel = Just checkoutModel
+                    , settingsAutoApprove = True
+                    }
+                merged = withInheritedLastModel project user
+            merged.settingsLastModel `shouldBe` Just checkoutModel
+            merged.settingsAutoApprove `shouldBe` True
+
     describe "loadProjectSettings/saveProjectAutoApprove" do
         it "defaults when settings are missing" $
             withTempDir "agent-project-" \root -> do
@@ -113,6 +157,28 @@ spec = describe "Agent.CLI.Project" do
                 updated.settingsAutoApprove `shouldBe` False
                 projectModelFor OpenAIProvider updated
                     `shouldBe` Just "gpt-project"
+
+        it "writes the last model to both the checkout and user home" $
+            withTempDir "agent-project-" \project ->
+                withTempDir "agent-home-" \home -> do
+                    saveProjectAutoApprove home True
+                    saveProjectAutoApprove project False
+                    saveRememberedModel home project
+                        (target XAIProvider "xai"
+                            "grok-4.6" "grok-4.6" GrokBuildDialect)
+
+                    projectSettings <- loadProjectSettings project
+                    userSettings <- loadUserSettings home
+                    projectSettings.settingsAutoApprove `shouldBe` False
+                    userSettings.settingsAutoApprove `shouldBe` True
+                    projectSettings.settingsLastModel `shouldBe` Just ProjectModel
+                        { projectModelTarget =
+                            target XAIProvider "xai"
+                                "grok-4.6" "grok-4.6" GrokBuildDialect
+                        }
+                    userSettings.settingsLastModel
+                        `shouldBe` projectSettings.settingsLastModel
+                    userSettingsPath home `shouldBe` projectSettingsPath home
 
         it "replaces the remembered provider/model without resetting approval" $
             withTempDir "agent-project-" \root -> do

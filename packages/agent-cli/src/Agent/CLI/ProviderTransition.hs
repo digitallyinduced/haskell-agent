@@ -16,6 +16,7 @@ import Agent.Loop (TurnInput)
 import Agent.Provider (BillingMode, Provider)
 import Agent.Tools.PlanMode (PlanModeState)
 import Control.Applicative ((<|>))
+import Data.Set (Set)
 import Data.Text (Text)
 
 data PendingTurn = PendingTurn
@@ -38,7 +39,7 @@ data ProviderTransition = ProviderTransition
     , transitionAccountId :: !(Maybe Text)
     , transitionSessionId :: !(Maybe Text)
     , transitionPendingTurn :: !(Maybe PendingTurn)
-    , transitionUnavailableProviders :: ![Provider]
+    , transitionUnavailableProviders :: !(Set Provider)
     , transitionCause :: !TransitionCause
     -- | Billing class of the session that initiated an automatic fallback.
     -- Preserved across failed replacement providers so the whole chain obeys
@@ -49,7 +50,7 @@ data ProviderTransition = ProviderTransition
 data TurnResult
     = TurnSucceeded
     | TurnCancelled
-    | TurnFailed
+    | TurnFailed !PendingTurn
     | TurnRestartRequested !Text !PendingTurn
     | TurnProviderUnavailable !ApiError !PendingTurn
 

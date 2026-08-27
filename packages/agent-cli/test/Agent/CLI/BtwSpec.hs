@@ -156,6 +156,7 @@ userItem text = MessageItem ResponseMessage
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -164,7 +165,9 @@ functionCallItem callId = FunctionCallItem FunctionCall
     { itemId = Nothing
     , callId
     , name = "shell_command"
+    , namespace = Nothing
     , arguments = "{}"
+    , encryptedFunctionArgs = Nothing
     , status = Nothing
     , extraFields = KeyMap.empty
     }
@@ -173,6 +176,8 @@ functionOutputItem :: Text.Text -> ResponseItem
 functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
     { itemId = Nothing
     , callId
+    , name = Nothing
+    , namespace = Nothing
     , output = Aeson.String "ok"
     , status = Nothing
     , extraFields = KeyMap.empty

@@ -13,8 +13,11 @@ mkDerivation {
     retry safe-exceptions scientific text vector
   ];
   testHaskellDepends = [
-    aeson agent-core agent-responses-types base bytestring hspec
-    QuickCheck retry text
+    aeson agent-core agent-responses-types base bytestring containers
+    hspec QuickCheck retry text
+  ];
+  benchmarkHaskellDepends = [
+    aeson agent-responses-types base bytestring text
   ];
   description = "Provider-neutral Responses codecs and adapters";
   license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";

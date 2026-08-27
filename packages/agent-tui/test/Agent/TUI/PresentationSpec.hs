@@ -10,6 +10,63 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "tool presentation" do
+    it "shows filesystem paths relative to the workspace" do
+        let workspace =
+                "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+            absolute = workspace <> "/nix/modules/telegram.nix"
+            edit =
+                functionToolCall
+                    "edit"
+                    "search_replace"
+                    ("{\"file_path\":\"" <> absolute <> "\"}")
+            listing =
+                functionToolCall
+                    "ls"
+                    "list_dir"
+                    ("{\"target_directory\":\"" <> workspace <> "\"}")
+            readCall =
+                functionToolCall
+                    "read"
+                    "read_file"
+                    ("{\"target_file\":\"" <> absolute <> "\"}")
+        workspaceRelativeDisplayPath workspace absolute
+            `shouldBe` "nix/modules/telegram.nix"
+        workspaceRelativeDisplayPath workspace (workspace <> "/")
+            `shouldBe` "."
+        workspaceRelativeDisplayPath workspace "src/Main.hs"
+            `shouldBe` "src/Main.hs"
+        workspaceRelativeDisplayPath workspace "/tmp/outside.hs"
+            `shouldBe` "/tmp/outside.hs"
+        workspaceRelativeDisplayPath
+            workspace
+            (workspace <> "/./nix/../nix/modules/telegram.nix")
+            `shouldBe` "nix/modules/telegram.nix"
+        workspaceRelativeDisplayPath workspace "src/../nix/foo.nix"
+            `shouldBe` "nix/foo.nix"
+        workspaceRelativeDisplayPath
+            "/worktree"
+            "/worktree-other/Foo.hs"
+            `shouldBe` "/worktree-other/Foo.hs"
+        summarizeToolCallRelative workspace edit
+            `shouldBe` "Edited nix/modules/telegram.nix"
+        summarizeToolCallRelative workspace listing
+            `shouldBe` "Listed ."
+        toolCallTitleRelative workspace readCall
+            `shouldBe` "Read nix/modules/telegram.nix"
+        permissionToolCallPromptRelative workspace edit
+            `shouldBe` "Allow Edited nix/modules/telegram.nix?"
+        formatToolOutputRelative
+            workspace
+            edit
+            ("The file " <> absolute <> " has been updated successfully.")
+            `shouldBe`
+                "The file nix/modules/telegram.nix has been updated successfully."
+        formatToolOutputRelative workspace listing
+            ("Directory listing for " <> workspace <> ":\nFoo.hs")
+            `shouldBe` "Directory listing for .:\nFoo.hs"
+        formatToolOutputRelative workspace readCall absolute
+            `shouldBe` absolute
+
     it "extracts tool details from function and custom calls" do
         toolDetail
             (functionToolCall "read" "read_file"

@@ -7,7 +7,10 @@ import Agent.TUI.Presentation
     )
 import Agent.Loop
     ( LoopEvent(..)
+    , TokenUsage(..)
+    , TurnOutput(..)
     , emptyTurnOutput
+    , liveTokenRateMinMillis
     )
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -306,6 +309,103 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "exit: 0\nclean"
             _ -> expectationFailure "expected one completed tool block"
 
+    it "updates an early tool start in place" do
+        let early = functionToolCall "c1" "Task" "{}"
+            canonical =
+                functionToolCall
+                    "c1"
+                    "Agent"
+                    "{\"description\":\"review the patch\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolUpdated canonical)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "Agent"
+                block.blockDetail `shouldBe` ""
+                block.blockState `shouldBe` BlockRunning
+            _ -> expectationFailure "expected one updated tool block"
+        Foldable.toList state.uiToolCalls
+            `shouldBe` [(0, canonical)]
+
+    it "retracts a tool and repairs later tool positions" do
+        let first = functionToolCall "c1" "Task" "{}"
+            second = functionToolCall "c2" "Read" "{\"file_path\":\"README.md\"}"
+            running =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted first)
+                    , UiSystemMessage "between"
+                    , UiLoop (ToolStarted second)
+                    ]
+            retracted =
+                reduceUi (UiLoop (ToolRetracted "c1")) running
+            finished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "c2"
+                                , output = "contents"
+                                , callKind = FunctionCallKind
+                                }))
+                    retracted
+        map (.blockBody) (Foldable.toList finished.uiBlocks)
+            `shouldBe` ["between", "contents"]
+        map (.blockState) (Foldable.toList finished.uiBlocks)
+            `shouldBe` [BlockComplete, BlockComplete]
+        finished.uiToolCalls `shouldBe` mempty
+
+    it "removes a completed tool when its provider message is retracted" do
+        let call = functionToolCall "c1" "Task" "{}"
+            completed =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "c1"
+                                , output = "done"
+                                , callKind = FunctionCallKind
+                                })
+                    ]
+            retracted =
+                reduceUi (UiLoop (ToolRetracted "c1")) completed
+        retracted.uiBlocks `shouldBe` mempty
+        retracted.uiToolCalls `shouldBe` mempty
+
+    it "discards only blocks from the current response attempt" do
+        let state =
+                apply
+                    [ UiUserSubmitted "hello"
+                    , UiLoop TurnStarted
+                    , UiLoop (TextDelta "partial")
+                    , UiLoop
+                        (ToolStarted
+                            (functionToolCall "c1" "Task" "{}"))
+                    , UiLoop ResponseAttemptDiscarded
+                    ]
+        map (.blockBody) (Foldable.toList state.uiBlocks)
+            `shouldBe` ["hello"]
+        state.uiToolCalls `shouldBe` mempty
+
+    it "settles running tools when a response restarts" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop
+                        (ToolStarted
+                            (functionToolCall "c1" "Task" "{}"))
+                    , UiLoop (ResponseRestarted "retrying")
+                    ]
+        map (.blockState) (Foldable.toList state.uiBlocks)
+            `shouldBe` [BlockFailed]
+        state.uiToolCalls `shouldBe` mempty
+
     it "renders write_stdin as a shell block" do
         let call = functionToolCall "c1" "write_stdin" "{\"session_id\":3}"
             state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
@@ -483,6 +583,36 @@ spec = describe "fullscreen UI reducer" do
                 replacementBlock.blockState `shouldBe` BlockComplete
             _ -> expectationFailure "expected retained and replacement blocks"
 
+    it "drops tool block positions when a running turn ends" do
+        let call =
+                functionToolCall
+                    "c1"
+                    "run_terminal_cmd"
+                    "{\"command\":\"work\"}"
+            result = ToolCallResult
+                { callId = "c1"
+                , output = "exit: 0\nlate final output"
+                , callKind = FunctionCallKind
+                }
+            ended =
+                reduceUi (UiTurnEnded BlockCancelled) $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (ToolStarted call)
+                        ]
+            afterLateEvents =
+                applyFrom
+                    ended
+                    [ UiLoop (ToolOutputUpdated "c1" "late live output")
+                    , UiLoop (ToolFinished result)
+                    ]
+        ended.uiToolCalls `shouldBe` mempty
+        case Foldable.toList afterLateEvents.uiBlocks of
+            [block] -> do
+                block.blockBody `shouldBe` ""
+                block.blockState `shouldBe` BlockCancelled
+            _ -> expectationFailure "expected one cancelled tool block"
+
     it "replaces a live snapshot with the final tool result" do
         let call = functionToolCall "c1" "run_terminal_cmd" "{\"command\":\"work\"}"
             result = ToolCallResult
@@ -571,6 +701,85 @@ spec = describe "fullscreen UI reducer" do
         running.uiElapsedMillis `shouldBe` 200
         after.uiElapsedMillis `shouldBe` 200
 
+    it "reports live and completed tokens per second" do
+        let call = functionToolCall "c1" "read_file" "{\"target_file\":\"A.hs\"}"
+            streaming =
+                advanceUiTime liveTokenRateMinMillis $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (TextDelta "abcdefghijklmnop")
+                        ]
+            reported usage tools =
+                (emptyTurnOutput "r1" tools (Just "abcdefghijklmnop"))
+                    { tokenUsage = usage }
+            usage =
+                TokenUsage
+                    { inputTokens = 20
+                    , outputTokens = 80
+                    , cachedTokens = 0
+                    }
+            finished =
+                reduceUi
+                    (UiLoop (TurnFinished (reported usage [])))
+                    streaming
+            duringTools =
+                reduceUi (UiLoop (ToolStarted call)) $
+                    reduceUi
+                        (UiLoop (TurnFinished (reported usage [call])))
+                        streaming
+            afterNext = reduceUi (UiLoop TurnStarted) finished
+        uiTokensPerSecond streaming `shouldBe` Just 10
+        uiTokensPerSecond finished `shouldBe` Just 200
+        finished.uiGenerating `shouldBe` False
+        uiTokensPerSecond duringTools `shouldBe` Just 200
+        duringTools.uiGenerating `shouldBe` False
+        duringTools.uiGenerationMillis `shouldBe` liveTokenRateMinMillis
+        (advanceUiTime 5000 duringTools).uiGenerationMillis
+            `shouldBe` liveTokenRateMinMillis
+        uiTokensPerSecond afterNext `shouldBe` Just 200
+        afterNext.uiGenerationMillis `shouldBe` 0
+
+    it "keeps turn elapsed time when a response restarts" do
+        let streaming =
+                advanceUiTime 800 $
+                    apply
+                        [ UiLoop TurnStarted
+                        , UiLoop (TextDelta "abcdefghijklmnop")
+                        ]
+            restarted =
+                reduceUi (UiLoop (ResponseRestarted "retrying")) streaming
+        streaming.uiElapsedMillis `shouldBe` 800
+        restarted.uiElapsedMillis `shouldBe` 800
+        restarted.uiGenerationMillis `shouldBe` 0
+        restarted.uiGenerationChars `shouldBe` 0
+        restarted.uiGenerating `shouldBe` True
+        restarted.uiActivity `shouldBe` "Retrying response…"
+
+    it "drops last tok/s when the conversation is cleared" do
+        let finished =
+                reduceUi
+                    (UiLoop
+                        (TurnFinished
+                            ((emptyTurnOutput "r1" [] (Just "abcdefghijklmnop"))
+                                { tokenUsage =
+                                    TokenUsage
+                                        { inputTokens = 20
+                                        , outputTokens = 80
+                                        , cachedTokens = 0
+                                        }
+                                })))
+                    (advanceUiTime liveTokenRateMinMillis $
+                        apply
+                            [ UiLoop TurnStarted
+                            , UiLoop (TextDelta "abcdefghijklmnop")
+                            ])
+            cleared = reduceUi UiConversationCleared finished
+        uiTokensPerSecond finished `shouldBe` Just 200
+        uiTokensPerSecond cleared `shouldBe` Nothing
+        cleared.uiLastTokensPerSecond `shouldBe` Nothing
+        cleared.uiGenerationChars `shouldBe` 0
+        cleared.uiGenerating `shouldBe` False
+
     it "briefly settles on Finished before returning to Ready" do
         let finished =
                 apply
@@ -658,6 +867,48 @@ spec = describe "fullscreen UI reducer" do
         uiNextDeadlineMillis started `shouldBe` Just 1000
         finished.uiRetryCountdown `shouldBe` Nothing
         uiNeedsTick finished `shouldBe` False
+
+    it "shows worktree-relative paths for edits" do
+        let workspace =
+                "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+            path = workspace <> "/nix/modules/telegram.nix"
+            call =
+                functionToolCall
+                    "edit-abs"
+                    "search_replace"
+                    ("{\"file_path\":\""
+                        <> path
+                        <> "\",\"old_string\":\"old\",\"new_string\":\"new\"}")
+            started =
+                apply
+                    [ UiSetRepository "main" "~/project" workspace
+                    , UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    ]
+            finished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "edit-abs"
+                                , output =
+                                    "The file "
+                                        <> path
+                                        <> " has been updated successfully."
+                                , callKind = FunctionCallKind
+                                }))
+                    started
+        case Foldable.toList started.uiBlocks of
+            [block] ->
+                block.blockTitle
+                    `shouldBe` "Edited nix/modules/telegram.nix"
+            _ -> expectationFailure "expected one running edit block"
+        case Foldable.toList finished.uiBlocks of
+            [block] ->
+                block.blockBody
+                    `shouldBe`
+                        "The file nix/modules/telegram.nix has been updated successfully."
+            _ -> expectationFailure "expected one completed edit block"
 
     it "shows a search-replace diff while the tool is running" do
         let call =
@@ -885,6 +1136,21 @@ spec = describe "fullscreen UI reducer" do
         afterSecondStarted.uiDraft `shouldBe` "draft for later"
         map (.blockBody) (Foldable.toList afterSecondStarted.uiBlocks)
             `shouldBe` ["first follow-up", "second follow-up"]
+
+    it "shows steering as part of the active turn and clears the draft" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiSetDraft "keep the schema" 15
+                    , UiInputSteered "keep the schema"
+                    ]
+        state.uiRunning `shouldBe` True
+        state.uiDraft `shouldBe` ""
+        Foldable.toList state.uiQueuedInputs `shouldBe` []
+        map (.blockBody) (Foldable.toList state.uiBlocks)
+            `shouldBe` ["keep the schema"]
+        (.noticeText) <$> state.uiNotice
+            `shouldBe` Just "Steering the current turn…"
 
     it "promotes a send-now draft ahead of existing queued inputs" do
         let state =

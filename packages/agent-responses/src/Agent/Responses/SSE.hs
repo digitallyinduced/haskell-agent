@@ -5,6 +5,7 @@ module Agent.Responses.SSE
     , feedSseDecoder
     , finishSseDecoder
     , parseSseEvents
+    , parseSseEventsBytes
     ) where
 
 import Agent.Error (ApiError(..))
@@ -12,6 +13,7 @@ import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.Types (ResponseStreamEvent)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -79,8 +81,13 @@ finishSseDecoder decoder = do
 
 -- | Decode a complete SSE body into the canonical typed Responses event union.
 parseSseEvents :: Text -> Either ApiError [ResponseStreamEvent]
-parseSseEvents sseText = do
-    (decoder, events) <- feedSseDecoder newSseDecoder (Text.encodeUtf8 sseText)
+parseSseEvents = parseSseEventsBytes . Text.encodeUtf8
+
+-- | Decode a complete SSE body without converting its validated wire bytes
+-- through 'Text' first.
+parseSseEventsBytes :: BS.ByteString -> Either ApiError [ResponseStreamEvent]
+parseSseEventsBytes bytes = do
+    (decoder, events) <- feedSseDecoder newSseDecoder bytes
     trailing <- finishSseDecoder decoder
     pure (events <> trailing)
 
@@ -139,35 +146,40 @@ parseBlockBytes bytes = case Text.decodeUtf8' bytes of
     Left err -> Left $ JsonDecodeError
         ("Invalid UTF-8 in Responses SSE event: " <> Text.pack (show err))
         (Text.take 2000 (Text.decodeUtf8With Text.lenientDecode bytes))
-    Right block -> parseBlock (Text.replace "\r\n" "\n" block)
+    Right _ -> parseBlock bytes
 
-parseBlock :: Text -> Either ApiError (Maybe ResponseStreamEvent)
+parseBlock :: BS.ByteString -> Either ApiError (Maybe ResponseStreamEvent)
 parseBlock block
-    | Text.null dataText = Right Nothing
-    | Text.strip dataText == "[DONE]" = Right Nothing
-    | otherwise = decodeEvent eventType dataText
+    | BS.null dataBytes = Right Nothing
+    | isDonePayload dataBytes = Right Nothing
+    | otherwise = decodeEvent eventType dataBytes
   where
-    blockLines = Text.lines block
+    blockLines = map dropTrailingCarriageReturn (BS8.lines block)
     eventType = Maybe.listToMaybe
-        [ Text.strip (Text.drop 6 line)
+        [ Text.strip (Text.decodeUtf8 (BS.drop 6 line))
         | line <- blockLines
-        , "event:" `Text.isPrefixOf` line
+        , "event:" `BS.isPrefixOf` line
         ]
-    dataText = Text.intercalate "\n"
-        [ stripOptionalSpace (Text.drop 5 line)
+    dataBytes = BS.intercalate "\n"
+        [ stripOptionalSpace (BS.drop 5 line)
         | line <- blockLines
-        , "data:" `Text.isPrefixOf` line
+        , "data:" `BS.isPrefixOf` line
         ]
 
-    stripOptionalSpace line = Maybe.fromMaybe line (Text.stripPrefix " " line)
+    stripOptionalSpace line = Maybe.fromMaybe line (BS.stripPrefix " " line)
+
+isDonePayload :: BS.ByteString -> Bool
+isDonePayload bytes =
+    "[DONE]" `BS.isInfixOf` bytes
+        && Text.strip (Text.decodeUtf8 bytes) == "[DONE]"
 
 -- A malformed JSON payload should not tear down an otherwise healthy stream.
 -- Codex skips such frames (notably partial/unparseable output_item events)
 -- and continues decoding subsequent events. Framing/UTF-8 failures remain
 -- hard errors because there is no safe way to recover their boundaries.
-decodeEvent :: Maybe Text -> Text -> Either ApiError (Maybe ResponseStreamEvent)
-decodeEvent eventType dataText =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 dataText) of
+decodeEvent :: Maybe Text -> BS.ByteString -> Either ApiError (Maybe ResponseStreamEvent)
+decodeEvent eventType dataBytes =
+    case Aeson.eitherDecodeStrict' dataBytes of
         Left _ -> Right Nothing
         Right value ->
             let decoded = case eventType of

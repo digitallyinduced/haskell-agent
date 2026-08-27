@@ -24,12 +24,16 @@ module Agent.CLI.AgentViewport
     , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
+    , responseItemStepPreviewsRelative
     , responseItemsToUiState
+    , responseItemsToUiStateRelative
+    , agentStepsForStatusRelative
+    , lookupAgentEntry
     , selectAgentTarget
     , selectedAgentEntry
     ) where
 
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render (summarizeToolCallRelative)
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -59,11 +63,9 @@ import Agent.TUI.Model
     )
 import Agent.TUI.Presentation (liveTodoPanelLines)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import Data.Foldable (toList)
 import Data.IORef (IORef)
-import Data.List (findIndex, sortOn)
+import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
 import qualified Data.Sequence as Seq
@@ -78,6 +80,7 @@ import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 data AgentTarget
     = AgentRoot
     | AgentChild !SubagentId
+    | AgentNative !Text
     deriving (Eq, Ord, Show)
 
 data AgentStepState
@@ -131,6 +134,7 @@ agentStatusGlyph status = case Text.toLower status of
     "done" -> "✓"
     "error" -> "✕"
     "interrupted" -> "■"
+    "cancelled" -> "■"
     "closed" -> "×"
     "missing" -> "?"
     _ -> "·"
@@ -156,6 +160,10 @@ initialAgentViewportState selected entries =
         }
   where
     ordered = sortOn (.agentPath) entries
+
+lookupAgentEntry :: AgentTarget -> [AgentEntry] -> Maybe AgentEntry
+lookupAgentEntry target =
+    find ((== target) . (.agentTarget))
 
 selectedAgentEntry :: AgentViewportState -> Maybe AgentEntry
 selectedAgentEntry state = case state.viewportAll of
@@ -348,8 +356,13 @@ responseItemLines = concatMap responseItemLineList
 -- and tool blocks without maintaining a second presentation model.
 responseItemsToUiState :: Bool -> [ResponseItem] -> UiState
 responseItemsToUiState showRawReasoning =
+    responseItemsToUiStateRelative showRawReasoning ""
+
+responseItemsToUiStateRelative :: Bool -> Text -> [ResponseItem] -> UiState
+responseItemsToUiStateRelative showRawReasoning workspace =
     normalizeTranscriptUi
-        . foldl' (appendResponseItem showRawReasoning) initialUiState
+        . foldl' (appendResponseItem showRawReasoning)
+            initialUiState { uiWorkspaceRoot = workspace }
 
 -- | Keep a compact agent preview: the first line for picker context plus
 -- only the most recent logical lines for the live pane. Earlier response
@@ -380,7 +393,10 @@ responseItemPreviewLines count items
 -- folded into their originating calls so the preview shows one semantic step
 -- instead of adjacent @tool: name@ / @tool: completed@ rows.
 responseItemStepPreviews :: Int -> [ResponseItem] -> [AgentStep]
-responseItemStepPreviews count items
+responseItemStepPreviews = responseItemStepPreviewsRelative ""
+
+responseItemStepPreviewsRelative :: Text -> Int -> [ResponseItem] -> [AgentStep]
+responseItemStepPreviewsRelative workspace count items
     | count <= 0 = []
     | otherwise = go count Map.empty (reverse items)
   where
@@ -410,7 +426,8 @@ responseItemStepPreviews count items
                         AgentStep
                             { agentStepState = state
                             , agentStepTitle =
-                                summarizeToolCall
+                                summarizeToolCallRelative
+                                    workspace
                                     (functionToolCall
                                         call.callId
                                         call.name
@@ -431,7 +448,8 @@ responseItemStepPreviews count items
                         AgentStep
                             { agentStepState = state
                             , agentStepTitle =
-                                summarizeToolCall
+                                summarizeToolCallRelative
+                                    workspace
                                     (customToolCall
                                         call.callId
                                         call.name
@@ -495,7 +513,15 @@ agentStepsForStatus
     -> SubagentStatus
     -> [ResponseItem]
     -> [AgentStep]
-agentStepsForStatus count status items
+agentStepsForStatus = agentStepsForStatusRelative ""
+
+agentStepsForStatusRelative
+    :: Text
+    -> Int
+    -> SubagentStatus
+    -> [ResponseItem]
+    -> [AgentStep]
+agentStepsForStatusRelative workspace count status items
     | count <= 0 = []
     | otherwise = take count $ case status of
         Pending ->
@@ -530,7 +556,7 @@ agentStepsForStatus count status items
         NotFound ->
             AgentStep AgentStepFailed "Agent unavailable" Nothing : settled
   where
-    recent = responseItemStepPreviews count items
+    recent = responseItemStepPreviewsRelative workspace count items
     settled = map settleStep recent
 
     settleStep step
@@ -630,6 +656,8 @@ responseContentText = \case
     InputImagePart{} -> ["[image]"]
     InputFilePart{filename} -> ["[file" <> maybe "" (" " <>) filename <> "]"]
     InputAudioPart{} -> ["[audio]"]
+    EncryptedContentPart{} -> []
+    PlainTextPart{text} -> [text]
     UnknownContentPart{} -> []
 
 appendResponseItem :: Bool -> UiState -> ResponseItem -> UiState
@@ -667,10 +695,19 @@ appendResponseItem showRawReasoning state = \case
             reasoning.status
             (reasoningDisplayText showRawReasoning reasoning)
             state
-    KnownResponseItem ItemAgentMessage tagged ->
+    AgentMessageItem message ->
         maybe state
             (\text -> reduceUi (UiUserSubmitted text) state)
-            (nonEmptyDisplayText (taggedContentText tagged))
+            (nonEmptyDisplayText (agentMessagePlainText message))
+    AdditionalToolsItemValue{} -> state
+    LocalShellCallItem{} -> state
+    ToolSearchCallItem{} -> state
+    ToolSearchOutputItem{} -> state
+    WebSearchCallItem{} -> state
+    ImageGenerationCallItem{} -> state
+    CompactionItemValue{} -> state
+    CompactionTriggerItemValue{} -> state
+    ContextCompactionItemValue{} -> state
     KnownResponseItem{} -> state
     ItemReferenceValue{} -> state
     UnknownResponseItem{} -> state
@@ -758,25 +795,22 @@ reasoningContentText :: ResponseContentPart -> [Text]
 reasoningContentText = \case
     ReasoningTextPart{text} -> [text]
     SummaryTextPart{text} -> [text]
+    PlainTextPart{text} -> [text]
     _ -> []
 
-taggedContentText :: TaggedObject -> Text
-taggedContentText tagged =
-    case KeyMap.lookup "content" tagged.fields of
-        Just (Aeson.Array values) ->
-            Text.intercalate "\n" (concatMap taggedPartText (toList values))
-        Just value ->
-            Text.intercalate "\n" (taggedPartText value)
-        Nothing -> ""
-
-taggedPartText :: Aeson.Value -> [Text]
-taggedPartText = \case
-    Aeson.String text -> [text]
-    Aeson.Object object ->
-        case KeyMap.lookup "text" object of
-            Just (Aeson.String text) -> [text]
+agentMessagePlainText :: ResponseAgentMessage -> Text
+agentMessagePlainText message =
+    Text.intercalate "\n"
+        [ text
+        | part <- message.content
+        , text <- case part of
+            InputTextPart{text} -> [text]
+            OutputTextPart{text} -> [text]
+            ReasoningTextPart{text} -> [text]
+            SummaryTextPart{text} -> [text]
+            PlainTextPart{text} -> [text]
             _ -> []
-    _ -> []
+        ]
 
 renderToolOutputValue :: Aeson.Value -> Text
 renderToolOutputValue = \case

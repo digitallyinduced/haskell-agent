@@ -3,11 +3,15 @@ module Agent.ProjectInstructionsSpec (spec) where
 import Agent.ProjectInstructions
 import System.OsPath (unsafeEncodeUtf)
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Exception.Safe (bracket)
+import Control.Exception.Safe (bracket, finally)
 import System.Directory
     ( createDirectoryIfMissing
+    , emptyPermissions
     , getTemporaryDirectory
     , removeDirectoryRecursive
+    , setOwnerReadable
+    , setOwnerWritable
+    , setPermissions
     )
 import System.FilePath ((</>))
 import System.IO (IOMode(AppendMode), hClose, openFile)
@@ -146,6 +150,20 @@ spec = describe "Agent.ProjectInstructions" do
         it "waits for a transient lock instead of dropping instructions" do
             withTempDir checkLockedInstructions
 
+        it "warns when an instruction file exists but cannot be read" do
+            withTempDir \dir -> do
+                createDirectoryIfMissing True (dir </> ".git")
+                let path = dir </> "AGENTS.md"
+                writeFile path "secret rules\n"
+                loaded <-
+                    withUnreadableFile path $
+                        discoverProjectInstructions
+                            defaultDiscoverOptions
+                            (fromFilePath dir)
+                loadedInstructionFiles loaded `shouldBe` []
+                map (.instructionWarningMessage) loaded.loadedWarnings
+                    `shouldNotBe` []
+
         it "loads a global home file before project files" do
             withTempDir \dir -> do
                 createDirectoryIfMissing True (dir </> ".git")
@@ -212,6 +230,13 @@ checkLockedInstructions dir = do
         hClose handle
     loaded <- discoverProjectInstructions defaultDiscoverOptions (fromFilePath dir)
     map (.instructionContent) loaded.loadedProject `shouldBe` ["locked rules\n"]
+
+withUnreadableFile :: FilePath -> IO a -> IO a
+withUnreadableFile path action = do
+    setPermissions path emptyPermissions
+    action `finally`
+        setPermissions path
+            (setOwnerWritable True (setOwnerReadable True emptyPermissions))
 
 withTempDir :: (FilePath -> IO a) -> IO a
 withTempDir action = do

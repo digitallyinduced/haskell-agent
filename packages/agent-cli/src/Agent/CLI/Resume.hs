@@ -23,6 +23,7 @@ module Agent.CLI.Resume
     , renderResumeFrame
     , renderResumeFrameFor
     , replaceResumeEntry
+    , resumeNeedsGeneratedContext
     , resumeEntryFromMeta
     , resumeEntriesFrom
     , resumeSearchEntries
@@ -48,6 +49,11 @@ import Agent.CLI.Session
     , loadSessionResumeStats
     )
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
+import Agent.OpenAI.Compaction
+    ( hasCompactionCheckpoint
+    , hasReloadedGeneratedContextItems
+    , isTranscriptResetTurn
+    )
 import Agent.CLI.TextLayout
     ( SplitPaneFrame(..)
     , clampSelectionIndex
@@ -60,7 +66,7 @@ import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
 import Control.Monad (forM)
 import Data.Char (isAlphaNum)
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
@@ -120,6 +126,25 @@ data ResumeState = ResumeState
     , resumeIndex :: !Int
     }
     deriving (Eq, Show)
+
+-- | Reinstall generated project and skill context after the newest durable
+-- transcript-replacement boundary until a later persisted turn proves that
+-- the regenerated context was consumed. This also repairs sessions compacted
+-- by older clients that did not reload generated context.
+resumeNeedsGeneratedContext :: [SessionTurn] -> Bool
+resumeNeedsGeneratedContext turns =
+    case break isContextBoundary (reverse turns) of
+        (_, []) -> False
+        (newerTurns, _boundary : _) ->
+            null newerTurns
+                || not
+                    (any
+                        (hasReloadedGeneratedContextItems . (.turnItems))
+                        newerTurns)
+  where
+    isContextBoundary turn =
+        isTranscriptResetTurn turn.turnUserText
+            || hasCompactionCheckpoint turn.turnItems
 
 -- | Build picker entries from already loaded sessions.
 resumeEntriesFrom :: [(SessionMeta, [SessionTurn])] -> [ResumeEntry]
@@ -382,7 +407,7 @@ cycleResumeSource browser =
             , resumeBrowserIndex = 0
             }
   where
-    providers = nub (map (.resumeProvider) browser.resumeBrowserAll)
+    providers = nubOrd (map (.resumeProvider) browser.resumeBrowserAll)
     first = \case
         [] -> Nothing
         value : _ -> Just value

@@ -3,6 +3,7 @@ module Agent.OpenAI.Request
     ( sanitizeCodexRequest
     ) where
 
+import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -19,11 +20,24 @@ import qualified Data.Aeson.KeyMap as KeyMap
 -- client feature flag is on; the current Responses Lite endpoint rejects it as
 -- an unknown parameter, so strip it at the wire boundary and leave the
 -- in-memory request params unchanged.
+--
+-- Responses Lite also requires @parallel_tool_calls=false@. Compaction and
+-- other request rebuilds can flip that flag back to true, so restore the
+-- Lite contract here for both HTTP and WebSocket.
 sanitizeCodexRequest :: ResponseCreateParams -> ResponseCreateParams
-sanitizeCodexRequest ResponseCreateParams{promptCacheRetention = _, input, ..} =
+sanitizeCodexRequest ResponseCreateParams
+        { promptCacheRetention = _
+        , input
+        , parallelToolCalls
+        , ..
+        } =
     ResponseCreateParams
         { promptCacheRetention = Nothing
         , input = fmap stripContentItemKindsInput input
+        , parallelToolCalls =
+            if maybe False isCodexResponsesLiteModel model
+                then Just False
+                else parallelToolCalls
         , ..
         }
 
@@ -37,7 +51,14 @@ stripContentItemKindsItem :: ResponseItem -> ResponseItem
 stripContentItemKindsItem = \case
     MessageItem message ->
         MessageItem message
-            { extraFields = stripContentItemKindsFields message.extraFields }
+            { passthrough = stripItemPassthrough message.passthrough
+            , extraFields = stripContentItemKindsFields message.extraFields
+            }
+    AgentMessageItem message ->
+        AgentMessageItem message
+            { passthrough = stripItemPassthrough message.passthrough
+            , extraFields = stripContentItemKindsFields message.extraFields
+            }
     FunctionCallItem value ->
         FunctionCallItem value
             { extraFields = stripContentItemKindsFields value.extraFields }
@@ -56,12 +77,56 @@ stripContentItemKindsItem = \case
     ItemReferenceValue value ->
         ItemReferenceValue value
             { extraFields = stripContentItemKindsFields value.extraFields }
+    AdditionalToolsItemValue value ->
+        AdditionalToolsItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    LocalShellCallItem value ->
+        LocalShellCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ToolSearchCallItem value ->
+        ToolSearchCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ToolSearchOutputItem value ->
+        ToolSearchOutputItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    WebSearchCallItem value ->
+        WebSearchCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ImageGenerationCallItem value ->
+        ImageGenerationCallItem value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    CompactionItemValue value ->
+        CompactionItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    CompactionTriggerItemValue value ->
+        CompactionTriggerItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
+    ContextCompactionItemValue value ->
+        ContextCompactionItemValue value
+            { extraFields = stripContentItemKindsFields value.extraFields }
     KnownResponseItem itemType tagged ->
         KnownResponseItem itemType tagged
             { fields = stripContentItemKindsFields tagged.fields }
     UnknownResponseItem tagged ->
         UnknownResponseItem tagged
             { fields = stripContentItemKindsFields tagged.fields }
+
+stripItemPassthrough
+    :: Maybe InternalChatMetadata
+    -> Maybe InternalChatMetadata
+stripItemPassthrough = \case
+    Nothing -> Nothing
+    Just metadata ->
+        let cleaned = metadata { contentItemKinds = Nothing }
+        in if cleaned == InternalChatMetadata
+                { turnId = Nothing
+                , createTime = Nothing
+                , contentItemKinds = Nothing
+                , executedToolCalls = Nothing
+                , extraFields = KeyMap.empty
+                }
+            then Nothing
+            else Just cleaned
 
 stripContentItemKindsFields :: Aeson.Object -> Aeson.Object
 stripContentItemKindsFields fields =

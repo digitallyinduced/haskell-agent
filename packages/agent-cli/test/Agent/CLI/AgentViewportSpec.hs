@@ -117,6 +117,48 @@ spec = do
             (.agentStatus) <$> selectedAgentEntry refreshed
                 `shouldBe` Just "done"
 
+        it "selects provider-native agents without changing host child identity" do
+            let native =
+                    AgentEntry
+                        { agentTarget = AgentNative "toolu-native"
+                        , agentPath = "/native/explore"
+                        , agentStatus = "running"
+                        , agentModel = Just "claude-sonnet"
+                        , agentSteps = []
+                        , agentTranscript = ["assistant: inspecting"]
+                        , agentConversation = initialUiState
+                        }
+                mixed = entries <> [native]
+                selected =
+                    selectAgentTarget (AgentNative "toolu-native")
+                        (initialAgentViewportState AgentRoot mixed)
+            (.agentTarget) <$> selectedAgentEntry selected
+                `shouldBe` Just (AgentNative "toolu-native")
+            lookupAgentEntry
+                (AgentChild (SubagentId "alpha"))
+                mixed
+                `shouldSatisfy` maybe False ((== "/root/alpha") . (.agentPath))
+
+        it "renders provider-native agents in the shared hierarchy" do
+            let native =
+                    AgentEntry
+                        { agentTarget = AgentNative "toolu-native"
+                        , agentPath = "/native/explore"
+                        , agentStatus = "cancelled"
+                        , agentModel = Just "claude-sonnet"
+                        , agentSteps = []
+                        , agentTranscript = ["assistant: partial result"]
+                        , agentConversation = initialUiState
+                        }
+                rendered =
+                    renderAgentTree
+                        False
+                        (AgentNative "toolu-native")
+                        (entries <> [native])
+            rendered `shouldSatisfy` Text.isInfixOf "explore  ■ cancelled"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "viewing /native/explore"
+
         it "renders hierarchy and transcript panes" do
             let frame = renderAgentViewportFrameFor False 10 70 state
             frame `shouldSatisfy` Text.isInfixOf "hierarchy"
@@ -251,6 +293,32 @@ spec = do
             body False `shouldBe` Just "Visible summary"
             body True
                 `shouldBe` Just "Visible summary\nprivate detail"
+
+        it "shows workspace-relative tool titles when hydrating a child transcript" do
+            let workspace = "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+                ui =
+                    responseItemsToUiStateRelative False workspace
+                        [ functionCallItem
+                            "call-1"
+                            "read_file"
+                            ("{\"target_file\":\""
+                                <> workspace
+                                <> "/nix/modules/telegram.nix\"}")
+                            (Just ItemCompleted)
+                        ]
+            map (.blockTitle) (toList ui.uiBlocks)
+                `shouldBe` ["Read nix/modules/telegram.nix"]
+            map (.agentStepTitle)
+                (responseItemStepPreviewsRelative workspace 1
+                    [ functionCallItem
+                        "call-1"
+                        "search_replace"
+                        ("{\"file_path\":\""
+                            <> workspace
+                            <> "/nix/modules/telegram.nix\"}")
+                        (Just ItemCompleted)
+                    ])
+                `shouldBe` ["Edited nix/modules/telegram.nix"]
 
     describe "responseItemStepPreviews" do
         it "coalesces tool calls with their outputs and returns newest first" do
@@ -392,6 +460,7 @@ messageItem role text = MessageItem ResponseMessage
     , role
     , status = Nothing
     , phase = Nothing
+    , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
 
@@ -406,7 +475,9 @@ functionCallItem callId name arguments status =
         { itemId = Nothing
         , callId
         , name
+        , namespace = Nothing
         , arguments
+        , encryptedFunctionArgs = Nothing
         , status
         , extraFields = KeyMap.empty
         }
@@ -416,6 +487,8 @@ functionOutputItem callId status =
     FunctionCallOutputItem FunctionCallOutput
         { itemId = Nothing
         , callId
+        , name = Nothing
+        , namespace = Nothing
         , output = Aeson.String "ok"
         , status
         , extraFields = KeyMap.empty
@@ -423,18 +496,13 @@ functionOutputItem callId status =
 
 agentMessageItem :: Text -> ResponseItem
 agentMessageItem text =
-    KnownResponseItem ItemAgentMessage TaggedObject
-        { tag = "agent_message"
-        , fields = KeyMap.fromList
-            [ ( "content"
-              , Aeson.toJSON
-                    [ Aeson.object
-                        [ "type" Aeson..= ("input_text" :: Text)
-                        , "text" Aeson..= text
-                        ]
-                    ]
-              )
-            ]
+    AgentMessageItem ResponseAgentMessage
+        { messageId = Nothing
+        , author = Nothing
+        , recipient = Nothing
+        , content = [InputTextPart text Nothing KeyMap.empty]
+        , passthrough = Nothing
+        , extraFields = KeyMap.empty
         }
 
 reasoningItem :: Text -> Text -> ResponseItem

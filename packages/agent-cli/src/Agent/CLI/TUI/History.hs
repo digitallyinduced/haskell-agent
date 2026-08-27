@@ -32,15 +32,20 @@ module Agent.CLI.TUI.History
     , historyWindowSelected
     , historyWindowSetAnchors
     , historyWindowSetGeneration
+    , historyWindowBlock
+    , setHistoryWindowTurns
     , historyWindowTurn
     , historyWindowVisible
     , markHistoryRequest
+    , unarchivedLiveStart
     ) where
 
-import Agent.TUI.Model (UiBlock(..))
-import Data.Foldable (find, toList)
+import Agent.TUI.Model (BlockId, UiBlock(..))
+import Data.Foldable (toList)
 import Data.Int (Int64)
 import Data.List (sortOn)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import qualified Data.Sequence as Seq
 import Data.Sequence (Seq)
 import qualified Data.Set as Set
@@ -87,6 +92,8 @@ data HistoryRequest = HistoryRequest
 data HistoryWindow = HistoryWindow
     { historyWindowGeneration :: !HistoryGeneration
     , historyWindowTurns :: !(Seq HistoryTurn)
+    , historyWindowTurnsByCursor :: !(Map HistoryCursor HistoryTurn)
+    , historyWindowBlocksById :: !(Map BlockId UiBlock)
     , historyWindowHasOlder :: !Bool
     , historyWindowHasNewer :: !Bool
     , historyWindowMaxTurns :: !Int
@@ -115,6 +122,8 @@ emptyHistoryWindow generation maxTurns maxBlocks maxBytes =
     HistoryWindow
         { historyWindowGeneration = generation
         , historyWindowTurns = Seq.empty
+        , historyWindowTurnsByCursor = Map.empty
+        , historyWindowBlocksById = Map.empty
         , historyWindowHasOlder = False
         , historyWindowHasNewer = False
         , historyWindowMaxTurns = max 1 maxTurns
@@ -125,6 +134,23 @@ emptyHistoryWindow generation maxTurns maxBlocks maxBytes =
         , historyWindowPending = Set.empty
         , historyWindowVisibleAnchor = Nothing
         , historyWindowSelectedAnchor = Nothing
+        }
+
+setHistoryWindowTurns :: Seq HistoryTurn -> HistoryWindow -> HistoryWindow
+setHistoryWindowTurns turns window =
+    window
+        { historyWindowTurns = turns
+        , historyWindowTurnsByCursor =
+            Map.fromList
+                [ (turn.historyTurnCursor, turn)
+                | turn <- toList turns
+                ]
+        , historyWindowBlocksById =
+            Map.fromList
+                [ (block.blockId, block)
+                | turn <- toList turns
+                , block <- toList turn.historyTurnBlocks
+                ]
         }
 
 historyWindowLoadedTurns :: HistoryWindow -> Int
@@ -160,9 +186,12 @@ historyWindowTurn
     :: HistoryCursor
     -> HistoryWindow
     -> Maybe HistoryTurn
-historyWindowTurn cursor =
-    find (\turn -> turn.historyTurnCursor == cursor)
-        . (.historyWindowTurns)
+historyWindowTurn cursor window =
+    Map.lookup cursor window.historyWindowTurnsByCursor
+
+historyWindowBlock :: BlockId -> HistoryWindow -> Maybe UiBlock
+historyWindowBlock ident window =
+    Map.lookup ident window.historyWindowBlocksById
 
 historyWindowSetAnchors
     :: Maybe HistoryCursor
@@ -190,17 +219,17 @@ historyWindowSetGeneration
     -> HistoryWindow
     -> HistoryWindow
 historyWindowSetGeneration generation window =
-    window
-        { historyWindowGeneration = generation
-        , historyWindowTurns = Seq.empty
-        , historyWindowHasOlder = False
-        , historyWindowHasNewer = False
-        , historyWindowGenerationStart = HistoryCursor 0
-        , historyWindowTotalTurns = 0
-        , historyWindowPending = Set.empty
-        , historyWindowVisibleAnchor = Nothing
-        , historyWindowSelectedAnchor = Nothing
-        }
+    setHistoryWindowTurns Seq.empty $
+        window
+            { historyWindowGeneration = generation
+            , historyWindowHasOlder = False
+            , historyWindowHasNewer = False
+            , historyWindowGenerationStart = HistoryCursor 0
+            , historyWindowTotalTurns = 0
+            , historyWindowPending = Set.empty
+            , historyWindowVisibleAnchor = Nothing
+            , historyWindowSelectedAnchor = Nothing
+            }
 
 historyWindowCanRequest
     :: HistoryDirection
@@ -236,6 +265,25 @@ historyWindowRequest direction window
 
 -- | Mark a request as in flight.  A request that cannot currently be made is
 -- ignored, which keeps event handlers idempotent when scroll ticks coalesce.
+-- | Live start index when archiving a turn that was rendered without
+-- 'UiUserSubmitted'. If the durable blocks already sit at the end of the
+-- live transcript, drop that suffix so 'drawTranscript' does not show both.
+unarchivedLiveStart :: Seq UiBlock -> Seq UiBlock -> Int
+unarchivedLiveStart liveBlocks durableBlocks
+    | Seq.null durableBlocks = liveCount
+    | liveCount >= durableCount
+    , map blockKey (drop (liveCount - durableCount) live)
+        == map blockKey durable =
+        liveCount - durableCount
+    | otherwise = liveCount
+  where
+    live = toList liveBlocks
+    durable = toList durableBlocks
+    liveCount = length live
+    durableCount = length durable
+    blockKey block =
+        (block.blockKind, Text.strip block.blockBody)
+
 markHistoryRequest
     :: HistoryDirection
     -> HistoryWindow
@@ -329,7 +377,8 @@ mergePage page window =
         case direction of
             HistoryOlder -> incoming <> existing
             HistoryNewer -> existing <> incoming
-    window' = window { historyWindowTurns = uniqueTurns (sortTurns merged) }
+    window' =
+        setHistoryWindowTurns (uniqueTurns (sortTurns merged)) window
 
 sortTurns :: Seq HistoryTurn -> Seq HistoryTurn
 sortTurns = Seq.fromList . sortOn (.historyTurnCursor) . toList
@@ -421,15 +470,11 @@ evictOne :: HistoryDirection -> HistoryWindow -> HistoryWindow
 evictOne direction window =
     case direction of
         HistoryOlder ->
-            window
-                { historyWindowTurns = dropFirst
-                , historyWindowHasOlder = True
-                }
+            setHistoryWindowTurns dropFirst $
+                window { historyWindowHasOlder = True }
         HistoryNewer ->
-            window
-                { historyWindowTurns = dropLast
-                , historyWindowHasNewer = True
-                }
+            setHistoryWindowTurns dropLast $
+                window { historyWindowHasNewer = True }
   where
     turns = window.historyWindowTurns
     dropFirst =

@@ -2,8 +2,10 @@ module Agent.CLI.TUIAppSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.Input (terminalTextWidth)
+import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
-    ( applyTextPromptEdit
+    ( applyStoredFullscreenWindowTitle
+    , applyTextPromptEdit
     , advanceCompletionFlashes
     , agentEntryWindow
     , agentPaneEntryLimit
@@ -18,6 +20,9 @@ import Agent.CLI.TUI.App
     , fullscreenVtyConfig
     , fullscreenSurface
     , mergeConversationView
+    , newFullscreenInputBuffer
+    , newFullscreenRuntime
+    , withTrackedVtyBuilder
     , wrapFullscreenKeyboardVty
     , motionDemandFor
     , motionDemandForTerminalFocus
@@ -33,12 +38,17 @@ import Agent.CLI.TUI.App
     , repositoryHeaderText
     , resumeSearchCursorColumn
     , selectedAgentConversation
+    , setFullscreenWindowTitle
+    , syntaxLanguagesForBlocks
     , textOverlayDisplayText
+    , turnCompletionRequiresRedraw
     , uiEventRestartsMotionSchedule
     )
+import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
     ( ChoiceOverlay(..)
     , ChoicePresentation(..)
+    , FullscreenRuntime(..)
     , Name(..)
     , TerminalFocus(..)
     , TextInputMode(..)
@@ -72,9 +82,10 @@ import Agent.TUI.Presentation
 import Agent.TUI.Motion
 import Control.Concurrent.STM (newTChanIO)
 import qualified Data.ByteString as ByteString
-import Data.Foldable (find)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Foldable (find, toList)
+import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -84,6 +95,17 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "on-demand syntax loading" do
+        it "requests grammars used by fenced file paths" do
+            let conversation =
+                    reduceUi
+                        (UiAssistantHistory
+                            "```src/Agent/Syntax.hs\nmain = pure ()\n```\n\
+                            \```python\nprint('hello')\n```")
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.fromList ["haskell", "python"]
+
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
             let url = "https://github.com/digitallyinduced/haskell-agent"
@@ -283,12 +305,28 @@ spec = do
                   , V.EvKey (V.KChar 'v') [V.MCtrl]
                   )
                 , ( Nothing
+                  , "\ESC[99;5u"
+                  , V.EvKey (V.KChar 'c') [V.MCtrl]
+                  )
+                , ( Nothing
+                  , "\ESC[99:67:67;5:1u"
+                  , V.EvKey (V.KChar 'c') [V.MCtrl]
+                  )
+                , ( Nothing
                   , "\ESC[118;9u"
                   , V.EvKey (V.KChar 'v') [V.MMeta]
                   )
                 , ( Nothing
                   , "\ESC[118:86:86;9:1u"
                   , V.EvKey (V.KChar 'v') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[114;5u"
+                  , V.EvKey (V.KChar 'r') [V.MCtrl]
+                  )
+                , ( Nothing
+                  , "\ESC[114:82:82;5:1u"
+                  , V.EvKey (V.KChar 'r') [V.MCtrl]
                   )
                 ]
 
@@ -338,6 +376,70 @@ spec = do
             V.shutdown wrapped
             readIORef events `shouldReturn` [Right ()]
 
+    describe "fullscreen window title" do
+        it "replays the stored session title as UTF-8 OSC bytes" do
+            titles <- newIORef ([] :: [ByteString.ByteString])
+            input <- newFullscreenInputBuffer
+            runtime <- newFullscreenRuntime
+                input
+                (pure ())
+                (const (pure ()))
+                (pure WarnExit)
+                (const (pure True))
+                (const (pure ()))
+                (const (pure ()))
+                (pure (AgentRoot, []))
+                (const (pure ()))
+                (pure ())
+                (const (pure ()))
+                MotionFull
+                False
+                initialUiState
+            (_, output) <- VMock.mockTerminal (80, 24)
+            let title = "⠋ New session"
+            setFullscreenWindowTitle runtime title
+            readIORef runtime.runtimeWindowTitle
+                `shouldReturn` Just title
+            applyStoredFullscreenWindowTitle
+                runtime
+                output
+                    { V.outputByteBuffer =
+                        \bytes -> modifyIORef' titles (<> [bytes])
+                    }
+            actual <- readIORef titles
+            actual `shouldBe` [oscWindowTitleBytes title]
+            actual
+                `shouldSatisfy`
+                    any (ByteString.isInfixOf (ByteString.pack [0xE2, 0xA0, 0x8B]))
+
+    describe "fullscreen Vty ownership" do
+        it "shuts down the rebuilt Vty when exit follows suspension" do
+            shutdowns <- newIORef ([] :: [String])
+            useInitial <- newIORef True
+            (_, output) <- VMock.mockTerminal (80, 24)
+            initialVty <- mockVty
+                output
+                (modifyIORef' shutdowns (<> ["initial"]))
+                (pure False)
+            resumedVty <- mockVty
+                output
+                (modifyIORef' shutdowns (<> ["resumed"]))
+                (pure False)
+            let makeVty = do
+                    initial <- readIORef useInitial
+                    writeIORef useInitial False
+                    pure (if initial then initialVty else resumedVty)
+
+            (withTrackedVtyBuilder makeVty \buildVty -> do
+                first <- buildVty
+                V.shutdown first
+                _ <- buildVty
+                ioError (userError "forced exit"))
+                `shouldThrow` anyIOException
+
+            readIORef shutdowns
+                `shouldReturn` ["initial", "resumed"]
+
     describe "repositoryHeaderText" do
         it "puts the git state before the full checkout path" do
             repositoryHeaderText
@@ -354,9 +456,15 @@ spec = do
         it "crops the empty-conversation art to tiny render contexts" do
             let image =
                     V.picImage $
-                        renderWidget Nothing [lambdaArtWidget 0] (5, 3)
+                        renderWidget Nothing [lambdaArtWidget True 0] (5, 3)
             V.imageWidth image `shouldSatisfy` (<= 5)
             V.imageHeight image `shouldSatisfy` (<= 3)
+
+        it "sweeps the empty-conversation sheen over time" do
+            let rendered elapsed =
+                    show $
+                        renderWidget Nothing [lambdaArtWidget True elapsed] (42, 21)
+            rendered 0 `shouldNotBe` rendered 400
 
         it "shows quick-start actions only when the empty pane has room" do
             quickStartVisible 100 30 `shouldBe` True
@@ -677,6 +785,27 @@ spec = do
                 400000
                 (MotionSlow, 500000, 4)
                 `shouldBe` (MotionSlow, 400000, 5)
+
+        it "requests one unfocused redraw when a running turn becomes idle" do
+            let running = reduceUi (UiLoop TurnStarted) initialUiState
+                finished =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput "response-1" [] Nothing)))
+                        running
+                continuing =
+                    reduceUi
+                        (UiLoop
+                            (TurnFinished
+                                (emptyTurnOutput
+                                    "response-1"
+                                    [functionToolCall "call-1" "read_file" "{}"]
+                                    Nothing)))
+                        running
+            turnCompletionRequiresRedraw running finished `shouldBe` True
+            turnCompletionRequiresRedraw running continuing `shouldBe` False
+            turnCompletionRequiresRedraw finished finished `shouldBe` False
 
         it "retains sub-millisecond time across clock samples" do
             elapsedMillisSince 1000000 1499999

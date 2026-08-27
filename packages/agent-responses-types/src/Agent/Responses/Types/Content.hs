@@ -111,6 +111,14 @@ data ResponseContentPart
         { text        :: !Text
         , extraFields :: !Aeson.Object
         }
+    | EncryptedContentPart
+        { encryptedContent :: !Text
+        , extraFields      :: !Aeson.Object
+        }
+    | PlainTextPart
+        { text        :: !Text
+        , extraFields :: !Aeson.Object
+        }
     | UnknownContentPart !TaggedObject
     deriving stock (Eq, Show)
 
@@ -152,6 +160,13 @@ instance ToJSON ResponseContentPart where
         [Just (field "type" ("reasoning_text" :: Text)), Just (field "text" text)]
     toJSON SummaryTextPart { text, extraFields } = objectWith extraFields
         [Just (field "type" ("summary_text" :: Text)), Just (field "text" text)]
+    toJSON EncryptedContentPart { encryptedContent, extraFields } =
+        objectWith extraFields
+            [ Just (field "type" ("encrypted_content" :: Text))
+            , Just (field "encrypted_content" encryptedContent)
+            ]
+    toJSON PlainTextPart { text, extraFields } = objectWith extraFields
+        [Just (field "type" ("text" :: Text)), Just (field "text" text)]
     toJSON (UnknownContentPart tagged) = toJSON tagged
 
 instance FromJSON ResponseContentPart where
@@ -191,6 +206,12 @@ instance FromJSON ResponseContentPart where
                 <$> o .: "text"
                 <*> pure (without ["type", "text"] o)
             "summary_text" -> SummaryTextPart
+                <$> o .: "text"
+                <*> pure (without ["type", "text"] o)
+            "encrypted_content" -> EncryptedContentPart
+                <$> o .: "encrypted_content"
+                <*> pure (without ["type", "encrypted_content"] o)
+            "text" -> PlainTextPart
                 <$> o .: "text"
                 <*> pure (without ["type", "text"] o)
             _ -> UnknownContentPart <$> parseJSON value) value

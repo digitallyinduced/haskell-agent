@@ -9,6 +9,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -20,7 +21,7 @@ spec = do
     describe "mapModel" do
         it "prefers exact overrides, passes slugs through, and falls back otherwise" do
             let options = defaultClientOptions
-                    { modelOverrides = [("gpt-5.1", "anthropic/claude-sonnet-4")]
+                    { modelOverrides = Map.fromList [("gpt-5.1", "anthropic/claude-sonnet-4")]
                     , defaultModel = "openai/gpt-5.1"
                     }
             mapModel options "gpt-5.1" `shouldBe` "anthropic/claude-sonnet-4"
@@ -169,6 +170,7 @@ sampleRequest = defaultResponseCreateParams
             , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
             , status = Nothing
             , phase = Nothing
+            , passthrough = Nothing
             , extraFields = mempty
             }
         ])

@@ -25,6 +25,8 @@ import Agent.Responses.LoopBackend
 import Agent.Responses.Types
     ( MessageContent(..)
     , FunctionCallOutput(..)
+    , InternalChatMetadata(..)
+    , ReasoningItem(..)
     , ResponseContentPart(..)
     , ResponseItem(..)
     , ResponseMessage(..)
@@ -247,11 +249,14 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , role = RoleUser
                 , status = Nothing
                 , phase = Nothing
+                , passthrough = Nothing
                 , extraFields = KeyMap.empty
                 }
             toolOutput = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
                 , callId = "call-1"
+                , name = Nothing
+                , namespace = Nothing
                 , output = Aeson.object
                     [ "type" Aeson..= ("input_image" :: Text.Text)
                     , "detail" Aeson..= ("high" :: Text.Text)
@@ -276,6 +281,38 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     jsonField "detail" output `shouldBe` Nothing
             other -> expectationFailure
                 ("unexpected normalized Lite input: " <> show other)
+
+    it "appends an empty assistant message after a trailing reasoning item" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Nothing
+                , status = Nothing
+                , extraFields = KeyMap.empty
+                }
+            user = turnInputsToItems [UserMessage "hello"]
+            params = defaultResponseCreateParams
+            request = withRequestInput params (user <> [reasoning])
+        case request.input of
+            Just (ResponseInputItems items) -> do
+                length items `shouldBe` 3
+                last items `shouldSatisfy` isEmptyAssistantFollowup
+            _ -> expectationFailure "expected request input items"
+
+    it "does not invent a follow-up when reasoning already has a successor" do
+        let reasoning = ReasoningItemValue ReasoningItem
+                { itemId = Just "rs-1"
+                , summary = []
+                , content = Nothing
+                , encryptedContent = Nothing
+                , status = Nothing
+                , extraFields = KeyMap.empty
+                }
+            items = turnInputsToItems [UserMessage "hello"] <> [reasoning]
+                <> turnInputsToItems [UserMessage "continue"]
+            request = withRequestInput defaultResponseCreateParams items
+        request.input `shouldBe` Just (ResponseInputItems items)
 
 credential :: String -> Credential
 credential label = Credential
@@ -305,6 +342,16 @@ isUserMessage = \case
                 _ -> False
     _ -> False
 
+isEmptyAssistantFollowup :: ResponseItem -> Bool
+isEmptyAssistantFollowup = \case
+    MessageItem message ->
+        message.role == RoleAssistant
+            && case message.content of
+                MessageContentParts [OutputTextPart{ text = value }] ->
+                    Text.null value
+                _ -> False
+    _ -> False
+
 developerMessage :: Text.Text -> [Text.Text] -> ResponseItem
 developerMessage messageText contentItemKinds =
     MessageItem ResponseMessage
@@ -314,10 +361,14 @@ developerMessage messageText contentItemKinds =
         , role = RoleDeveloper
         , status = Nothing
         , phase = Nothing
-        , extraFields = KeyMap.singleton
-            (Key.fromText "internal_chat_message_metadata_passthrough")
-            (Aeson.object
-                [ "content_item_kinds" Aeson..= contentItemKinds ])
+        , passthrough = Just InternalChatMetadata
+            { turnId = Nothing
+            , createTime = Nothing
+            , contentItemKinds = Just contentItemKinds
+            , executedToolCalls = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , extraFields = KeyMap.empty
         }
 
 jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value

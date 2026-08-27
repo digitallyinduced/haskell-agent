@@ -16,6 +16,8 @@ module Agent.CLI.Runtime
     , formatRepositoryPath
     , formatStartupTimings
     , formatTokenUsage
+    , formatTokensPerSecond
+    , formatUsageWithRate
     , learnAboutUserOnboardingPrompt
     , run
     , withRestoredCurrentDirectory

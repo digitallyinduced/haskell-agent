@@ -3,7 +3,10 @@ module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
     , schemasFromAppTools
+    , hostedSearchToolNames
+    , hostedSearchToolCollisions
     , webSearchTool
+    , xSearchTool
     ) where
 
 import Agent.Responses.Types
@@ -32,7 +35,8 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.List (find, partition)
+import Data.List (partition)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -42,27 +46,56 @@ requireToolRegistry tools =
     either (ioError . userError . Text.unpack) pure (mkToolRegistry tools)
 
 lookupAppTool :: Text -> [AppTool] -> Maybe AppTool
-lookupAppTool name =
-    find (\tool -> tool.appToolName == canonicalToolName name)
+lookupAppTool name tools =
+    Map.lookup (canonicalToolName name) byName
+  where
+    byName =
+        Map.fromList
+            [ (canonicalToolName tool.appToolName, tool)
+            | tool <- tools
+            ]
 
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.
 webSearchTool :: ResponseTool
-webSearchTool = KnownResponseTool ToolWebSearch TaggedObject
-    { tag = "web_search"
-    , fields = KeyMap.empty
-    }
+webSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+
+-- | Grok Build hosted @x_search@ tool. Server-side; the loop never dispatches it.
+xSearchTool :: ResponseTool
+xSearchTool = knownResponseTool ToolXSearch KeyMap.empty
+
+hostedSearchToolTypes :: Dialect -> [ResponseToolType]
+hostedSearchToolTypes dialect =
+    ToolWebSearch
+        : [ToolXSearch | dialectId dialect == GrokBuildDialect]
+
+hostedSearchTools :: Dialect -> [ResponseTool]
+hostedSearchTools dialect =
+    map (`knownResponseTool` KeyMap.empty) (hostedSearchToolTypes dialect)
+
+-- | Model-facing names for hosted search tools advertised in this dialect.
+hostedSearchToolNames :: Dialect -> [Text]
+hostedSearchToolNames =
+    map responseToolTypeText . hostedSearchToolTypes
+
+-- | Names reserved so MCP servers cannot shadow hosted search tools.
+hostedSearchToolCollisions :: [(Text, Text)]
+hostedSearchToolCollisions =
+    [ (responseToolTypeText ToolWebSearch, "built-in web search")
+    , (responseToolTypeText ToolXSearch, "built-in X search")
+    ]
 
 schemasFromAppTools :: Dialect -> [AppTool] -> [ResponseTool]
 schemasFromAppTools dialect tools = case dialectToolLayout dialect of
     CollaborationNamespaceLayout ->
         let (multi, rest) = partition isMultiAgentTool tools
-            base = webSearchTool : mapMaybe (schemaFromAppTool dialect) rest
+            base = hostedSearchTools dialect
+                ++ mapMaybe (schemaFromAppTool dialect) rest
         in if null multi
             then base
             else base ++ [multiAgentNamespaceTool multi]
     FlatToolLayout ->
-        webSearchTool : mapMaybe (schemaFromAppTool dialect) tools
+        hostedSearchTools dialect ++ mapMaybe (schemaFromAppTool dialect) tools
     NoHostToolLayout ->
         []
 
@@ -142,15 +175,13 @@ grokPublicText =
 
 -- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool
-multiAgentNamespaceTool tools = KnownResponseTool ToolNamespace TaggedObject
-    { tag = "namespace"
-    , fields = KeyMap.fromList
+multiAgentNamespaceTool tools = knownResponseTool ToolNamespace $
+    KeyMap.fromList
         [ (Key.fromText "name", Aeson.String multiAgentNamespace)
         , (Key.fromText "description", Aeson.String
             "Tools for spawning and managing sub-agents.")
         , (Key.fromText "tools", Aeson.toJSON (map nestedFunction tools))
         ]
-    }
   where
     nestedFunction tool = Aeson.object
         [ "type" .= ("function" :: Text)
@@ -174,9 +205,8 @@ appToolJsonParameters tool = case tool.appToolSchema of
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool
-applyPatchCustomTool name description = KnownResponseTool ToolCustom TaggedObject
-    { tag = "custom"
-    , fields = KeyMap.fromList
+applyPatchCustomTool name description = knownResponseTool ToolCustom $
+    KeyMap.fromList
         [ (Key.fromText "name", Aeson.String name)
         , (Key.fromText "description", Aeson.String description)
         , (Key.fromText "format", Aeson.object
@@ -185,4 +215,3 @@ applyPatchCustomTool name description = KnownResponseTool ToolCustom TaggedObjec
             , "definition" .= applyPatchGrammar
             ])
         ]
-    }

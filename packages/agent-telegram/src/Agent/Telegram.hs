@@ -24,12 +24,22 @@ module Agent.Telegram
     , emptyTelegramState
     , classifyTelegramUpdate
     , classifyTelegramUpdateWithMode
+    , groupJoinAuthorized
+    , isAnonymousAdmin
+    , telegramAnonymousAdminUserId
     , storeUpdateAction
     , nextPendingAction
     , checkpointPendingVoiceTranscript
     , reactionMessageText
     , telegramReactionEmoji
     , telegramReplyText
+    , telegramAgentPrompt
+    , telegramCommandArguments
+    , telegramReplyUserIdFromPrompt
+    , telegramUserLabel
+    , recordSeenTelegramUsers
+    , resolveTelegramUser
+    , TelegramUserResolution(..)
     , transcribeWithXAI
     , downloadTelegramMediaAttachmentsWith
     ) where
@@ -80,13 +90,23 @@ import Agent.Telegram.Classify
     , checkpointPendingVoiceTranscript
     , classifyTelegramUpdate
     , classifyTelegramUpdateWithMode
+    , grantableTelegramUser
+    , groupJoinAuthorized
+    , isAnonymousAdmin
+    , telegramAnonymousAdminUserId
     , isAmbientGroupPrompt
     , nextPendingAction
     , reactionMessageText
+    , recordSeenTelegramUsers
+    , resolveTelegramUser
     , storeUpdateAction
     , telegramCommand
+    , telegramCommandArguments
     , telegramReactionEmoji
     , telegramReplyText
+    , telegramReplyUserIdFromPrompt
+    , telegramUserLabel
+    , TelegramUserResolution(..)
     )
 import Agent.Telegram.Bridge
     ( TelegramBridgeEnv(..)
@@ -104,6 +124,7 @@ import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider)
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Store.Postgres
     ( Store
     , managedPostgresConfigFromEnv
@@ -147,6 +168,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
+import Data.List (sortOn)
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -370,8 +392,18 @@ manageTelegramUsers command = do
             TelegramUsersRemove userId ->
                 config { telegramAllowedUsers = Set.delete userId users }
     case command of
-        TelegramUsersList ->
-            forM_ (Set.toAscList users) (Text.putStrLn . Text.pack . show)
+        TelegramUsersList -> do
+            stateExists <- doesFileExist (statePathFor home)
+            state <-
+                if stateExists
+                    then loadTelegramState (statePathFor home)
+                    else pure emptyTelegramState
+            let ids = users <> state.allowedUserIds
+            forM_ (Set.toAscList ids) \userId ->
+                Text.putStrLn $
+                    case Map.lookup userId state.seenTelegramUsers of
+                        Just user -> telegramUserLabel user
+                        Nothing -> Text.pack (show userId)
         _ -> do
             when (Set.null updated.telegramAllowedUsers) $
                 die "refusing to remove the last allowed Telegram user"
@@ -379,7 +411,9 @@ manageTelegramUsers command = do
                 (configPath home)
                 0o600
                 (encode updated)
-            Text.putStrLn "Telegram allowlist updated. Restart the gateway to apply it."
+            Text.putStrLn
+                "Telegram allowlist updated. Restart the gateway to apply a CLI \
+                \change. In a group, /allow applies immediately without a restart."
 
 telegramStatus :: IO ()
 telegramStatus = do
@@ -550,7 +584,10 @@ runTelegramWithStore store home config token = do
         (die . Text.unpack)
         pure
     let provider = config.telegramProvider
-        effort = fromMaybe (defaultEffortFor provider) config.telegramEffort
+        effort =
+            fromMaybe
+                (reasoningEffortText (defaultEffortFor provider))
+                config.telegramEffort
         root = sessionsRoot home
         gatewayDir = gatewayDirectory home
         statePath = statePathFor home
@@ -574,7 +611,12 @@ runTelegramWithStore store home config token = do
     let target = resolvedOption.modelTarget
     createDirectoryIfMissing True gatewayDir
     setFileMode (unsafeToFilePath gatewayDir) 0o700
-    state <- loadTelegramState statePath
+    loadedState <- loadTelegramState statePath
+    let state = loadedState
+            { allowedUserIds =
+                loadedState.allowedUserIds <> config.telegramAllowedUsers
+            }
+    when (state /= loadedState) (saveTelegramState statePath state)
     stateVar <- newMVar state
     workQueue <- newChan
     scheduled <- newMVar Set.empty
@@ -586,7 +628,6 @@ runTelegramWithStore store home config token = do
     let runtime = TelegramRuntime
             { runtimeClient = client
             , runtimeBot = bot
-            , runtimeAllowedUsers = config.telegramAllowedUsers
             , runtimeRespondToAllGroupMessages =
                 config.telegramRespondToAllGroupMessages
             , runtimeWorkerCount = config.telegramWorkerCount
@@ -686,7 +727,6 @@ processIsAlive pid =
 data TelegramRuntime = TelegramRuntime
     { runtimeClient :: !TelegramClient
     , runtimeBot :: !TelegramUser
-    , runtimeAllowedUsers :: !(Set Integer)
     , runtimeRespondToAllGroupMessages :: !Bool
     , runtimeWorkerCount :: !Int
     , runtimeGatewayDirectory :: !OsPath
@@ -714,12 +754,21 @@ pollForever runtime = do
                 ]
             threadDelay 2_000_000
         Right updates ->
-            forM_ updates (processUpdate runtime)
+            -- Process updates in ascending update_id order. storeUpdateAction
+            -- advances the poll offset (nextUpdateId) monotonically and
+            -- updateAlreadyStored drops anything at or below it, so handling a
+            -- higher-id update before a lower-id one in the same batch would
+            -- advance the offset past the lower-id update and silently drop it
+            -- — a queued message or approval callback lost, and getUpdates
+            -- never returns it again. Telegram already returns updates sorted;
+            -- sort defensively to keep the offset invariant robust.
+            forM_ (sortOn (.updateId) updates) (processUpdate runtime)
     pollForever runtime
 
 processUpdate :: TelegramRuntime -> TelegramUpdate -> IO ()
 processUpdate runtime update = do
     handled <- tryAny do
+        modifyState runtime (recordSeenTelegramUsers update)
         action <- classifyUpdate runtime update
         modifyState runtime (storeUpdateAction update.updateId action)
     case handled of
@@ -736,34 +785,94 @@ classifyUpdate
     :: TelegramRuntime
     -> TelegramUpdate
     -> IO TelegramUpdateAction
-classifyUpdate runtime update =
-    case update.updateMessageReaction of
-        Just reaction
-            | reaction.messageReactionChat.telegramChatType /= "private" -> do
-                state <- readMVar runtime.runtimeStateVar
-                let key = TelegramChatKey
-                        { chatId =
-                            reaction.messageReactionChat.telegramChatId
-                        , messageThreadId = Nothing
-                        }
-                    belongsToBot =
-                        maybe False
-                            (Set.member reaction.messageReactionMessageId)
-                            (Map.lookup key state.outboundMessageIds)
-                pure $
-                    if belongsToBot
-                        then classifyTelegramUpdateWithMode
-                            runtime.runtimeBot
-                            runtime.runtimeAllowedUsers
-                            runtime.runtimeRespondToAllGroupMessages
-                            update
-                        else IgnoreUpdate
-        _ ->
-            pure (classifyTelegramUpdateWithMode
+classifyUpdate runtime update = do
+    state <- readMVar runtime.runtimeStateVar
+    classified <-
+        case classifyTelegramUpdateWithMode
                 runtime.runtimeBot
-                runtime.runtimeAllowedUsers
+                state.allowedUserIds
+                state.authorizedGroupChatIds
                 runtime.runtimeRespondToAllGroupMessages
-                update)
+                update of
+            ReviewGroupJoin chatId actor ->
+                resolveGroupJoin runtime chatId actor
+            action ->
+                pure action
+    pure $ case (classified, update.updateMessageReaction) of
+        (LeaveUnauthorizedGroup _, _) ->
+            classified
+        (_, Just reaction)
+            | reaction.messageReactionChat.telegramChatType /= "private"
+            , not (reactionBelongsToBot state reaction) ->
+                IgnoreUpdate
+        _ ->
+            classified
+
+reactionBelongsToBot :: TelegramState -> TelegramMessageReaction -> Bool
+reactionBelongsToBot state reaction =
+    let key = TelegramChatKey
+            { chatId = reaction.messageReactionChat.telegramChatId
+            , messageThreadId = Nothing
+            }
+    in maybe False
+        (Set.member reaction.messageReactionMessageId)
+        (Map.lookup key state.outboundMessageIds)
+
+resolveGroupJoin
+    :: TelegramRuntime
+    -> Integer
+    -> TelegramUser
+    -> IO TelegramUpdateAction
+resolveGroupJoin runtime chatId actor = do
+    allowedUsers <- readAllowedUsers runtime
+    resolveGroupJoinWith allowedUsers runtime chatId actor
+
+resolveGroupJoinWith
+    :: Set Integer
+    -> TelegramRuntime
+    -> Integer
+    -> TelegramUser
+    -> IO TelegramUpdateAction
+resolveGroupJoinWith allowedUsers runtime chatId actor
+    | actor.userId `Set.notMember` allowedUsers
+    , not (isAnonymousAdmin actor) = do
+        logRejectedJoin chatId actor "adder is not an allowed user"
+        pure (LeaveUnauthorizedGroup chatId)
+    | otherwise =
+        TelegramClient.getChatAdministrators runtime.runtimeClient chatId >>= \case
+            Left err -> do
+                logTelegramEvent "group_admin_lookup_failed"
+                    [ "chat_id" .= chatId
+                    , "user_id" .= actor.userId
+                    , "error" .=
+                        redactToken runtime.runtimeClient.clientToken err
+                    ]
+                logRejectedJoin chatId actor
+                    "could not verify group administrators"
+                pure (LeaveUnauthorizedGroup chatId)
+            Right admins
+                | groupJoinAuthorized allowedUsers actor admins -> do
+                    logTelegramEvent "group_join_authorized"
+                        [ "chat_id" .= chatId
+                        , "user_id" .= actor.userId
+                        ]
+                    pure (AuthorizeGroupChat chatId)
+                | otherwise -> do
+                    logRejectedJoin chatId actor
+                        "adder is not an allowed group administrator"
+                    pure (LeaveUnauthorizedGroup chatId)
+
+logRejectedJoin
+    :: Integer
+    -> TelegramUser
+    -> Text
+    -> IO ()
+logRejectedJoin chatId actor reason =
+    logTelegramEvent "group_join_rejected"
+        [ "chat_id" .= chatId
+        , "user_id" .= actor.userId
+        , "reason" .= reason
+        ]
 
 dispatchForever :: TelegramRuntime -> IO ()
 dispatchForever runtime =
@@ -777,7 +886,7 @@ scheduleTelegramWorkForever :: TelegramRuntime -> IO ()
 scheduleTelegramWorkForever runtime = do
     processTelegramCallbacks
         runtime.runtimeClient
-        runtime.runtimeAllowedUsers
+        (readAllowedUsers runtime)
         (modifyState runtime)
         (readMVar runtime.runtimeStateVar)
     state <- readMVar runtime.runtimeStateVar
@@ -802,6 +911,59 @@ telegramWorkerLoop runtime = do
         modifyMVar_ runtime.runtimeScheduled
             (pure . Set.delete key)
     telegramWorkerLoop runtime
+
+unauthorizedGroupLeaveNotice :: Text
+unauthorizedGroupLeaveNotice =
+    "I only join group chats when an authorized admin adds me. Leaving this group."
+
+leaveUnauthorizedGroup
+    :: TelegramRuntime
+    -> TelegramPendingLeave
+    -> IO ()
+leaveUnauthorizedGroup runtime pending = do
+    let key = pending.pendingLeaveChat
+        chatId = key.chatId
+    logTelegramEvent "leaving_unauthorized_group"
+        [ "chat_id" .= chatId
+        , "update_id" .= pending.pendingLeaveUpdateId
+        ]
+    TelegramClient.sendRichMessage
+        runtime.runtimeClient
+        key
+        Nothing
+        unauthorizedGroupLeaveNotice >>= \case
+            Left err ->
+                logTelegramEvent "unauthorized_group_notice_failed"
+                    [ "chat_id" .= chatId
+                    , "error" .=
+                        redactToken runtime.runtimeClient.clientToken err
+                    ]
+            Right _ -> pure ()
+    TelegramClient.leaveChat runtime.runtimeClient chatId >>= \case
+        Left err
+            | isBenignLeaveError err ->
+                logTelegramEvent "unauthorized_group_already_left"
+                    [ "chat_id" .= chatId
+                    , "error" .=
+                        redactToken runtime.runtimeClient.clientToken err
+                    ]
+            | otherwise ->
+                fail (Text.unpack err)
+        Right () ->
+            logTelegramEvent "left_unauthorized_group"
+                [ "chat_id" .= chatId
+                ]
+
+isBenignLeaveError :: Text -> Bool
+isBenignLeaveError err =
+    any (`Text.isInfixOf` Text.toLower err)
+        [ "chat not found"
+        , "bot is not a member"
+        , "chat_id is empty"
+        , "peer_id_invalid"
+        , "bot was kicked"
+        , "bot was blocked"
+        ]
 
 processChatQueue :: TelegramRuntime -> TelegramChatKey -> IO ()
 processChatQueue runtime key =
@@ -855,6 +1017,9 @@ processChatQueue runtime key =
                                             (Just pending.pendingMediaMessageId)
                                             replyText))
                                     completed
+                LeaveUnauthorizedChat pending -> do
+                    leaveUnauthorizedGroup runtime pending
+                    modifyState runtime (completePendingAction action)
             case result of
                 Left err -> do
                     delay <- recordPendingFailure
@@ -881,7 +1046,8 @@ runQueuedTurn runtime pending =
     case telegramCommand pending.pendingTurnText of
         Just "start" -> pure
             "Send a message to start or continue an agent session. \
-            \Use /new for a fresh session and /session for its ID."
+            \Use /new for a fresh session, /session for its ID, and /allow \
+            \in a group to accept another member by name or by replying to them."
         Just "new" -> do
             modifyState runtime \state ->
                 state
@@ -901,42 +1067,60 @@ runQueuedTurn runtime pending =
                 runtime
                 pending.pendingTurnChat
                 (pending.pendingTurnUpdateId + 1)
+        Just "allow" ->
+            applyAllowlistChange
+                runtime
+                pending.pendingTurnChat.chatId
+                AllowlistGrant
+                Nothing
+                (telegramCommandArguments pending.pendingTurnText)
+        Just "deny" ->
+            applyAllowlistChange
+                runtime
+                pending.pendingTurnChat.chatId
+                AllowlistRevoke
+                Nothing
+                (telegramCommandArguments pending.pendingTurnText)
+        Just "users" ->
+            describeTelegramAllowlist runtime pending.pendingTurnChat.chatId
         Just command -> pure ("Unknown command: /" <> command)
-        Nothing -> case pending.pendingTurnVoice of
-            Nothing ->
-                runAgentTurn
-                    runtime
-                    pending.pendingTurnChat
-                    (telegramTurnUserId runtime pending.pendingTurnChat)
-                    (Just pending.pendingTurnMessageId)
-                    pending.pendingTurnText
-            Just voice ->
-                tryAny (transcribeTelegramVoice runtime pending voice) >>= \case
-                    Left err -> do
-                        logTelegramEvent "voice_transcription_failed"
-                            [ "update_id" .= pending.pendingTurnUpdateId
-                            , "chat_id" .= pending.pendingTurnChat.chatId
-                            , "error" .=
-                                redactToken
-                                    runtime.runtimeClient.clientToken
-                                    (Text.pack (displayException err))
-                            ]
-                        pure
-                            "I could not transcribe that voice message. \
-                            \Check that Codex is installed and logged in, and \
-                            \that the subscription has usage available."
-                    Right prompt -> do
-                        let deliveredPrompt
-                                | isAmbientGroupPrompt pending.pendingTurnText =
-                                    ambientGroupPrompt prompt
-                                | otherwise = prompt
-                        checkpointVoiceTranscript runtime pending deliveredPrompt
-                        runAgentTurn
-                            runtime
-                            pending.pendingTurnChat
-                            (telegramTurnUserId runtime pending.pendingTurnChat)
-                            (Just pending.pendingTurnMessageId)
-                            deliveredPrompt
+        Nothing -> do
+            userId <- telegramTurnUserId runtime pending.pendingTurnChat
+            case pending.pendingTurnVoice of
+                Nothing ->
+                    runAgentTurn
+                        runtime
+                        pending.pendingTurnChat
+                        userId
+                        (Just pending.pendingTurnMessageId)
+                        pending.pendingTurnText
+                Just voice ->
+                    tryAny (transcribeTelegramVoice runtime pending voice) >>= \case
+                        Left err -> do
+                            logTelegramEvent "voice_transcription_failed"
+                                [ "update_id" .= pending.pendingTurnUpdateId
+                                , "chat_id" .= pending.pendingTurnChat.chatId
+                                , "error" .=
+                                    redactToken
+                                        runtime.runtimeClient.clientToken
+                                        (Text.pack (displayException err))
+                                ]
+                            pure
+                                "I could not transcribe that voice message. \
+                                \Check that Codex is installed and logged in, and \
+                                \that the subscription has usage available."
+                        Right prompt -> do
+                            let deliveredPrompt
+                                    | isAmbientGroupPrompt pending.pendingTurnText =
+                                        ambientGroupPrompt prompt
+                                    | otherwise = prompt
+                            checkpointVoiceTranscript runtime pending deliveredPrompt
+                            runAgentTurn
+                                runtime
+                                pending.pendingTurnChat
+                                userId
+                                (Just pending.pendingTurnMessageId)
+                                deliveredPrompt
 
 telegramConversationStatus :: TelegramRuntime -> TelegramChatKey -> IO Text
 telegramConversationStatus runtime key = do
@@ -1008,10 +1192,13 @@ rekeyPendingAction updateId = \case
         RunPendingTurn pending { pendingTurnUpdateId = updateId }
     RunPendingMediaTurn pending ->
         RunPendingMediaTurn pending { pendingMediaUpdateId = updateId }
+    LeaveUnauthorizedChat pending ->
+        LeaveUnauthorizedChat pending { pendingLeaveUpdateId = updateId }
 
 runQueuedMediaTurn :: TelegramRuntime -> TelegramPendingMediaTurn -> IO Text
 runQueuedMediaTurn runtime pending = do
     handle <- sessionForPrompt runtime pending.pendingMediaChat pending.pendingMediaText
+    let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     attachments <- downloadTelegramMediaAttachments runtime handle pending
     let imageAttachments =
             [ media
@@ -1024,7 +1211,7 @@ runQueuedMediaTurn runtime pending = do
             ]
         request = ManagedTurnRequest
             { managedTurnVersion = 1
-            , managedTurnText = pending.pendingMediaText
+            , managedTurnText = agentPrompt
             , managedTurnImages = imageAttachments
             , managedTurnFiles = fileAttachments
             , managedTurnBridgeDirectory = Nothing
@@ -1049,16 +1236,14 @@ runQueuedMediaTurn runtime pending = do
                     , managedUserId = pending.pendingMediaUserId
                     }
                 request
-        bridgeEnv = TelegramBridgeEnv
-            { telegramBridgeClient = runtime.runtimeClient
-            , telegramBridgeRequest = gatewayRequest
-            , telegramBridgeChat = pending.pendingMediaChat
-            , telegramBridgeUserId = pending.pendingMediaUserId
-            , telegramBridgeReplyTo = Just pending.pendingMediaMessageId
-            , telegramBridgeAllowedRoot =
-                unsafeToFilePath handle.sessionTempDir
-            , telegramBridgeModifyState = modifyState runtime
-            }
+        bridgeEnv =
+            telegramBridgeEnv
+                runtime
+                gatewayRequest
+                pending.pendingMediaChat
+                pending.pendingMediaUserId
+                (Just pending.pendingMediaMessageId)
+                (unsafeToFilePath handle.sessionTempDir)
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
     priorTurnIndex <-
@@ -1090,7 +1275,7 @@ runQueuedMediaTurn runtime pending = do
                                 Just turnIndex
                                     | maybe True (< turnIndex) priorTurnIndex
                                     , latestTurnMatches
-                                        pending.pendingMediaText
+                                        agentPrompt
                                         turns ->
                                         pure (renderLatestTurn turns)
                                 _ ->
@@ -1298,7 +1483,7 @@ recordPendingFailure runtime action err =
                     (TelegramRetryMetadata 0 Nothing Nothing)
                     (Map.lookup key state.retryMetadata)
             attempts = previous.retryAttempts + 1
-        if attempts >= 5
+        if attempts >= 5 && not (isLeaveAction action)
             then do
                 let withoutAction =
                         (deletePendingAction action state)
@@ -1326,7 +1511,7 @@ recordPendingFailure runtime action err =
                 saveTelegramState runtime.runtimeStatePath next
                 pure (next, Nothing)
             else do
-                let seconds = min 60 (2 ^ attempts)
+                let seconds = min 60 (2 ^ min 6 attempts)
                     retryAt = addUTCTime (fromIntegral seconds) now
                     next = state
                         { retryMetadata =
@@ -1345,6 +1530,7 @@ recordPendingFailure runtime action err =
 failureReply :: PendingChatAction -> Maybe TelegramPendingReply
 failureReply = \case
     DeliverReply _ -> Nothing
+    LeaveUnauthorizedChat _ -> Nothing
     RunPendingTurn pending ->
         Just TelegramPendingReply
             { pendingUpdateId = pending.pendingTurnUpdateId
@@ -1375,19 +1561,27 @@ pendingRetryKey action =
             DeliverReply _ -> "reply"
             RunPendingTurn _ -> "turn"
             RunPendingMediaTurn _ -> "media"
+            LeaveUnauthorizedChat _ -> "leave"
         ]
+
+isLeaveAction :: PendingChatAction -> Bool
+isLeaveAction = \case
+    LeaveUnauthorizedChat _ -> True
+    _ -> False
 
 pendingActionUpdateIdLocal :: PendingChatAction -> Integer
 pendingActionUpdateIdLocal = \case
     DeliverReply pending -> pending.pendingUpdateId
     RunPendingTurn pending -> pending.pendingTurnUpdateId
     RunPendingMediaTurn pending -> pending.pendingMediaUpdateId
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveUpdateId
 
 pendingActionChatLocal :: PendingChatAction -> TelegramChatKey
 pendingActionChatLocal = \case
     DeliverReply pending -> pending.pendingChat
     RunPendingTurn pending -> pending.pendingTurnChat
     RunPendingMediaTurn pending -> pending.pendingMediaChat
+    LeaveUnauthorizedChat pending -> pending.pendingLeaveChat
 
 runAgentTurn
     :: TelegramRuntime
@@ -1398,12 +1592,7 @@ runAgentTurn
     -> IO Text
 runAgentTurn runtime key userId replyToMessageId prompt = do
     handle <- sessionForPrompt runtime key prompt
-    let agentPrompt =
-            prompt
-                <> "\n\n[Telegram delivery context: If the best response is \
-                \only a lightweight acknowledgement, you may respond with \
-                \exactly one standard Telegram reaction emoji. Otherwise \
-                \respond normally. Do not mention this delivery context.]"
+    let agentPrompt = telegramAgentPrompt prompt
     runManagedAgentTurn
         runtime
         handle
@@ -1412,6 +1601,19 @@ runAgentTurn runtime key userId replyToMessageId prompt = do
         replyToMessageId
         (managedTurnRequestFromText agentPrompt)
         agentPrompt
+
+telegramAgentPrompt :: Text -> Text
+telegramAgentPrompt prompt =
+    prompt
+        <> "\n\n[Telegram delivery context: You are conversing in Telegram. \
+        \Keep messages concise and conversational; avoid terminal-style \
+        \verbosity unless the user asks for detail. Your answer and available \
+        \reasoning summaries are shown to the user as a live Telegram draft \
+        \while you work, followed by your normal final response. If the best \
+        \complete response \
+        \is only a lightweight acknowledgement, you may instead respond with \
+        \exactly one standard Telegram reaction emoji. Do not mention these \
+        \delivery instructions.]"
 
 runManagedAgentTurn
     :: TelegramRuntime
@@ -1441,16 +1643,14 @@ runManagedAgentTurn
                     , managedUserId = userId
                     }
                 baseRequest
-        bridgeEnv = TelegramBridgeEnv
-            { telegramBridgeClient = runtime.runtimeClient
-            , telegramBridgeRequest = request
-            , telegramBridgeChat = key
-            , telegramBridgeUserId = userId
-            , telegramBridgeReplyTo = replyToMessageId
-            , telegramBridgeAllowedRoot =
-                unsafeToFilePath handle.sessionTempDir
-            , telegramBridgeModifyState = modifyState runtime
-            }
+        bridgeEnv =
+            telegramBridgeEnv
+                runtime
+                request
+                key
+                userId
+                replyToMessageId
+                (unsafeToFilePath handle.sessionTempDir)
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
     priorTurnIndex <-
@@ -1487,12 +1687,203 @@ runManagedAgentTurn
                                             "agent completed without recording \
                                             \the Telegram turn"
 
-telegramTurnUserId :: TelegramRuntime -> TelegramChatKey -> Integer
+telegramTurnUserId :: TelegramRuntime -> TelegramChatKey -> IO Integer
 telegramTurnUserId runtime key
-    | key.chatId > 0 = key.chatId
-    | Set.size runtime.runtimeAllowedUsers == 1 =
-        Set.findMin runtime.runtimeAllowedUsers
-    | otherwise = 0
+    | key.chatId > 0 = pure key.chatId
+    | otherwise = do
+        allowedUsers <- readAllowedUsers runtime
+        pure
+            if Set.size allowedUsers == 1
+                then Set.findMin allowedUsers
+                else 0
+
+readAllowedUsers :: TelegramRuntime -> IO (Set Integer)
+readAllowedUsers runtime =
+    (.allowedUserIds) <$> readMVar runtime.runtimeStateVar
+
+data AllowlistChange
+    = AllowlistGrant
+    | AllowlistRevoke
+
+telegramBridgeEnv
+    :: TelegramRuntime
+    -> ManagedTurnRequest
+    -> TelegramChatKey
+    -> Integer
+    -> Maybe Integer
+    -> FilePath
+    -> TelegramBridgeEnv
+telegramBridgeEnv runtime request key userId replyTo allowedRoot =
+    TelegramBridgeEnv
+        { telegramBridgeClient = runtime.runtimeClient
+        , telegramBridgeRequest = request
+        , telegramBridgeChat = key
+        , telegramBridgeUserId = userId
+        , telegramBridgeReplyTo = replyTo
+        , telegramBridgeAllowedRoot = allowedRoot
+        , telegramBridgeModifyState = modifyState runtime
+        , telegramBridgeGrantUser =
+            applyAllowlistChange
+                runtime
+                key.chatId
+                AllowlistGrant
+                (telegramReplyUserIdFromPrompt request.managedTurnText)
+        , telegramBridgeRevokeUser =
+            applyAllowlistChange
+                runtime
+                key.chatId
+                AllowlistRevoke
+                (telegramReplyUserIdFromPrompt request.managedTurnText)
+        , telegramBridgeListUsers =
+            describeTelegramAllowlist runtime key.chatId
+        }
+
+applyAllowlistChange
+    :: TelegramRuntime
+    -> Integer
+    -> AllowlistChange
+    -> Maybe Integer
+    -> Text
+    -> IO Text
+applyAllowlistChange runtime chatId change fallbackUserId query = do
+    state <- readMVar runtime.runtimeStateVar
+    case resolveTelegramUser state chatId fallbackUserId query of
+        UnresolvedTelegramUser err ->
+            pure err
+        AmbiguousTelegramUsers users ->
+            pure $
+                "Multiple people match that request:\n"
+                    <> Text.unlines
+                        [ "- " <> telegramUserLabel user
+                        | user <- users
+                        ]
+                    <> "Pass a more specific @username or reply to one of \
+                       \their messages."
+        ResolvedTelegramUser user ->
+            case change of
+                AllowlistGrant -> grantAllowedUser runtime chatId user
+                AllowlistRevoke -> revokeAllowedUser runtime user
+
+grantAllowedUser
+    :: TelegramRuntime
+    -> Integer
+    -> TelegramUser
+    -> IO Text
+grantAllowedUser runtime chatId user = do
+    alreadyAllowed <- modifyMVar runtime.runtimeStateVar \state -> do
+        let already = Set.member user.userId state.allowedUserIds
+            next = state
+                { allowedUserIds = Set.insert user.userId state.allowedUserIds
+                , seenTelegramUsers =
+                    Map.insert user.userId user state.seenTelegramUsers
+                , seenUsersByChat =
+                    Map.insertWith
+                        Set.union
+                        chatId
+                        (Set.singleton user.userId)
+                        state.seenUsersByChat
+                }
+        saveTelegramState runtime.runtimeStatePath next
+        pure (next, already)
+    persistAllowedUserIdsToConfig runtime
+    logTelegramEvent "allowed_user_granted"
+        [ "chat_id" .= chatId
+        , "user_id" .= user.userId
+        ]
+    pure
+        if alreadyAllowed
+            then telegramUserLabel user
+                <> " is already allowed to talk to this bot."
+            else
+                "Now accepting messages from "
+                    <> telegramUserLabel user
+                    <> "."
+
+revokeAllowedUser :: TelegramRuntime -> TelegramUser -> IO Text
+revokeAllowedUser runtime user = do
+    result <- modifyMVar runtime.runtimeStateVar \state ->
+        let remaining = Set.delete user.userId state.allowedUserIds
+        in if Set.null remaining
+            then pure
+                (state, Left "Refusing to remove the last allowed Telegram user.")
+            else if user.userId `Set.notMember` state.allowedUserIds
+                then pure
+                    ( state
+                    , Left
+                        (telegramUserLabel user <> " is not on the allowlist.")
+                    )
+                else do
+                    let next = state { allowedUserIds = remaining }
+                    saveTelegramState runtime.runtimeStatePath next
+                    pure (next, Right remaining)
+    case result of
+        Left message -> pure message
+        Right remaining -> do
+            persistAllowedUserIdsToConfig runtime
+            logTelegramEvent "allowed_user_revoked"
+                [ "user_id" .= user.userId
+                , "remaining" .= Set.size remaining
+                ]
+            pure
+                ("No longer accepting messages from "
+                    <> telegramUserLabel user
+                    <> ".")
+
+describeTelegramAllowlist :: TelegramRuntime -> Integer -> IO Text
+describeTelegramAllowlist runtime chatId = do
+    state <- readMVar runtime.runtimeStateVar
+    let allowed =
+            [ maybe
+                ("user " <> Text.pack (show userId))
+                telegramUserLabel
+                (Map.lookup userId state.seenTelegramUsers)
+            | userId <- Set.toAscList state.allowedUserIds
+            ]
+        seen =
+            [ telegramUserLabel user
+            | userId <-
+                Set.toAscList
+                    (fromMaybe Set.empty (Map.lookup chatId state.seenUsersByChat))
+            , Just user <- [Map.lookup userId state.seenTelegramUsers]
+            , grantableTelegramUser user
+            ]
+    pure $
+        "Allowed users:\n"
+            <> formatLines allowed
+            <> if chatId < 0 && not (null seen)
+                then "\nSeen in this chat:\n" <> formatLines seen
+                else ""
+  where
+    formatLines values =
+        Text.unlines [ "- " <> value | value <- values ]
+
+persistAllowedUserIdsToConfig :: TelegramRuntime -> IO ()
+persistAllowedUserIdsToConfig runtime = do
+    users <- readAllowedUsers runtime
+    let path =
+            runtime.runtimeGatewayDirectory
+                </> unsafeEncodeUtf "config.json"
+    result <- tryAny do
+        exists <- doesFileExist path
+        when exists do
+            bytes <- LBS.readFile (unsafeToFilePath path)
+            case eitherDecode bytes of
+                Left err ->
+                    fail ("could not decode Telegram config: " <> err)
+                Right config ->
+                    writeLazyFileAtomically
+                        path
+                        0o600
+                        (encode config { telegramAllowedUsers = users })
+    case result of
+        Left err ->
+            logTelegramEvent "allowlist_config_persist_failed"
+                [ "error" .=
+                    redactToken
+                        runtime.runtimeClient.clientToken
+                        (Text.pack (displayException err))
+                ]
+        Right () -> pure ()
 
 cleanupManagedTurnMedia :: ManagedTurnRequest -> IO ()
 cleanupManagedTurnMedia request =
@@ -1546,17 +1937,20 @@ sessionForPrompt
     -> IO SessionHandle
 sessionForPrompt runtime key prompt = do
     state <- readMVar runtime.runtimeStateVar
-    existing <- case lookupBinding key state of
-        Nothing -> pure Nothing
+    case lookupBinding key state of
         Just sessionId ->
             loadSessionHandle
                 runtime.runtimePool
                 runtime.runtimeSessionsRoot
                 sessionId >>= \case
-                Left _ -> pure Nothing
-                Right (handle, _) -> pure (Just handle)
-    case existing of
-        Just handle -> pure handle
+                Left err ->
+                    fail . Text.unpack $
+                        "could not load Telegram session "
+                            <> sessionId
+                            <> ": "
+                            <> err
+                Right (handle, _) ->
+                    pure handle
         Nothing -> do
             handle <- createSession SessionCreate
                 { createPool = runtime.runtimePool
@@ -1659,20 +2053,19 @@ withTelegramProgress client key action =
         action
 
 withTelegramProgressUsing :: IO () -> IO () -> IO a -> IO a
-withTelegramProgressUsing sendTyping sendDraft action =
+withTelegramProgressUsing sendTyping sendDraft action = do
+    -- Seed the native draft once. The managed-turn bridge takes ownership of
+    -- refreshing it with live reasoning, response, and tool activity.
+    void (tryAny sendDraft)
     withAsync progressLoop (const action)
   where
-    progressLoop = loop (0 :: Int)
-    loop tick = do
-        -- Chat actions expire after roughly five seconds. Rich drafts last
-        -- longer, so refresh typing every four seconds and the draft every
-        -- fifth tick. Both are best-effort: the final reply remains durable
-        -- even when a client or Bot API version does not support rich drafts.
+    progressLoop = loop
+    loop = do
+        -- Chat actions expire after roughly five seconds. Keep typing as a
+        -- fallback for clients that do not support native rich drafts.
         void (tryAny sendTyping)
-        when (tick `mod` 5 == 0) $
-            void (tryAny sendDraft)
         threadDelay 4_000_000
-        loop (tick + 1)
+        loop
 
 loadTelegramState :: OsPath -> IO TelegramState
 loadTelegramState path = do
