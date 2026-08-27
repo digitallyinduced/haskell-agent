@@ -3,8 +3,6 @@
 -- Every cell gets a fresh VM context. Healthy Bun processes may be retained
 -- between cells, but malformed or unexpected protocol messages retire the
 -- worker. Effects remain restricted to the typed 'CodeModeToolHandler'.
-{-# LANGUAGE TemplateHaskell #-}
-
 module Agent.Tools.CodeMode.Host
     ( CodeModeConfig(..)
     , CodeModeError(..)
@@ -33,7 +31,29 @@ import Agent.Tools.CodeMode.Protocol
     , encodeToolFailure
     , encodeToolSuccess
     )
-import Paths_agent_core (getDataFileName)
+import Agent.Tools.CodeMode.Host.Types
+    ( Cell(..)
+    , CellObservation(..)
+    , CellOutcome(..)
+    , CodeModeConfig(..)
+    , CodeModeError(..)
+    , CodeModeHost(..)
+    , CodeModeResult(..)
+    , CodeModeToolHandler
+    , ImageDetailVisibility(..)
+    , IdleWorker(..)
+    , WorkerPool(..)
+    , defaultCodeModeConfig
+    )
+import Agent.Tools.CodeMode.Host.Availability
+    ( checkCodeModeAvailability
+    , resolveBunExecutable
+    , resolveWorkerScript
+    )
+import Agent.Tools.CodeMode.Host.Worker
+    ( bundledCodeModeWorkerPath
+    , codeModeWorkerPath
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
@@ -79,7 +99,7 @@ import Data.Aeson (Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -96,221 +116,15 @@ import System.IO
     , hSetBinaryMode
     , hSetBuffering
     )
-import System.Directory
-    ( canonicalizePath
-    , doesFileExist
-    , findExecutable
-    , getTemporaryDirectory
-    , renameFile
-    )
-import System.Exit (ExitCode(..))
-import System.FilePath
-    ( isPathSeparator
-    , (</>)
-    )
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
     , StdStream(..)
     , createProcess
     , proc
-    , readProcessWithExitCode
     , terminateProcess
     , waitForProcess
     )
-import Data.Bits (xor)
-import Data.Word (Word64)
-import qualified Language.Haskell.TH.Syntax as TH
-import Language.Haskell.TH.Syntax
-    ( makeRelativeToProject
-    , qAddDependentFile
-    , runIO
-    )
-import System.Posix.Process (getProcessID)
-
-type CodeModeToolHandler =
-    Text -> Value -> IO (Either Text Value)
-
-data ImageDetailVisibility
-    = ImageDetailVisible
-    | ImageDetailHidden
-    deriving (Eq, Show)
-
-data CodeModeConfig = CodeModeConfig
-    { bunExecutable :: !FilePath
-    , workerScript :: !FilePath
-    , startupTimeoutMs :: !Int
-    , maxActiveCells :: !Int
-    , maxSourceBytes :: !Int
-    , toolHandler :: !CodeModeToolHandler
-    , notifyHandler :: !(Text -> IO ())
-    , imageDetailVisibility :: !ImageDetailVisibility
-    -- | Maximum idle Bun processes retained between cells. Set to zero to
-    -- retain the legacy one-process-per-cell behavior.
-    , workerPoolSize :: !Int
-    }
-
-defaultCodeModeConfig :: FilePath -> CodeModeToolHandler -> CodeModeConfig
-defaultCodeModeConfig script handler = CodeModeConfig
-    { bunExecutable = "bun"
-    , workerScript = script
-    , startupTimeoutMs = 3000
-    , maxActiveCells = 64
-    , maxSourceBytes = 1024 * 1024
-    , toolHandler = handler
-    , notifyHandler = \_ -> pure ()
-    , imageDetailVisibility = ImageDetailVisible
-    , workerPoolSize = 2
-    }
-
--- | Resolve the worker through Cabal's data-file lookup, so installed
--- executables do not depend on the source tree. When the data file is not
--- present — interpreted development sessions, fresh worktrees, or a stale
--- data-directory override — the compile-time embedded worker source is
--- materialized into a content-addressed temporary file for Bun.
-bundledCodeModeWorkerPath :: IO FilePath
-bundledCodeModeWorkerPath = do
-    installedPath <- getDataFileName workerRelativePath
-    installedExists <- doesFileExist installedPath
-    if installedExists
-        then pure installedPath
-        else materializeEmbeddedWorker
-  where
-    workerRelativePath = "data/code-mode/worker.mjs"
-
--- | Preferred public name for the bundled worker lookup.
---
--- 'bundledCodeModeWorkerPath' is retained as a compatibility alias.
-codeModeWorkerPath :: IO FilePath
-codeModeWorkerPath = bundledCodeModeWorkerPath
-
--- | The worker source embedded at compile time.
-embeddedCodeModeWorkerSource :: Text
-embeddedCodeModeWorkerSource =
-    Text.pack
-        $(do
-            path <- makeRelativeToProject "data/code-mode/worker.mjs"
-            qAddDependentFile path
-            contents <- runIO (readFile path)
-            TH.lift contents
-         )
-
--- | Write the embedded worker into the temporary directory under a
--- content-hashed name. Concurrent materialization is safe: each writer
--- creates a private file and renames it into place.
-materializeEmbeddedWorker :: IO FilePath
-materializeEmbeddedWorker = do
-    -- Canonicalize the target directory so Bun receives the stable real path
-    -- even when the platform temporary directory (such as macOS @/tmp@) is a
-    -- symlink.
-    tmpDir <- getTemporaryDirectory >>= canonicalizePath
-    let bytes = Text.encodeUtf8 embeddedCodeModeWorkerSource
-        target =
-            tmpDir
-                </> ("haskell-agent-code-mode-worker-"
-                    <> embeddedWorkerFingerprint bytes
-                    <> ".mjs")
-    exists <- doesFileExist target
-    if exists
-        then pure target
-        else do
-            processId <- getProcessID
-            let staging = target <> "." <> show processId <> ".tmp"
-            BS.writeFile staging bytes
-            renameFile staging target
-            pure target
-
-embeddedWorkerFingerprint :: BS.ByteString -> String
-embeddedWorkerFingerprint bytes =
-    show (BS.length bytes) <> "-" <> show (BS.foldl' step seed bytes)
-  where
-    -- FNV-1a, enough to key a cache file on content identity.
-    seed = 14695981039346656037 :: Word64
-    step acc byte =
-        (acc `xor` fromIntegral byte) * 1099511628211
-
-data CodeModeError
-    = CodeModeStartupError !Text
-    | CodeModeProtocolError !Text
-    | CodeModeExecutionError !Text
-    | CodeModeResourceError !Text
-    | CodeModeUnknownCell !Text
-    | CodeModeBusyObserver !Text
-    | CodeModeAlreadyTerminating !Text
-    | CodeModeClosedCell !Text
-    deriving (Eq, Show)
-
-data CodeModeResult
-    = CodeModeFinished
-        { cellId :: !Text
-        , cellValue :: !Value
-        }
-    | CodeModeFailed
-        { cellId :: !Text
-        , cellValue :: !Value
-        , cellError :: !Text
-        }
-    | CodeModeRunning
-        { cellId :: !Text
-        , cellOutput :: !Value
-        }
-    | CodeModeTerminated
-        { cellId :: !Text
-        , cellValue :: !Value
-        }
-    deriving (Eq, Show)
-
-data CellOutcome
-    = CellSucceeded !Value
-    | CellFailed !Value !Text
-
-data CellObservation
-    = CellIdle
-    | CellObserved
-    | CellTerminating
-    | CellClosed
-
-data Cell = Cell
-    { cellIdentifier :: !Text
-    , cellInput :: !Handle
-    , cellOutput :: !Handle
-    , cellErrorOutput :: !Handle
-    , cellProcess :: !ProcessHandle
-    , cellWriterLock :: !(MVar ())
-    , cellResult :: !(TMVar (Either CodeModeError CellOutcome))
-    , cellYields :: !(TQueue Value)
-    , cellContent :: !(TQueue Value)
-    , cellMonitor :: !(Async ())
-    , cellStderr :: !(Async Text)
-    , cellCallbacks :: !(MVar [Async ()])
-    , cellObservation :: !(MVar CellObservation)
-    }
-
--- | A worker retained for reuse between cells.  The monitor thread is
--- stopped after each execution; the process itself remains alive waiting for
--- another @exec@ request.
-data IdleWorker = IdleWorker
-    !Handle
-    !Handle
-    !Handle
-    !ProcessHandle
-    !(MVar ())
-    !(Async Text)
-
-data WorkerPool = WorkerPool
-    { poolIdle :: ![IdleWorker]
-    , poolFiller :: !(Maybe (Async ()))
-    , poolClosed :: !Bool
-    }
-
-data CodeModeHost = CodeModeHost
-    { hostConfig :: !CodeModeConfig
-    , hostCells :: !(MVar (Map Text Cell))
-    , hostNextId :: !(IORef Int)
-    , hostStoredValues :: !(MVar (Map Text Value))
-    , hostWorkerPool :: !(MVar WorkerPool)
-    }
-
 newCodeModeHost :: CodeModeConfig -> IO CodeModeHost
 newCodeModeHost config = do
     host <- CodeModeHost config
@@ -325,72 +139,6 @@ newCodeModeHost config = do
             Left _ -> pure ()
         else pure ()
     pure host
-
--- | Check the external runtime before exposing @exec@/@wait@ to the model.
---
--- In ordinary code mode the caller can use this failure to fall back to
--- direct tools. In code-mode-only it is a fail-closed startup error rather
--- than an advertised tool that is guaranteed to fail on first use.
-checkCodeModeAvailability :: CodeModeConfig -> IO (Either Text ())
-checkCodeModeAvailability config = do
-    executable <- resolveBunExecutable config.bunExecutable
-    worker <- resolveWorkerScript config.workerScript
-    runtime <- case executable of
-        Nothing -> pure Nothing
-        Just path -> Just <$> inspectBun path
-    pure $ case (runtime, worker) of
-        (Nothing, _) ->
-            Left $
-                "Bun runtime executable was not found: "
-                    <> Text.pack config.bunExecutable
-        (Just (Left err), _) -> Left err
-        (_, Nothing) ->
-            Left $
-                "code-mode worker script was not found: "
-                    <> Text.pack config.workerScript
-        (Just (Right ()), Just _) -> Right ()
-  where
-    inspectBun executable = do
-        checked <- try @_ @SomeException $
-            readProcessWithExitCode executable bunFeatureProbe ""
-        pure $ case checked of
-            Left err ->
-                Left $
-                    "failed to inspect Bun runtime: "
-                        <> Text.pack (displayException err)
-            Right (ExitFailure code, _, stderrText) ->
-                Left $
-                    "Bun lacks the vm sandbox features required by code mode (exit "
-                        <> Text.pack (show code)
-                        <> "): "
-                        <> Text.strip (Text.pack stderrText)
-            Right (ExitSuccess, _, _) -> Right ()
-
-bunFeatureProbe :: [String]
-bunFeatureProbe =
-    [ "--smol"
-    , "--no-install"
-    , "--no-env-file"
-    , "--no-addons"
-    , "-e"
-    , "import vm from 'node:vm';"
-        <> "if (typeof vm.createContext !== 'function' || "
-        <> "typeof vm.SourceTextModule !== 'function') process.exit(1);"
-    ]
-
-resolveBunExecutable :: FilePath -> IO (Maybe FilePath)
-resolveBunExecutable executable
-    | any isPathSeparator executable = do
-        exists <- doesFileExist executable
-        pure (if exists then Just executable else Nothing)
-    | otherwise = findExecutable executable
-
-resolveWorkerScript :: FilePath -> IO (Maybe FilePath)
-resolveWorkerScript script = do
-    exists <- doesFileExist script
-    if exists
-        then Just <$> canonicalizePath script
-        else pure Nothing
 
 closeCodeModeHost :: CodeModeHost -> IO ()
 closeCodeModeHost host = do

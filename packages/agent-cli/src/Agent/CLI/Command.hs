@@ -44,6 +44,13 @@ import Agent.CLI.Options
     , reasoningEffortsForDialect
     )
 import Agent.CLI.Command.Types
+import Agent.CLI.Command.Catalog (slashCommands)
+import Agent.CLI.Command.Instructions
+    ( deepResearchInstruction
+    , goalInstruction
+    , loopScheduleInstruction
+    , workflowInstruction
+    )
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Dialect (DialectId(..))
 import Agent.ReasoningEffort
@@ -53,10 +60,7 @@ import Agent.ReasoningEffort
     )
 import Agent.Responses.Types
 
-import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson ((.=))
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.List (isPrefixOf, sortOn)
 import qualified Data.Map.Strict as Map
@@ -67,74 +71,6 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import Data.Text.Encoding (decodeUtf8)
-
-slashCommands :: [SlashCommand]
-slashCommands =
-    [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one" True
-    , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
-    , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
-    , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
-    , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
-    , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
-    , cmd "retry" [] "/retry" "Retry the last failed turn exactly" False
-    , cmd "session" [] "/session" "Print the current session id" False
-    , cmd "session-info" ["status", "info"] "/session-info" "Show session details (model, tools, and context usage)" False
-    , cmd "afk" [] "/afk [HOST:PATH]" "Move this session into tmux, locally or over SSH" True
-    , cmd "worktree" [] "/worktree" "Start a fresh session in a new git worktree" False
-    , cmd "rename" ["title"] "/rename <TITLE>|--auto" "Rename the current session, or restore automatic titles" True
-    , cmd "login" ["accounts"] "/login" "Manage provider credentials and usage" False
-    , cmd "resume" [] "/resume [ID]" "Pick a session to resume, or resume ID" True
-    , cmd "search" [] "/search <QUERY>" "Search past conversations and resume a match" True
-    , cmd "compact" [] "/compact [FOCUS]" "Summarize history to free context" True
-    , cmd "clear" [] "/clear" "Reset the live conversation (same session id)" False
-    , cmd "new" [] "/new" "Start a fresh persisted session id" False
-    , cmd "usage" [] "/usage" "Show usage, pacing, and reset times for connected accounts" False
-    , cmd "reload-auth" [] "/reload-auth" "Re-read provider credentials" False
-    , cmd "paste" [] "/paste [--send] [TEXT]" "Attach a clipboard image (Cmd+V / Ctrl+V) and preview it in the terminal" True
-    , cmd "attachments" [] "/attachments" "List queued clipboard images" False
-    , cmd "clear-attachments" [] "/clear-attachments" "Drop queued clipboard images" False
-    , cmd "copy" ["copy-last"] "/copy" "Copy the last assistant response" False
-    , cmd "copy-code" [] "/copy-code [N]" "Copy fenced code block N from the last response" True
-    , cmd "copy-diff" [] "/copy-diff" "Copy the last diff block" False
-    , cmd "copy-path" [] "/copy-path" "Copy the active worktree path" False
-    , cmd "copy-session" [] "/copy-session" "Copy the current session id" False
-    , cmd "terminal" ["ghostty"] "/terminal" "Show detected terminal capabilities" False
-    , cmd "agents" ["a"] "/agents [limit [N]]" "Browse agents, or show/set the concurrent subagent cap" True
-    , cmd "mcp" ["mcps"] "/mcp" "Manage local MCP servers" False
-    , grokToolCmd "scheduler_create"
-        "loop" [] "/loop [interval] <prompt>"
-        "Run a prompt on a recurring interval" True
-    , grokToolCmd "update_goal"
-        "goal" [] "/goal <objective> [--budget N] | status | pause | resume | clear"
-        "Set, manage, or check an autonomous goal" True
-    , grokToolCmd "workflow"
-        "workflow" [] "/workflow runs | <name> [input]"
-        "Launch a named workflow or list workflow runs" True
-    , grokToolCmd "workflow"
-        "deep-research" [] "/deep-research <query>"
-        "Run bounded background research, cross-check evidence, and write a cited report" True
-    , cmd "skills" [] "/skills [reload]" "List discovered skills or reload them from disk" True
-    , cmd "shell" [] "/shell [ghci|bash|both|none]" "Show or select the allowed shell tools" True
-    , cmd "always-approve" ["yolo"] "/always-approve" "Toggle project auto-approve (or Shift+Tab)" False
-    , cmd "quit" ["exit"] "/quit" "Exit the current session" False
-    ]
-  where
-    cmd name aliases usage summary takesArguments =
-        SlashCommand
-            { slashName = name
-            , slashAliases = aliases
-            , slashUsage = usage
-            , slashSummary = summary
-            , slashTakesArguments = takesArguments
-            , slashDialects = Nothing
-            , slashRequiredTools = []
-            }
-    grokToolCmd requiredTool name aliases usage summary takesArguments =
-        (cmd name aliases usage summary takesArguments)
-            { slashDialects = Just [GrokBuildDialect]
-            , slashRequiredTools = [requiredTool]
-            }
 
 -- | Legacy/default catalog. It intentionally contains only always-on commands;
 -- callers with a live session should use 'mkSlashCatalog'.
@@ -550,69 +486,6 @@ loopUsageMessage =
         , ""
         , "Tell me how often it should run (for example 30m, 1 hour, or every 2 days)."
         ]
-
--- | Canonical model instruction for the detached scheduler implemented by this
--- host. Cadence parsing stays with the model so natural language remains valid.
-loopScheduleInstruction :: Text -> Text
-loopScheduleInstruction args =
-    Text.unlines
-        [ "# /loop -- schedule a recurring prompt"
-        , ""
-        , "Turn the input below into a scheduler_create call."
-        , "Each fire runs in a detached background subagent, not in this conversation, so the stored prompt must stand on its own."
-        , "Inline every path, job/PR/branch id, status command, success condition, and stop condition that a fresh fire needs."
-        , "Keep one fire bounded: it must report a short status and stop rather than polling inline."
-        , "The parent session or user owns cancellation; the detached child cannot modify the schedule. Tasks otherwise expire after seven days."
-        , ""
-        , "Convert the user's cadence, wherever phrased, into a compact <number><unit> interval using s, m, h, or d."
-        , "The minimum is 60 seconds. If no cadence is present, ask how often to run and never invent a default."
-        , ""
-        , "Call scheduler_create with the interval, the self-contained prompt, and fire_immediately: true."
-        , "Do not execute the scheduled prompt inline. Confirm the cadence, stop condition, seven-day expiry, and task_id."
-        , ""
-        , "Input:"
-        , args
-        ]
-
--- | Model instruction used after the host has activated goal state.
-goalInstruction :: Text -> Text
-goalInstruction objective =
-    Text.unlines
-        [ "# /goal -- pursue an objective"
-        , ""
-        , "A goal has been set: " <> objective
-        , ""
-        , "Work directly on this goal and carry it as far as possible. Deliver everything requested without leaving manual steps for the user."
-        , "Break the objective into concrete tracked steps and verify changes on the real path as you go."
-        , "Call update_goal(completed: true, message: \"summary\") only when the goal is fully achieved."
-        , "Call update_goal(blocked_reason: \"reason\") only when truly stuck after at least three consecutive failed attempts at the same problem."
-        , "Call update_goal(message: \"status note\") to record useful progress. If update_goal errors, continue and report status in the reply."
-        , ""
-        , "Start now."
-        ]
-
-workflowInstruction :: Text -> Text -> Text
-workflowInstruction name input =
-    let argsJson =
-            decodeUtf8
-                (LazyByteString.toStrict
-                    (Aeson.encode
-                        (Aeson.object ["query" .= input])))
-    in Text.unlines
-        [ "# /workflow -- launch a named workflow"
-        , ""
-        , "Call the workflow tool immediately with exactly the name and args below."
-        , "The args value is a JSON object whose query field contains the verbatim input; do not omit args or flatten query into a top-level tool argument."
-        , "Do not imitate the workflow inline or inspect the workspace before launching it."
-        , "If the workflow tool rejects an unsupported option, report that error honestly rather than silently changing semantics."
-        , ""
-        , "name: " <> name
-        , "args: " <> argsJson
-        ]
-
-deepResearchInstruction :: Text -> Text
-deepResearchInstruction query =
-    workflowInstruction "deep-research" query
 
 parseResumeCommand :: [Text] -> ReplAction
 parseResumeCommand = \case

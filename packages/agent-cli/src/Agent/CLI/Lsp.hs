@@ -1,5 +1,4 @@
--- | Session-owned stdio Language Server Protocol clients for Grok's @lsp@
--- tool. Servers are advertised only after a successful initialize handshake.
+-- | Session-owned stdio Language Server Protocol clients for Grok's @lsp@ tool.
 module Agent.CLI.Lsp
     ( LspRuntime
     , LspStartup(..)
@@ -8,14 +7,26 @@ module Agent.CLI.Lsp
     , lspRuntimeTool
     , encodeLspFrame
     ) where
-
 import Agent.CLI.Config
     ( LspConfig(..)
     , LspServerConfig(..)
     )
+import Agent.CLI.Lsp.Capabilities (clientCapabilities)
 import Agent.CLI.FileUri
     ( fileUri
-    , fileUriPath
+    )
+import Agent.CLI.Lsp.Formatting (formatLspResult)
+import Agent.CLI.Lsp.Path
+    ( exceptionText
+    , pathWithin
+    , quote
+    , resolveWorkspace
+    , sanitizeName
+    )
+import Agent.CLI.Lsp.Protocol
+    ( encodeLspFrame
+    , readMessage
+    , sendMessage
     )
 import Agent.GrokBuild.Dialect.Lsp
     ( LspOperation(..)
@@ -40,9 +51,7 @@ import Control.Concurrent.MVar
     , withMVar
     )
 import Control.Exception.Safe
-    ( SomeException
-    , displayException
-    , finally
+    ( finally
     , mask
     , onException
     , tryAny
@@ -55,12 +64,9 @@ import Control.Monad
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
-import Data.Char (isAlphaNum, toLower)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -72,7 +78,6 @@ import Data.List (find)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
-import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -81,7 +86,6 @@ import qualified Data.Vector as Vector
 import System.Directory
     ( canonicalizePath
     , createDirectoryIfMissing
-    , doesDirectoryExist
     )
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode)
@@ -109,17 +113,14 @@ import System.Process
     )
 import System.Timeout (timeout)
 import System.Posix.Types (ProcessID)
-
 data LspStartup = LspStartup
     { lspStartupRuntime :: !(Maybe LspRuntime)
     , lspStartupWarnings :: ![Text]
     }
-
 data LspRuntime = LspRuntime
     { runtimeClients :: !(Map Text LspClient)
     , runtimeWorkspace :: !FilePath
     }
-
 data LspClient = LspClient
     { clientName :: !Text
     , clientConfig :: !LspServerConfig
@@ -136,7 +137,6 @@ data LspClient = LspClient
     , clientRequestLock :: !(MVar ())
     , clientClosed :: !(IORef Bool)
     }
-
 newLspRuntime :: LspConfig -> ToolEnv -> IO LspStartup
 newLspRuntime config env
     | not config.lspEnabled =
@@ -226,15 +226,12 @@ newLspRuntime config env
                                         ]
                                     else warnings
                             }
-
 closeLspRuntime :: LspRuntime -> IO ()
 closeLspRuntime runtime =
     mapM_ closeLspClient (Map.elems runtime.runtimeClients)
-
 lspRuntimeTool :: LspRuntime -> AppTool
 lspRuntimeTool runtime =
     lspTool (runLsp runtime)
-
 startLspClient
     :: FilePath
     -> FilePath
@@ -286,7 +283,6 @@ startLspClient workspace logDirectory name config = do
                                     forceCloseLspClient client
                                     pure (name, Left err)
                                 Right () -> pure (name, Right client)
-
 spawnClient
     :: Text
     -> LspServerConfig
@@ -381,7 +377,6 @@ spawnClient name config workspace logHandle = mask \restore -> do
             finishSetup
                 `onException` stopAsync stderrWorker)
         `onException` closePartial
-
 initializeClient :: LspClient -> IO (Either Text ())
 initializeClient client = do
     let rootUri = fileUri client.clientWorkspace
@@ -442,30 +437,6 @@ initializeClient client = do
                                                         ("settings notification failed: "
                                                             <> err))
                                             Right () -> pure (Right ())
-
-clientCapabilities :: Aeson.Value
-clientCapabilities =
-    Aeson.object
-        [ "workspace" .= Aeson.object
-            [ "symbol" .= Aeson.object []
-            , "workspaceFolders" .= True
-            , "configuration" .= True
-            , "applyEdit" .= False
-            ]
-        , "textDocument" .= Aeson.object
-            [ "definition" .= Aeson.object []
-            , "references" .= Aeson.object []
-            , "hover" .= Aeson.object
-                [ "contentFormat" .=
-                    [ "markdown" :: Text
-                    , "plaintext"
-                    ]
-                ]
-            , "implementation" .= Aeson.object []
-            , "documentSymbol" .= Aeson.object []
-            ]
-        ]
-
 runLsp :: LspRuntime -> LspRequest -> IO (Either Text Text)
 runLsp runtime request =
     case request.lspOperation of
@@ -476,7 +447,6 @@ runLsp runtime request =
                 Left err -> pure (Left err)
                 Right (client, path, uri) ->
                     dispatchFileOperation client path uri request operation
-
 runWorkspaceSymbol
     :: LspRuntime
     -> LspRequest
@@ -514,7 +484,6 @@ runWorkspaceSymbol runtime request =
                             <> formatLspResult WorkspaceSymbol value
                         | (name, value) <- successes
                         ]
-
 prepareFileRequest
     :: LspRuntime
     -> LspRequest
@@ -578,7 +547,6 @@ prepareFileRequest runtime request =
                                                 , canonical
                                                 , fileUri canonical
                                                 ))
-
 dispatchFileOperation
     :: LspClient
     -> FilePath
@@ -638,7 +606,6 @@ dispatchFileOperation client path uri request operation =
                 Left err -> pure (Left err)
                 Right value ->
                     pure (Right (formatLspResult operation value))
-
 synchronizeDocument
     :: LspClient
     -> FilePath
@@ -821,6 +788,12 @@ decodeResponse object =
             Right
                 (fromMaybe Aeson.Null (KeyMap.lookup "result" object))
 
+compactJson :: Aeson.Value -> Text
+compactJson =
+    Text.decodeUtf8With lenientDecode
+        . LBS.toStrict
+        . Aeson.encode
+
 answerServerRequest
     :: LspClient
     -> Text
@@ -924,106 +897,6 @@ sendMessageWithin client timeoutMilliseconds label value =
                         <> exceptionText exception
             Just (Right ()) -> pure (Right ())
 
-sendMessage :: Handle -> Aeson.Value -> IO ()
-sendMessage handle value = do
-    BS.hPut handle (encodeLspFrame value)
-    hFlush handle
-
-encodeLspFrame :: Aeson.Value -> BS.ByteString
-encodeLspFrame value =
-    let body = LBS.toStrict (Aeson.encode value)
-    in BS8.pack
-        ("Content-Length: " <> show (BS.length body) <> "\r\n\r\n")
-            <> body
-
-readMessage :: Handle -> IO (Either Text Aeson.Value)
-readMessage handle = do
-    headers <- tryAny (readHeaders handle 0 0 Map.empty)
-    case headers of
-        Left exception ->
-            pure . Left $
-                "failed to read LSP response headers: "
-                    <> exceptionText exception
-        Right values ->
-            case Map.lookup "content-length" values >>= readMaybeInt of
-                Nothing ->
-                    pure (Left "LSP response omitted a valid Content-Length")
-                Just bodyLength
-                    | bodyLength < 0 ->
-                        pure (Left "LSP response had a negative Content-Length")
-                    | bodyLength > maxLspMessageBytes ->
-                        pure . Left $
-                            "LSP response exceeds "
-                                <> Text.pack (show maxLspMessageBytes)
-                                <> " bytes"
-                    | otherwise -> do
-                        bodyResult <- tryAny (BS.hGet handle bodyLength)
-                        pure case bodyResult of
-                            Left exception ->
-                                Left
-                                    ( "failed to read LSP response body: "
-                                        <> exceptionText exception
-                                    )
-                            Right body
-                                | BS.length body /= bodyLength ->
-                                    Left "LSP response ended before Content-Length"
-                                | otherwise ->
-                                    case Aeson.eitherDecodeStrict' body of
-                                        Left err ->
-                                            Left
-                                                ( "LSP response was invalid JSON: "
-                                                    <> Text.pack err
-                                                )
-                                        Right value -> Right value
-
-readHeaders
-    :: Handle
-    -> Int
-    -> Int
-    -> Map String String
-    -> IO (Map String String)
-readHeaders handle count totalBytes headers = do
-    when (count >= maxLspHeaderCount) $
-        ioError (userError "LSP response sent too many headers")
-    when (totalBytes >= maxLspHeaderBytes) $
-        ioError (userError "LSP response headers are too large")
-    rawLine <- BS8.hGetLine handle
-    let line = BS8.unpack (BS8.takeWhile (/= '\r') rawLine)
-        nextBytes = totalBytes + BS.length rawLine
-    when (nextBytes > maxLspHeaderBytes) $
-        ioError (userError "LSP response headers are too large")
-    if null line
-        then pure headers
-        else
-            case break (== ':') line of
-                (name, ':' : value) ->
-                    readHeaders handle (count + 1) nextBytes $
-                        Map.insert
-                            (map toLower name)
-                            (dropWhile (== ' ') value)
-                            headers
-                _ ->
-                    readHeaders
-                        handle
-                        (count + 1)
-                        nextBytes
-                        headers
-
-maxLspHeaderCount :: Int
-maxLspHeaderCount = 100
-
-maxLspHeaderBytes :: Int
-maxLspHeaderBytes = 64 * 1024
-
-maxLspMessageBytes :: Int
-maxLspMessageBytes = 16 * 1024 * 1024
-
-readMaybeInt :: String -> Maybe Int
-readMaybeInt raw =
-    case reads raw of
-        [(value, "")] -> Just value
-        _ -> Nothing
-
 closeLspClient :: LspClient -> IO ()
 closeLspClient client =
     withMVar client.clientRequestLock \() -> do
@@ -1120,217 +993,3 @@ stopAsync worker =
 ignoreException :: IO a -> IO ()
 ignoreException action =
     void (tryAny action)
-
-resolveWorkspace
-    :: FilePath
-    -> Maybe Text
-    -> IO (Either Text FilePath)
-resolveWorkspace workspace override = do
-    let requested = case override of
-            Nothing -> workspace
-            Just value
-                | FilePath.isAbsolute (Text.unpack value) ->
-                    Text.unpack value
-                | otherwise ->
-                    workspace FilePath.</> Text.unpack value
-    resolved <-
-        tryAny do
-            exists <- doesDirectoryExist requested
-            unless exists $
-                ioError (userError "workspace folder does not exist")
-            canonicalizePath requested
-    canonicalWorkspace <- tryAny (canonicalizePath workspace)
-    pure case (canonicalWorkspace, resolved) of
-        (Left exception, _) ->
-            Left
-                ( "failed to resolve active workspace: "
-                    <> exceptionText exception
-                )
-        (_, Left exception) ->
-            Left
-                ( "invalid workspaceFolder: "
-                    <> exceptionText exception
-                )
-        (Right root, Right child)
-            | pathWithin root child -> Right child
-            | otherwise ->
-                Left "workspaceFolder must be inside the active workspace"
-
-pathWithin :: FilePath -> FilePath -> Bool
-pathWithin root candidate =
-    let relative =
-            FilePath.normalise
-                (FilePath.makeRelative
-                    (FilePath.normalise root)
-                    (FilePath.normalise candidate))
-    in relative == "."
-        || (not (FilePath.isAbsolute relative)
-            && relative /= ".."
-            && not
-                ( (".." <> [FilePath.pathSeparator])
-                    `isPrefixOfString` relative
-                ))
-
-formatLspResult :: LspOperation -> Aeson.Value -> Text
-formatLspResult operation value =
-    case operation of
-        GoToDefinition -> formatLocations "definition" value
-        FindReferences -> formatLocations "references" value
-        GoToImplementation -> formatLocations "implementations" value
-        Hover -> formatHover value
-        DocumentSymbol -> formatSymbols value
-        WorkspaceSymbol -> formatSymbols value
-
-formatLocations :: Text -> Aeson.Value -> Text
-formatLocations label value =
-    case collectLocations value of
-        [] -> "No " <> label <> " found."
-        locations -> Text.intercalate "\n" locations
-
-collectLocations :: Aeson.Value -> [Text]
-collectLocations = \case
-    Aeson.Array values ->
-        concatMap collectLocations (Vector.toList values)
-    Aeson.Object object ->
-        case locationFromObject object of
-            Just location -> [location]
-            Nothing -> []
-    _ -> []
-
-locationFromObject :: KeyMap.KeyMap Aeson.Value -> Maybe Text
-locationFromObject object = do
-    uri <-
-        stringField "uri" object
-            <|> stringField "targetUri" object
-    let range =
-            KeyMap.lookup "range" object
-                <|> KeyMap.lookup "targetSelectionRange" object
-                <|> KeyMap.lookup "targetRange" object
-        (line, character) =
-            fromMaybe (0, 0) (range >>= startPosition)
-        path = maybe uri Text.pack (fileUriPath uri)
-    pure $
-        path
-            <> ":"
-            <> Text.pack (show (line + 1))
-            <> ":"
-            <> Text.pack (show (character + 1))
-
-startPosition :: Aeson.Value -> Maybe (Int, Int)
-startPosition (Aeson.Object range) = do
-    Aeson.Object start <- KeyMap.lookup "start" range
-    line <- integerField "line" start
-    character <- integerField "character" start
-    pure (line, character)
-startPosition _ = Nothing
-
-formatHover :: Aeson.Value -> Text
-formatHover Aeson.Null = "No hover information found."
-formatHover (Aeson.Object object) =
-    maybe
-        (compactJson (Aeson.Object object))
-        formatHoverContents
-        (KeyMap.lookup "contents" object)
-formatHover value = formatHoverContents value
-
-formatHoverContents :: Aeson.Value -> Text
-formatHoverContents = \case
-    Aeson.String value -> value
-    Aeson.Array values ->
-        Text.intercalate "\n\n"
-            (map formatHoverContents (Vector.toList values))
-    Aeson.Object object ->
-        fromMaybe
-            (compactJson (Aeson.Object object))
-            (stringField "value" object
-                <|> stringField "language" object)
-    Aeson.Null -> "No hover information found."
-    value -> compactJson value
-
-formatSymbols :: Aeson.Value -> Text
-formatSymbols value =
-    case symbolLines 0 value of
-        [] -> "No symbols found."
-        lines' -> Text.intercalate "\n" lines'
-
-symbolLines :: Int -> Aeson.Value -> [Text]
-symbolLines depth = \case
-    Aeson.Array values ->
-        concatMap (symbolLines depth) (Vector.toList values)
-    Aeson.Object object ->
-        case stringField "name" object of
-            Nothing -> []
-            Just name ->
-                let
-                    location =
-                        KeyMap.lookup "location" object
-                            >>= \case
-                                Aeson.Object locationObject ->
-                                    locationFromObject locationObject
-                                _ -> Nothing
-                    directLocation = locationFromObject object
-                    suffix =
-                        maybe ""
-                            (" — " <>)
-                            (location <|> directLocation)
-                    current =
-                        Text.replicate depth "  "
-                            <> "- "
-                            <> name
-                            <> suffix
-                    children =
-                        maybe []
-                            (symbolLines (depth + 1))
-                            (KeyMap.lookup "children" object)
-                in current : children
-    _ -> []
-
-stringField
-    :: Text
-    -> KeyMap.KeyMap Aeson.Value
-    -> Maybe Text
-stringField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
-
-integerField
-    :: Text
-    -> KeyMap.KeyMap Aeson.Value
-    -> Maybe Int
-integerField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.Number value) -> toBoundedInteger value
-        _ -> Nothing
-
-compactJson :: Aeson.Value -> Text
-compactJson =
-    Text.decodeUtf8With lenientDecode
-        . LBS.toStrict
-        . Aeson.encode
-
-sanitizeName :: Text -> FilePath
-sanitizeName =
-    Text.unpack
-        . Text.map
-            (\character ->
-                if isAlphaNum character || character `elem` ("-_" :: String)
-                    then character
-                    else '_')
-
-exceptionText :: SomeException -> Text
-exceptionText = Text.pack . displayException
-
-quote :: Text -> Text
-quote value = "'" <> value <> "'"
-
-isPrefixOfString :: String -> String -> Bool
-isPrefixOfString prefix value =
-    take (length prefix) value == prefix
-
-infixr 3 <|>
-
-(<|>) :: Maybe a -> Maybe a -> Maybe a
-first <|> second = case first of
-    Just value -> Just value
-    Nothing -> second

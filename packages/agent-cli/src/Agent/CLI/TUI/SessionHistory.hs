@@ -11,8 +11,8 @@ module Agent.CLI.TUI.SessionHistory
 import Agent.CLI.Session
     ( SessionTurn(..)
     , SessionTurnPage(..)
-    , TranscriptEffect(..)
     )
+import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryDirection
