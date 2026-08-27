@@ -96,6 +96,9 @@ library
                     , Agent.MCP.Fleet
                     , Agent.MCP.Supervisor
                     , Agent.MCP.Types
+                    , Agent.Subagents.Registry.Internal.Core
+                    , Agent.Subagents.Registry.Internal.Operations
+                    , Agent.Subagents.Registry.Internal.Types
                     , Agent.Tools.CodeMode.Host.Types
                     , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_core
