@@ -174,6 +174,26 @@ spec = describe "typed stream assembly" do
         [name | FunctionCallItem FunctionCall { name } <- result.output]
             `shouldBe` ["late-added"]
 
+    it "retains done-only fields after a late added overlay" do
+        let done =
+                case renameCall "done" toolCall of
+                    FunctionCallItem value ->
+                        FunctionCallItem value
+                            { namespace = Just "done-only" }
+                    other -> other
+            late = renameCall "late" toolCall
+        result <- expectRight $ buildStreamResponse config
+            [ outputDone 0 done
+            , outputAdded 0 late
+            , completed (response [])
+            ]
+        case result.output of
+            [FunctionCallItem call] -> do
+                call.name `shouldBe` "late"
+                call.namespace `shouldBe` Just "done-only"
+            other ->
+                expectationFailure ("unexpected output: " <> show other)
+
     it "retains fields present only on output_item.added" do
         let added = case toolCall of
                 FunctionCallItem value ->
@@ -315,7 +335,10 @@ spec = describe "typed stream assembly" do
                             False
                     Right result ->
                         result.output ===
-                            [mergeExpectedItem terminalItem lateItem]
+                            [ mergeExpectedItem
+                                terminalItem
+                                (mergeExpectedItem doneItem lateItem)
+                            ]
 
     modifyMaxSuccess (const 300) $
         prop "ignores all events after the first terminal lifecycle event" $
@@ -552,7 +575,7 @@ applyExpected model operation =
         Just
             ( if operation.operationDone
                 then mergeExpectedItem oldItem newItem
-                else newItem
+                else mergeExpectedItem oldItem newItem
             , wasDone || operation.operationDone
             )
 

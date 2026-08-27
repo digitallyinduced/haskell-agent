@@ -409,7 +409,12 @@ updateItem outputIndex done newValue state =
                     partial ->
                         ParsedItem
                             (mergePartialIntoDone partial newValue)
-                else mergePartialItem old.itemValue newValue
+                else case old.itemValue of
+                    ParsedItem oldValue ->
+                        ParsedItem
+                            (mergeParsedItems oldValue newValue)
+                    partial ->
+                        mergePartialItem partial newValue
         , itemDone = old.itemDone || done
         }
 
