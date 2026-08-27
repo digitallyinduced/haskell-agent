@@ -14,7 +14,6 @@ import Agent.Tools.Scheduling
     , ToolResource(..)
     , ToolResourceClaim(..)
     )
-import Control.Monad (join)
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
@@ -58,7 +57,7 @@ todoUpdateDecoder = Json.object $
     TodoUpdate
         <$> Json.atKey "id" Json.text
         <*> optionalTextValue "content"
-        <*> (join <$> Json.atKeyOptional "status" (Json.nullable todoStatusDecoder))
+        <*> Json.optionalKey "status" todoStatusDecoder
 
 data TodoWriteArgs = TodoWriteArgs
     { merge :: !Bool

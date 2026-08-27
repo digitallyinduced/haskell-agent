@@ -8,7 +8,6 @@ module Agent.GrokBuild.Dialect.Json
     , textList
     ) where
 
-import Control.Monad (join)
 import qualified Agent.Json.Decode as Json
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -24,19 +23,19 @@ optionalText key =
 
 optionalTextValue :: Text -> Json.FieldsDecoder (Maybe Text)
 optionalTextValue key =
-    join <$> Json.atKeyOptional key (Json.nullable Json.text)
+    Json.optionalKey key Json.text
 
 optionalInt :: Text -> Json.FieldsDecoder (Maybe Int)
 optionalInt key =
-    join <$> Json.atKeyOptional key (Json.nullable Json.int)
+    Json.optionalKey key Json.int
 
 optionalIntOrString :: Text -> Json.FieldsDecoder (Maybe Int)
 optionalIntOrString key =
-    join <$> Json.atKeyOptional key (Json.nullable intOrString)
+    Json.optionalKey key intOrString
 
 optionalBool :: Text -> Json.FieldsDecoder (Maybe Bool)
 optionalBool key =
-    join <$> Json.atKeyOptional key (Json.nullable boolOrString)
+    Json.optionalKey key boolOrString
 
 requiredTextList :: Text -> Json.FieldsDecoder [Text]
 requiredTextList key = Json.atKey key textList

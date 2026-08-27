@@ -44,7 +44,6 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Control.Monad (join)
 import Data.Aeson (Value, object, (.=))
 import qualified Data.Aeson.Text as Aeson
 import Data.List (sortOn)
@@ -125,8 +124,7 @@ workflowArgsDecoder = Json.object do
         name <- optionalText "name"
         script <- optionalText "script"
         scriptPath <- optionalText "script_path"
-        workflowInputArgs <-
-            join <$> Json.atKeyOptional "args" (Json.nullable workflowInputDecoder)
+        workflowInputArgs <- Json.optionalKey "args" workflowInputDecoder
         resumeFromRunId <- optionalText "resume_from_run_id"
         validateOnly <- maybe False id <$> optionalBool "validate_only"
         pure WorkflowArgs

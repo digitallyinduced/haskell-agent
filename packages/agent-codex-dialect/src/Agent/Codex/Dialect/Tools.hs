@@ -68,7 +68,6 @@ import Agent.Tools.Types
     , jsonTool
     , withToolResourceClaims
     )
-import Control.Monad (join)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -453,7 +452,7 @@ runUpdatePlanBody args
 optionalText :: Text -> Json.FieldsDecoder (Maybe Text)
 optionalText key =
     fmap (>>= nonEmpty) $
-        join <$> Json.atKeyOptional key (Json.nullable Json.text)
+        Json.optionalKey key Json.text
   where
     nonEmpty value
         | Text.null value = Nothing
@@ -461,7 +460,7 @@ optionalText key =
 
 optionalIntOrString :: Text -> Json.FieldsDecoder (Maybe Int)
 optionalIntOrString key =
-    join <$> Json.atKeyOptional key (Json.nullable intOrString)
+    Json.optionalKey key intOrString
 
 intOrString :: Json.Decoder Int
 intOrString = Json.withType \case
