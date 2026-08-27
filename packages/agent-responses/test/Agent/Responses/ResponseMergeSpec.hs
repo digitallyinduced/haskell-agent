@@ -31,6 +31,31 @@ spec = describe "typed response merging" do
                         && response.status == ResponseCompleted
                 Nothing -> False
 
+    it "overlays lifecycle fragments associatively" do
+        let first = withModel "one" baseResponse
+            second = withIdentityAndStatus "" ResponseCompleted baseResponse
+            third = withOutput [functionCall "call-3"] baseResponse
+        mergeResponseFragments [first, second, third]
+            `shouldBe`
+                (mergeResponseFragments [first, second]
+                    >>= \merged -> mergeResponseFragments [merged, third])
+
+    it "keeps unrelated earlier lifecycle fields" do
+        let earlier = withModel "request-model" baseResponse
+            later = withIdentityAndStatus "resp-final" ResponseCompleted
+                baseResponse
+        mergeResponseFragments [earlier, later]
+            `shouldSatisfy` \case
+                Just response ->
+                    response.responseId == "resp-final"
+                        && response.model == "request-model"
+                Nothing -> False
+
+    it "merging an identifiable streamed item is idempotent" do
+        let call = functionCall "call-1"
+            once = mergeCompletedResponseOutput [call] baseResponse
+        mergeCompletedResponseOutput [call] once `shouldBe` once
+
 baseResponse :: Response
 baseResponse =
     either error id $ decodeResponse $ BS.pack

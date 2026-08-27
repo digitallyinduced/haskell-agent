@@ -349,12 +349,14 @@ findItemIndex item =
 
 findIdentityIndex :: [Maybe Text] -> StreamAssemblyState -> Maybe Int
 findIdentityIndex identities state =
-    fst <$> find matches (IntMap.toList state.outputItems)
+    foldr (<|>) Nothing (map findValue values)
   where
     values = [value | Just value <- identities, not (Text.null value)]
-    matches (_, progress) =
-        any (`elem` values)
-            (map snd (responseItemIdentities progress.itemValue))
+    findValue value =
+        fst <$> find
+            (elem value . map snd
+                . responseItemIdentities . (.itemValue) . snd)
+            (IntMap.toList state.outputItems)
 
 nextOutputIndex :: StreamAssemblyState -> Int
 nextOutputIndex state =
