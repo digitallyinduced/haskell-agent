@@ -1,5 +1,6 @@
 module Claude.Agent.SDK.ClientSpec (spec) where
 
+import qualified Agent.Json.Decode as Json
 import Claude.Agent.SDK
 import Claude.Agent.SDK.TestSupport
 import Control.Concurrent
@@ -14,10 +15,7 @@ import Control.Concurrent
     )
 import Control.Monad (void, when)
 import Control.Exception.Safe (finally, tryAny)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as ByteString
-import Data.Foldable (toList)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -90,8 +88,10 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                     ]
 
             input <- ByteString.readFile inputPath
-            Aeson.eitherDecodeStrict' input
-                `shouldBe` Right (expectedQueryValue "hello from Haskell")
+            Json.decodeEither queryRecordDecoder input
+                `shouldBe` Right
+                    (expectedQueryRecord
+                        [ProbeText "hello from Haskell"])
 
     it "serializes image content in streaming user messages" do
         withFakeClaude transportProbeScript \directory executable -> do
@@ -121,25 +121,12 @@ spec = describe "ClaudeSDKClient subprocess transport" do
             _ <- expectRight queryResult
 
             input <- ByteString.readFile inputPath
-            Aeson.eitherDecodeStrict' input
+            Json.decodeEither queryRecordDecoder input
                 `shouldBe`
                     Right
-                        (expectedContentQueryValue
-                            [ Aeson.object
-                                [ "type" Aeson..= ("image" :: Text)
-                                , "source" Aeson..= Aeson.object
-                                    [ "type" Aeson..= ("base64" :: Text)
-                                    , "media_type" Aeson..=
-                                        ("image/png" :: Text)
-                                    , "data" Aeson..=
-                                        ("cG5nLWJ5dGVz" :: Text)
-                                    ]
-                                ]
-                            , Aeson.object
-                                [ "type" Aeson..= ("text" :: Text)
-                                , "text" Aeson..=
-                                    ("describe this image" :: Text)
-                                ]
+                        (expectedQueryRecord
+                            [ ProbeImage "image/png" "cG5nLWJ5dGVz"
+                            , ProbeText "describe this image"
                             ])
 
     it "supports minimal and full Claude Code system prompts" do
@@ -1233,65 +1220,75 @@ expectedArguments =
     , "high"
     ]
 
-expectedQueryValue :: Text -> Aeson.Value
-expectedQueryValue prompt =
-    expectedContentQueryValue
-        [ Aeson.object
-            [ "type" Aeson..= ("text" :: Text)
-            , "text" Aeson..= prompt
-            ]
-        ]
+data ProbeContent
+    = ProbeText !Text
+    | ProbeImage !Text !Text
+    deriving (Eq, Show)
 
-expectedContentQueryValue :: [Aeson.Value] -> Aeson.Value
-expectedContentQueryValue content =
-    Aeson.object
-        [ "type" Aeson..= ("user" :: Text)
-        , "message" Aeson..= Aeson.object
-            [ "role" Aeson..= ("user" :: Text)
-            , "content" Aeson..= content
-            ]
-        , "parent_tool_use_id" Aeson..= Aeson.Null
-        , "session_id" Aeson..= testSessionId
-        , "origin" Aeson..= Aeson.object
-            [ "kind" Aeson..= ("human" :: Text)
-            ]
-        ]
+data QueryRecord = QueryRecord
+    { queryType :: !Text
+    , queryRole :: !Text
+    , queryContent :: ![ProbeContent]
+    , queryParentIsNull :: !Bool
+    , querySession :: !Text
+    , queryOriginKind :: !Text
+    } deriving (Eq, Show)
 
-decodePrompt :: String -> Either String Text
-decodePrompt bytes = do
-    value <-
-        Aeson.eitherDecodeStrict'
-            (TextEncoding.encodeUtf8 (Text.pack bytes))
-    case value of
-        Aeson.Object object -> do
-            message <- case KeyMap.lookup "message" object of
-                Just (Aeson.Object nested) -> Right nested
-                _ -> Left "missing message object"
-            case KeyMap.lookup "content" message of
-                Just (Aeson.Array values) ->
-                    case toList values of
-                        [Aeson.Object content]
-                            | Just (Aeson.String prompt) <-
-                                KeyMap.lookup "text" content ->
-                                Right prompt
-                        _ ->
-                            Left "missing text content"
-                _ -> Left "missing text content"
-        _ ->
-            Left "query was not an object"
+expectedQueryRecord :: [ProbeContent] -> QueryRecord
+expectedQueryRecord queryContent = QueryRecord
+    { queryType = "user"
+    , queryRole = "user"
+    , queryContent
+    , queryParentIsNull = True
+    , querySession = testSessionId
+    , queryOriginKind = "human"
+    }
 
-querySessionId :: ByteString.ByteString -> Either String Text
-querySessionId bytes = do
-    value <- Aeson.eitherDecodeStrict' bytes
-    case value of
-        Aeson.Object object ->
-            case KeyMap.lookup "session_id" object of
-                Just (Aeson.String sessionId) ->
-                    Right sessionId
-                _ ->
-                    Left "missing session_id"
-        _ ->
-            Left "query was not an object"
+queryRecordDecoder :: Json.Decoder QueryRecord
+queryRecordDecoder = Json.object do
+    queryType <- Json.atKey "type" Json.text
+    (queryRole, queryContent) <-
+        Json.atKey "message" $ Json.object $
+            (,)
+                <$> Json.atKey "role" Json.text
+                <*> Json.atKey "content" (Json.list probeContentDecoder)
+    queryParentIsNull <- Json.atKey "parent_tool_use_id" Json.isNull
+    querySession <- Json.atKey "session_id" Json.text
+    queryOriginKind <- Json.atKey "origin" $
+        Json.object (Json.atKey "kind" Json.text)
+    pure QueryRecord{..}
+
+probeContentDecoder :: Json.Decoder ProbeContent
+probeContentDecoder = Json.object do
+    contentType <- Json.atKey "type" Json.text
+    Json.liftObjectDecoder $ case contentType of
+        "text" -> Json.object $
+            ProbeText <$> Json.atKey "text" Json.text
+        "image" -> Json.object $
+            Json.atKey "source" $ Json.object $
+                ProbeImage
+                    <$> Json.atKey "media_type" Json.text
+                    <*> Json.atKey "data" Json.text
+        _ -> fail "unexpected query content type"
+
+decodePrompt :: String -> Either Json.JsonError Text
+decodePrompt bytes =
+    Json.decodeText promptDecoder (Text.pack bytes)
+
+promptDecoder :: Json.Decoder Text
+promptDecoder = Json.object $
+    Json.atKey "message" $ Json.object $
+        Json.atKey "content" $ Json.list probeContentDecoder
+            >>= \case
+                [ProbeText prompt] -> pure prompt
+                _ -> fail "missing text content"
+
+querySessionId
+    :: ByteString.ByteString
+    -> Either Json.JsonError Text
+querySessionId =
+    Json.decodeEither $
+        Json.object (Json.atKey "session_id" Json.text)
 
 transportProbeScript :: String
 transportProbeScript =

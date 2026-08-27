@@ -53,6 +53,7 @@ import Agent.Responses.Types
     , TaggedObject
     )
 import qualified Agent.ToolDispatch as ToolDispatch
+import Agent.Json (rawJsonBytes)
 import Claude.Agent.SDK.Client
     ( ClaudeSDKClient
     , ClaudeSDKTurn
@@ -678,7 +679,10 @@ sdkErrorToApiError = \case
             , rawBody =
                 maybe
                     ""
-                    (Text.take 2_000 . renderJsonValue)
+                    ( Text.take 2_000
+                        . TextEncoding.decodeUtf8With lenientDecode
+                        . rawJsonBytes
+                    )
                     rawMessage
             }
     sdkError@ResultError{} ->

@@ -13,6 +13,8 @@ module Agent.Claude.Internal.Messages
 
 import Agent.Loop (LoopEvent(..))
 import Agent.Loop (NativeAgentStatus(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decode as Json
 import Agent.Responses.Types
     ( FunctionCall(..)
     , FunctionCallOutput(..)
@@ -30,8 +32,10 @@ import Claude.Agent.SDK.Types
     , Message(..)
     , ResultMessage(..)
     , StreamEvent(..)
+    , StreamToolUse(..)
     , SystemMessage(..)
     , Usage(..)
+    , ToolResultContent(..)
     , UserMessage(..)
     , QueryMessageScope(..)
     , QueryProgress(..)
@@ -42,10 +46,7 @@ import Claude.Agent.SDK.Types
     , modelUsageToUsage
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString.Lazy as LazyByteString
-import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -53,7 +54,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Text.Encoding.Error (lenientDecode)
 
 data CompletedClaudeTurn = CompletedClaudeTurn
     { sessionId :: !Text
@@ -255,12 +255,21 @@ nativeAgentModel :: ToolCall -> Maybe Text
 nativeAgentModel call = jsonTextField "model" call.arguments
 
 jsonTextField :: Text -> Text -> Maybe Text
-jsonTextField key raw = do
-    Aeson.Object object <-
-        Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
-    Aeson.String value <- KeyMap.lookup (Key.fromText key) object
-    let stripped = Text.strip value
-    if Text.null stripped then Nothing else Just stripped
+jsonTextField key raw =
+    either (const Nothing) id $
+        Json.decodeText
+            (Json.object $
+                (Json.atKeyOptional key $
+                    Json.withType \case
+                        Json.VString -> do
+                            value <- Text.strip <$> Json.text
+                            pure $
+                                if Text.null value
+                                    then Nothing
+                                    else Just value
+                        _ -> pure Nothing)
+                    >>= pure . (>>= id))
+            raw
 
 appendUnknownWarning
     :: ClaudeEventState
@@ -290,9 +299,8 @@ unknownToolLikeType = \case
     MessageAssistant assistant ->
         firstNonEmptyText
             [ contentType
-            | UnknownContentBlock (Aeson.Object object) <- assistant.content
-            , Just (Aeson.String contentType) <-
-                [KeyMap.lookup "type" object]
+            | UnknownContentBlock{contentType = Just contentType}
+                <- assistant.content
             , "tool" `Text.isInfixOf` Text.toLower contentType
             ]
     _ -> Nothing
@@ -420,7 +428,7 @@ messageToolEvents = \case
     MessageUser user ->
         concatMap userBlockEvents user.content
     MessageStreamEvent stream ->
-        streamEventToolEvents stream.event
+        streamEventToolEvents stream
     _ ->
         []
 
@@ -459,14 +467,14 @@ canonicalToolItems messages =
             Set.member output.callId started
         _ -> True
 
-functionCallItem :: Text -> Text -> Aeson.Value -> ResponseItem
+functionCallItem :: Text -> Text -> RawJson -> ResponseItem
 functionCallItem callId name input =
     FunctionCallItem FunctionCall
         { itemId = Nothing
         , callId
         , name
         , namespace = Nothing
-        , arguments = encodeValue input
+        , arguments = rawJsonText input
         , encryptedFunctionArgs = Nothing
         , status = Just ItemCompleted
         , extraFields =
@@ -477,7 +485,7 @@ functionCallItem callId name input =
 
 functionOutputItem
     :: Text
-    -> Maybe Aeson.Value
+    -> Maybe ToolResultContent
     -> Maybe Bool
     -> ResponseItem
 functionOutputItem callId content isError =
@@ -486,7 +494,8 @@ functionOutputItem callId content isError =
         , callId
         , name = Nothing
         , namespace = Nothing
-        , output = fromMaybe Aeson.Null content
+        , output =
+            maybe Aeson.Null (Aeson.String . (.renderedText)) content
         , status =
             Just $
                 if isError == Just True
@@ -498,30 +507,17 @@ functionOutputItem callId content isError =
                 (Aeson.String "claude-code")
         }
 
-streamEventToolEvents :: Aeson.Value -> [ClaudeToolEvent]
-streamEventToolEvents = \case
-    Aeson.Object eventObject
-        | Just (Aeson.String "content_block_start") <-
-            KeyMap.lookup "type" eventObject
-        , Just (Aeson.Object block) <-
-            KeyMap.lookup "content_block" eventObject
-        , Just (Aeson.String blockType) <- KeyMap.lookup "type" block
-        , blockType `elem` ["tool_use", "server_tool_use"]
-        , Just (Aeson.String toolUseId) <- KeyMap.lookup "id" block
-        , Just (Aeson.String name) <- KeyMap.lookup "name" block ->
-            [ ClaudeToolStarted ToolCall
-                { callId = toolUseId
-                , name
-                , arguments =
-                    encodeValue $
-                        fromMaybe
-                            (Aeson.Object KeyMap.empty)
-                            (KeyMap.lookup "input" block)
-                , callKind = FunctionCallKind
-                , argumentsEncrypted = False
-                }
-            ]
-    _ -> []
+streamEventToolEvents :: StreamEvent -> [ClaudeToolEvent]
+streamEventToolEvents StreamEvent{streamToolUse = Just toolUse} =
+    [ ClaudeToolStarted ToolCall
+        { callId = toolUse.toolUseId
+        , name = toolUse.name
+        , arguments = rawJsonText toolUse.input
+        , callKind = FunctionCallKind
+        , argumentsEncrypted = False
+        }
+    ]
+streamEventToolEvents _ = []
 
 assistantBlockEvents :: ContentBlock -> [ClaudeToolEvent]
 assistantBlockEvents = \case
@@ -529,7 +525,7 @@ assistantBlockEvents = \case
         [ ClaudeToolStarted ToolCall
             { callId = toolUseId
             , name
-            , arguments = encodeValue input
+            , arguments = rawJsonText input
             , callKind = FunctionCallKind
             , argumentsEncrypted = False
             }
@@ -538,7 +534,7 @@ assistantBlockEvents = \case
         [ ClaudeToolStarted ToolCall
             { callId = toolUseId
             , name
-            , arguments = encodeValue input
+            , arguments = rawJsonText input
             , callKind = FunctionCallKind
             , argumentsEncrypted = False
             }
@@ -632,24 +628,11 @@ advanceToolEvents initialState toolEvents =
                 , ToolFinished result : events
                 )
 
-renderResultContent :: Aeson.Value -> Text
-renderResultContent = \case
-    Aeson.String text -> text
-    Aeson.Array values ->
-        Text.intercalate "\n"
-            (map renderResultContent (toList values))
-    Aeson.Object object ->
-        case KeyMap.lookup "text" object of
-            Just (Aeson.String text) -> text
-            _ -> encodeValue (Aeson.Object object)
-    Aeson.Null -> ""
-    other -> encodeValue other
+renderResultContent :: ToolResultContent -> Text
+renderResultContent = (.renderedText)
 
-encodeValue :: Aeson.Value -> Text
-encodeValue =
-    TextEncoding.decodeUtf8With lenientDecode
-        . LazyByteString.toStrict
-        . Aeson.encode
+rawJsonText :: RawJson -> Text
+rawJsonText = TextEncoding.decodeUtf8 . rawJsonBytes
 
 firstNonEmptyText :: [Text] -> Maybe Text
 firstNonEmptyText values =
