@@ -46,10 +46,10 @@ import Agent.CLI.Options
 import Agent.CLI.Command.Types
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Dialect (DialectId(..))
+import Agent.Json (emptyExtensions)
 import Agent.Responses.Types
 
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isAlphaNum, isDigit, isSpace)
@@ -692,7 +692,7 @@ setReasoningEffort level ResponseCreateParams{..} =
             , generateSummary = Nothing
             , reasoningMode = Nothing
             , summary = Nothing
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
 
 currentEffort :: ResponseCreateParams -> Text

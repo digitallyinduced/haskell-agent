@@ -17,32 +17,36 @@ module Agent.Responses.StreamAssembly
     ) where
 
 import Agent.Error (ApiError(..))
-import Agent.Responses.ResponseMerge (mergeDoneResponse)
+import Agent.Json
+    ( RawJson
+    , emptyExtensions
+    , lookupExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as Decoder
+import Agent.Responses.ResponseMerge
+    ( mergeDoneResponse
+    , mergeResponseFragments
+    , responseItemIdentities
+    , responseItemKind
+    )
 import Agent.Responses.Types
+import Agent.Responses.Types.Items (reasoningSummaryPartDecoder)
 import Control.Applicative ((<|>))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
-import qualified Data.Text.Encoding.Error as TextEncoding (lenientDecode)
-import qualified Data.Vector as Vector
 
 -- | Provider-specific failure classification around shared event assembly.
 data StreamAssemblyConfig = StreamAssemblyConfig
     { missingCompletionMessage :: !Text
-      -- ^ Error message when no terminal response or stream failure is present.
     , classifyStreamError :: !(ResponseStreamError -> ApiError)
-      -- ^ Classify top-level and nested stream error events.
     , classifyFailedResponse :: !(ResponseFailure -> ApiError)
-      -- ^ Classify a permissive terminal @response.failed@ payload.
     , incompleteAsFailure :: !Bool
-      -- ^ Whether @response.incomplete@ should be returned as an error.
     }
 
 data ResponseFailure = ResponseFailure
@@ -51,25 +55,47 @@ data ResponseFailure = ResponseFailure
     , failureErrorCode         :: !(Maybe Text)
     , failureErrorMessage      :: !(Maybe Text)
     , failureIncompleteDetails :: !(Maybe IncompleteDetails)
-    , failureResponseValue     :: !Aeson.Value
+    , failureResponseValue     :: !(Maybe Response)
     } deriving (Eq, Show)
 
+data PartialResponseItem
+    = ParsedItem !ResponseItem
+    | PartialFunctionCall
+        { partialItemId    :: !(Maybe Text)
+        , partialName      :: !(Maybe Text)
+        , partialArguments :: !Text
+        }
+    | PartialCustomToolCall
+        { partialItemId :: !(Maybe Text)
+        , partialCallId :: !(Maybe Text)
+        , partialInput  :: !Text
+        }
+    | PartialReasoning
+        { partialItemId  :: !(Maybe Text)
+        , partialSummary :: !(Map Int ReasoningSummaryPart)
+        , partialContent :: !(Map Int ResponseContentPart)
+        }
+    | PartialMessage
+        { partialItemId :: !(Maybe Text)
+        , partialContent :: !(Map Int ResponseContentPart)
+        }
+    deriving (Eq, Show)
+
 data ItemProgress = ItemProgress
-    { itemValue :: !Aeson.Value
+    { itemValue :: !PartialResponseItem
     , itemDone  :: !Bool
     }
+    deriving (Eq, Show)
 
 -- | Incremental state shared by HTTP/SSE and reusable WebSocket transports.
--- Lifecycle response objects are overlaid in wire order; output items are
--- indexed so an @output_item.done@ replaces its earlier @added@ form.
 data StreamAssemblyState = StreamAssemblyState
-    { responseObject :: !Aeson.Object
-    , outputItems    :: !(IntMap ItemProgress)
+    { lifecycleResponse :: !(Maybe Response)
+    , outputItems       :: !(IntMap ItemProgress)
     }
 
 emptyStreamAssemblyState :: StreamAssemblyState
 emptyStreamAssemblyState = StreamAssemblyState
-    { responseObject = KeyMap.empty
+    { lifecycleResponse = Nothing
     , outputItems = IntMap.empty
     }
 
@@ -83,9 +109,33 @@ applyStreamEvent state event = case event of
     ResponseFailedEvent { responseValue } -> overlayLifecycle responseValue state
     ResponseIncompleteEvent { responseValue } -> overlayLifecycle responseValue state
     ResponseOutputItemAddedEvent { item, outputIndex } ->
-        updateStreamItem outputIndex False (Aeson.toJSON item) state
+        updateStreamItem outputIndex False item state
     ResponseOutputItemDoneEvent { item, outputIndex } ->
-        updateStreamItem outputIndex True (Aeson.toJSON item) state
+        updateStreamItem outputIndex True item state
+    ResponseOutputTextDeltaEvent
+        { delta, streamItemId, streamOutputIndex, contentIndex } ->
+            updateTextEvent
+                updateOutputText appendText
+                delta streamItemId streamOutputIndex contentIndex state
+    ResponseOutputTextDoneEvent
+        { text, streamItemId, streamOutputIndex, contentIndex } ->
+            updateTextEvent
+                updateOutputText setText
+                text streamItemId streamOutputIndex contentIndex state
+    ResponseFunctionCallArgumentsDeltaEvent
+        { delta, streamItemId, streamOutputIndex } ->
+            case (delta, resolveOutputIndex streamOutputIndex [streamItemId] state) of
+                (Just argumentsDelta, Just outputIndex) ->
+                    updateFunctionCall outputIndex streamItemId Nothing
+                        (appendText argumentsDelta) state
+                _ -> state
+    ResponseFunctionCallArgumentsDoneEvent
+        { arguments, functionName, streamItemId, streamOutputIndex } ->
+            case resolveOutputIndex streamOutputIndex [streamItemId] state of
+                Just outputIndex ->
+                    updateFunctionCall outputIndex streamItemId functionName
+                        (maybe id setText arguments) state
+                Nothing -> state
     ResponseCustomToolInputDeltaEvent
         { delta, streamItemId, streamCallId, streamOutputIndex } ->
             case ( delta
@@ -93,153 +143,99 @@ applyStreamEvent state event = case event of
                     streamOutputIndex [streamItemId, streamCallId] state
                  ) of
                 (Just inputDelta, Just outputIndex) ->
-                    updateCustomToolInput outputIndex
-                        streamItemId
-                        streamCallId
-                        (appendInput inputDelta)
-                        state
+                    updateCustomToolInput outputIndex streamItemId streamCallId
+                        (appendText inputDelta) state
                 _ -> state
     ResponseCustomToolInputDoneEvent
         { inputText, streamItemId, streamCallId, streamOutputIndex } ->
-            case ( inputText
-                 , resolveOutputIndex
-                    streamOutputIndex [streamItemId, streamCallId] state
-                 ) of
-                (Just finalInput, Just outputIndex) ->
-                    updateCustomToolInput outputIndex
-                        streamItemId
-                        streamCallId
-                        (setInput finalInput)
-                        state
-                _ -> state
-    ResponseFunctionCallArgumentsDeltaEvent
-        { delta, streamItemId, streamOutputIndex } ->
-            case ( delta
-                 , resolveOutputIndex streamOutputIndex [streamItemId] state
-                 ) of
-                (Just argumentsDelta, Just outputIndex) ->
-                    updateFunctionCallArguments outputIndex
-                        streamItemId
-                        (appendArguments argumentsDelta)
-                        state
-                _ -> state
-    ResponseFunctionCallArgumentsDoneEvent
-        { arguments, functionName, streamItemId, streamOutputIndex } ->
-            case resolveOutputIndex streamOutputIndex [streamItemId] state of
+            case resolveOutputIndex
+                    streamOutputIndex [streamItemId, streamCallId] state of
                 Just outputIndex ->
-                    updateFunctionCallArguments outputIndex
-                        streamItemId
-                        (setArguments arguments functionName)
-                        state
+                    updateCustomToolInput outputIndex streamItemId streamCallId
+                        (maybe id setText inputText) state
                 Nothing -> state
     ResponseReasoningSummaryPartAddedEvent
         { streamItemId, streamOutputIndex, summaryIndex, partValue } ->
-            case ( summaryIndex
-                 , resolveOutputIndex streamOutputIndex [streamItemId] state
-                 ) of
-                (Just index, Just outputIndex) ->
-                    updateReasoningSummary outputIndex
-                        (fromMaybe "" streamItemId)
-                        index
-                        (maybe id const partValue)
-                        state
-                _ -> state
+            updateReasoningPartEvent
+                partValue streamItemId streamOutputIndex summaryIndex state
+    ResponseReasoningSummaryPartDoneEvent
+        { streamItemId, streamOutputIndex, summaryIndex, partValue } ->
+            updateReasoningPartEvent
+                partValue streamItemId streamOutputIndex summaryIndex state
+    ResponseReasoningSummaryTextDeltaEvent
+        { streamItemId, streamOutputIndex, summaryIndex, delta } ->
+            updateTextEvent
+                updateReasoningSummary appendSummaryText
+                delta streamItemId streamOutputIndex summaryIndex state
     ResponseReasoningSummaryTextDoneEvent
         { streamItemId, streamOutputIndex, summaryIndex, text } ->
-            case ( summaryIndex
-                 , text
-                 , resolveOutputIndex streamOutputIndex [streamItemId] state
-                 ) of
-                (Just index, Just finalText, Just outputIndex) ->
-                    updateReasoningSummary outputIndex
-                        (fromMaybe "" streamItemId)
-                        index
-                        (setObjectText finalText)
-                        state
-                _ -> state
-    OtherResponseStreamEvent
-        { otherEventType = EventReasoningSummaryTextDelta
-        , eventExtraFields
-        } ->
-            case ( intField "summary_index" eventExtraFields
-                 , textField "delta" eventExtraFields
-                 ) of
-                (Just summaryIndex, Just delta) ->
-                    case resolveOutputIndex
-                            (intField "output_index" eventExtraFields)
-                            [textField "item_id" eventExtraFields]
-                            state of
-                        Just outputIndex ->
-                            updateReasoningSummary outputIndex
-                                (fromMaybe ""
-                                    (textField "item_id" eventExtraFields))
-                                summaryIndex
-                                (appendObjectText delta)
-                                state
-                        Nothing -> state
-                _ -> state
+            updateTextEvent
+                updateReasoningSummary setSummaryText
+                text streamItemId streamOutputIndex summaryIndex state
+    ResponseReasoningTextDeltaEvent
+        { streamItemId, streamOutputIndex, contentIndex, delta } ->
+            updateTextEvent
+                updateReasoningText appendText
+                delta streamItemId streamOutputIndex contentIndex state
+    ResponseReasoningTextDoneEvent
+        { streamItemId, streamOutputIndex, contentIndex, text } ->
+            updateTextEvent
+                updateReasoningText setText
+                text streamItemId streamOutputIndex contentIndex state
     _ -> state
 
--- | Assemble one terminal lifecycle event into the canonical strict response.
--- Codex lifecycle frames can omit fields unrelated to that event, so only the
--- response id remains mandatory here.
 finishStreamResponse
     :: Maybe Text
     -> StreamAssemblyState
     -> ResponseStreamEvent
     -> Either ApiError Response
-finishStreamResponse modelHint state terminalEvent = do
-    terminalStatus <- case terminalEvent of
-        ResponseCompletedEvent{} -> Right "completed"
-        ResponseDoneEvent{} -> Right "completed"
-        ResponseIncompleteEvent{} -> Right "incomplete"
-        ResponseFailedEvent{} -> Right "failed"
+finishStreamResponse modelHint state terminalEvent =
+    case terminalEvent of
+        ResponseCompletedEvent{} -> finishState modelHint ResponseCompleted state
+        ResponseDoneEvent{} -> finishState modelHint ResponseCompleted state
+        ResponseIncompleteEvent{} -> finishState modelHint ResponseIncomplete state
+        ResponseFailedEvent{} -> finishState modelHint ResponseFailed state
         _ -> Left $ JsonDecodeError
             "Cannot assemble a non-terminal response event"
-            (jsonPreview terminalEvent)
-    let terminalFragment = responseValueFor terminalEvent
-        withStatus = case terminalFragment of
-            Just (Aeson.Object object)
-                | KeyMap.member "status" object -> state.responseObject
-            _ -> KeyMap.insert "status" (Aeson.String terminalStatus)
-                    state.responseObject
-        withDefaults =
-            insertMissing "object" (Aeson.String "response")
-                $ insertMissing "model" (Aeson.String (fromMaybe "" modelHint))
-                $ insertMissing "created_at" (Aeson.Number 0)
-                $ withStatus
-        withOutput =
-            KeyMap.insert "output"
-                (Aeson.Array (Vector.fromList (assembledOutput state withDefaults)))
-                withDefaults
-        assembled = Aeson.Object withOutput
-    case KeyMap.lookup "id" withOutput of
-        Just (Aeson.String responseId) | not (Text.null responseId) ->
-            case Aeson.fromJSON assembled of
-                Aeson.Success response -> Right response
-                Aeson.Error err -> Left $ JsonDecodeError
-                    (Text.pack err)
-                    (jsonPreview assembled)
-        _ -> Left $ JsonDecodeError
-            "Streamed response did not contain a response id"
-            (jsonPreview assembled)
+            (preview terminalEvent)
 
--- | Assemble the current stream state as an incomplete response. Used when the
--- provider emits @response.incomplete@ or the socket dies after output items
--- were already collected.
+finishState
+    :: Maybe Text
+    -> ResponseStatus
+    -> StreamAssemblyState
+    -> Either ApiError Response
+finishState modelHint terminalStatus state =
+    case state.lifecycleResponse of
+        Nothing -> Left $ JsonDecodeError
+            "Streamed response did not contain a lifecycle response"
+            (preview state.outputItems)
+        Just response ->
+            let assembled = response
+                    { responseId = response.responseId
+                    , model =
+                        if Text.null response.model
+                            then fromMaybe "" modelHint
+                            else response.model
+                    , object =
+                        if Text.null response.object
+                            then "response"
+                            else response.object
+                    , status = terminalStatus
+                    , output = assembledOutput state
+                    }
+            in if Text.null assembled.responseId
+                then Left $ JsonDecodeError
+                    "Streamed response did not contain a response id"
+                    (preview assembled)
+                else Right assembled
+
 finishAssembledIncomplete
     :: Maybe Text
     -> StreamAssemblyState
     -> Either ApiError Response
-finishAssembledIncomplete modelHint state =
-    finishStreamResponse modelHint state
-        (ResponseIncompleteEvent
-            (Aeson.Object state.responseObject)
-            Nothing
-            KeyMap.empty)
+finishAssembledIncomplete modelHint =
+    finishState modelHint ResponseIncomplete
 
--- | Build a response without a request-model hint. This remains the shared
--- entry point used by provider SSE transports.
 buildStreamResponse
     :: StreamAssemblyConfig
     -> [ResponseStreamEvent]
@@ -247,8 +243,6 @@ buildStreamResponse
 buildStreamResponse config =
     buildStreamResponseWithModel config Nothing
 
--- | Build a response while using the originating request model if the
--- provider's partial lifecycle frames omit it.
 buildStreamResponseWithModel
     :: StreamAssemblyConfig
     -> Maybe Text
@@ -259,7 +253,7 @@ buildStreamResponseWithModel config modelHint events =
   where
     go _ [] = Left $ JsonDecodeError
         config.missingCompletionMessage
-        (jsonPreview events)
+        (preview events)
     go state (event : rest) =
         let nextState = applyStreamEvent state event
         in case event of
@@ -283,32 +277,17 @@ buildStreamResponseWithModel config modelHint events =
                 Left (config.classifyStreamError streamError)
             _ -> go nextState rest
 
--- | Compatibility wrapper for callers that already hold a complete base
--- response plus streamed done items.
 assembleDoneResponse
     :: Maybe Response
-    -> [Aeson.Value]
-    -> Aeson.Value
+    -> [ResponseItem]
+    -> Response
     -> Either ApiError Response
 assembleDoneResponse baseResponse doneItems doneResponse =
-    let merged = mergeDoneResponse
-            (Aeson.toJSON <$> baseResponse)
-            doneItems
-            doneResponse
-    in case Aeson.fromJSON merged of
-        Aeson.Success response -> Right response
-        Aeson.Error err -> Left $ JsonDecodeError
-            (Text.pack err)
-            (jsonPreview merged)
+    Right (mergeDoneResponse baseResponse doneItems doneResponse)
 
-responseFragmentHasOutput :: Aeson.Value -> Bool
-responseFragmentHasOutput (Aeson.Object object) =
-    case KeyMap.lookup "output" object of
-        Just (Aeson.Array output) -> not (Vector.null output)
-        _ -> False
-responseFragmentHasOutput _ = False
+responseFragmentHasOutput :: Response -> Bool
+responseFragmentHasOutput = not . null . (.output)
 
--- | Best available text from a failed terminal response.
 failedResponseMessage :: Response -> Text
 failedResponseMessage response =
     case response.error >>= bestErrorDetail of
@@ -320,7 +299,6 @@ failedResponseMessage response =
     bestErrorDetail responseError =
         nonEmpty (Just responseError.message)
             <|> nonEmpty (Just responseError.code)
-
     responseLabel = case response.status of
         ResponseIncomplete -> "response.incomplete"
         _ -> "response.failed"
@@ -340,58 +318,53 @@ failedStreamResponseMessage failure =
 
 responseFailureFromState :: StreamAssemblyState -> ResponseFailure
 responseFailureFromState state =
-    let value = Aeson.Object state.responseObject
-        parseOptional fieldName = case KeyMap.lookup fieldName state.responseObject of
-            Just fieldValue -> case Aeson.fromJSON fieldValue of
-                Aeson.Success parsed -> Just parsed
-                Aeson.Error _ -> Nothing
-            Nothing -> Nothing
-        nestedText objectName fieldName = do
-            Aeson.Object object <-
-                KeyMap.lookup objectName state.responseObject
-            textField fieldName object
+    let responseError = state.lifecycleResponse >>= (.error)
     in ResponseFailure
-        { failureStatus = parseOptional "status"
-        , failureErrorType = nestedText "error" "type"
-        , failureErrorCode = nestedText "error" "code"
-        , failureErrorMessage = nestedText "error" "message"
-        , failureIncompleteDetails = parseOptional "incomplete_details"
-        , failureResponseValue = value
+        { failureStatus =
+            responseStatusText . (.status) <$> state.lifecycleResponse
+        , failureErrorType = responseError >>= \err ->
+            lookupExtension "type" err.extraFields >>= decodeRawText
+        , failureErrorCode = responseError >>= nonEmpty . Just . (.code)
+        , failureErrorMessage =
+            responseError >>= nonEmpty . Just . (.message)
+        , failureIncompleteDetails =
+            state.lifecycleResponse >>= (.incompleteDetails)
+        , failureResponseValue = state.lifecycleResponse
         }
 
-overlayLifecycle :: Aeson.Value -> StreamAssemblyState -> StreamAssemblyState
-overlayLifecycle (Aeson.Object fragment) state =
+overlayLifecycle :: Response -> StreamAssemblyState -> StreamAssemblyState
+overlayLifecycle response state =
     state
-        { responseObject =
-            KeyMap.foldrWithKey KeyMap.insert state.responseObject fragment
+        { lifecycleResponse =
+            mergeResponseFragments
+                (maybe [] pure state.lifecycleResponse <> [response])
         }
-overlayLifecycle _ state = state
 
 updateItem
     :: Int
     -> Bool
-    -> Aeson.Value
+    -> ResponseItem
     -> StreamAssemblyState
     -> StreamAssemblyState
 updateItem outputIndex done newValue state =
     state
         { outputItems =
-            IntMap.alter
-                (Just . mergeProgress)
-                outputIndex
-                state.outputItems
+            IntMap.alter (Just . mergeProgress) outputIndex state.outputItems
         }
   where
-    mergeProgress Nothing = ItemProgress newValue done
+    mergeProgress Nothing = ItemProgress (ParsedItem newValue) done
     mergeProgress (Just old) = ItemProgress
-        { itemValue = mergeObjects old.itemValue newValue
+        { itemValue =
+            if done
+                then ParsedItem newValue
+                else mergePartialItem old.itemValue newValue
         , itemDone = old.itemDone || done
         }
 
 updateStreamItem
     :: Maybe Int
     -> Bool
-    -> Aeson.Value
+    -> ResponseItem
     -> StreamAssemblyState
     -> StreamAssemblyState
 updateStreamItem explicitIndex done newValue state =
@@ -421,50 +394,496 @@ resolveOutputIndex explicitIndex identities state =
 findIdentityIndex :: Text -> StreamAssemblyState -> Maybe Int
 findIdentityIndex wanted state =
     fst <$> IntMap.lookupMin
-        (IntMap.filter (matchesIdentity wanted . (.itemValue)) state.outputItems)
-  where
-    matchesIdentity wanted = \case
-        Aeson.Object object ->
-            textField "id" object == Just wanted
-                || textField "call_id" object == Just wanted
-        _ -> False
+        (IntMap.filter
+            (elem wanted . map snd . partialItemIdentities . (.itemValue))
+            state.outputItems)
 
-findItemIndex :: Aeson.Value -> StreamAssemblyState -> Maybe Int
+findItemIndex :: ResponseItem -> StreamAssemblyState -> Maybe Int
 findItemIndex value state =
     firstJust
         [ findIdentityIndex identity state
-        | identity <- itemIdentities value
+        | (_, identity) <- responseItemIdentities value
         ]
 
-findPendingItemIndex :: Aeson.Value -> StreamAssemblyState -> Maybe Int
+findPendingItemIndex :: ResponseItem -> StreamAssemblyState -> Maybe Int
 findPendingItemIndex value state =
-    case wantedType of
-        Nothing -> Nothing
-        Just _ ->
-            fst <$> IntMap.lookupMin
-                (IntMap.filter matchesPending state.outputItems)
+    fst <$> IntMap.lookupMin
+        (IntMap.filter matchesPending state.outputItems)
   where
-    wantedType = objectTextField "type" value
     matchesPending progress =
         not progress.itemDone
-            && objectTextField "type" progress.itemValue == wantedType
+            && partialItemKind progress.itemValue == responseItemKind value
 
 nextOutputIndex :: StreamAssemblyState -> Int
 nextOutputIndex state =
     maybe 0 ((+ 1) . fst) (IntMap.lookupMax state.outputItems)
 
-itemIdentities :: Aeson.Value -> [Text]
-itemIdentities = \case
-    Aeson.Object object ->
-        foldMap
-            (\fieldName -> maybe [] pure (textField fieldName object))
-            ["id", "call_id"]
-    _ -> []
+updateFunctionCall
+    :: Int
+    -> Maybe Text
+    -> Maybe Text
+    -> (Text -> Text)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateFunctionCall outputIndex itemId functionName update state =
+    alterProgress outputIndex state \case
+        Nothing ->
+            ItemProgress
+                (PartialFunctionCall itemId functionName (update ""))
+                False
+        Just progress -> progress
+            { itemValue =
+                updateFunctionPartial
+                    itemId functionName update progress.itemValue
+            }
 
-objectTextField :: Text -> Aeson.Value -> Maybe Text
-objectTextField fieldName = \case
-    Aeson.Object object -> textField fieldName object
-    _ -> Nothing
+updateCustomToolInput
+    :: Int
+    -> Maybe Text
+    -> Maybe Text
+    -> (Text -> Text)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateCustomToolInput outputIndex itemId callId update state =
+    alterProgress outputIndex state \case
+        Nothing ->
+            ItemProgress
+                (PartialCustomToolCall itemId callId (update ""))
+                False
+        Just progress -> progress
+            { itemValue =
+                updateCustomPartial itemId callId update progress.itemValue
+            }
+
+updateTextEvent
+    :: (Int
+        -> Text
+        -> Int
+        -> (part -> part)
+        -> StreamAssemblyState
+        -> StreamAssemblyState)
+    -> (Text -> part -> part)
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Int
+    -> Maybe Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateTextEvent updateItemPart updatePart value itemId outputIndex partIndex state =
+    case (value, partIndex, resolveOutputIndex outputIndex [itemId] state) of
+        (Just text, Just index, Just resolvedIndex) ->
+            updateItemPart resolvedIndex (fromMaybe "" itemId) index
+                (updatePart text) state
+        _ -> state
+
+updateReasoningPartEvent
+    :: Maybe RawJson
+    -> Maybe Text
+    -> Maybe Int
+    -> Maybe Int
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateReasoningPartEvent partValue itemId outputIndex summaryIndex state =
+    case ( partValue >>= decodeReasoningSummaryPart
+         , summaryIndex
+         , resolveOutputIndex outputIndex [itemId] state
+         ) of
+        (Just part, Just index, Just resolvedIndex) ->
+            updateReasoningSummary resolvedIndex (fromMaybe "" itemId)
+                index (const part) state
+        _ -> state
+
+updateReasoningSummary
+    :: Int
+    -> Text
+    -> Int
+    -> (ReasoningSummaryPart -> ReasoningSummaryPart)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateReasoningSummary outputIndex itemId index update state =
+    alterProgress outputIndex state \case
+        Nothing ->
+            ItemProgress
+                (PartialReasoning
+                    (nonEmpty (Just itemId))
+                    (Map.singleton index (update emptySummaryPart))
+                    Map.empty)
+                False
+        Just progress -> progress
+            { itemValue =
+                updateReasoningSummaryPartial
+                    itemId index update progress.itemValue
+            }
+
+updateReasoningText
+    :: Int
+    -> Text
+    -> Int
+    -> (Text -> Text)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateReasoningText outputIndex itemId index update state =
+    alterProgress outputIndex state \case
+        Nothing ->
+            ItemProgress
+                (PartialReasoning
+                    (nonEmpty (Just itemId))
+                    Map.empty
+                    (Map.singleton index
+                        (ReasoningTextPart (update "") emptyExtensions)))
+                False
+        Just progress -> progress
+            { itemValue =
+                updateReasoningTextPartial
+                    itemId index update progress.itemValue
+            }
+
+updateOutputText
+    :: Int
+    -> Text
+    -> Int
+    -> (Text -> Text)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateOutputText outputIndex itemId index update state =
+    alterProgress outputIndex state \case
+        Nothing ->
+            ItemProgress
+                (PartialMessage
+                    (nonEmpty (Just itemId))
+                    (Map.singleton index
+                        (OutputTextPart
+                            (update "") Nothing Nothing emptyExtensions)))
+                False
+        Just progress -> progress
+            { itemValue =
+                updateOutputTextPartial
+                    itemId index update progress.itemValue
+            }
+
+alterProgress
+    :: Int
+    -> StreamAssemblyState
+    -> (Maybe ItemProgress -> ItemProgress)
+    -> StreamAssemblyState
+alterProgress index state update =
+    state
+        { outputItems =
+            IntMap.alter (Just . update) index state.outputItems
+        }
+
+assembledOutput :: StreamAssemblyState -> [ResponseItem]
+assembledOutput state =
+    foldMap (partialToList . (.itemValue)) . IntMap.elems $
+        IntMap.unionWith combine state.outputItems terminalItems
+  where
+    finalItems = maybe [] (.output) state.lifecycleResponse
+    terminalItems = IntMap.fromList
+        [ (index, ItemProgress (ParsedItem value) True)
+        | (index, value) <- zip [0 ..] finalItems
+        ]
+    combine streamed terminal
+        | streamed.itemDone =
+            ItemProgress
+                (mergeProgressItems terminal.itemValue streamed.itemValue)
+                True
+        | otherwise =
+            ItemProgress
+                (mergeProgressItems streamed.itemValue terminal.itemValue)
+                True
+
+mergePartialItem :: PartialResponseItem -> ResponseItem -> PartialResponseItem
+mergePartialItem partial item = mergeProgressItems partial (ParsedItem item)
+
+mergeProgressItems
+    :: PartialResponseItem
+    -> PartialResponseItem
+    -> PartialResponseItem
+mergeProgressItems base overlay = case overlay of
+    ParsedItem item -> applyPartialToItem base item
+    PartialFunctionCall itemId functionName arguments ->
+        updateFunctionPartial itemId functionName (const arguments) base
+    PartialCustomToolCall itemId callId input ->
+        updateCustomPartial itemId callId (const input) base
+    PartialReasoning itemId summaries content ->
+        let withSummaries = Map.foldlWithKey'
+                (\current index part ->
+                    updateReasoningSummaryPartial
+                        (fromMaybe "" itemId) index (const part) current)
+                base summaries
+        in Map.foldlWithKey'
+            (\current index part ->
+                updateReasoningTextPartPartial
+                    (fromMaybe "" itemId) index (const part) current)
+            withSummaries content
+    PartialMessage itemId content ->
+        Map.foldlWithKey'
+            (\current index part ->
+                updateOutputTextPartPartial
+                    (fromMaybe "" itemId) index (const part) current)
+            base content
+
+applyPartialToItem :: PartialResponseItem -> ResponseItem -> PartialResponseItem
+applyPartialToItem partial item = case (partial, item) of
+    (PartialFunctionCall _ functionName arguments, FunctionCallItem call) ->
+        ParsedItem (FunctionCallItem call
+            { name = fromMaybe call.name functionName
+            , arguments
+            })
+    (PartialCustomToolCall _ _ input, CustomToolCallItem call) ->
+        ParsedItem (CustomToolCallItem call { input })
+    (PartialReasoning _ summaries content, ReasoningItemValue reasoning) ->
+        ParsedItem (ReasoningItemValue reasoning
+            { summary =
+                if Map.null summaries
+                    then reasoning.summary
+                    else indexedValues emptySummaryPart summaries
+            , content =
+                if Map.null content
+                    then reasoning.content
+                    else Just (indexedValues emptyReasoningTextPart content)
+            })
+    (PartialMessage _ content, MessageItem message) ->
+        ParsedItem (MessageItem message
+            { content =
+                if Map.null content
+                    then message.content
+                    else MessageContentParts
+                        (indexedValues emptyOutputTextPart content)
+            })
+    _ -> ParsedItem item
+
+updateFunctionPartial
+    :: Maybe Text
+    -> Maybe Text
+    -> (Text -> Text)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateFunctionPartial itemId functionName update = \case
+    ParsedItem (FunctionCallItem call) ->
+        ParsedItem (FunctionCallItem call
+            { name = fromMaybe call.name functionName
+            , arguments = update call.arguments
+            })
+    PartialFunctionCall oldItemId oldName arguments ->
+        PartialFunctionCall
+            (itemId <|> oldItemId)
+            (functionName <|> oldName)
+            (update arguments)
+    other -> other
+
+updateCustomPartial
+    :: Maybe Text
+    -> Maybe Text
+    -> (Text -> Text)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateCustomPartial itemId callId update = \case
+    ParsedItem (CustomToolCallItem call) ->
+        ParsedItem (CustomToolCallItem call { input = update call.input })
+    PartialCustomToolCall oldItemId oldCallId input ->
+        PartialCustomToolCall
+            (itemId <|> oldItemId)
+            (callId <|> oldCallId)
+            (update input)
+    other -> other
+
+updateReasoningSummaryPartial
+    :: Text
+    -> Int
+    -> (ReasoningSummaryPart -> ReasoningSummaryPart)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateReasoningSummaryPartial itemId index update = \case
+    ParsedItem (ReasoningItemValue reasoning) ->
+        ParsedItem (ReasoningItemValue reasoning
+            { summary =
+                updateListAt index update emptySummaryPart reasoning.summary
+            })
+    PartialReasoning oldItemId summaries content ->
+        PartialReasoning
+            (nonEmpty (Just itemId) <|> oldItemId)
+            (Map.alter
+                (Just . update . fromMaybe emptySummaryPart)
+                index summaries)
+            content
+    other -> other
+
+updateReasoningTextPartial
+    :: Text
+    -> Int
+    -> (Text -> Text)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateReasoningTextPartial itemId index update =
+    updateReasoningTextPartPartial itemId index \part ->
+        case part of
+            ReasoningTextPart text fields ->
+                ReasoningTextPart (update text) fields
+            _ -> ReasoningTextPart (update "") emptyExtensions
+
+updateReasoningTextPartPartial
+    :: Text
+    -> Int
+    -> (ResponseContentPart -> ResponseContentPart)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateReasoningTextPartPartial itemId index update = \case
+    ParsedItem (ReasoningItemValue reasoning) ->
+        ParsedItem (ReasoningItemValue reasoning
+            { content = Just (updateListAt index update
+                emptyReasoningTextPart (fromMaybe [] reasoning.content))
+            })
+    PartialReasoning oldItemId summaries content ->
+        PartialReasoning
+            (nonEmpty (Just itemId) <|> oldItemId)
+            summaries
+            (Map.alter
+                (Just . update . fromMaybe emptyReasoningTextPart)
+                index content)
+    other -> other
+
+updateOutputTextPartial
+    :: Text
+    -> Int
+    -> (Text -> Text)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateOutputTextPartial itemId index update =
+    updateOutputTextPartPartial itemId index \part ->
+        case part of
+            OutputTextPart text annotations logprobs fields ->
+                OutputTextPart (update text) annotations logprobs fields
+            _ -> OutputTextPart (update "") Nothing Nothing emptyExtensions
+
+updateOutputTextPartPartial
+    :: Text
+    -> Int
+    -> (ResponseContentPart -> ResponseContentPart)
+    -> PartialResponseItem
+    -> PartialResponseItem
+updateOutputTextPartPartial itemId index update = \case
+    ParsedItem (MessageItem message) ->
+        let parts = case message.content of
+                MessageContentParts values -> values
+                MessageContentText value ->
+                    [OutputTextPart value Nothing Nothing emptyExtensions]
+        in ParsedItem (MessageItem message
+            { content = MessageContentParts
+                (updateListAt index update emptyOutputTextPart parts)
+            })
+    PartialMessage oldItemId content ->
+        PartialMessage
+            (nonEmpty (Just itemId) <|> oldItemId)
+            (Map.alter
+                (Just . update . fromMaybe emptyOutputTextPart)
+                index content)
+    other -> other
+
+partialToList :: PartialResponseItem -> [ResponseItem]
+partialToList = \case
+    ParsedItem item -> [item]
+    PartialFunctionCall{} -> []
+    PartialCustomToolCall{} -> []
+    PartialReasoning itemId summaries content ->
+        [ReasoningItemValue ReasoningItem
+            { itemId
+            , summary = indexedValues emptySummaryPart summaries
+            , content =
+                if Map.null content
+                    then Nothing
+                    else Just (indexedValues emptyReasoningTextPart content)
+            , encryptedContent = Nothing
+            , status = Nothing
+            , extraFields = emptyExtensions
+            }]
+    PartialMessage itemId content ->
+        [MessageItem ResponseMessage
+            { messageId = itemId
+            , content = MessageContentParts
+                (indexedValues emptyOutputTextPart content)
+            , role = RoleAssistant
+            , status = Nothing
+            , phase = Nothing
+            , passthrough = Nothing
+            , extraFields = emptyExtensions
+            }]
+
+partialItemIdentities :: PartialResponseItem -> [(Text, Text)]
+partialItemIdentities = \case
+    ParsedItem item -> responseItemIdentities item
+    PartialFunctionCall itemId _ _ -> optionalIdentity "id" itemId
+    PartialCustomToolCall itemId callId _ ->
+        optionalIdentity "id" itemId <> optionalIdentity "call_id" callId
+    PartialReasoning itemId _ _ -> optionalIdentity "id" itemId
+    PartialMessage itemId _ -> optionalIdentity "id" itemId
+
+partialItemKind :: PartialResponseItem -> Text
+partialItemKind = \case
+    ParsedItem item -> responseItemKind item
+    PartialFunctionCall{} -> "function_call"
+    PartialCustomToolCall{} -> "custom_tool_call"
+    PartialReasoning{} -> "reasoning"
+    PartialMessage{} -> "message"
+
+emptySummaryPart :: ReasoningSummaryPart
+emptySummaryPart = ReasoningSummaryPart
+    { partType = "summary_text"
+    , text = Nothing
+    , extraFields = emptyExtensions
+    }
+
+emptyOutputTextPart :: ResponseContentPart
+emptyOutputTextPart =
+    OutputTextPart "" Nothing Nothing emptyExtensions
+
+emptyReasoningTextPart :: ResponseContentPart
+emptyReasoningTextPart =
+    ReasoningTextPart "" emptyExtensions
+
+setSummaryText :: Text -> ReasoningSummaryPart -> ReasoningSummaryPart
+setSummaryText value part = part { text = Just value }
+
+appendSummaryText :: Text -> ReasoningSummaryPart -> ReasoningSummaryPart
+appendSummaryText delta part =
+    part { text = Just (fromMaybe "" part.text <> delta) }
+
+appendText :: Text -> Text -> Text
+appendText delta current = current <> delta
+
+setText :: Text -> Text -> Text
+setText = const
+
+indexedValues :: value -> Map Int value -> [value]
+indexedValues defaultValue values
+    | Map.null values = []
+    | otherwise =
+        [ Map.findWithDefault defaultValue index values
+        | index <- [0 .. fst (Map.findMax values)]
+        ]
+
+updateListAt :: Int -> (value -> value) -> value -> [value] -> [value]
+updateListAt index update defaultValue values
+    | index < 0 = values
+    | otherwise =
+        indexedValues defaultValue $
+            Map.alter
+                (Just . update . fromMaybe defaultValue)
+                index
+                (Map.fromList (zip [0 ..] values))
+
+decodeReasoningSummaryPart :: RawJson -> Maybe ReasoningSummaryPart
+decodeReasoningSummaryPart raw =
+    either (const Nothing) Just
+        (Decoder.decode reasoningSummaryPartDecoder (rawJsonBytes raw))
+
+decodeRawText :: RawJson -> Maybe Text
+decodeRawText raw =
+    either (const Nothing) Just
+        (Decoder.decode Decoder.text (rawJsonBytes raw))
+
+optionalIdentity :: Text -> Maybe Text -> [(Text, Text)]
+optionalIdentity field = maybe [] (pure . (field,))
 
 firstJust :: [Maybe value] -> Maybe value
 firstJust = foldr (<|>) Nothing
@@ -473,230 +892,15 @@ nonEmpty :: Maybe Text -> Maybe Text
 nonEmpty value = value >>= \text ->
     if Text.null text then Nothing else Just text
 
-updateCustomToolInput
-    :: Int
-    -> Maybe Text
-    -> Maybe Text
-    -> (Aeson.Object -> Aeson.Object)
-    -> StreamAssemblyState
-    -> StreamAssemblyState
-updateCustomToolInput outputIndex itemId callId updateInput state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . updateProgress)
-                outputIndex
-                state.outputItems
-        }
-  where
-    baseObject =
-        maybe id
-            (KeyMap.insert "id" . Aeson.String)
-            itemId
-        $ maybe id
-            (KeyMap.insert "call_id" . Aeson.String)
-            callId
-        $ KeyMap.fromList
-            [ ("type", Aeson.String "custom_tool_call")
-            , ("input", Aeson.String "")
-            ]
-    updateProgress Nothing =
-        ItemProgress (Aeson.Object (updateInput baseObject)) False
-    updateProgress (Just progress) =
-        progress
-            { itemValue = case progress.itemValue of
-                Aeson.Object object -> Aeson.Object (updateInput object)
-                _ -> Aeson.Object (updateInput baseObject)
-            }
+responseStatusText :: ResponseStatus -> Text
+responseStatusText = \case
+    ResponseCompleted -> "completed"
+    ResponseFailed -> "failed"
+    ResponseInProgress -> "in_progress"
+    ResponseCancelled -> "cancelled"
+    ResponseQueued -> "queued"
+    ResponseIncomplete -> "incomplete"
+    ResponseStatusUnknown value -> value
 
-updateReasoningSummary
-    :: Int
-    -> Text
-    -> Int
-    -> (Aeson.Value -> Aeson.Value)
-    -> StreamAssemblyState
-    -> StreamAssemblyState
-updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . updateProgress)
-                outputIndex
-                state.outputItems
-        }
-  where
-    baseObject = KeyMap.fromList
-        [ ("type", Aeson.String "reasoning")
-        , ("id", Aeson.String itemId)
-        , ("summary", Aeson.Array Vector.empty)
-        ]
-    updateProgress Nothing =
-        ItemProgress (Aeson.Object (updateSummary baseObject)) False
-    updateProgress (Just progress) =
-        progress
-            { itemValue = case progress.itemValue of
-                Aeson.Object object -> Aeson.Object (updateSummary object)
-                _ -> Aeson.Object (updateSummary baseObject)
-            }
-    updateSummary object =
-        let current = case KeyMap.lookup "summary" object of
-                Just (Aeson.Array values) -> values
-                _ -> Vector.empty
-            updated = updateVectorAt summaryIndex updatePart current
-        in KeyMap.insert "summary" (Aeson.Array updated) object
-
-assembledOutput :: StreamAssemblyState -> Aeson.Object -> [Aeson.Value]
-assembledOutput state response =
-    map (.itemValue) . IntMap.elems $
-        IntMap.unionWith combine
-            state.outputItems
-            terminalItems
-  where
-    terminalItems = IntMap.fromList
-        [ (index, ItemProgress value True)
-        | (index, value) <- zip [0 ..] finalItems
-        ]
-    finalItems = case KeyMap.lookup "output" response of
-        Just (Aeson.Array values) -> Vector.toList values
-        _ -> []
-    combine streamed terminal
-        | streamed.itemDone =
-            ItemProgress
-                (mergeObjects terminal.itemValue streamed.itemValue)
-                True
-        | otherwise =
-            ItemProgress
-                (mergeObjects streamed.itemValue terminal.itemValue)
-                True
-
-responseValueFor :: ResponseStreamEvent -> Maybe Aeson.Value
-responseValueFor = \case
-    ResponseCreatedEvent { responseValue } -> Just responseValue
-    ResponseInProgressEvent { responseValue } -> Just responseValue
-    ResponseQueuedEvent { responseValue } -> Just responseValue
-    ResponseCompletedEvent { responseValue } -> Just responseValue
-    ResponseDoneEvent { responseValue } -> Just responseValue
-    ResponseFailedEvent { responseValue } -> Just responseValue
-    ResponseIncompleteEvent { responseValue } -> Just responseValue
-    _ -> Nothing
-
-mergeObjects :: Aeson.Value -> Aeson.Value -> Aeson.Value
-mergeObjects (Aeson.Object base) (Aeson.Object overlay) =
-    Aeson.Object (KeyMap.foldrWithKey KeyMap.insert base overlay)
-mergeObjects _ overlay = overlay
-
-insertMissing :: Key.Key -> Aeson.Value -> Aeson.Object -> Aeson.Object
-insertMissing key value object
-    | KeyMap.member key object = object
-    | otherwise = KeyMap.insert key value object
-
-appendInput :: Text -> Aeson.Object -> Aeson.Object
-appendInput delta object =
-    let current = fromMaybe "" (textField "input" object)
-    in KeyMap.insert "input" (Aeson.String (current <> delta)) object
-
-setInput :: Text -> Aeson.Object -> Aeson.Object
-setInput input =
-    KeyMap.insert "input" (Aeson.String input)
-
-updateFunctionCallArguments
-    :: Int
-    -> Maybe Text
-    -> (Aeson.Object -> Aeson.Object)
-    -> StreamAssemblyState
-    -> StreamAssemblyState
-updateFunctionCallArguments outputIndex itemId updateArgs state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . updateProgress)
-                outputIndex
-                state.outputItems
-        }
-  where
-    baseObject =
-        maybe id
-            (KeyMap.insert "id" . Aeson.String)
-            itemId
-        $ KeyMap.fromList
-            [ ("type", Aeson.String "function_call")
-            , ("arguments", Aeson.String "")
-            ]
-    updateProgress Nothing =
-        ItemProgress (Aeson.Object (updateArgs baseObject)) False
-    updateProgress (Just progress) =
-        progress
-            { itemValue = case progress.itemValue of
-                Aeson.Object object -> Aeson.Object (updateArgs object)
-                _ -> Aeson.Object (updateArgs baseObject)
-            }
-
-appendArguments :: Text -> Aeson.Object -> Aeson.Object
-appendArguments delta object =
-    let current = fromMaybe "" (textField "arguments" object)
-    in KeyMap.insert "arguments" (Aeson.String (current <> delta)) object
-
-setArguments :: Maybe Text -> Maybe Text -> Aeson.Object -> Aeson.Object
-setArguments arguments functionName object =
-    maybe id (KeyMap.insert "name" . Aeson.String) functionName $
-        maybe id (KeyMap.insert "arguments" . Aeson.String) arguments
-            object
-
-setObjectText :: Text -> Aeson.Value -> Aeson.Value
-setObjectText text = \case
-    Aeson.Object object ->
-        Aeson.Object (KeyMap.insert "text" (Aeson.String text) object)
-    _ -> Aeson.object
-        [ "type" Aeson..= ("summary_text" :: Text)
-        , "text" Aeson..= text
-        ]
-
-appendObjectText :: Text -> Aeson.Value -> Aeson.Value
-appendObjectText delta = \case
-    Aeson.Object object ->
-        let current = fromMaybe "" (textField "text" object)
-        in Aeson.Object
-            (KeyMap.insert "text" (Aeson.String (current <> delta)) object)
-    _ -> Aeson.object
-        [ "type" Aeson..= ("summary_text" :: Text)
-        , "text" Aeson..= delta
-        ]
-
-updateVectorAt
-    :: Int
-    -> (Aeson.Value -> Aeson.Value)
-    -> Vector.Vector Aeson.Value
-    -> Vector.Vector Aeson.Value
-updateVectorAt index update values
-    | index < 0 = values
-    | index < Vector.length values =
-        values Vector.// [(index, update (values Vector.! index))]
-    | otherwise =
-        let padding = Vector.replicate
-                (index - Vector.length values)
-                (Aeson.object ["type" Aeson..= ("summary_text" :: Text)])
-        in values
-            <> padding
-            <> Vector.singleton
-                (update (Aeson.object ["type" Aeson..= ("summary_text" :: Text)]))
-
-textField :: Text -> Aeson.Object -> Maybe Text
-textField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
-
-intField :: Text -> Aeson.Object -> Maybe Int
-intField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just value -> case Aeson.fromJSON value of
-            Aeson.Success int -> Just int
-            Aeson.Error _ -> Nothing
-        Nothing -> Nothing
-
-jsonPreview :: Aeson.ToJSON value => value -> Text
-jsonPreview =
-    Text.take 2000
-        . TextEncoding.decodeUtf8With TextEncoding.lenientDecode
-        . LBS.toStrict
-        . Aeson.encode
+preview :: Show value => value -> Text
+preview = Text.take 2000 . Text.pack . show

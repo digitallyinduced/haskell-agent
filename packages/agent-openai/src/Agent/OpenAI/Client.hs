@@ -27,6 +27,7 @@ import Agent.OpenAI.Features
 import Agent.OpenAI.Http (decodeCodexHttpBodyWithModel, postCodexJson)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
+import Agent.Responses.Codec (encodeResponseCreateParams)
 import Agent.OpenAI.WebSocketClient
     ( CodexTurnState
     , finishCodexTurnStateResponse
@@ -49,7 +50,6 @@ import Control.Retry
     , limitRetries
     , retrying
     )
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -281,7 +281,7 @@ makeCodexRequest options baseUrl accessToken accountId turnState request = do
     -- and rejects an omitted/false stream flag. WebSocket callers do not need
     -- this field, so enforce it at the HTTP transport boundary.
     turnStateValue <- maybe (pure Nothing) readCodexTurnState turnState
-    let requestBody = Aeson.toJSON
+    let requestBody = encodeResponseCreateParams
             (sanitizeCodexRequest request) { OpenAI.stream = Just True }
         addBetaFeaturesHeader req = do
             req

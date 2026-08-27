@@ -11,9 +11,18 @@ import Agent.XAI.Options
 import Agent.XAI.Request
 import Agent.XAI.Stream
 import Agent.Responses.Types
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , extensionsSingleton
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
@@ -88,19 +97,17 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields =
-                        KeyMap.singleton "status" (Aeson.String "completed")
+                    , extraFields = statusExtension
                     }
                 message = MessageItem ResponseMessage
                     { messageId = Just "msg_1"
                     , content = MessageContentParts
-                        [InputTextPart "hello" Nothing KeyMap.empty]
+                        [InputTextPart "hello" Nothing emptyExtensions]
                     , role = RoleUser
                     , status = Just ItemCompleted
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields =
-                        KeyMap.singleton "status" (Aeson.String "completed")
+                    , extraFields = statusExtension
                     }
                 request = setInstructions Nothing $
                     setInput
@@ -125,13 +132,13 @@ spec = do
                         [ InputTextPart
                             "Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it."
                             Nothing
-                            KeyMap.empty
+                            emptyExtensions
                         , EncryptedContentPart
                             "opaque-provider-payload"
-                            KeyMap.empty
+                            emptyExtensions
                         ]
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 request = setInstructions Nothing $
                     setInput
@@ -175,9 +182,9 @@ spec = do
         it "serializes hosted tools from ResponseToolType, not a tag string" do
             let mismatched = KnownResponseTool ToolXSearch TaggedObject
                     { tag = "web_search"
-                    , fields = KeyMap.empty
+                    , fields = emptyExtensions
                     }
-            Aeson.toJSON mismatched `shouldBe` Aeson.object
+            encodedValue responseToolEncoder mismatched `shouldBe` Aeson.object
                 ["type" .= ("x_search" :: Text)]
 
         it "injects hosted x_search when the caller omitted it" do
@@ -345,7 +352,8 @@ sseBlock eventType dataText =
     "event: " <> eventType <> "\ndata: " <> dataText <> "\n\n"
 
 requestValue :: ClientOptions -> ResponseCreateParams -> Aeson.Value
-requestValue options = Aeson.toJSON . buildRequest options
+requestValue options =
+    encodedValue responseCreateParamsEncoder . buildRequest options
 
 sampleRequest :: ResponseCreateParams
 sampleRequest = defaultResponseCreateParams
@@ -366,12 +374,12 @@ sampleRequest = defaultResponseCreateParams
         [ FunctionToolValue FunctionTool
             { name = "echo_text"
             , description = Just "Echo the text back"
-            , parameters = Just (Aeson.object [])
+            , parameters = Just (rawValue (Aeson.object []))
             , strict = Nothing
             , extraFields = mempty
             }
         , knownResponseTool ToolWebSearch
-            (KeyMap.singleton "external_web_access" (Aeson.Bool True))
+            (extensionsSingleton "external_web_access" (rawValue (Aeson.Bool True)))
         , knownResponseTool ToolComputer mempty
         ]
     , reasoning = Just (reasoningConfig "high")
@@ -431,3 +439,19 @@ expectRight :: Show e => Either e a -> IO a
 expectRight = \case
     Left err -> expectationFailure ("expected Right, got Left " <> show err) >> fail "unreachable"
     Right value -> pure value
+
+statusExtension :: Extensions
+statusExtension =
+    extensionsSingleton "status" (rawValue (Aeson.String "completed"))
+
+rawValue :: Aeson.Value -> RawJson
+rawValue value =
+    case JsonDecoder.validateRawJson (LBS.toStrict (Aeson.encode value)) of
+        Left err -> error ("invalid test JSON: " <> show err)
+        Right raw -> raw
+
+encodedValue :: JsonEncoder.Encoder value -> value -> Aeson.Value
+encodedValue encoder value =
+    case Aeson.eitherDecodeStrict' (JsonEncoder.encode encoder value) of
+        Left err -> error ("direct encoder emitted invalid JSON: " <> err)
+        Right result -> result

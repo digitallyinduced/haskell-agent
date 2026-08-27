@@ -1,5 +1,7 @@
 module Agent.CLI.ResumeSpec (spec) where
 
+import Agent.Json (emptyExtensions)
+
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.CLI.Resume
 import Agent.CLI.Session
@@ -17,7 +19,6 @@ import Agent.Responses.Types
     , ResponseItem(..)
     )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
@@ -90,7 +91,7 @@ spec = do
                     CompactionItemValue CompactionItem
                         { itemId = Nothing
                         , encryptedContent = Nothing
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
             resumeNeedsGeneratedContext
                 [sampleTurn { turnItems = [checkpoint] }]

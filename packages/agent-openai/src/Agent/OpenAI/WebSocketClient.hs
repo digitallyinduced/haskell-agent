@@ -42,6 +42,18 @@ import Agent.OpenAI.Features (remoteCompactionV2Feature)
 import Agent.OpenAI.Http (rejectFailedCodexResponse)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , extensionsFromList
+    , extensionsToList
+    , insertExtension
+    , lookupExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , applyStreamEvent
@@ -71,17 +83,16 @@ import Control.Retry
     )
 import qualified Control.Exception as Exception
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.List (find)
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
     , newIORef
     , readIORef
     )
-import Data.List (find)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -345,7 +356,7 @@ type StreamEventCallback = ResponseStreamEvent -> IO ()
 
 -- | Escape hatch for callers that need the raw event @type@ and JSON object,
 -- e.g. for compatibility with another streaming event model.
-type RawStreamEventCallback = Text -> Aeson.Value -> IO ()
+type RawStreamEventCallback = Text -> BS.ByteString -> IO ()
 
 -- | Optional controls for a WebSocket Responses request.
 data CodexWsOptions = CodexWsOptions
@@ -483,7 +494,7 @@ sendWsRequestWithRawEventsAndOptions options cc request previousResponseId onEve
         \event ->
         onEvent
             (streamEventTypeText (responseStreamEventType event))
-            (Aeson.toJSON event)
+            (JsonEncoder.encode responseStreamEventEncoder event)
 
 data TurnStateCompletion
     = FinishNormalTurnState
@@ -504,9 +515,9 @@ sendWsRequestWithEventsAndOptions completion options cc request previousResponse
   where
     sendOverWs session turnState = do
         turnStateValue <- readCodexTurnState turnState
-        let wsPayload = addTurnStateToPayload turnStateValue
-                (buildWsPayloadWithOptions options request previousResponseId)
-            encoded = Aeson.encode wsPayload
+        let wsPayload = addTurnStateToPayloadBytes turnStateValue
+                (buildWsPayloadBytes options request previousResponseId)
+            encoded = LBS.fromStrict wsPayload
         result <- WebSocket.withWebSocketRequestWithTimeout
             options.sendIdleTimeoutMicros
             options.receiveIdleTimeoutMicros
@@ -548,75 +559,85 @@ responseEventTurnState OtherResponseStreamEvent { eventExtraFields } =
     extractTurnState eventExtraFields
 responseEventTurnState _ = Nothing
 
-extractTurnState :: Aeson.Object -> Maybe Text
+extractTurnState :: Extensions -> Maybe Text
 extractTurnState fields =
     textFieldCaseInsensitive "x-codex-turn-state" fields
         <|> textFieldCaseInsensitive "turn_state" fields
-        <|> (lookupFieldCaseInsensitive "headers" fields >>= \case
-            Aeson.Object headers ->
+        <|> (lookupFieldCaseInsensitive "headers" fields >>= decodeExtensions >>= \headers ->
                 textFieldCaseInsensitive "x-codex-turn-state" headers
                     <|> textFieldCaseInsensitive "turn_state" headers
-            _ -> Nothing)
+            )
 
 addTurnStateToPayload :: Maybe Text -> Aeson.Value -> Aeson.Value
-addTurnStateToPayload Nothing payload = payload
-addTurnStateToPayload (Just turnState) (Aeson.Object object) =
-    -- WebSocket request headers are fixed at handshake time. The Responses
-    -- WebSocket protocol carries this per-request sticky-routing value through
-    -- client_metadata instead.
-    Aeson.Object
-        (KeyMap.insert "client_metadata" metadataValue object)
-  where
-    metadataValue = case KeyMap.lookup "client_metadata" object of
-        Just (Aeson.Object metadata) ->
-            Aeson.Object
-                (KeyMap.insert "x-codex-turn-state"
-                    (Aeson.String turnState)
-                    metadata)
-        _ -> Aeson.object
-            [ "x-codex-turn-state" Aeson..= turnState ]
-addTurnStateToPayload _ payload = payload
+addTurnStateToPayload turnState payload =
+    maybe payload id
+        (Aeson.decodeStrict'
+            (addTurnStateToPayloadBytes turnState
+                (LBS.toStrict (Aeson.encode payload))))
+
+addTurnStateToPayloadBytes :: Maybe Text -> BS.ByteString -> BS.ByteString
+addTurnStateToPayloadBytes Nothing payload = payload
+addTurnStateToPayloadBytes (Just turnState) payload =
+    case JsonDecoder.decode responseCreateParamsDecoder payload of
+        Left _ -> payload
+        Right request ->
+            JsonEncoder.encode responseCreateParamsEncoder
+                (addClientMetadata
+                    "x-codex-turn-state"
+                    (encodedRaw JsonEncoder.text turnState)
+                    request)
 
 -- | Pure WebSocket envelope builder, exported for payload contract tests.
 -- All fields are flattened at the top level (not nested inside "response").
-buildWsPayloadWithOptions :: CodexWsOptions -> ResponseCreateParams -> Maybe Text -> Aeson.Value
+buildWsPayloadWithOptions
+    :: CodexWsOptions
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> Aeson.Value
 buildWsPayloadWithOptions options request previousResponseId =
-    case Aeson.toJSON (sanitizeCodexRequest request) of
-        Aeson.Object object -> Aeson.Object
-            $ addContextManagement
-            $ addPreviousResponseId
-            $ addResponsesLiteMetadata
-            $ KeyMap.insert "stream" (Aeson.Bool True)
-            $ KeyMap.insert "store" (Aeson.Bool False)
-            $ KeyMap.insert "type" (Aeson.String "response.create") object
-        other -> other
-  where
-    addPreviousResponseId = case previousResponseId of
-        Just responseId -> KeyMap.insert "previous_response_id" (Aeson.String responseId)
-        Nothing -> KeyMap.delete "previous_response_id"
+    maybe Aeson.Null id
+        (Aeson.decodeStrict'
+            (buildWsPayloadBytes options request previousResponseId))
 
-    addResponsesLiteMetadata object
+buildWsPayloadBytes
+    :: CodexWsOptions
+    -> ResponseCreateParams
+    -> Maybe Text
+    -> BS.ByteString
+buildWsPayloadBytes options request previousResponseId =
+    JsonEncoder.encode responseCreateParamsEncoder
+        $ addContextManagement
+        $ addResponsesLiteMetadata
+        $ (sanitizeCodexRequest request)
+            { stream = Just True
+            , store = Just False
+            , previousResponseId
+            , extraFields = insertExtension
+                "type"
+                (encodedRaw JsonEncoder.text "response.create")
+                (sanitizeCodexRequest request).extraFields
+            }
+  where
+    addResponsesLiteMetadata value
         | Just modelName <- request.model
         , isCodexResponsesLiteModel modelName =
-            let metadata = case KeyMap.lookup "client_metadata" object of
-                    Just (Aeson.Object fields) -> fields
-                    _ -> KeyMap.empty
-            in KeyMap.insert "client_metadata"
-                (Aeson.Object (KeyMap.insert
-                    "ws_request_header_x_openai_internal_codex_responses_lite"
-                    (Aeson.String "true")
-                    metadata))
-                object
-        | otherwise = object
+            addClientMetadata
+                "ws_request_header_x_openai_internal_codex_responses_lite"
+                (encodedRaw JsonEncoder.text "true")
+                value
+        | otherwise = value
 
-    addContextManagement = case options.compactThreshold of
-        Just threshold | threshold > 0 -> KeyMap.insert "context_management" (Aeson.toJSON
-            [ Aeson.object
-                [ "type" Aeson..= ("compaction" :: Text)
-                , "compact_threshold" Aeson..= threshold
+    addContextManagement value = case options.compactThreshold of
+        Just threshold | threshold > 0 -> value
+            { contextManagement = Just
+                [ ContextManagement
+                    { contextType = "compaction"
+                    , compactThreshold = Just threshold
+                    , extraFields = emptyExtensions
+                    }
                 ]
-            ])
-        _ -> id
+            }
+        _ -> value
 
 data WebSocketReceiveActions = WebSocketReceiveActions
     { receiveFrame      :: !(IO (Either ApiError LBS.ByteString))
@@ -662,7 +683,8 @@ receiveWsResponseWithActions modelHint actions onEvent =
             Right (msgBytes :: LBS.ByteString) -> do
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
-                case ResponsesCodec.decodeResponseStreamEvent msgBytes of
+                case ResponsesCodec.decodeResponseStreamEvent
+                        (LBS.toStrict msgBytes) of
                     Left err -> do
                         -- Keep receiving so one bad frame cannot strand an
                         -- otherwise valid turn, but surface the dropped
@@ -759,9 +781,9 @@ unparsedStreamEvent err bytes =
     OtherResponseStreamEvent
         { otherEventType = StreamEventUnknown unparsedStreamEventTypeText
         , sequenceNumber = Nothing
-        , eventExtraFields = KeyMap.fromList
-            [ (Key.fromText "error", Aeson.String (Text.pack err))
-            , (Key.fromText "payload", Aeson.String (framePreview bytes))
+        , eventExtraFields = extensionsFromList
+            [ ("error", encodedRaw JsonEncoder.text (Text.pack err))
+            , ("payload", encodedRaw JsonEncoder.text (framePreview bytes))
             ]
         }
 
@@ -785,7 +807,7 @@ framePreview =
 -- straight through to 'Agent.OpenAI.Auth.reportRateLimit'. A code-only event
 -- is also typed; untyped events use an outer HTTP status when one is
 -- available, otherwise falling back to 'ConnectionError'.
-parseWsErrorEvent :: Aeson.Object -> ResponseStreamError -> ApiError
+parseWsErrorEvent :: Extensions -> ResponseStreamError -> ApiError
 parseWsErrorEvent outerFields streamError =
     let typedError =
             nonBlank =<< (streamError.errorType <|> streamError.code)
@@ -813,43 +835,75 @@ parseWsErrorEvent outerFields streamError =
         (Nothing, Nothing)
             | isPreviousResponseIdError parsedError -> parsedError
             | otherwise -> ConnectionError
-                ("WebSocket error (no type): "
-                    <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode streamError)))
+                ("WebSocket error (no type): " <> streamError.message)
 
-outerRetryAfter :: Aeson.Object -> Maybe Int
+outerRetryAfter :: Extensions -> Maybe Int
 outerRetryAfter outerFields = do
-    Aeson.Object headers <-
-        lookupFieldCaseInsensitive "headers" outerFields
+    headersRaw <- lookupFieldCaseInsensitive "headers" outerFields
+    headers <- decodeExtensions headersRaw
     value <- lookupFieldCaseInsensitive "retry-after" headers
-    case value of
-        Aeson.String text ->
-            parseRetryAfterSeconds [Text.encodeUtf8 text]
-        Aeson.Number{} ->
-            max 1 <$> jsonInt value
-        _ -> Nothing
+    (decodeRaw JsonDecoder.text value >>=
+        \text -> parseRetryAfterSeconds [Text.encodeUtf8 text])
+        <|> (max 1 <$> jsonInt value)
 
-jsonInt :: Aeson.Value -> Maybe Int
-jsonInt = \case
-    Aeson.Number value -> case Aeson.fromJSON (Aeson.Number value) of
-        Aeson.Success parsed -> Just parsed
-        Aeson.Error _ -> Nothing
-    Aeson.String value -> case TextRead.decimal value of
-        Right (parsed, remainder) | Text.null remainder -> Just parsed
-        _ -> Nothing
-    _ -> Nothing
+jsonInt :: RawJson -> Maybe Int
+jsonInt raw =
+    decodeRaw (JsonDecoder.byType \case
+        JsonDecoder.JsonNumber -> JsonDecoder.int
+        JsonDecoder.JsonString ->
+            JsonDecoder.mapEither
+                (\value -> case TextRead.decimal value of
+                    Right (parsed, remainder)
+                        | Text.null remainder -> Right parsed
+                    _ -> Left "expected integer text")
+                JsonDecoder.text
+        _ -> JsonDecoder.mapEither
+            (const (Left "expected integer"))
+            JsonDecoder.skip)
+        raw
 
-lookupFieldCaseInsensitive :: Text -> Aeson.Object -> Maybe Aeson.Value
+lookupFieldCaseInsensitive :: Text -> Extensions -> Maybe RawJson
 lookupFieldCaseInsensitive wanted object =
     snd <$> find
-        (\(key, _) ->
-            Text.toCaseFold (Key.toText key) == Text.toCaseFold wanted)
-        (KeyMap.toList object)
+        (\(key, _) -> Text.toCaseFold key == Text.toCaseFold wanted)
+        (extensionsToList object)
 
-textFieldCaseInsensitive :: Text -> Aeson.Object -> Maybe Text
+textFieldCaseInsensitive :: Text -> Extensions -> Maybe Text
 textFieldCaseInsensitive name object =
-    lookupFieldCaseInsensitive name object >>= \case
-        Aeson.String value -> Just value
-        _ -> Nothing
+    lookupFieldCaseInsensitive name object >>= decodeRaw JsonDecoder.text
+
+addClientMetadata
+    :: Text
+    -> RawJson
+    -> ResponseCreateParams
+    -> ResponseCreateParams
+addClientMetadata key value request =
+    let metadata =
+            maybe emptyExtensions id
+                (lookupExtension "client_metadata" request.extraFields
+                    >>= decodeExtensions)
+        updated = insertExtension key value metadata
+    in request
+        { extraFields = insertExtension
+            "client_metadata"
+            (encodedRaw (JsonEncoder.objectWithExtensions id []) updated)
+            request.extraFields
+        }
+
+decodeExtensions :: RawJson -> Maybe Extensions
+decodeExtensions =
+    decodeRaw (JsonDecoder.objectFields JsonDecoder.extensionFields)
+
+decodeRaw :: JsonDecoder.Decoder value -> RawJson -> Maybe value
+decodeRaw decoder raw =
+    either (const Nothing) Just
+        (JsonDecoder.decode decoder (rawJsonBytes raw))
+
+encodedRaw :: JsonEncoder.Encoder value -> value -> RawJson
+encodedRaw encoder value =
+    case JsonDecoder.validateRawJson (JsonEncoder.encode encoder value) of
+        Right raw -> raw
+        Left err -> error ("impossible invalid direct JSON encoding: " <> show err)
 
 nonBlank :: Text -> Maybe Text
 nonBlank value

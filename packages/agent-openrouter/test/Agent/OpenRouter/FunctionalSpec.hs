@@ -11,6 +11,9 @@ module Agent.OpenRouter.FunctionalSpec (spec) where
 import Agent.OpenRouter.Client
 import Agent.OpenRouter.Credential
 import Agent.OpenRouter.Options
+import Agent.Json (RawJson)
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -97,7 +100,8 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing
-            , output = Aeson.object ["echoed" Aeson..= ("openrouter functional tool ok" :: Text)]
+            , output = encodeRawJson echoOutputEncoder
+                "openrouter functional tool ok"
             , status = Nothing
             , extraFields = mempty
             }
@@ -110,16 +114,40 @@ echoTool :: ResponseTool
 echoTool = FunctionToolValue FunctionTool
     { name = "echo_text"
     , description = Just "Echo the given text back to the caller."
-    , parameters = Just (Aeson.object
-        [ "type" Aeson..= ("object" :: Text)
-        , "properties" Aeson..= Aeson.object
-            [ "text" Aeson..= Aeson.object [ "type" Aeson..= ("string" :: Text) ] ]
-        , "required" Aeson..= [ "text" :: Text ]
-        , "additionalProperties" Aeson..= False
-        ])
+    , parameters = Just (encodeRawJson echoParametersEncoder ())
     , strict = Just True
     , extraFields = mempty
     }
+
+echoOutputEncoder :: JsonEncoder.Encoder Text
+echoOutputEncoder = JsonEncoder.object
+    [ JsonEncoder.field "echoed" JsonEncoder.text id
+    ]
+
+echoParametersEncoder :: JsonEncoder.Encoder ()
+echoParametersEncoder = JsonEncoder.object
+    [ JsonEncoder.field "type" JsonEncoder.text
+        (const ("object" :: Text))
+    , JsonEncoder.field "properties" propertiesEncoder id
+    , JsonEncoder.field "required" (JsonEncoder.list JsonEncoder.text)
+        (const ["text"])
+    , JsonEncoder.field "additionalProperties" JsonEncoder.bool
+        (const False)
+    ]
+  where
+    propertiesEncoder = JsonEncoder.object
+        [ JsonEncoder.field "text" textPropertyEncoder id
+        ]
+    textPropertyEncoder = JsonEncoder.object
+        [ JsonEncoder.field "type" JsonEncoder.text
+            (const ("string" :: Text))
+        ]
+
+encodeRawJson :: JsonEncoder.Encoder value -> value -> RawJson
+encodeRawJson encoder value =
+    case JsonDecoder.validateRawJson (JsonEncoder.encode encoder value) of
+        Left err -> error (Text.unpack (JsonDecoder.renderDecodeError err))
+        Right raw -> raw
 
 userMessage :: Text -> ResponseItem
 userMessage text = MessageItem ResponseMessage

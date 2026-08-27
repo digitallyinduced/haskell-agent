@@ -38,9 +38,20 @@ import Agent.Responses.Types
     , TaggedObject(..)
     , defaultResponseCreateParams
     )
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , insertExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import Data.IORef
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Text as Text
 import Test.Hspec
@@ -92,8 +103,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     { otherEventType = EventReasoningTextDelta
                     , sequenceNumber = Just 1
                     , eventExtraFields =
-                        KeyMap.singleton "delta"
-                            (Aeson.String "checking the implementation")
+                        textExtensions "delta" "checking the implementation"
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -114,13 +124,13 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     { otherEventType = EventReasoningTextDelta
                     , sequenceNumber = Just 1
                     , eventExtraFields =
-                        KeyMap.singleton "delta" (Aeson.String "raw")
+                        textExtensions "delta" "raw"
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
                     , sequenceNumber = Just 2
                     , eventExtraFields =
-                        KeyMap.singleton "delta" (Aeson.String "summary")
+                        textExtensions "delta" "summary"
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -141,14 +151,13 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     , summaryIndex = Just 0
                     , partValue = Nothing
                     , sequenceNumber = Just 1
-                    , eventExtraFields = KeyMap.empty
+                    , eventExtraFields = emptyExtensions
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
                     , sequenceNumber = Just 2
                     , eventExtraFields =
-                        KeyMap.singleton "delta"
-                            (Aeson.String "**Inspecting dependencies**")
+                        textExtensions "delta" "**Inspecting dependencies**"
                     }
                 onStreamEvent ResponseReasoningSummaryPartAddedEvent
                     { streamItemId = Just "reasoning-1"
@@ -156,14 +165,13 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     , summaryIndex = Just 1
                     , partValue = Nothing
                     , sequenceNumber = Just 3
-                    , eventExtraFields = KeyMap.empty
+                    , eventExtraFields = emptyExtensions
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
                     , sequenceNumber = Just 4
                     , eventExtraFields =
-                        KeyMap.singleton "delta"
-                            (Aeson.String "**Planning the fix**")
+                        textExtensions "delta" "**Planning the fix**"
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -182,7 +190,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
     it "preserves request input prefixes when adding transcript items" do
         let prefix = UnknownResponseItem TaggedObject
                 { tag = "additional_tools"
-                , fields = KeyMap.empty
+                , fields = emptyExtensions
                 }
             params = defaultResponseCreateParams
                 { input = Just (ResponseInputItems [prefix])
@@ -206,7 +214,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
     it "preserves only developer items marked as base instructions" do
         let additional = UnknownResponseItem TaggedObject
                 { tag = "additional_tools"
-                , fields = KeyMap.empty
+                , fields = emptyExtensions
                 }
             unmarkedDeveloper = developerMessage
                 "not base"
@@ -233,7 +241,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
     it "strips image detail hints from Lite messages and tool outputs" do
         let additional = UnknownResponseItem TaggedObject
                 { tag = "additional_tools"
-                , fields = KeyMap.empty
+                , fields = emptyExtensions
                 }
             imageMessage = MessageItem ResponseMessage
                 { messageId = Nothing
@@ -243,27 +251,27 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                         , fileId = Nothing
                         , imageUrl = Just "data:image/png;base64,AA=="
                         , promptCacheBreakpoint = Nothing
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     ]
                 , role = RoleUser
                 , status = Nothing
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             toolOutput = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
-                , output = Aeson.object
+                , output = rawFromAeson (Aeson.object
                     [ "type" Aeson..= ("input_image" :: Text.Text)
                     , "detail" Aeson..= ("high" :: Text.Text)
                     , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
-                    ]
+                    ])
                 , status = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             params = defaultResponseCreateParams
                 { input = Just (ResponseInputItems [additional])
@@ -289,7 +297,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , content = Nothing
                 , encryptedContent = Nothing
                 , status = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             user = turnInputsToItems [UserMessage "hello"]
             params = defaultResponseCreateParams
@@ -307,7 +315,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , content = Nothing
                 , encryptedContent = Nothing
                 , status = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             items = turnInputsToItems [UserMessage "hello"] <> [reasoning]
                 <> turnInputsToItems [UserMessage "continue"]
@@ -357,7 +365,7 @@ developerMessage messageText contentItemKinds =
     MessageItem ResponseMessage
         { messageId = Nothing
         , content = MessageContentParts
-            [InputTextPart messageText Nothing KeyMap.empty]
+            [InputTextPart messageText Nothing emptyExtensions]
         , role = RoleDeveloper
         , status = Nothing
         , phase = Nothing
@@ -366,12 +374,32 @@ developerMessage messageText contentItemKinds =
             , createTime = Nothing
             , contentItemKinds = Just contentItemKinds
             , executedToolCalls = Nothing
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
-jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value
-jsonField fieldName = \case
-    Aeson.Object object -> KeyMap.lookup (Key.fromText fieldName) object
-    _ -> Nothing
+jsonField :: Text.Text -> RawJson -> Maybe Aeson.Value
+jsonField fieldName raw = do
+    value <- Aeson.decodeStrict' (rawJsonBytes raw)
+    case value of
+        Aeson.Object object ->
+            KeyMap.lookup (Key.fromText fieldName) object
+        _ -> Nothing
+
+textExtensions :: Text.Text -> Text.Text -> Extensions
+textExtensions key value =
+    insertExtension
+        key
+        (validatedRaw (JsonEncoder.encode JsonEncoder.text value))
+        emptyExtensions
+
+rawFromAeson :: Aeson.Value -> RawJson
+rawFromAeson =
+    validatedRaw . LBS.toStrict . Aeson.encode
+
+validatedRaw :: ByteString -> RawJson
+validatedRaw bytes =
+    case JsonDecoder.validateRawJson bytes of
+        Left err -> error (show err)
+        Right raw -> raw

@@ -1,5 +1,13 @@
 module Agent.CLI.RequestSpec (spec) where
 
+import Agent.Json (emptyExtensions, lookupExtension)
+
+import Agent.CLI.JsonCompat
+    ( decodeRawValue
+    , encodedValue
+    , extensionFromValue
+    , extensionsFromValueList
+    )
 import Agent.CLI.Request
     ( requestParams
     , setRequestInstructionsAndTools
@@ -12,6 +20,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import Test.Hspec
 
@@ -42,7 +51,7 @@ spec = describe "requestParams" do
                 reasoning.generateSummary `shouldBe` Nothing
                 reasoning.reasoningMode `shouldBe` Nothing
                 reasoning.summary `shouldBe` Just "auto"
-                reasoning.extraFields `shouldBe` KeyMap.empty
+                reasoning.extraFields `shouldBe` emptyExtensions
 
     it "leaves reasoning summaries provider-controlled outside OpenAI" do
         let params =
@@ -73,7 +82,7 @@ spec = describe "requestParams" do
         params.text `shouldBe` Just ResponseTextConfig
             { format = Nothing
             , verbosity = Just "low"
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
         case params.reasoning of
             Nothing -> expectationFailure "expected reasoning configuration"
@@ -150,8 +159,8 @@ spec = describe "requestParams" do
             genericText = ResponseTextConfig
                 { format = Nothing
                 , verbosity = Just "medium"
-                , extraFields = KeyMap.singleton
-                    (Key.fromText "vendor_option")
+                , extraFields = extensionFromValue
+                    "vendor_option"
                     (Aeson.Bool True)
                 }
             generic =
@@ -217,14 +226,14 @@ functionTool toolName = FunctionToolValue FunctionTool
     , description = Nothing
     , parameters = Nothing
     , strict = Just True
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 customTool :: Text -> ResponseTool
 customTool toolName = KnownResponseTool ToolCustom TaggedObject
     { tag = "custom"
-    , fields = KeyMap.singleton
-        (Key.fromText "name")
+    , fields = extensionFromValue
+        "name"
         (Aeson.String toolName)
     }
 
@@ -232,9 +241,11 @@ namespaceTool :: Text -> Maybe Text -> [ResponseTool] -> ResponseTool
 namespaceTool namespaceName namespaceDescription nestedTools =
     KnownResponseTool ToolNamespace TaggedObject
         { tag = "namespace"
-        , fields = KeyMap.fromList $
+        , fields = extensionsFromValueList $
             [ (Key.fromText "name", Aeson.String namespaceName)
-            , (Key.fromText "tools", Aeson.toJSON nestedTools)
+            , ( Key.fromText "tools"
+              , Aeson.toJSON (map (encodedValue responseToolEncoder) nestedTools)
+              )
             ]
             <> case namespaceDescription of
                 Just description ->
@@ -248,12 +259,12 @@ userMessage :: Text -> ResponseItem
 userMessage value = MessageItem ResponseMessage
     { messageId = Nothing
     , content = MessageContentParts
-        [InputTextPart value Nothing KeyMap.empty]
+        [InputTextPart value Nothing emptyExtensions]
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 appendInputItem
@@ -280,10 +291,10 @@ withText nextText ResponseCreateParams { text = _, .. } =
 additionalToolValues :: ResponseCreateParams -> [Aeson.Value]
 additionalToolValues params = case params.input of
     Just (ResponseInputItems (AdditionalToolsItemValue item : _)) ->
-        item.tools
+        mapMaybe decodeRawValue item.tools
     Just (ResponseInputItems
         (UnknownResponseItem TaggedObject{tag = "additional_tools", fields} : _)) ->
-            case KeyMap.lookup (Key.fromText "tools") fields of
+            case lookupExtension "tools" fields >>= decodeRawValue of
                 Just (Aeson.Array values) -> toList values
                 _ -> []
     _ -> []

@@ -6,7 +6,9 @@ module Agent.OpenAI.Http
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
+import qualified Agent.Json.Decoder as JsonDecoder
 import Agent.OpenAI.Error (mkOpenAIError)
+import Agent.Responses.Codec (decodeResponse)
 import Agent.Responses.SSE (parseSseEvents)
 import Agent.Responses.LoopBackend (hasRecoverableIncompleteOutput)
 import Agent.Responses.StreamAssembly
@@ -18,9 +20,8 @@ import Agent.Responses.StreamAssembly
     )
 import qualified Agent.Responses.Types as OpenAI
 import Control.Applicative ((<|>))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Builder as Builder
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -31,7 +32,6 @@ import Network.Http.Client
     , buildRequest1
     , establishConnection
     , http
-    , jsonBody
     , receiveResponse
     , sendRequest
     , setContentType
@@ -54,7 +54,7 @@ postCodexJson
     -> Text
     -> Text
     -> (RequestBuilder () -> RequestBuilder ())
-    -> Aeson.Value
+    -> BS.ByteString
     -> (Response -> Streams.InputStream BS.ByteString -> IO (Either ApiError value))
     -> IO (Either ApiError value)
 postCodexJson baseUrl endpoint accessToken accountId configureRequest body handler = do
@@ -80,7 +80,8 @@ postCodexJson baseUrl endpoint accessToken accountId configureRequest body handl
                             (Text.encodeUtf8 accountId)
             in withOpenSSL $
                 withConnection (establishConnection (Text.encodeUtf8 url)) \connection -> do
-                    sendRequest connection request (jsonBody body)
+                    sendRequest connection request
+                        (Streams.write (Just (Builder.byteString body)))
                     receiveResponse connection handler
 
 codexEndpointUri :: Text -> Text -> Maybe URI.URI
@@ -112,25 +113,20 @@ decodeCodexHttpBodyWithModel modelHint bodyText
         response <- buildStreamResponseWithModel streamConfig modelHint events
         rejectFailedCodexResponse response
     | otherwise =
-        case decodeJsonResponseBody bodyText of
-            Just jsonValue -> decodeResponseValue jsonValue bodyText
-            Nothing -> Left (JsonDecodeError
-                "Invalid Codex Responses body"
-                (Text.take 2000 bodyText))
+        let bytes = Text.encodeUtf8 (Text.strip bodyText)
+        in case decodeResponse bytes of
+            Right response -> rejectFailedCodexResponse response
+            Left directError ->
+                case JsonDecoder.decode wrappedResponseDecoder bytes of
+                    Right response -> rejectFailedCodexResponse response
+                    Left _ -> Left (JsonDecodeError
+                        (Text.pack directError)
+                        (Text.take 2000 bodyText))
 
-decodeJsonResponseBody :: Text -> Maybe Aeson.Value
-decodeJsonResponseBody bodyText =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 (Text.strip bodyText)) of
-        Right (Aeson.Object object)
-            | Just inner <- KeyMap.lookup "response" object -> Just inner
-            | otherwise -> Just (Aeson.Object object)
-        _ -> Nothing
-
-decodeResponseValue :: Aeson.Value -> Text -> Either ApiError OpenAI.Response
-decodeResponseValue jsonValue bodyText =
-    case Aeson.fromJSON jsonValue of
-        Aeson.Success response -> rejectFailedCodexResponse response
-        Aeson.Error err -> Left (JsonDecodeError (Text.pack err) (Text.take 2000 bodyText))
+wrappedResponseDecoder :: JsonDecoder.Decoder OpenAI.Response
+wrappedResponseDecoder =
+    JsonDecoder.objectFields
+        (JsonDecoder.requiredField "response" OpenAI.responseDecoder)
 
 -- | The Responses endpoint can return HTTP 200 with a terminal
 -- @status: "failed"@ payload. Normalize that wire shape into the same typed

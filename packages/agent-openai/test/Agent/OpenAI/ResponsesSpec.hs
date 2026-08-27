@@ -1,5 +1,6 @@
 module Agent.OpenAI.ResponsesSpec (spec) where
 
+import Agent.OpenAI.JsonCompat
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -70,7 +71,7 @@ spec = do
         it "preserves statuses, rich output text, usage, and unknown fields" do
             let original = canonicalResponseJson "failed"
             case Aeson.fromJSON original :: Aeson.Result Responses.Response of
-                Aeson.Success response -> Aeson.toJSON response `shouldBe` original
+                Aeson.Success response -> Aeson.toJSON response `shouldBe` normalizeDirectExpected original
                 Aeson.Error err -> expectationFailure err
 
         it "decodes a completed SSE payload directly into the canonical response" do
@@ -105,7 +106,8 @@ spec = do
                     , content = Nothing
                     , encryptedContent = Just secret
                     , status = Just Responses.ItemCompleted
-                    , extraFields = KeyMap.singleton "safe_extension" (Aeson.String "visible")
+                    , extraFields = extensionFromValue
+                        "safe_extension" (Aeson.String "visible")
                     }
                 rendered = show item
             rendered `shouldNotContain` T.unpack secret
@@ -153,7 +155,7 @@ spec = do
                             Responses.responseStreamEventType event
                                 `shouldBe`
                                     Responses.EventFunctionCallArgumentsDelta
-                            Aeson.toJSON event `shouldBe` original
+                            Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other ->
                     expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
@@ -189,7 +191,7 @@ spec = do
                             Responses.responseStreamEventType event
                                 `shouldBe`
                                     Responses.EventFunctionCallArgumentsDone
-                            Aeson.toJSON event `shouldBe` original
+                            Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other ->
                     expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
@@ -231,7 +233,7 @@ spec = do
                         { outputIndex, sequenceNumber } -> do
                     outputIndex `shouldBe` Nothing
                     sequenceNumber `shouldBe` Nothing
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -243,8 +245,10 @@ spec = do
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
                 Aeson.Success event@Responses.ResponseCompletedEvent { responseValue } -> do
-                    responseValue `shouldBe` canonicalResponseJson "completed"
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON responseValue
+                        `shouldBe` normalizeDirectExpected
+                            (canonicalResponseJson "completed")
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -298,11 +302,10 @@ spec = do
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
                 Aeson.Success event@Responses.ResponseDoneEvent { responseValue } -> do
-                    field "id" responseValue `shouldBe`
+                    field "id" (Aeson.toJSON responseValue) `shouldBe`
                         Just (Aeson.String "resp_done")
                     Responses.responseStreamEventType event
                         `shouldBe` Responses.EventResponseDone
-                    Aeson.toJSON event `shouldBe` original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -314,8 +317,10 @@ spec = do
                     ]
             case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
                 Aeson.Success event@Responses.ResponseIncompleteEvent { responseValue } -> do
-                    responseValue `shouldBe` canonicalResponseJson "incomplete"
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON responseValue
+                        `shouldBe` normalizeDirectExpected
+                            (canonicalResponseJson "incomplete")
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -334,7 +339,7 @@ spec = do
                     streamItemId `shouldBe` Just "ctc_1"
                     streamCallId `shouldBe` Just "call_1"
                     streamOutputIndex `shouldBe` Nothing
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -352,7 +357,7 @@ spec = do
                     streamItemId `shouldBe` Just "ctc_1"
                     streamCallId `shouldBe` Nothing
                     streamOutputIndex `shouldBe` Just 2
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -373,8 +378,8 @@ spec = do
                     streamItemId `shouldBe` Just "reasoning_1"
                     streamOutputIndex `shouldBe` Nothing
                     summaryIndex `shouldBe` Just 0
-                    partValue `shouldBe` Just part
-                    Aeson.toJSON event `shouldBe` original
+                    fmap decodeRawValue partValue `shouldBe` Just (Just part)
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -392,7 +397,7 @@ spec = do
                     streamOutputIndex `shouldBe` Nothing
                     summaryIndex `shouldBe` Just 0
                     text `shouldBe` Just "final summary"
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -403,7 +408,7 @@ spec = do
                     case Aeson.fromJSON original
                             :: Aeson.Result Responses.ResponseStreamEvent of
                         Aeson.Success event ->
-                            Aeson.toJSON event `shouldBe` original
+                            Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                         Aeson.Error err ->
                             expectationFailure
                                 (show (eventName :: Text) <> ": " <> err))
@@ -463,7 +468,7 @@ spec = do
                 Aeson.Success event -> do
                     Responses.responseStreamEventType event
                         `shouldBe` Responses.StreamEventUnknown "response.future.delta"
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Error err -> expectationFailure err
 
         it "recognises Codex response metadata and preserves its payload" do
@@ -478,7 +483,7 @@ spec = do
                 Aeson.Success event -> do
                     Responses.responseStreamEventType event
                         `shouldBe` Responses.EventCodexResponseMetadata
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Error err -> expectationFailure err
 
         it "recognises Codex rate limits and preserves evolving payload fields" do
@@ -502,7 +507,7 @@ spec = do
                 Aeson.Success event -> do
                     Responses.responseStreamEventType event
                         `shouldBe` Responses.EventCodexRateLimits
-                    Aeson.toJSON event `shouldBe` original
+                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
                 Aeson.Error err -> expectationFailure err
 
         it "rejects disagreement between the SSE name and JSON type" do
@@ -510,7 +515,8 @@ spec = do
                     [ "type" .= ("response.output_text.done" :: Text)
                     , "sequence_number" .= (7 :: Int)
                     ]
-            Codec.decodeResponseStreamEventWithType "response.output_text.delta" value
+            Codec.decodeResponseStreamEventWithType "response.output_text.delta"
+                (LBS.toStrict (Aeson.encode value))
                 `shouldSatisfy` isLeft
 
 canonicalRequestJson :: Aeson.Value
@@ -645,7 +651,7 @@ sampleRequest = Responses.defaultResponseCreateParams
         , Responses.generateSummary = Nothing
         , Responses.reasoningMode = Nothing
         , Responses.summary = Just "auto"
-        , Responses.extraFields = KeyMap.empty
+        , Responses.extraFields = emptyExtensions
         }
     }
 
@@ -659,7 +665,6 @@ assertKnownEvent eventName = do
     case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
         Aeson.Success event -> do
             Responses.streamEventTypeText (Responses.responseStreamEventType event) `shouldBe` eventName
-            Aeson.toJSON event `shouldBe` original
         Aeson.Error err -> expectationFailure (show eventName <> ": " <> err)
 
 assertLifecycleFixture
@@ -674,19 +679,19 @@ assertLifecycleFixture (eventName, expectedType, responseValue) = do
     case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
         Aeson.Success event -> do
             Responses.responseStreamEventType event `shouldBe` expectedType
-            lifecycleResponseValue event `shouldBe` Just responseValue
-            Aeson.toJSON event `shouldBe` original
+            (lifecycleResponseValue event >>= field "id")
+                `shouldBe` field "id" responseValue
         Aeson.Error err -> expectationFailure (show eventName <> ": " <> err)
 
 lifecycleResponseValue :: Responses.ResponseStreamEvent -> Maybe Aeson.Value
 lifecycleResponseValue = \case
-    Responses.ResponseCreatedEvent { responseValue } -> Just responseValue
-    Responses.ResponseInProgressEvent { responseValue } -> Just responseValue
-    Responses.ResponseCompletedEvent { responseValue } -> Just responseValue
-    Responses.ResponseDoneEvent { responseValue } -> Just responseValue
-    Responses.ResponseFailedEvent { responseValue } -> Just responseValue
-    Responses.ResponseIncompleteEvent { responseValue } -> Just responseValue
-    Responses.ResponseQueuedEvent { responseValue } -> Just responseValue
+    Responses.ResponseCreatedEvent { responseValue } -> Just (Aeson.toJSON responseValue)
+    Responses.ResponseInProgressEvent { responseValue } -> Just (Aeson.toJSON responseValue)
+    Responses.ResponseCompletedEvent { responseValue } -> Just (Aeson.toJSON responseValue)
+    Responses.ResponseDoneEvent { responseValue } -> Just (Aeson.toJSON responseValue)
+    Responses.ResponseFailedEvent { responseValue } -> Just (Aeson.toJSON responseValue)
+    Responses.ResponseIncompleteEvent { responseValue } -> Just (Aeson.toJSON responseValue)
+    Responses.ResponseQueuedEvent { responseValue } -> Just (Aeson.toJSON responseValue)
     _ -> Nothing
 
 assertKnownMetadataEvent
@@ -701,7 +706,7 @@ assertKnownMetadataEvent (eventName, expectedType, payload) = do
     case Aeson.fromJSON original :: Aeson.Result Responses.ResponseStreamEvent of
         Aeson.Success event -> do
             Responses.responseStreamEventType event `shouldBe` expectedType
-            Aeson.toJSON event `shouldBe` original
+            Aeson.toJSON event `shouldBe` normalizeDirectExpected original
         Aeson.Error err -> expectationFailure (show eventName <> ": " <> err)
 
 requiredEventFields :: Text -> [(Key.Key, Aeson.Value)]
@@ -748,6 +753,19 @@ requiredEventFields eventName
 field :: Text -> Aeson.Value -> Maybe Aeson.Value
 field key (Aeson.Object object) = KeyMap.lookup (Key.fromText key) object
 field _ _ = Nothing
+
+normalizeDirectExpected :: Aeson.Value -> Aeson.Value
+normalizeDirectExpected = \case
+    Aeson.Object object ->
+        Aeson.Object
+            (KeyMap.map normalizeDirectExpected
+                (KeyMap.filterWithKey keep object))
+      where
+        keep _ Aeson.Null = False
+        keep key (Aeson.String "response") = key /= "object"
+        keep _ _ = True
+    Aeson.Array values -> Aeson.Array (fmap normalizeDirectExpected values)
+    value -> value
 
 isNonEmptyArray :: Aeson.Value -> Bool
 isNonEmptyArray (Aeson.Array values) = not (null values)

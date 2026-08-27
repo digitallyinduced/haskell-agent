@@ -13,6 +13,8 @@ import Agent.CLI.Session
     , SessionTurnPage(..)
     , TranscriptEffect(..)
     )
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decoder as JsonDecoder
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryDirection
@@ -50,8 +52,6 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
@@ -250,9 +250,8 @@ responseContentText = \case
     RefusalPart{refusal} -> [refusal]
     _ -> []
 
-renderJsonValue :: Aeson.Value -> Text.Text
-renderJsonValue = \case
-    Aeson.String text -> text
-    value ->
-        TextEncoding.decodeUtf8With lenientDecode
-            (LazyByteString.toStrict (Aeson.encode value))
+renderJsonValue :: RawJson -> Text.Text
+renderJsonValue value =
+    case JsonDecoder.decode JsonDecoder.text (rawJsonBytes value) of
+        Right text -> text
+        Left _ -> TextEncoding.decodeUtf8With lenientDecode (rawJsonBytes value)

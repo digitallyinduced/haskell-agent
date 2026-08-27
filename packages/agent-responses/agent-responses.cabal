@@ -12,6 +12,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Web
 build-type:         Simple
 extra-source-files: README.md
+                  , benchmark/README.md
 
 common common-opts
     default-language: Haskell2010
@@ -49,6 +50,7 @@ library
                     , Agent.Responses.GenericBackend
                     , Agent.Responses.GenericClient
                     , Agent.Responses.HttpSSE
+                    , Agent.Responses.Hermes
                     , Agent.Responses.Request
                     , Agent.Responses.SSE
                     , Agent.Responses.ResponseMerge
@@ -57,14 +59,16 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-json-codec      == 0.1.0.0
+                    , agent-json-hermes     == 0.1.0.0
                     , agent-responses-types >= 0.1 && < 0.2
-                    , aeson                 >= 2.0
                     , base64-bytestring
                     , bytestring
                     , containers
                     , http-client
                     , http-client-tls
                     , http-conduit
+                    , hermes-json
                     , retry
                     , safe-exceptions
                     , scientific
@@ -84,6 +88,7 @@ test-suite agent-responses-test
                     , Agent.Responses.StreamAssemblySpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json-codec
                     , agent-responses
                     , agent-responses-types
                     , aeson >= 2.0
@@ -92,4 +97,20 @@ test-suite agent-responses-test
                     , hspec
                     , QuickCheck >= 2.14 && < 2.16
                     , retry
+                    , text
+
+benchmark responses-hot-path
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ResponsesHotPath.hs
+    ghc-options:      -O2 -rtsopts
+    build-depends:    agent-core
+                    , agent-json-codec
+                    , agent-json-hermes
+                    , agent-responses
+                    , agent-responses-types
+                    , aeson >= 2.2 && < 2.4
+                    , base >= 4.14 && < 5
+                    , bytestring
                     , text

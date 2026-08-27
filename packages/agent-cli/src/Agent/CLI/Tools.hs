@@ -10,6 +10,8 @@ module Agent.CLI.Tools
     ) where
 
 import Agent.Responses.Types
+import Agent.Json (emptyExtensions, extensionsFromList, RawJson)
+import qualified Agent.Json.Decoder as JsonDecoder
 import Agent.Dialect
     ( Dialect
     , DialectId(..)
@@ -33,8 +35,8 @@ import Agent.Tools.Types
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LazyByteString
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
@@ -58,11 +60,11 @@ lookupAppTool name tools =
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.
 webSearchTool :: ResponseTool
-webSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+webSearchTool = knownResponseTool ToolWebSearch emptyExtensions
 
 -- | Grok Build hosted @x_search@ tool. Server-side; the loop never dispatches it.
 xSearchTool :: ResponseTool
-xSearchTool = knownResponseTool ToolXSearch KeyMap.empty
+xSearchTool = knownResponseTool ToolXSearch emptyExtensions
 
 hostedSearchToolTypes :: Dialect -> [ResponseToolType]
 hostedSearchToolTypes dialect =
@@ -71,7 +73,7 @@ hostedSearchToolTypes dialect =
 
 hostedSearchTools :: Dialect -> [ResponseTool]
 hostedSearchTools dialect =
-    map (`knownResponseTool` KeyMap.empty) (hostedSearchToolTypes dialect)
+    map (`knownResponseTool` emptyExtensions) (hostedSearchToolTypes dialect)
 
 -- | Model-facing names for hosted search tools advertised in this dialect.
 hostedSearchToolNames :: Dialect -> [Text]
@@ -117,12 +119,12 @@ schemaFromAppTool dialect tool =
             Just (FunctionToolValue FunctionTool
                 { name = tool.appToolName
                 , description = Just tool.appToolDescription
-                , parameters = Just parameters
+                , parameters = Just (rawJsonFromAeson (Aeson.toJSON parameters))
                 , strict = case dialectFunctionSchemaStyle dialect of
                     StrictFunctionSchemas -> Just False
                     LooseFunctionSchemas -> Nothing
                     NoFunctionSchemas -> Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 })
         FreeformApplyPatchSchema ->
             case dialectFunctionSchemaStyle dialect of
@@ -176,11 +178,11 @@ grokPublicText =
 -- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool
 multiAgentNamespaceTool tools = knownResponseTool ToolNamespace $
-    KeyMap.fromList
-        [ (Key.fromText "name", Aeson.String multiAgentNamespace)
-        , (Key.fromText "description", Aeson.String
-            "Tools for spawning and managing sub-agents.")
-        , (Key.fromText "tools", Aeson.toJSON (map nestedFunction tools))
+    extensionsFromList
+        [ ("name", rawJsonFromAeson (Aeson.String multiAgentNamespace))
+        , ("description", rawJsonFromAeson (Aeson.String
+            "Tools for spawning and managing sub-agents."))
+        , ("tools", rawJsonFromAeson (Aeson.toJSON (map nestedFunction tools)))
         ]
   where
     nestedFunction tool = Aeson.object
@@ -203,15 +205,22 @@ appToolJsonParameters tool = case tool.appToolSchema of
     RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
 
+rawJsonFromAeson :: Aeson.Value -> RawJson
+rawJsonFromAeson =
+    either (error . show) id
+    . JsonDecoder.validateRawJson
+    . LazyByteString.toStrict
+    . Aeson.encode
+
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool
 applyPatchCustomTool name description = knownResponseTool ToolCustom $
-    KeyMap.fromList
-        [ (Key.fromText "name", Aeson.String name)
-        , (Key.fromText "description", Aeson.String description)
-        , (Key.fromText "format", Aeson.object
+    extensionsFromList
+        [ ("name", rawJsonFromAeson (Aeson.String name))
+        , ("description", rawJsonFromAeson (Aeson.String description))
+        , ("format", rawJsonFromAeson (Aeson.object
             [ "type" .= ("grammar" :: Text)
             , "syntax" .= ("lark" :: Text)
             , "definition" .= applyPatchGrammar
-            ])
+            ]))
         ]

@@ -4,11 +4,11 @@ import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.OpenAI.CompactClient
 import Agent.OpenAI.Compaction
 import Agent.OpenAI.ModelMetadata
+import Agent.OpenAI.JsonCompat
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
 import Agent.Responses.Types
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isLeft)
 import qualified Data.Text as Text
@@ -26,7 +26,7 @@ spec = do
                     , generateSummary = Nothing
                     , reasoningMode = Nothing
                     , summary = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 params = defaultResponseCreateParams
                     { instructions = Just "instructions"
@@ -48,7 +48,7 @@ spec = do
             request.stream `shouldBe` Just True
             request.toolChoice `shouldBe` Just (ToolChoiceMode ToolChoiceAuto)
             requestItems request `shouldBe` history <> [compactionTriggerItem]
-            Aeson.toJSON compactionTriggerItem
+            encodedValue responseItemEncoder compactionTriggerItem
                 `shouldBe` Aeson.object ["type" .= ("compaction_trigger" :: Text.Text)]
 
         it "disables parallel tool calls for Responses Lite compaction" do
@@ -90,7 +90,7 @@ spec = do
                 tool = FunctionToolValue FunctionTool
                     { name = "large_schema"
                     , description = Just schemaText
-                    , parameters = Just (Aeson.object
+                    , parameters = Just (rawValue (Aeson.object
                         [ "type" .= ("object" :: Text.Text)
                         , "properties" .= Aeson.object
                             [ "value" .= Aeson.object
@@ -98,9 +98,9 @@ spec = do
                                 , "description" .= schemaText
                                 ]
                             ]
-                        ])
+                        ]))
                     , strict = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { tools = Just [tool]
@@ -125,7 +125,7 @@ spec = do
                             "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -158,7 +158,7 @@ spec = do
                             (remoteCompactionMaxStringLength + 1)
                             "x"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -188,7 +188,7 @@ spec = do
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimResponseHistoryToFit
@@ -226,7 +226,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 history =
                     [ user "old"
@@ -242,13 +242,13 @@ spec = do
                 rich = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [ InputTextPart "keep this" Nothing KeyMap.empty
+                        [ InputTextPart "keep this" Nothing emptyExtensions
                         , InputImagePart
                             { detail = Just "auto"
                             , fileId = Nothing
                             , imageUrl = Just ("data:image/png;base64," <> payload)
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         , InputFilePart
                             { detail = Just "auto"
@@ -257,22 +257,22 @@ spec = do
                             , fileUrl = Nothing
                             , filename = Just "notes.txt"
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         , InputAudioPart
-                            { inputAudio = Aeson.String payload
-                            , extraFields = KeyMap.empty
+                            { inputAudio = rawText payload
+                            , extraFields = emptyExtensions
                             }
                         , UnknownContentPart TaggedObject
                             { tag = "input_unknown"
-                            , fields = KeyMap.empty
+                            , fields = emptyExtensions
                             }
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 compacted =
                     buildRemoteCompactedHistory 1_000 [rich] (checkpoint "opaque")
@@ -293,20 +293,20 @@ spec = do
                 multimodal = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [ InputTextPart "inspect this" Nothing KeyMap.empty
+                        [ InputTextPart "inspect this" Nothing emptyExtensions
                         , InputImagePart
                             { detail = Just "auto"
                             , fileId = Nothing
                             , imageUrl = Just imageUrl
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 compacted =
                     buildRemoteCompactedHistory
@@ -338,14 +338,14 @@ spec = do
                             , fileId = Nothing
                             , imageUrl = Just "data:image/png;base64,huge"
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         ]
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
             sanitizeCompactionHistory [rich] `shouldSatisfy` \case
                 [MessageItem message] ->
@@ -361,20 +361,20 @@ spec = do
                 multimodal = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [ InputTextPart "inspect this" Nothing KeyMap.empty
+                        [ InputTextPart "inspect this" Nothing emptyExtensions
                         , InputImagePart
                             { detail = Just "auto"
                             , fileId = Nothing
                             , imageUrl = Just imageUrl
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -396,7 +396,7 @@ spec = do
                     }
                 opaque = UnknownResponseItem TaggedObject
                     { tag = "vendor_blob"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "vendor_blob")
                         , ("blob", Aeson.String (Text.replicate 20_000 "x"))
                         ]
@@ -418,7 +418,7 @@ spec = do
                     }
                 prior = KnownResponseItem ItemCompaction TaggedObject
                     { tag = "compaction"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("encrypted_content",
                             Aeson.String (Text.replicate 20_000 "x"))
                         ]
@@ -487,9 +487,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String (Text.replicate 10_000 "x")
+                    , output = rawText (Text.replicate 10_000 "x")
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -498,8 +498,8 @@ spec = do
                         [user "keep", oversized]
             case reverse trimmed of
                 FunctionCallOutputItem output : _ ->
-                    output.output `shouldBe` Aeson.String
-                        "Output exceeded the available model context and was truncated"
+                    decodeRawValue output.output `shouldBe` Just (Aeson.String
+                        "Output exceeded the available model context and was truncated")
                 other ->
                     expectationFailure
                         ("expected rewritten tool output, got " <> show other)
@@ -511,9 +511,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String "ok"
+                    , output = rawText "ok"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -522,7 +522,7 @@ spec = do
                         [huge, tiny]
             trimmed `shouldSatisfy` any \case
                 FunctionCallOutputItem output ->
-                    output.output == Aeson.String "ok"
+                    decodeRawValue output.output == Just (Aeson.String "ok")
                 _ -> False
             trimmed `shouldSatisfy` any \case
                 MessageItem message ->
@@ -541,9 +541,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String (Text.replicate 20_000 "y")
+                    , output = rawText (Text.replicate 20_000 "y")
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -557,15 +557,16 @@ spec = do
                 _ -> False
             trimmed `shouldSatisfy` any \case
                 FunctionCallOutputItem result ->
-                    result.output
-                        == Aeson.String
+                    decodeRawValue result.output
+                        == Just (Aeson.String
                             "Output exceeded the available model context and was truncated"
+                            )
                 _ -> False
 
         it "drops an irreducible old item so a recent small output can fit" do
             let old = KnownResponseItem ItemReasoning TaggedObject
                     { tag = "reasoning"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "reasoning")
                         , ("summary", Aeson.String (Text.replicate 20_000 "x"))
                         ]
@@ -575,9 +576,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String "ok"
+                    , output = rawText "ok"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -591,7 +592,7 @@ spec = do
         it "does not delete tagged outputs when pairing ids are missing" do
             let callWith identifier = KnownResponseItem ItemShellCall TaggedObject
                     { tag = "shell_call"
-                    , fields = KeyMap.fromList $
+                    , fields = extensionsFromValueList $
                         [ ("command", Aeson.String (Text.replicate 20_000 "x"))
                         ]
                             <> maybe []
@@ -601,7 +602,7 @@ spec = do
                 outputWith identifier =
                     KnownResponseItem ItemShellCallOutput TaggedObject
                         { tag = "shell_call_output"
-                        , fields = KeyMap.fromList $
+                        , fields = extensionsFromValueList $
                             [ ("output", Aeson.String "ok")
                             ]
                                 <> maybe []
@@ -628,16 +629,16 @@ spec = do
                     , arguments = Text.replicate 20_000 "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 output = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
                     , callId = ""
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String "ok"
+                    , output = rawText "ok"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 recent = user "recent"
                 trimmed =
@@ -650,14 +651,14 @@ spec = do
         it "drops paired tagged outputs with their oversized calls" do
             let call = KnownResponseItem ItemShellCall TaggedObject
                     { tag = "shell_call"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("id", Aeson.String "call-1")
                         , ("command", Aeson.String (Text.replicate 20_000 "x"))
                         ]
                     }
                 output = KnownResponseItem ItemShellCallOutput TaggedObject
                     { tag = "shell_call_output"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("call_id", Aeson.String "call-1")
                         , ("output", Aeson.String "ok")
                         ]
@@ -675,14 +676,14 @@ spec = do
         it "drops MCP approval responses with their oversized requests" do
             let request = KnownResponseItem ItemMcpApprovalRequest TaggedObject
                     { tag = "mcp_approval_request"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("id", Aeson.String "approval-1")
                         , ("reason", Aeson.String (Text.replicate 20_000 "x"))
                         ]
                     }
                 response = KnownResponseItem ItemMcpApprovalResponse TaggedObject
                     { tag = "mcp_approval_response"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("approval_request_id", Aeson.String "approval-1")
                         , ("approved", Aeson.Bool True)
                         ]
@@ -700,7 +701,7 @@ spec = do
         it "rewrites large tagged output items when they expose a payload field" do
             let output = KnownResponseItem ItemShellCallOutput TaggedObject
                     { tag = "shell_call_output"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "shell_call_output")
                         , ("id", Aeson.String "shell-output-1")
                         , ("output", Aeson.String (Text.replicate 20_000 "x"))
@@ -713,7 +714,7 @@ spec = do
                         [user "keep", output]
             trimmed `shouldSatisfy` any \case
                 KnownResponseItem ItemShellCallOutput tagged ->
-                    KeyMap.lookup "output" tagged.fields
+                    lookupExtensionValue "output" tagged.fields
                         == Just (Aeson.String
                             "Output exceeded the available model context and was truncated")
                 _ -> False
@@ -721,7 +722,7 @@ spec = do
         it "rewrites plural payload fields on provider-managed outputs" do
             let output = KnownResponseItem ItemCodeInterpreterCall TaggedObject
                     { tag = "code_interpreter_call"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("id", Aeson.String "code-1")
                         , ("outputs", Aeson.Array
                             (Vector.singleton
@@ -735,7 +736,7 @@ spec = do
                         [user "keep", output]
             trimmed `shouldSatisfy` any \case
                 KnownResponseItem ItemCodeInterpreterCall tagged ->
-                    KeyMap.lookup "outputs" tagged.fields
+                    lookupExtensionValue "outputs" tagged.fields
                         == Just (Aeson.Array Vector.empty)
                 _ -> False
 
@@ -744,7 +745,7 @@ spec = do
                     (ItemUnknownType "vendor_widget_output")
                     TaggedObject
                         { tag = "vendor_widget_output"
-                        , fields = KeyMap.fromList
+                        , fields = extensionsFromValueList
                             [ ("type", Aeson.String "vendor_widget_output")
                             , ("id", Aeson.String "vendor-output-1")
                             , ("result", Aeson.String (Text.replicate 20_000 "x"))
@@ -757,9 +758,9 @@ spec = do
                         [user "keep", output]
             trimmed `shouldSatisfy` any \case
                 KnownResponseItem (ItemUnknownType "vendor_widget_output") tagged ->
-                    KeyMap.lookup "type" tagged.fields
+                    lookupExtensionValue "type" tagged.fields
                         == Just (Aeson.String "vendor_widget_output")
-                        && KeyMap.lookup "result" tagged.fields
+                        && lookupExtensionValue "result" tagged.fields
                             == Just (Aeson.String
                                 "Output exceeded the available model context and was truncated")
                 _ -> False
@@ -767,7 +768,7 @@ spec = do
         it "rewrites inline results on call-shaped provider items" do
             let output = KnownResponseItem ItemMcpCall TaggedObject
                     { tag = "mcp_call"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "mcp_call")
                         , ("id", Aeson.String "mcp-1")
                         , ("status", Aeson.String "completed")
@@ -781,11 +782,11 @@ spec = do
                         [user "keep", output]
             trimmed `shouldSatisfy` any \case
                 KnownResponseItem ItemMcpCall tagged ->
-                    KeyMap.lookup "type" tagged.fields
+                    lookupExtensionValue "type" tagged.fields
                         == Just (Aeson.String "mcp_call")
-                        && KeyMap.lookup "status" tagged.fields
+                        && lookupExtensionValue "status" tagged.fields
                             == Just (Aeson.String "completed")
-                        && KeyMap.lookup "result" tagged.fields
+                        && lookupExtensionValue "result" tagged.fields
                             == Just (Aeson.String
                                 "Output exceeded the available model context and was truncated")
                 _ -> False
@@ -794,7 +795,7 @@ spec = do
             let recent = user "recent"
                 knownCall = KnownResponseItem ItemMcpCall TaggedObject
                     { tag = "mcp_call"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "mcp_call")
                         , ("id", Aeson.String "mcp-1")
                         , ("content", Aeson.String (Text.replicate 20_000 "x"))
@@ -802,7 +803,7 @@ spec = do
                     }
                 unknownCall = UnknownResponseItem TaggedObject
                     { tag = "vendor_call"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "vendor_call")
                         , ("id", Aeson.String "vendor-1")
                         , ("payload", Aeson.String (Text.replicate 20_000 "x"))
@@ -819,7 +820,7 @@ spec = do
         it "rewrites completely unknown output tags when their payload is recognizable" do
             let output = UnknownResponseItem TaggedObject
                     { tag = "acme_output"
-                    , fields = KeyMap.fromList
+                    , fields = extensionsFromValueList
                         [ ("type", Aeson.String "acme_output")
                         , ("output", Aeson.String (Text.replicate 20_000 "x"))
                         ]
@@ -831,9 +832,9 @@ spec = do
                         [user "keep", output]
             trimmed `shouldSatisfy` any \case
                 UnknownResponseItem tagged ->
-                    KeyMap.lookup "type" tagged.fields
+                    lookupExtensionValue "type" tagged.fields
                         == Just (Aeson.String "acme_output")
-                        && KeyMap.lookup "output" tagged.fields
+                        && lookupExtensionValue "output" tagged.fields
                             == Just (Aeson.String
                                 "Output exceeded the available model context and was truncated")
                 _ -> False
@@ -866,7 +867,7 @@ spec = do
 
         it "still counts tool-output data URLs as model-visible text" do
             let payload = Text.replicate 200_000 "A"
-                item = toolOutput (Aeson.String ("data:image/png;base64," <> payload))
+                item = toolOutput (rawText ("data:image/png;base64," <> payload))
             estimateItemsTokens [item]
                 `shouldBe` naiveEncodedTokens item
 
@@ -879,7 +880,7 @@ spec = do
         it "discounts structured input_image parts in tool output" do
             let payload = Text.replicate 200_000 "A"
                 item =
-                    toolOutput $
+                    toolOutput $ rawValue $
                         Aeson.Array $
                             Vector.fromList
                                 [ Aeson.object
@@ -1081,30 +1082,30 @@ spec = do
 
     user text = MessageItem ResponseMessage
         { messageId = Nothing
-        , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , content = MessageContentParts [InputTextPart text Nothing emptyExtensions]
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
     imageUser payload = MessageItem ResponseMessage
         { messageId = Nothing
         , content = MessageContentParts
-            [ InputTextPart "inspect this" Nothing KeyMap.empty
+            [ InputTextPart "inspect this" Nothing emptyExtensions
             , InputImagePart
                 { detail = Just "auto"
                 , fileId = Nothing
                 , imageUrl = Just ("data:image/png;base64," <> payload)
                 , promptCacheBreakpoint = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             ]
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
     toolOutput output = FunctionCallOutputItem FunctionCallOutput
         { itemId = Nothing
@@ -1113,16 +1114,16 @@ spec = do
         , namespace = Nothing
         , output
         , status = Just ItemCompleted
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
     assistant text = MessageItem ResponseMessage
         { messageId = Nothing
-        , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , content = MessageContentParts [InputTextPart text Nothing emptyExtensions]
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
     isSummary (MessageItem m) =
         m.role == RoleAssistant
@@ -1162,12 +1163,12 @@ spec = do
             { messageId = Nothing
             , author = Just author
             , recipient = Just recipient
-            , content = [InputTextPart text Nothing KeyMap.empty]
+            , content = [InputTextPart text Nothing emptyExtensions]
             , passthrough = Nothing
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
     checkpoint name = CompactionItemValue CompactionItem
         { itemId = Nothing
         , encryptedContent = Nothing
-        , extraFields = KeyMap.fromList [("name", Aeson.String name)]
+        , extraFields = extensionsFromValueList [("name", Aeson.String name)]
         }

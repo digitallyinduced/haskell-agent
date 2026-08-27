@@ -5,18 +5,32 @@ module Agent.Responses.Types.Streaming
     , responseStreamEventType
     , responseStreamEventSequenceNumber
     , streamEventTypeText
-    , parseStreamEventWithType
+    , responseStreamEventEncoder
+    , responseStreamEventDecoder
+    , responseStreamEventDecoderWithType
     , unparsedStreamEventTypeText
     ) where
 
-import Agent.Responses.Types.Common
-import Agent.Responses.Types.Items (ResponseItem)
-import Data.Aeson hiding (TaggedObject)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (Parser)
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , extensionsToList
+    , insertExtension
+    )
+import qualified Agent.Json.Decoder as Decoder
+import qualified Agent.Json.Encoder as Encoder
+import Agent.Responses.Types.Items
+    ( ResponseItem
+    , responseItemDecoder
+    , responseItemEncoder
+    )
+import Agent.Responses.Types.Response
+    ( Response
+    , responseFragmentDecoder
+    , responseEncoder
+    )
 import Data.Text (Text)
-import qualified Data.Text as Text
 
 data StreamEventType
     = EventResponseCreated
@@ -231,85 +245,80 @@ data ResponseStreamError = ResponseStreamError
     , message     :: !Text
     , param       :: !(Maybe Text)
     , retryAfter  :: !(Maybe Int)
-    , extraFields :: !Aeson.Object
+    , extraFields :: !Extensions
     } deriving stock (Eq, Show)
-
-instance ToJSON ResponseStreamError where
-    toJSON ResponseStreamError { errorType, code, message, param, retryAfter, extraFields } =
-        objectWith extraFields
-            [ optionalField "type" errorType
-            , optionalField "code" code
-            , Just (field "message" message)
-            , optionalField "param" param
-            , optionalField "resets_in_seconds" retryAfter
-            ]
-
-instance FromJSON ResponseStreamError where
-    parseJSON = withObject "ResponseStreamError" $ \o -> ResponseStreamError
-        <$> o .:? "type"
-        <*> o .:? "code"
-        -- Some Responses gateways emit code/type without a human-readable
-        -- message. Keep the wire shape permissive so those errors can still
-        -- be classified instead of aborting event decoding.
-        <*> o .:? "message" .!= ""
-        <*> o .:? "param"
-        <*> o .:? "resets_in_seconds"
-        <*> pure (without ["message"] o)
 
 data ResponseStreamEvent
     = ResponseCreatedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseInProgressEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseCompletedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseDoneEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseFailedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseIncompleteEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseQueuedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseOutputItemAddedEvent
         { item             :: !ResponseItem
         , outputIndex      :: !(Maybe Int)
         , sequenceNumber   :: !(Maybe Int)
-        , eventExtraFields :: !Aeson.Object
+        , eventExtraFields :: !Extensions
         }
     | ResponseOutputItemDoneEvent
         { item             :: !ResponseItem
         , outputIndex      :: !(Maybe Int)
         , sequenceNumber   :: !(Maybe Int)
-        , eventExtraFields :: !Aeson.Object
+        , eventExtraFields :: !Extensions
+        }
+    | ResponseOutputTextDeltaEvent
+        { delta             :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , contentIndex      :: !(Maybe Int)
+        , logprobs          :: !(Maybe RawJson)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Extensions
+        }
+    | ResponseOutputTextDoneEvent
+        { text              :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , contentIndex      :: !(Maybe Int)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Extensions
         }
     | ResponseFunctionCallArgumentsDeltaEvent
         { delta             :: !(Maybe Text)
         , streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseFunctionCallArgumentsDoneEvent
         { arguments         :: !(Maybe Text)
@@ -317,7 +326,7 @@ data ResponseStreamEvent
         , streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseCustomToolInputDeltaEvent
         { delta             :: !(Maybe Text)
@@ -325,7 +334,7 @@ data ResponseStreamEvent
         , streamCallId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseCustomToolInputDoneEvent
         { inputText         :: !(Maybe Text)
@@ -333,15 +342,31 @@ data ResponseStreamEvent
         , streamCallId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseReasoningSummaryPartAddedEvent
         { streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , summaryIndex      :: !(Maybe Int)
-        , partValue         :: !(Maybe Aeson.Value)
+        , partValue         :: !(Maybe RawJson)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
+        }
+    | ResponseReasoningSummaryPartDoneEvent
+        { streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , summaryIndex      :: !(Maybe Int)
+        , partValue         :: !(Maybe RawJson)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Extensions
+        }
+    | ResponseReasoningSummaryTextDeltaEvent
+        { delta             :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , summaryIndex      :: !(Maybe Int)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Extensions
         }
     | ResponseReasoningSummaryTextDoneEvent
         { streamItemId      :: !(Maybe Text)
@@ -349,22 +374,38 @@ data ResponseStreamEvent
         , summaryIndex      :: !(Maybe Int)
         , text              :: !(Maybe Text)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
+        }
+    | ResponseReasoningTextDeltaEvent
+        { delta             :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , contentIndex      :: !(Maybe Int)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Extensions
+        }
+    | ResponseReasoningTextDoneEvent
+        { text              :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , contentIndex      :: !(Maybe Int)
+        , sequenceNumber    :: !(Maybe Int)
+        , eventExtraFields  :: !Extensions
         }
     | ResponseErrorEvent
         { streamError       :: !ResponseStreamError
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | ResponseNestedErrorEvent
         { streamError       :: !ResponseStreamError
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     | OtherResponseStreamEvent
         { otherEventType    :: !StreamEventType
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventExtraFields  :: !Extensions
         }
     deriving stock (Eq, Show)
 
@@ -379,6 +420,8 @@ responseStreamEventType = \case
     ResponseQueuedEvent{} -> EventResponseQueued
     ResponseOutputItemAddedEvent{} -> EventOutputItemAdded
     ResponseOutputItemDoneEvent{} -> EventOutputItemDone
+    ResponseOutputTextDeltaEvent{} -> EventOutputTextDelta
+    ResponseOutputTextDoneEvent{} -> EventOutputTextDone
     ResponseFunctionCallArgumentsDeltaEvent{} ->
         EventFunctionCallArgumentsDelta
     ResponseFunctionCallArgumentsDoneEvent{} ->
@@ -386,7 +429,11 @@ responseStreamEventType = \case
     ResponseCustomToolInputDeltaEvent{} -> EventCustomToolInputDelta
     ResponseCustomToolInputDoneEvent{} -> EventCustomToolInputDone
     ResponseReasoningSummaryPartAddedEvent{} -> EventReasoningSummaryPartAdded
+    ResponseReasoningSummaryPartDoneEvent{} -> EventReasoningSummaryPartDone
+    ResponseReasoningSummaryTextDeltaEvent{} -> EventReasoningSummaryTextDelta
     ResponseReasoningSummaryTextDoneEvent{} -> EventReasoningSummaryTextDone
+    ResponseReasoningTextDeltaEvent{} -> EventReasoningTextDelta
+    ResponseReasoningTextDoneEvent{} -> EventReasoningTextDone
     ResponseErrorEvent{} -> EventError
     ResponseNestedErrorEvent{} -> EventError
     OtherResponseStreamEvent { otherEventType } -> otherEventType
@@ -394,256 +441,535 @@ responseStreamEventType = \case
 responseStreamEventSequenceNumber :: ResponseStreamEvent -> Maybe Int
 responseStreamEventSequenceNumber event = event.sequenceNumber
 
-instance ToJSON ResponseStreamEvent where
-    toJSON = \case
-        ResponseCreatedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.created" responseValue sequenceNumber eventExtraFields
-        ResponseInProgressEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.in_progress" responseValue sequenceNumber eventExtraFields
-        ResponseCompletedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.completed" responseValue sequenceNumber eventExtraFields
-        ResponseDoneEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            objectWith eventExtraFields
-                [ Just (field "type" ("response.done" :: Text))
-                , optionalField "sequence_number" sequenceNumber
-                , Just (field "response" responseValue)
-                ]
-        ResponseFailedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.failed" responseValue sequenceNumber eventExtraFields
-        ResponseIncompleteEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.incomplete" responseValue sequenceNumber eventExtraFields
-        ResponseQueuedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.queued" responseValue sequenceNumber eventExtraFields
-        ResponseOutputItemAddedEvent { item, outputIndex, sequenceNumber, eventExtraFields } ->
-            outputItemEvent "response.output_item.added" item outputIndex sequenceNumber eventExtraFields
-        ResponseOutputItemDoneEvent { item, outputIndex, sequenceNumber, eventExtraFields } ->
-            outputItemEvent "response.output_item.done" item outputIndex sequenceNumber eventExtraFields
-        ResponseFunctionCallArgumentsDeltaEvent { delta, streamItemId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
-            indexedItemEvent "response.function_call_arguments.delta"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
-                [optionalField "delta" delta]
-        ResponseFunctionCallArgumentsDoneEvent { arguments, functionName, streamItemId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
-            indexedItemEvent "response.function_call_arguments.done"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
-                [ optionalField "name" functionName
-                , optionalField "arguments" arguments
-                ]
-        ResponseCustomToolInputDeltaEvent { delta, streamItemId, streamCallId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
-            indexedItemEvent "response.custom_tool_call_input.delta"
-                streamItemId streamCallId streamOutputIndex sequenceNumber eventExtraFields
-                [optionalField "delta" delta]
-        ResponseCustomToolInputDoneEvent { inputText, streamItemId, streamCallId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
-            indexedItemEvent "response.custom_tool_call_input.done"
-                streamItemId streamCallId streamOutputIndex sequenceNumber eventExtraFields
-                [optionalField "input" inputText]
-        ResponseReasoningSummaryPartAddedEvent { streamItemId, streamOutputIndex, summaryIndex, partValue, sequenceNumber, eventExtraFields } ->
-            indexedItemEvent "response.reasoning_summary_part.added"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
-                [ optionalField "summary_index" summaryIndex
-                , optionalField "part" partValue
-                ]
-        ResponseReasoningSummaryTextDoneEvent { streamItemId, streamOutputIndex, summaryIndex, text, sequenceNumber, eventExtraFields } ->
-            indexedItemEvent "response.reasoning_summary_text.done"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
-                [ optionalField "summary_index" summaryIndex
-                , optionalField "text" text
-                ]
-        ResponseErrorEvent { streamError, sequenceNumber, eventExtraFields } ->
-            topLevelErrorEvent streamError sequenceNumber eventExtraFields
-        ResponseNestedErrorEvent { streamError, sequenceNumber, eventExtraFields } ->
-            objectWith eventExtraFields
-                [ Just (field "type" ("error" :: Text))
-                , optionalField "sequence_number" sequenceNumber
-                , Just (field "error" streamError)
-                ]
-        OtherResponseStreamEvent { otherEventType, sequenceNumber, eventExtraFields } ->
-            objectWith eventExtraFields
-                [ Just (field "type" (streamEventTypeText otherEventType))
-                , optionalField "sequence_number" sequenceNumber
-                ]
-      where
-        lifecycleEvent eventType response sequenceNumber extras = objectWith extras
-            [ Just (field "type" (eventType :: Text))
-            , optionalField "sequence_number" sequenceNumber
-            , Just (field "response" response)
+-- | Encode a streaming event without constructing an intermediate JSON tree.
+responseStreamEventEncoder :: Encoder.Encoder ResponseStreamEvent
+responseStreamEventEncoder = Encoder.choose \case
+    ResponseCreatedEvent{} -> lifecycleEncoder "response.created"
+    ResponseInProgressEvent{} -> lifecycleEncoder "response.in_progress"
+    ResponseCompletedEvent{} -> lifecycleEncoder "response.completed"
+    ResponseDoneEvent{} -> lifecycleEncoder "response.done"
+    ResponseFailedEvent{} -> lifecycleEncoder "response.failed"
+    ResponseIncompleteEvent{} -> lifecycleEncoder "response.incomplete"
+    ResponseQueuedEvent{} -> lifecycleEncoder "response.queued"
+    ResponseOutputItemAddedEvent{} -> outputItemEncoder "response.output_item.added"
+    ResponseOutputItemDoneEvent{} -> outputItemEncoder "response.output_item.done"
+    ResponseOutputTextDeltaEvent{} ->
+        indexedEncoder "response.output_text.delta"
+            [ Encoder.optionalField "content_index" Encoder.int (.contentIndex)
+            , Encoder.optionalField "delta" Encoder.text (.delta)
+            , Encoder.optionalField "logprobs" Encoder.rawJson (.logprobs)
             ]
-        outputItemEvent eventType item outputIndex sequenceNumber extras = objectWith extras
-            [ Just (field "type" (eventType :: Text))
-            , optionalField "sequence_number" sequenceNumber
-            , optionalField "output_index" outputIndex
-            , Just (field "item" item)
+    ResponseOutputTextDoneEvent{} ->
+        indexedEncoder "response.output_text.done"
+            [ Encoder.optionalField "content_index" Encoder.int (.contentIndex)
+            , Encoder.optionalField "text" Encoder.text (.text)
             ]
-        indexedItemEvent eventType itemId callId outputIndex sequenceNumber extras payloadFields =
-            objectWith extras
-                ( [ Just (field "type" (eventType :: Text))
-                  , optionalField "sequence_number" sequenceNumber
-                  , optionalField "item_id" itemId
-                  , optionalField "call_id" callId
-                  , optionalField "output_index" outputIndex
-                  ]
-                    <> payloadFields
-                )
-        topLevelErrorEvent streamError sequenceNumber extras =
-            objectWith (KeyMap.union extras streamError.extraFields)
-                [ Just (field "type" ("error" :: Text))
-                , optionalField "sequence_number" sequenceNumber
-                , optionalField "code" streamError.code
-                , Just (field "message" streamError.message)
-                , optionalField "param" streamError.param
-                , optionalField "resets_in_seconds" streamError.retryAfter
-                ]
+    ResponseFunctionCallArgumentsDeltaEvent{} ->
+        indexedEncoder "response.function_call_arguments.delta"
+            [Encoder.optionalField "delta" Encoder.text (.delta)]
+    ResponseFunctionCallArgumentsDoneEvent{} ->
+        indexedEncoder "response.function_call_arguments.done"
+            [ Encoder.optionalField "name" Encoder.text (.functionName)
+            , Encoder.optionalField "arguments" Encoder.text (.arguments)
+            ]
+    ResponseCustomToolInputDeltaEvent{} ->
+        indexedCallEncoder "response.custom_tool_call_input.delta"
+            [Encoder.optionalField "delta" Encoder.text (.delta)]
+    ResponseCustomToolInputDoneEvent{} ->
+        indexedCallEncoder "response.custom_tool_call_input.done"
+            [Encoder.optionalField "input" Encoder.text (.inputText)]
+    ResponseReasoningSummaryPartAddedEvent{} ->
+        summaryPartEncoder "response.reasoning_summary_part.added"
+    ResponseReasoningSummaryPartDoneEvent{} ->
+        summaryPartEncoder "response.reasoning_summary_part.done"
+    ResponseReasoningSummaryTextDeltaEvent{} ->
+        summaryEncoder "response.reasoning_summary_text.delta"
+            [Encoder.optionalField "delta" Encoder.text (.delta)]
+    ResponseReasoningSummaryTextDoneEvent{} ->
+        summaryEncoder "response.reasoning_summary_text.done"
+            [Encoder.optionalField "text" Encoder.text (.text)]
+    ResponseReasoningTextDeltaEvent{} ->
+        indexedEncoder "response.reasoning_text.delta"
+            [ Encoder.optionalField "content_index" Encoder.int (.contentIndex)
+            , Encoder.optionalField "delta" Encoder.text (.delta)
+            ]
+    ResponseReasoningTextDoneEvent{} ->
+        indexedEncoder "response.reasoning_text.done"
+            [ Encoder.optionalField "content_index" Encoder.int (.contentIndex)
+            , Encoder.optionalField "text" Encoder.text (.text)
+            ]
+    ResponseErrorEvent{} -> topLevelErrorEncoder
+    ResponseNestedErrorEvent{} ->
+        eventEncoder "error"
+            [Encoder.field "error" responseStreamErrorEncoder (.streamError)]
+    OtherResponseStreamEvent { otherEventType } ->
+        eventEncoder (streamEventTypeText otherEventType) []
+  where
+    eventEncoder
+        :: Text
+        -> [Encoder.Field ResponseStreamEvent]
+        -> Encoder.Encoder ResponseStreamEvent
+    eventEncoder eventType fields =
+        Encoder.object
+            ( [ Encoder.field "type" Encoder.text (const eventType)
+              , Encoder.optionalField
+                    "sequence_number" Encoder.int (.sequenceNumber)
+              ]
+            <> fields
+            <> [Encoder.extensionsField (.eventExtraFields)]
+            )
 
-instance FromJSON ResponseStreamEvent where
-    parseJSON = withObject "ResponseStreamEvent" $ \o -> do
-        tag <- o .: "type"
-        sequenceNumber <- o .:? "sequence_number"
-        case parseStreamEventType tag of
-            EventResponseCreated -> lifecycle ResponseCreatedEvent sequenceNumber o
-            EventResponseInProgress -> lifecycle ResponseInProgressEvent sequenceNumber o
-            EventResponseCompleted -> lifecycle ResponseCompletedEvent sequenceNumber o
-            EventResponseDone -> ResponseDoneEvent
-                <$> o .: "response"
-                <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type", "response"]
-                    $ withoutNonNull ["sequence_number"] o
-                    )
-            EventResponseFailed -> lifecycle ResponseFailedEvent sequenceNumber o
-            EventResponseIncomplete -> lifecycle ResponseIncompleteEvent sequenceNumber o
-            EventResponseQueued -> lifecycle ResponseQueuedEvent sequenceNumber o
-            EventOutputItemAdded -> outputItem ResponseOutputItemAddedEvent sequenceNumber o
-            EventOutputItemDone -> outputItem ResponseOutputItemDoneEvent sequenceNumber o
-            EventFunctionCallArgumentsDelta ->
-                ResponseFunctionCallArgumentsDeltaEvent
-                    <$> o .:? "delta"
-                    <*> o .:? "item_id"
-                    <*> o .:? "output_index"
-                    <*> pure sequenceNumber
-                    <*> pure
-                        ( without ["type"]
-                        $ withoutNonNull
-                            ["sequence_number", "delta", "item_id", "output_index"]
-                            o
+    lifecycleEncoder eventType =
+        eventEncoder eventType
+            [Encoder.field "response" responseEncoder (.responseValue)]
+
+    outputItemEncoder eventType =
+        eventEncoder eventType
+            [ Encoder.optionalField "output_index" Encoder.int (.outputIndex)
+            , Encoder.field "item" responseItemEncoder (.item)
+            ]
+
+    indexedEncoder eventType fields =
+        eventEncoder eventType
+            ( [ Encoder.optionalField "item_id" Encoder.text (.streamItemId)
+              , Encoder.optionalField
+                    "output_index" Encoder.int (.streamOutputIndex)
+              ]
+            <> fields
+            )
+
+    indexedCallEncoder eventType fields =
+        indexedEncoder eventType
+            (Encoder.optionalField "call_id" Encoder.text (.streamCallId) : fields)
+
+    summaryEncoder eventType fields =
+        indexedEncoder eventType
+            (Encoder.optionalField "summary_index" Encoder.int (.summaryIndex) : fields)
+
+    summaryPartEncoder eventType =
+        summaryEncoder eventType
+            [Encoder.optionalField "part" Encoder.rawJson (.partValue)]
+
+    topLevelErrorEncoder =
+        Encoder.object
+            [ Encoder.field "type" Encoder.text
+                (const ("error" :: Text))
+            , Encoder.optionalField
+                "sequence_number" Encoder.int (.sequenceNumber)
+            , Encoder.optionalField "code" Encoder.text
+                (\event -> event.streamError.code)
+            , Encoder.field "message" Encoder.text
+                (\event -> event.streamError.message)
+            , Encoder.optionalField "param" Encoder.text
+                (\event -> event.streamError.param)
+            , Encoder.optionalField "resets_in_seconds" Encoder.int
+                (\event -> event.streamError.retryAfter)
+            , Encoder.extensionsField
+                (\event ->
+                    mergeExtensions
+                        event.eventExtraFields
+                        event.streamError.extraFields)
+            ]
+
+responseStreamErrorEncoder :: Encoder.Encoder ResponseStreamError
+responseStreamErrorEncoder =
+    Encoder.object
+        [ Encoder.optionalField "type" Encoder.text (.errorType)
+        , Encoder.optionalField "code" Encoder.text (.code)
+        , Encoder.field "message" Encoder.text (.message)
+        , Encoder.optionalField "param" Encoder.text (.param)
+        , Encoder.optionalField "resets_in_seconds" Encoder.int (.retryAfter)
+        , Encoder.extensionsField (.extraFields)
+        ]
+
+mergeExtensions :: Extensions -> Extensions -> Extensions
+mergeExtensions preferred fallback =
+    foldr (uncurry insertExtension) fallback (extensionsToList preferred)
+
+data DirectEvent = DirectEvent
+    { directType :: !(Maybe Text)
+    , directSequenceNumber :: !(Maybe Int)
+    , directResponse :: !(Maybe Response)
+    , directItem :: !(Maybe ResponseItem)
+    , directItemId :: !(Maybe Text)
+    , directOutputIndex :: !(Maybe Int)
+    , directContentIndex :: !(Maybe Int)
+    , directSummaryIndex :: !(Maybe Int)
+    , directDelta :: !(Maybe Text)
+    , directText :: !(Maybe Text)
+    , directLogprobs :: !(Maybe RawJson)
+    , directArguments :: !(Maybe Text)
+    , directName :: !(Maybe Text)
+    , directCallId :: !(Maybe Text)
+    , directInput :: !(Maybe Text)
+    , directPart :: !(Maybe RawJson)
+    , directNestedError :: !(Maybe ResponseStreamError)
+    , directCode :: !(Maybe Text)
+    , directMessage :: !(Maybe Text)
+    , directParam :: !(Maybe Text)
+    , directRetryAfter :: !(Maybe Int)
+    , directExtensions :: !Extensions
+    }
+
+-- | Decode an event whose type must be present in the JSON object.
+responseStreamEventDecoder :: Decoder.Decoder ResponseStreamEvent
+responseStreamEventDecoder = responseStreamEventDecoderWithType Nothing
+
+-- | Decode an event in one object traversal. A supplied transport type fills
+-- an omitted JSON type and must agree with it when both are present.
+responseStreamEventDecoderWithType
+    :: Maybe Text
+    -> Decoder.Decoder ResponseStreamEvent
+responseStreamEventDecoderWithType externalType =
+    case externalType of
+        Just "response.output_text.delta" ->
+            textDeltaDecoder EventOutputTextDelta
+        Just "response.reasoning_text.delta" ->
+            textDeltaDecoder EventReasoningTextDelta
+        Just "response.reasoning_summary_text.delta" ->
+            textDeltaDecoder EventReasoningSummaryTextDelta
+        _ -> Decoder.mapEither finish directEventDecoder
+  where
+    finish event = do
+        eventTypeText <- case (externalType, event.directType) of
+            (Nothing, Nothing) -> Left "missing required field type"
+            (Just supplied, Just actual)
+                | supplied /= actual ->
+                    Left
+                        ( "SSE event type " <> supplied
+                        <> " disagrees with JSON type " <> actual
                         )
-            EventFunctionCallArgumentsDone ->
-                ResponseFunctionCallArgumentsDoneEvent
-                    <$> o .:? "arguments"
-                    <*> o .:? "name"
-                    <*> o .:? "item_id"
-                    <*> o .:? "output_index"
-                    <*> pure sequenceNumber
-                    <*> pure
-                        ( without ["type"]
-                        $ withoutNonNull
-                            [ "sequence_number"
-                            , "arguments"
-                            , "name"
-                            , "item_id"
-                            , "output_index"
-                            ]
-                            o
+            (Just supplied, _) -> Right supplied
+            (_, Just actual) -> Right actual
+        buildEvent (parseStreamEventType eventTypeText) event
+
+data TextDeltaState = TextDeltaState
+    { textDeltaType :: !(Maybe Text)
+    , textDeltaSequenceNumber :: !(Maybe Int)
+    , textDeltaItemId :: !(Maybe Text)
+    , textDeltaOutputIndex :: !(Maybe Int)
+    , textDeltaContentIndex :: !(Maybe Int)
+    , textDeltaSummaryIndex :: !(Maybe Int)
+    , textDeltaValue :: !(Maybe Text)
+    , textDeltaLogprobs :: !(Maybe RawJson)
+    , textDeltaExtensions :: !Extensions
+    }
+
+textDeltaDecoder :: StreamEventType -> Decoder.Decoder ResponseStreamEvent
+textDeltaDecoder expectedType =
+    Decoder.object
+        (TextDeltaState
+            Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+            emptyExtensions)
+        [ field "type" Decoder.text \value state ->
+            state { textDeltaType = Just value }
+        , field "sequence_number" Decoder.int \value state ->
+            state { textDeltaSequenceNumber = Just value }
+        , field "item_id" Decoder.text \value state ->
+            state { textDeltaItemId = Just value }
+        , field "output_index" Decoder.int \value state ->
+            state { textDeltaOutputIndex = Just value }
+        , field "content_index" Decoder.int \value state ->
+            state { textDeltaContentIndex = Just value }
+        , field "summary_index" Decoder.int \value state ->
+            state { textDeltaSummaryIndex = Just value }
+        , field "delta" Decoder.text \value state ->
+            state { textDeltaValue = Just value }
+        , field "logprobs" Decoder.rawJson \value state ->
+            state { textDeltaLogprobs = Just value }
+        ]
+        (Decoder.unknownField Decoder.rawJson \key value state ->
+            Right state
+                { textDeltaExtensions =
+                    insertExtension key value state.textDeltaExtensions
+                })
+        finish
+  where
+    expectedText = streamEventTypeText expectedType
+    finish state = do
+        case state.textDeltaType of
+            Just actual
+                | actual /= expectedText ->
+                    Left
+                        ( "SSE event type " <> expectedText
+                        <> " disagrees with JSON type " <> actual
                         )
-            EventCustomToolInputDelta -> ResponseCustomToolInputDeltaEvent
-                <$> o .:? "delta"
-                <*> o .:? "item_id"
-                <*> o .:? "call_id"
-                <*> o .:? "output_index"
-                <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "delta", "item_id", "call_id", "output_index"]
-                        o
-                    )
-            EventCustomToolInputDone -> ResponseCustomToolInputDoneEvent
-                <$> o .:? "input"
-                <*> o .:? "item_id"
-                <*> o .:? "call_id"
-                <*> o .:? "output_index"
-                <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "input", "item_id", "call_id", "output_index"]
-                        o
-                    )
-            EventReasoningSummaryPartAdded -> ResponseReasoningSummaryPartAddedEvent
-                <$> o .:? "item_id"
-                <*> o .:? "output_index"
-                <*> o .:? "summary_index"
-                <*> o .:? "part"
-                <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "item_id", "output_index", "summary_index", "part"]
-                        o
-                    )
-            EventReasoningSummaryTextDone -> ResponseReasoningSummaryTextDoneEvent
-                <$> o .:? "item_id"
-                <*> o .:? "output_index"
-                <*> o .:? "summary_index"
-                <*> o .:? "text"
-                <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "item_id", "output_index", "summary_index", "text"]
-                        o
-                    )
-            EventError -> parseErrorEvent sequenceNumber o
-            eventType -> pure OtherResponseStreamEvent
-                { otherEventType = eventType
-                , sequenceNumber
-                , eventExtraFields =
-                    without ["type"] (withoutNonNull ["sequence_number"] o)
-                }
-      where
-        lifecycle constructor sequenceNumber object = constructor
-            <$> object .: "response"
-            <*> pure sequenceNumber
-            <*> pure
-                ( without ["type", "response"]
-                $ withoutNonNull ["sequence_number"] object
-                )
-        outputItem constructor sequenceNumber object = constructor
-            <$> object .: "item"
-            <*> object .:? "output_index"
-            <*> pure sequenceNumber
-            <*> pure
-                ( without ["type", "item"]
-                $ withoutNonNull ["sequence_number", "output_index"] object
-                )
-        parseErrorEvent sequenceNumber object = do
-            nestedError <- object .:? "error"
-            case nestedError of
-                Just streamError -> pure ResponseNestedErrorEvent
-                    { streamError
-                    , sequenceNumber
-                    , eventExtraFields =
-                        without ["type", "error"]
-                            (withoutNonNull ["sequence_number"] object)
+            _ -> Right ()
+        case expectedType of
+            EventOutputTextDelta ->
+                Right ResponseOutputTextDeltaEvent
+                    { delta = state.textDeltaValue
+                    , streamItemId = state.textDeltaItemId
+                    , streamOutputIndex = state.textDeltaOutputIndex
+                    , contentIndex = state.textDeltaContentIndex
+                    , logprobs = state.textDeltaLogprobs
+                    , sequenceNumber = state.textDeltaSequenceNumber
+                    , eventExtraFields = state.textDeltaExtensions
                     }
-                Nothing -> do
-                    streamError <- ResponseStreamError
-                        <$> pure Nothing
-                        <*> object .:? "code"
-                        <*> object .:? "message" .!= ""
-                        <*> object .:? "param"
-                        <*> object .:? "resets_in_seconds"
-                        <*> pure (without ["type", "sequence_number", "message"] object)
-                    pure ResponseErrorEvent
-                        { streamError
-                        , sequenceNumber
-                        , eventExtraFields =
-                            without ["type", "code", "message", "param", "resets_in_seconds"]
-                                (withoutNonNull ["sequence_number"] object)
-                        }
+            EventReasoningTextDelta ->
+                Right ResponseReasoningTextDeltaEvent
+                    { delta = state.textDeltaValue
+                    , streamItemId = state.textDeltaItemId
+                    , streamOutputIndex = state.textDeltaOutputIndex
+                    , contentIndex = state.textDeltaContentIndex
+                    , sequenceNumber = state.textDeltaSequenceNumber
+                    , eventExtraFields = state.textDeltaExtensions
+                    }
+            EventReasoningSummaryTextDelta ->
+                Right ResponseReasoningSummaryTextDeltaEvent
+                    { delta = state.textDeltaValue
+                    , streamItemId = state.textDeltaItemId
+                    , streamOutputIndex = state.textDeltaOutputIndex
+                    , summaryIndex = state.textDeltaSummaryIndex
+                    , sequenceNumber = state.textDeltaSequenceNumber
+                    , eventExtraFields = state.textDeltaExtensions
+                    }
+            _ -> Left "internal text delta decoder mismatch"
 
-parseStreamEventWithType :: Text -> Aeson.Value -> Parser ResponseStreamEvent
-parseStreamEventWithType suppliedType = withObject "ResponseStreamEvent" $ \o -> do
-    payloadType <- o .:? "type"
-    case payloadType of
-        Just actual | actual /= suppliedType ->
-            fail ("SSE event type " <> Text.unpack suppliedType <> " disagrees with JSON type " <> Text.unpack actual)
-        _ -> parseJSON (Aeson.Object (KeyMap.insert "type" (Aeson.String suppliedType) o))
+    field key decoder update =
+        Decoder.field key decoder \value state ->
+            Right (update value state)
+
+directEventDecoder :: Decoder.Decoder DirectEvent
+directEventDecoder =
+    Decoder.object
+        emptyDirectEvent
+        [ field "type" Decoder.text \value state ->
+            state { directType = Just value }
+        , optionalField "sequence_number" Decoder.int \value state ->
+            state { directSequenceNumber = value }
+        , optionalField "response" responseFragmentDecoder \value state ->
+            state { directResponse = value }
+        , optionalField "item" responseItemDecoder \value state ->
+            state { directItem = value }
+        , optionalField "item_id" Decoder.text \value state ->
+            state { directItemId = value }
+        , optionalField "output_index" Decoder.int \value state ->
+            state { directOutputIndex = value }
+        , optionalField "content_index" Decoder.int \value state ->
+            state { directContentIndex = value }
+        , optionalField "summary_index" Decoder.int \value state ->
+            state { directSummaryIndex = value }
+        , optionalField "delta" Decoder.text \value state ->
+            state { directDelta = value }
+        , optionalField "text" Decoder.text \value state ->
+            state { directText = value }
+        , optionalField "logprobs" Decoder.rawJson \value state ->
+            state { directLogprobs = value }
+        , optionalField "arguments" Decoder.text \value state ->
+            state { directArguments = value }
+        , optionalField "name" Decoder.text \value state ->
+            state { directName = value }
+        , optionalField "call_id" Decoder.text \value state ->
+            state { directCallId = value }
+        , optionalField "input" Decoder.text \value state ->
+            state { directInput = value }
+        , optionalField "part" Decoder.rawJson \value state ->
+            state { directPart = value }
+        , optionalField "error" responseStreamErrorDecoder \value state ->
+            state { directNestedError = value }
+        , optionalField "code" Decoder.text \value state ->
+            state { directCode = value }
+        , optionalField "message" Decoder.text \value state ->
+            state { directMessage = value }
+        , optionalField "param" Decoder.text \value state ->
+            state { directParam = value }
+        , optionalField "resets_in_seconds" Decoder.int \value state ->
+            state { directRetryAfter = value }
+        ]
+        (Decoder.unknownField Decoder.rawJson \key value state ->
+            Right state
+                { directExtensions =
+                    insertExtension key value state.directExtensions
+                })
+        Right
+  where
+    field key decoder update =
+        Decoder.field key decoder \value state ->
+            Right (update value state)
+    optionalField key decoder update =
+        Decoder.field key (Decoder.nullable decoder) \value state ->
+            Right (update value state)
+
+emptyDirectEvent :: DirectEvent
+emptyDirectEvent = DirectEvent
+    { directType = Nothing
+    , directSequenceNumber = Nothing
+    , directResponse = Nothing
+    , directItem = Nothing
+    , directItemId = Nothing
+    , directOutputIndex = Nothing
+    , directContentIndex = Nothing
+    , directSummaryIndex = Nothing
+    , directDelta = Nothing
+    , directText = Nothing
+    , directLogprobs = Nothing
+    , directArguments = Nothing
+    , directName = Nothing
+    , directCallId = Nothing
+    , directInput = Nothing
+    , directPart = Nothing
+    , directNestedError = Nothing
+    , directCode = Nothing
+    , directMessage = Nothing
+    , directParam = Nothing
+    , directRetryAfter = Nothing
+    , directExtensions = emptyExtensions
+    }
+
+buildEvent
+    :: StreamEventType
+    -> DirectEvent
+    -> Either Text ResponseStreamEvent
+buildEvent eventType event = case eventType of
+    EventResponseCreated -> lifecycle ResponseCreatedEvent
+    EventResponseInProgress -> lifecycle ResponseInProgressEvent
+    EventResponseCompleted -> lifecycle ResponseCompletedEvent
+    EventResponseDone -> lifecycle ResponseDoneEvent
+    EventResponseFailed -> lifecycle ResponseFailedEvent
+    EventResponseIncomplete -> lifecycle ResponseIncompleteEvent
+    EventResponseQueued -> lifecycle ResponseQueuedEvent
+    EventOutputItemAdded -> outputItem ResponseOutputItemAddedEvent
+    EventOutputItemDone -> outputItem ResponseOutputItemDoneEvent
+    EventOutputTextDelta -> Right ResponseOutputTextDeltaEvent
+        { delta = event.directDelta
+        , streamItemId = event.directItemId
+        , streamOutputIndex = event.directOutputIndex
+        , contentIndex = event.directContentIndex
+        , logprobs = event.directLogprobs
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+    EventOutputTextDone -> Right ResponseOutputTextDoneEvent
+        { text = event.directText
+        , streamItemId = event.directItemId
+        , streamOutputIndex = event.directOutputIndex
+        , contentIndex = event.directContentIndex
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+    EventFunctionCallArgumentsDelta ->
+        Right ResponseFunctionCallArgumentsDeltaEvent
+            { delta = event.directDelta
+            , streamItemId = event.directItemId
+            , streamOutputIndex = event.directOutputIndex
+            , sequenceNumber = event.directSequenceNumber
+            , eventExtraFields = event.directExtensions
+            }
+    EventFunctionCallArgumentsDone ->
+        Right ResponseFunctionCallArgumentsDoneEvent
+            { arguments = event.directArguments
+            , functionName = event.directName
+            , streamItemId = event.directItemId
+            , streamOutputIndex = event.directOutputIndex
+            , sequenceNumber = event.directSequenceNumber
+            , eventExtraFields = event.directExtensions
+            }
+    EventCustomToolInputDelta -> Right ResponseCustomToolInputDeltaEvent
+        { delta = event.directDelta
+        , streamItemId = event.directItemId
+        , streamCallId = event.directCallId
+        , streamOutputIndex = event.directOutputIndex
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+    EventCustomToolInputDone -> Right ResponseCustomToolInputDoneEvent
+        { inputText = event.directInput
+        , streamItemId = event.directItemId
+        , streamCallId = event.directCallId
+        , streamOutputIndex = event.directOutputIndex
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+    EventReasoningSummaryPartAdded ->
+        summaryPart ResponseReasoningSummaryPartAddedEvent
+    EventReasoningSummaryPartDone ->
+        summaryPart ResponseReasoningSummaryPartDoneEvent
+    EventReasoningSummaryTextDelta ->
+        Right ResponseReasoningSummaryTextDeltaEvent
+            { delta = event.directDelta
+            , streamItemId = event.directItemId
+            , streamOutputIndex = event.directOutputIndex
+            , summaryIndex = event.directSummaryIndex
+            , sequenceNumber = event.directSequenceNumber
+            , eventExtraFields = event.directExtensions
+            }
+    EventReasoningSummaryTextDone ->
+        Right ResponseReasoningSummaryTextDoneEvent
+            { streamItemId = event.directItemId
+            , streamOutputIndex = event.directOutputIndex
+            , summaryIndex = event.directSummaryIndex
+            , text = event.directText
+            , sequenceNumber = event.directSequenceNumber
+            , eventExtraFields = event.directExtensions
+            }
+    EventReasoningTextDelta -> Right ResponseReasoningTextDeltaEvent
+        { delta = event.directDelta
+        , streamItemId = event.directItemId
+        , streamOutputIndex = event.directOutputIndex
+        , contentIndex = event.directContentIndex
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+    EventReasoningTextDone -> Right ResponseReasoningTextDoneEvent
+        { text = event.directText
+        , streamItemId = event.directItemId
+        , streamOutputIndex = event.directOutputIndex
+        , contentIndex = event.directContentIndex
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+    EventError -> case event.directNestedError of
+        Just streamError -> Right ResponseNestedErrorEvent
+            { streamError
+            , sequenceNumber = event.directSequenceNumber
+            , eventExtraFields = event.directExtensions
+            }
+        Nothing -> Right ResponseErrorEvent
+            { streamError = ResponseStreamError
+                { errorType = Nothing
+                , code = event.directCode
+                , message = maybe "" id event.directMessage
+                , param = event.directParam
+                , retryAfter = event.directRetryAfter
+                , extraFields = emptyExtensions
+                }
+            , sequenceNumber = event.directSequenceNumber
+            , eventExtraFields = event.directExtensions
+            }
+    other -> Right OtherResponseStreamEvent
+        { otherEventType = other
+        , sequenceNumber = event.directSequenceNumber
+        , eventExtraFields = event.directExtensions
+        }
+  where
+    lifecycle constructor = constructor
+        <$> maybe (Left "missing required field response") Right
+            event.directResponse
+        <*> pure event.directSequenceNumber
+        <*> pure event.directExtensions
+    outputItem constructor = constructor
+        <$> maybe (Left "missing required field item") Right event.directItem
+        <*> pure event.directOutputIndex
+        <*> pure event.directSequenceNumber
+        <*> pure event.directExtensions
+    summaryPart constructor = Right (constructor
+        event.directItemId
+        event.directOutputIndex
+        event.directSummaryIndex
+        event.directPart
+        event.directSequenceNumber
+        event.directExtensions)
+
+responseStreamErrorDecoder :: Decoder.Decoder ResponseStreamError
+responseStreamErrorDecoder =
+    Decoder.objectFields $
+        ResponseStreamError
+            <$> Decoder.optionalField "type" Decoder.text
+            <*> Decoder.optionalField "code" Decoder.text
+            <*> Decoder.defaultField "" "message" Decoder.text
+            <*> Decoder.optionalField "param" Decoder.text
+            <*> Decoder.optionalField
+                "resets_in_seconds"
+                Decoder.int
+            <*> Decoder.extensionFields

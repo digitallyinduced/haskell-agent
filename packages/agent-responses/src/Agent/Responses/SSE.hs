@@ -1,17 +1,26 @@
 -- | Incremental decoding for provider-neutral Responses SSE events.
 module Agent.Responses.SSE
     ( SseDecoder
+    , SseFrame(..)
     , newSseDecoder
+    , feedSseFrameDecoder
+    , finishSseFrameDecoder
+    , feedSseDecoderWith
+    , finishSseDecoderWith
     , feedSseDecoder
     , finishSseDecoder
     , parseSseEvents
     ) where
 
 import Agent.Error (ApiError(..))
-import qualified Agent.Responses.Codec as ResponsesCodec
-import Agent.Responses.Types (ResponseStreamEvent)
-import qualified Data.Aeson as Aeson
+import qualified Agent.Json.Decoder as Decoder
+import Agent.Responses.Types
+    ( ResponseStreamEvent
+    , responseStreamEventDecoderWithType
+    )
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
+import Data.Functor.Identity (Identity(..))
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -28,6 +37,14 @@ data SseDecoder = SseDecoder
     , decoderEventBytes :: !Int
     }
 
+-- | A complete SSE event payload, retaining the optional transport-level
+-- event type and strict JSON bytes for the caller's chosen decoder backend.
+data SseFrame = SseFrame
+    { sseFrameEventType :: !(Maybe Text)
+    , sseFrameData :: !BS.ByteString
+    }
+    deriving stock (Eq, Show)
+
 newSseDecoder :: SseDecoder
 newSseDecoder = SseDecoder
     { decoderLineChunksRev = []
@@ -42,6 +59,16 @@ feedSseDecoder
     -> BS.ByteString
     -> Either ApiError (SseDecoder, [ResponseStreamEvent])
 feedSseDecoder decoder chunk =
+    runIdentity $
+        feedSseDecoderWith (pure . decodeFrame) decoder chunk
+
+-- | Feed an arbitrary HTTP body chunk and return complete strict frames
+-- without selecting a JSON backend.
+feedSseFrameDecoder
+    :: SseDecoder
+    -> BS.ByteString
+    -> Either ApiError (SseDecoder, [SseFrame])
+feedSseFrameDecoder decoder chunk =
     decodeAvailable decoder chunk []
   where
     decodeAvailable current bytes events
@@ -63,10 +90,33 @@ feedSseDecoder decoder chunk =
                         (BS.tail restWithNewline)
                         (maybe events (: events) decoded)
 
+-- | Feed bytes and decode complete frames with a caller-supplied backend.
+-- The callback can close over a decoder session scoped by the caller.
+feedSseDecoderWith
+    :: Applicative f
+    => (SseFrame -> f (Maybe event))
+    -> SseDecoder
+    -> BS.ByteString
+    -> f (Either ApiError (SseDecoder, [event]))
+feedSseDecoderWith decode decoder chunk =
+    case feedSseFrameDecoder decoder chunk of
+        Left err -> pure (Left err)
+        Right (next, frames) ->
+            fmap
+                (Right . (next,) . Maybe.catMaybes)
+                (traverse decode frames)
+
 -- | Finish an SSE stream, accepting a final event without a trailing blank
 -- line.
 finishSseDecoder :: SseDecoder -> Either ApiError [ResponseStreamEvent]
-finishSseDecoder decoder = do
+finishSseDecoder decoder =
+    runIdentity $
+        finishSseDecoderWith (pure . decodeFrame) decoder
+
+-- | Finish framing an SSE stream, accepting a final event without a trailing
+-- blank line.
+finishSseFrameDecoder :: SseDecoder -> Either ApiError [SseFrame]
+finishSseFrameDecoder decoder = do
     (afterLine, lineEvent) <-
         if null decoder.decoderLineChunksRev
             then Right (decoder, Nothing)
@@ -74,8 +124,22 @@ finishSseDecoder decoder = do
                 let line = completeLine decoder
                     withoutLine = decoder { decoderLineChunksRev = [] }
                 in consumeLine withoutLine line
-    blockEvent <- parseBlockLines (reverse afterLine.decoderBlockLinesRev)
+    blockEvent <- frameBlockLines (reverse afterLine.decoderBlockLinesRev)
     pure (Maybe.catMaybes [lineEvent, blockEvent])
+
+-- | Finish framing and decode trailing frames with a caller-supplied backend.
+finishSseDecoderWith
+    :: Applicative f
+    => (SseFrame -> f (Maybe event))
+    -> SseDecoder
+    -> f (Either ApiError [event])
+finishSseDecoderWith decode decoder =
+    case finishSseFrameDecoder decoder of
+        Left err -> pure (Left err)
+        Right frames ->
+            fmap
+                (Right . Maybe.catMaybes)
+                (traverse decode frames)
 
 -- | Decode a complete SSE body into the canonical typed Responses event union.
 parseSseEvents :: Text -> Either ApiError [ResponseStreamEvent]
@@ -116,10 +180,10 @@ completeLine =
 consumeLine
     :: SseDecoder
     -> BS.ByteString
-    -> Either ApiError (SseDecoder, Maybe ResponseStreamEvent)
+    -> Either ApiError (SseDecoder, Maybe SseFrame)
 consumeLine decoder line
     | BS.null line = do
-        decoded <- parseBlockLines (reverse decoder.decoderBlockLinesRev)
+        decoded <- frameBlockLines (reverse decoder.decoderBlockLinesRev)
         pure (newSseDecoder, decoded)
     | otherwise =
         Right
@@ -130,61 +194,52 @@ consumeLine decoder line
             , Nothing
             )
 
-parseBlockLines :: [BS.ByteString] -> Either ApiError (Maybe ResponseStreamEvent)
-parseBlockLines [] = Right Nothing
-parseBlockLines lines = parseBlockBytes (BS.intercalate "\n" lines)
+frameBlockLines :: [BS.ByteString] -> Either ApiError (Maybe SseFrame)
+frameBlockLines [] = Right Nothing
+frameBlockLines lines = frameBlockBytes (BS.intercalate "\n" lines)
 
-parseBlockBytes :: BS.ByteString -> Either ApiError (Maybe ResponseStreamEvent)
-parseBlockBytes bytes = case Text.decodeUtf8' bytes of
+frameBlockBytes :: BS.ByteString -> Either ApiError (Maybe SseFrame)
+frameBlockBytes bytes = case Text.decodeUtf8' bytes of
     Left err -> Left $ JsonDecodeError
         ("Invalid UTF-8 in Responses SSE event: " <> Text.pack (show err))
         (Text.take 2000 (Text.decodeUtf8With Text.lenientDecode bytes))
-    Right block -> parseBlock (Text.replace "\r\n" "\n" block)
+    Right _ -> Right (frameBlock bytes)
 
-parseBlock :: Text -> Either ApiError (Maybe ResponseStreamEvent)
-parseBlock block
-    | Text.null dataText = Right Nothing
-    | Text.strip dataText == "[DONE]" = Right Nothing
-    | otherwise = decodeEvent eventType dataText
+frameBlock :: BS.ByteString -> Maybe SseFrame
+frameBlock block
+    | BS.null dataBytes = Nothing
+    | Text.strip (Text.decodeUtf8 dataBytes) == "[DONE]" = Nothing
+    | otherwise = Just SseFrame
+        { sseFrameEventType = eventType
+        , sseFrameData = dataBytes
+        }
   where
-    blockLines = Text.lines block
+    blockLines = BS8.lines block
     eventType = Maybe.listToMaybe
-        [ Text.strip (Text.drop 6 line)
+        [ Text.strip (Text.decodeUtf8 (BS.drop 6 line))
         | line <- blockLines
-        , "event:" `Text.isPrefixOf` line
+        , "event:" `BS.isPrefixOf` line
         ]
-    dataText = Text.intercalate "\n"
-        [ stripOptionalSpace (Text.drop 5 line)
+    dataBytes = BS.intercalate "\n"
+        [ stripOptionalSpace (BS.drop 5 line)
         | line <- blockLines
-        , "data:" `Text.isPrefixOf` line
+        , "data:" `BS.isPrefixOf` line
         ]
 
-    stripOptionalSpace line = Maybe.fromMaybe line (Text.stripPrefix " " line)
+    stripOptionalSpace line = Maybe.fromMaybe line (BS.stripPrefix " " line)
 
 -- A malformed JSON payload should not tear down an otherwise healthy stream.
 -- Codex skips such frames (notably partial/unparseable output_item events)
 -- and continues decoding subsequent events. Framing/UTF-8 failures remain
 -- hard errors because there is no safe way to recover their boundaries.
-decodeEvent :: Maybe Text -> Text -> Either ApiError (Maybe ResponseStreamEvent)
-decodeEvent eventType dataText =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 dataText) of
-        Left _ -> Right Nothing
-        Right value ->
-            let decoded = case eventType of
-                    Just suppliedType ->
-                        ResponsesCodec.decodeResponseStreamEventWithType
-                            suppliedType
-                            value
-                    Nothing ->
-                        case ResponsesCodec.decodeResponseStreamEventValue value of
-                            Aeson.Success event -> Right event
-                            Aeson.Error err -> Left err
-            in case decoded of
-                -- A valid JSON object with an invalid/partial event payload
-                -- is also skippable. Unknown event types still decode to
-                -- OtherResponseStreamEvent and are therefore preserved.
-                Left _ -> Right Nothing
-                Right event -> Right (Just event)
+decodeFrame :: SseFrame -> Maybe ResponseStreamEvent
+decodeFrame SseFrame{sseFrameEventType, sseFrameData} =
+    -- Both malformed JSON and valid but invalid/partial event payloads are
+    -- skippable. Unknown event types decode to OtherResponseStreamEvent.
+    either (const Nothing) Just $
+        Decoder.decode
+            (responseStreamEventDecoderWithType sseFrameEventType)
+            sseFrameData
 
 dropTrailingCarriageReturn :: BS.ByteString -> BS.ByteString
 dropTrailingCarriageReturn bytes = case BS.unsnoc bytes of

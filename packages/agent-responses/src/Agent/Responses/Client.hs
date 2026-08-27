@@ -6,10 +6,11 @@ module Agent.Responses.Client
     ) where
 
 import Agent.Error (ApiError)
+import Agent.Responses.Codec (encodeResponseCreateParams)
 import qualified Agent.Responses.HttpSSE as HttpSSE
 import Agent.Responses.Types
 import Control.Retry (RetryPolicyM, retrying)
-import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Text (Text)
 import Network.HTTP.Simple (Request)
@@ -40,7 +41,7 @@ performResponsesRequest config request configureRequest =
             }
         config.clientBaseUrl
         config.clientTimeoutSeconds
-        (Aeson.encode request)
+        (LBS.fromStrict (encodeResponseCreateParams request))
         configureRequest
 
 -- | Retry a streaming operation only while replay remains invisible to its

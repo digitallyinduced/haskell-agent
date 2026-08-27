@@ -62,8 +62,8 @@ import Agent.TUI.Model
     , visibleTodoList
     )
 import Agent.TUI.Presentation (liveTodoPanelLines)
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LBS
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decoder as JsonDecoder
 import Data.IORef (IORef)
 import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
@@ -810,13 +810,14 @@ agentMessagePlainText message =
             _ -> []
         ]
 
-renderToolOutputValue :: Aeson.Value -> Text
-renderToolOutputValue = \case
-    Aeson.String text -> text
-    Aeson.Null -> ""
-    value ->
-        TextEncoding.decodeUtf8 $
-            LBS.toStrict (Aeson.encode value)
+renderToolOutputValue :: RawJson -> Text
+renderToolOutputValue value
+    | Right text <- JsonDecoder.decode JsonDecoder.text (rawJsonBytes value) =
+        text
+    | Right () <- JsonDecoder.decode (JsonDecoder.nullValue ())
+            (rawJsonBytes value) =
+        ""
+    | otherwise = TextEncoding.decodeUtf8 (rawJsonBytes value)
 
 normalizeTranscriptUi :: UiState -> UiState
 normalizeTranscriptUi state =

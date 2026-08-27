@@ -8,9 +8,12 @@ module Agent.Responses.HttpSSE
 import Agent.Error (ApiError(..))
 import Agent.Http.Header (parseRetryAfterSeconds)
 import Agent.Http.Url (trimTrailingSlash)
+import qualified Agent.Json.Decoder.Hermes as Hermes
+import qualified Agent.Responses.Hermes as ResponsesHermes
 import Agent.Responses.SSE
-    ( feedSseDecoder
-    , finishSseDecoder
+    ( SseFrame(..)
+    , feedSseDecoderWith
+    , finishSseDecoderWith
     , newSseDecoder
     )
 import Agent.Responses.Types
@@ -94,12 +97,19 @@ performResponsesHttpSse
                             (getResponseHeader "Retry-After" response))
                         bodyText
 
-    consumeSse body = go newSseDecoder []
+    consumeSse body =
+        -- Hermes environments are mutable parser scratch space. Scope one to
+        -- this response stream rather than sharing one across concurrent
+        -- requests or paying to allocate one for every SSE event.
+        Hermes.withDecoderSession \session ->
+            go session newSseDecoder []
       where
-        go decoder reversedEvents = do
+        go session decoder reversedEvents = do
             chunk <- HttpClient.brRead body
             if BS.null chunk
-                then case finishSseDecoder decoder of
+                then finishSseDecoderWith
+                    (decodeFrame session)
+                    decoder >>= \case
                     Left err -> pure (Left err)
                     Right trailing -> do
                         let delivered = takeThroughTerminal trailing
@@ -107,7 +117,10 @@ performResponsesHttpSse
                         pure $ buildResponse
                             (reverse reversedEvents
                                 <> filter retainForResponse delivered)
-                else case feedSseDecoder decoder chunk of
+                else feedSseDecoderWith
+                    (decodeFrame session)
+                    decoder
+                    chunk >>= \case
                     Left err -> pure (Left err)
                     Right (nextDecoder, events) -> do
                         let delivered = takeThroughTerminal events
@@ -116,7 +129,52 @@ performResponsesHttpSse
                             allEvents = reverse retained <> reversedEvents
                         if any isTerminal delivered
                             then pure (buildResponse (reverse allEvents))
-                            else go nextDecoder allEvents
+                            else go session nextDecoder allEvents
+
+        decodeFrame session SseFrame{sseFrameEventType, sseFrameData} = do
+            decoded <- case sseFrameEventType of
+                Just eventType
+                    | eventType == "response.output_text.delta" ->
+                        fmap (fmap toOutputTextDelta) $
+                            Hermes.decodeHermesIO
+                                session
+                                ResponsesHermes.textDeltaEventDecoder
+                                sseFrameData
+                    | eventType == "response.reasoning_text.delta" ->
+                        fmap (fmap toReasoningTextDelta) $
+                            Hermes.decodeHermesIO
+                                session
+                                ResponsesHermes.textDeltaEventDecoder
+                                sseFrameData
+                _ -> Hermes.decodeIO
+                    session
+                    (responseStreamEventDecoderWithType sseFrameEventType)
+                    sseFrameData
+            -- Malformed JSON and structurally invalid/partial events are
+            -- skippable. The framer reports size and UTF-8 failures before
+            -- decoding, because those do not have a safe recovery boundary.
+            pure (either (const Nothing) Just decoded)
+
+        toOutputTextDelta ResponsesHermes.TextDeltaFields{..} =
+                ResponseOutputTextDeltaEvent
+                    { delta
+                    , streamItemId = itemId
+                    , streamOutputIndex = outputIndex
+                    , contentIndex
+                    , logprobs
+                    , sequenceNumber
+                    , eventExtraFields = extensions
+                    }
+
+        toReasoningTextDelta ResponsesHermes.TextDeltaFields{..} =
+                ResponseReasoningTextDeltaEvent
+                    { delta
+                    , streamItemId = itemId
+                    , streamOutputIndex = outputIndex
+                    , contentIndex
+                    , sequenceNumber
+                    , eventExtraFields = extensions
+                    }
 
     consumeBody body = LBS.fromChunks <$> readChunks []
       where

@@ -6,6 +6,7 @@ import qualified Agent.OpenAI.Auth as Auth
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Responses.Types as OpenAI
 import Agent.OpenAI.WebSocketClient (CodexConn, sendWsRequestWithRawEvents, withCodexWs)
+import Agent.OpenAI.JsonCompat (rawText, rawValue)
 
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
@@ -158,7 +159,7 @@ echoTextTool =
     OpenAI.FunctionToolValue OpenAI.FunctionTool
         { OpenAI.name = "echo_text"
         , OpenAI.description = Just "Echoes the provided text."
-        , OpenAI.parameters = Just (Aeson.object
+        , OpenAI.parameters = Just (rawValue (Aeson.object
             [ "type" Aeson..= ("object" :: Text)
             , "properties" Aeson..= Aeson.object
                 [ "text" Aeson..= Aeson.object
@@ -167,7 +168,7 @@ echoTextTool =
                     ]
                 ]
             , "required" Aeson..= (["text"] :: [Text])
-            ])
+            ]))
         , OpenAI.strict = Just True
         , OpenAI.extraFields = mempty
         }
@@ -198,7 +199,7 @@ functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCall
     , OpenAI.callId = callId
     , OpenAI.name = Nothing
     , OpenAI.namespace = Nothing
-    , OpenAI.output = Aeson.String output
+    , OpenAI.output = rawText output
     , OpenAI.status = Nothing
     , OpenAI.extraFields = mempty
     }

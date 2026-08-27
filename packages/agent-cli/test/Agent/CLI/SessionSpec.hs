@@ -1,5 +1,12 @@
 module Agent.CLI.SessionSpec (spec) where
 
+import Agent.Json (Extensions, RawJson, deleteExtension, emptyExtensions)
+import Agent.CLI.JsonCompat
+    ( extensionFromValue
+    , extensionsFromValueList
+    , rawValue
+    )
+
 import Agent.CLI.Session
 import Agent.CLI.Session.StoreCodec
     ( fromStoredResponseItem
@@ -58,7 +65,7 @@ import Test.QuickCheck
     , oneof
     , resize
     , sized
-    , suchThatMap
+    , suchThat
     , vectorOf
     , (===)
     )
@@ -111,7 +118,7 @@ storedContentPartRoundTrip (StoredRoundTripContentPart part) =
         , status = Just ItemCompleted
         , phase = Just "final"
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 genResponseItem :: Gen ResponseItem
@@ -150,10 +157,7 @@ genResponseMessage =
 
 genResponseAgentMessage :: Gen ResponseAgentMessage
 genResponseAgentMessage =
-    suchThatMap generate jsonRoundTrip
-  where
-    generate =
-        ResponseAgentMessage
+    ResponseAgentMessage
             <$> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
@@ -166,25 +170,16 @@ genResponseAgentMessage =
                     ])
                 genJsonObject
 
-jsonRoundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a) => a -> Maybe a
-jsonRoundTrip value =
-    case Aeson.fromJSON (Aeson.toJSON value) of
-        Aeson.Success decoded -> Just decoded
-        Aeson.Error _ -> Nothing
-
-withoutReservedKeys :: [Text.Text] -> Aeson.Object -> Aeson.Object
+withoutReservedKeys :: [Text.Text] -> Extensions -> Extensions
 withoutReservedKeys names object =
     foldl
-        (flip (KeyMap.delete . Key.fromText))
+        (flip deleteExtension)
         object
         names
 
 genAdditionalToolsItem :: Gen AdditionalToolsItem
 genAdditionalToolsItem =
-    suchThatMap generate jsonRoundTrip
-  where
-    generate =
-        AdditionalToolsItem
+    AdditionalToolsItem
             <$> genMaybe genText
             <*> genText
             <*> genSmallList genJsonValue
@@ -194,18 +189,12 @@ genAdditionalToolsItem =
 
 genCompactionTriggerItem :: Gen CompactionTriggerItem
 genCompactionTriggerItem =
-    suchThatMap generate jsonRoundTrip
-  where
-    generate =
-        CompactionTriggerItem
+    CompactionTriggerItem
             <$> fmap (withoutReservedKeys ["type"]) genJsonObject
 
 genCompactionItem :: Gen CompactionItem
 genCompactionItem =
-    suchThatMap generate jsonRoundTrip
-  where
-    generate =
-        CompactionItem
+    CompactionItem
             <$> genMaybe genText
             <*> genMaybe genText
             <*> fmap
@@ -295,13 +284,13 @@ genContentPart =
     oneof
         [ InputTextPart
             <$> genText
-            <*> genMaybe genJsonValue
+            <*> genMaybe genNonNullJsonValue
             <*> genJsonObject
         , InputImagePart
             <$> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
-            <*> genMaybe genJsonValue
+            <*> genMaybe genNonNullJsonValue
             <*> genJsonObject
         , InputFilePart
             <$> genMaybe genText
@@ -309,10 +298,10 @@ genContentPart =
             <*> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
-            <*> genMaybe genJsonValue
+            <*> genMaybe genNonNullJsonValue
             <*> genJsonObject
         , InputAudioPart
-            <$> genJsonValue
+            <$> genNonNullJsonValue
             <*> genJsonObject
         , OutputTextPart
             <$> genText
@@ -366,21 +355,29 @@ genTaggedObject prefix =
         <$> ((prefix <>) <$> genText)
         <*> genJsonObject
 
-genJsonObject :: Gen Aeson.Object
-genJsonObject = sized genJsonObjectAt
+genJsonObject :: Gen Extensions
+genJsonObject =
+    extensionsFromValueList . KeyMap.toList <$> sized genAesonObjectAt
 
-genJsonObjectAt :: Int -> Gen Aeson.Object
-genJsonObjectAt size = do
+genAesonObjectAt :: Int -> Gen Aeson.Object
+genAesonObjectAt size = do
     count <- chooseInt (0, min 4 (max 0 size))
     fields <-
         vectorOf count $
             (,)
                 <$> (Key.fromText <$> genText)
-                <*> resize (max 0 (size - 1)) genJsonValue
+                <*> resize (max 0 (size - 1)) genAesonValue
     pure (KeyMap.fromList fields)
 
-genJsonValue :: Gen Aeson.Value
-genJsonValue = sized go
+genJsonValue :: Gen RawJson
+genJsonValue = rawValue <$> genAesonValue
+
+genNonNullJsonValue :: Gen RawJson
+genNonNullJsonValue =
+    rawValue <$> suchThat genAesonValue (/= Aeson.Null)
+
+genAesonValue :: Gen Aeson.Value
+genAesonValue = sized go
   where
     go size
         | size <= 0 = scalar
@@ -391,9 +388,9 @@ genJsonValue = sized go
                     count <- chooseInt (0, min 4 size)
                     Aeson.toJSON
                         <$> vectorOf count
-                            (resize (size `div` 2) genJsonValue))
+                            (resize (size `div` 2) genAesonValue))
                 , (2, Aeson.Object
-                        <$> genJsonObjectAt (size `div` 2))
+                        <$> genAesonObjectAt (size `div` 2))
                 ]
 
     scalar =
@@ -499,7 +496,7 @@ spec = describe "Agent.CLI.Session" do
                             Nothing
                             (Just imageUrl)
                             Nothing
-                            KeyMap.empty
+                            emptyExtensions
                         , InputFilePart
                             Nothing
                             (Just fileData)
@@ -507,13 +504,13 @@ spec = describe "Agent.CLI.Session" do
                             Nothing
                             (Just "notes.txt")
                             Nothing
-                            KeyMap.empty
+                            emptyExtensions
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
             case toStoredResponseItem item of
                 StoredMessageItem StoredMessage
@@ -549,7 +546,7 @@ spec = describe "Agent.CLI.Session" do
                             Nothing
                             (Just "https://example.com/image.png")
                             Nothing
-                            KeyMap.empty
+                            emptyExtensions
                         , InputFilePart
                             Nothing
                             (Just "data:text/plain;base64,not base64")
@@ -557,13 +554,13 @@ spec = describe "Agent.CLI.Session" do
                             Nothing
                             Nothing
                             Nothing
-                            KeyMap.empty
+                            emptyExtensions
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
             fromStoredResponseItem (toStoredResponseItem item)
                 `shouldBe` Right item
@@ -596,7 +593,7 @@ spec = describe "Agent.CLI.Session" do
                         , phase = Nothing
                         , passthrough = Nothing
                         , extraFields =
-                            KeyMap.singleton
+                            extensionFromValue
                                 "provider_extension"
                                 (Aeson.Bool True)
                         }
@@ -607,28 +604,33 @@ spec = describe "Agent.CLI.Session" do
                                 { text = "input"
                                 , promptCacheBreakpoint =
                                     Just
-                                        (Aeson.object
+                                        (rawValue (Aeson.object
                                             ["scope" Aeson..= ("turn" :: Text.Text)])
-                                , extraFields = KeyMap.empty
+                                        )
+                                , extraFields = emptyExtensions
                                 }
                             , OutputTextPart
                                 { text = "output"
                                 , annotations =
                                     Just
-                                        [ Aeson.object
-                                            ["type" Aeson..= ("citation" :: Text.Text)]
+                                        [ rawValue (Aeson.object
+                                            [ "type" Aeson..=
+                                                ("citation" :: Text.Text)
+                                            ])
                                         ]
                                 , logprobs =
                                     Just
-                                        [ Aeson.object
-                                            ["token" Aeson..= ("output" :: Text.Text)]
+                                        [ rawValue (Aeson.object
+                                            [ "token" Aeson..=
+                                                ("output" :: Text.Text)
+                                            ])
                                         ]
-                                , extraFields = KeyMap.empty
+                                , extraFields = emptyExtensions
                                 }
                             , UnknownContentPart TaggedObject
                                 { tag = "provider_content"
                                 , fields =
-                                    KeyMap.singleton
+                                    extensionFromValue
                                         "opaque"
                                         (Aeson.Bool True)
                                 }
@@ -637,7 +639,7 @@ spec = describe "Agent.CLI.Session" do
                         , status = Just ItemInProgress
                         , phase = Just "commentary"
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , FunctionCallItem FunctionCall
                         { itemId = Just "call-item"
@@ -647,7 +649,7 @@ spec = describe "Agent.CLI.Session" do
                         , arguments = "{\"command\":\"pwd\"}"
                         , encryptedFunctionArgs = Nothing
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , FunctionCallOutputItem FunctionCallOutput
                         { itemId = Just "output-item"
@@ -655,10 +657,11 @@ spec = describe "Agent.CLI.Session" do
                         , name = Nothing
                         , namespace = Nothing
                         , output =
-                            Aeson.object
+                            rawValue (Aeson.object
                                 ["stdout" Aeson..= ("/tmp/project" :: Text.Text)]
+                            )
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , CustomToolCallItem CustomToolCall
                         { itemId = Nothing
@@ -667,15 +670,15 @@ spec = describe "Agent.CLI.Session" do
                         , namespace = Nothing
                         , input = "*** Begin Patch"
                         , status = Nothing
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , CustomToolCallOutputItem CustomToolCallOutput
                         { itemId = Nothing
                         , callId = "custom-1"
                         , name = Just "apply_patch"
-                        , output = Aeson.String "Done"
+                        , output = rawValue (Aeson.String "Done")
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , ReasoningItemValue ReasoningItem
                         { itemId = Just "reasoning-1"
@@ -683,23 +686,23 @@ spec = describe "Agent.CLI.Session" do
                             [ ReasoningSummaryPart
                                 { partType = "summary_text"
                                 , text = Just "Checked the schema"
-                                , extraFields = KeyMap.empty
+                                , extraFields = emptyExtensions
                                 }
                             ]
                         , content =
                             Just
                                 [ ReasoningTextPart
                                     { text = "private placeholder"
-                                    , extraFields = KeyMap.empty
+                                    , extraFields = emptyExtensions
                                     }
                                 ]
                         , encryptedContent = Just "encrypted"
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , ItemReferenceValue ItemReference
                         { itemId = "call-item"
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , AgentMessageItem ResponseAgentMessage
                         { messageId = Nothing
@@ -709,23 +712,25 @@ spec = describe "Agent.CLI.Session" do
                             [ InputTextPart
                                 { text = "Found it."
                                 , promptCacheBreakpoint = Nothing
-                                , extraFields = KeyMap.empty
+                                , extraFields = emptyExtensions
                                 }
                             , EncryptedContentPart
                                 { encryptedContent = "opaque-provider-payload"
-                                , extraFields = KeyMap.empty
+                                , extraFields = emptyExtensions
                                 }
                             ]
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     , CompactionTriggerItemValue CompactionTriggerItem
-                        { extraFields = KeyMap.empty
+                        { extraFields = emptyExtensions
                         }
                     , UnknownResponseItem TaggedObject
                         { tag = "provider_item"
                         , fields =
-                            KeyMap.singleton "payload" (Aeson.String "opaque")
+                            extensionFromValue
+                                "payload"
+                                (Aeson.String "opaque")
                         }
                     ]
             traverse fromStoredResponseItem (map toStoredResponseItem items)
@@ -792,12 +797,12 @@ spec = describe "Agent.CLI.Session" do
                 let item = MessageItem ResponseMessage
                         { messageId = Nothing
                         , content = MessageContentParts
-                            [InputTextPart "hi" Nothing KeyMap.empty]
+                            [InputTextPart "hi" Nothing emptyExtensions]
                         , role = RoleUser
                         , status = Nothing
                         , phase = Nothing
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
+                        , extraFields = emptyExtensions
                         }
                     normalTurn = SessionTurn
                         { turnAt = fixedTime

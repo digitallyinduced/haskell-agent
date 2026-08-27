@@ -54,6 +54,19 @@ library
     other-modules:    Agent.Responses.Types.Common
     hs-source-dirs:   src
     build-depends:    base       >= 4.14 && < 5
-                    , aeson      >= 2.0
+                    , agent-json-codec == 0.1.0.0
+                    , bytestring >= 0.11 && < 0.13
                     , scientific
                     , text
+
+test-suite agent-responses-types-test
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    build-depends:    agent-json-codec
+                    , agent-responses-types
+                    , aeson >= 2.2 && < 2.4
+                    , base >= 4.14 && < 5
+                    , bytestring
+                    , hspec >= 2.11 && < 2.12

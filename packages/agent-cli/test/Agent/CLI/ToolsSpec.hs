@@ -1,5 +1,8 @@
 module Agent.CLI.ToolsSpec (spec) where
 
+import Agent.Json (Extensions, emptyExtensions, extensionsToList)
+
+import Agent.CLI.JsonCompat (decodeRawValue, rawValue)
 import Agent.CLI.Tools
 import Agent.Dialect
     ( claudeCodeDialect
@@ -42,7 +45,7 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do
                 tagged.tag `shouldBe` "web_search"
-                tagged.fields `shouldBe` KeyMap.empty
+                tagged.fields `shouldBe` emptyExtensions
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
     it "builds a strict function tool for OpenAI JSON tools" do
@@ -93,7 +96,8 @@ spec = describe "schemasFromAppTools" do
                 taskTool.description `shouldBe`
                     Just
                         "Use `spawn_subagent`, then get_command_or_subagent_output or kill_command_or_subagent."
-                Just (Aeson.Object parameters) <- pure taskTool.parameters
+                Just (Aeson.Object parameters) <-
+                    pure (taskTool.parameters >>= decodeRawValue)
                 Just (Aeson.Object properties) <-
                     pure (KeyMap.lookup "properties" parameters)
                 KeyMap.member "background" properties `shouldBe` True
@@ -146,7 +150,7 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools codexDialect [tool] of
             [_, FunctionToolValue function] -> do
                 function.name `shouldBe` "gsc_site_get"
-                function.parameters `shouldBe` Just parameters
+                function.parameters `shouldBe` Just (rawValue parameters)
                 function.strict `shouldBe` Just False
             other -> expectationFailure
                 ("expected raw OpenAI function tool, got " <> show other)
@@ -165,7 +169,7 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools grokBuildDialect [tool] of
             [KnownResponseTool ToolWebSearch _, KnownResponseTool ToolXSearch _, FunctionToolValue function] -> do
                 function.name `shouldBe` "seo_auth_status"
-                function.parameters `shouldBe` Just parameters
+                function.parameters `shouldBe` Just (rawValue parameters)
                 function.strict `shouldBe` Nothing
             other -> expectationFailure
                 ("expected raw Grok function tool, got " <> show other)
@@ -174,9 +178,9 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools codexDialect [patchTool] of
             [_, KnownResponseTool ToolCustom tagged] -> do
                 tagged.tag `shouldBe` "custom"
-                KeyMap.lookup "name" tagged.fields
+                KeyMap.lookup "name" (aesonFields tagged.fields)
                     `shouldBe` Just (Aeson.String "apply_patch")
-                case KeyMap.lookup "format" tagged.fields of
+                case KeyMap.lookup "format" (aesonFields tagged.fields) of
                     Just (Aeson.Object format) -> do
                         KeyMap.lookup "syntax" format `shouldBe` Just (Aeson.String "lark")
                         let definition = KeyMap.lookup "definition" format
@@ -196,7 +200,7 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools codexDialect [jsonTool, spawn] of
             [_, FunctionToolValue _, KnownResponseTool ToolNamespace tagged] -> do
                 tagged.tag `shouldBe` "namespace"
-                KeyMap.lookup "name" tagged.fields
+                KeyMap.lookup "name" (aesonFields tagged.fields)
                     `shouldBe` Just (Aeson.String "collaboration")
             other -> expectationFailure ("expected namespace tool, got " <> show other)
 
@@ -207,7 +211,7 @@ spec = describe "schemasFromAppTools" do
                 (noArgsTool "wait_agent" (pure (Right "ok")))
         case schemasFromAppTools codexDialect [wait] of
             [_, KnownResponseTool ToolNamespace tagged] ->
-                case KeyMap.lookup "tools" tagged.fields of
+                case KeyMap.lookup "tools" (aesonFields tagged.fields) of
                     Just (Aeson.Array tools) -> case toList tools of
                         [Aeson.Object tool] -> do
                             Just (Aeson.Object parameters) <-
@@ -262,7 +266,7 @@ spec = describe "schemasFromAppTools" do
                     [function] -> do
                         function.strict `shouldBe` Just True
                         Just (Aeson.Object parameters) <-
-                            pure function.parameters
+                            pure (function.parameters >>= decodeRawValue)
                         KeyMap.lookup "required" parameters
                             `shouldBe` Just
                                 (Aeson.toJSON
@@ -288,7 +292,7 @@ spec = describe "schemasFromAppTools" do
                             <> show other)
                 case namespaces of
                     [tagged] ->
-                        case KeyMap.lookup "tools" tagged.fields of
+                        case KeyMap.lookup "tools" (aesonFields tagged.fields) of
                             Just (Aeson.Array tools) -> do
                                 let spawnTools =
                                         mapMaybe spawnAgentObject (toList tools)
@@ -373,12 +377,19 @@ spawnAgentObject _ = Nothing
 
 required_ :: FunctionTool -> Maybe Aeson.Value
 required_ tool = do
-    Aeson.Object parameters <- tool.parameters
+    Aeson.Object parameters <- tool.parameters >>= decodeRawValue
     KeyMap.lookup "required" parameters
 
 offsetType :: FunctionTool -> Maybe Aeson.Value
 offsetType tool = do
-    Aeson.Object parameters <- tool.parameters
+    Aeson.Object parameters <- tool.parameters >>= decodeRawValue
     Aeson.Object properties <- KeyMap.lookup "properties" parameters
     Aeson.Object offset <- KeyMap.lookup (Key.fromText "offset") properties
     KeyMap.lookup "type" offset
+
+aesonFields :: Extensions -> Aeson.Object
+aesonFields =
+    KeyMap.fromList
+        . mapMaybe (\(name, value) ->
+            (,) (Key.fromText name) <$> decodeRawValue value)
+        . extensionsToList

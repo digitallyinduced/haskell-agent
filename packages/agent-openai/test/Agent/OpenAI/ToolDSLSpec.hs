@@ -1,6 +1,7 @@
 module Agent.OpenAI.ToolDSLSpec (spec) where
 
 import Agent.OpenAI.ToolDSL
+import Agent.OpenAI.JsonCompat (decodeRawValue)
 import Agent.Responses.Types (FunctionTool(..), ResponseTool(..))
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
@@ -170,7 +171,8 @@ spec = do
 
 -- | Extract the parameters.properties.<name> schema from a built tool.
 propertyField :: Text -> ResponseTool -> Maybe Aeson.Value
-propertyField name (FunctionToolValue FunctionTool { parameters = Just (Aeson.Object params) }) =
+propertyField name (FunctionToolValue FunctionTool { parameters = Just raw }) = do
+    Aeson.Object params <- decodeRawValue raw
     case KeyMap.lookup "properties" params of
         Just (Aeson.Object props) -> KeyMap.lookup (Key.fromText name) props
         _                         -> Nothing
@@ -178,12 +180,14 @@ propertyField _ _ = Nothing
 
 -- | Extract the parameters.required array.
 required_ :: ResponseTool -> Maybe Aeson.Value
-required_ (FunctionToolValue FunctionTool { parameters = Just (Aeson.Object params) }) =
+required_ (FunctionToolValue FunctionTool { parameters = Just raw }) = do
+    Aeson.Object params <- decodeRawValue raw
     KeyMap.lookup "required" params
 required_ _ = Nothing
 
 additionalProperties_ :: ResponseTool -> Maybe Aeson.Value
-additionalProperties_ (FunctionToolValue FunctionTool { parameters = Just (Aeson.Object params) }) =
+additionalProperties_ (FunctionToolValue FunctionTool { parameters = Just raw }) = do
+    Aeson.Object params <- decodeRawValue raw
     KeyMap.lookup "additionalProperties" params
 additionalProperties_ _ = Nothing
 

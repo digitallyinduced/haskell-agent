@@ -3,7 +3,11 @@ module Agent.Responses.Types
     ( -- * Create request
       ResponseCreateParams(..)
     , defaultResponseCreateParams
+    , responseCreateParamsEncoder
+    , responseCreateParamsDecoder
     , ResponseInput(..)
+    , responseInputEncoder
+    , responseInputDecoder
     , ResponseInclude(..)
     , ContextManagement(..)
     , Conversation(..)
@@ -18,6 +22,8 @@ module Agent.Responses.Types
 
       -- * Items and content
     , ResponseItem(..)
+    , responseItemEncoder
+    , responseItemDecoder
     , ResponseItemType(..)
     , parseResponseItemType
     , responseItemTypeText
@@ -36,8 +42,14 @@ module Agent.Responses.Types
     , CompactionTriggerItem(..)
     , ContextCompactionItem(..)
     , ResponseRole(..)
+    , responseRoleEncoder
+    , responseRoleDecoder
     , MessageContent(..)
+    , messageContentEncoder
+    , messageContentDecoder
     , ResponseContentPart(..)
+    , responseContentPartEncoder
+    , responseContentPartDecoder
     , ItemStatus(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
@@ -50,6 +62,8 @@ module Agent.Responses.Types
 
       -- * Tools
     , ResponseTool(..)
+    , responseToolEncoder
+    , responseToolDecoder
     , ResponseToolType(..)
     , responseToolTypeText
     , knownResponseTool
@@ -57,6 +71,8 @@ module Agent.Responses.Types
 
       -- * Response
     , Response(..)
+    , responseEncoder
+    , responseDecoder
     , ResponseStatus(..)
     , ResponseError(..)
     , IncompleteDetails(..)
@@ -70,7 +86,9 @@ module Agent.Responses.Types
     , responseStreamEventType
     , responseStreamEventSequenceNumber
     , streamEventTypeText
-    , parseStreamEventWithType
+    , responseStreamEventEncoder
+    , responseStreamEventDecoder
+    , responseStreamEventDecoderWithType
     , unparsedStreamEventTypeText
     ) where
 

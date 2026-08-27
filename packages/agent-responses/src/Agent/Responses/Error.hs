@@ -8,9 +8,7 @@ module Agent.Responses.Error
     ) where
 
 import Agent.Error
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Agent.Json.Decoder as Decoder
 import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -105,64 +103,188 @@ classifyHttpFailure status body =
         Left _ -> HttpError status (Text.take 1000 body)
 
 decodeProviderErrorPayload :: Text -> Either String ProviderErrorPayload
-decodeProviderErrorPayload body = do
-    value <- Aeson.eitherDecodeStrict' (Text.encodeUtf8 body)
-    maybe (Left "JSON body contains no provider error") Right (payloadFromValue value)
+decodeProviderErrorPayload body =
+    case Decoder.decode providerErrorValueDecoder (Text.encodeUtf8 body) of
+        Left err -> Left (Text.unpack (Decoder.renderDecodeError err))
+        Right Nothing -> Left "JSON body contains no provider error"
+        Right (Just payload) -> Right payload
 
-payloadFromValue :: Aeson.Value -> Maybe ProviderErrorPayload
-payloadFromValue = \case
-    Aeson.Object object ->
-        case KeyMap.lookup "error" object of
-            Just (Aeson.Object nested) -> payloadFromObjects object nested
-            Just (Aeson.String message)
-                | not (Text.null (Text.strip message)) ->
-                    Just ProviderErrorPayload
-                        { payloadType = providerTypeField object
-                        , payloadCode = scalarTextField "code" object
-                            `orElse` scalarTextField "error_code" object
-                        , payloadMessage = message
-                        , payloadRetryAfter = retryAfterField object
-                            `orElse` retryAfterFromMessage message
-                        }
-            Just value -> payloadFromValue value
-            Nothing -> payloadFromTopLevel object
-    Aeson.String message
-        | not (Text.null (Text.strip message)) ->
-            Just ProviderErrorPayload
-                { payloadType = Nothing
-                , payloadCode = Nothing
-                , payloadMessage = message
-                , payloadRetryAfter = retryAfterFromMessage message
-                }
-    Aeson.Array values -> firstJust (map payloadFromValue (foldr (:) [] values))
-    _ -> Nothing
+data ErrorField
+    = ErrorFieldAbsent
+    | ErrorFieldText !Text
+    | ErrorFieldPayload !(Maybe ProviderErrorPayload)
 
-payloadFromObjects :: Aeson.Object -> Aeson.Object -> Maybe ProviderErrorPayload
-payloadFromObjects outer nested = do
-    message <- firstTextField ["message", "error", "detail", "description"] nested
-        `orElse` textField "type" nested
-    pure ProviderErrorPayload
-        { payloadType = providerTypeField nested `orElse` providerTypeField outer
-        , payloadCode = scalarTextField "code" nested
-            `orElse` scalarTextField "error_code" nested
-            `orElse` scalarTextField "code" outer
-        , payloadMessage = message
-        , payloadRetryAfter = retryAfterField nested
-            `orElse` retryAfterField outer
-            `orElse` retryAfterFromMessage message
-        }
+data ErrorObjectState = ErrorObjectState
+    { stateType :: !(Maybe Text)
+    , stateCode :: !(Maybe Text)
+    , stateErrorCode :: !(Maybe Text)
+    , stateMessage :: !(Maybe Text)
+    , stateDetail :: !(Maybe Text)
+    , stateMsg :: !(Maybe Text)
+    , stateDescription :: !(Maybe Text)
+    , stateError :: !ErrorField
+    , stateRetryAfter :: !(Maybe Int)
+    , stateResetsInSeconds :: !(Maybe Int)
+    }
 
-payloadFromTopLevel :: Aeson.Object -> Maybe ProviderErrorPayload
-payloadFromTopLevel object = do
-    message <- firstTextField ["message", "detail", "msg", "description"] object
-    pure ProviderErrorPayload
-        { payloadType = providerTypeField object
-        , payloadCode = scalarTextField "code" object
-            `orElse` scalarTextField "error_code" object
-        , payloadMessage = message
-        , payloadRetryAfter = retryAfterField object
-            `orElse` retryAfterFromMessage message
-        }
+emptyErrorObjectState :: ErrorObjectState
+emptyErrorObjectState = ErrorObjectState
+    Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+    ErrorFieldAbsent Nothing Nothing
+
+providerErrorValueDecoder
+    :: Decoder.Decoder (Maybe ProviderErrorPayload)
+providerErrorValueDecoder =
+    Decoder.byType \case
+        Decoder.JsonString ->
+            Decoder.mapDecoder payloadFromMessage Decoder.text
+        Decoder.JsonArray ->
+            Decoder.mapDecoder firstJust
+                (Decoder.array providerErrorValueDecoder)
+        Decoder.JsonObject -> providerErrorObjectDecoder
+        _ -> Nothing <$ Decoder.skip
+  where
+    payloadFromMessage message
+        | Text.null (Text.strip message) = Nothing
+        | otherwise = Just ProviderErrorPayload
+            { payloadType = Nothing
+            , payloadCode = Nothing
+            , payloadMessage = message
+            , payloadRetryAfter = retryAfterFromMessage message
+            }
+
+providerErrorObjectDecoder
+    :: Decoder.Decoder (Maybe ProviderErrorPayload)
+providerErrorObjectDecoder =
+    Decoder.object
+        emptyErrorObjectState
+        [ textField "type" \value state ->
+            state { stateType = Just value }
+        , scalarField "code" \value state ->
+            state { stateCode = Just value }
+        , scalarField "error_code" \value state ->
+            state { stateErrorCode = Just value }
+        , textField "message" \value state ->
+            state { stateMessage = Just value }
+        , textField "detail" \value state ->
+            state { stateDetail = Just value }
+        , textField "msg" \value state ->
+            state { stateMsg = Just value }
+        , textField "description" \value state ->
+            state { stateDescription = Just value }
+        , Decoder.field "error" errorFieldDecoder \value state ->
+            Right state { stateError = value }
+        , retryField "retry_after" \value state ->
+            state { stateRetryAfter = Just value }
+        , retryField "resets_in_seconds" \value state ->
+            state { stateResetsInSeconds = Just value }
+        ]
+        (Decoder.unknownField Decoder.skip
+            \_ () state -> Right state)
+        (Right . finish)
+  where
+    textField name update =
+        Decoder.field name Decoder.text \value state ->
+            Right (update value state)
+    scalarField name update =
+        Decoder.field name scalarTextDecoder \value state ->
+            Right (update value state)
+    retryField name update =
+        Decoder.field name retryAfterDecoder \value state ->
+            Right (update value state)
+
+    finish state =
+        case state.stateError of
+            ErrorFieldPayload (Just nested) ->
+                Just nested
+                    { payloadType =
+                        nested.payloadType
+                            `orElse` normalizedProviderType state.stateType
+                    , payloadCode =
+                        nested.payloadCode
+                            `orElse` state.stateCode
+                            `orElse` state.stateErrorCode
+                    , payloadRetryAfter =
+                        nested.payloadRetryAfter
+                            `orElse` retry state
+                    }
+            ErrorFieldText message ->
+                payload state message
+            _ ->
+                firstJust
+                    [ state.stateMessage
+                    , state.stateDetail
+                    , state.stateMsg
+                    , state.stateDescription
+                    ]
+                    >>= payload state
+
+    retry state =
+        state.stateResetsInSeconds `orElse` state.stateRetryAfter
+    payload state message
+        | Text.null (Text.strip message) = Nothing
+        | otherwise = Just ProviderErrorPayload
+            { payloadType = normalizedProviderType state.stateType
+            , payloadCode =
+                state.stateCode `orElse` state.stateErrorCode
+            , payloadMessage = message
+            , payloadRetryAfter =
+                retry state `orElse` retryAfterFromMessage message
+            }
+
+errorFieldDecoder :: Decoder.Decoder ErrorField
+errorFieldDecoder =
+    Decoder.byType \case
+        Decoder.JsonString ->
+            ErrorFieldText <$> Decoder.text
+        Decoder.JsonObject ->
+            ErrorFieldPayload <$> providerErrorObjectDecoder
+        Decoder.JsonArray ->
+            ErrorFieldPayload
+                . firstJust
+                <$> Decoder.array providerErrorValueDecoder
+        _ -> ErrorFieldAbsent <$ Decoder.skip
+
+scalarTextDecoder :: Decoder.Decoder Text
+scalarTextDecoder =
+    Decoder.byType \case
+        Decoder.JsonString -> Decoder.text
+        Decoder.JsonNumber ->
+            Text.pack . show <$> Decoder.scientific
+        Decoder.JsonBoolean ->
+            (\value -> if value then "true" else "false")
+                <$> Decoder.bool
+        _ -> "" <$ Decoder.skip
+
+retryAfterDecoder :: Decoder.Decoder Int
+retryAfterDecoder =
+    Decoder.byType \case
+        Decoder.JsonNumber ->
+            Decoder.mapEither
+                (\value ->
+                    maybe
+                        (Left "retry delay is not an integer")
+                        (Right . max 1)
+                        (toBoundedInteger value))
+                Decoder.scientific
+        Decoder.JsonString ->
+            Decoder.mapEither
+                (\value -> case reads (Text.unpack value) of
+                    [(seconds, "")] -> Right (max 1 seconds)
+                    _ -> Left "invalid retry delay")
+                Decoder.text
+        _ -> Decoder.mapEither
+            (const (Left "invalid retry delay"))
+            Decoder.skip
+
+normalizedProviderType :: Maybe Text -> Maybe Text
+normalizedProviderType = \case
+    Just value
+        | Text.toLower value
+            `elem` ["error", "errors", "unknown", "unknown_error"] ->
+                Nothing
+        | otherwise -> Just value
+    Nothing -> Nothing
 
 errorTypeFromStatus :: Int -> ErrorType
 errorTypeFromStatus = \case
@@ -182,41 +304,6 @@ errorTypeFromStatus = \case
     504 -> ServiceUnavailableError
     529 -> OverloadedError
     _ -> ApiErrorType
-
-textField :: Text -> Aeson.Object -> Maybe Text
-textField name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.String value) | not (Text.null (Text.strip value)) -> Just value
-    _ -> Nothing
-
-providerTypeField :: Aeson.Object -> Maybe Text
-providerTypeField object = do
-    value <- textField "type" object
-    if Text.toLower value `elem` ["error", "errors", "unknown", "unknown_error"]
-        then Nothing
-        else Just value
-
-scalarTextField :: Text -> Aeson.Object -> Maybe Text
-scalarTextField name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.String value) | not (Text.null (Text.strip value)) -> Just value
-    Just (Aeson.Number value) -> Just (Text.pack (show value))
-    Just (Aeson.Bool value) -> Just (if value then "true" else "false")
-    _ -> Nothing
-
-firstTextField :: [Text] -> Aeson.Object -> Maybe Text
-firstTextField names object = firstJust (map (`textField` object) names)
-
-retryAfterField :: Aeson.Object -> Maybe Int
-retryAfterField object =
-    numberField "resets_in_seconds" object
-        `orElse` numberField "retry_after" object
-
-numberField :: Text -> Aeson.Object -> Maybe Int
-numberField name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.Number value) -> max 1 <$> toBoundedInteger value
-    Just (Aeson.String value) -> case reads (Text.unpack value) of
-        [(seconds, "")] -> Just (max 1 seconds)
-        _ -> Nothing
-    _ -> Nothing
 
 retryAfterFromMessage :: Text -> Maybe Int
 retryAfterFromMessage message = do

@@ -1,7 +1,14 @@
 module Agent.OpenRouter.RequestSpec (spec) where
 
 import Agent.Error (ApiError(..))
+import Agent.Json
+    ( RawJson
+    , extensionsSingleton
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.Responses.Types
+import Agent.Responses.Codec (encodeResponseCreateParams)
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request
 import Agent.OpenRouter.Stream
@@ -67,15 +74,15 @@ spec = do
             let codexTools =
                     [ KnownResponseTool ToolCustom TaggedObject
                         { tag = "custom"
-                        , fields = KeyMap.singleton
+                        , fields = extensionsSingleton
                             "name"
-                            (Aeson.String "apply_patch")
+                            (encodeRawJson JsonEncoder.text "apply_patch")
                         }
                     , KnownResponseTool ToolNamespace TaggedObject
                         { tag = "namespace"
-                        , fields = KeyMap.singleton
+                        , fields = extensionsSingleton
                             "name"
-                            (Aeson.String "collaboration")
+                            (encodeRawJson JsonEncoder.text "collaboration")
                         }
                     ]
                 request = withTools (Just codexTools) sampleRequest
@@ -155,7 +162,11 @@ sseBlock eventType dataText =
     "event: " <> eventType <> "\ndata: " <> dataText <> "\n\n"
 
 requestValue :: ClientOptions -> ResponseCreateParams -> Aeson.Value
-requestValue options = Aeson.toJSON . buildRequest options
+requestValue options request =
+    case Aeson.eitherDecodeStrict'
+        (encodeResponseCreateParams (buildRequest options request)) of
+        Left err -> error err
+        Right value -> value
 
 sampleRequest :: ResponseCreateParams
 sampleRequest = defaultResponseCreateParams
@@ -178,13 +189,14 @@ sampleRequest = defaultResponseCreateParams
         [ FunctionToolValue FunctionTool
             { name = "echo_text"
             , description = Just "Echo the text back"
-            , parameters = Just (Aeson.object [])
+            , parameters = Just (encodeRawJson (JsonEncoder.object []) ())
             , strict = Nothing
             , extraFields = mempty
             }
         , KnownResponseTool ToolWebSearch TaggedObject
             { tag = "web_search"
-            , fields = KeyMap.singleton "external_web_access" (Aeson.Bool True)
+            , fields = extensionsSingleton "external_web_access"
+                (encodeRawJson JsonEncoder.bool True)
             }
         , KnownResponseTool ToolComputer TaggedObject
             { tag = "computer"
@@ -210,6 +222,12 @@ withModel nextModel ResponseCreateParams { model = _, .. } =
 withTools :: Maybe [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
 withTools nextTools ResponseCreateParams { tools = _, .. } =
     ResponseCreateParams { tools = nextTools, .. }
+
+encodeRawJson :: JsonEncoder.Encoder value -> value -> RawJson
+encodeRawJson encoder value =
+    case JsonDecoder.validateRawJson (JsonEncoder.encode encoder value) of
+        Left err -> error (Text.unpack (JsonDecoder.renderDecodeError err))
+        Right raw -> raw
 
 expectObject :: Aeson.Value -> IO Aeson.Object
 expectObject = \case

@@ -4,12 +4,23 @@ module Agent.Responses.Types.Items.Known
     ( ResponseItemType(..)
     , parseResponseItemType
     , responseItemTypeText
+    , responseItemTypeEncoder
+    , responseItemTypeDecoder
     , InternalChatMetadata(..)
+    , internalChatMetadataEncoder
+    , internalChatMetadataDecoder
     ) where
 
-import Agent.Responses.Types.Common
-import Data.Aeson hiding (TaggedObject)
-import qualified Data.Aeson as Aeson
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , insertExtension
+    )
+import Agent.Json.Decoder (Decoder)
+import qualified Agent.Json.Decoder as D
+import Agent.Json.Encoder (Encoder)
+import qualified Agent.Json.Encoder as E
 import Data.Text (Text)
 
 data ResponseItemType
@@ -121,36 +132,57 @@ parseResponseItemType value = case value of
     "program_output" -> ItemProgramOutput
     other -> ItemUnknownType other
 
+responseItemTypeEncoder :: Encoder ResponseItemType
+responseItemTypeEncoder = E.contramap responseItemTypeText E.text
+
+responseItemTypeDecoder :: Decoder ResponseItemType
+responseItemTypeDecoder = D.mapDecoder parseResponseItemType D.text
+
 data InternalChatMetadata = InternalChatMetadata
     { turnId            :: !(Maybe Text)
-    , createTime        :: !(Maybe Aeson.Value)
+    , createTime        :: !(Maybe RawJson)
     , contentItemKinds  :: !(Maybe [Text])
-    , executedToolCalls :: !(Maybe Aeson.Value)
-    , extraFields       :: !Aeson.Object
+    , executedToolCalls :: !(Maybe RawJson)
+    , extraFields       :: !Extensions
     }
     deriving stock (Eq, Show)
 
-instance ToJSON InternalChatMetadata where
-    toJSON InternalChatMetadata
-        { turnId, createTime, contentItemKinds, executedToolCalls
-        , extraFields } =
-            objectWith extraFields
-                [ optionalField "turn_id" turnId
-                , optionalField "create_time" createTime
-                , optionalField "content_item_kinds" contentItemKinds
-                , optionalField "executed_tool_calls" executedToolCalls
-                ]
+internalChatMetadataEncoder :: Encoder InternalChatMetadata
+internalChatMetadataEncoder = E.objectWithExtensions (.extraFields)
+    [ E.optionalField "turn_id" E.text (.turnId)
+    , E.optionalField "create_time" E.rawJson (.createTime)
+    , E.optionalField "content_item_kinds" (E.list E.text) (.contentItemKinds)
+    , E.optionalField "executed_tool_calls" E.rawJson (.executedToolCalls)
+    ]
 
-instance FromJSON InternalChatMetadata where
-    parseJSON = withObject "InternalChatMetadata" $ \o ->
-        InternalChatMetadata
-            <$> o .:? "turn_id"
-            <*> o .:? "create_time"
-            <*> o .:? "content_item_kinds"
-            <*> o .:? "executed_tool_calls"
-            <*> pure
-                (without
-                    [ "turn_id", "create_time", "content_item_kinds"
-                    , "executed_tool_calls"
-                    ]
-                    o)
+data InternalChatMetadataState = InternalChatMetadataState
+    { stateTurnId :: !(Maybe Text)
+    , stateCreateTime :: !(Maybe RawJson)
+    , stateContentItemKinds :: !(Maybe [Text])
+    , stateExecutedToolCalls :: !(Maybe RawJson)
+    , stateExtraFields :: !Extensions
+    }
+
+internalChatMetadataDecoder :: Decoder InternalChatMetadata
+internalChatMetadataDecoder =
+    D.object
+        (InternalChatMetadataState Nothing Nothing Nothing Nothing emptyExtensions)
+        [ D.field "turn_id" (D.nullable D.text) \v s ->
+            Right s { stateTurnId = v }
+        , D.field "create_time" (D.nullable D.rawJson) \v s ->
+            Right s { stateCreateTime = v }
+        , D.field "content_item_kinds" (D.nullable (D.list D.text)) \v s ->
+            Right s { stateContentItemKinds = v }
+        , D.field "executed_tool_calls" (D.nullable D.rawJson) \v s ->
+            Right s { stateExecutedToolCalls = v }
+        ]
+        (D.unknownField D.rawJson \key value s ->
+            Right s { stateExtraFields =
+                insertExtension key value s.stateExtraFields })
+        \state -> Right InternalChatMetadata
+            { turnId = state.stateTurnId
+            , createTime = state.stateCreateTime
+            , contentItemKinds = state.stateContentItemKinds
+            , executedToolCalls = state.stateExecutedToolCalls
+            , extraFields = state.stateExtraFields
+            }

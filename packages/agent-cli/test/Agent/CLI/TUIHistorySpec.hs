@@ -4,6 +4,10 @@
 
 module Agent.CLI.TUIHistorySpec (spec) where
 
+import Agent.CLI.JsonCompat (rawText)
+
+import Agent.Json (emptyExtensions)
+
 import Agent.CLI.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
@@ -12,8 +16,6 @@ import Agent.CLI.TUI.History
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
 import Agent.Responses.Types
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
 import Agent.TUI.Model
     ( BlockId(..)
@@ -316,13 +318,13 @@ spec = describe "bounded fullscreen history window" do
                                     , text =
                                         Just
                                             "Don't mention skills. Brief summary for the user."
-                                    , extraFields = KeyMap.empty
+                                    , extraFields = emptyExtensions
                                     }
                                 ]
                             , content = Nothing
                             , encryptedContent = Nothing
                             , status = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         , FunctionCallItem FunctionCall
                             { itemId = Nothing
@@ -332,16 +334,16 @@ spec = describe "bounded fullscreen history window" do
                             , arguments = "{\"command\":\"pwd\"}"
                             , encryptedFunctionArgs = Nothing
                             , status = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         , FunctionCallOutputItem FunctionCallOutput
                             { itemId = Nothing
                             , callId = "call-1"
                             , name = Nothing
                             , namespace = Nothing
-                            , output = Aeson.String "/tmp/project"
+                            , output = rawText "/tmp/project"
                             , status = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         , assistantMessage "Done"
                         ])
@@ -506,7 +508,7 @@ userMessage text =
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 assistantMessage :: Text.Text -> ResponseItem
@@ -518,7 +520,7 @@ assistantMessage text =
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 fixedTime :: UTCTime

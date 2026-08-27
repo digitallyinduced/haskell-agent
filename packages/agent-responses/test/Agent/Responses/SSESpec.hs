@@ -3,12 +3,10 @@ module Agent.Responses.SSESpec (spec) where
 import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
 import Agent.Responses.Types
+import Agent.Json (emptyExtensions)
+import qualified Agent.Json.Encoder as JsonEncoder
 import Control.Monad (foldM)
-import qualified Data.Aeson as Aeson
-import Data.Aeson ((.=))
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -60,6 +58,23 @@ spec = describe "Responses SSE decoder" do
             "event: ping\nid: 1\n\n"
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
+
+    it "exposes strict framed bytes and the optional SSE event type" do
+        (decoder, firstFrames) <- expectRight $
+            feedSseFrameDecoder newSseDecoder
+                "event: response.output_text.delta\ndata: {\"delta\":"
+        firstFrames `shouldBe` []
+        (_, frames) <- expectRight $
+            feedSseFrameDecoder decoder
+                (Text.encodeUtf8 "\"héllo\"}\n\n")
+        frames `shouldBe`
+            [ SseFrame
+                { sseFrameEventType =
+                    Just "response.output_text.delta"
+                , sseFrameData =
+                    Text.encodeUtf8 "{\"delta\":\"héllo\"}"
+                }
+            ]
 
     it "skips malformed event payloads while preserving unknown events" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
@@ -185,25 +200,60 @@ genEvent index =
 genLifecycleEvent :: Int -> Gen ResponseStreamEvent
 genLifecycleEvent index = do
     model <- genText
-    status <-
-        elements ["completed", "incomplete", "failed"]
-            :: Gen Text
-    let response =
-            Aeson.object
-                [ "id" .= ("resp-" <> Text.pack (show index))
-                , "created_at" .= index
-                , "model" .= model
-                , "status" .= status
-                ]
-    elements
-        [ ResponseCreatedEvent response (Just index) KeyMap.empty
-        , ResponseInProgressEvent response (Just index) KeyMap.empty
-        , ResponseCompletedEvent response (Just index) KeyMap.empty
-        , ResponseDoneEvent response (Just index) KeyMap.empty
-        , ResponseFailedEvent response (Just index) KeyMap.empty
-        , ResponseIncompleteEvent response (Just index) KeyMap.empty
-        , ResponseQueuedEvent response (Just index) KeyMap.empty
+    status <- elements
+        [ ResponseCompleted
+        , ResponseIncomplete
+        , ResponseFailed
         ]
+    let response = minimalResponse index model status
+    elements
+        [ ResponseCreatedEvent response (Just index) emptyExtensions
+        , ResponseInProgressEvent response (Just index) emptyExtensions
+        , ResponseCompletedEvent response (Just index) emptyExtensions
+        , ResponseDoneEvent response (Just index) emptyExtensions
+        , ResponseFailedEvent response (Just index) emptyExtensions
+        , ResponseIncompleteEvent response (Just index) emptyExtensions
+        , ResponseQueuedEvent response (Just index) emptyExtensions
+        ]
+
+minimalResponse :: Int -> Text -> ResponseStatus -> Response
+minimalResponse index responseModel responseStatus = Response
+    { responseId = "resp-" <> Text.pack (show index)
+    , createdAt = fromIntegral index
+    , error = Nothing
+    , incompleteDetails = Nothing
+    , instructions = Nothing
+    , metadata = Nothing
+    , model = responseModel
+    , object = "response"
+    , output = []
+    , parallelToolCalls = Nothing
+    , temperature = Nothing
+    , toolChoice = Nothing
+    , tools = Nothing
+    , topP = Nothing
+    , background = Nothing
+    , completedAt = Nothing
+    , conversation = Nothing
+    , maxOutputTokens = Nothing
+    , maxToolCalls = Nothing
+    , moderation = Nothing
+    , previousResponseId = Nothing
+    , prompt = Nothing
+    , promptCacheKey = Nothing
+    , promptCacheOptions = Nothing
+    , promptCacheRetention = Nothing
+    , reasoning = Nothing
+    , safetyIdentifier = Nothing
+    , serviceTier = Nothing
+    , status = responseStatus
+    , text = Nothing
+    , topLogprobs = Nothing
+    , truncation = Nothing
+    , usage = Nothing
+    , user = Nothing
+    , extraFields = emptyExtensions
+    }
 
 genOutputItemEvent :: Int -> Gen ResponseStreamEvent
 genOutputItemEvent index = do
@@ -217,20 +267,20 @@ genOutputItemEvent index = do
                             { text = body
                             , annotations = Nothing
                             , logprobs = Nothing
-                            , extraFields = KeyMap.empty
+                            , extraFields = emptyExtensions
                             }
                         ]
                 , role = RoleAssistant
                 , status = Just ItemCompleted
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
     elements
         [ ResponseOutputItemAddedEvent
-            item (Just index) (Just index) KeyMap.empty
+            item (Just index) (Just index) emptyExtensions
         , ResponseOutputItemDoneEvent
-            item (Just index) (Just index) KeyMap.empty
+            item (Just index) (Just index) emptyExtensions
         ]
 
 genCustomToolDelta :: Int -> Gen ResponseStreamEvent
@@ -240,9 +290,9 @@ genCustomToolDelta index = do
         callId = Just ("call-" <> Text.pack (show index))
     elements
         [ ResponseCustomToolInputDeltaEvent
-            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+            (Just delta) itemId callId (Just index) (Just index) emptyExtensions
         , ResponseCustomToolInputDoneEvent
-            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+            (Just delta) itemId callId (Just index) (Just index) emptyExtensions
         ]
 
 genText :: Gen Text
@@ -263,7 +313,8 @@ eventBlock :: Text -> Bool -> ResponseStreamEvent -> Text
 eventBlock lineEnding includeEventLine event =
     eventLine
         <> "data: "
-        <> Text.decodeUtf8 (LBS.toStrict (Aeson.encode event))
+        <> Text.decodeUtf8
+            (JsonEncoder.encode responseStreamEventEncoder event)
         <> lineEnding
         <> lineEnding
   where

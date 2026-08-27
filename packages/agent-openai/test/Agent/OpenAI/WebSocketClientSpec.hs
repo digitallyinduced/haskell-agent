@@ -1,5 +1,6 @@
 module Agent.OpenAI.WebSocketClientSpec (spec) where
 
+import Agent.OpenAI.JsonCompat
 import Test.Hspec
 import Agent.Error
 import Agent.Provider (Credential(..), Provider(..))
@@ -34,7 +35,7 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 ])
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
@@ -555,7 +556,7 @@ sampleLitePrefixRequest = sampleRequest
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , content = MessageContentParts
-                [InputTextPart "base instructions" Nothing KeyMap.empty]
+                [InputTextPart "base instructions" Nothing emptyExtensions]
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
@@ -564,9 +565,9 @@ sampleLitePrefixRequest = sampleRequest
                 , createTime = Nothing
                 , contentItemKinds = Just ["model.base_instructions"]
                 , executedToolCalls = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
         ])
     }

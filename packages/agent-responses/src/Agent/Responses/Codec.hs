@@ -1,48 +1,47 @@
 -- | Explicit JSON codecs for the canonical Responses API wire types.
 --
--- The types also have ordinary aeson instances.  These functions make the
--- wire boundary obvious at transport call sites and provide the SSE variant
--- where the event discriminator arrives outside the JSON payload.
+-- The wire codecs are deliberately built on the direct codecs exported by
+-- @agent-responses-types@.  In particular, this module does not construct an
+-- intermediate Aeson 'Value' tree at either side of the transport boundary.
 module Agent.Responses.Codec
     ( encodeResponseCreateParams
-    , encodeResponseCreateParamsValue
     , decodeResponseCreateParams
     , decodeResponse
-    , decodeResponseValue
     , decodeResponseStreamEvent
-    , decodeResponseStreamEventValue
     , decodeResponseStreamEventWithType
     ) where
 
-import Data.Aeson (Result, Value)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Types as AesonTypes
-import qualified Data.ByteString.Lazy as LBS
+import qualified Agent.Json.Decoder as Decoder
+import qualified Agent.Json.Encoder as Encoder
+import qualified Data.ByteString as BS
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 import Agent.Responses.Types
 
-encodeResponseCreateParams :: ResponseCreateParams -> LBS.ByteString
-encodeResponseCreateParams = Aeson.encode
+encodeResponseCreateParams :: ResponseCreateParams -> BS.ByteString
+encodeResponseCreateParams =
+    Encoder.encode responseCreateParamsEncoder
 
-encodeResponseCreateParamsValue :: ResponseCreateParams -> Value
-encodeResponseCreateParamsValue = Aeson.toJSON
+decodeResponseCreateParams :: BS.ByteString -> Either String ResponseCreateParams
+decodeResponseCreateParams =
+    decodeDirect responseCreateParamsDecoder
 
-decodeResponseCreateParams :: LBS.ByteString -> Either String ResponseCreateParams
-decodeResponseCreateParams = Aeson.eitherDecode'
+decodeResponse :: BS.ByteString -> Either String Response
+decodeResponse = decodeDirect responseDecoder
 
-decodeResponse :: LBS.ByteString -> Either String Response
-decodeResponse = Aeson.eitherDecode'
+decodeResponseStreamEvent :: BS.ByteString -> Either String ResponseStreamEvent
+decodeResponseStreamEvent =
+    decodeDirect responseStreamEventDecoder
 
-decodeResponseValue :: Value -> Result Response
-decodeResponseValue = Aeson.fromJSON
-
-decodeResponseStreamEvent :: LBS.ByteString -> Either String ResponseStreamEvent
-decodeResponseStreamEvent = Aeson.eitherDecode'
-
-decodeResponseStreamEventValue :: Value -> Result ResponseStreamEvent
-decodeResponseStreamEventValue = Aeson.fromJSON
-
-decodeResponseStreamEventWithType :: Text -> Value -> Either String ResponseStreamEvent
+decodeResponseStreamEventWithType
+    :: Text
+    -> BS.ByteString
+    -> Either String ResponseStreamEvent
 decodeResponseStreamEventWithType eventType =
-    AesonTypes.parseEither (parseStreamEventWithType eventType)
+    decodeDirect (responseStreamEventDecoderWithType (Just eventType))
+
+decodeDirect :: Decoder.Decoder value -> BS.ByteString -> Either String value
+decodeDirect decoder =
+    either (Left . Text.unpack . Decoder.renderDecodeError) Right
+        . Decoder.decode decoder

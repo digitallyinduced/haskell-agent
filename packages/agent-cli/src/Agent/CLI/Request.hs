@@ -9,14 +9,20 @@ module Agent.CLI.Request
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
 import Agent.Provider (Provider(..))
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , extensionsToList
+    , lookupExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Control.Applicative ((<|>))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Vector as Vector
 
 -- | Codex requires @store = false@. Continuation still uses
 -- @previous_response_id@, with the local transcript available for recovery.
@@ -56,7 +62,7 @@ requestParams provider modelName instructionText toolSchemas effort =
                         if provider == OpenAIProvider
                             then Just "auto"
                             else Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 , store = Just False
                 , stream = Just True
@@ -195,17 +201,17 @@ updateResponsesLitePrefix instructionText maybeTools existingInput =
 -- | Convert conventional Responses tools to the Lite @additional_tools@
 -- representation. Function and custom tools share the default @functions@
 -- namespace; hosted tools and non-default namespaces remain top-level.
-responsesLiteToolValues :: [ResponseTool] -> [Aeson.Value]
+responsesLiteToolValues :: [ResponseTool] -> [RawJson]
 responsesLiteToolValues tools =
     case groupedValues of
         [] -> ungroupedValues
         _ ->
-            let namespaceValue = Aeson.object
-                    [ "type" Aeson..= ("namespace" :: Text)
-                    , "name" Aeson..= ("functions" :: Text)
-                    , "description" Aeson..= namespaceDescription
-                    , "tools" Aeson..= groupedValues
-                    ]
+            let namespaceValue = encodeRaw liteNamespaceEncoder LiteNamespace
+                    { namespaceType = "namespace"
+                    , namespaceName = "functions"
+                    , namespaceDescription
+                    , namespaceTools = groupedValues
+                    }
                 insertionIndex = fromMaybe 0 firstGroupedPosition
             in take insertionIndex ungroupedValues
                 <> [namespaceValue]
@@ -223,14 +229,18 @@ responsesLiteToolValues tools =
                 , ungrouped
                 )
             Nothing ->
-                (firstPosition, grouped, description, ungrouped <> [Aeson.toJSON tool])
+                ( firstPosition
+                , grouped
+                , description
+                , ungrouped <> [encodeRaw responseToolEncoder tool]
+                )
 
-groupedToolValues :: ResponseTool -> Maybe ([Aeson.Value], Maybe Text)
+groupedToolValues :: ResponseTool -> Maybe ([RawJson], Maybe Text)
 groupedToolValues tool = case tool of
-    FunctionToolValue{} -> Just ([Aeson.toJSON tool], Nothing)
-    KnownResponseTool ToolCustom _ -> Just ([Aeson.toJSON tool], Nothing)
+    FunctionToolValue{} -> Just ([encoded], Nothing)
+    KnownResponseTool ToolCustom _ -> Just ([encoded], Nothing)
     UnknownResponseTool tagged
-        | tagged.tag == "custom" -> Just ([Aeson.toJSON tool], Nothing)
+        | tagged.tag == "custom" -> Just ([encoded], Nothing)
     KnownResponseTool ToolNamespace tagged
         | textField "name" tagged.fields == Just "functions" ->
             Just
@@ -238,14 +248,16 @@ groupedToolValues tool = case tool of
                 , nonBlank =<< textField "description" tagged.fields
                 )
     _ -> Nothing
+  where
+    encoded = encodeRaw responseToolEncoder tool
 
-additionalToolsItem :: [Aeson.Value] -> ResponseItem
+additionalToolsItem :: [RawJson] -> ResponseItem
 additionalToolsItem tools =
     AdditionalToolsItemValue AdditionalToolsItem
         { itemId = Nothing
         , role = "developer"
         , tools
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 baseInstructionItems :: Text -> [ResponseItem]
@@ -255,7 +267,7 @@ baseInstructionItems instructionText
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , content = MessageContentParts
-                [InputTextPart instructionText Nothing KeyMap.empty]
+                [InputTextPart instructionText Nothing emptyExtensions]
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
@@ -264,9 +276,9 @@ baseInstructionItems instructionText
                 , createTime = Nothing
                 , contentItemKinds = Just ["model.base_instructions"]
                 , executedToolCalls = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
         ]
 
@@ -287,24 +299,22 @@ responsesLiteTemplateParts requestInput =
     (baseItems, suffix) = span isBaseInstructionsItem afterAdditional
     instructionText = fromMaybe "" (firstBaseInstructionText baseItems)
 
-liteToolValuesToConventional :: [Aeson.Value] -> [ResponseTool]
+liteToolValuesToConventional :: [RawJson] -> [ResponseTool]
 liteToolValuesToConventional = concatMap flatten
   where
-    flatten value@(Aeson.Object object)
-        | textField "type" object == Just "namespace"
-        , textField "name" object == Just "functions" =
-            mapMaybe decodeTool (arrayField "tools" object)
+    flatten value
+        | Just namespace <- decodeRaw liteNamespaceDecoder value
+        , namespace.namespaceType == "namespace"
+        , namespace.namespaceName == "functions" =
+            mapMaybe decodeTool namespace.namespaceTools
         | otherwise = maybeToListDecoded value
-    flatten value = maybeToListDecoded value
 
     maybeToListDecoded value = maybe [] pure (decodeTool value)
 
-decodeTool :: Aeson.Value -> Maybe ResponseTool
-decodeTool value = case Aeson.fromJSON value of
-    Aeson.Success tool -> Just tool
-    Aeson.Error _ -> Nothing
+decodeTool :: RawJson -> Maybe ResponseTool
+decodeTool = decodeRaw responseToolDecoder
 
-additionalToolsValues :: Maybe ResponseItem -> [Aeson.Value]
+additionalToolsValues :: Maybe ResponseItem -> [RawJson]
 additionalToolsValues = \case
     Just (AdditionalToolsItemValue item) -> item.tools
     Just (UnknownResponseItem TaggedObject{tag = "additional_tools", fields}) ->
@@ -346,12 +356,12 @@ responseInputItems = \case
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , content = MessageContentParts
-                [InputTextPart text Nothing KeyMap.empty]
+                [InputTextPart text Nothing emptyExtensions]
             , role = RoleUser
             , status = Nothing
             , phase = Nothing
             , passthrough = Nothing
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
         ]
     Nothing -> []
@@ -373,7 +383,7 @@ liteTextConfig :: ResponseTextConfig
 liteTextConfig = ResponseTextConfig
     { format = Nothing
     , verbosity = Just "low"
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 toResponsesLiteTextConfig
@@ -393,28 +403,76 @@ fromResponsesLiteTextConfig = \case
         , verbosity = Just "low"
         , extraFields
         }
-        | KeyMap.null extraFields -> Nothing
+        | null (extensionsToList extraFields) -> Nothing
     Just ResponseTextConfig{..} ->
         Just ResponseTextConfig { verbosity = Nothing, .. }
     Nothing -> Nothing
 
-textField :: Text -> Aeson.Object -> Maybe Text
-textField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
+textField :: Text -> Extensions -> Maybe Text
+textField name fields =
+    lookupExtension name fields >>= decodeRaw JsonDecoder.text
 
-arrayField :: Text -> Aeson.Object -> [Aeson.Value]
-arrayField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.Array values) -> Vector.toList values
-        _ -> []
+arrayField :: Text -> Extensions -> [RawJson]
+arrayField name fields =
+    fromMaybe [] $
+        lookupExtension name fields
+            >>= decodeRaw (JsonDecoder.list JsonDecoder.rawJson)
 
-arrayTextField :: Text -> Aeson.Object -> [Text]
-arrayTextField name object =
-    [value | Aeson.String value <- arrayField name object]
+data LiteNamespace = LiteNamespace
+    { namespaceType :: !Text
+    , namespaceName :: !Text
+    , namespaceDescription :: !Text
+    , namespaceTools :: ![RawJson]
+    }
 
 nonBlank :: Text -> Maybe Text
 nonBlank value
     | Text.null (Text.strip value) = Nothing
     | otherwise = Just value
+
+liteNamespaceEncoder :: JsonEncoder.Encoder LiteNamespace
+liteNamespaceEncoder = JsonEncoder.object
+    [ JsonEncoder.field "type" JsonEncoder.text (const "namespace")
+    , JsonEncoder.field "name" JsonEncoder.text (const "functions")
+    , JsonEncoder.field "description" JsonEncoder.text (.namespaceDescription)
+    , JsonEncoder.field
+        "tools"
+        (JsonEncoder.list JsonEncoder.rawJson)
+        (.namespaceTools)
+    ]
+
+liteNamespaceDecoder :: JsonDecoder.Decoder LiteNamespace
+liteNamespaceDecoder =
+    JsonDecoder.object
+        LiteNamespace
+            { namespaceType = ""
+            , namespaceName = ""
+            , namespaceDescription = ""
+            , namespaceTools = []
+            }
+        [ JsonDecoder.field "type" JsonDecoder.text \value state ->
+            Right state { namespaceType = value }
+        , JsonDecoder.field "name" JsonDecoder.text \value state ->
+            Right state { namespaceName = value }
+        , JsonDecoder.field "description" JsonDecoder.text \value state ->
+            Right state { namespaceDescription = value }
+        , JsonDecoder.field
+            "tools"
+            (JsonDecoder.list JsonDecoder.rawJson)
+            \value state -> Right state { namespaceTools = value }
+        ]
+        (JsonDecoder.unknownField JsonDecoder.skip
+            \_ _ state -> Right state)
+        Right
+
+encodeRaw :: JsonEncoder.Encoder value -> value -> RawJson
+encodeRaw encoder =
+    either (error . show) id
+        . JsonDecoder.validateRawJson
+        . JsonEncoder.encode encoder
+
+decodeRaw :: JsonDecoder.Decoder value -> RawJson -> Maybe value
+decodeRaw decoder =
+    either (const Nothing) Just
+        . JsonDecoder.decode decoder
+        . rawJsonBytes

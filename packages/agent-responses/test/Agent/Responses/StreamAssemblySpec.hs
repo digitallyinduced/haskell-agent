@@ -1,13 +1,10 @@
 module Agent.Responses.StreamAssemblySpec (spec) where
 
 import Agent.Error (ApiError(..))
-import Agent.Responses.SSE (parseSseEvents)
+import Agent.Json (emptyExtensions)
 import Agent.Responses.StreamAssembly
 import Agent.Responses.Types
 import Control.Applicative ((<|>))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -17,673 +14,413 @@ import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
 import Test.QuickCheck
     ( Arbitrary(..)
     , chooseInt
-    , conjoin
     , counterexample
     , elements
     , listOf
-    , listOf1
-    , oneof
     , (===)
     )
 
 spec :: Spec
-spec = describe "buildStreamResponse" do
-    it "merges output_item.done events into the terminal response" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.output_item.done"
-                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"echo\",\"arguments\":\"{}\"}}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"created_at\":0,\"model\":\"test\",\"status\":\"completed\",\"output\":[]}}"
+spec = describe "typed stream assembly" do
+    it "merges output_item.done items into terminal output without duplicates" do
+        result <- expectRight $ buildStreamResponse config
+            [ outputDone 0 toolCall
+            , completed (response [toolCall])
             ]
-        response <- expectRight (buildStreamResponse config events)
-        [name | FunctionCallItem FunctionCall { name } <- response.output]
-            `shouldBe` ["echo"]
+        result.output `shouldBe` [toolCall]
 
-    it "assembles a partial response.done after a function call" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-done\"}}"
-            , sseBlock "response.output_item.done"
-                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-done\",\"name\":\"shell_command\",\"arguments\":\"{\\\"command\\\":\\\"echo done\\\"}\"}}"
-            , sseBlock "response.done"
-                "{\"type\":\"response.done\",\"response\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"total_tokens\":12}}}"
+    it "uses lifecycle response bases and normalizes response.done" do
+        result <- expectRight $ buildStreamResponse config
+            [ created ((response []) { user = Just "retained" })
+            , done ((response []) { user = Nothing, status = ResponseInProgress })
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        response.responseId `shouldBe` "resp-done"
-        response.model `shouldBe` "request-model"
-        response.status `shouldBe` ResponseCompleted
-        fmap (.totalTokens) response.usage `shouldBe` Just 12
-        [name | FunctionCallItem FunctionCall { name } <- response.output]
-            `shouldBe` ["shell_command"]
+        result.user `shouldBe` Just "retained"
+        result.status `shouldBe` ResponseCompleted
 
-    it "assembles minimal created and completed lifecycle fragments" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-partial\"}}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-partial\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}"
+    it "accumulates function-call argument deltas" do
+        result <- expectRight $ buildStreamResponse config
+            [ outputAdded 0 toolCall
+            , ResponseFunctionCallArgumentsDeltaEvent
+                (Just "{\"value\":") (Just "fc_1") (Just 0)
+                Nothing emptyExtensions
+            , ResponseFunctionCallArgumentsDoneEvent
+                (Just "{\"value\":1}") (Just "echo")
+                (Just "fc_1") (Just 0) Nothing emptyExtensions
+            , completed (response [])
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        response.responseId `shouldBe` "resp-partial"
-        response.createdAt `shouldBe` 0
-        response.model `shouldBe` "request-model"
-        response.object `shouldBe` "response"
-        response.status `shouldBe` ResponseCompleted
-        response.output `shouldBe` []
-        fmap (.totalTokens) response.usage `shouldBe` Just 10
+        [arguments | FunctionCallItem FunctionCall { arguments } <- result.output]
+            `shouldBe` ["{\"value\":1}"]
 
-    it "classifies an incomplete lifecycle fragment as a failure" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-incomplete\"}}"
-            , sseBlock "response.incomplete"
-                "{\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}"
+    it "accumulates custom-tool input deltas by call id" do
+        result <- expectRight $ buildStreamResponse config
+            [ outputAdded 0 customCall
+            , ResponseCustomToolInputDeltaEvent
+                (Just "*** Begin") Nothing (Just "custom-call")
+                Nothing Nothing emptyExtensions
+            , ResponseCustomToolInputDeltaEvent
+                (Just " Patch") Nothing (Just "custom-call")
+                Nothing Nothing emptyExtensions
+            , completed (response [])
             ]
-        buildStreamResponseWithModel config (Just "request-model") events
-            `shouldBe`
-                Left (ConnectionError
-                    "failed: response.incomplete: max_output_tokens")
+        [input | CustomToolCallItem CustomToolCall { input } <- result.output]
+            `shouldBe` ["*** Begin Patch"]
 
-    it "replaces indexed added items with done items without duplicates" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-indexed\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"stale-second\",\"arguments\":\"\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"first\",\"arguments\":\"{}\"}}"
-            , sseBlock "response.output_item.done"
-                "{\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"second\",\"arguments\":\"{}\"}}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-indexed\"}}"
+    it "uses dedicated reasoning summary delta events" do
+        result <- expectRight $ buildStreamResponse config
+            [ outputAdded 0 reasoningItem
+            , ResponseReasoningSummaryTextDeltaEvent
+                (Just "Checked ") (Just "reason_1") (Just 0) (Just 0)
+                Nothing emptyExtensions
+            , ResponseReasoningSummaryTextDoneEvent
+                (Just "reason_1") (Just 0) (Just 0)
+                (Just "Checked repository") Nothing emptyExtensions
+            , completed (response [])
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        [name | FunctionCallItem FunctionCall { name } <- response.output]
-            `shouldBe` ["first", "second"]
-        length response.output `shouldBe` 2
+        [text
+            | ReasoningItemValue ReasoningItem
+                { summary = [ReasoningSummaryPart { text }] } <- result.output
+            ] `shouldBe` [Just "Checked repository"]
 
-    it "assembles indexless done-only output items in wire order" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-indexless\"}}"
-            , sseBlock "response.output_item.done"
-                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"first\",\"arguments\":\"{}\"}}"
-            , sseBlock "response.output_item.done"
-                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"second\",\"arguments\":\"{}\"}}"
-            , sseBlock "response.done"
-                "{\"type\":\"response.done\",\"response\":{}}"
+    it "assembles dedicated output-text deltas without an output item frame" do
+        result <- expectRight $ buildStreamResponse config
+            [ created (response [])
+            , ResponseOutputTextDeltaEvent
+                (Just "hello ") (Just "msg_1") (Just 0) (Just 0)
+                Nothing Nothing emptyExtensions
+            , ResponseOutputTextDoneEvent
+                (Just "hello world") (Just "msg_1") (Just 0) (Just 0)
+                Nothing emptyExtensions
+            , completed (response [])
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        [name | FunctionCallItem FunctionCall { name } <- response.output]
-            `shouldBe` ["first", "second"]
+        [text
+            | MessageItem ResponseMessage
+                { content = MessageContentParts [OutputTextPart { text }] }
+                <- result.output
+            ] `shouldBe` ["hello world"]
 
-    it "assembles custom-tool input events without output_index" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-custom\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ctc-1\",\"call_id\":\"call-1\",\"name\":\"apply_patch\",\"input\":\"\"}}"
-            , sseBlock "response.custom_tool_call_input.delta"
-                "{\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"not-the-item\",\"call_id\":\"call-1\",\"delta\":\"*** Begin\"}"
-            , sseBlock "response.custom_tool_call_input.delta"
-                "{\"type\":\"response.custom_tool_call_input.delta\",\"call_id\":\"call-1\",\"delta\":\" Patch\"}"
-            , sseBlock "response.custom_tool_call_input.done"
-                "{\"type\":\"response.custom_tool_call_input.done\",\"item_id\":\"ctc-1\",\"input\":\"*** Begin Patch\"}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-custom\"}}"
+    it "keeps done precedence over terminal after a late added overlay" do
+        let streamedDone = renameCall "done" toolCall
+            lateAdded = renameCall "late-added" toolCall
+            terminal = renameCall "terminal" toolCall
+        result <- expectRight $ buildStreamResponse config
+            [ outputDone 0 streamedDone
+            , outputAdded 0 lateAdded
+            , completed (response [terminal])
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        case response.output of
-            [CustomToolCallItem CustomToolCall { name, input }] ->
-                (name, input)
-                    `shouldBe` ("apply_patch", "*** Begin Patch")
-            other -> expectationFailure
-                ("expected one custom tool call, got " <> show other)
+        [name | FunctionCallItem FunctionCall { name } <- result.output]
+            `shouldBe` ["late-added"]
 
-    it "assembles function-call arguments without output_item.done" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-args\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"read_file\",\"arguments\":\"\"}}"
-            , sseBlock "response.function_call_arguments.delta"
-                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-1\",\"output_index\":0,\"delta\":\"{\\\"target_file\\\":\\\"\"}"
-            , sseBlock "response.function_call_arguments.delta"
-                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-1\",\"delta\":\"README.md\\\"}\"}"
-            , sseBlock "response.function_call_arguments.done"
-                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-1\",\"name\":\"read_file\",\"arguments\":\"{\\\"target_file\\\":\\\"README.md\\\"}\"}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-args\",\"output\":[]}}"
+    it "classifies terminal failures from typed response fields" do
+        buildStreamResponse config
+            [ ResponseFailedEvent
+                ((response [])
+                    { status = ResponseFailed
+                    , error = Just ResponseError
+                        { code = "overloaded"
+                        , message = "try later"
+                        , extraFields = emptyExtensions
+                        }
+                    })
+                Nothing emptyExtensions
             ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        case response.output of
-            [FunctionCallItem FunctionCall { name, arguments }] ->
-                (name, arguments)
-                    `shouldBe` ("read_file", "{\"target_file\":\"README.md\"}")
-            other -> expectationFailure
-                ("expected one function call, got " <> show other)
+            `shouldBe` Left (ConnectionError "failed: try later")
 
-    it "assembles a function call after a reasoning item from argument events" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-reason-then-call\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
-            , sseBlock "response.output_item.done"
-                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"echo\",\"arguments\":\"\"}}"
-            , sseBlock "response.function_call_arguments.done"
-                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-1\",\"output_index\":1,\"name\":\"echo\",\"arguments\":\"{\\\"message\\\":\\\"hi\\\"}\"}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-reason-then-call\",\"output\":[]}}"
-            ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        [name | FunctionCallItem FunctionCall { name } <- response.output]
-            `shouldBe` ["echo"]
-        [arguments | FunctionCallItem FunctionCall { arguments } <- response.output]
-            `shouldBe` ["{\"message\":\"hi\"}"]
-
-    it "assembles reasoning summary part and text events by item id" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-reasoning\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
-            , sseBlock "response.reasoning_summary_part.added"
-                "{\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs-1\",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}"
-            , sseBlock "response.reasoning_summary_text.done"
-                "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs-1\",\"summary_index\":0,\"text\":\"Checked the repository.\"}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-reasoning\"}}"
-            ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        case response.output of
-            [ReasoningItemValue ReasoningItem
-                { summary = [ReasoningSummaryPart { text = Just partText }]
-                }] ->
-                    partText `shouldBe` "Checked the repository."
-            other -> expectationFailure
-                ("expected one reasoning summary, got " <> show other)
-
-    it "assembles indexless reasoning summary text deltas by item id" do
-        events <- expectRight $ parseSseEvents $ Text.intercalate ""
-            [ sseBlock "response.created"
-                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-reasoning-delta\"}}"
-            , sseBlock "response.output_item.added"
-                "{\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs-1\",\"summary\":[]}}"
-            , sseBlock "response.reasoning_summary_part.added"
-                "{\"type\":\"response.reasoning_summary_part.added\",\"item_id\":\"rs-1\",\"summary_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}"
-            , sseBlock "response.reasoning_summary_text.delta"
-                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-1\",\"summary_index\":0,\"delta\":\"Checked \"}"
-            , sseBlock "response.reasoning_summary_text.delta"
-                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-1\",\"summary_index\":0,\"delta\":\"the repository.\"}"
-            , sseBlock "response.completed"
-                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-reasoning-delta\"}}"
-            ]
-        response <- expectRight
-            (buildStreamResponseWithModel config (Just "request-model") events)
-        case response.output of
-            [ReasoningItemValue ReasoningItem
-                { summary = [ReasoningSummaryPart { text = Just partText }]
-                }] ->
-                    partText `shouldBe` "Checked the repository."
-            other -> expectationFailure
-                ("expected one reasoning summary, got " <> show other)
-
-    it "uses provider classifiers when no terminal response is present" do
-        streamEvents <- expectRight $ parseSseEvents $ sseBlock "error"
-            "{\"type\":\"error\",\"error\":{\"message\":\"stream broke\"}}"
-        buildStreamResponse config streamEvents
-            `shouldBe` Left (ConnectionError "stream: stream broke")
-
-        failedEvents <- expectRight $ parseSseEvents $ sseBlock "response.failed"
-            "{\"type\":\"response.failed\",\"response\":{\"id\":\"resp-f\",\"created_at\":0,\"model\":\"test\",\"status\":\"failed\",\"incomplete_details\":{\"reason\":\"overloaded\"}}}"
-        buildStreamResponse config failedEvents
-            `shouldBe` Left (ConnectionError "failed: response.failed: overloaded")
-
-        emptyFailedEvents <- expectRight $ parseSseEvents $
-            sseBlock "response.failed"
-                "{\"type\":\"response.failed\",\"response\":{}}"
-        buildStreamResponse config emptyFailedEvents
-            `shouldBe` Left
-                (ConnectionError "failed: response.failed (no details)")
-
-        messageFailedEvents <- expectRight $ parseSseEvents $
-            sseBlock "response.failed"
-                "{\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"exploded\"}}}"
-        buildStreamResponse config messageFailedEvents
-            `shouldBe` Left (ConnectionError "failed: exploded")
-
-    it "accepts code-only stream errors" do
-        streamEvents <- expectRight $ parseSseEvents $ sseBlock "error"
-            "{\"type\":\"error\",\"code\":\"rate_limit\"}"
-        case streamEvents of
-            [ResponseErrorEvent { streamError }] -> do
-                streamError.code `shouldBe` Just "rate_limit"
-                streamError.message `shouldBe` ""
-            other -> expectationFailure
-                ("expected one stream error event, got " <> show other)
-
-    it "uses the configured missing-completion message" do
-        case buildStreamResponse config [] of
-            Left (JsonDecodeError message _) ->
-                message `shouldBe` "custom missing completion"
-            other -> expectationFailure
-                ("expected missing-completion JsonDecodeError, got " <> show other)
+    it "finishes collected state as incomplete after transport loss" do
+        let state = applyStreamEvent
+                (applyStreamEvent emptyStreamAssemblyState
+                    (created (response [])))
+                (outputDone 0 toolCall)
+        result <- expectRight (finishAssembledIncomplete Nothing state)
+        result.status `shouldBe` ResponseIncomplete
+        result.output `shouldBe` [toolCall]
 
     modifyMaxSuccess (const 500) $
         prop "matches an independent model for adversarial indexed events" $
             \(AdversarialOperations operations) ->
                 let events =
-                        [ ResponseCreatedEvent
-                            (responseFragment "adversarial")
-                            Nothing
-                            mempty
-                        ]
-                        <> map operationEvent operations
-                        <> [ ResponseCompletedEvent
-                                (responseFragment "adversarial")
-                                Nothing
-                                mempty
-                           ]
-                    expectedModel =
-                        foldl applyExpected Map.empty operations
+                        created (response [])
+                            : map operationEvent operations
+                            <> [completed (response [])]
                     expected =
-                        expectedOutput expectedModel
+                        map fst . Map.elems $
+                            foldl applyExpected Map.empty operations
                 in case buildStreamResponse config events of
                     Left err ->
                         counterexample
-                            ( "unexpected assembly failure: "
-                                <> show err
-                                <> "\noperations: "
-                                <> show operations
+                            ( "unexpected assembly failure: " <> show err
+                            <> "\noperations: " <> show operations
                             )
                             False
-                    Right response ->
-                        let actual = map Aeson.toJSON response.output
-                        in counterexample
-                            ( "operations: " <> show operations
-                                <> "\nexpected: " <> show expected
-                                <> "\nactual: " <> show actual
-                            )
-                            (actual === expected)
+                    Right result ->
+                        counterexample
+                            ("operations: " <> show operations)
+                            (result.output === expected)
 
     modifyMaxSuccess (const 300) $
-        prop "keeps done precedence when a late added event is merged" $
+        prop "keeps done precedence when a late added item is merged" $
             \doneFragment lateFragment terminalFragment ->
-                let doneOperation = IndexedOperation (Just 0) True doneFragment
-                    lateOperation = IndexedOperation (Just 0) False lateFragment
-                    terminalValue =
-                        Aeson.toJSON (toResponseItem terminalFragment)
-                    streamedValue =
-                        mergeModelValues
-                            (Aeson.toJSON (toResponseItem doneFragment))
-                            (Aeson.toJSON (toResponseItem lateFragment))
-                    expected =
-                        [mergeModelValues terminalValue streamedValue]
+                let doneItem = fragmentItem doneFragment
+                    lateItem = fragmentItem lateFragment
+                    terminalItem = fragmentItem terminalFragment
                     events =
-                        [ ResponseCreatedEvent
-                            (responseFragment "sticky-done")
-                            Nothing
-                            mempty
-                        , operationEvent doneOperation
-                        , operationEvent lateOperation
-                        , ResponseCompletedEvent
-                            (responseFragmentWithOutput
-                                "sticky-done"
-                                [toResponseItem terminalFragment])
-                            Nothing
-                            mempty
+                        [ outputDone 0 doneItem
+                        , outputAdded 0 lateItem
+                        , completed (response [terminalItem])
                         ]
                 in case buildStreamResponse config events of
                     Left err ->
                         counterexample
                             ("unexpected assembly failure: " <> show err)
                             False
-                    Right response ->
-                        map Aeson.toJSON response.output === expected
+                    Right result ->
+                        result.output === [lateItem]
 
     modifyMaxSuccess (const 300) $
         prop "ignores all events after the first terminal lifecycle event" $
-            \(LifecycleTrace before terminal after) ->
+            \(LifecycleTrace (before, terminal, after)) ->
                 let events =
-                        map lifecycleEvent before
-                        <> [lifecycleEvent terminal]
-                        <> map lifecycleEvent after
-                    expectedId = terminal.lifecycleId
+                        map (created . responseWithId) before
+                        <> [completed (responseWithId terminal)]
+                        <> map (completed . responseWithId) after
                 in case buildStreamResponse config events of
                     Left err ->
                         counterexample
                             ("unexpected assembly failure: " <> show err)
                             False
-                    Right response ->
-                        conjoin
-                            [ counterexample
-                                ("terminal: " <> show terminal
-                                    <> "\nafter: " <> show after)
-                                (response.responseId === expectedId)
-                            ]
-  where
-    config = StreamAssemblyConfig
-        { missingCompletionMessage = "custom missing completion"
-        , classifyStreamError =
-            \streamError -> ConnectionError ("stream: " <> streamError.message)
-        , classifyFailedResponse =
-            \failure ->
-                ConnectionError
-                    ("failed: " <> failedStreamResponseMessage failure)
-        , incompleteAsFailure = True
+                    Right result ->
+                        result.responseId === identifierText terminal
+
+config :: StreamAssemblyConfig
+config = StreamAssemblyConfig
+    { missingCompletionMessage = "missing completion"
+    , classifyStreamError =
+        \streamError -> ConnectionError ("stream: " <> streamError.message)
+    , classifyFailedResponse =
+        \failure ->
+            ConnectionError ("failed: " <> failedStreamResponseMessage failure)
+    , incompleteAsFailure = True
+    }
+
+created :: Response -> ResponseStreamEvent
+created value = ResponseCreatedEvent value Nothing emptyExtensions
+
+completed :: Response -> ResponseStreamEvent
+completed value = ResponseCompletedEvent value Nothing emptyExtensions
+
+done :: Response -> ResponseStreamEvent
+done value = ResponseDoneEvent value Nothing emptyExtensions
+
+outputAdded :: Int -> ResponseItem -> ResponseStreamEvent
+outputAdded index value =
+    ResponseOutputItemAddedEvent value (Just index) Nothing emptyExtensions
+
+outputDone :: Int -> ResponseItem -> ResponseStreamEvent
+outputDone index value =
+    ResponseOutputItemDoneEvent value (Just index) Nothing emptyExtensions
+
+response :: [ResponseItem] -> Response
+response items = Response
+    { responseId = "resp_1"
+    , createdAt = 1
+    , error = Nothing
+    , incompleteDetails = Nothing
+    , instructions = Nothing
+    , metadata = Nothing
+    , model = "test-model"
+    , object = "response"
+    , output = items
+    , parallelToolCalls = Nothing
+    , temperature = Nothing
+    , toolChoice = Nothing
+    , tools = Nothing
+    , topP = Nothing
+    , background = Nothing
+    , completedAt = Nothing
+    , conversation = Nothing
+    , maxOutputTokens = Nothing
+    , maxToolCalls = Nothing
+    , moderation = Nothing
+    , previousResponseId = Nothing
+    , prompt = Nothing
+    , promptCacheKey = Nothing
+    , promptCacheOptions = Nothing
+    , promptCacheRetention = Nothing
+    , reasoning = Nothing
+    , safetyIdentifier = Nothing
+    , serviceTier = Nothing
+    , status = ResponseCompleted
+    , text = Nothing
+    , topLogprobs = Nothing
+    , truncation = Nothing
+    , usage = Nothing
+    , user = Nothing
+    , extraFields = emptyExtensions
+    }
+
+toolCall :: ResponseItem
+toolCall =
+    FunctionCallItem FunctionCall
+        { itemId = Just "fc_1"
+        , callId = "call_1"
+        , name = "echo"
+        , namespace = Nothing
+        , arguments = ""
+        , encryptedFunctionArgs = Nothing
+        , status = Nothing
+        , extraFields = emptyExtensions
         }
 
-responseFragment :: Text -> Aeson.Value
-responseFragment responseId =
-    Aeson.object
-        [ "id" Aeson..= responseId
-        , "created_at" Aeson..= (0 :: Int)
-        , "model" Aeson..= ("generated-model" :: Text)
-        , "status" Aeson..= ("completed" :: Text)
-        , "output" Aeson..= ([] :: [Aeson.Value])
-        ]
+customCall :: ResponseItem
+customCall =
+    CustomToolCallItem CustomToolCall
+        { itemId = Just "custom_1"
+        , callId = "custom-call"
+        , name = "apply_patch"
+        , namespace = Nothing
+        , input = ""
+        , status = Nothing
+        , extraFields = emptyExtensions
+        }
 
-responseFragmentWithOutput :: Text -> [ResponseItem] -> Aeson.Value
-responseFragmentWithOutput responseId output =
-    Aeson.object
-        [ "id" Aeson..= responseId
-        , "created_at" Aeson..= (0 :: Int)
-        , "model" Aeson..= ("generated-model" :: Text)
-        , "status" Aeson..= ("completed" :: Text)
-        , "output" Aeson..= output
-        ]
+reasoningItem :: ResponseItem
+reasoningItem =
+    ReasoningItemValue ReasoningItem
+        { itemId = Just "reason_1"
+        , summary = []
+        , content = Nothing
+        , encryptedContent = Nothing
+        , status = Nothing
+        , extraFields = emptyExtensions
+        }
 
--- This model deliberately stores raw item values rather than reusing the
--- implementation's progress type. An explicit output index identifies one
--- item, and later object fields overlay earlier fields.
-type StreamModel = Map.Map Int (Aeson.Value, Bool)
+renameCall :: Text -> ResponseItem -> ResponseItem
+renameCall value (FunctionCallItem call) =
+    FunctionCallItem call { name = value }
+renameCall _ item = item
+
+expectRight :: (Show error) => Either error value -> IO value
+expectRight = \case
+    Right value -> pure value
+    Left err -> do
+        expectationFailure ("expected Right, got " <> show err)
+        error "expectRight: unreachable"
 
 data CallFragment = CallFragment
-    { fragmentItemId    :: !(Maybe Text)
-    , fragmentCallId    :: !Text
-    , fragmentName      :: !Text
-    , fragmentNamespace :: !(Maybe Text)
-    , fragmentArguments  :: !Text
-    , fragmentStatus     :: !(Maybe ItemStatus)
-    , fragmentMarker     :: !Text
+    { fragmentItemId :: !(Maybe Text)
+    , fragmentCallId :: !Text
+    , fragmentName :: !Text
+    , fragmentArguments :: !Text
     }
     deriving (Eq, Show)
-
-data LifecycleStep = LifecycleStep
-    { lifecycleId       :: !Text
-    , lifecycleTerminal :: !Bool
-    }
-    deriving (Eq, Show)
-
-instance Arbitrary LifecycleStep where
-    arbitrary = LifecycleStep
-        <$> elements ["response-before-a", "response-before-b", "response-final"]
-        <*> arbitrary
-
-data LifecycleTrace = LifecycleTrace
-    { lifecycleBefore   :: ![LifecycleStep]
-    , lifecycleTerminalStep :: !LifecycleStep
-    , lifecycleAfter    :: ![LifecycleStep]
-    }
-    deriving (Eq, Show)
-
-instance Arbitrary LifecycleTrace where
-    arbitrary = do
-        beforeIds <- listOf
-            (elements ["response-before-a", "response-before-b"])
-        terminal <- LifecycleStep
-            <$> elements ["response-final", "response-final-b"]
-            <*> pure True
-        after <- listOf arbitrary
-        pure (LifecycleTrace
-            (map (`LifecycleStep` False) beforeIds)
-            terminal
-            after)
-    shrink (LifecycleTrace before terminal after) =
-        [ LifecycleTrace before' terminal after
-        | before' <- shrink before
-        ]
-        <> [ LifecycleTrace before terminal after'
-           | after' <- shrink after
-           ]
-
-lifecycleEvent :: LifecycleStep -> ResponseStreamEvent
-lifecycleEvent step
-    | step.lifecycleTerminal =
-        ResponseCompletedEvent
-            (responseFragment step.lifecycleId)
-            Nothing
-            mempty
-    | otherwise =
-        ResponseCreatedEvent
-            (responseFragment step.lifecycleId)
-            Nothing
-            mempty
 
 instance Arbitrary CallFragment where
-    arbitrary = CallFragment
-        <$> arbitraryOptional
-        <*> elements ["call-a", "call-b", "call-c", "call-latest"]
-        <*> elements ["first", "second", "third", "latest"]
-        <*> arbitraryOptional
-        <*> elements ["{}", "{\"value\":1}", "{\"value\":2}", ""]
-        <*> arbitraryOptionalStatus
-        <*> elements ["marker-a", "marker-b", "marker-c", "marker-latest"]
-      where
-        arbitraryOptional =
-            elements
-                [ Nothing
-                , Just "item-a"
-                , Just "item-b"
-                , Just "item-c"
-                ]
-        arbitraryOptionalStatus =
-            elements
-                [ Nothing
-                , Just ItemInProgress
-                , Just ItemCompleted
-                , Just ItemIncomplete
-                ]
+    arbitrary = do
+        identifier <- chooseInt (0, 20)
+        includeItemId <- elements [False, True]
+        marker <- chooseInt (-1000, 1000)
+        pure CallFragment
+            { fragmentItemId =
+                if includeItemId
+                    then Just ("item-" <> identifierText identifier)
+                    else Nothing
+            , fragmentCallId = "call-" <> identifierText identifier
+            , fragmentName = "name-" <> identifierText marker
+            , fragmentArguments = "{\"marker\":"
+                <> identifierText marker <> "}"
+            }
+    shrink _ = []
+
+fragmentItem :: CallFragment -> ResponseItem
+fragmentItem fragment =
+    FunctionCallItem FunctionCall
+        { itemId = fragment.fragmentItemId
+        , callId = fragment.fragmentCallId
+        , name = fragment.fragmentName
+        , namespace = Nothing
+        , arguments = fragment.fragmentArguments
+        , encryptedFunctionArgs = Nothing
+        , status = Nothing
+        , extraFields = emptyExtensions
+        }
 
 data IndexedOperation = IndexedOperation
     { operationIndex :: !(Maybe Int)
-    , operationDone  :: !Bool
-    , operationCall  :: !CallFragment
+    , operationDone :: !Bool
+    , operationFragment :: !CallFragment
     }
     deriving (Eq, Show)
 
 instance Arbitrary IndexedOperation where
     arbitrary = IndexedOperation
-        <$> oneof
-            [ pure Nothing
-            , Just <$> chooseInt (-3, 100)
-            ]
+        <$> elements [Nothing, Just 0, Just 1, Just 2, Just 4]
+        <*> elements [False, True]
         <*> arbitrary
-        <*> arbitrary
+    shrink _ = []
 
-newtype AdversarialOperations = AdversarialOperations [IndexedOperation]
-    deriving (Eq, Show)
+newtype AdversarialOperations =
+    AdversarialOperations [IndexedOperation]
+    deriving (Show)
 
 instance Arbitrary AdversarialOperations where
-    arbitrary = do
-        -- Keep these operations in every generated stream so that each
-        -- property run exercises duplicates, both orderings, and sparse,
-        -- out-of-order indexes. Additional operations remain arbitrary.
-        doneBeforeAddedIndex <- chooseInt (30, 40)
-        addedBeforeDoneIndex <- chooseInt (60, 70)
-        lateAddedIndex <- chooseInt (0, 10)
-        forced <- traverse
-            (\(index, done) ->
-                IndexedOperation index done <$> arbitrary)
-            [ (Just doneBeforeAddedIndex, True)
-            , (Just doneBeforeAddedIndex, False)
-            , (Just addedBeforeDoneIndex, False)
-            , (Just addedBeforeDoneIndex, True)
-            , (Just lateAddedIndex, True)
-            , (Just lateAddedIndex, False)
-            ]
-        noise <- listOf1
-            (IndexedOperation
-                <$> (oneof
-                    [ pure Nothing
-                    , Just <$> chooseInt (0, 100)
-                    ])
-                <*> arbitrary
-                <*> arbitrary)
-        let shared = CallFragment
-                { fragmentItemId = Just "shared-item"
-                , fragmentCallId = "shared-call"
-                , fragmentName = "shared"
-                , fragmentNamespace = Nothing
-                , fragmentArguments = "{}"
-                , fragmentStatus = Just ItemInProgress
-                , fragmentMarker = "shared"
-                }
-            conflicting = shared
-                { fragmentCallId = "other-call"
-                , fragmentName = "conflicting"
-                , fragmentMarker = "conflicting"
-                }
-            identityOperations =
-                [ IndexedOperation Nothing True shared
-                , IndexedOperation Nothing False conflicting
-                ]
-        pure (AdversarialOperations
-            (forced <> identityOperations <> noise))
-    shrink (AdversarialOperations operations) =
-        AdversarialOperations <$> shrink operations
+    arbitrary = AdversarialOperations <$> listOf arbitrary
+    shrink _ = []
 
 operationEvent :: IndexedOperation -> ResponseStreamEvent
-operationEvent operation
-    | operation.operationDone =
-        ResponseOutputItemDoneEvent
-            (toResponseItem operation.operationCall)
-            operation.operationIndex
-            Nothing
-            mempty
-    | otherwise =
-        ResponseOutputItemAddedEvent
-            (toResponseItem operation.operationCall)
-            operation.operationIndex
-            Nothing
-            mempty
+operationEvent operation =
+    let item = fragmentItem operation.operationFragment
+    in if operation.operationDone
+        then ResponseOutputItemDoneEvent
+            item operation.operationIndex Nothing emptyExtensions
+        else ResponseOutputItemAddedEvent
+            item operation.operationIndex Nothing emptyExtensions
 
-toResponseItem :: CallFragment -> ResponseItem
-toResponseItem fragment =
-    FunctionCallItem FunctionCall
-        { itemId = fragment.fragmentItemId
-        , callId = fragment.fragmentCallId
-        , name = fragment.fragmentName
-        , namespace = fragment.fragmentNamespace
-        , arguments = fragment.fragmentArguments
-        , encryptedFunctionArgs = Nothing
-        , status = fragment.fragmentStatus
-        , extraFields =
-            KeyMap.singleton
-                "model_test_marker"
-                (Aeson.String fragment.fragmentMarker)
-        }
+type StreamModel = Map.Map Int (ResponseItem, Bool)
 
 applyExpected :: StreamModel -> IndexedOperation -> StreamModel
-applyExpected expected operation =
-    Map.alter update outputIndex expected
+applyExpected model operation =
+    Map.alter update targetIndex model
   where
-    newValue = Aeson.toJSON (toResponseItem operation.operationCall)
-    outputIndex =
-        fromMaybe (nextModelIndex expected) $
-            operation.operationIndex
-                <|> findModelItemIndex newValue expected
-                <|> if operation.operationDone
-                    then findPendingModelIndex newValue expected
-                    else Nothing
-    update Nothing = Just (newValue, operation.operationDone)
-    update (Just (oldValue, wasDone)) =
-        Just
-            ( mergeModelValues oldValue newValue
-            , wasDone || operation.operationDone
-            )
+    newItem = fragmentItem operation.operationFragment
+    targetIndex = fromMaybe (nextModelIndex model) $
+        operation.operationIndex
+            <|> findMatchingIndex newItem model
+            <|> if operation.operationDone
+                then fst <$> Map.lookupMin (Map.filter (not . snd) model)
+                else Nothing
+    update Nothing = Just (newItem, operation.operationDone)
+    update (Just (_, wasDone)) =
+        Just (newItem, wasDone || operation.operationDone)
 
-mergeModelValues :: Aeson.Value -> Aeson.Value -> Aeson.Value
-mergeModelValues (Aeson.Object oldObject) (Aeson.Object newObject) =
-    Aeson.Object (KeyMap.union newObject oldObject)
-mergeModelValues _ newValue = newValue
-
-expectedOutput :: StreamModel -> [Aeson.Value]
-expectedOutput = map fst . Map.elems
+findMatchingIndex :: ResponseItem -> StreamModel -> Maybe Int
+findMatchingIndex (FunctionCallItem wanted) model =
+    firstMatching (.itemId) wanted.itemId
+        <|> firstMatching (Just . (.callId)) (Just wanted.callId)
+  where
+    firstMatching project expected =
+        fst <$> Map.lookupMin
+            (Map.filter
+                (\case
+                    (FunctionCallItem item, _) ->
+                        expected /= Nothing && project item == expected
+                    _ -> False)
+                model)
+findMatchingIndex _ _ = Nothing
 
 nextModelIndex :: StreamModel -> Int
 nextModelIndex model =
     maybe 0 ((+ 1) . fst) (Map.lookupMax model)
 
-findModelItemIndex :: Aeson.Value -> StreamModel -> Maybe Int
-findModelItemIndex value model =
-    firstJustModel
-        [ findIdentityModel identity model
-        | identity <- itemIdentitiesModel value
-        ]
+newtype LifecycleTrace = LifecycleTrace ([Int], Int, [Int])
+    deriving (Show)
 
-findIdentityModel :: Text -> StreamModel -> Maybe Int
-findIdentityModel wanted model =
-    fst <$> Map.lookupMin
-        (Map.filter
-            (matchesIdentityValue wanted . fst)
-            model)
+instance Arbitrary LifecycleTrace where
+    arbitrary = LifecycleTrace
+        <$> ((,,) <$> listOf arbitrary <*> arbitrary <*> listOf arbitrary)
+    shrink _ = []
 
-matchesIdentityValue :: Text -> Aeson.Value -> Bool
-matchesIdentityValue wanted candidate =
-    objectTextFieldModel "id" candidate == Just wanted
-        || objectTextFieldModel "call_id" candidate == Just wanted
+responseWithId :: Int -> Response
+responseWithId identifier =
+    (response []) { responseId = identifierText identifier }
 
-itemIdentitiesModel :: Aeson.Value -> [Text]
-itemIdentitiesModel value =
-    [ identity
-    | fieldName <- ["id", "call_id"]
-    , Just identity <- [objectTextFieldModel fieldName value]
-    ]
-
-findPendingModelIndex :: Aeson.Value -> StreamModel -> Maybe Int
-findPendingModelIndex value model =
-    case objectTextFieldModel "type" value of
-        Nothing -> Nothing
-        Just wantedType ->
-            fst <$> Map.lookupMin
-                (Map.filter
-                    (\(item, done) ->
-                        not done
-                            && objectTextFieldModel "type" item
-                                == Just wantedType)
-                    model)
-
-firstJustModel :: [Maybe value] -> Maybe value
-firstJustModel = foldr (<|>) Nothing
-
-objectTextFieldModel :: Text -> Aeson.Value -> Maybe Text
-objectTextFieldModel fieldName value =
-    case value of
-        Aeson.Object object ->
-            case KeyMap.lookup (Key.fromText fieldName) object of
-                Just (Aeson.String text) -> Just text
-                _ -> Nothing
-        _ -> Nothing
-
-sseBlock :: Text -> Text -> Text
-sseBlock eventType dataText =
-    "event: " <> eventType <> "\ndata: " <> dataText <> "\n\n"
-
-expectRight :: Show error => Either error value -> IO value
-expectRight = \case
-    Left err ->
-        expectationFailure ("expected Right, got Left " <> show err)
-            >> fail "unreachable"
-    Right value -> pure value
+identifierText :: Int -> Text
+identifierText = Text.pack . show

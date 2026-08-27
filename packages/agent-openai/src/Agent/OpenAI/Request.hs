@@ -5,9 +5,17 @@ module Agent.OpenAI.Request
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.Json
+    ( Extensions
+    , deleteExtension
+    , emptyExtensions
+    , extensionsToList
+    , insertExtension
+    , lookupExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 
 -- | Keep Codex-incompatible fields out of the serialized request.
 --
@@ -123,24 +131,38 @@ stripItemPassthrough = \case
                 , createTime = Nothing
                 , contentItemKinds = Nothing
                 , executedToolCalls = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             then Nothing
             else Just cleaned
 
-stripContentItemKindsFields :: Aeson.Object -> Aeson.Object
+stripContentItemKindsFields :: Extensions -> Extensions
 stripContentItemKindsFields fields =
-    case KeyMap.lookup passthroughKey fields of
-        Just (Aeson.Object metadata) ->
-            let cleaned = KeyMap.delete contentItemKindsKey metadata
-            in if KeyMap.null cleaned
-                then KeyMap.delete passthroughKey fields
-                else KeyMap.insert
+    case lookupExtension passthroughKey fields >>= decodeExtensions of
+        Just metadata ->
+            let cleaned = deleteExtension contentItemKindsKey metadata
+            in if null (extensionsToList cleaned)
+                then deleteExtension passthroughKey fields
+                else insertExtension
                     passthroughKey
-                    (Aeson.Object cleaned)
+                    (encodeExtensions cleaned)
                     fields
         _ -> fields
   where
-    passthroughKey =
-        Key.fromText "internal_chat_message_metadata_passthrough"
-    contentItemKindsKey = Key.fromText "content_item_kinds"
+    passthroughKey = "internal_chat_message_metadata_passthrough"
+    contentItemKindsKey = "content_item_kinds"
+
+decodeExtensions raw =
+    either (const Nothing) Just
+        (JsonDecoder.decode
+            (JsonDecoder.objectFields JsonDecoder.extensionFields)
+            (rawJsonBytes raw))
+
+encodeExtensions =
+    validatedRaw
+        . JsonEncoder.encode (JsonEncoder.objectWithExtensions id [])
+
+validatedRaw bytes =
+    case JsonDecoder.validateRawJson bytes of
+        Right raw -> raw
+        Left err -> error ("impossible invalid extension encoding: " <> show err)

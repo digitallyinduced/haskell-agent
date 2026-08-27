@@ -186,6 +186,7 @@ library
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-json-codec >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
@@ -333,6 +334,7 @@ test-suite agent-cli-test
                     , Agent.CLI.FileUriSpec
                     , Agent.CLI.GatewayBridgeSpec
                     , Agent.CLI.ImagePreviewSpec
+                    , Agent.CLI.JsonCompat
                     , Agent.CLI.InputSpec
                     , Agent.CLI.InterruptSpec
                     , Agent.CLI.LoginSpec
@@ -388,6 +390,7 @@ test-suite agent-cli-test
                     , agent-core
                     , agent-codex-dialect
                     , agent-grok-build-dialect
+                    , agent-json-codec
                     , agent-store
                     , agent-tui
                     , agent-openai

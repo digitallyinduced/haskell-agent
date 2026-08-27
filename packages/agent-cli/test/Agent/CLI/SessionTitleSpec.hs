@@ -1,5 +1,7 @@
 module Agent.CLI.SessionTitleSpec (spec) where
 
+import Agent.Json (emptyExtensions)
+
 import Agent.CLI.SessionTitle
 import Agent.Loop
     ( Backend(..)
@@ -14,7 +16,6 @@ import Control.Concurrent
     , takeMVar
     , threadDelay
     )
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Text as Text
 import Test.Hspec
@@ -53,7 +54,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                 , generateSummary = Nothing
                 , reasoningMode = Nothing
                 , summary = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             baseParams =
                 case defaultResponseCreateParams :: ResponseCreateParams of

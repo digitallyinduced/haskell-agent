@@ -38,15 +38,20 @@ module Agent.OpenAI.Compaction
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.LoopBackend (withRequestInput)
 import Agent.Responses.Types
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.Json
+    ( RawJson
+    , emptyExtensions
+    , extensionsToList
+    , insertExtension
+    , lookupExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Data.Maybe (listToMaybe, mapMaybe)
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import qualified Data.Vector as Vector
 
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
@@ -67,7 +72,7 @@ maxRetainedAgentMessageTokens = 10_000
 compactionTriggerItem :: ResponseItem
 compactionTriggerItem =
     CompactionTriggerItemValue CompactionTriggerItem
-        { extraFields = KeyMap.empty
+        { extraFields = emptyExtensions
         }
 
 -- | Build a normal streaming Responses request whose final input item asks the
@@ -101,10 +106,14 @@ estimateRequestTokensWithItems
     -> [ResponseItem]
     -> Int
 estimateRequestTokensWithItems params items =
-    estimateEncodedValue (withRequestInput params items)
+    estimateResponseCreateParamsTokens (withRequestInput params items)
 
 estimateResponseCreateParamsTokens :: ResponseCreateParams -> Int
-estimateResponseCreateParamsTokens = estimateEncodedValue
+estimateResponseCreateParamsTokens params =
+    estimateEncodedValue
+        responseCreateParamsEncoder
+        (mediaEstimateAdjustmentInput params.input)
+        params
 
 -- | Estimate serialized JSON at four characters per token, matching the rest
 -- of compaction accounting. Base64 payloads on @input_image.image_url@ are
@@ -112,15 +121,14 @@ estimateResponseCreateParamsTokens = estimateEncodedValue
 -- images as vision tokens, not as the transport encoding. Ordinary strings
 -- that happen to contain a data URL, including tool-output text, stay at raw
 -- size.
-estimateEncodedValue :: Aeson.ToJSON value => value -> Int
-estimateEncodedValue value =
-    estimateAdjustedJsonTokens (Aeson.toJSON value)
-
-estimateAdjustedJsonTokens :: Aeson.Value -> Int
-estimateAdjustedJsonTokens json =
+estimateEncodedValue
+    :: JsonEncoder.Encoder value
+    -> (Int, Int)
+    -> value
+    -> Int
+estimateEncodedValue encoder (payloadBytes, replacementBytes) value =
     let encoded =
-            TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode json))
-        (payloadBytes, replacementBytes) = mediaEstimateAdjustment json
+            TextEncoding.decodeUtf8 (JsonEncoder.encode encoder value)
         adjusted =
             max 0 (Text.length encoded - payloadBytes) + replacementBytes
     in max 1 (adjusted `div` 4)
@@ -131,42 +139,71 @@ estimateAdjustedJsonTokens json =
 resizedImageBytesEstimate :: Int
 resizedImageBytesEstimate = 7_373
 
-mediaEstimateAdjustment :: Aeson.Value -> (Int, Int)
-mediaEstimateAdjustment = \case
-    Aeson.Array values ->
-        foldl'
-            (\acc value -> addPair acc (mediaEstimateAdjustment value))
-            (0, 0)
-            values
-    Aeson.Object fields ->
-        let isInputImage =
-                KeyMap.lookup "type" fields == Just (Aeson.String "input_image")
-        in foldl'
-            (\acc (key, value) ->
-                addPair acc (fieldAdjustment isInputImage key value))
-            (0, 0)
-            (KeyMap.toList fields)
-    _ ->
-        (0, 0)
+mediaEstimateAdjustmentInput :: Maybe ResponseInput -> (Int, Int)
+mediaEstimateAdjustmentInput = \case
+    Just (ResponseInputItems items) ->
+        foldAdjustments mediaEstimateAdjustmentItem items
+    _ -> (0, 0)
+
+mediaEstimateAdjustmentItem :: ResponseItem -> (Int, Int)
+mediaEstimateAdjustmentItem = \case
+    MessageItem message -> contentAdjustment message.content
+    AgentMessageItem message ->
+        foldAdjustments partAdjustment message.content
+    FunctionCallOutputItem output -> rawAdjustment output.output
+    CustomToolCallOutputItem output -> rawAdjustment output.output
+    KnownResponseItem _ tagged ->
+        foldAdjustments (rawAdjustment . snd)
+            (extensionsToList tagged.fields)
+    UnknownResponseItem tagged ->
+        foldAdjustments (rawAdjustment . snd)
+            (extensionsToList tagged.fields)
+    _ -> (0, 0)
   where
-    addPair (payloadAcc, replacementAcc) (payload, replacement) =
-        (payloadAcc + payload, replacementAcc + replacement)
+    contentAdjustment = \case
+        MessageContentParts parts -> foldAdjustments partAdjustment parts
+        MessageContentText _ -> (0, 0)
 
-    fieldAdjustment isInputImage key value
-        | isInputImage && key == "image_url" =
-            imageUrlAdjustment value
-        | otherwise =
-            mediaEstimateAdjustment value
-
-imageUrlAdjustment :: Aeson.Value -> (Int, Int)
-imageUrlAdjustment = \case
-    Aeson.String text ->
-        case parseBase64ImageDataUrl text of
+    partAdjustment InputImagePart{imageUrl = Just url} =
+        case parseBase64ImageDataUrl url of
             Just payload ->
                 (Text.length payload, resizedImageBytesEstimate)
-            Nothing ->
-                (0, 0)
-    _ ->
+            Nothing -> (0, 0)
+    partAdjustment _ = (0, 0)
+
+rawAdjustment :: RawJson -> (Int, Int)
+rawAdjustment raw =
+    case JsonDecoder.decode rawAdjustmentDecoder (rawJsonBytes raw) of
+        Right adjustment -> adjustment
+        Left _ -> (0, 0)
+  where
+    rawAdjustmentDecoder = JsonDecoder.byType \case
+        JsonDecoder.JsonArray ->
+            JsonDecoder.mapDecoder
+                (foldAdjustments rawAdjustment)
+                (JsonDecoder.list JsonDecoder.rawJson)
+        JsonDecoder.JsonObject ->
+            JsonDecoder.mapDecoder objectAdjustment
+                (JsonDecoder.objectFields JsonDecoder.extensionFields)
+        _ -> JsonDecoder.mapDecoder (const (0, 0)) JsonDecoder.skip
+
+    objectAdjustment fields
+        | (lookupExtension "type" fields >>= decodeRaw JsonDecoder.text)
+            == Just "input_image"
+        , Just urlRaw <- lookupExtension "image_url" fields
+        , Just url <- decodeRaw JsonDecoder.text urlRaw
+        , Just payload <- parseBase64ImageDataUrl url =
+            (Text.length payload, resizedImageBytesEstimate)
+        | otherwise =
+            foldAdjustments (rawAdjustment . snd)
+                (extensionsToList fields)
+
+foldAdjustments :: (value -> (Int, Int)) -> [value] -> (Int, Int)
+foldAdjustments adjustment =
+    foldl'
+        (\(payloadTotal, replacementTotal) value ->
+            let (payload, replacement) = adjustment value
+            in (payloadTotal + payload, replacementTotal + replacement))
         (0, 0)
 
 -- | Return the base64 payload of a @data:image/...;base64,...@ URL.
@@ -232,7 +269,8 @@ trimRemoteCompactionRequestToFit contextWindow params =
         requestTokens
   where
     requestTokens history =
-        estimateEncodedValue (buildRemoteCompactionRequest params history)
+        estimateResponseCreateParamsTokens
+            (buildRemoteCompactionRequest params history)
 
 -- | Trim history for a normal Responses request with fixed trailing items.
 -- Local summarization uses this to bound the transcript before appending its
@@ -382,9 +420,7 @@ taggedProtocolIds tagged =
 
 taggedTextField :: Text -> TaggedObject -> Maybe Text
 taggedTextField name tagged =
-    case KeyMap.lookup (Key.fromText name) tagged.fields of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
+    lookupExtension name tagged.fields >>= decodeRaw JsonDecoder.text
 
 identifiersMatch :: [Text] -> [Text] -> Bool
 identifiersMatch expected actual =
@@ -436,9 +472,14 @@ oversizedToolArgumentsMessage =
 
 oversizedFunctionArguments :: Text
 oversizedFunctionArguments =
-    TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode $ Aeson.object
-        [ "compaction_notice" Aeson..= oversizedToolArgumentsMessage
-        ]
+    TextEncoding.decodeUtf8 $ JsonEncoder.encode
+        (JsonEncoder.object
+            [ JsonEncoder.field
+                "compaction_notice"
+                JsonEncoder.text
+                id
+            ])
+        oversizedToolArgumentsMessage
 
 rewriteOversizedToolOutput :: ResponseItem -> Maybe ResponseItem
 rewriteOversizedToolOutput = \case
@@ -448,7 +489,8 @@ rewriteOversizedToolOutput = \case
             , callId = output.callId
             , name = output.name
             , namespace = output.namespace
-            , output = Aeson.String contextWindowTruncatedOutputMessage
+            , output = encodedRaw JsonEncoder.text
+                contextWindowTruncatedOutputMessage
             , status = output.status
             , extraFields = output.extraFields
             }
@@ -457,7 +499,8 @@ rewriteOversizedToolOutput = \case
             { itemId = output.itemId
             , callId = output.callId
             , name = output.name
-            , output = Aeson.String contextWindowTruncatedOutputMessage
+            , output = encodedRaw JsonEncoder.text
+                contextWindowTruncatedOutputMessage
             , status = output.status
             , extraFields = output.extraFields
             }
@@ -564,10 +607,9 @@ rewriteTaggedFields payloadKeys tagged =
         rewritten =
             foldr
                 (\name fields ->
-                    let key = Key.fromText name
-                    in case KeyMap.lookup key fields of
+                    case lookupExtension name fields of
                         Just value ->
-                            KeyMap.insert key (truncatePayload value) fields
+                            insertExtension name (truncatePayload value) fields
                         Nothing -> fields)
                 tagged.fields
                 payloadKeys
@@ -575,15 +617,30 @@ rewriteTaggedFields payloadKeys tagged =
         then Nothing
         else Just tagged { fields = rewritten }
 
-truncatePayload :: Aeson.Value -> Aeson.Value
-truncatePayload = \case
-    Aeson.String _ ->
-        Aeson.String contextWindowTruncatedOutputMessage
-    Aeson.Array _ ->
-        Aeson.Array Vector.empty
-    Aeson.Object _ ->
-        Aeson.Object KeyMap.empty
-    value -> value
+truncatePayload :: RawJson -> RawJson
+truncatePayload raw =
+    case JsonDecoder.decode payloadReplacementDecoder (rawJsonBytes raw) of
+        Right (Just replacement) -> replacement
+        _ -> raw
+  where
+    payloadReplacementDecoder = JsonDecoder.byType \case
+        JsonDecoder.JsonString ->
+            JsonDecoder.mapDecoder
+                (const (Just (encodedRaw JsonEncoder.text
+                    contextWindowTruncatedOutputMessage)))
+                JsonDecoder.text
+        JsonDecoder.JsonArray ->
+            JsonDecoder.mapDecoder
+                (const (Just (encodedRaw (JsonEncoder.list JsonEncoder.rawJson)
+                    [])))
+                (JsonDecoder.list JsonDecoder.rawJson)
+        JsonDecoder.JsonObject ->
+            JsonDecoder.mapDecoder
+                (const (Just (encodedRaw
+                    (JsonEncoder.objectWithExtensions id [])
+                    emptyExtensions)))
+                (JsonDecoder.objectFields JsonDecoder.extensionFields)
+        _ -> JsonDecoder.mapDecoder (const Nothing) JsonDecoder.skip
 
 rewriteItemForBudget :: Int -> ResponseItem -> Maybe ResponseItem
 rewriteItemForBudget budget item =
@@ -680,13 +737,13 @@ richContentNoticePart role notice =
                 { text = notice
                 , annotations = Nothing
                 , logprobs = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
         _ ->
             InputTextPart
                 { text = notice
                 , promptCacheBreakpoint = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
 
 richContentNotice :: ResponseContentPart -> Text
@@ -973,7 +1030,24 @@ estimateTokens text = max 1 (Text.length text `div` 4)
 
 estimateItemsTokens :: [ResponseItem] -> Int
 estimateItemsTokens items =
-    sum [estimateEncodedValue item | item <- items]
+    sum
+        [ estimateEncodedValue
+            responseItemEncoder
+            (mediaEstimateAdjustmentItem item)
+            item
+        | item <- items
+        ]
+
+decodeRaw :: JsonDecoder.Decoder value -> RawJson -> Maybe value
+decodeRaw decoder raw =
+    either (const Nothing) Just
+        (JsonDecoder.decode decoder (rawJsonBytes raw))
+
+encodedRaw :: JsonEncoder.Encoder value -> value -> RawJson
+encodedRaw encoder value =
+    case JsonDecoder.validateRawJson (JsonEncoder.encode encoder value) of
+        Right raw -> raw
+        Left err -> error ("impossible invalid direct JSON encoding: " <> show err)
 
 -- | Collect recent real user message texts (newest last), skipping /compact markers.
 collectRecentUserTexts :: Int -> [ResponseItem] -> [Text]
@@ -1010,12 +1084,13 @@ messageText message = case message.content of
 userTextItem :: Text -> ResponseItem
 userTextItem text = MessageItem ResponseMessage
     { messageId = Nothing
-    , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , content = MessageContentParts
+        [InputTextPart text Nothing emptyExtensions]
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 assistantSummaryItem :: Text -> ResponseItem
@@ -1028,13 +1103,13 @@ assistantSummaryItem summary =
                     (summaryPrefix <> "\n" <> Text.strip summary)
                     Nothing
                     Nothing
-                    KeyMap.empty
+                    emptyExtensions
                 ]
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 -- | Grok-style local rebuild: recent user texts + assistant summary.

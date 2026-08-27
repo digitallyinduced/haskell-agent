@@ -17,9 +17,12 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import Agent.Json (RawJson)
+import qualified Agent.Json.Decoder as JsonDecoder
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -109,7 +112,8 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing
-            , output = Aeson.object ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
+            , output = rawValue $
+                Aeson.object ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
             , status = Nothing
             , extraFields = mempty
             }
@@ -124,13 +128,13 @@ echoTool :: ResponseTool
 echoTool = FunctionToolValue FunctionTool
     { name = "echo_text"
     , description = Just "Echo the given text back to the caller."
-    , parameters = Just (Aeson.object
+    , parameters = Just (rawValue (Aeson.object
         [ "type" Aeson..= ("object" :: Text)
         , "properties" Aeson..= Aeson.object
             [ "text" Aeson..= Aeson.object [ "type" Aeson..= ("string" :: Text) ] ]
         , "required" Aeson..= [ "text" :: Text ]
         , "additionalProperties" Aeson..= False
-        ])
+        ]))
     , strict = Just True
     , extraFields = mempty
     }
@@ -167,6 +171,12 @@ functionCallArgumentText key arguments = case Aeson.decodeStrict' (Text.encodeUt
         Just (Aeson.String value) -> value
         _ -> ""
     _ -> ""
+
+rawValue :: Aeson.Value -> RawJson
+rawValue value =
+    case JsonDecoder.validateRawJson (LBS.toStrict (Aeson.encode value)) of
+        Left err -> error ("invalid test JSON: " <> show err)
+        Right raw -> raw
 
 --------------------------------------------------------------------------------
 -- Credential loading

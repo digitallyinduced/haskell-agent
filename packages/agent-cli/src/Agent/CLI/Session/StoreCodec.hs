@@ -9,11 +9,19 @@ module Agent.CLI.Session.StoreCodec
     ) where
 
 import Control.Applicative ((<|>))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , deleteExtension
+    , emptyExtensions
+    , insertExtension
+    , lookupExtension
+    , rawJsonBytes
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
+import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Base64 as Base64
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -35,6 +43,12 @@ import Agent.Responses.Types
     , ResponseRole(..)
     , TaggedObject(..)
     , parseResponseItemType
+    , responseItemDecoder
+    , responseItemEncoder
+    )
+import Agent.Responses.Types.Items
+    ( internalChatMetadataDecoder
+    , internalChatMetadataEncoder
     )
 import Agent.Store.SessionItem
 
@@ -49,7 +63,7 @@ toStoredResponseItem = \case
             , storedMessagePhase = message.phase
             , storedMessageExtraFields =
                 encodeObject
-                    (insertOptionalJson
+                    (insertOptionalJson internalChatMetadataEncoder
                         "internal_chat_message_metadata_passthrough"
                         message.passthrough
                         message.extraFields)
@@ -63,8 +77,8 @@ toStoredResponseItem = \case
             , storedFunctionCallStatus = itemStatusText <$> call.status
             , storedFunctionCallExtraFields =
                 encodeObject
-                    (insertOptionalJson "namespace" call.namespace $
-                        insertOptionalJson
+                    (insertOptionalJson JsonEncoder.text "namespace" call.namespace $
+                        insertOptionalJson (JsonEncoder.list JsonEncoder.text)
                             "encrypted_function_args"
                             call.encryptedFunctionArgs
                             call.extraFields)
@@ -79,8 +93,8 @@ toStoredResponseItem = \case
                 itemStatusText <$> output.status
             , storedFunctionCallOutputExtraFields =
                 encodeObject
-                    (insertOptionalJson "name" output.name $
-                        insertOptionalJson
+                    (insertOptionalJson JsonEncoder.text "name" output.name $
+                        insertOptionalJson JsonEncoder.text
                             "namespace"
                             output.namespace
                             output.extraFields)
@@ -94,7 +108,7 @@ toStoredResponseItem = \case
             , storedCustomToolCallStatus = itemStatusText <$> call.status
             , storedCustomToolCallExtraFields =
                 encodeObject
-                    (insertOptionalJson
+                    (insertOptionalJson JsonEncoder.text
                         "namespace"
                         call.namespace
                         call.extraFields)
@@ -131,25 +145,25 @@ toStoredResponseItem = \case
                 encodeObject reference.extraFields
             }
     AgentMessageItem message ->
-        storedTypedKnownItem "agent_message" message
+        storedKnownItem "agent_message" (AgentMessageItem message)
     AdditionalToolsItemValue item ->
-        storedTypedKnownItem "additional_tools" item
+        storedKnownItem "additional_tools" (AdditionalToolsItemValue item)
     LocalShellCallItem item ->
-        storedTypedKnownItem "local_shell_call" item
+        storedKnownItem "local_shell_call" (LocalShellCallItem item)
     ToolSearchCallItem item ->
-        storedTypedKnownItem "tool_search_call" item
+        storedKnownItem "tool_search_call" (ToolSearchCallItem item)
     ToolSearchOutputItem item ->
-        storedTypedKnownItem "tool_search_output" item
+        storedKnownItem "tool_search_output" (ToolSearchOutputItem item)
     WebSearchCallItem item ->
-        storedTypedKnownItem "web_search_call" item
+        storedKnownItem "web_search_call" (WebSearchCallItem item)
     ImageGenerationCallItem item ->
-        storedTypedKnownItem "image_generation_call" item
+        storedKnownItem "image_generation_call" (ImageGenerationCallItem item)
     CompactionItemValue item ->
-        storedTypedKnownItem "compaction" item
+        storedKnownItem "compaction" (CompactionItemValue item)
     CompactionTriggerItemValue item ->
-        storedTypedKnownItem "compaction_trigger" item
+        storedKnownItem "compaction_trigger" (CompactionTriggerItemValue item)
     ContextCompactionItemValue item ->
-        storedTypedKnownItem "context_compaction" item
+        storedKnownItem "context_compaction" (ContextCompactionItemValue item)
     KnownResponseItem _ tagged ->
         StoredTaggedResponseItem StoredTaggedItem
             { storedTaggedItemRepresentation = StoredKnownRepresentation
@@ -173,7 +187,7 @@ fromStoredResponseItem = \case
             "stored message extra fields"
             message.storedMessageExtraFields
         let (passthrough, extraFields) =
-                takeOptionalJson extraFields0
+                takeOptionalJson internalChatMetadataDecoder extraFields0
                     "internal_chat_message_metadata_passthrough"
         Right $ MessageItem ResponseMessage
             { messageId = message.storedMessageProviderItemId
@@ -190,9 +204,12 @@ fromStoredResponseItem = \case
             "stored function-call extra fields"
             call.storedFunctionCallExtraFields
         let (namespace, extraFields1) =
-                takeOptionalJson extraFields0 "namespace"
+                takeOptionalJson JsonDecoder.text extraFields0 "namespace"
             (encryptedFunctionArgs, extraFields) =
-                takeOptionalJson extraFields1 "encrypted_function_args"
+                takeOptionalJson
+                    (JsonDecoder.list JsonDecoder.text)
+                    extraFields1
+                    "encrypted_function_args"
         Right $ FunctionCallItem FunctionCall
             { itemId = call.storedFunctionCallProviderItemId
             , callId = call.storedFunctionCallCallId
@@ -214,9 +231,9 @@ fromStoredResponseItem = \case
             "stored function-call-output extra fields"
             output.storedFunctionCallOutputExtraFields
         let (name, extraFields1) =
-                takeOptionalJson extraFields0 "name"
+                takeOptionalJson JsonDecoder.text extraFields0 "name"
             (namespace, extraFields) =
-                takeOptionalJson extraFields1 "namespace"
+                takeOptionalJson JsonDecoder.text extraFields1 "namespace"
         Right $ FunctionCallOutputItem FunctionCallOutput
             { itemId = output.storedFunctionCallOutputProviderItemId
             , callId = output.storedFunctionCallOutputCallId
@@ -232,7 +249,7 @@ fromStoredResponseItem = \case
             "stored custom-tool-call extra fields"
             call.storedCustomToolCallExtraFields
         let (namespace, extraFields) =
-                takeOptionalJson extraFields0 "namespace"
+                takeOptionalJson JsonDecoder.text extraFields0 "namespace"
         Right $ CustomToolCallItem CustomToolCall
             { itemId = call.storedCustomToolCallProviderItemId
             , callId = call.storedCustomToolCallCallId
@@ -384,9 +401,9 @@ toStoredContentPart = \case
         (emptyStoredContentPart "output_text" extraFields)
             { storedContentPartText = Just text
             , storedContentPartAnnotations =
-                encodeValue . Aeson.toJSON <$> annotations
+                encodeValues <$> annotations
             , storedContentPartLogprobs =
-                encodeValue . Aeson.toJSON <$> logprobs
+                encodeValues <$> logprobs
             }
     RefusalPart{refusal, extraFields} ->
         (emptyStoredContentPart "refusal" extraFields)
@@ -509,7 +526,7 @@ fromStoredContentPart part = do
 
 emptyStoredContentPart
     :: Text
-    -> Aeson.Object
+    -> Extensions
     -> StoredContentPart
 emptyStoredContentPart partType extraFields = StoredContentPart
     { storedContentPartType = partType
@@ -566,45 +583,45 @@ renderInlineBinary binary =
         <> TextEncoding.decodeUtf8
             (Base64.encode binary.storedBinaryDataBytes)
 
-toStoredToolOutput :: Aeson.Value -> StoredToolOutput
-toStoredToolOutput = \case
-    Aeson.String value -> StoredToolOutput
+toStoredToolOutput :: RawJson -> StoredToolOutput
+toStoredToolOutput value
+    | Just text <- decodeRaw JsonDecoder.text value = StoredToolOutput
         { storedToolOutputKind = StoredToolOutputText
-        , storedToolOutputText = value
+        , storedToolOutputText = text
         }
-    value -> StoredToolOutput
+    | otherwise = StoredToolOutput
         { storedToolOutputKind = StoredToolOutputEncoded
-        , storedToolOutputText = encodeAeson value
+        , storedToolOutputText = encodeRaw value
         }
 
 fromStoredToolOutput
     :: Text
     -> StoredToolOutput
-    -> Either Text Aeson.Value
+    -> Either Text RawJson
 fromStoredToolOutput label output =
     case output.storedToolOutputKind of
         StoredToolOutputText ->
-            Right (Aeson.String output.storedToolOutputText)
+            Right (encodeWith JsonEncoder.text output.storedToolOutputText)
         StoredToolOutputEncoded ->
-            decodeAeson label output.storedToolOutputText
+            decodeStoredRaw label output.storedToolOutputText
 
-storedTypedKnownItem :: Aeson.ToJSON a => Text -> a -> StoredResponseItem
-storedTypedKnownItem tag value =
+storedKnownItem :: Text -> ResponseItem -> StoredResponseItem
+storedKnownItem tag value =
     StoredTaggedResponseItem StoredTaggedItem
         { storedTaggedItemRepresentation = StoredKnownRepresentation
         , storedTaggedItemWireTag = tag
         , storedTaggedItemFields =
-            encodeObject (objectWithoutType (Aeson.toJSON value))
+            encodeObject (itemFields value)
         }
 
 decodeKnownTaggedItem :: TaggedObject -> Either Text ResponseItem
 decodeKnownTaggedItem tagged =
     case parseResponseItemType tagged.tag of
         itemType | isPromotedKnownItem itemType ->
-            case Aeson.fromJSON (Aeson.toJSON tagged) of
-                Aeson.Success item -> Right item
-                Aeson.Error err ->
-                    Left ("stored " <> tagged.tag <> ": " <> Text.pack err)
+            firstDecodeError ("stored " <> tagged.tag) $
+                JsonDecoder.decode
+                    responseItemDecoder
+                    (JsonEncoder.encode taggedObjectEncoder tagged)
         itemType -> Right (KnownResponseItem itemType tagged)
 
 isPromotedKnownItem :: ResponseItemType -> Bool
@@ -622,78 +639,127 @@ isPromotedKnownItem = \case
     _ -> False
 
 insertOptionalJson
-    :: Aeson.ToJSON a
-    => Text
+    :: JsonEncoder.Encoder a
+    -> Text
     -> Maybe a
-    -> Aeson.Object
-    -> Aeson.Object
-insertOptionalJson name = \case
+    -> Extensions
+    -> Extensions
+insertOptionalJson encoder name = \case
     Nothing -> id
     Just value ->
-        KeyMap.insert (Key.fromText name) (Aeson.toJSON value)
+        insertExtension name (encodeWith encoder value)
 
 takeOptionalJson
-    :: Aeson.FromJSON a
-    => Aeson.Object
+    :: JsonDecoder.Decoder a
+    -> Extensions
     -> Text
-    -> (Maybe a, Aeson.Object)
-takeOptionalJson object name =
-    let key = Key.fromText name
-    in case KeyMap.lookup key object of
-        Just value
-            | Aeson.Success parsed <- Aeson.fromJSON value ->
-                (Just parsed, KeyMap.delete key object)
-        _ -> (Nothing, object)
+    -> (Maybe a, Extensions)
+takeOptionalJson decoder object name =
+    case lookupExtension name object >>= decodeRaw decoder of
+        Just parsed -> (Just parsed, deleteExtension name object)
+        Nothing -> (Nothing, object)
 
-objectWithoutType :: Aeson.Value -> Aeson.Object
-objectWithoutType = \case
-    Aeson.Object object -> KeyMap.delete "type" object
-    _ -> KeyMap.empty
-
-encodeObject :: Aeson.Object -> StoredOpaqueObject
-encodeObject =
-    StoredOpaqueObject . encodeAeson . Aeson.Object
+encodeObject :: Extensions -> StoredOpaqueObject
+encodeObject fields =
+    StoredOpaqueObject . encodeBytes $
+        JsonEncoder.encode
+            (JsonEncoder.objectWithExtensions id [])
+            fields
 
 decodeObject
     :: Text
     -> StoredOpaqueObject
-    -> Either Text Aeson.Object
+    -> Either Text Extensions
 decodeObject label value =
-    decodeAeson label value.storedOpaqueObjectText >>= \case
-        Aeson.Object object -> Right object
-        _ -> Left (label <> ": expected an object")
+    decodeStored label extensionsDecoder value.storedOpaqueObjectText
 
-encodeValue :: Aeson.Value -> StoredOpaqueValue
-encodeValue = StoredOpaqueValue . encodeAeson
+encodeValue :: RawJson -> StoredOpaqueValue
+encodeValue = StoredOpaqueValue . encodeRaw
 
 decodeValue
     :: Text
     -> StoredOpaqueValue
-    -> Either Text Aeson.Value
+    -> Either Text RawJson
 decodeValue label value =
-    decodeAeson label value.storedOpaqueValueText
+    decodeStoredRaw label value.storedOpaqueValueText
 
 decodeValues
     :: Text
     -> StoredOpaqueValue
-    -> Either Text [Aeson.Value]
-decodeValues label value = do
-    decoded <- decodeValue label value
-    case Aeson.fromJSON decoded of
-        Aeson.Error err -> Left (label <> ": " <> Text.pack err)
-        Aeson.Success values -> Right values
+    -> Either Text [RawJson]
+decodeValues label value =
+    decodeStored label
+        (JsonDecoder.list JsonDecoder.rawJson)
+        value.storedOpaqueValueText
 
-encodeAeson :: Aeson.Value -> Text
-encodeAeson =
-    TextEncoding.decodeUtf8
-        . LazyByteString.toStrict
-        . Aeson.encode
+encodeValues :: [RawJson] -> StoredOpaqueValue
+encodeValues =
+    StoredOpaqueValue
+        . encodeBytes
+        . JsonEncoder.encode (JsonEncoder.list JsonEncoder.rawJson)
 
-decodeAeson :: Text -> Text -> Either Text Aeson.Value
-decodeAeson label value =
-    case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 value) of
-        Left err -> Left (label <> ": " <> Text.pack err)
-        Right decoded -> Right decoded
+encodeWith :: JsonEncoder.Encoder value -> value -> RawJson
+encodeWith encoder =
+    either (error . show) id
+        . JsonDecoder.validateRawJson
+        . JsonEncoder.encode encoder
+
+encodeRaw :: RawJson -> Text
+encodeRaw = encodeBytes . rawJsonBytes
+
+encodeBytes :: ByteString.ByteString -> Text
+encodeBytes = TextEncoding.decodeUtf8
+
+decodeStoredRaw :: Text -> Text -> Either Text RawJson
+decodeStoredRaw label =
+    firstDecodeError label
+        . JsonDecoder.validateRawJson
+        . TextEncoding.encodeUtf8
+
+decodeStored
+    :: Text
+    -> JsonDecoder.Decoder value
+    -> Text
+    -> Either Text value
+decodeStored label decoder =
+    firstDecodeError label
+        . JsonDecoder.decode decoder
+        . TextEncoding.encodeUtf8
+
+decodeRaw :: JsonDecoder.Decoder value -> RawJson -> Maybe value
+decodeRaw decoder =
+    either (const Nothing) Just
+        . JsonDecoder.decode decoder
+        . rawJsonBytes
+
+firstDecodeError
+    :: Show error
+    => Text
+    -> Either error value
+    -> Either Text value
+firstDecodeError label =
+    either (Left . ((label <> ": ") <>) . Text.pack . show) Right
+
+extensionsDecoder :: JsonDecoder.Decoder Extensions
+extensionsDecoder =
+    JsonDecoder.object
+        emptyExtensions
+        []
+        (JsonDecoder.unknownField JsonDecoder.rawJson
+            \key value fields -> Right (insertExtension key value fields))
+        Right
+
+taggedObjectEncoder :: JsonEncoder.Encoder TaggedObject
+taggedObjectEncoder =
+    JsonEncoder.objectWithExtensions (.fields)
+        [ JsonEncoder.field "type" JsonEncoder.text (.tag) ]
+
+itemFields :: ResponseItem -> Extensions
+itemFields item =
+    case JsonDecoder.decode extensionsDecoder
+            (JsonEncoder.encode responseItemEncoder item) of
+        Right fields -> deleteExtension "type" fields
+        Left err -> error ("could not encode stored response item: " <> show err)
 
 required :: Text -> Maybe a -> Either Text a
 required label = maybe (Left (label <> " is missing")) Right

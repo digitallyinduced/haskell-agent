@@ -1,5 +1,9 @@
 module Agent.CLI.AgentViewportSpec (spec) where
 
+import Agent.CLI.JsonCompat (rawText)
+
+import Agent.Json (emptyExtensions)
+
 import Agent.CLI.AgentViewport
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Responses.Types
@@ -19,8 +23,6 @@ import Agent.ToolDispatch
     , ToolCallResult(..)
     , functionToolCall
     )
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -419,7 +421,7 @@ messageItem role text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 functionCallItem
@@ -437,7 +439,7 @@ functionCallItem callId name arguments status =
         , arguments
         , encryptedFunctionArgs = Nothing
         , status
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 functionOutputItem :: Text -> Maybe ItemStatus -> ResponseItem
@@ -447,9 +449,9 @@ functionOutputItem callId status =
         , callId
         , name = Nothing
         , namespace = Nothing
-        , output = Aeson.String "ok"
+        , output = rawText "ok"
         , status
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 agentMessageItem :: Text -> ResponseItem
@@ -458,9 +460,9 @@ agentMessageItem text =
         { messageId = Nothing
         , author = Nothing
         , recipient = Nothing
-        , content = [InputTextPart text Nothing KeyMap.empty]
+        , content = [InputTextPart text Nothing emptyExtensions]
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 reasoningItem :: Text -> Text -> ResponseItem
@@ -471,19 +473,19 @@ reasoningItem summary raw =
             [ ReasoningSummaryPart
                 { partType = "summary_text"
                 , text = Just summary
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             ]
         , content =
             Just
                 [ ReasoningTextPart
                     { text = raw
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 ]
         , encryptedContent = Nothing
         , status = Just ItemCompleted
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 atMay :: [a] -> Int -> Maybe a

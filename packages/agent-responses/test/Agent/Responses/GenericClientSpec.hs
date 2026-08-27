@@ -3,8 +3,13 @@ module Agent.Responses.GenericClientSpec (spec) where
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Responses.GenericClient
 import Agent.Responses.Types
+import Agent.Json
+    ( emptyExtensions
+    , insertExtension
+    )
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Control.Retry (constantDelay, limitRetries)
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Test.Hspec
 
@@ -30,9 +35,11 @@ spec = do
                     , description = Nothing
                     , parameters = Nothing
                     , strict = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
-                requestExtras = KeyMap.singleton "custom" "value"
+                requestExtras =
+                    insertTextExtension "custom" "value"
+                        emptyExtensions
                 request = case defaultResponseCreateParams of
                     ResponseCreateParams{..} -> ResponseCreateParams
                         { tools = Just [tool]
@@ -89,3 +96,9 @@ spec = do
         , bearerToken = Nothing
         , requestTimeoutSeconds = 60
         }
+
+    insertTextExtension key value extensions =
+        case JsonDecoder.validateRawJson
+            (JsonEncoder.encode JsonEncoder.text value) of
+            Left err -> error (show err)
+            Right raw -> insertExtension key raw extensions

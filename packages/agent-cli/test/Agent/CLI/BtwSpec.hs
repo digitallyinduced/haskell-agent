@@ -1,5 +1,9 @@
 module Agent.CLI.BtwSpec (spec) where
 
+import Agent.CLI.JsonCompat (rawText)
+
+import Agent.Json (emptyExtensions)
+
 import Agent.CLI.Btw
 import Agent.Error (ApiError(..))
 import Agent.Loop
@@ -11,8 +15,6 @@ import Agent.Loop
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.ToolDispatch (functionToolCall)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Text as Text
 import Test.Hspec
@@ -56,7 +58,7 @@ spec = do
         it "uses private state and preserves parent params including tools" do
             let originalItems = turnInputsToItems [UserMessage "earlier context"]
                 tool = KnownResponseTool ToolWebSearch
-                    (TaggedObject "web_search" KeyMap.empty)
+                    (TaggedObject "web_search" emptyExtensions)
                 originalParams = case defaultResponseCreateParams of
                     ResponseCreateParams{..} -> ResponseCreateParams
                         { input = Just (ResponseInputText "stale input")
@@ -152,12 +154,12 @@ spec = do
 userItem :: Text.Text -> ResponseItem
 userItem text = MessageItem ResponseMessage
     { messageId = Nothing
-    , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , content = MessageContentParts [InputTextPart text Nothing emptyExtensions]
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 functionCallItem :: Text.Text -> ResponseItem
@@ -169,7 +171,7 @@ functionCallItem callId = FunctionCallItem FunctionCall
     , arguments = "{}"
     , encryptedFunctionArgs = Nothing
     , status = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 functionOutputItem :: Text.Text -> ResponseItem
@@ -178,9 +180,9 @@ functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
     , callId
     , name = Nothing
     , namespace = Nothing
-    , output = Aeson.String "ok"
+    , output = rawText "ok"
     , status = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 reasoningItem :: ResponseItem
@@ -190,5 +192,5 @@ reasoningItem = ReasoningItemValue ReasoningItem
     , content = Nothing
     , encryptedContent = Nothing
     , status = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }

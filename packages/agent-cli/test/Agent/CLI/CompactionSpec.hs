@@ -1,5 +1,7 @@
 module Agent.CLI.CompactionSpec (spec) where
 
+import Agent.CLI.JsonCompat ()
+
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
     , autoCompactOpenAiBackendWith

@@ -12,8 +12,7 @@ import Agent.Responses.Request
     )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.Json (Extensions, deleteExtension, emptyExtensions)
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -53,7 +52,7 @@ buildRequest options request =
                 , generateSummary = Nothing
                 , reasoningMode = Nothing
                 , summary = Just "concise"
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             , include = request.include
             , promptCacheKey = request.promptCacheKey
@@ -65,12 +64,12 @@ buildRequest options request =
                 [ MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [InputTextPart instructions Nothing KeyMap.empty]
+                        [InputTextPart instructions Nothing emptyExtensions]
                     , role = RoleSystem
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
                 ]
         _ -> []
@@ -105,10 +104,10 @@ isHostedXSearch = \case
     _ -> False
 
 hostedWebSearchTool :: ResponseTool
-hostedWebSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+hostedWebSearchTool = knownResponseTool ToolWebSearch emptyExtensions
 
 hostedXSearchTool :: ResponseTool
-hostedXSearchTool = knownResponseTool ToolXSearch KeyMap.empty
+hostedXSearchTool = knownResponseTool ToolXSearch emptyExtensions
 
 xaiReasoningEffort :: Maybe Text -> Text
 xaiReasoningEffort = \case
@@ -136,7 +135,7 @@ requestInputItems request = case request.input of
             , status = Nothing
             , phase = Nothing
             , passthrough = Nothing
-            , extraFields = KeyMap.empty
+            , extraFields = emptyExtensions
             }
         ]
     Nothing -> []
@@ -152,12 +151,12 @@ normalizeInputItem =
             MessageItem ResponseMessage
                 { messageId = Nothing
                 , content = MessageContentParts
-                    [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
+                    [InputTextPart (agentMessageText message) Nothing emptyExtensions]
                 , role = RoleUser
                 , status = Nothing
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
         item -> item
 
@@ -230,7 +229,8 @@ stripItemStatus = \case
             }
     item -> item
 
-withoutStatusFields = KeyMap.delete (Key.fromText "status")
+withoutStatusFields :: Extensions -> Extensions
+withoutStatusFields = deleteExtension "status"
 
 agentMessageText :: ResponseAgentMessage -> Text
 agentMessageText message =

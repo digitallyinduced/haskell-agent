@@ -1,5 +1,7 @@
 module Agent.CLI.SubagentStoreSpec (spec) where
 
+import Agent.Json (emptyExtensions)
+
 import Agent.CLI.Compaction (estimatedOccupancy)
 import Agent.CLI.SubagentStore
 import Agent.CLI.Session (LegacySubagentTarget(..))
@@ -39,7 +41,6 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM_, replicateM_)
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -252,7 +253,7 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
+                    , extraFields = emptyExtensions
                     }
             Right taskPath <- pure (parseTaskPath "/root/research/worker")
             let identity = SubagentIdentity (Just parentId) 2 taskPath
@@ -783,7 +784,7 @@ messageItem role text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+    , extraFields = emptyExtensions
     }
 
 withTempDir :: (OsPath -> IO a) -> IO a

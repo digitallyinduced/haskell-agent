@@ -24,6 +24,8 @@ import Agent.Error
     , ErrorType(..)
     )
 import Agent.InterAgentMessage (renderInterAgentMessage)
+import Agent.Json (RawJson, emptyExtensions, rawJsonBytes)
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -49,7 +51,7 @@ import Agent.Responses.Types
     , ResponseItem(..)
     , ResponseMessage(..)
     , ResponseRole(..)
-    , TaggedObject
+    , responseItemEncoder
     )
 import qualified Agent.ToolDispatch as ToolDispatch
 import Claude.Agent.SDK.Client
@@ -61,7 +63,6 @@ import Claude.Agent.SDK.Client
     , withClaudeSDKTurn
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Char as Char
 import Data.IORef
@@ -459,41 +460,41 @@ renderResponseItem = \case
     FunctionCallOutputItem output ->
         labelled
             ("Tool result " <> output.callId)
-            (renderJsonValue output.output)
+            (renderRawJson output.output)
     CustomToolCallOutputItem output ->
         labelled
             ("Tool result " <> output.callId)
-            (renderJsonValue output.output)
+            (renderRawJson output.output)
     -- Reasoning is deliberately excluded from imported history. In
     -- particular, never copy private chain-of-thought into a Claude prompt.
     ReasoningItemValue{} ->
         Nothing
     ItemReferenceValue{} ->
         Nothing
-    AgentMessageItem message ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON message))
-    AdditionalToolsItemValue item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    LocalShellCallItem item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    ToolSearchCallItem item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    ToolSearchOutputItem item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    WebSearchCallItem item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    ImageGenerationCallItem item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    CompactionItemValue item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    CompactionTriggerItemValue item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    ContextCompactionItemValue item ->
-        labelled "Context item" (renderJsonValue (Aeson.toJSON item))
-    KnownResponseItem _ tagged ->
-        labelled "Context item" (renderTaggedObject tagged)
-    UnknownResponseItem tagged ->
-        labelled "Context item" (renderTaggedObject tagged)
+    item@AgentMessageItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@AdditionalToolsItemValue{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@LocalShellCallItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@ToolSearchCallItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@ToolSearchOutputItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@WebSearchCallItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@ImageGenerationCallItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@CompactionItemValue{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@CompactionTriggerItemValue{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@ContextCompactionItemValue{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@KnownResponseItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
+    item@UnknownResponseItem{} ->
+        labelled "Context item" (renderResponseItemJson item)
   where
     labelled label text
         | Text.null (Text.strip text) = Nothing
@@ -530,14 +531,18 @@ contentPartText = \case
     PlainTextPart{text} -> [text]
     UnknownContentPart{} -> []
 
-renderTaggedObject :: TaggedObject -> Text
-renderTaggedObject =
+renderRawJson :: RawJson -> Text
+renderRawJson =
     TextEncoding.decodeUtf8With lenientDecode
-        . LazyByteString.toStrict
-        . Aeson.encode
+        . rawJsonBytes
 
-renderJsonValue :: Aeson.Value -> Text
-renderJsonValue = \case
+renderResponseItemJson :: ResponseItem -> Text
+renderResponseItemJson =
+    TextEncoding.decodeUtf8With lenientDecode
+        . JsonEncoder.encode responseItemEncoder
+
+renderAesonValue :: Aeson.Value -> Text
+renderAesonValue = \case
     Aeson.String text -> text
     value ->
         TextEncoding.decodeUtf8With lenientDecode
@@ -637,14 +642,14 @@ assistantMessageItem assistantText =
                 { text = fromMaybe "" assistantText
                 , annotations = Nothing
                 , logprobs = Nothing
-                , extraFields = KeyMap.empty
+                , extraFields = emptyExtensions
                 }
             ]
         , role = RoleAssistant
         , status = Just ItemCompleted
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
+        , extraFields = emptyExtensions
         }
 
 sdkErrorToApiError :: ClaudeSDKError -> ApiError
@@ -660,7 +665,7 @@ sdkErrorToApiError = \case
             , rawBody =
                 maybe
                     ""
-                    (Text.take 2_000 . renderJsonValue)
+                    (Text.take 2_000 . renderAesonValue)
                     rawMessage
             }
     sdkError@ResultError{} ->

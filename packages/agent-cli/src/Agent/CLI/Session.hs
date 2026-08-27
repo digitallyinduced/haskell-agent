@@ -82,7 +82,11 @@ import Agent.Dialect
     , providerSupportsDialect
     )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types
+    ( ResponseItem
+    , responseItemDecoder
+    , responseItemEncoder
+    )
 import Agent.OpenAI.Compaction
     ( hasCompactionCheckpoint
     , isClearSessionTurn
@@ -107,6 +111,8 @@ import Control.Monad.Trans.Except
     )
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits (xor)
 import Data.Int (Int64)
@@ -348,7 +354,7 @@ instance ToJSON SessionTurn where
         , "error" .= turn.turnError
         , "responseId" .= turn.turnResponseId
         , "effect" .= transcriptEffectText turn.turnEffect
-        , "items" .= turn.turnItems
+        , "items" .= responseItemsValue turn.turnItems
         , "usage" .= turn.turnUsage
         ]
 
@@ -359,7 +365,12 @@ instance FromJSON SessionTurn where
         assistantText <- o .:? "assistantText"
         turnErrorValue <- o .:? "error"
         responseId <- o .:? "responseId"
-        items <- o .: "items"
+        itemsValue <- o .: "items"
+        items <- case JsonDecoder.decode
+                (JsonDecoder.list responseItemDecoder)
+                (LBS.toStrict (Aeson.encode (itemsValue :: Aeson.Value))) of
+            Left err -> fail (Text.unpack (JsonDecoder.renderDecodeError err))
+            Right value -> pure value
         usage <- o .:? "usage"
         effect <- o .:? "effect" >>= \case
             Nothing -> pure (inferTranscriptEffect userText items)
@@ -376,6 +387,15 @@ instance FromJSON SessionTurn where
             , turnItems = items
             , turnUsage = usage
             }
+
+responseItemsValue :: [ResponseItem] -> Aeson.Value
+responseItemsValue items =
+    fromMaybe
+        (error "direct response-item encoder produced invalid JSON")
+        (Aeson.decodeStrict'
+            (JsonEncoder.encode
+                (JsonEncoder.list responseItemEncoder)
+                items))
 
 transcriptEffectText :: TranscriptEffect -> Text
 transcriptEffectText = \case

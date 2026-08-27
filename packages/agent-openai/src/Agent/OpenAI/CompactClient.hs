@@ -10,6 +10,9 @@ import Agent.OpenAI.Client (defaultCodexBaseUrl)
 import Agent.OpenAI.Error (classifyHttpFailure)
 import Agent.OpenAI.Http (postCodexJson)
 import Agent.Responses.Types hiding (Response)
+import qualified Agent.Responses.Types.Request as ResponseRequest
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.Provider
     ( Credential(..)
     , Provider(..)
@@ -17,11 +20,7 @@ import Agent.Provider
     , runWithTokenProvider
     )
 import Control.Exception.Safe (tryAny)
-import Data.Aeson ((.=))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
-import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -39,16 +38,25 @@ data CompactRequest = CompactRequest
     , compactReasoning :: !(Maybe ReasoningConfig)
     } deriving (Eq, Show)
 
-instance Aeson.ToJSON CompactRequest where
-    toJSON req =
-        Aeson.object $ catMaybes
-            [ Just ("model" .= req.compactModel)
-            , Just ("input" .= req.compactInput)
-            , ("instructions" .=) <$> req.compactInstructions
-            , ("tools" .=) <$> req.compactTools
-            , Just ("parallel_tool_calls" .= req.compactParallelToolCalls)
-            , ("reasoning" .=) <$> req.compactReasoning
-            ]
+compactRequestEncoder :: JsonEncoder.Encoder CompactRequest
+compactRequestEncoder = JsonEncoder.object
+    [ JsonEncoder.field "model" JsonEncoder.text (.compactModel)
+    , JsonEncoder.field "input"
+        (JsonEncoder.list responseItemEncoder)
+        (.compactInput)
+    , JsonEncoder.optionalField "instructions"
+        JsonEncoder.text
+        (.compactInstructions)
+    , JsonEncoder.optionalField "tools"
+        (JsonEncoder.list responseToolEncoder)
+        (.compactTools)
+    , JsonEncoder.field "parallel_tool_calls"
+        JsonEncoder.bool
+        (.compactParallelToolCalls)
+    , JsonEncoder.optionalField "reasoning"
+        ResponseRequest.reasoningConfigEncoder
+        (.compactReasoning)
+    ]
 
 compactConversation
     :: TokenProvider
@@ -89,7 +97,7 @@ postCompact baseUrl credential request =
             credential.accessToken
             credential.accountId
             id
-            (Aeson.toJSON request)
+            (JsonEncoder.encode compactRequestEncoder request)
             compactResponseHandler
 
 compactResponseHandler
@@ -106,16 +114,15 @@ compactResponseHandler response stream = do
 
 decodeCompactBody :: Text -> Either ApiError [ResponseItem]
 decodeCompactBody bodyText =
-    case Aeson.eitherDecodeStrict (Text.encodeUtf8 bodyText) of
-        Left err -> Left (JsonDecodeError (Text.pack err) bodyText)
-        Right (Aeson.Object object) ->
-            case KeyMap.lookup "output" object of
-                Just value ->
-                    case Aeson.fromJSON value of
-                        Aeson.Success items -> Right items
-                        Aeson.Error err ->
-                            Left (JsonDecodeError (Text.pack err) bodyText)
-                Nothing ->
-                    Left (JsonDecodeError "compact response missing output" bodyText)
-        Right _ ->
-            Left (JsonDecodeError "compact response was not an object" bodyText)
+    case JsonDecoder.decode compactResponseDecoder
+            (Text.encodeUtf8 bodyText) of
+        Left err -> Left (JsonDecodeError
+            (JsonDecoder.renderDecodeError err)
+            bodyText)
+        Right items -> Right items
+
+compactResponseDecoder :: JsonDecoder.Decoder [ResponseItem]
+compactResponseDecoder =
+    JsonDecoder.objectFields
+        (JsonDecoder.requiredField "output"
+            (JsonDecoder.list responseItemDecoder))

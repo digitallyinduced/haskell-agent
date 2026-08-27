@@ -2,6 +2,7 @@ module Agent.OpenAI.ClientSpec (spec) where
 
 import Agent.OpenAI.Client
 import Agent.OpenAI.Credential (staticBearerProvider)
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Error
 import Agent.OpenAI.Http
 import Agent.OpenAI.WebSocketClient
@@ -711,9 +712,11 @@ withPromptCacheRetention nextRetention
     ResponseCreateParams { promptCacheRetention = nextRetention, .. }
 
 decodeResponse :: Aeson.Value -> Response
-decodeResponse value = case Aeson.fromJSON value of
-    Aeson.Success response -> response
-    Aeson.Error err -> error err
+decodeResponse value =
+    case ResponsesCodec.decodeResponse
+            (LBS.toStrict (Aeson.encode value)) of
+        Right response -> response
+        Left err -> error err
 
 extractAssistantText :: Response -> Maybe Text
 extractAssistantText response = case

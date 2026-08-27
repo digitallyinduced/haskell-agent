@@ -27,6 +27,8 @@ import Agent.Dialect
     , parseDialect
     )
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import qualified Agent.Json.Decoder as JsonDecoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types
@@ -301,7 +303,10 @@ saveSubagentState sessionDir agentId snapshot =
             writeLazyFileAtomically
                 transcriptPath
                 0o600
-                (Aeson.encode snapshot.snapshotItems)
+                (LBS.fromStrict
+                    (JsonEncoder.encode
+                        (JsonEncoder.list responseItemEncoder)
+                        snapshot.snapshotItems))
             pure (Right ())
 
 loadSubagentState
@@ -328,7 +333,7 @@ loadSubagentState sessionDir agentId =
                             (LegacySubagentTargetFields
                                 Nothing Nothing Nothing Nothing)))
                     itemsResult <- if hasTranscript
-                        then decodeFile transcriptPath
+                        then decodeTranscriptFile transcriptPath
                         else pure (Right [])
                     pure $ case (metaResult, itemsResult) of
                         (Left err, _) -> Left err
@@ -345,4 +350,17 @@ loadSubagentState sessionDir agentId =
                         <> toText path
                         <> ": "
                         <> Text.pack err
+            Right value -> pure (Right value)
+
+    decodeTranscriptFile path = do
+        raw <- retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
+        case JsonDecoder.decode
+                (JsonDecoder.list responseItemDecoder)
+                (LBS.toStrict raw) of
+            Left err ->
+                pure $ Left $
+                    "failed to decode "
+                        <> toText path
+                        <> ": "
+                        <> JsonDecoder.renderDecodeError err
             Right value -> pure (Right value)

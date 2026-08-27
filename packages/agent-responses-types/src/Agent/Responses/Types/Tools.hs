@@ -5,11 +5,23 @@ module Agent.Responses.Types.Tools
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , taggedObjectEncoder
+    , taggedObjectDecoder
+    , responseToolTypeEncoder
+    , responseToolTypeDecoder
+    , functionToolEncoder
+    , functionToolDecoder
+    , responseToolEncoder
+    , responseToolDecoder
     ) where
 
-import Agent.Responses.Types.Common
-import Data.Aeson hiding (TaggedObject)
-import qualified Data.Aeson as Aeson
+import Agent.Json
+    ( Extensions
+    , RawJson
+    )
+import qualified Agent.Json.Decoder as Decoder
+import qualified Agent.Json.Encoder as Encoder
+import Agent.Responses.Types.Common (TaggedObject(..))
 import Data.Text (Text)
 
 data ResponseToolType
@@ -79,31 +91,10 @@ parseResponseToolType value = case value of
 data FunctionTool = FunctionTool
     { name        :: !Text
     , description :: !(Maybe Text)
-    , parameters  :: !(Maybe Aeson.Value)
+    , parameters  :: !(Maybe RawJson)
     , strict      :: !(Maybe Bool)
-    , extraFields :: !Aeson.Object
+    , extraFields :: !Extensions
     } deriving stock (Eq, Show)
-
-instance ToJSON FunctionTool where
-    toJSON FunctionTool
-        { name, description, parameters, strict, extraFields } =
-            objectWith extraFields
-                [ Just (field "type" ("function" :: Text))
-                , Just (field "name" name)
-                , optionalField "description" description
-                , optionalField "parameters" parameters
-                , optionalField "strict" strict
-                ]
-
-instance FromJSON FunctionTool where
-    parseJSON = withObject "FunctionTool" $ \o -> FunctionTool
-        <$> o .: "name"
-        <*> o .:? "description"
-        <*> o .:? "parameters"
-        <*> o .:? "strict"
-        <*> pure
-            (without
-                ["type", "name", "description", "parameters", "strict"] o)
 
 data ResponseTool
     = FunctionToolValue !FunctionTool
@@ -113,23 +104,85 @@ data ResponseTool
 
 -- | Hosted or built-in Responses tool whose wire @type@ comes from
 -- 'ResponseToolType', not a caller-supplied tag string.
-knownResponseTool :: ResponseToolType -> Aeson.Object -> ResponseTool
+knownResponseTool :: ResponseToolType -> Extensions -> ResponseTool
 knownResponseTool toolType fields =
     KnownResponseTool toolType TaggedObject
         { tag = responseToolTypeText toolType
         , fields
         }
 
-instance ToJSON ResponseTool where
-    toJSON (FunctionToolValue value) = toJSON value
-    toJSON (KnownResponseTool toolType TaggedObject { fields }) =
-        objectWith fields [Just (field "type" (responseToolTypeText toolType))]
-    toJSON (UnknownResponseTool value) = toJSON value
+taggedObjectEncoder :: Encoder.Encoder TaggedObject
+taggedObjectEncoder = Encoder.objectWithExtensions (.fields)
+    [ Encoder.field "type" Encoder.text (.tag) ]
 
-instance FromJSON ResponseTool where
-    parseJSON value = withObject "ResponseTool" (\o -> do
-        tag <- o .: "type"
+taggedObjectDecoder :: Decoder.Decoder TaggedObject
+taggedObjectDecoder = Decoder.objectFields $
+    TaggedObject
+        <$> Decoder.requiredField "type" Decoder.text
+        <*> Decoder.extensionFields
+
+responseToolTypeEncoder :: Encoder.Encoder ResponseToolType
+responseToolTypeEncoder = Encoder.contramap responseToolTypeText Encoder.text
+
+responseToolTypeDecoder :: Decoder.Decoder ResponseToolType
+responseToolTypeDecoder = Decoder.mapDecoder parseResponseToolType Decoder.text
+
+functionToolEncoder :: Encoder.Encoder FunctionTool
+functionToolEncoder = Encoder.objectWithExtensions (.extraFields)
+    [ Encoder.field "type" Encoder.text (const "function")
+    , Encoder.field "name" Encoder.text (.name)
+    , Encoder.optionalField "description" Encoder.text (.description)
+    , Encoder.optionalField "parameters" Encoder.rawJson (.parameters)
+    , Encoder.optionalField "strict" Encoder.bool (.strict)
+    ]
+
+functionToolDecoder :: Decoder.Decoder FunctionTool
+functionToolDecoder = Decoder.objectFields $
+    FunctionTool
+        <$> Decoder.requiredField "name" Decoder.text
+        <*> Decoder.optionalField "description" Decoder.text
+        <*> Decoder.optionalField "parameters" Decoder.rawJson
+        <*> Decoder.optionalField "strict" Decoder.bool
+        <*> Decoder.extensionFields
+        <* Decoder.defaultField
+            ()
+            "type"
+            (() <$ Decoder.text)
+
+responseToolEncoder :: Encoder.Encoder ResponseTool
+responseToolEncoder = Encoder.choose \case
+    FunctionToolValue _ ->
+        Encoder.contramap functionValue functionToolEncoder
+    KnownResponseTool toolType _ ->
+        Encoder.contramap
+            knownTagged
+            (Encoder.objectWithExtensions (.fields)
+                [ Encoder.field
+                    "type"
+                    Encoder.text
+                    (const (responseToolTypeText toolType))
+                ])
+    UnknownResponseTool _ ->
+        Encoder.contramap unknownTagged taggedObjectEncoder
+  where
+    functionValue = \case
+        FunctionToolValue value -> value
+        _ -> impossible
+    knownTagged = \case
+        KnownResponseTool _ value -> value
+        _ -> impossible
+    unknownTagged = \case
+        UnknownResponseTool value -> value
+        _ -> impossible
+    impossible = error "responseToolEncoder: impossible variant"
+
+responseToolDecoder :: Decoder.Decoder ResponseTool
+responseToolDecoder =
+    Decoder.discriminatedObject "type" \tag ->
         case parseResponseToolType tag of
-            ToolFunction -> FunctionToolValue <$> parseJSON value
-            ToolUnknownType{} -> UnknownResponseTool <$> parseJSON value
-            toolType -> KnownResponseTool toolType <$> parseJSON value) value
+            ToolFunction ->
+                FunctionToolValue <$> functionToolDecoder
+            ToolUnknownType{} ->
+                UnknownResponseTool <$> taggedObjectDecoder
+            toolType ->
+                KnownResponseTool toolType <$> taggedObjectDecoder
