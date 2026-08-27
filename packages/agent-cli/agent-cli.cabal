@@ -282,6 +282,17 @@ benchmark subagent-retention-bench
                     , containers
                     , text
 
+benchmark history-cursor-index-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          HistoryCursorIndex.hs
+    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-cli
+                    , base >= 4.17 && < 5
+                    , containers
+                    , time
+
 benchmark history-retention-bench
     import:           common-options
     type:             exitcode-stdio-1.0

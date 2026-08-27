@@ -171,7 +171,9 @@ import Agent.CLI.TUI.History
     , clearHistoryRequest
     , emptyHistoryWindow
     , historyWindowBlock
+    , historyWindowCursorForBlock
     , historyWindowOlderAvailable
+    , historyWindowTurn
     , historyWindowRequest
     , unarchivedLiveStart
     , historyWindowSetAnchors
@@ -1518,25 +1520,15 @@ remapHistoryBlocks nextId =
         (nextId, Seq.empty)
 
 historyContainsBlock :: BlockId -> HistoryWindow -> Bool
-historyContainsBlock blockId =
-    any
-        (any ((== blockId) . (.blockId))
-            . toList
-            . (.historyTurnBlocks))
-        . toList
-        . (.historyWindowTurns)
+historyContainsBlock blockId window =
+    Map.member blockId window.historyWindowBlockCursors
 
 historyCursorForBlock
     :: HistoryWindow
     -> BlockId
     -> Maybe HistoryCursor
 historyCursorForBlock window blockId =
-    (.historyTurnCursor)
-        <$> find
-            (any ((== blockId) . (.blockId))
-                . toList
-                . (.historyTurnBlocks))
-            (toList window.historyWindowTurns)
+    historyWindowCursorForBlock blockId window
 
 historyEdgeCursor
     :: HistoryDirection
@@ -1554,12 +1546,11 @@ historyPageAnchorBlock
     -> HistoryWindow
     -> Maybe BlockId
 historyPageAnchorBlock direction window =
-    edgeTurn >>= edgeBlock
+    historyEdgeCursor direction window
+        >>= \cursor ->
+            historyWindowTurn cursor window
+                >>= edgeBlock
   where
-    turns = window.historyWindowTurns
-    edgeTurn = case direction of
-        HistoryOlder -> turns Seq.!? 0
-        HistoryNewer -> turns Seq.!? (Seq.length turns - 1)
     edgeBlock turn =
         let blocks = turn.historyTurnBlocks
         in case direction of
@@ -2586,9 +2577,7 @@ retainExistingFlashes
     -> Map.Map BlockId Int
 retainExistingFlashes ui =
     Map.filterWithKey
-        (\blockId _ ->
-            any ((== blockId) . (.blockId))
-                (toList ui.uiBlocks))
+        (\blockId _ -> Map.member blockId ui.uiBlockIndices)
 
 uiEventCanCompleteBlocks :: UiEvent -> Bool
 uiEventCanCompleteBlocks = \case
@@ -3604,15 +3593,13 @@ mergeConversationView previous incoming
                     else incoming.uiTodos
             }
   where
-    previousBlocks =
-        Map.fromList
-            [ (block.blockId, block)
-            | block <- toList previous.uiBlocks
-            ]
+    previousBlock ident =
+        Map.lookup ident previous.uiBlockIndices
+            >>= (`Seq.lookup` previous.uiBlocks)
     mergedBlocks =
         fmap
             (\block ->
-                case Map.lookup block.blockId previousBlocks of
+                case previousBlock block.blockId of
                     Just old
                         | sameConversationBlock old block ->
                             block
@@ -3623,7 +3610,7 @@ mergeConversationView previous incoming
     selected =
         case previous.uiSelectedBlock of
             Just ident
-                | Just old <- Map.lookup ident previousBlocks
+                | Just old <- previousBlock ident
                 , Just new <-
                     Map.lookup ident incoming.uiBlockIndices
                         >>= \index -> Seq.lookup index incoming.uiBlocks
