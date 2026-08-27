@@ -4,6 +4,7 @@ import Agent.CLI.GatewayBridge
 import Agent.CLI.ManagedTurn
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.Loop (LoopEvent(..), defaultLoopDispatch)
+import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
@@ -14,7 +15,7 @@ import Agent.Tools.Types (AppTool(..), appToolHandlers)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (bracket)
-import Data.Aeson (Value(..), eitherDecode)
+import Data.Aeson (Value(..))
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (listToMaybe)
 import System.Directory
@@ -42,10 +43,10 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     call)
                 \running -> do
                     bridgeRequest <- waitForBridgeRequest request
-                    bridgeRequest.bridgeRequestKind `shouldBe` "send_document"
+                    bridgeRequest.decodedRequestKind `shouldBe` "send_document"
                     writeManagedBridgeResponse request ManagedBridgeResponse
                         { bridgeResponseVersion = 1
-                        , bridgeResponseId = bridgeRequest.bridgeRequestId
+                        , bridgeResponseId = bridgeRequest.decodedRequestId
                         , bridgeResponseOk = True
                         , bridgeResponseResult = Just (String "sent")
                         , bridgeResponseError = Nothing
@@ -68,10 +69,10 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     "*** Begin Patch"
             withAsync (requestManagedApproval request call) \running -> do
                 bridgeRequest <- waitForBridgeRequest request
-                bridgeRequest.bridgeRequestKind `shouldBe` "approval"
+                bridgeRequest.decodedRequestKind `shouldBe` "approval"
                 writeManagedBridgeResponse request ManagedBridgeResponse
                     { bridgeResponseVersion = 1
-                    , bridgeResponseId = bridgeRequest.bridgeRequestId
+                    , bridgeResponseId = bridgeRequest.decodedRequestId
                     , bridgeResponseOk = True
                     , bridgeResponseResult = Just (String "allow_once")
                     , bridgeResponseError = Nothing
@@ -87,11 +88,10 @@ spec = describe "Agent.CLI.GatewayBridge" do
             publish (TextDelta "the issue.")
             bytes <- LBS.readFile
                 (unsafeToFilePath (managedBridgeActivityPath request))
-            activity <- case
-                    eitherDecode bytes
-                        :: Either String ManagedActivity
+            activity <- case Hermes.decodeEither managedActivityDecoder
+                    (LBS.toStrict bytes)
                 of
-                Left err -> expectationFailure err >> fail err
+                Left err -> expectationFailure (show err) >> fail (show err)
                 Right value -> pure value
             activity.managedActivityKind `shouldBe` "writing"
             activity.managedActivityMessage `shouldBe` "Writing reply…"
@@ -118,7 +118,7 @@ withBridgeRequest action =
             (unsafeToFilePath (managedBridgeResponsesDirectory request))
         action request
 
-waitForBridgeRequest :: ManagedTurnRequest -> IO ManagedBridgeRequest
+waitForBridgeRequest :: ManagedTurnRequest -> IO DecodedBridgeRequest
 waitForBridgeRequest request = go (100 :: Int)
   where
     directory =
@@ -130,7 +130,8 @@ waitForBridgeRequest request = go (100 :: Int)
             Nothing -> threadDelay 20_000 >> go (attempts - 1)
             Just name -> do
                 bytes <- LBS.readFile (directory </> name)
-                case eitherDecode bytes of
+                case Hermes.decodeEither managedBridgeRequestDecoder
+                        (LBS.toStrict bytes) of
                     Left _ -> threadDelay 20_000 >> go (attempts - 1)
                     Right value -> pure value
 

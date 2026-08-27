@@ -1,8 +1,12 @@
 -- | Private request/response bridge for gateway-owned agent turns.
 module Agent.CLI.GatewayBridge
     ( ManagedBridgeRequest(..)
+    , DecodedBridgeRequest(..)
+    , managedBridgeRequestDecoder
     , ManagedBridgeResponse(..)
+    , managedBridgeResponseDecoder
     , ManagedActivity(..)
+    , managedActivityDecoder
     , managedGatewayTools
     , newManagedLoopEventPublisher
     , requestManagedApproval
@@ -26,6 +30,12 @@ import Agent.TextBuffer
     )
 import Agent.Json.Decode (optionalKey)
 import Agent.Json.Decode qualified as Hermes
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -40,19 +50,13 @@ import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (SomeException, finally, try)
 import Control.Monad (void)
 import Data.Aeson
-    ( FromJSON(..)
-    , ToJSON(..)
+    ( ToJSON(..)
     , Value(..)
-    , eitherDecode
     , encode
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Maybe (fromMaybe)
@@ -89,13 +93,20 @@ instance ToJSON ManagedBridgeRequest where
         , "payload" .= request.bridgeRequestPayload
         ]
 
-instance FromJSON ManagedBridgeRequest where
-    parseJSON = withObject "ManagedBridgeRequest" \o ->
-        ManagedBridgeRequest
-            <$> (o .:? "version" .!= bridgeSchemaVersion)
-            <*> o .: "id"
-            <*> o .: "kind"
-            <*> (o .:? "payload" .!= Object KeyMap.empty)
+data DecodedBridgeRequest = DecodedBridgeRequest
+    { decodedRequestVersion :: !Int
+    , decodedRequestId :: !Text
+    , decodedRequestKind :: !Text
+    , decodedRequestPayload :: !RawJson
+    } deriving (Eq, Show)
+
+managedBridgeRequestDecoder :: Hermes.Decoder DecodedBridgeRequest
+managedBridgeRequestDecoder = Hermes.object $
+    DecodedBridgeRequest
+        <$> Hermes.defaultKey bridgeSchemaVersion "version" Hermes.int
+        <*> Hermes.atKey "id" Hermes.text
+        <*> Hermes.atKey "kind" Hermes.text
+        <*> Hermes.atKey "payload" rawJsonDecoder
 
 data ManagedBridgeResponse = ManagedBridgeResponse
     { bridgeResponseVersion :: !Int
@@ -114,14 +125,22 @@ instance ToJSON ManagedBridgeResponse where
         , "error" .= response.bridgeResponseError
         ]
 
-instance FromJSON ManagedBridgeResponse where
-    parseJSON = withObject "ManagedBridgeResponse" \o ->
-        ManagedBridgeResponse
-            <$> (o .:? "version" .!= bridgeSchemaVersion)
-            <*> o .: "id"
-            <*> o .: "ok"
-            <*> o .:? "result"
-            <*> o .:? "error"
+data DecodedBridgeResponse = DecodedBridgeResponse
+    { decodedResponseVersion :: !Int
+    , decodedResponseId :: !Text
+    , decodedResponseOk :: !Bool
+    , decodedResponseResult :: !(Maybe RawJson)
+    , decodedResponseError :: !(Maybe Text)
+    }
+
+managedBridgeResponseDecoder :: Hermes.Decoder DecodedBridgeResponse
+managedBridgeResponseDecoder = Hermes.object $
+    DecodedBridgeResponse
+        <$> Hermes.defaultKey bridgeSchemaVersion "version" Hermes.int
+        <*> Hermes.atKey "id" Hermes.text
+        <*> Hermes.atKey "ok" Hermes.bool
+        <*> optionalKey "result" rawJsonDecoder
+        <*> optionalKey "error" Hermes.text
 
 data ManagedActivity = ManagedActivity
     { managedActivityVersion :: !Int
@@ -142,15 +161,15 @@ instance ToJSON ManagedActivity where
         , "updated_at" .= activity.managedActivityUpdatedAt
         ]
 
-instance FromJSON ManagedActivity where
-    parseJSON = withObject "ManagedActivity" \o ->
+managedActivityDecoder :: Hermes.Decoder ManagedActivity
+managedActivityDecoder = Hermes.object $
         ManagedActivity
-            <$> (o .:? "version" .!= bridgeSchemaVersion)
-            <*> o .: "kind"
-            <*> o .: "message"
-            <*> (o .:? "reasoning" .!= "")
-            <*> (o .:? "response" .!= "")
-            <*> o .: "updated_at"
+            <$> Hermes.defaultKey bridgeSchemaVersion "version" Hermes.int
+            <*> Hermes.atKey "kind" Hermes.text
+            <*> Hermes.atKey "message" Hermes.text
+            <*> Hermes.defaultKey "" "reasoning" Hermes.text
+            <*> Hermes.defaultKey "" "response" Hermes.text
+            <*> Hermes.atKey "updated_at" Hermes.utcTime
 
 managedGatewayTools :: ManagedTurnRequest -> [AppTool]
 managedGatewayTools request =
@@ -343,10 +362,10 @@ bridgeTool request call kind payload =
     performBridgeRequest request call.callId kind payload (30 * 60 * 1_000_000)
         >>= \case
             Left err -> pure (Left err)
-            Right (String text) -> pure (Right text)
-            Right value ->
-                pure (Right
-                    (TextEncoding.decodeUtf8 (LBS.toStrict (encode value))))
+            Right raw ->
+                pure $ Right $ case Hermes.decodeEither Hermes.text (rawJsonBytes raw) of
+                    Right text -> text
+                    Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes raw)
 
 requestManagedApproval
     :: ManagedTurnRequest
@@ -362,10 +381,12 @@ requestManagedApproval request call =
             , "arguments" .= call.arguments
             ])
         (30 * 60 * 1_000_000) >>= \case
-            Right (String "allow_once") -> pure (Just PermissionAllowOnce)
-            Right (String "allow_tool") -> pure (Just PermissionAllowTool)
-            Right (String "allow_all") -> pure (Just PermissionAllowAll)
-            Right (String "deny") -> pure (Just PermissionDeny)
+            Right raw -> case Hermes.decodeEither Hermes.text (rawJsonBytes raw) of
+                Right "allow_once" -> pure (Just PermissionAllowOnce)
+                Right "allow_tool" -> pure (Just PermissionAllowTool)
+                Right "allow_all" -> pure (Just PermissionAllowAll)
+                Right "deny" -> pure (Just PermissionDeny)
+                _ -> pure Nothing
             _ -> pure Nothing
 
 data ManagedActivityAccumulator = ManagedActivityAccumulator
@@ -518,7 +539,7 @@ performBridgeRequest
     -> Text
     -> Value
     -> Int
-    -> IO (Either Text Value)
+    -> IO (Either Text RawJson)
 performBridgeRequest request callId kind payload timeoutMicros =
     case request.managedTurnBridgeDirectory of
         Nothing -> pure (Left "managed gateway bridge is unavailable")
@@ -543,11 +564,11 @@ performBridgeRequest request callId kind payload timeoutMicros =
                     removePrivateFile requestPath
                     removePrivateFile responsePath
 
-waitForBridgeResponse :: OsPath -> Int -> IO (Either Text Value)
+waitForBridgeResponse :: OsPath -> Int -> IO (Either Text RawJson)
 waitForBridgeResponse path timeoutMicros = go timeoutMicros
   where
     step = 100_000
-    go :: Int -> IO (Either Text Value)
+    go :: Int -> IO (Either Text RawJson)
     go remaining
         | remaining <= 0 =
             pure (Left "timed out waiting for the Telegram gateway")
@@ -559,21 +580,22 @@ waitForBridgeResponse path timeoutMicros = go timeoutMicros
                     decoded <- try @_ @SomeException do
                         bytes <- retryOnFileBusy
                             (LBS.readFile (unsafeToFilePath path))
-                        pure
-                            (eitherDecode bytes
-                                :: Either String ManagedBridgeResponse)
+                        pure (Hermes.decodeEither managedBridgeResponseDecoder
+                            (LBS.toStrict bytes))
                     case decoded of
                         Left _ -> threadDelay step >> go (remaining - step)
                         Right (Left _) -> threadDelay step >> go (remaining - step)
                         Right (Right response)
-                            | response.bridgeResponseOk ->
+                            | response.decodedResponseOk ->
                                 pure (Right
-                                    (fromMaybe Null response.bridgeResponseResult))
+                                    (fromMaybe
+                                        (rawJsonFromEncoding (Aeson.toEncoding Aeson.Null))
+                                        response.decodedResponseResult))
                             | otherwise ->
                                 pure (Left
                                     (fromMaybe
                                         "Telegram gateway request failed"
-                                        response.bridgeResponseError))
+                                        response.decodedResponseError))
 
 ensureBridgeDirectories :: ManagedTurnRequest -> IO ()
 ensureBridgeDirectories request = do

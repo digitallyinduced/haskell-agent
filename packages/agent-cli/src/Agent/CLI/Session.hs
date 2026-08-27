@@ -73,7 +73,7 @@ import Agent.CLI.Session.StoreCodec
     , toStoredResponseItem
     )
 import Agent.CLI.Models (ModelTarget(..))
-import Agent.Loop (TokenUsage(..))
+import Agent.Loop (TokenUsage(..), tokenUsageDecoder)
 import Agent.Dialect
     ( DialectId
     , dialectSlug
@@ -90,6 +90,9 @@ import Agent.OpenAI.Compaction
     , isNewSessionTurn
     )
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
 import Agent.Store.Postgres.Session (TranscriptEffect(..))
@@ -107,6 +110,7 @@ import Control.Monad.Trans.Except
     )
 import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits (xor)
 import Data.Int (Int64)
@@ -209,16 +213,16 @@ instance ToJSON LegacySubagentTarget where
         , "dialect" .= dialectSlug target.legacyTargetDialect
         ]
 
-instance FromJSON LegacySubagentTarget where
-    parseJSON = withObject "LegacySubagentTarget" \o -> do
-        providerText <- o .: "provider"
+legacySubagentTargetDecoder :: Hermes.Decoder LegacySubagentTarget
+legacySubagentTargetDecoder = Hermes.object do
+        providerText <- Hermes.atKey "provider" Hermes.text
         provider <- case parseProvider providerText of
             Just parsed -> pure parsed
             Nothing ->
                 fail
                     ("unknown legacy subagent provider: "
                         <> Text.unpack providerText)
-        dialectText <- o .: "dialect"
+        dialectText <- Hermes.atKey "dialect" Hermes.text
         dialect <- case parseDialect dialectText of
             Just parsed -> pure parsed
             Nothing ->
@@ -232,12 +236,21 @@ instance FromJSON LegacySubagentTarget where
                     <> " is incompatible with provider "
                     <> Text.unpack (providerSlug provider)
                 )
-        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
+        connection <- fromMaybe (providerSlug provider)
+            <$> optionalKey "connection" Hermes.text
         when (Text.null (Text.strip connection)) $
             fail "legacy subagent connection must not be empty"
         LegacySubagentTarget provider connection
-            <$> o .: "effectiveModel"
+            <$> Hermes.atKey "effectiveModel" Hermes.text
             <*> pure dialect
+
+-- Transitional compatibility for the legacy transfer decoder. Remove with
+-- 'SessionTransfer' once response-item decoders are available in this branch.
+instance FromJSON LegacySubagentTarget where
+    parseJSON value =
+        either (fail . Text.unpack . Hermes.jsonErrorMessage) pure $
+            Hermes.decodeEither legacySubagentTargetDecoder
+                (LBS.toStrict (Aeson.encode value))
 
 instance ToJSON SessionMeta where
     toJSON meta = object
@@ -266,18 +279,19 @@ instance ToJSON SessionMeta where
         , "lastRecapMainTurns" .= meta.metaLastRecapMainTurns
         ]
 
-instance FromJSON SessionMeta where
-    parseJSON = withObject "SessionMeta" \o -> do
-        version <- o .: "version"
-        providerText <- o .: "provider"
+sessionMetaDecoder :: Hermes.Decoder SessionMeta
+sessionMetaDecoder = Hermes.object do
+        version <- Hermes.atKey "version" Hermes.int
+        providerText <- Hermes.atKey "provider" Hermes.text
         provider <- case parseProvider providerText of
             Just p -> pure p
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
-        model <- o .: "model"
-        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
+        model <- Hermes.atKey "model" Hermes.text
+        connection <- fromMaybe (providerSlug provider)
+            <$> optionalKey "connection" Hermes.text
         when (Text.null (Text.strip connection)) $
             fail "session connection must not be empty"
-        dialectText <- o .:? "dialect"
+        dialectText <- optionalKey "dialect" Hermes.text
         dialect <- case dialectText of
             Nothing -> pure (legacyDialectIdForProvider provider)
             Just text -> case parseDialect text of
@@ -291,28 +305,36 @@ instance FromJSON SessionMeta where
                     <> Text.unpack (providerSlug provider)
                 )
         SessionMeta version
-            <$> o .: "id"
-            <*> o .: "createdAt"
-            <*> o .: "updatedAt"
+            <$> Hermes.atKey "id" Hermes.text
+            <*> Hermes.atKey "createdAt" Hermes.utcTime
+            <*> Hermes.atKey "updatedAt" Hermes.utcTime
             <*> pure provider
             <*> pure connection
             <*> pure model
-            <*> o .:? "transportModel"
+            <*> optionalKey "transportModel" Hermes.text
             <*> pure dialect
-            <*> o .:? "legacySubagentTarget"
-            <*> (unsafeEncodeUtf <$> o .: "cwd")
-            <*> o .: "effort"
-            <*> o .: "title"
-            <*> (o .:? "titleIsManual" .!= False)
-            <*> (o .:? "titleRefreshIndex" .!= 2)
-            <*> (o .:? "titleUserTurns" .!= 6)
-            <*> o .:? "lastResponseId"
-            <*> (o .:? "inputTokens" .!= 0)
-            <*> (o .:? "outputTokens" .!= 0)
-            <*> (o .:? "cachedTokens" .!= 0)
-            <*> o .:? "lastRecap"
-            <*> o .:? "lastTurnSummary"
-            <*> (o .:? "lastRecapMainTurns" .!= 0)
+            <*> optionalKey "legacySubagentTarget" legacySubagentTargetDecoder
+            <*> (unsafeEncodeUtf <$> Hermes.atKey "cwd" Hermes.string)
+            <*> Hermes.atKey "effort" Hermes.text
+            <*> Hermes.atKey "title" Hermes.text
+            <*> Hermes.defaultKey False "titleIsManual" Hermes.bool
+            <*> Hermes.defaultKey 2 "titleRefreshIndex" Hermes.int
+            <*> Hermes.defaultKey 6 "titleUserTurns" Hermes.int
+            <*> optionalKey "lastResponseId" Hermes.text
+            <*> Hermes.defaultKey 0 "inputTokens" Hermes.int
+            <*> Hermes.defaultKey 0 "outputTokens" Hermes.int
+            <*> Hermes.defaultKey 0 "cachedTokens" Hermes.int
+            <*> optionalKey "lastRecap" Hermes.text
+            <*> optionalKey "lastTurnSummary" Hermes.text
+            <*> Hermes.defaultKey 0 "lastRecapMainTurns" Hermes.int
+
+-- Transitional compatibility for 'SessionTransfer'; direct metadata files
+-- already use 'sessionMetaDecoder'.
+instance FromJSON SessionMeta where
+    parseJSON value =
+        either (fail . Text.unpack . Hermes.jsonErrorMessage) pure $
+            Hermes.decodeEither sessionMetaDecoder
+                (LBS.toStrict (Aeson.encode value))
 
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
@@ -360,7 +382,13 @@ instance FromJSON SessionTurn where
         turnErrorValue <- o .:? "error"
         responseId <- o .:? "responseId"
         items <- o .: "items"
-        usage <- o .:? "usage"
+        usageValue <- o .:? "usage" :: Parser (Maybe Aeson.Value)
+        usage <- traverse
+            (either (fail . Text.unpack . Hermes.jsonErrorMessage) pure
+                . Hermes.decodeEither tokenUsageDecoder
+                . LBS.toStrict
+                . Aeson.encode)
+            usageValue
         effect <- o .:? "effect" >>= \case
             Nothing -> pure (inferTranscriptEffect userText items)
             Just value ->
@@ -416,13 +444,13 @@ instance ToJSON SessionActivity where
         , "updated_at" .= activity.activityUpdatedAt
         ]
 
-instance FromJSON SessionActivity where
-    parseJSON = withObject "SessionActivity" \o ->
-        SessionActivity
-            <$> o .: "kind"
-            <*> o .: "message"
-            <*> o .:? "retry_at"
-            <*> o .: "updated_at"
+sessionActivityDecoder :: Hermes.Decoder SessionActivity
+sessionActivityDecoder = Hermes.object $
+    SessionActivity
+        <$> Hermes.atKey "kind" Hermes.text
+        <*> Hermes.atKey "message" Hermes.text
+        <*> optionalKey "retry_at" Hermes.utcTime
+        <*> Hermes.atKey "updated_at" Hermes.utcTime
 
 data SessionHandle = SessionHandle
     { sessionPool :: !StorePool
@@ -539,7 +567,7 @@ loadSessionActivity root sessionId =
                             Left _ -> Nothing
                             Right bytes ->
                                 either (const Nothing) Just
-                                    (Aeson.eitherDecode bytes)
+                                    (decodeLazy sessionActivityDecoder bytes)
 
 sessionActivityPath :: OsPath -> OsPath
 sessionActivityPath tempDir =
@@ -1291,14 +1319,17 @@ decodeTurnLine line =
         Left err -> Left ("invalid transcript line: " <> Text.pack err)
         Right turn -> Right turn
 
-decodeFileEither :: FromJSON a => OsPath -> ExceptT Text IO a
-decodeFileEither path = do
+decodeFileEither
+    :: Hermes.Decoder a
+    -> OsPath
+    -> ExceptT Text IO a
+decodeFileEither decoder path = do
     exists <- lift (doesFileExist path)
     unless exists $
         throwE ("missing file: " <> toText path)
     bytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
-    case Aeson.eitherDecode' bytes of
-        Left err -> throwE (toText path <> ": " <> Text.pack err)
+    case decodeLazy decoder bytes of
+        Left err -> throwE (toText path <> ": " <> err)
         Right value -> pure value
 
 decodeStoredSession
@@ -1503,7 +1534,7 @@ importLegacySession root pool sessionId = do
     if not exists
         then pure False
         else do
-            meta <- decodeFileEither metaPath
+            meta <- decodeFileEither sessionMetaDecoder metaPath
             validateSessionMeta sessionId meta
             turns <- loadTranscript transcriptPath
             metaBytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath metaPath)))

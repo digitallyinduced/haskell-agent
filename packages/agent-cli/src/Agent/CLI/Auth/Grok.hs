@@ -10,10 +10,10 @@ module Agent.CLI.Auth.Grok
 
 import Agent.CLI.Auth.Types
     ( GrokAuthState(..)
-    , applyGrokAuthTokens
     , externalAuthSelectionId
     , grokAuthStateFromJson
     , grokAuthStateToJson
+    , grokAuthStateToJsonWithKnownFields
     , grokOAuthOptionsFromAuthJson
     , xaiOAuthClientId
     )
@@ -310,12 +310,9 @@ persistGrokPayload managedId filePath original newState = do
 
 encodeGrokPayload :: Text -> GrokAuthState -> Text
 encodeGrokPayload original state =
-    case Aeson.decodeStrict (TextEncoding.encodeUtf8 original) of
-        Just value | Just patched <- applyGrokAuthTokens state value ->
-            TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode patched))
-        _ ->
-            TextEncoding.decodeUtf8
-                (LBS.toStrict (Aeson.encode (grokAuthStateToJson state)))
+    TextEncoding.decodeUtf8
+        (LBS.toStrict
+            (Aeson.encode (grokAuthStateToJsonWithKnownFields original state)))
 
 readGrokAuthFile :: OsPath -> IO (Maybe Text)
 readGrokAuthFile path = do

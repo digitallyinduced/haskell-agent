@@ -6,15 +6,16 @@
 module Agent.CLI.Database
     ( DatabaseScope(..)
     , databaseScopeDecoder
+    , ConversationSearchMatch(..)
     , DatabaseToolsEnv(..)
     , databaseTools
     ) where
 
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
-import Agent.CLI.Json (integer)
-import Agent.Json.Decode (defaultKey, optionalKey)
+import Agent.Json.Decode (defaultKey)
 import Agent.Json.Decode qualified as Hermes
+import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
@@ -55,11 +56,11 @@ data DatabaseToolsEnv = DatabaseToolsEnv
     { databaseDescribeScope
         :: !(DatabaseScope -> IO (Either Text Value))
     , databaseRunQuery
-        :: !(DatabaseScope -> Text -> IO (Either Text Value))
+        :: !(DatabaseScope -> Text -> IO (Either Text RawJson))
     , databaseRunExecute
         :: !(DatabaseScope -> Text -> Text -> IO (Either Text Value))
     , databaseSearchConversations
-        :: !(Text -> Int -> IO (Either Text Value))
+        :: !(Text -> Int -> IO (Either Text [ConversationSearchMatch]))
     }
 
 data SchemaArgs = SchemaArgs
@@ -106,21 +107,8 @@ conversationSearchArgsDecoder = Hermes.object $
             <*> defaultKey 10 "limit" Hermes.int
 
 data ConversationSearchMatch
-    = ConversationSearchMatch
-        !Text
-        !Integer
-        !(Maybe Text)
-        !Text
-        !(Maybe Text)
-
-conversationSearchMatchDecoder :: Hermes.Decoder ConversationSearchMatch
-conversationSearchMatchDecoder = Hermes.object $
-        ConversationSearchMatch
-            <$> Hermes.atKey "session_id" Hermes.text
-            <*> Hermes.atKey "turn_index" integer
-            <*> optionalKey "occurred_at" Hermes.text
-            <*> Hermes.atKey "user_text" Hermes.text
-            <*> optionalKey "assistant_text" Hermes.text
+    = ConversationSearchMatch !Text !Integer !(Maybe Text) !Text !(Maybe Text)
+    deriving (Eq, Show)
 
 databaseTools :: DatabaseToolsEnv -> [AppTool]
 databaseTools env =
@@ -161,7 +149,7 @@ queryTool env = jsonTool
     (typedTool "database_query" queryArgsDecoder \(QueryArgs scope sql) ->
         if Text.null (Text.strip sql)
             then pure (Left "database query must not be empty")
-            else encodeResult
+            else fmap (Text.decodeUtf8 . rawJsonBytes)
                 <$> env.databaseRunQuery scope sql)
 
 executeTool :: DatabaseToolsEnv -> AppTool
@@ -216,7 +204,7 @@ conversationSearchTool env = jsonTool
             then pure (Left "conversation search query must not be empty")
             else if limit < 1 || limit > 100
                 then pure (Left "conversation search limit must be between 1 and 100")
-                else fmap (>>= renderConversationSearchResult) $
+                else fmap (fmap renderConversationSearchResult) $
                     env.databaseSearchConversations query limit)
 
 scopeProperty :: PropertySchema
@@ -233,17 +221,9 @@ encodeResult :: Either Text Value -> Either Text Text
 encodeResult =
     fmap (Text.decodeUtf8 . LBS.toStrict . Aeson.encode)
 
-renderConversationSearchResult :: Value -> Either Text Text
-renderConversationSearchResult value =
-    case Hermes.decodeEither
-            (Hermes.list conversationSearchMatchDecoder)
-            (LBS.toStrict (Aeson.encode value)) of
-        Left errorMessage ->
-            Left $
-                "conversation search returned an unexpected result: "
-                    <> Hermes.jsonErrorMessage errorMessage
-        Right matches ->
-            Right $ case matches of
+renderConversationSearchResult :: [ConversationSearchMatch] -> Text
+renderConversationSearchResult matches =
+    case matches of
                 [] -> "(no matching conversations)"
                 _ -> Text.intercalate "\n\n" $
                     zipWith renderConversationSearchMatch [1 :: Int ..] matches

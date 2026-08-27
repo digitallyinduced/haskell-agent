@@ -8,6 +8,7 @@ module Agent.CLI.Auth.Types
     , applyGrokAuthTokens
     , grokAuthStateFromJson
     , grokAuthStateToJson
+    , grokAuthStateToJsonWithKnownFields
     , grokCredentialFromAuthJson
     , grokEmailFromAuthJson
     , grokOAuthOptionsFromAuthJson
@@ -27,13 +28,16 @@ import Agent.Provider
     , providerSlug
     )
 import qualified Agent.XAI.Auth as XAIAuth
+import Agent.Json.Decode (optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe, isJust, listToMaybe)
+import qualified Data.ByteString as BS
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -119,34 +123,106 @@ instance Show GrokAuthState where
             <> maybe "Nothing" (const "Just <redacted>") state.grokIdToken
             <> ", grokExpiresAt = " <> show state.grokExpiresAt <> " }"
 
+data GrokFields = GrokFields
+    { grokFieldKey :: !(Maybe Text)
+    , grokFieldAccessToken :: !(Maybe Text)
+    , grokFieldRefreshToken :: !(Maybe Text)
+    , grokFieldIdToken :: !(Maybe Text)
+    , grokFieldExpiresAt :: !(Maybe UTCTime)
+    , grokFieldExpiresIn :: !(Maybe Int)
+    , grokFieldClientId :: !(Maybe Text)
+    , grokFieldPrincipalType :: !(Maybe Text)
+    , grokFieldPrincipalId :: !(Maybe Text)
+    , grokFieldEmail :: !(Maybe Text)
+    }
+
+grokFieldsDecoder :: Hermes.Decoder GrokFields
+grokFieldsDecoder = Hermes.object grokFieldsFieldsDecoder
+
+grokFieldsFieldsDecoder :: Hermes.FieldsDecoder GrokFields
+grokFieldsFieldsDecoder =
+    GrokFields
+        <$> optionalKey "key" Hermes.text
+        <*> optionalKey "access_token" Hermes.text
+        <*> optionalKey "refresh_token" Hermes.text
+        <*> optionalKey "id_token" Hermes.text
+        <*> optionalKey "expires_at" timestampDecoder
+        <*> optionalKey "expires_in" Hermes.int
+        <*> optionalKey "oidc_client_id" Hermes.text
+        <*> optionalKey "principal_type" Hermes.text
+        <*> optionalKey "principal_id" Hermes.text
+        <*> optionalKey "email" Hermes.text
+
+grokDocumentDecoder :: Hermes.Decoder GrokFields
+grokDocumentDecoder = Hermes.object do
+    direct <- grokFieldsFieldsDecoder
+    nested <- Hermes.liftObjectDecoder $
+        Hermes.objectFold Nothing \_ found ->
+            Hermes.withRawJsonByteString \raw ->
+                pure $ found <|> validGrokFields
+                    (Hermes.decodeEither grokFieldsDecoder (BS.copy raw))
+    case validFields direct <|> nested of
+        Just fields -> pure fields
+        Nothing -> fail "authentication object has no access token"
+  where
+    validGrokFields = either (const Nothing) validFields
+
+validFields :: GrokFields -> Maybe GrokFields
+validFields fields
+    | isJust (fields.grokFieldKey <|> fields.grokFieldAccessToken) =
+        Just fields
+    | otherwise = Nothing
+
+timestampDecoder :: Hermes.Decoder UTCTime
+timestampDecoder =
+    Hermes.withRawJsonByteString \raw ->
+        case Hermes.decodeEither Hermes.utcTime (BS.copy raw) of
+            Right value -> pure value
+            Left _ -> case Hermes.decodeEither Hermes.scientific (BS.copy raw) of
+                Right seconds ->
+                    pure (posixSecondsToUTCTime (realToFrac seconds))
+                Left _ -> fail "expected an ISO timestamp or epoch seconds"
+
 openaiAuthStateFromJson :: UTCTime -> LBS.ByteString -> Maybe OpenAI.AuthState
 openaiAuthStateFromJson now bytes = do
-    value <- Aeson.decode bytes
-    tokens <- tokensObject value
-    accessToken <- textField "access_token" tokens
-    refreshToken <- textField "refresh_token" tokens <|> Just ""
-    accountId <- textField "account_id" tokens
-    let idToken = textField "id_token" tokens
+    OpenAiTokens{..} <- either (const Nothing) Just $
+        Hermes.decodeEither openAiTokensDocumentDecoder (LBS.toStrict bytes)
     Just OpenAI.AuthState
         { accessToken
-        , refreshToken
+        , refreshToken = fromMaybe "" refreshToken
         , accountId
         , idToken
         , lastRefresh = now
         }
 
-tokensObject :: Aeson.Value -> Maybe Aeson.Object
-tokensObject value = case value of
-    Aeson.Object object ->
-        case KeyMap.lookup "tokens" object of
-            Just (Aeson.Object tokens) -> Just tokens
-            _ | isJust (textField "access_token" object) -> Just object
-            _ -> Nothing
-    Aeson.Array values ->
-        case [item | item <- foldr (:) [] values] of
-            (first : _) -> tokensObject first
-            [] -> Nothing
-    _ -> Nothing
+data OpenAiTokens = OpenAiTokens
+    { accessToken :: !Text
+    , refreshToken :: !(Maybe Text)
+    , accountId :: !Text
+    , idToken :: !(Maybe Text)
+    }
+
+openAiTokensDecoder :: Hermes.Decoder OpenAiTokens
+openAiTokensDecoder = Hermes.object $
+    OpenAiTokens
+        <$> Hermes.atKey "access_token" Hermes.text
+        <*> optionalKey "refresh_token" Hermes.text
+        <*> Hermes.atKey "account_id" Hermes.text
+        <*> optionalKey "id_token" Hermes.text
+
+openAiTokensDocumentDecoder :: Hermes.Decoder OpenAiTokens
+openAiTokensDocumentDecoder = Hermes.withType \case
+    Hermes.VObject -> Hermes.object do
+        nested <- optionalKey "tokens" openAiTokensDecoder
+        case nested of
+            Just tokens -> pure tokens
+            Nothing -> Hermes.liftObjectDecoder openAiTokensDecoder
+    Hermes.VArray -> do
+        values <- Hermes.list openAiTokensDocumentDecoder
+        case values of
+            first : _ -> pure first
+            [] -> fail "authentication array is empty"
+    _ -> fail "expected an authentication object or array"
 
 authStateToJson :: OpenAI.AuthState -> UTCTime -> Aeson.Value
 authStateToJson state now = Aeson.object
@@ -168,16 +244,14 @@ grokCredentialFromAuthJson raw =
 
 grokAuthStateFromJson :: UTCTime -> Text -> Maybe GrokAuthState
 grokAuthStateFromJson now raw = do
-    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
-    object <- authObject value
-    grokAccessToken <-
-        textField "key" object <|> textField "access_token" object
-    let grokRefreshToken = textField "refresh_token" object
-        grokIdToken = textField "id_token" object
+    fields <- either (const Nothing) Just $
+        Hermes.decodeEither grokDocumentDecoder (TextEncoding.encodeUtf8 raw)
+    grokAccessToken <- fields.grokFieldKey <|> fields.grokFieldAccessToken
+    let grokRefreshToken = fields.grokFieldRefreshToken
+        grokIdToken = fields.grokFieldIdToken
         grokExpiresAt =
-            utcTimeField "expires_at" object
-                <|> ((`addUTCTime` now) . fromIntegral
-                    <$> intField "expires_in" object)
+            fields.grokFieldExpiresAt
+                <|> ((`addUTCTime` now) . fromIntegral <$> fields.grokFieldExpiresIn)
                 <|> OpenAI.parseJwtExp grokAccessToken
     pure GrokAuthState{..}
 
@@ -188,6 +262,27 @@ grokAuthStateToJson state = Aeson.object
     , "id_token" .= state.grokIdToken
     , "expires_at" .= state.grokExpiresAt
     ]
+
+-- | Normalize a supported flat or one-level nested Grok auth document while
+-- retaining the known non-token profile fields used during refresh.
+grokAuthStateToJsonWithKnownFields :: Text -> GrokAuthState -> Aeson.Value
+grokAuthStateToJsonWithKnownFields original state =
+    Aeson.object $
+        [ "access_token" .= state.grokAccessToken
+        , "refresh_token" .= state.grokRefreshToken
+        , "id_token" .= state.grokIdToken
+        , "expires_at" .= state.grokExpiresAt
+        ]
+        <> maybe [] (\value -> ["email" .= value]) (fields >>= (.grokFieldEmail))
+        <> maybe [] (\value -> ["oidc_client_id" .= value])
+            (fields >>= (.grokFieldClientId))
+        <> maybe [] (\value -> ["principal_type" .= value])
+            (fields >>= (.grokFieldPrincipalType))
+        <> maybe [] (\value -> ["principal_id" .= value])
+            (fields >>= (.grokFieldPrincipalId))
+  where
+    fields = either (const Nothing) Just $
+        Hermes.decodeEither grokDocumentDecoder (TextEncoding.encodeUtf8 original)
 
 -- | Patch rotated Grok tokens into an existing auth document, preserving the
 -- grok CLI's nested map and any profile fields around the token object.
@@ -236,68 +331,30 @@ updateGrokAuthObject state object =
 -- principal fields that must be echoed on refresh.
 grokOAuthOptionsFromAuthJson :: Text -> Text -> XAIAuth.OAuthOptions
 grokOAuthOptionsFromAuthJson defaultClientId raw =
-    case Aeson.decodeStrict (TextEncoding.encodeUtf8 raw) >>= authObject of
-        Nothing -> XAIAuth.defaultOAuthOptions defaultClientId
-        Just object ->
+    case Hermes.decodeEither grokDocumentDecoder (TextEncoding.encodeUtf8 raw) of
+        Left _ -> XAIAuth.defaultOAuthOptions defaultClientId
+        Right fields ->
             let clientId =
                     fromMaybe defaultClientId
-                        (textField "oidc_client_id" object)
+                        fields.grokFieldClientId
                 options = XAIAuth.defaultOAuthOptions clientId
             in options
-                { XAIAuth.principalType = textField "principal_type" object
-                , XAIAuth.principalId = textField "principal_id" object
+                { XAIAuth.principalType = fields.grokFieldPrincipalType
+                , XAIAuth.principalId = fields.grokFieldPrincipalId
                 }
-
-authObject :: Aeson.Value -> Maybe Aeson.Object
-authObject = \case
-    Aeson.Object object
-        | hasGrokAccessToken object -> Just object
-        | otherwise ->
-            listToMaybe
-                [ nestedObject
-                | Aeson.Object nestedObject <- KeyMap.elems object
-                , hasGrokAccessToken nestedObject
-                ]
-    _ -> Nothing
 
 hasGrokAccessToken :: Aeson.Object -> Bool
 hasGrokAccessToken object =
     isJust (textField "key" object <|> textField "access_token" object)
 
-utcTimeField :: Text -> Aeson.Object -> Maybe UTCTime
-utcTimeField name object =
-    KeyMap.lookup (Key.fromText name) object >>= \value ->
-        case Aeson.fromJSON value of
-            Aeson.Success time -> Just time
-            Aeson.Error _ -> case value of
-                Aeson.Number seconds ->
-                    Just (posixSecondsToUTCTime (realToFrac seconds))
-                _ -> Nothing
-
-intField :: Text -> Aeson.Object -> Maybe Int
-intField name object = case KeyMap.lookup (Key.fromText name) object of
-    Just (Aeson.Number value) -> Just (floor value)
-    _ -> Nothing
-
 grokEmailFromAuthJson :: Text -> Maybe Text
 grokEmailFromAuthJson raw = do
-    value <- Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
-    entryEmail value <|> firstNestedEmail value
-  where
-    entryEmail (Aeson.Object object) =
-        textField "email" object
-            <|> (textField "id_token" object >>= XAIAuth.emailFromToken)
-            <|> (textField "access_token" object >>= XAIAuth.emailFromToken)
-            <|> (textField "key" object >>= XAIAuth.emailFromToken)
-    entryEmail _ = Nothing
-
-    firstNestedEmail (Aeson.Object object) =
-        listToMaybe
-            [ email
-            | nested <- KeyMap.elems object
-            , Just email <- [entryEmail nested]
-            ]
-    firstNestedEmail _ = Nothing
+    fields <- either (const Nothing) Just $
+        Hermes.decodeEither grokDocumentDecoder (TextEncoding.encodeUtf8 raw)
+    fields.grokFieldEmail
+        <|> (fields.grokFieldIdToken >>= XAIAuth.emailFromToken)
+        <|> (fields.grokFieldAccessToken >>= XAIAuth.emailFromToken)
+        <|> (fields.grokFieldKey >>= XAIAuth.emailFromToken)
 
 textField :: Text -> Aeson.Object -> Maybe Text
 textField name object = case KeyMap.lookup (Key.fromText name) object of
