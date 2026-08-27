@@ -100,7 +100,6 @@ spec = describe "provider-native agent tracking" do
                 , callId = "agent-1"
                 , name = "Agent"
                 , namespace = Nothing
-                , provider = Just provider
                 , provider = Just "claude-code"
                 , arguments =
                     "{\"description\":\"Review API\",\"model\":\"sonnet\"}"
@@ -130,6 +129,7 @@ spec = describe "provider-native agent tracking" do
                 , callId = identifier
                 , name = "Task"
                 , namespace = Nothing
+                , provider = Just provider
                 , arguments = "{}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted

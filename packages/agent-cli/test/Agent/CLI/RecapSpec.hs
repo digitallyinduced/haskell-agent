@@ -60,7 +60,6 @@ spec = describe "Agent.CLI.Recap" do
                         , status = Just ItemCompleted
                         , phase = Nothing
                         , passthrough = Nothing
-                        , extraFields = mempty
                         }
                     ]
             params <- newIORef defaultResponseCreateParams

@@ -410,6 +410,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-json
                     , agent-codex-dialect
                     , agent-grok-build-dialect
                     , agent-store

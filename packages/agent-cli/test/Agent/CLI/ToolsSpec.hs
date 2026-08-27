@@ -7,6 +7,8 @@ import Agent.Dialect
     , grokBuildDialect
     )
 import Agent.Loop (LoopError(..))
+import Agent.Json (RawJson, rawJsonBytes, rawJsonFromEncoding)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.Types
 import Agent.Subagents
     ( closeSubagentRegistry
@@ -26,11 +28,8 @@ import Agent.Tools.Types
     , rawJsonAppTool
     )
 import Control.Exception.Safe (bracket)
+import Control.Monad (join)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Foldable (toList)
-import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.OsPath (unsafeEncodeUtf)
@@ -40,9 +39,7 @@ spec :: Spec
 spec = describe "schemasFromAppTools" do
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
-            KnownResponseTool ToolWebSearch tagged : _ -> do
-                tagged.tag `shouldBe` "web_search"
-                tagged.fields `shouldBe` KeyMap.empty
+            KnownResponseTool ToolWebSearch : _ -> pure ()
             other -> expectationFailure ("expected web_search first, got " <> show other)
 
     it "builds a strict function tool for OpenAI JSON tools" do
@@ -75,8 +72,8 @@ spec = describe "schemasFromAppTools" do
             killTask = testTool "kill_task"
         case schemasFromAppTools grokBuildDialect
             [terminal, task, getOutput, waitTasks, killTask] of
-            [ KnownResponseTool ToolWebSearch _
-                , KnownResponseTool ToolXSearch _
+            [ KnownResponseTool ToolWebSearch
+                , KnownResponseTool ToolXSearch
                 , FunctionToolValue terminalTool
                 , FunctionToolValue taskTool
                 , FunctionToolValue getOutputTool
@@ -93,17 +90,11 @@ spec = describe "schemasFromAppTools" do
                 taskTool.description `shouldBe`
                     Just
                         "Use `spawn_subagent`, then get_command_or_subagent_output or kill_command_or_subagent."
-                Just (Aeson.Object parameters) <- pure taskTool.parameters
-                Just (Aeson.Object properties) <-
-                    pure (KeyMap.lookup "properties" parameters)
-                KeyMap.member "background" properties `shouldBe` True
-                KeyMap.member "run_in_background" properties `shouldBe` False
-                Just (Aeson.Object background) <-
-                    pure (KeyMap.lookup "background" properties)
-                KeyMap.lookup "description" background `shouldBe`
+                propertyNames taskTool `shouldMatchList`
+                    ["prompt", "background"]
+                propertyDescription "background" taskTool `shouldBe`
                     Just
-                        (Aeson.String
-                            "Use get_command_or_subagent_output after background=true.")
+                        "Use get_command_or_subagent_output after background=true."
             other -> expectationFailure
                 ("expected projected Grok tools, got " <> show other)
 
@@ -119,11 +110,11 @@ spec = describe "schemasFromAppTools" do
 
     it "builds a loose grok-build function tool for xAI" do
         case schemasFromAppTools grokBuildDialect [jsonTool] of
-            [KnownResponseTool ToolWebSearch _, KnownResponseTool ToolXSearch _, FunctionToolValue tool] -> do
+            [KnownResponseTool ToolWebSearch, KnownResponseTool ToolXSearch, FunctionToolValue tool] -> do
                 tool.name `shouldBe` "read_file"
                 tool.strict `shouldBe` Nothing
-                required_ tool `shouldBe` Just (Aeson.toJSON (["target_file"] :: [Text]))
-                offsetType tool `shouldBe` Just (Aeson.String "integer")
+                required_ tool `shouldBe` Just ["target_file"]
+                offsetType tool `shouldBe` Just "integer"
             other -> expectationFailure ("expected function tool, got " <> show other)
 
     it "preserves a raw MCP schema and disables strict mode for OpenAI" do
@@ -146,7 +137,7 @@ spec = describe "schemasFromAppTools" do
         case schemasFromAppTools codexDialect [tool] of
             [_, FunctionToolValue function] -> do
                 function.name `shouldBe` "gsc_site_get"
-                function.parameters `shouldBe` Just parameters
+                function.parameters `shouldBe` Just (rawJsonValue parameters)
                 function.strict `shouldBe` Just False
             other -> expectationFailure
                 ("expected raw OpenAI function tool, got " <> show other)
@@ -163,29 +154,23 @@ spec = describe "schemasFromAppTools" do
                 AlwaysReadOnly
                 (noArgsTool "seo_auth_status" (pure (Right "ok")))
         case schemasFromAppTools grokBuildDialect [tool] of
-            [KnownResponseTool ToolWebSearch _, KnownResponseTool ToolXSearch _, FunctionToolValue function] -> do
+            [KnownResponseTool ToolWebSearch, KnownResponseTool ToolXSearch, FunctionToolValue function] -> do
                 function.name `shouldBe` "seo_auth_status"
-                function.parameters `shouldBe` Just parameters
+                function.parameters `shouldBe` Just (rawJsonValue parameters)
                 function.strict `shouldBe` Nothing
             other -> expectationFailure
                 ("expected raw Grok function tool, got " <> show other)
 
     it "registers apply_patch as a custom Lark tool" do
         case schemasFromAppTools codexDialect [patchTool] of
-            [_, KnownResponseTool ToolCustom tagged] -> do
-                tagged.tag `shouldBe` "custom"
-                KeyMap.lookup "name" tagged.fields
-                    `shouldBe` Just (Aeson.String "apply_patch")
-                case KeyMap.lookup "format" tagged.fields of
-                    Just (Aeson.Object format) -> do
-                        KeyMap.lookup "syntax" format `shouldBe` Just (Aeson.String "lark")
-                        let definition = KeyMap.lookup "definition" format
-                        definition `shouldBe` Just (Aeson.String applyPatchGrammar)
-                        definition `shouldSatisfy` \case
-                            Just (Aeson.String grammar) ->
-                                Text.isInfixOf "%import common.LF" grammar
-                            _ -> False
-                    other -> expectationFailure ("expected format object, got " <> show other)
+            [_, CustomToolValue tool] -> do
+                tool.name `shouldBe` "apply_patch"
+                fmap (rawTextField "syntax") tool.format
+                    `shouldBe` Just (Just "lark")
+                let definition = tool.format >>= rawTextField "definition"
+                definition `shouldBe` Just applyPatchGrammar
+                definition `shouldSatisfy`
+                    maybe False (Text.isInfixOf "%import common.LF")
             other -> expectationFailure ("expected custom tool, got " <> show other)
 
     it "emits collaboration as a Responses namespace tool" do
@@ -194,10 +179,8 @@ spec = describe "schemasFromAppTools" do
                 AlwaysPrompt
                 (noArgsTool "spawn_agent" (pure (Right "ok")))
         case schemasFromAppTools codexDialect [jsonTool, spawn] of
-            [_, FunctionToolValue _, KnownResponseTool ToolNamespace tagged] -> do
-                tagged.tag `shouldBe` "namespace"
-                KeyMap.lookup "name" tagged.fields
-                    `shouldBe` Just (Aeson.String "collaboration")
+            [_, FunctionToolValue _, NamespaceToolValue namespace] -> do
+                namespace.name `shouldBe` "collaboration"
             other -> expectationFailure ("expected namespace tool, got " <> show other)
 
     it "omits an empty required list from reserved collaboration schemas" do
@@ -206,17 +189,12 @@ spec = describe "schemasFromAppTools" do
                 AlwaysReadOnly
                 (noArgsTool "wait_agent" (pure (Right "ok")))
         case schemasFromAppTools codexDialect [wait] of
-            [_, KnownResponseTool ToolNamespace tagged] ->
-                case KeyMap.lookup "tools" tagged.fields of
-                    Just (Aeson.Array tools) -> case toList tools of
-                        [Aeson.Object tool] -> do
-                            Just (Aeson.Object parameters) <-
-                                pure (KeyMap.lookup "parameters" tool)
-                            KeyMap.lookup "required" parameters `shouldBe` Nothing
-                        other -> expectationFailure
-                            ("expected one nested tool, got " <> show other)
+            [_, NamespaceToolValue namespace] ->
+                case namespace.tools of
+                    [FunctionToolValue tool] ->
+                        required_ tool `shouldBe` Nothing
                     other -> expectationFailure
-                        ("expected namespace tools, got " <> show other)
+                        ("expected one nested tool, got " <> show other)
             other -> expectationFailure
                 ("expected collaboration namespace, got " <> show other)
 
@@ -249,8 +227,8 @@ spec = describe "schemasFromAppTools" do
                             codexDialect
                             (multiAgentTools context)
                     namespaces =
-                        [ tagged
-                        | KnownResponseTool ToolNamespace tagged <-
+                        [ namespace
+                        | NamespaceToolValue namespace <-
                             schemas
                         ]
                     worktreeFunctions =
@@ -261,81 +239,53 @@ spec = describe "schemasFromAppTools" do
                 case worktreeFunctions of
                     [function] -> do
                         function.strict `shouldBe` Just True
-                        Just (Aeson.Object parameters) <-
-                            pure function.parameters
-                        KeyMap.lookup "required" parameters
-                            `shouldBe` Just
-                                (Aeson.toJSON
-                                    ( [ "task_name"
-                                      , "message"
-                                      , "model"
-                                      , "reasoning_effort"
-                                      , "fork_turns"
-                                      ] :: [Text]
-                                    ))
-                        Just (Aeson.Object properties) <-
-                            pure (KeyMap.lookup "properties" parameters)
-                        map Key.toText (KeyMap.keys properties)
-                            `shouldMatchList`
-                                [ "task_name"
-                                , "message"
-                                , "model"
-                                , "reasoning_effort"
-                                , "fork_turns"
-                                ]
+                        required_ function `shouldBe` Just
+                            [ "task_name", "message", "model"
+                            , "reasoning_effort", "fork_turns"
+                            ]
+                        propertyNames function `shouldMatchList`
+                            [ "task_name", "message", "model"
+                            , "reasoning_effort", "fork_turns"
+                            ]
                     other -> expectationFailure
                         ("expected top-level spawn_agent_in_worktree, got "
                             <> show other)
                 case namespaces of
-                    [tagged] ->
-                        case KeyMap.lookup "tools" tagged.fields of
-                            Just (Aeson.Array tools) -> do
-                                let spawnTools =
-                                        mapMaybe spawnAgentObject (toList tools)
-                                case spawnTools of
-                                    [tool] -> do
-                                        Just (Aeson.Object parameters) <-
-                                            pure (KeyMap.lookup "parameters" tool)
-                                        KeyMap.lookup "required" parameters
-                                            `shouldBe` Just
-                                                (Aeson.toJSON
-                                                    (["task_name", "message"] :: [Text]))
-                                        Just (Aeson.Object properties) <-
-                                            pure (KeyMap.lookup "properties" parameters)
-                                        map Key.toText (KeyMap.keys properties)
-                                            `shouldMatchList`
-                                                [ "task_name"
-                                                , "message"
-                                                , "model"
-                                                , "reasoning_effort"
-                                                , "fork_turns"
-                                                ]
-                                    other -> expectationFailure
-                                        ("expected production spawn_agent, got "
-                                            <> show other)
-                                let waitTools =
-                                        mapMaybe waitAgentObject (toList tools)
-                                case waitTools of
-                                    [tool] -> do
-                                        KeyMap.lookup "strict" tool
-                                            `shouldBe` Just (Aeson.Bool False)
-                                        Just (Aeson.Object parameters) <-
-                                            pure (KeyMap.lookup "parameters" tool)
-                                        KeyMap.lookup "required" parameters
-                                            `shouldBe` Nothing
-                                        KeyMap.lookup "additionalProperties" parameters
-                                            `shouldBe` Just (Aeson.Bool False)
-                                        Just (Aeson.Object properties) <-
-                                            pure (KeyMap.lookup "properties" parameters)
-                                        Just (Aeson.Object timeout) <-
-                                            pure (KeyMap.lookup "timeout_ms" properties)
-                                        KeyMap.lookup "type" timeout
-                                            `shouldBe` Just (Aeson.String "number")
-                                    other -> expectationFailure
-                                        ("expected production wait_agent, got "
-                                            <> show other)
+                    [namespace] -> do
+                        let spawnTools =
+                                functionToolsNamed
+                                    "spawn_agent"
+                                    namespace.tools
+                        case spawnTools of
+                            [tool] -> do
+                                required_ tool `shouldBe`
+                                    Just ["task_name", "message"]
+                                propertyNames tool
+                                    `shouldMatchList`
+                                        [ "task_name"
+                                        , "message"
+                                        , "model"
+                                        , "reasoning_effort"
+                                        , "fork_turns"
+                                        ]
                             other -> expectationFailure
-                                ("expected namespace tools, got " <> show other)
+                                ("expected production spawn_agent, got "
+                                    <> show other)
+                        let waitTools =
+                                functionToolsNamed
+                                    "wait_agent"
+                                    namespace.tools
+                        case waitTools of
+                            [tool] -> do
+                                tool.strict `shouldBe` Just False
+                                required_ tool `shouldBe` Nothing
+                                additionalProperties tool `shouldBe`
+                                    Just False
+                                propertyType "timeout_ms" tool `shouldBe`
+                                    Just "number"
+                            other -> expectationFailure
+                                ("expected production wait_agent, got "
+                                    <> show other)
                     other -> expectationFailure
                         ("expected one collaboration namespace, got "
                             <> show other)
@@ -359,26 +309,57 @@ testTool name =
     jsonAppTool name ("Use " <> name <> ".") [] AlwaysPrompt
         (noArgsTool name (pure (Right "ok")))
 
-waitAgentObject :: Aeson.Value -> Maybe Aeson.Object
-waitAgentObject (Aeson.Object tool)
-    | KeyMap.lookup "name" tool == Just (Aeson.String "wait_agent") =
-        Just tool
-waitAgentObject _ = Nothing
+functionToolsNamed :: Text -> [ResponseTool] -> [FunctionTool]
+functionToolsNamed expected =
+    foldr
+        (\case
+            FunctionToolValue tool
+                | tool.name == expected -> (tool :)
+            _ -> id)
+        []
 
-spawnAgentObject :: Aeson.Value -> Maybe Aeson.Object
-spawnAgentObject (Aeson.Object tool)
-    | KeyMap.lookup "name" tool == Just (Aeson.String "spawn_agent") =
-        Just tool
-spawnAgentObject _ = Nothing
+required_ :: FunctionTool -> Maybe [Text]
+required_ tool =
+    join $ tool.parameters >>= decodeRaw (Hermes.object $
+        Hermes.optionalKey "required" (Hermes.list Hermes.text))
 
-required_ :: FunctionTool -> Maybe Aeson.Value
-required_ tool = do
-    Aeson.Object parameters <- tool.parameters
-    KeyMap.lookup "required" parameters
+offsetType :: FunctionTool -> Maybe Text
+offsetType = propertyType "offset"
 
-offsetType :: FunctionTool -> Maybe Aeson.Value
-offsetType tool = do
-    Aeson.Object parameters <- tool.parameters
-    Aeson.Object properties <- KeyMap.lookup "properties" parameters
-    Aeson.Object offset <- KeyMap.lookup (Key.fromText "offset") properties
-    KeyMap.lookup "type" offset
+propertyNames :: FunctionTool -> [Text]
+propertyNames tool =
+    maybe [] id $ tool.parameters >>= decodeRaw (Hermes.object $
+        Hermes.atKey "properties" $
+            Hermes.objectFold []
+                (\key names ->
+                    (key : names) <$ Hermes.withRawJsonByteString (const (pure ()))))
+
+propertyDescription :: Text -> FunctionTool -> Maybe Text
+propertyDescription propertyName tool =
+    tool.parameters >>= decodeRaw (Hermes.object $
+        Hermes.atKey "properties" $ Hermes.object $
+            Hermes.atKey propertyName $ Hermes.object $
+                Hermes.atKey "description" Hermes.text)
+
+propertyType :: Text -> FunctionTool -> Maybe Text
+propertyType propertyName tool =
+    tool.parameters >>= decodeRaw (Hermes.object $
+        Hermes.atKey "properties" $ Hermes.object $
+            Hermes.atKey propertyName $ Hermes.object $
+                Hermes.atKey "type" Hermes.text)
+
+additionalProperties :: FunctionTool -> Maybe Bool
+additionalProperties tool =
+    join $ tool.parameters >>= decodeRaw (Hermes.object $
+        Hermes.optionalKey "additionalProperties" Hermes.bool)
+
+rawTextField :: Text -> RawJson -> Maybe Text
+rawTextField fieldName =
+    decodeRaw (Hermes.object (Hermes.atKey fieldName Hermes.text))
+
+decodeRaw :: Hermes.Decoder value -> RawJson -> Maybe value
+decodeRaw decoder =
+    either (const Nothing) Just . Hermes.decodeEither decoder . rawJsonBytes
+
+rawJsonValue :: Aeson.ToJSON value => value -> RawJson
+rawJsonValue = rawJsonFromEncoding . Aeson.toEncoding
