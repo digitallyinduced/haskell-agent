@@ -87,7 +87,7 @@ spec = describe "typed response merging" do
 
     it "does not re-emit a stale raw source after merging fragments" do
         first <- decodeFragment "{\"id\":\"first\"}"
-        second <- decodeFragment "{\"id\":\"second\"}"
+        second <- decodeFragment "{\"status\":\"completed\"}"
         merged <- case mergeResponseFragments [first, second] of
             Just value -> pure value
             Nothing -> expectationFailure "missing merged response"
@@ -95,7 +95,9 @@ spec = describe "typed response merging" do
         Decoder.decode responseFragmentDecoder
             (Encoder.encode responseFragmentEncoder merged)
             `shouldSatisfy` \case
-                Right response -> response.responseId == "second"
+                Right response ->
+                    response.responseId == "first"
+                        && response.status == ResponseCompleted
                 Left{} -> False
 
     modifyMaxSuccess (const 300) $
