@@ -41,7 +41,7 @@ import Control.Monad
     ( unless
     , when
     )
-import qualified Data.Hermes as Hermes
+import qualified Agent.Json.Decode as Hermes
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
