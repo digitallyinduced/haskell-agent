@@ -12,14 +12,12 @@ import Agent.OpenRouter.Client
 import Agent.OpenRouter.Credential
 import Agent.OpenRouter.Options
 import Agent.Responses.Types
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Environment (lookupEnv)
 import Test.Hspec
 
@@ -145,8 +143,7 @@ assistantText response = case
         values -> Just (Text.intercalate "\n" values)
 
 functionCallArgumentText :: Text -> Text -> Text
-functionCallArgumentText key arguments = case Aeson.decodeStrict' (Text.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
+functionCallArgumentText key arguments =
+    case Json.decodeText (Json.object (Json.atKey key Json.text)) arguments of
+        Right value -> value
+        Left _ -> ""

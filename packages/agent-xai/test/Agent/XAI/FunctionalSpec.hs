@@ -17,14 +17,12 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Environment (lookupEnv)
 import Test.Hspec
 
@@ -162,11 +160,10 @@ assistantText response = case
         values -> Just (Text.intercalate "\n" values)
 
 functionCallArgumentText :: Text -> Text -> Text
-functionCallArgumentText key arguments = case Aeson.decodeStrict' (Text.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
+functionCallArgumentText key arguments =
+    case Json.decodeText (Json.object (Json.atKey key Json.text)) arguments of
+        Right value -> value
+        Left _ -> ""
 
 --------------------------------------------------------------------------------
 -- Credential loading
@@ -194,23 +191,30 @@ loadGrokCredential = do
 
 -- | Accepts the auth.json map, one entry of it, or @{"access_token": ...}@.
 accessTokenFromAuthJson :: Text -> Maybe Text
-accessTokenFromAuthJson raw = do
-    value <- Aeson.decodeStrict (Text.encodeUtf8 raw)
-    entryToken value `orElse` firstNestedToken value
+accessTokenFromAuthJson raw =
+    either (const Nothing) id (Json.decodeText authObjectTokenDecoder raw)
   where
-    orElse (Just a) _ = Just a
-    orElse Nothing b = b
+    authObjectTokenDecoder =
+        chooseToken <$> Json.objectFold (Nothing, Nothing) decodeField
 
-    entryToken (Aeson.Object object) =
-        textField "key" object `orElse` textField "access_token" object
-    entryToken _ = Nothing
+    decodeField name (direct, nested)
+        | name == "key" || name == "access_token" = do
+            value <- maybeTextValue
+            pure (direct `orElse` nonEmpty value, nested)
+        | otherwise = do
+            value <- nestedTokenValue
+            pure (direct, nested `orElse` value)
 
-    firstNestedToken (Aeson.Object object) =
-        case [token | nested <- KeyMap.elems object, Just token <- [entryToken nested]] of
-            (token : _) -> Just token
-            [] -> Nothing
-    firstNestedToken _ = Nothing
+    maybeTextValue = Json.withType \case
+        Json.VString -> Just <$> Json.text
+        _ -> Json.withRawJsonByteString (const (pure Nothing))
 
-    textField name object = case KeyMap.lookup name object of
-        Just (Aeson.String value) | not (Text.null value) -> Just value
-        _ -> Nothing
+    nestedTokenValue = Json.withType \case
+        Json.VObject -> authObjectTokenDecoder
+        _ -> Json.withRawJsonByteString (const (pure Nothing))
+
+    chooseToken (direct, nested) = direct `orElse` nested
+    nonEmpty (Just value) | not (Text.null value) = Just value
+    nonEmpty _ = Nothing
+    Just value `orElse` _ = Just value
+    Nothing `orElse` fallback = fallback

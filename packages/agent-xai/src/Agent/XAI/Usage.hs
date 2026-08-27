@@ -8,18 +8,15 @@ module Agent.XAI.Usage
     ) where
 
 import Control.Exception.Safe (tryAny)
+import qualified Agent.Json.Decode as Json
 import Agent.Provider (Credential(..))
 import Agent.XAI.Options
     ( defaultGrokClientVersion
     , grokTokenAuthValue
     , grokUserAgent
     )
-import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.:?))
-import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe)
-import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -35,22 +32,22 @@ data GrokUsageSnapshot = GrokUsageSnapshot
     }
     deriving (Eq, Show)
 
-instance Aeson.FromJSON GrokUsageSnapshot where
-    parseJSON = Aeson.withObject "Grok billing response" \response -> do
-        config <- response .: "config"
-        Aeson.withObject "Grok billing config" parseConfig config
-      where
-        parseConfig config = do
+grokUsageSnapshotDecoder :: Json.Decoder GrokUsageSnapshot
+grokUsageSnapshotDecoder = Json.object $
+    Json.atKey "config" $ Json.object do
             -- The credits service uses proto3 JSON, which omits scalar fields
             -- at their default value. A freshly reset account can therefore
             -- omit creditUsagePercent entirely; that represents 0%, not an
             -- unreadable response.
             creditUsagePercent <-
                 fromMaybe 0
-                    <$> (config .:? "creditUsagePercent" :: Parser (Maybe Scientific))
-            currentPeriod <- config .: "currentPeriod"
-            (periodType, startsAt, resetsAt) <-
-                Aeson.withObject "Grok billing period" parsePeriod currentPeriod
+                    <$> optionalNullable "creditUsagePercent" Json.scientific
+            (periodType, startsAt, resetsAt) <- Json.atKey "currentPeriod" $
+                Json.object $
+                    (,,)
+                        <$> (fromMaybe "" <$> optionalNullable "type" Json.text)
+                        <*> Json.atKey "start" Json.utcTime
+                        <*> Json.atKey "end" Json.utcTime
             let usedPercent = max 0 (min 100 (floor creditUsagePercent))
                 windowSeconds =
                     max 1 (round (diffUTCTime resetsAt startsAt))
@@ -61,17 +58,22 @@ instance Aeson.FromJSON GrokUsageSnapshot where
                 , resetsAt
                 }
 
-        parsePeriod period =
-            (,,)
-                <$> (fromMaybe "" <$> period .:? "type")
-                <*> period .: "start"
-                <*> period .: "end"
-
 decodeGrokUsage :: LBS.ByteString -> Either Text GrokUsageSnapshot
-decodeGrokUsage body = case Aeson.eitherDecode body of
+decodeGrokUsage body = case
+    Json.decodeEither grokUsageSnapshotDecoder (LBS.toStrict body) of
     Left _ ->
         Left "Grok returned an unreadable usage response."
     Right snapshot -> Right snapshot
+
+optionalNullable
+    :: Text
+    -> Json.Decoder value
+    -> Json.FieldsDecoder (Maybe value)
+optionalNullable key decoder =
+    joinMaybe <$> Json.atKeyOptional key (Json.nullable decoder)
+  where
+    joinMaybe (Just value) = value
+    joinMaybe Nothing = Nothing
 
 -- | The fullscreen composer mirrors Grok Build's weekly reserve label only
 -- when the billing service explicitly reports a weekly period.

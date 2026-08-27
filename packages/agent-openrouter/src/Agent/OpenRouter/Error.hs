@@ -5,26 +5,25 @@ module Agent.OpenRouter.Error
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
+import qualified Agent.Json.Decode as Json
 import Agent.Responses.Error (classifyHttpFailure, decodeOpenAIError, mkOpenAIError)
 import Agent.Responses.Types (ResponseStreamError(..))
-import Control.Applicative ((<|>))
-import Data.Aeson ((.:), (.:?), (.!=), FromJSON(..), withObject)
-import qualified Data.Aeson as Aeson
+import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 
 data OpenRouterErrorEnvelope = OpenRouterErrorEnvelope
     { envelopeCode :: !(Maybe Text)
     , envelopeMessage :: !Text
     }
 
-instance FromJSON OpenRouterErrorEnvelope where
-    parseJSON = withObject "OpenRouter error envelope" \object -> do
-        errObject <- object .: "error"
+openRouterErrorEnvelopeDecoder :: Json.Decoder OpenRouterErrorEnvelope
+openRouterErrorEnvelopeDecoder = Json.object $
+    Json.atKey "error" $ Json.object $
         OpenRouterErrorEnvelope
-            <$> errObject .:? "code"
-            <*> (errObject .: "message" <|> errObject .:? "msg" .!= "")
+            <$> optionalNullable "code" Json.text
+            <*> (Maybe.fromMaybe ""
+                <$> firstPresent "message" "msg" Json.text)
 
 -- | Classify a non-success response from OpenRouter.
 classifyFailure :: Int -> Maybe Int -> Text -> ApiError
@@ -79,9 +78,26 @@ classifyStreamError streamError
 
 decodeOpenRouterError :: Text -> Maybe OpenRouterErrorEnvelope
 decodeOpenRouterError body =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 body) of
+    case Json.decodeText openRouterErrorEnvelopeDecoder body of
         Right envelope -> Just envelope
         Left _ -> Nothing
+
+optionalNullable
+    :: Text
+    -> Json.Decoder value
+    -> Json.FieldsDecoder (Maybe value)
+optionalNullable key decoder =
+    maybe Nothing id <$> Json.atKeyOptional key (Json.nullable decoder)
+
+firstPresent
+    :: Text
+    -> Text
+    -> Json.Decoder value
+    -> Json.FieldsDecoder (Maybe value)
+firstPresent firstKey secondKey decoder = do
+    first <- optionalNullable firstKey decoder
+    second <- optionalNullable secondKey decoder
+    pure (first `orElse` second)
 
 errorTypeFromOpenRouter :: Int -> Maybe Text -> ErrorType
 errorTypeFromOpenRouter status code = case Text.toLower <$> code of
