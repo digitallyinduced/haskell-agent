@@ -1,7 +1,6 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedRecordDot #-}
-{-# LANGUAGE ScopedTypeVariables #-}
 
 module Agent.CLI.TUIHistorySpec (spec) where
 
@@ -16,7 +15,6 @@ import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
-import Data.List (nub)
 import Agent.TUI.Model
     ( BlockId(..)
     , BlockState(..)
@@ -28,78 +26,14 @@ import Agent.TUI.Model
     , reduceUi
     )
 import qualified Data.Sequence as Seq
-import qualified Data.Map.Strict as Map
-import qualified Data.Set as Set
 import Data.Int (Int64)
 import qualified Data.Text as Text
 import Data.Time.Calendar (fromGregorian)
 import Data.Time.Clock (UTCTime(..), secondsToDiffTime)
 import Test.Hspec
-import Test.QuickCheck
 
 spec :: Spec
 spec = describe "bounded fullscreen history window" do
-    it "keeps cursor indexes synchronized across retained turns" do
-        property \(cursors :: [Int]) ->
-            let values :: [Int64]
-                values = take 40 (nub (map (fromIntegral . (`mod` 1000) . abs) cursors))
-                turns = Seq.fromList [turn cursor 1 | cursor <- values]
-                window = setHistoryWindowTurns turns
-                    (emptyHistoryWindow (HistoryGeneration 1) 100 1000 1000000)
-            in indexInvariant window
-
-    it "keeps indexes correct after append, dedupe, eviction, and generation reset" do
-        property \(seed :: Int) ->
-            let base = emptyHistoryWindow (HistoryGeneration 1) 3 100 1000000
-                pages =
-                    [ HistoryPage (HistoryGeneration 1) HistoryNewer
-                        (Seq.fromList [turn (fromIntegral (abs seed `mod` 5)) 1, turn 8 1])
-                        (HistoryCursor 0) 9 False False
-                    , HistoryPage (HistoryGeneration 1) HistoryOlder
-                        (Seq.fromList [turn 2 1, turn 8 1])
-                        (HistoryCursor 0) 9 True True
-                    ]
-                window = foldl
-                    (\current page -> either (const current) id
-                        (applyHistoryPage page current))
-                    base pages
-                appended = appendHistoryTurn (turn 20 1) window
-                remapped =
-                    setHistoryWindowTurns
-                        (fmap (remapTurn (abs seed `mod` 1000))
-                            appended.historyWindowTurns)
-                        appended
-                truncated =
-                    setHistoryWindowTurns
-                        (Seq.take 1 appended.historyWindowTurns)
-                        appended
-                reset = historyWindowSetGeneration (HistoryGeneration 2) appended
-            in indexInvariant window
-                && indexInvariant appended
-                && indexInvariant remapped
-                && indexInvariant truncated
-                && indexInvariant reset
-                && Map.keysSet reset.historyWindowBlockCursors == Set.empty
-                && all
-                    (\block ->
-                        Map.lookup block.blockId reset.historyWindowBlockCursors
-                            == Nothing)
-                    (concatMap (toList . (.historyTurnBlocks)) (toList reset.historyWindowTurns))
-
-    it "keeps the first cursor for duplicate block ids" do
-        let first = turn 1 1
-            duplicate =
-                (turn 2 1)
-                    { historyTurnBlocks =
-                        fmap (\current -> current {blockId = BlockId 10})
-                            ((turn 2 1).historyTurnBlocks)
-                    }
-            window = setHistoryWindowTurns
-                (Seq.fromList [first, duplicate])
-                (emptyHistoryWindow (HistoryGeneration 1) 10 20 1000000)
-        historyWindowCursorForBlock (BlockId 10) window
-            `shouldBe` Just (HistoryCursor 1)
-
     it "allows keyboard scrollback when only persisted history is loaded" do
         let generation = HistoryGeneration 1
             empty = emptyHistoryWindow generation 10 20 1_000_000
@@ -142,8 +76,6 @@ spec = describe "bounded fullscreen history window" do
             Right window -> do
                 historyWindowCursors window
                     `shouldBe` Seq.fromList (map HistoryCursor [10, 11, 12])
-                historyWindowCursorForBlock (BlockId 100) window
-                    `shouldBe` Just (HistoryCursor 10)
                 historyWindowRequest HistoryOlder window
                     `shouldBe`
                         Just HistoryRequest
@@ -181,8 +113,6 @@ spec = describe "bounded fullscreen history window" do
         historyWindowCursors merged
             `shouldBe` Seq.fromList (map HistoryCursor [8, 9, 10, 11])
         historyWindowLoadedBlocks merged `shouldBe` 7
-        historyWindowCursorForBlock (BlockId 100) merged
-            `shouldBe` Just (HistoryCursor 10)
         historyWindowRequest HistoryOlder requested
             `shouldBe` Nothing
 
@@ -537,42 +467,6 @@ block identifier =
         , blockExpanded = False
         , blockCallId = Nothing
         }
-
-indexInvariant :: HistoryWindow -> Bool
-indexInvariant window =
-    let turns = toList window.historyWindowTurns
-        expectedTurns =
-            Map.fromList
-                [ (turn.historyTurnCursor, turn)
-                | turn <- turns
-                ]
-        expectedBlocks =
-            Map.fromList
-                [ (block.blockId, block)
-                | turn <- turns
-                , block <- toList turn.historyTurnBlocks
-                ]
-        expectedCursors =
-            Map.fromListWith (flip const)
-                [ (block.blockId, turn.historyTurnCursor)
-                | turn <- turns
-                , block <- toList turn.historyTurnBlocks
-                ]
-    in window.historyWindowTurnsByCursor == expectedTurns
-        && window.historyWindowBlocksById == expectedBlocks
-        && window.historyWindowBlockCursors == expectedCursors
-
-remapTurn :: Int -> HistoryTurn -> HistoryTurn
-remapTurn offset original =
-    original
-        { historyTurnBlocks =
-            fmap
-                (\current ->
-                    current {blockId = BlockId (offset + blockIdValue current.blockId)})
-                original.historyTurnBlocks
-        }
-  where
-    blockIdValue (BlockId value) = value
 
 isRight :: Either a b -> Bool
 isRight value =
