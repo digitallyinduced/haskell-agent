@@ -30,7 +30,7 @@ import Agent.Json (rawJsonDecoder)
 import qualified Agent.Json.Decode as Hermes
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (displayException, tryAny)
-import Control.Monad (join, when)
+import Control.Monad (when)
 import Control.Retry
     ( fullJitterBackoff
     , limitRetries
@@ -71,7 +71,7 @@ data TelegramFile = TelegramFile
 
 telegramFileDecoder :: Hermes.Decoder TelegramFile
 telegramFileDecoder = Hermes.object $
-    TelegramFile <$> optionalField "file_path" Hermes.text
+    TelegramFile <$> Hermes.optionalKey "file_path" Hermes.text
 
 telegramRequest
     :: TelegramClient
@@ -615,12 +615,6 @@ requestUnit client method body =
         Right response ->
             pure (() <$ decodeTelegramResponse rawJsonDecoder response)
 
-optionalField
-    :: Text
-    -> Hermes.Decoder a
-    -> Hermes.FieldsDecoder (Maybe a)
-optionalField key decoder =
-    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
 
 threadParameters :: TelegramChatKey -> [(Key.Key, Value)]
 threadParameters key =

@@ -13,7 +13,6 @@ module Agent.Telegram.Types.Config
 
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import qualified Agent.Json.Decode as Hermes
-import Control.Monad (join)
 import Data.Aeson
     ( ToJSON(..)
     , object
@@ -82,14 +81,14 @@ telegramConfigDecoder = Hermes.object do
             pure
             (parseProvider providerText)
         legacyYolo <- fromMaybe False
-            <$> optionalField "yolo" Hermes.bool
+            <$> Hermes.optionalKey "yolo" Hermes.bool
         approvalMode <- fromMaybe
             (if legacyYolo
                 then TelegramApprovalYolo
                 else TelegramApprovalPrompt)
-            <$> optionalField "approvalMode" telegramApprovalModeDecoder
+            <$> Hermes.optionalKey "approvalMode" telegramApprovalModeDecoder
         workerCount <- fromMaybe defaultTelegramWorkerCount
-            <$> optionalField "workers" Hermes.int
+            <$> Hermes.optionalKey "workers" Hermes.int
         if workerCount < 1 || workerCount > maximumTelegramWorkerCount
             then fail
                 ("workers must be between 1 and "
@@ -97,22 +96,16 @@ telegramConfigDecoder = Hermes.object do
             else pure ()
         TelegramConfig
             <$> pure telegramProvider
-            <*> optionalField "model" Hermes.text
+            <*> Hermes.optionalKey "model" Hermes.text
             <*> (Text.unpack <$> Hermes.atKey "cwd" Hermes.text)
-            <*> optionalField "effort" Hermes.text
+            <*> Hermes.optionalKey "effort" Hermes.text
             <*> pure approvalMode
             <*> (Set.fromList <$> Hermes.atKey "allowedUsers"
                 (Hermes.list integerDecoder))
             <*> (fromMaybe False
-                <$> optionalField "respondToAllGroupMessages" Hermes.bool)
+                <$> Hermes.optionalKey "respondToAllGroupMessages" Hermes.bool)
             <*> pure workerCount
 
-optionalField
-    :: Text
-    -> Hermes.Decoder a
-    -> Hermes.FieldsDecoder (Maybe a)
-optionalField key decoder =
-    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
 
 integerDecoder :: Hermes.Decoder Integer
 integerDecoder = fromIntegral <$> Hermes.int

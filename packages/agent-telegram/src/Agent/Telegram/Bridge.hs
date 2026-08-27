@@ -28,7 +28,7 @@ import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race, wait, withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
-import Control.Monad (forM_, join, void, when)
+import Control.Monad (forM_, void, when)
 import Data.Aeson (Value(..))
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (isPrefixOf, sort)
@@ -82,8 +82,8 @@ pathRequestDecoder :: Hermes.Decoder PathRequest
 pathRequestDecoder = Hermes.object $
         PathRequest
             <$> (Text.unpack <$> Hermes.atKey "path" Hermes.text)
-            <*> optionalField "caption" Hermes.text
-            <*> optionalField "filename" Hermes.text
+            <*> Hermes.optionalKey "caption" Hermes.text
+            <*> Hermes.optionalKey "filename" Hermes.text
 
 data ReactionRequest = ReactionRequest
     { reactionRequestEmoji :: !Text
@@ -94,7 +94,7 @@ reactionRequestDecoder :: Hermes.Decoder ReactionRequest
 reactionRequestDecoder = Hermes.object $
     ReactionRequest
         <$> Hermes.atKey "emoji" Hermes.text
-        <*> optionalField "message_id" integerDecoder
+        <*> Hermes.optionalKey "message_id" integerDecoder
 
 data ChoiceRequest = ChoiceRequest
     { choiceRequestQuestion :: !Text
@@ -126,8 +126,8 @@ data AllowlistRequest = AllowlistRequest
 allowlistRequestDecoder :: Hermes.Decoder AllowlistRequest
 allowlistRequestDecoder = Hermes.object $
     AllowlistRequest
-        <$> optionalField "query" Hermes.text
-        <*> optionalField "user_id" integerDecoder
+        <$> Hermes.optionalKey "query" Hermes.text
+        <*> Hermes.optionalKey "user_id" integerDecoder
 
 allowlistRequestQuery :: AllowlistRequest -> Text
 allowlistRequestQuery request =
@@ -339,12 +339,6 @@ withPayload decoder request use =
         Left err -> pure (Left (Hermes.jsonErrorMessage err))
         Right payload -> use payload
 
-optionalField
-    :: Text
-    -> Hermes.Decoder a
-    -> Hermes.FieldsDecoder (Maybe a)
-optionalField key decoder =
-    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
 
 defaultField
     :: Text
@@ -352,7 +346,7 @@ defaultField
     -> Hermes.Decoder a
     -> Hermes.FieldsDecoder a
 defaultField key fallback decoder =
-    fromMaybe fallback <$> optionalField key decoder
+    Hermes.defaultKey fallback key decoder
 
 integerDecoder :: Hermes.Decoder Integer
 integerDecoder = fromIntegral <$> Hermes.int

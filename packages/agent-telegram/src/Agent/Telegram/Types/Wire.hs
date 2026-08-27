@@ -43,7 +43,6 @@ module Agent.Telegram.Types.Wire
 import Agent.Json (RawJson, rawJsonDecoder)
 import qualified Agent.Json.Decode as Hermes
 import Control.Applicative ((<|>))
-import Control.Monad (join)
 import Data.Aeson
     ( ToJSON(..)
     , object
@@ -71,12 +70,12 @@ instance ToJSON TelegramVoice where
 
 telegramVoiceDecoder :: Hermes.Decoder TelegramVoice
 telegramVoiceDecoder = Hermes.object do
-    snakeFileId <- optionalField "file_id" Hermes.text
-    camelFileId <- optionalField "fileId" Hermes.text
-    snakeMime <- optionalField "mime_type" Hermes.text
-    camelMime <- optionalField "mimeType" Hermes.text
-    snakeSize <- optionalField "file_size" integerDecoder
-    camelSize <- optionalField "fileSize" integerDecoder
+    snakeFileId <- Hermes.optionalKey "file_id" Hermes.text
+    camelFileId <- Hermes.optionalKey "fileId" Hermes.text
+    snakeMime <- Hermes.optionalKey "mime_type" Hermes.text
+    camelMime <- Hermes.optionalKey "mimeType" Hermes.text
+    snakeSize <- Hermes.optionalKey "file_size" integerDecoder
+    camelSize <- Hermes.optionalKey "fileSize" integerDecoder
     duration <- defaultField "duration" 0 Hermes.int
     case snakeFileId <|> camelFileId of
         Nothing -> fail "missing Telegram voice file id"
@@ -107,18 +106,18 @@ instance ToJSON TelegramUser where
 
 telegramUserDecoder :: Hermes.Decoder TelegramUser
 telegramUserDecoder = Hermes.object do
-    snakeBot <- optionalField "is_bot" Hermes.bool
-    camelBot <- optionalField "isBot" Hermes.bool
-    snakeFirst <- optionalField "first_name" Hermes.text
-    camelFirst <- optionalField "firstName" Hermes.text
-    snakeLast <- optionalField "last_name" Hermes.text
-    camelLast <- optionalField "lastName" Hermes.text
+    snakeBot <- Hermes.optionalKey "is_bot" Hermes.bool
+    camelBot <- Hermes.optionalKey "isBot" Hermes.bool
+    snakeFirst <- Hermes.optionalKey "first_name" Hermes.text
+    camelFirst <- Hermes.optionalKey "firstName" Hermes.text
+    snakeLast <- Hermes.optionalKey "last_name" Hermes.text
+    camelLast <- Hermes.optionalKey "lastName" Hermes.text
     TelegramUser
         <$> Hermes.atKey "id" integerDecoder
         <*> pure (fromMaybe False (snakeBot <|> camelBot))
         <*> pure (snakeFirst <|> camelFirst)
         <*> pure (snakeLast <|> camelLast)
-        <*> optionalField "username" Hermes.text
+        <*> Hermes.optionalKey "username" Hermes.text
 
 data TelegramMessageEntity = TelegramMessageEntity
     { entityType :: !Text
@@ -133,7 +132,7 @@ telegramMessageEntityDecoder = Hermes.object $
         <$> Hermes.atKey "type" Hermes.text
         <*> Hermes.atKey "offset" Hermes.int
         <*> Hermes.atKey "length" Hermes.int
-        <*> optionalField "user" telegramUserDecoder
+        <*> Hermes.optionalKey "user" telegramUserDecoder
 
 data TelegramChat = TelegramChat
     { telegramChatId :: !Integer
@@ -157,7 +156,7 @@ telegramChatMemberDecoder = Hermes.object $
     TelegramChatMember
         <$> Hermes.atKey "user" telegramUserDecoder
         <*> Hermes.atKey "status" Hermes.text
-        <*> optionalField "is_member" Hermes.bool
+        <*> Hermes.optionalKey "is_member" Hermes.bool
 
 data TelegramChatMemberUpdated = TelegramChatMemberUpdated
     { chatMemberUpdatedChat :: !TelegramChat
@@ -207,28 +206,28 @@ telegramMessageDecoder :: Hermes.Decoder TelegramMessage
 telegramMessageDecoder = Hermes.object $
     TelegramMessage
         <$> Hermes.atKey "message_id" integerDecoder
-        <*> optionalField "from" telegramUserDecoder
+        <*> Hermes.optionalKey "from" telegramUserDecoder
         <*> Hermes.atKey "chat" telegramChatDecoder
-        <*> optionalField "message_thread_id" integerDecoder
-        <*> optionalField "text" Hermes.text
-        <*> optionalField "caption" Hermes.text
-        <*> optionalField "voice" telegramVoiceDecoder
-        <*> optionalField "audio" telegramAudioDecoder
-        <*> optionalField "document" telegramDocumentDecoder
+        <*> Hermes.optionalKey "message_thread_id" integerDecoder
+        <*> Hermes.optionalKey "text" Hermes.text
+        <*> Hermes.optionalKey "caption" Hermes.text
+        <*> Hermes.optionalKey "voice" telegramVoiceDecoder
+        <*> Hermes.optionalKey "audio" telegramAudioDecoder
+        <*> Hermes.optionalKey "document" telegramDocumentDecoder
         <*> defaultField "photo" [] (Hermes.list telegramPhotoSizeDecoder)
-        <*> optionalField "video" telegramVideoDecoder
-        <*> optionalField "video_note" telegramVideoNoteDecoder
-        <*> optionalField "animation" telegramAnimationDecoder
-        <*> optionalField "sticker" telegramStickerDecoder
-        <*> optionalField "location" telegramLocationDecoder
-        <*> optionalField "contact" telegramContactDecoder
-        <*> optionalField "venue" telegramVenueDecoder
-        <*> optionalField "poll" telegramPollDecoder
-        <*> optionalField "dice" telegramDiceDecoder
-        <*> optionalField "media_group_id" Hermes.text
-        <*> optionalField "forward_origin" rawJsonDecoder
-        <*> optionalField "edit_date" integerDecoder
-        <*> optionalField "reply_to_message" telegramMessageDecoder
+        <*> Hermes.optionalKey "video" telegramVideoDecoder
+        <*> Hermes.optionalKey "video_note" telegramVideoNoteDecoder
+        <*> Hermes.optionalKey "animation" telegramAnimationDecoder
+        <*> Hermes.optionalKey "sticker" telegramStickerDecoder
+        <*> Hermes.optionalKey "location" telegramLocationDecoder
+        <*> Hermes.optionalKey "contact" telegramContactDecoder
+        <*> Hermes.optionalKey "venue" telegramVenueDecoder
+        <*> Hermes.optionalKey "poll" telegramPollDecoder
+        <*> Hermes.optionalKey "dice" telegramDiceDecoder
+        <*> Hermes.optionalKey "media_group_id" Hermes.text
+        <*> Hermes.optionalKey "forward_origin" rawJsonDecoder
+        <*> Hermes.optionalKey "edit_date" integerDecoder
+        <*> Hermes.optionalKey "reply_to_message" telegramMessageDecoder
         <*> defaultField "new_chat_members" [] (Hermes.list telegramUserDecoder)
         <*> defaultField "entities" [] (Hermes.list telegramMessageEntityDecoder)
         <*> defaultField "caption_entities" [] (Hermes.list telegramMessageEntityDecoder)
@@ -243,8 +242,8 @@ telegramReactionTypeDecoder :: Hermes.Decoder TelegramReactionType
 telegramReactionTypeDecoder = Hermes.object $
     TelegramReactionType
         <$> Hermes.atKey "type" Hermes.text
-        <*> optionalField "emoji" Hermes.text
-        <*> optionalField "custom_emoji_id" Hermes.text
+        <*> Hermes.optionalKey "emoji" Hermes.text
+        <*> Hermes.optionalKey "custom_emoji_id" Hermes.text
 
 data TelegramMessageReaction = TelegramMessageReaction
     { messageReactionChat :: !TelegramChat
@@ -259,7 +258,7 @@ telegramMessageReactionDecoder = Hermes.object $
     TelegramMessageReaction
         <$> Hermes.atKey "chat" telegramChatDecoder
         <*> Hermes.atKey "message_id" integerDecoder
-        <*> optionalField "user" telegramUserDecoder
+        <*> Hermes.optionalKey "user" telegramUserDecoder
         <*> defaultField "old_reaction" [] (Hermes.list telegramReactionTypeDecoder)
         <*> defaultField "new_reaction" [] (Hermes.list telegramReactionTypeDecoder)
 
@@ -276,7 +275,7 @@ telegramPhotoSizeDecoder = Hermes.object $
         <$> Hermes.atKey "file_id" Hermes.text
         <*> defaultField "width" 0 Hermes.int
         <*> defaultField "height" 0 Hermes.int
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramDocument = TelegramDocument
     { documentFileId :: !Text
@@ -289,9 +288,9 @@ telegramDocumentDecoder :: Hermes.Decoder TelegramDocument
 telegramDocumentDecoder = Hermes.object $
     TelegramDocument
         <$> Hermes.atKey "file_id" Hermes.text
-        <*> optionalField "file_name" Hermes.text
-        <*> optionalField "mime_type" Hermes.text
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramVideo = TelegramVideo
     { videoFileId :: !Text
@@ -306,9 +305,9 @@ telegramVideoDecoder = Hermes.object $
     TelegramVideo
         <$> Hermes.atKey "file_id" Hermes.text
         <*> defaultField "duration" 0 Hermes.int
-        <*> optionalField "mime_type" Hermes.text
-        <*> optionalField "file_name" Hermes.text
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramVideoNote = TelegramVideoNote
     { videoNoteFileId :: !Text
@@ -323,7 +322,7 @@ telegramVideoNoteDecoder = Hermes.object $
         <$> Hermes.atKey "file_id" Hermes.text
         <*> defaultField "duration" 0 Hermes.int
         <*> defaultField "length" 0 Hermes.int
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramAudio = TelegramAudio
     { audioFileId :: !Text
@@ -338,9 +337,9 @@ telegramAudioDecoder = Hermes.object $
     TelegramAudio
         <$> Hermes.atKey "file_id" Hermes.text
         <*> defaultField "duration" 0 Hermes.int
-        <*> optionalField "mime_type" Hermes.text
-        <*> optionalField "file_name" Hermes.text
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramAnimation = TelegramAnimation
     { animationFileId :: !Text
@@ -353,9 +352,9 @@ telegramAnimationDecoder :: Hermes.Decoder TelegramAnimation
 telegramAnimationDecoder = Hermes.object $
     TelegramAnimation
         <$> Hermes.atKey "file_id" Hermes.text
-        <*> optionalField "mime_type" Hermes.text
-        <*> optionalField "file_name" Hermes.text
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramSticker = TelegramSticker
     { stickerFileId :: !Text
@@ -368,9 +367,9 @@ telegramStickerDecoder :: Hermes.Decoder TelegramSticker
 telegramStickerDecoder = Hermes.object $
     TelegramSticker
         <$> Hermes.atKey "file_id" Hermes.text
-        <*> optionalField "emoji" Hermes.text
+        <*> Hermes.optionalKey "emoji" Hermes.text
         <*> defaultField "is_animated" False Hermes.bool
-        <*> optionalField "file_size" integerDecoder
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramLocation = TelegramLocation
     { locationLatitude :: !Double
@@ -394,7 +393,7 @@ telegramContactDecoder = Hermes.object $
     TelegramContact
         <$> Hermes.atKey "phone_number" Hermes.text
         <*> Hermes.atKey "first_name" Hermes.text
-        <*> optionalField "last_name" Hermes.text
+        <*> Hermes.optionalKey "last_name" Hermes.text
 
 data TelegramVenue = TelegramVenue
     { venueTitle :: !Text
@@ -494,14 +493,14 @@ instance ToJSON TelegramFileMedia where
 
 telegramFileMediaDecoder :: Hermes.Decoder TelegramFileMedia
 telegramFileMediaDecoder = Hermes.object do
-    snakeId <- optionalField "file_id" Hermes.text
-    camelId <- optionalField "fileId" Hermes.text
-    snakeName <- optionalField "file_name" Hermes.text
-    camelName <- optionalField "name" Hermes.text
-    snakeMime <- optionalField "mime_type" Hermes.text
-    camelMime <- optionalField "mimeType" Hermes.text
-    snakeSize <- optionalField "file_size" integerDecoder
-    camelSize <- optionalField "fileSize" integerDecoder
+    snakeId <- Hermes.optionalKey "file_id" Hermes.text
+    camelId <- Hermes.optionalKey "fileId" Hermes.text
+    snakeName <- Hermes.optionalKey "file_name" Hermes.text
+    camelName <- Hermes.optionalKey "name" Hermes.text
+    snakeMime <- Hermes.optionalKey "mime_type" Hermes.text
+    camelMime <- Hermes.optionalKey "mimeType" Hermes.text
+    snakeSize <- Hermes.optionalKey "file_size" integerDecoder
+    camelSize <- Hermes.optionalKey "fileSize" integerDecoder
     case snakeId <|> camelId of
         Nothing -> fail "missing Telegram media file id"
         Just fileId ->
@@ -509,7 +508,7 @@ telegramFileMediaDecoder = Hermes.object do
                 (snakeName <|> camelName)
                 (snakeMime <|> camelMime)
                 (snakeSize <|> camelSize)
-                <$> optionalField "duration" Hermes.int
+                <$> Hermes.optionalKey "duration" Hermes.int
 
 data TelegramMedia = TelegramMedia
     { telegramMediaKind :: !TelegramMediaKind
@@ -528,7 +527,7 @@ telegramMediaDecoder :: Hermes.Decoder TelegramMedia
 telegramMediaDecoder = Hermes.object $
         TelegramMedia
             <$> Hermes.atKey "kind" telegramMediaKindDecoder
-            <*> optionalField "file" telegramFileMediaDecoder
+            <*> Hermes.optionalKey "file" telegramFileMediaDecoder
             <*> defaultField "description" "" Hermes.text
 
 data TelegramUpdate = TelegramUpdate
@@ -544,11 +543,11 @@ telegramUpdateDecoder :: Hermes.Decoder TelegramUpdate
 telegramUpdateDecoder = Hermes.object $
         TelegramUpdate
             <$> Hermes.atKey "update_id" integerDecoder
-            <*> optionalField "message" telegramMessageDecoder
-            <*> optionalField "edited_message" telegramMessageDecoder
-            <*> optionalField "message_reaction" telegramMessageReactionDecoder
-            <*> optionalField "callback_query" telegramCallbackQueryDecoder
-            <*> optionalField "my_chat_member" telegramChatMemberUpdatedDecoder
+            <*> Hermes.optionalKey "message" telegramMessageDecoder
+            <*> Hermes.optionalKey "edited_message" telegramMessageDecoder
+            <*> Hermes.optionalKey "message_reaction" telegramMessageReactionDecoder
+            <*> Hermes.optionalKey "callback_query" telegramCallbackQueryDecoder
+            <*> Hermes.optionalKey "my_chat_member" telegramChatMemberUpdatedDecoder
 
 data TelegramCallbackQuery = TelegramCallbackQuery
     { callbackQueryId :: !Text
@@ -562,8 +561,8 @@ telegramCallbackQueryDecoder = Hermes.object $
         TelegramCallbackQuery
             <$> Hermes.atKey "id" Hermes.text
             <*> Hermes.atKey "from" telegramUserDecoder
-            <*> optionalField "message" telegramMessageDecoder
-            <*> optionalField "data" Hermes.text
+            <*> Hermes.optionalKey "message" telegramMessageDecoder
+            <*> Hermes.optionalKey "data" Hermes.text
 
 data TelegramResponse a = TelegramResponse
     { responseOk :: !Bool
@@ -579,10 +578,10 @@ telegramResponseDecoder
 telegramResponseDecoder resultDecoder = Hermes.object $
         TelegramResponse
             <$> Hermes.atKey "ok" Hermes.bool
-            <*> optionalField "result" resultDecoder
-            <*> optionalField "description" Hermes.text
-            <*> optionalField "error_code" Hermes.int
-            <*> optionalField "parameters" telegramResponseParametersDecoder
+            <*> Hermes.optionalKey "result" resultDecoder
+            <*> Hermes.optionalKey "description" Hermes.text
+            <*> Hermes.optionalKey "error_code" Hermes.int
+            <*> Hermes.optionalKey "parameters" telegramResponseParametersDecoder
 
 data TelegramResponseParameters = TelegramResponseParameters
     { responseRetryAfter :: !(Maybe Int)
@@ -590,19 +589,13 @@ data TelegramResponseParameters = TelegramResponseParameters
 
 telegramResponseParametersDecoder :: Hermes.Decoder TelegramResponseParameters
 telegramResponseParametersDecoder = Hermes.object $
-    TelegramResponseParameters <$> optionalField "retry_after" Hermes.int
+    TelegramResponseParameters <$> Hermes.optionalKey "retry_after" Hermes.int
 
 data TelegramClient = TelegramClient
     { clientToken :: !Text
     , clientManager :: !Http.Manager
     }
 
-optionalField
-    :: Text
-    -> Hermes.Decoder a
-    -> Hermes.FieldsDecoder (Maybe a)
-optionalField key decoder =
-    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
 
 defaultField
     :: Text
@@ -610,7 +603,7 @@ defaultField
     -> Hermes.Decoder a
     -> Hermes.FieldsDecoder a
 defaultField key fallback decoder =
-    fromMaybe fallback <$> optionalField key decoder
+    Hermes.defaultKey fallback key decoder
 
 integerDecoder :: Hermes.Decoder Integer
 integerDecoder = fromIntegral <$> Hermes.int

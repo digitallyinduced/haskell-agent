@@ -29,7 +29,6 @@ import Agent.Telegram.Types.Wire
     , telegramUserDecoder
     , telegramVoiceDecoder
     )
-import Control.Monad (join)
 import Data.Aeson
     ( ToJSON(..)
     , object
@@ -93,7 +92,7 @@ telegramChatKeyDecoder :: Hermes.Decoder TelegramChatKey
 telegramChatKeyDecoder = Hermes.object $
     TelegramChatKey
         <$> Hermes.atKey "chatId" integerDecoder
-        <*> optionalField "messageThreadId" integerDecoder
+        <*> Hermes.optionalKey "messageThreadId" integerDecoder
 
 data TelegramBinding = TelegramBinding
     { bindingChat :: !TelegramChatKey
@@ -188,7 +187,7 @@ telegramStateDecoder = Hermes.object do
             else fail
                 ("unsupported Telegram state version: "
                     <> show storedVersion)
-        nextUpdateId <- optionalField "nextUpdateId" integerDecoder
+        nextUpdateId <- Hermes.optionalKey "nextUpdateId" integerDecoder
         storedBindings <- defaultField "bindings" []
             (Hermes.list telegramBindingDecoder)
         pendingTurns <- defaultField "pendingTurns" []
@@ -201,7 +200,7 @@ telegramStateDecoder = Hermes.object do
         pendingLeaves <-
             defaultField "pendingLeaves" []
                 (Hermes.list telegramPendingLeaveDecoder)
-        storedAuthorized <- optionalField "authorizedGroupChats"
+        storedAuthorized <- Hermes.optionalKey "authorizedGroupChats"
             (Hermes.list integerDecoder)
         storedCallbacks <-
             defaultField "pendingCallbacks" []
@@ -344,7 +343,7 @@ telegramPendingTurnDecoder = Hermes.object $
             <*> defaultField "messageId" 0 integerDecoder
             <*> Hermes.atKey "chat" telegramChatKeyDecoder
             <*> Hermes.atKey "text" Hermes.text
-            <*> optionalField "voice" telegramVoiceDecoder
+            <*> Hermes.optionalKey "voice" telegramVoiceDecoder
 
 data TelegramPendingReply = TelegramPendingReply
     { pendingUpdateId :: !Integer
@@ -366,7 +365,7 @@ telegramPendingReplyDecoder = Hermes.object $
         TelegramPendingReply
             <$> Hermes.atKey "updateId" integerDecoder
             <*> Hermes.atKey "chat" telegramChatKeyDecoder
-            <*> optionalField "replyToMessageId" integerDecoder
+            <*> Hermes.optionalKey "replyToMessageId" integerDecoder
             <*> Hermes.atKey "text" Hermes.text
 
 data TelegramPendingMediaTurn = TelegramPendingMediaTurn
@@ -402,7 +401,7 @@ telegramPendingMediaTurnDecoder = Hermes.object $
             <*> defaultField "text" "" Hermes.text
             <*> defaultField "attachments" [] (Hermes.list telegramMediaDecoder)
             <*> defaultField "edited" False Hermes.bool
-            <*> optionalField "mediaGroupId" Hermes.text
+            <*> Hermes.optionalKey "mediaGroupId" Hermes.text
 
 data TelegramPendingLeave = TelegramPendingLeave
     { pendingLeaveUpdateId :: !Integer
@@ -446,8 +445,8 @@ telegramPendingCallbackDecoder = Hermes.object $
             <$> Hermes.atKey "updateId" integerDecoder
             <*> Hermes.atKey "queryId" Hermes.text
             <*> Hermes.atKey "userId" integerDecoder
-            <*> optionalField "chat" telegramChatKeyDecoder
-            <*> optionalField "messageId" integerDecoder
+            <*> Hermes.optionalKey "chat" telegramChatKeyDecoder
+            <*> Hermes.optionalKey "messageId" integerDecoder
             <*> Hermes.atKey "data" Hermes.text
 
 data TelegramRetryMetadata = TelegramRetryMetadata
@@ -467,8 +466,8 @@ telegramRetryMetadataDecoder :: Hermes.Decoder TelegramRetryMetadata
 telegramRetryMetadataDecoder = Hermes.object $
         TelegramRetryMetadata
             <$> defaultField "attempts" 0 Hermes.int
-            <*> optionalField "nextAt" Hermes.utcTime
-            <*> optionalField "lastError" Hermes.text
+            <*> Hermes.optionalKey "nextAt" Hermes.utcTime
+            <*> Hermes.optionalKey "lastError" Hermes.text
 
 data TelegramDeadLetter = TelegramDeadLetter
     { deadLetterUpdateId :: !Integer
@@ -491,10 +490,10 @@ telegramDeadLetterDecoder :: Hermes.Decoder TelegramDeadLetter
 telegramDeadLetterDecoder = Hermes.object $
         TelegramDeadLetter
             <$> Hermes.atKey "updateId" integerDecoder
-            <*> optionalField "chat" telegramChatKeyDecoder
+            <*> Hermes.optionalKey "chat" telegramChatKeyDecoder
             <*> Hermes.atKey "error" Hermes.text
             <*> Hermes.atKey "failedAt" Hermes.utcTime
-            <*> optionalField "action" pendingChatActionDecoder
+            <*> Hermes.optionalKey "action" pendingChatActionDecoder
 
 data TelegramCallbackBinding = TelegramCallbackBinding
     { callbackBindingData :: !Text
@@ -528,7 +527,7 @@ telegramCallbackBindingDecoder = Hermes.object $
             <*> Hermes.atKey "requestId" Hermes.text
             <*> Hermes.atKey "chat" telegramChatKeyDecoder
             <*> Hermes.atKey "userId" integerDecoder
-            <*> optionalField "messageId" integerDecoder
+            <*> Hermes.optionalKey "messageId" integerDecoder
             <*> (Text.unpack <$> Hermes.atKey "bridgeDirectory" Hermes.text)
             <*> Hermes.atKey "value" Hermes.text
             <*> Hermes.atKey "expiresAt" Hermes.utcTime
@@ -541,12 +540,6 @@ data PendingChatAction
     | LeaveUnauthorizedChat !TelegramPendingLeave
     deriving (Eq, Show)
 
-optionalField
-    :: Text
-    -> Hermes.Decoder a
-    -> Hermes.FieldsDecoder (Maybe a)
-optionalField key decoder =
-    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
 
 defaultField
     :: Text
@@ -554,7 +547,7 @@ defaultField
     -> Hermes.Decoder a
     -> Hermes.FieldsDecoder a
 defaultField key fallback decoder =
-    fromMaybe fallback <$> optionalField key decoder
+    Hermes.defaultKey fallback key decoder
 
 integerDecoder :: Hermes.Decoder Integer
 integerDecoder = fromIntegral <$> Hermes.int
