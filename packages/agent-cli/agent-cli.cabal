@@ -73,8 +73,13 @@ library
                     , Agent.CLI.Runtime.Orchestration
                     , Agent.CLI.Runtime.Orchestration.Background
                     , Agent.CLI.Runtime.Orchestration.Concurrent
+                    , Agent.CLI.Runtime.Orchestration.Flow
+                    , Agent.CLI.Runtime.Orchestration.Initialized
+                    , Agent.CLI.Runtime.Orchestration.Providers
                     , Agent.CLI.Runtime.Orchestration.Restart
+                    , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
+                    , Agent.CLI.Runtime.Orchestration.Tools
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
