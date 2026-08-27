@@ -13,7 +13,11 @@ module Agent.Claude.Internal.Messages
 
 import Agent.Loop (LoopEvent(..))
 import Agent.Loop (NativeAgentStatus(..))
-import Agent.Json (RawJson, rawJsonBytes)
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonFromEncoding
+    )
 import qualified Agent.Json.Decode as Json
 import Agent.Responses.Types
     ( FunctionCall(..)
@@ -45,8 +49,7 @@ import Claude.Agent.SDK.Types
     , messageUuid
     , modelUsageToUsage
     )
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Encoding as Aeson
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Set (Set)
@@ -477,10 +480,6 @@ functionCallItem callId name input =
         , arguments = rawJsonText input
         , encryptedFunctionArgs = Nothing
         , status = Just ItemCompleted
-        , extraFields =
-            KeyMap.singleton
-                "provider"
-                (Aeson.String "claude-code")
         }
 
 functionOutputItem
@@ -495,16 +494,15 @@ functionOutputItem callId content isError =
         , name = Nothing
         , namespace = Nothing
         , output =
-            maybe Aeson.Null (Aeson.String . (.renderedText)) content
+            maybe
+                (rawJsonFromEncoding Aeson.null_)
+                (.raw)
+                content
         , status =
             Just $
                 if isError == Just True
                     then ItemIncomplete
                     else ItemCompleted
-        , extraFields =
-            KeyMap.singleton
-                "provider"
-                (Aeson.String "claude-code")
         }
 
 streamEventToolEvents :: StreamEvent -> [ClaudeToolEvent]

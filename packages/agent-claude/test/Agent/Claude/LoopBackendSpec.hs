@@ -110,7 +110,6 @@ spec = do
                                 , generateSummary = Nothing
                                 , reasoningMode = Nothing
                                 , summary = Nothing
-                                , extraFields = mempty
                                 }
                             , instructions =
                                 Just "Use the outer harness instructions."
@@ -542,7 +541,6 @@ spec = do
                                 , generateSummary = Nothing
                                 , reasoningMode = Nothing
                                 , summary = Nothing
-                                , extraFields = mempty
                                 }
                             }
                     backend =
@@ -875,7 +873,6 @@ spec = do
                                         , generateSummary = Nothing
                                         , reasoningMode = Nothing
                                         , summary = Nothing
-                                        , extraFields = mempty
                                         }
                                     }
                             afterEffortChange <- expectTurn =<<

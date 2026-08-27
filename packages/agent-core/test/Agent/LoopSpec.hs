@@ -1593,5 +1593,4 @@ endlessToolsBackend = do
 stateMarker :: ResponseItem
 stateMarker = UnknownResponseItem TaggedObject
     { tag = "test_state"
-    , fields = mempty
     }
