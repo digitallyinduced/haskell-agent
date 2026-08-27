@@ -111,21 +111,44 @@ main = hspec do
             second `shouldBe` Right (Person "Grace" 85)
 
         it "captures complete nested raw extensions in one Hermes pass" do
-            Hermes.withDecoderSession \session -> do
-                result <- Hermes.decodeIO session envelopeDecoder
+            result <-
+                Hermes.withDecoderSession \session ->
+                    Hermes.decodeIO session envelopeDecoder
                     "{\"name\":\"Ada\",\"future\":{\"nested\":[1,true,null]}}"
-                case result of
-                    Left err -> expectationFailure (show err)
-                    Right envelope ->
-                        rawJsonBytes
-                            <$> lookupExtension
-                                "future"
-                                envelope.envelopeExtensions
-                            `shouldBe`
-                                Just "{\"nested\":[1,true,null]}"
+            case result of
+                Left err -> expectationFailure (show err)
+                Right envelope ->
+                    rawJsonBytes
+                        <$> lookupExtension
+                            "future"
+                            envelope.envelopeExtensions
+                        `shouldBe`
+                            Just "{\"nested\":[1,true,null]}"
+
+        it "captures and decodes the same object after raw capture" do
+            let input = "{\"age\":37,\"name\":\"Ada\"}"
+            result <-
+                Hermes.withDecoderSession \session ->
+                    Hermes.decodeIO session
+                        (Decoder.withRaw personDecoder)
+                        input
+            case result of
+                Left err -> expectationFailure (show err)
+                Right (person, raw) -> do
+                    person `shouldBe` Person "Ada" 37
+                    rawJsonBytes raw `shouldBe` input
 
         it "decodes unordered discriminated objects without a DOM" do
             Hermes.withDecoderSession \session -> do
                 Hermes.decodeIO session taggedTextDecoder
                     "{\"value\":\"ok\",\"type\":\"text\"}"
                     `shouldReturn` Right "ok"
+
+        it "uses the final duplicate discriminator" do
+            Hermes.withDecoderSession \session -> do
+                let input =
+                        "{\"type\":\"unknown\",\"value\":\"ok\","
+                            <> "\"type\":\"text\"}"
+                Hermes.decodeIO session taggedTextDecoder input
+                    `shouldReturn`
+                        Decoder.decode taggedTextDecoder input

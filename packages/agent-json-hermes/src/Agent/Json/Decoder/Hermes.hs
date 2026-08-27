@@ -101,13 +101,13 @@ toHermes = \case
                     | otherwise ->
                         current <$ validateValue
         either (fail . Text.unpack) pure (finishObjectPlan plan)
-    discriminated@DiscriminatedObjectDecoder{} ->
-        Hermes.withRawJsonByteString \bytes ->
-            case DecoderAPI.decode discriminated (BS.copy bytes) of
-                Left err ->
-                    fail (Text.unpack
-                        (DecoderAPI.renderDecodeError err))
-                Right value -> pure value
+    DiscriminatedObjectDecoder discriminator select ->
+        Hermes.object do
+            -- Select the branch, reset the On Demand object, then decode the
+            -- selected shape with Hermes. Extracting raw JSON here would
+            -- consume and reparse the complete object.
+            tag <- Hermes.atKey discriminator Hermes.text
+            Hermes.liftObjectDecoder (toHermes (select tag))
     NullableDecoder inner ->
         Hermes.nullable (toHermes inner)
     ByTypeDecoder select -> do
@@ -121,18 +121,7 @@ toHermes = \case
         value <- toHermes inner
         either (fail . Text.unpack) pure (transform value)
     WithRawDecoder inner ->
-        Hermes.withRawJsonByteString \bytes ->
-            case DecoderAPI.decode inner (BS.copy bytes) of
-                Left err ->
-                    fail
-                        (Text.unpack
-                            (DecoderAPI.renderDecodeError err))
-                Right value ->
-                    pure
-                        ( value
-                        , unsafeRawJsonFromValidatedBytes
-                            (BS.copy bytes)
-                        )
+        hermesWithRaw inner
 
 hermesObjectField
     :: Text.Text
@@ -197,5 +186,40 @@ openBracket = 0x5b
 
 rawJsonValue :: Hermes.Decoder RawJson
 rawJsonValue =
-    Hermes.withRawJsonByteString \bytes ->
-        pure (unsafeRawJsonFromValidatedBytes (BS.copy bytes))
+    Hermes.withRawJsonByteString copyRawJson
+
+hermesWithRaw :: Decoder a -> Hermes.Decoder (a, RawJson)
+hermesWithRaw inner =
+    Hermes.getType >>= \case
+        -- raw_json() consumes an On Demand value. Objects can be reset and
+        -- decoded again inside the same simdjson document, avoiding a copy
+        -- followed by a second portable parse.
+        Hermes.VObject ->
+            Hermes.withRawJsonByteString \bytes -> do
+                value <- Hermes.object $
+                    Hermes.liftObjectDecoder (toHermes inner)
+                raw <- copyRawJson bytes
+                pure (value, raw)
+        -- Hermes currently exposes object reset but not the equivalent array
+        -- reset primitive. Keep the compatibility fallback for other shapes,
+        -- sharing one owned copy between decoding and raw retention.
+        _ ->
+            Hermes.withRawJsonByteString \bytes -> do
+                let owned = BS.copy bytes
+                owned `seq`
+                    case DecoderAPI.decode inner owned of
+                        Left err ->
+                            fail
+                                (Text.unpack
+                                    (DecoderAPI.renderDecodeError err))
+                        Right value ->
+                            pure
+                                ( value
+                                , unsafeRawJsonFromValidatedBytes owned
+                                )
+
+copyRawJson :: BS.ByteString -> Hermes.Decoder RawJson
+copyRawJson bytes =
+    let owned = BS.copy bytes
+    in owned `seq`
+        pure (unsafeRawJsonFromValidatedBytes owned)
