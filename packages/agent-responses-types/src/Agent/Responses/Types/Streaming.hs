@@ -1,6 +1,7 @@
 module Agent.Responses.Types.Streaming
     ( ResponseStreamEvent(..)
     , ResponseStreamError(..)
+    , CodexRateLimits(..)
     , StreamEventType(..)
     , responseStreamEventType
     , responseStreamEventSequenceNumber
@@ -238,6 +239,13 @@ data ResponseStreamError = ResponseStreamError
 
     } deriving stock (Eq, Show)
 
+data CodexRateLimits = CodexRateLimits
+    { allowed              :: !(Maybe Bool)
+    , limitReached         :: !(Maybe Bool)
+    , primaryUsedPercent   :: !(Maybe Double)
+    , secondaryUsedPercent :: !(Maybe Double)
+    } deriving stock (Eq, Show)
+
 instance ToJSON ResponseStreamError where
     toJSON ResponseStreamError { errorType, code, message, param, retryAfter } =
         objectWith
@@ -354,6 +362,10 @@ data ResponseStreamEvent
         , sequenceNumber    :: !(Maybe Int)
 
         }
+    | ResponseCodexRateLimitsEvent
+        { rateLimits     :: !CodexRateLimits
+        , sequenceNumber :: !(Maybe Int)
+        }
     | OtherResponseStreamEvent
         { otherEventType    :: !StreamEventType
         , sequenceNumber    :: !(Maybe Int)
@@ -385,6 +397,7 @@ responseStreamEventType = \case
     ResponseReasoningSummaryTextDoneEvent{} -> EventReasoningSummaryTextDone
     ResponseErrorEvent{} -> EventError
     ResponseNestedErrorEvent{} -> EventError
+    ResponseCodexRateLimitsEvent{} -> EventCodexRateLimits
     OtherResponseStreamEvent { otherEventType } -> otherEventType
 
 responseStreamEventSequenceNumber :: ResponseStreamEvent -> Maybe Int
@@ -451,6 +464,11 @@ instance ToJSON ResponseStreamEvent where
                 [ Just (field "type" ("error" :: Text))
                 , optionalField "sequence_number" sequenceNumber
                 , Just (field "error" streamError)
+                ]
+        ResponseCodexRateLimitsEvent { sequenceNumber } ->
+            objectWith
+                [ Just (field "type" ("codex.rate_limits" :: Text))
+                , optionalField "sequence_number" sequenceNumber
                 ]
         OtherResponseStreamEvent
             { otherEventType, sequenceNumber, eventDelta, streamItemId
@@ -654,6 +672,10 @@ decoderForType wireType =
         EventReasoningSummaryPartAdded -> eventDecoder wireType
         EventReasoningSummaryTextDone -> eventDecoder wireType
         EventError -> eventDecoder wireType
+        EventCodexRateLimits -> Hermes.object $
+            ResponseCodexRateLimitsEvent
+                <$> Hermes.atKey "rate_limits" codexRateLimitsDecoder
+                <*> optionalAtKey "sequence_number" Hermes.int
         eventType -> otherEventDecoder eventType
 
 otherEventDecoder :: StreamEventType -> Hermes.Decoder ResponseStreamEvent
@@ -665,3 +687,19 @@ otherEventDecoder eventType = Hermes.object $
         <*> optionalAtKey "item_id" Hermes.text
         <*> optionalAtKey "output_index" Hermes.int
         <*> optionalAtKey "summary_index" Hermes.int
+
+codexRateLimitsDecoder :: Hermes.Decoder CodexRateLimits
+codexRateLimitsDecoder = Hermes.object $
+    CodexRateLimits
+        <$> optionalAtKey "allowed" Hermes.bool
+        <*> optionalAtKey "limit_reached" Hermes.bool
+        <*> (fmap (.usedPercent)
+            <$> optionalAtKey "primary" rateLimitWindowDecoder)
+        <*> (fmap (.usedPercent)
+            <$> optionalAtKey "secondary" rateLimitWindowDecoder)
+
+newtype RateLimitWindow = RateLimitWindow { usedPercent :: Double }
+
+rateLimitWindowDecoder :: Hermes.Decoder RateLimitWindow
+rateLimitWindowDecoder = Hermes.object $
+    RateLimitWindow <$> Hermes.atKey "used_percent" Hermes.double

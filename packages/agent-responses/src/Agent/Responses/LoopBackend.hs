@@ -538,6 +538,12 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
         { summaryIndex = Just index }
         | index > 0 ->
             Just (ReasoningDelta "\n\n")
+    ResponseCodexRateLimitsEvent { rateLimits = limits } ->
+            codexRateLimitsWarning limits
+    OtherResponseStreamEvent
+        { otherEventType = StreamEventUnknown eventType } ->
+            Just (ActivityUpdated
+                ("Warning: unsupported provider event " <> eventType))
     OtherResponseStreamEvent { otherEventType, eventDelta } ->
         case eventDelta of
             Just text -> case otherEventType of
@@ -549,6 +555,38 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
                 _ -> Nothing
             Nothing -> Nothing
     _ -> Nothing
+
+codexRateLimitsWarning :: CodexRateLimits -> Maybe LoopEvent
+codexRateLimitsWarning limits =
+    if reached || not (null lowWindows)
+        then Just (WarningRaised
+            (headline <> foldMap formatWindows (nonEmpty lowWindows)))
+        else Nothing
+  where
+    windows =
+        [ ("primary", used)
+        | used <- maybeToList limits.primaryUsedPercent
+        ]
+        <> [ ("secondary", used)
+           | used <- maybeToList limits.secondaryUsedPercent
+           ]
+    lowWindows = filter ((>= 90) . snd) windows
+    reached =
+        limits.limitReached == Just True
+            || limits.allowed == Just False
+            || any ((>= 100) . snd) windows
+    headline
+        | reached = "Codex usage limit reached"
+        | otherwise = "Codex usage is low"
+    nonEmpty [] = Nothing
+    nonEmpty values = Just values
+    formatWindows values =
+        ": " <> Text.intercalate " · "
+            [ label <> " " <> Text.pack (show (max 0 (100 - round used) :: Int))
+                <> "% left"
+            | (label, used) <- values
+            ]
+            <> ". Check /usage for reset details."
 
 -- | Stateful projection of one streamed response attempt into loop events.
 --

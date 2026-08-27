@@ -68,6 +68,7 @@ module Agent.Responses.Types
       -- * Streaming
     , ResponseStreamEvent(..)
     , ResponseStreamError(..)
+    , CodexRateLimits(..)
     , StreamEventType(..)
     , responseStreamEventType
     , responseStreamEventSequenceNumber
