@@ -86,6 +86,7 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
@@ -167,10 +168,8 @@ spec = do
             KeyMap.lookup "include" object `shouldBe` Nothing
 
         it "serializes hosted tools from ResponseToolType, not a tag string" do
-            let mismatched = KnownResponseTool ToolXSearch TaggedObject
-                    { tag = "web_search"
-                    }
-            Aeson.toJSON mismatched `shouldBe` Aeson.object
+            let hosted = KnownResponseTool ToolXSearch
+            Aeson.toJSON hosted `shouldBe` Aeson.object
                 ["type" .= ("x_search" :: Text)]
 
         it "injects hosted x_search when the caller omitted it" do

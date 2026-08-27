@@ -96,6 +96,7 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing
+            , provider = Nothing
             , output = rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
                 ["echoed" Aeson..= ("openrouter functional tool ok" :: Text)]
             , status = Nothing

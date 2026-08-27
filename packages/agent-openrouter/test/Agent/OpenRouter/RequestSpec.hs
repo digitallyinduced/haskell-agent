@@ -66,11 +66,15 @@ spec = do
 
         it "preserves Codex custom and namespace tools" do
             let codexTools =
-                    [ KnownResponseTool ToolCustom TaggedObject
-                        { tag = "custom"
+                    [ CustomToolValue CustomTool
+                        { name = "grammar"
+                        , description = Nothing
+                        , format = Nothing
                         }
-                    , KnownResponseTool ToolNamespace TaggedObject
-                        { tag = "namespace"
+                    , NamespaceToolValue NamespaceTool
+                        { name = "tools"
+                        , description = Nothing
+                        , tools = []
                         }
                     ]
                 request = withTools (Just codexTools) sampleRequest
@@ -176,12 +180,8 @@ sampleRequest = defaultResponseCreateParams
                 rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))
             , strict = Nothing
             }
-        , KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            }
-        , KnownResponseTool ToolComputer TaggedObject
-            { tag = "computer"
-            }
+        , KnownResponseTool ToolWebSearch
+        , KnownResponseTool ToolComputer
         ]
     , reasoning = Just ReasoningConfig
         { context = Nothing
