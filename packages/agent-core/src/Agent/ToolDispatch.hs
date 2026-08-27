@@ -28,6 +28,8 @@ import Agent.Json.Decode (Decoder)
 import qualified Agent.Json.Decode as Json
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (SomeException, tryAny)
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -187,7 +189,11 @@ decodeToolArguments :: Decoder args -> Text -> Either Text args
 decodeToolArguments decoder value =
     case Json.decodeText decoder value of
         Right args -> Right args
-        Left err -> Left err.jsonErrorMessage
+        Left originalError ->
+            case Json.decodeEither decoder
+                (LBS.toStrict (Aeson.encode value)) of
+                Right args -> Right args
+                Left _ -> Left originalError.jsonErrorMessage
 
 findHandler :: Text -> [ToolHandler] -> Maybe ToolHandler
 findHandler name handlers =

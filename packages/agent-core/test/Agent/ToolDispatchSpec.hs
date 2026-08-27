@@ -93,6 +93,15 @@ spec = describe "dispatchToolCall" do
     it "retains invalid argument text for the decoder to reject" do
         toolArgumentsValue "not-json" `shouldBe` "not-json"
 
+    it "lets custom tools decode raw text through a JSON string decoder" do
+        result <- dispatchToolCall testConfig
+            [ typedTool "patch" Json.text \patch ->
+                pure (Right ("patch:" <> patch))
+            ]
+            (customToolCall "call-1" "patch" "*** Begin Patch")
+        result `shouldBe`
+            ToolCallResult "call-1" "patch:*** Begin Patch" CustomCallKind
+
     it "supports no-argument tools" do
         result <- dispatchToolCall testConfig
             [noArgsTool "ping" (pure (Right "pong"))]
