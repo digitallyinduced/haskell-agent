@@ -53,6 +53,7 @@ import Agent.CLI.LearnedSkills.Store
     ( loadApplicableLearnedSkillsForStore
     )
 import Agent.CLI.Options (CliOptions(..), isOneShot)
+import Agent.CLI.PendingInputs (clearPendingInputs)
 import Agent.CLI.Runtime.Types
     ( PendingTurnPresentation(..)
     , RunResult(..)
@@ -605,13 +606,13 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             writeIORef usageRef emptyTokenUsage
             modifyIORef' renderStateRef clearRenderTokenRate
             writeIORef lastAssistantRef Nothing
-            writeIORef pendingNotices []
             writeIORef subagentSessions Map.empty
             writeIORef selectedAgent AgentRoot
             writeIORef agentStepCache Map.empty
             case multiCtx of
                 Just ctx -> resetSubagentRegistry ctx.multiRegistry
                 Nothing -> pure ()
+            clearPendingInputs pendingNotices
             reloadGeneratedContext
         refreshSkills queueContext = do
             refreshed <- loadSkillsCatalogQuiet

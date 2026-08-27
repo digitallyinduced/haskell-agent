@@ -97,7 +97,11 @@ import Agent.CLI.Options
                  optPrompt, optPromptFile, optManagedTurnFile,
                  optScreenMode, optGhci, optBash, optResume, optCwd),
       ScreenMode(ScreenMinimal) )
-import Agent.CLI.PendingInputs ( withPendingInputs )
+import Agent.CLI.PendingInputs
+    ( enqueuePendingInput
+    , newPendingInputs
+    , withPendingInputs
+    )
 import Agent.CLI.Plan ( cliPlanHooks )
 import Agent.CLI.Project
     ( ProjectAccount(..),
@@ -1655,7 +1659,7 @@ runAgentInitializedWithLock
     subagentSessions <- newIORef Map.empty
     subagentStoreRoot <- newIORef Nothing
     subagentForkSource <- newIORef (Nothing :: Maybe (IO [ResponseItem]))
-    pendingNotices <- newIORef ([] :: [TurnInput])
+    pendingNotices <- newPendingInputs
     let maxConcurrentAgents =
             fromMaybe defaultMaxConcurrent $
                 options.optMaxConcurrentAgents
@@ -1685,8 +1689,7 @@ runAgentInitializedWithLock
             _ ->
                 Nothing
         sendToRoot message = do
-            atomicModifyIORef' pendingNotices \xs ->
-                (xs <> [AgentMessage message], ())
+            enqueuePendingInput pendingNotices (AgentMessage message)
             pure (Right "queued")
         createSubagentWorktree source =
             createWorktree source (worktreeRoot home) >>= \case
@@ -1814,13 +1817,8 @@ runAgentInitializedWithLock
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
             when (settled && not (null statuses)) $
-                atomicModifyIORef' pendingNotices \notices ->
-                    ( notices
-                        <> [ UserMessage
-                                (formatMcpModelNoticeFor dialectId statuses)
-                           ]
-                    , ()
-                    )
+                enqueuePendingInput pendingNotices
+                    (UserMessage (formatMcpModelNoticeFor dialectId statuses))
     mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
@@ -1900,8 +1898,8 @@ runAgentInitializedWithLock
     case multiCtx of
         Just ctx -> do
             setSubagentOnComplete ctx.multiRegistry \agentId status -> do
-                atomicModifyIORef' pendingNotices \xs ->
-                    (xs <> [UserMessage (formatCompletionNotice agentId status)], ())
+                enqueuePendingInput pendingNotices
+                    (UserMessage (formatCompletionNotice agentId status))
             setSubagentOnSettled ctx.multiRegistry \agentId status -> do
                 sessions <- readIORef subagentSessions
                 case Map.lookup agentId sessions of
