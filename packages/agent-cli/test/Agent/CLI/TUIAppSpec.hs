@@ -1,6 +1,11 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
-import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentStep(..)
+    , AgentStepState(..)
+    , AgentTarget(..)
+    )
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
@@ -10,6 +15,7 @@ import Agent.CLI.TUI.App
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , backgroundActivityText
     , completionFlashTransitions
     , conversationScrollbarRenderer
     , choiceRowColumns
@@ -111,6 +117,36 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "background activity status" do
+        it "names a running agent and its current step" do
+            backgroundActivityText
+                [ rootEntry
+                , (childEntry 1)
+                    { agentSteps =
+                        [ AgentStep AgentStepCompleted "Read files" Nothing
+                        , AgentStep AgentStepRunning "Running focused tests" Nothing
+                        ]
+                    }
+                ]
+                `shouldBe` "Background · agent-1 — Running focused tests"
+
+        it "summarizes multiple active agents and ignores finished agents" do
+            backgroundActivityText
+                [ rootEntry
+                , (childEntry 1)
+                    { agentSteps = [AgentStep AgentStepRunning "Reading logs" Nothing] }
+                , (childEntry 2)
+                    { agentSteps = [AgentStep AgentStepRunning "Reproducing bug" Nothing] }
+                , (childEntry 3)
+                    { agentSteps = [AgentStep AgentStepRunning "Waiting" Nothing] }
+                , (childEntry 4) { agentStatus = "done" }
+                ]
+                `shouldBe` "3 agents · agent-1 — Reading logs; agent-2 — Reproducing bug …"
+
+        it "falls back to the agent name before its first step arrives" do
+            backgroundActivityText [rootEntry, childEntry 1]
+                `shouldBe` "Background · agent-1"
+
     describe "on-demand syntax loading" do
         it "requests grammars used by fenced file paths" do
             let conversation =

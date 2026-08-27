@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Render.Internal
     , agentEntryWindow
     , agentPaneVisible
     , agentPaneEntryLimit
+    , backgroundActivityText
     , conversationScrollbarRenderer
     , choiceRowColumns
     , quickStartVisible
@@ -214,7 +215,7 @@ import Data.IORef ()
 import Data.List
     ( findIndex, intersperse, nub, sort, sortOn )
 import Data.List.NonEmpty ()
-import Data.Maybe ( fromMaybe, isJust, maybeToList )
+import Data.Maybe ( fromMaybe, isJust, listToMaybe, maybeToList )
 import Data.Sequence ( Seq )
 import Data.Text ( Text )
 import Data.Time.Clock ( UTCTime )
@@ -628,7 +629,8 @@ drawPromptActivity state
             withAttr Theme.mutedAttr $
                 terminalTxt
                     (backgroundIndicator motionGlyphSet mode motionMillis
-                        <> " Background work")
+                        <> " "
+                        <> backgroundActivityText state.appAgentEntries)
         | otherwise = emptyWidget
     elapsed =
         " · "
@@ -641,3 +643,30 @@ drawPromptActivity state
         | ui.uiCompletionRemainingMillis > 0 =
             maybe "" formatTokensPerSecond (uiTokensPerSecond ui)
         | otherwise = ""
+
+-- | Describe the child agents which keep the session alive after the root
+-- agent has finished. Prefer their current running step so the status line
+-- shows observable progress instead of an unverifiable generic claim.
+backgroundActivityText :: [AgentEntry] -> Text
+backgroundActivityText entries =
+    case activeEntries of
+        [] -> "Background work"
+        [entry] -> "Background · " <> describe entry
+        _ ->
+            Text.pack (show (length activeEntries))
+                <> " agents · "
+                <> Text.intercalate "; " (map describe (take 2 activeEntries))
+                <> if length activeEntries > 2 then " …" else ""
+  where
+    activeEntries = filter isBackgroundAgentActive entries
+    describe entry =
+        agentDisplayName entry.agentPath
+            <> maybe "" (" — " <>) (currentStep entry)
+    currentStep entry =
+        (.agentStepTitle)
+            <$> listToMaybe
+                ( filter
+                    ((== AgentStepRunning) . (.agentStepState))
+                    entry.agentSteps
+                    <> entry.agentSteps
+                )
