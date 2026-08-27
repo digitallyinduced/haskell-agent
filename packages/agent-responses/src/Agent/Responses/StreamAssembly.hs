@@ -970,6 +970,13 @@ assembledOutput state =
                                 streamedValue
                                 terminalValue))
                         True
+                (partial, ParsedItem terminalValue) ->
+                    ItemProgress
+                        (ParsedItem
+                            (mergePartialIntoDone
+                                partial
+                                terminalValue))
+                        True
                 _ -> terminal
 
 mergePartialItem :: PartialResponseItem -> ResponseItem -> PartialResponseItem

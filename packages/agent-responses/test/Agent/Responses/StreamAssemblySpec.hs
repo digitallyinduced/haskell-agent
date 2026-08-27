@@ -81,6 +81,33 @@ spec = describe "typed stream assembly" do
             other ->
                 expectationFailure ("unexpected output: " <> show other)
 
+    it "fills reasoning content omitted from terminal output" do
+        let terminalReasoning =
+                ReasoningItemValue ReasoningItem
+                    { itemId = Just "reasoning-1"
+                    , summary = []
+                    , content = Nothing
+                    , encryptedContent = Nothing
+                    , status = Nothing
+                    , extraFields = emptyExtensions
+                    }
+        result <- expectRight $ buildStreamResponse config
+            [ ResponseReasoningTextDeltaEvent
+                (Just "reasoning") (Just "reasoning-1")
+                (Just 0) (Just 0) Nothing emptyExtensions
+            , completed (response [terminalReasoning])
+            ]
+        case result.output of
+            [ReasoningItemValue reasoning] ->
+                reasoning.content
+                    `shouldBe` Just
+                        [ ReasoningTextPart
+                            "reasoning"
+                            emptyExtensions
+                        ]
+            other ->
+                expectationFailure ("unexpected output: " <> show other)
+
     it "keeps output_item.done authoritative over an earlier partial" do
         let doneCall =
                 case toolCall of
