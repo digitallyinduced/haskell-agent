@@ -409,7 +409,8 @@ newFullscreenRuntimeWithSyntaxLoader
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO
         syntaxRequests <- newTQueueIO
-        syntaxHighlighter <- newIORef Nothing
+        syntaxHighlighter <-
+            newIORef (SyntaxHighlighterUnloaded 0)
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
         dictationJobs <- newTQueueIO
@@ -607,18 +608,25 @@ resetFullscreenHistory runtime initialPage = do
 
 loadSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
 loadSyntaxHighlighterForRuntime runtime = do
-    startedAt <- getMonotonicTimeNSec
-    result <- tryAny runtime.runtimeLoadSyntaxHighlighter
-    finishedAt <- getMonotonicTimeNSec
-    let highlighter = case result of
-            Left _ -> Nothing
-            Right loaded -> either (const Nothing) Just loaded
-    writeIORef runtime.runtimeSyntaxHighlighter highlighter
-    enqueueAppEvent runtime (AppSyntaxHighlighterLoaded highlighter)
-    void $
-        tryAny $
-            runtime.runtimeSyntaxLoadFinished
-                (nanosecondsToNominalDiffTime (finishedAt - startedAt))
+    readIORef runtime.runtimeSyntaxHighlighter >>= \case
+        SyntaxHighlighterInactive _ -> pure ()
+        state -> do
+            let generation = syntaxHighlighterGeneration state
+            startedAt <- getMonotonicTimeNSec
+            result <- tryAny runtime.runtimeLoadSyntaxHighlighter
+            finishedAt <- getMonotonicTimeNSec
+            let highlighter = case result of
+                    Left _ -> Nothing
+                    Right loaded -> either (const Nothing) Just loaded
+            published <-
+                publishSyntaxHighlighter runtime generation highlighter
+            when published $
+                enqueueAppEvent runtime AppSyntaxHighlighterChanged
+            void $
+                tryAny $
+                    runtime.runtimeSyntaxLoadFinished
+                        (nanosecondsToNominalDiffTime
+                            (finishedAt - startedAt))
 
 runSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
 runSyntaxHighlighterForRuntime runtime = do
@@ -628,16 +636,24 @@ runSyntaxHighlighterForRuntime runtime = do
             atomically $
                 (:) <$> readTQueue runtime.runtimeSyntaxRequests
                     <*> flushTQueue runtime.runtimeSyntaxRequests
+        ensureSyntaxHighlighterForRuntime runtime
         readIORef runtime.runtimeSyntaxHighlighter >>= \case
-            Nothing -> pure ()
-            Just highlighter -> do
+            SyntaxHighlighterInactive _ -> pure ()
+            SyntaxHighlighterUnloaded _ -> pure ()
+            SyntaxHighlighterActive _ Nothing -> pure ()
+            SyntaxHighlighterActive generation (Just highlighter) -> do
                 (changed, loaded) <-
                     foldSyntaxRequests highlighter languages
                 when changed do
-                    writeIORef runtime.runtimeSyntaxHighlighter (Just loaded)
-                    enqueueAppEvent
-                        runtime
-                        (AppSyntaxHighlighterLoaded (Just loaded))
+                    published <-
+                        publishSyntaxHighlighter
+                            runtime
+                            generation
+                            (Just loaded)
+                    when published $
+                        enqueueAppEvent
+                            runtime
+                            AppSyntaxHighlighterChanged
   where
     foldSyntaxRequests current = \case
         [] -> pure (False, current)
@@ -648,6 +664,36 @@ runSyntaxHighlighterForRuntime runtime = do
                 Right (Right loaded) -> do
                     (_, final) <- foldSyntaxRequests loaded remaining
                     pure (True, final)
+
+ensureSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
+ensureSyntaxHighlighterForRuntime runtime =
+    readIORef runtime.runtimeSyntaxHighlighter >>= \case
+        SyntaxHighlighterUnloaded _ ->
+            loadSyntaxHighlighterForRuntime runtime
+        SyntaxHighlighterActive{} -> pure ()
+        SyntaxHighlighterInactive _ -> pure ()
+
+publishSyntaxHighlighter
+    :: FullscreenRuntime
+    -> Word64
+    -> Maybe SyntaxHighlighter
+    -> IO Bool
+publishSyntaxHighlighter runtime generation highlighter =
+    atomicModifyIORef' runtime.runtimeSyntaxHighlighter \case
+        SyntaxHighlighterUnloaded current
+            | current == generation ->
+                (SyntaxHighlighterActive current highlighter, True)
+        SyntaxHighlighterActive current _
+            | current == generation ->
+                (SyntaxHighlighterActive current highlighter, True)
+        current ->
+            (current, False)
+
+syntaxHighlighterGeneration :: SyntaxHighlighterState -> Word64
+syntaxHighlighterGeneration = \case
+    SyntaxHighlighterUnloaded generation -> generation
+    SyntaxHighlighterActive generation _ -> generation
+    SyntaxHighlighterInactive generation -> generation
 
 nanosecondsToNominalDiffTime :: Word64 -> NominalDiffTime
 nanosecondsToNominalDiffTime nanoseconds =
@@ -2574,23 +2620,48 @@ advanceAppClockNow = do
 noteTerminalFocusLost :: EventM Name AppState ()
 noteTerminalFocusLost = do
     now <- liftIO getMonotonicTimeNSec
+    state <- get
+    liftIO $
+        atomicModifyIORef'
+            state.appRuntime.runtimeSyntaxHighlighter
+            \syntaxState ->
+                ( SyntaxHighlighterInactive
+                    (syntaxHighlighterGeneration syntaxState + 1)
+                , ()
+                )
+    liftIO $ atomically $ void $ flushTQueue
+        state.appRuntime.runtimeSyntaxRequests
     modify' \state ->
         state
             { appTerminalFocus = TerminalUnfocused
             , appFocusLostAt = Just now
             , appAutoRecapShownThisAway = False
             , appLastAutoRecapAttemptAt = Nothing
+            , appSyntaxHighlighter = Nothing
+            , appSyntaxRequested = Set.empty
             }
+    invalidateCache
 
 noteTerminalFocusGained :: EventM Name AppState ()
 noteTerminalFocusGained = do
     maybeRequestAutoRecap
+    state <- get
+    liftIO $
+        atomicModifyIORef'
+            state.appRuntime.runtimeSyntaxHighlighter
+            \case
+                SyntaxHighlighterInactive generation ->
+                    (SyntaxHighlighterUnloaded generation, ())
+                active ->
+                    (active, ())
     modify' \state ->
         state
             { appTerminalFocus = TerminalFocused
             , appFocusLostAt = Nothing
             , appMotionScheduleReset = True
+            , appSyntaxRequested = Set.empty
             }
+    requestVisibleSyntaxLanguages
     invalidateCache
     getVtyHandle >>= liftIO . V.refresh
 
@@ -2695,7 +2766,7 @@ eventMayExposeSyntax = \case
         uiEventMayExposeSyntax uiEvent
     AppEvent (AppUiBatch uiEvents) ->
         any uiEventMayExposeSyntax uiEvents
-    AppEvent (AppSyntaxHighlighterLoaded _) -> True
+    AppEvent AppSyntaxHighlighterChanged -> True
     AppEvent (AppHistoryReset _) -> True
     AppEvent (AppHistoryLoaded _ _) -> True
     AppEvent (AppHistoryCommitted _ _ _) -> True
@@ -2738,7 +2809,10 @@ requestVisibleSyntaxLanguages = do
             syntaxLanguagesForBlocks (visibleConversationBlocks state)
         missing =
             Set.difference languages state.appSyntaxRequested
-    unless (Set.null missing) do
+    when
+        ( state.appTerminalFocus /= TerminalUnfocused
+            && not (Set.null missing)
+        ) do
         liftIO $
             atomically $
                 mapM_
@@ -2933,13 +3007,21 @@ handleEventInner event = case event of
         vty <- getVtyHandle
         liftIO (writeOutputWindowTitle (V.outputIface vty) title)
         modify' \current -> current { appWindowTitle = Just title }
-    AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
-        case highlighter of
-            Nothing -> pure ()
-            Just loaded -> do
-                modify' \current ->
-                    current { appSyntaxHighlighter = Just loaded }
-                invalidateCache
+    AppEvent AppSyntaxHighlighterChanged -> do
+        state <- get
+        when (state.appTerminalFocus /= TerminalUnfocused) do
+            highlighter <-
+                liftIO $
+                    readIORef state.appRuntime.runtimeSyntaxHighlighter
+            modify' \current ->
+                current
+                    { appSyntaxHighlighter =
+                        case highlighter of
+                            SyntaxHighlighterActive _ loaded -> loaded
+                            SyntaxHighlighterUnloaded _ -> Nothing
+                            SyntaxHighlighterInactive _ -> Nothing
+                    }
+            invalidateCache
     AppEvent (AppHistoryReset page) -> do
         modify' (resetHistoryPage page)
         invalidateCache
