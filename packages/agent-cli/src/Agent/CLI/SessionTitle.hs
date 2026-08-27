@@ -31,6 +31,7 @@ import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
 import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Control.Monad (forever, void)
+import Control.Retry (limitRetries, retrying)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -211,11 +212,13 @@ generateTitleWithRetry
     :: SessionTitleManager
     -> SessionTitleJob
     -> IO (Either SomeException (Either Text Text))
-generateTitleWithRetry manager job = do
-    firstAttempt <- tryAny (generateTitle manager job)
-    case firstAttempt of
-        Right (Right _) -> pure firstAttempt
-        _ -> tryAny (generateTitle manager job)
+generateTitleWithRetry manager job =
+    retrying (limitRetries 1) shouldRetry \_ ->
+        tryAny (generateTitle manager job)
+  where
+    shouldRetry _ = \case
+        Right (Right _) -> pure False
+        _ -> pure True
 
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
