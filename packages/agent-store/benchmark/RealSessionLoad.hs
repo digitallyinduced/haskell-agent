@@ -9,15 +9,15 @@ import Agent.Store.Postgres
     )
 import Agent.Store.Postgres.Session
     ( SessionMetadata(..)
+    , SessionReadImplementation(..)
     , SessionTurn(..)
     , StoredSession(..)
     , StoredTurn(..)
-    , loadActiveSession
-    , loadSession
+    , loadActiveSessionWithImplementation
+    , loadSessionWithImplementation
     )
 import Agent.Store.SessionItem
 import Agent.Store.Types (StoreError, renderStoreError)
-import Control.Exception (evaluate)
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM)
 import Data.List (sort)
@@ -48,7 +48,11 @@ main = do
         then pure ()
         else die "RTS statistics are disabled; run with +RTS -T"
     getArgs >>= \case
-        [stateDirectory, workloadArg, sessionKeyArg, sampleCountArg] -> do
+        [implementationArg, stateDirectory, workloadArg, sessionKeyArg, sampleCountArg] -> do
+            implementation <- case implementationArg of
+                "per-item" -> pure PerItemSessionRead
+                "adaptive" -> pure AdaptiveSessionRead
+                value -> die ("unknown implementation: " <> value)
             workload <- case workloadArg of
                 "active" -> pure Active
                 "full" -> pure Full
@@ -61,6 +65,7 @@ main = do
                 \store -> do
                     let action =
                             loadWorkload
+                                implementation
                                 workload
                                 store
                                 (Text.pack sessionKeyArg)
@@ -69,7 +74,8 @@ main = do
                         measure action
                     let sample = median samples
                     printf
-                        "%s,%s,%.3f,%.3f,%d,%d\n"
+                        "%s,%s,%s,%.3f,%.3f,%d,%d\n"
+                        implementationArg
                         workloadArg
                         sessionKeyArg
                         sample.elapsedMillis
@@ -79,9 +85,10 @@ main = do
         _ ->
             die $
                 "usage: real-session-load-bench "
-                    <> "STATE_DIRECTORY (active|full) SESSION_KEY SAMPLES\n"
-                    <> "output: workload,session_key,elapsed_ms,cpu_ms,"
-                    <> "allocated_bytes,checksum"
+                    <> "(per-item|adaptive) STATE_DIRECTORY "
+                    <> "(active|full) SESSION_KEY SAMPLES\n"
+                    <> "output: implementation,workload,session_key,"
+                    <> "elapsed_ms,cpu_ms,allocated_bytes,checksum"
 
 parsePositive :: String -> IO Int
 parsePositive value =
@@ -90,8 +97,13 @@ parsePositive value =
             | parsed > 0 -> pure parsed
         _ -> die ("invalid sample count: " <> value)
 
-loadWorkload :: Workload -> Store -> Text -> IO (Either StoreError StoredSession)
-loadWorkload workload store sessionKey =
+loadWorkload
+    :: SessionReadImplementation
+    -> Workload
+    -> Store
+    -> Text
+    -> IO (Either StoreError StoredSession)
+loadWorkload implementation workload store sessionKey =
     loader (trustedPool store) sessionKey >>= \case
         Left err -> pure (Left err)
         Right Nothing ->
@@ -99,8 +111,8 @@ loadWorkload workload store sessionKey =
         Right (Just session) -> pure (Right session)
   where
     loader = case workload of
-        Active -> loadActiveSession
-        Full -> loadSession
+        Active -> loadActiveSessionWithImplementation implementation
+        Full -> loadSessionWithImplementation implementation
 
 measure :: IO (Either StoreError StoredSession) -> IO Sample
 measure action = do
@@ -109,7 +121,7 @@ measure action = do
     beforeCpu <- getCPUTime
     beforeElapsed <- getMonotonicTimeNSec
     stored <- action >>= requireStore "load session"
-    forced <- evaluate (checksumSession stored)
+    forced <- pure $! checksumSession stored
     afterElapsed <- getMonotonicTimeNSec
     afterCpu <- getCPUTime
     performGC

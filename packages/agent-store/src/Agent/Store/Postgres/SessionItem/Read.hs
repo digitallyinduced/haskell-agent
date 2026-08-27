@@ -6,6 +6,7 @@
 
 module Agent.Store.Postgres.SessionItem.Read
     ( loadResponseItems
+    , loadResponseItemsPerItem
     ) where
 
 import Control.Monad (forM)
@@ -43,13 +44,29 @@ toolOutputKindFromText = \case
 loadResponseItems
     :: Text
     -> Transaction.Transaction (Either Text [StoredResponseItem])
-loadResponseItems turnId = do
+loadResponseItems = loadResponseItemsWith True
+
+-- | Retain the original point-read implementation as an executable benchmark
+-- baseline for session-loading changes.
+loadResponseItemsPerItem
+    :: Text
+    -> Transaction.Transaction (Either Text [StoredResponseItem])
+loadResponseItemsPerItem = loadResponseItemsWith False
+
+loadResponseItemsWith
+    :: Bool
+    -> Text
+    -> Transaction.Transaction (Either Text [StoredResponseItem])
+loadResponseItemsWith adaptiveBatching turnId = do
     rows <- Transaction.statement turnId loadBaseRowsStatement
-    let messagesBatched = shouldBatch "message" rows
-        functionCallsBatched = shouldBatch "function_call" rows
+    let messagesBatched =
+            adaptiveBatching && shouldBatch "message" rows
+        functionCallsBatched =
+            adaptiveBatching && shouldBatch "function_call" rows
         functionOutputsBatched =
-            shouldBatch "function_call_output" rows
-        reasoningBatched = shouldBatch "reasoning" rows
+            adaptiveBatching && shouldBatch "function_call_output" rows
+        reasoningBatched =
+            adaptiveBatching && shouldBatch "reasoning" rows
     messages <- loadIf messagesBatched loadMessagesStatement
     functionCalls <- loadIf functionCallsBatched loadFunctionCallsStatement
     functionOutputs <- loadIf

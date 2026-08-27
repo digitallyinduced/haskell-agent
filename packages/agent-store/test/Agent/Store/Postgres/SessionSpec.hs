@@ -184,15 +184,26 @@ spec = describe "PostgreSQL session schema" do
                                 `shouldReturn` Right True
                             appendSessionTurn pool batchedTurn metadata3
                                 `shouldReturn` Right True
-                            loadSession pool "session-batched" >>= \case
-                                Right (Just stored) ->
-                                    map (.storedTurn) (toList stored.storedTurns)
-                                        `shouldBe` [batchedTurn]
-                                other ->
-                                    expectationFailure
-                                        ( "unexpected batched session: "
-                                            <> show other
-                                        )
+                            let assertBatched implementation =
+                                    loadSessionWithImplementation
+                                        implementation
+                                        pool
+                                        "session-batched" >>= \case
+                                            Right (Just stored) ->
+                                                map
+                                                    (.storedTurn)
+                                                    (toList stored.storedTurns)
+                                                    `shouldBe` [batchedTurn]
+                                            other ->
+                                                expectationFailure
+                                                    ( "unexpected batched session: "
+                                                        <> show other
+                                                    )
+                            mapM_
+                                assertBatched
+                                [ AdaptiveSessionRead
+                                , PerItemSessionRead
+                                ]
                             searchConversationTurns pool "compact" 10 >>= \case
                                 Right [match] -> do
                                     match.searchSessionId `shouldBe` "session-1"
