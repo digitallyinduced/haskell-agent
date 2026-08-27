@@ -549,7 +549,9 @@ responseKeepsTurnOpen response =
         _ -> False
 
 responseEventTurnState :: ResponseStreamEvent -> Maybe Text
-responseEventTurnState _ = Nothing
+responseEventTurnState = \case
+    OtherResponseStreamEvent other -> other.turnState
+    _ -> Nothing
 
 addTurnStateToPayload :: Maybe Text -> Aeson.Value -> Aeson.Value
 addTurnStateToPayload Nothing payload = payload
