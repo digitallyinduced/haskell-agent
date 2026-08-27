@@ -472,6 +472,19 @@ resumeConversationFollow = do
     vScrollToEnd (viewportScroll ConversationViewport)
     queueConversationReflow
 
+-- | Reassert the root viewport's retained follow policy after content
+-- replacement or focus restoration. Brick does not clamp an old viewport top
+-- when shorter content still exceeds the viewport, and scroll requests made
+-- during a suppressed redraw do not survive later hidden-tab events.
+resolveConversationFollow :: EventM Name AppState ()
+resolveConversationFollow = do
+    state <- get
+    when (state.appAgentSelected == AgentRoot) $
+        case Scroll.conversationFollowScroll state.appUi.uiFollow of
+            Scroll.KeepConversationPosition -> pure ()
+            Scroll.ScrollConversationToEnd ->
+                vScrollToEnd (viewportScroll ConversationViewport)
+
 applyActiveConversationUiEvent :: UiEvent -> EventM Name AppState ()
 applyActiveConversationUiEvent uiEvent = do
     state <- get

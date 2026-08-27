@@ -462,6 +462,7 @@ handleEventInner event = case event of
                 (commitLiveHistoryTurn turn commit
                     . setHistoryGeneration generation)
             invalidateCache
+            resolveConversationFollow
             queueConversationReflow
     AppEvent (AppAgentSnapshot selected entries) -> do
         state <- get
@@ -743,7 +744,7 @@ handleEventInner event = case event of
     VtyEvent V.EvLostFocus ->
         noteTerminalFocusLost
     VtyEvent V.EvGainedFocus ->
-        noteTerminalFocusGained
+        noteTerminalFocusGained >> resolveConversationFollow
     VtyEvent V.EvResize{} -> do
         clearAgentHover
         invalidateCache
