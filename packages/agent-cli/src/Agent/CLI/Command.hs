@@ -54,7 +54,6 @@ import Agent.ReasoningEffort
 import Agent.Responses.Types
 
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Char (isAlphaNum, isDigit, isSpace)
@@ -702,7 +701,6 @@ setReasoningEffort level ResponseCreateParams{..} =
             , generateSummary = Nothing
             , reasoningMode = Nothing
             , summary = Nothing
-            , extraFields = KeyMap.empty
             }
 
 currentEffort :: ResponseCreateParams -> ReasoningEffort
