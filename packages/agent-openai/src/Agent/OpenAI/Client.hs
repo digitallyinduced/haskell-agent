@@ -24,7 +24,7 @@ import Agent.OpenAI.Features
     ( betaFeaturesHeaderValue
     , remoteCompactionV2Feature
     )
-import Agent.OpenAI.Http (decodeCodexHttpBodyWithModel, postCodexJson)
+import Agent.OpenAI.Http (decodeCodexHttpBodyBytesWithModel, postCodexJson)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
@@ -320,8 +320,8 @@ responseHandler idleTimeoutMicros modelHint turnState response stream = do
     let status = getStatusCode response
     captureResponseTurnState turnState response
     bodyResult <- readBodyWithIdleTimeout idleTimeoutMicros stream
-    let bodyText = Text.decodeUtf8With Text.lenientDecode
-            (LBS.toStrict (bodyReadBytes bodyResult))
+    let bodyBytes = LBS.toStrict (bodyReadBytes bodyResult)
+        bodyText = Text.decodeUtf8With Text.lenientDecode bodyBytes
     case bodyResult of
         BodyReadTimedOut _
             | status >= 200 && status < 300 ->
@@ -332,7 +332,7 @@ responseHandler idleTimeoutMicros modelHint turnState response stream = do
                     classifyTimedOutHttpFailure status bodyText
         BodyReadComplete _
             | status >= 200 && status < 300 ->
-                pure (decodeCodexHttpBodyWithModel modelHint bodyText)
+                pure (decodeCodexHttpBodyBytesWithModel modelHint bodyBytes)
             | otherwise -> pure $ Left
                 (withRetryAfterHeader response
                     (classifyHttpFailure status bodyText))

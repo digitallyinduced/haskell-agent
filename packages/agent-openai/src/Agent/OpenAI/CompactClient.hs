@@ -3,6 +3,7 @@ module Agent.OpenAI.CompactClient
     ( CompactRequest(..)
     , compactConversation
     , compactConversationAt
+    , decodeCompactBodyBytes
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
@@ -99,23 +100,29 @@ compactResponseHandler
 compactResponseHandler response stream = do
     let status = getStatusCode response
     bytes <- Streams.fold mappend mempty stream
-    let bodyText = Text.decodeUtf8With Text.lenientDecode bytes
     if status >= 200 && status < 300
-        then pure (decodeCompactBody bodyText)
-        else pure $ Left (classifyHttpFailure status bodyText)
+        then pure (decodeCompactBodyBytes bytes)
+        else pure $ Left (classifyHttpFailure status (bodyText bytes))
 
-decodeCompactBody :: Text -> Either ApiError [ResponseItem]
-decodeCompactBody bodyText =
-    case Aeson.eitherDecodeStrict (Text.encodeUtf8 bodyText) of
-        Left err -> Left (JsonDecodeError (Text.pack err) bodyText)
+decodeCompactBodyBytes :: BS.ByteString -> Either ApiError [ResponseItem]
+decodeCompactBodyBytes bytes =
+    case Aeson.eitherDecodeStrict bytes of
+        Left err -> Left (JsonDecodeError (Text.pack err) (bodyText bytes))
         Right (Aeson.Object object) ->
             case KeyMap.lookup "output" object of
                 Just value ->
                     case Aeson.fromJSON value of
                         Aeson.Success items -> Right items
                         Aeson.Error err ->
-                            Left (JsonDecodeError (Text.pack err) bodyText)
+                            Left (JsonDecodeError (Text.pack err) (bodyText bytes))
                 Nothing ->
-                    Left (JsonDecodeError "compact response missing output" bodyText)
+                    Left (JsonDecodeError
+                        "compact response missing output"
+                        (bodyText bytes))
         Right _ ->
-            Left (JsonDecodeError "compact response was not an object" bodyText)
+            Left (JsonDecodeError
+                "compact response was not an object"
+                (bodyText bytes))
+
+bodyText :: BS.ByteString -> Text
+bodyText = Text.decodeUtf8With Text.lenientDecode

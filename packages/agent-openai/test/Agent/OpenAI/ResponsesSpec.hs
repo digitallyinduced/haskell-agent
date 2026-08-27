@@ -1,16 +1,21 @@
 module Agent.OpenAI.ResponsesSpec (spec) where
 
+import Agent.Error (ApiError(..))
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
-import Agent.OpenAI.Http (decodeCodexHttpBody)
+import Agent.OpenAI.Http
+    ( decodeCodexHttpBody
+    , decodeCodexHttpBodyBytes
+    )
 import qualified Agent.Responses.Codec as Codec
 import qualified Agent.Responses.Types as Responses
 import Agent.OpenAI.ToolDSL
@@ -67,6 +72,20 @@ spec = do
                     ])
 
     describe "canonical Responses response" do
+        it "decodes canonical JSON directly from wire bytes" do
+            let bytes =
+                    LBS.toStrict (Aeson.encode (canonicalResponseJson "completed"))
+            case decodeCodexHttpBodyBytes bytes of
+                Right response -> response.responseId `shouldBe` "resp_1"
+                Left err -> expectationFailure (show err)
+
+        it "rejects invalid UTF-8 in a direct byte response" do
+            decodeCodexHttpBodyBytes (BS.pack [0xff])
+                `shouldBe` Left
+                    (JsonDecodeError
+                        "Invalid Codex Responses body"
+                        "\xfffd")
+
         it "preserves statuses, rich output text, usage, and unknown fields" do
             let original = canonicalResponseJson "failed"
             case Aeson.fromJSON original :: Aeson.Result Responses.Response of
@@ -81,6 +100,19 @@ spec = do
                         ])
                     <> "\n\n"
             case decodeCodexHttpBody body of
+                Right response -> do
+                    response.responseId `shouldBe` "resp_1"
+                    response.status `shouldBe` Responses.ResponseCompleted
+                Left err -> expectationFailure (show err)
+
+        it "decodes a completed SSE payload directly from wire bytes" do
+            let body = "event: response.completed\ndata: "
+                    <> jsonText (Aeson.object
+                        [ "type" .= ("response.completed" :: Text)
+                        , "response" .= canonicalResponseJson "completed"
+                        ])
+                    <> "\n\n"
+            case decodeCodexHttpBodyBytes (Text.encodeUtf8 body) of
                 Right response -> do
                     response.responseId `shouldBe` "resp_1"
                     response.status `shouldBe` Responses.ResponseCompleted
