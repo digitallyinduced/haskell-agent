@@ -17,7 +17,8 @@ mkDerivation {
     hspec QuickCheck retry text
   ];
   benchmarkHaskellDepends = [
-    aeson agent-responses-types base bytestring text
+    aeson agent-core agent-responses-types base bytestring containers
+    text
   ];
   description = "Provider-neutral Responses codecs and adapters";
   license = lib.meta.getLicenseFromSpdxId "BSD-3-Clause";

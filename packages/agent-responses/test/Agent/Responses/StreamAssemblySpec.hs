@@ -269,6 +269,159 @@ spec = describe "buildStreamResponse" do
             other -> expectationFailure
                 ("expected one reasoning summary, got " <> show other)
 
+    it "buffers interleaved argument and sparse summary deltas in wire order" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-interleaved\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-a\",\"call_id\":\"call-a\",\"name\":\"a\",\"arguments\":\"\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fc-b\",\"call_id\":\"call-b\",\"name\":\"b\",\"arguments\":\"\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-sparse\",\"summary\":[]}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-a\",\"delta\":\"a1\"}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-b\",\"delta\":\"b1\"}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-a\",\"delta\":\"a2\"}"
+            , sseBlock "response.reasoning_summary_text.delta"
+                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-sparse\",\"summary_index\":2,\"delta\":\"third \"}"
+            , sseBlock "response.reasoning_summary_text.delta"
+                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-sparse\",\"summary_index\":2,\"delta\":\"part\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-interleaved\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [arguments | FunctionCallItem FunctionCall { arguments } <- response.output]
+            `shouldBe` ["a1a2", "b1"]
+        case [summary | ReasoningItemValue ReasoningItem { summary }
+                <- response.output] of
+            [[_, _, ReasoningSummaryPart { text = Just partText }]] ->
+                partText `shouldBe` "third part"
+            other -> expectationFailure
+                ("expected a sparse third summary part, got " <> show other)
+
+    it "lets authoritative done values replace buffered deltas" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-replace\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ct-replace\",\"call_id\":\"call-replace\",\"name\":\"apply_patch\",\"input\":\"\"}}"
+            , sseBlock "response.custom_tool_call_input.delta"
+                "{\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ct-replace\",\"delta\":\"stale\"}"
+            , sseBlock "response.custom_tool_call_input.done"
+                "{\"type\":\"response.custom_tool_call_input.done\",\"item_id\":\"ct-replace\",\"input\":\"authoritative\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-replace\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [input | CustomToolCallItem CustomToolCall { input } <- response.output]
+            `shouldBe` ["authoritative"]
+
+    it "appends deltas after authoritative done values from that value" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-after-done\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"ct-after\",\"call_id\":\"ct-call\",\"name\":\"custom\",\"input\":\"\"}}"
+            , sseBlock "response.custom_tool_call_input.delta"
+                "{\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ct-after\",\"delta\":\"discarded\"}"
+            , sseBlock "response.custom_tool_call_input.done"
+                "{\"type\":\"response.custom_tool_call_input.done\",\"item_id\":\"ct-after\",\"input\":\"custom-final\"}"
+            , sseBlock "response.custom_tool_call_input.delta"
+                "{\"type\":\"response.custom_tool_call_input.delta\",\"item_id\":\"ct-after\",\"delta\":\"+tail\"}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"fn-after\",\"call_id\":\"fn-call\",\"name\":\"function\",\"arguments\":\"\"}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fn-after\",\"delta\":\"discarded\"}"
+            , sseBlock "response.function_call_arguments.done"
+                "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fn-after\",\"arguments\":\"function-final\"}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fn-after\",\"delta\":\"+tail\"}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"reasoning\",\"id\":\"rs-after\",\"summary\":[]}}"
+            , sseBlock "response.reasoning_summary_text.delta"
+                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-after\",\"summary_index\":0,\"delta\":\"discarded\"}"
+            , sseBlock "response.reasoning_summary_text.done"
+                "{\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs-after\",\"summary_index\":0,\"text\":\"reasoning-final\"}"
+            , sseBlock "response.reasoning_summary_text.delta"
+                "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs-after\",\"summary_index\":0,\"delta\":\"+tail\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-after-done\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [input | CustomToolCallItem CustomToolCall { input } <- response.output]
+            `shouldBe` ["custom-final+tail"]
+        [arguments | FunctionCallItem FunctionCall { arguments } <- response.output]
+            `shouldBe` ["function-final+tail"]
+        [partText
+            | ReasoningItemValue ReasoningItem { summary } <- response.output
+            , ReasoningSummaryPart { text = Just partText } <- summary
+            ] `shouldBe` ["reasoning-final+tail"]
+
+    it "lets terminal output overlay buffered streamed deltas" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-terminal-overlay\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fn-overlay\",\"call_id\":\"fn-overlay-call\",\"name\":\"streamed-name\",\"arguments\":\"\"}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fn-overlay\",\"delta\":\"buffered-value\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-terminal-overlay\",\"output\":[{\"type\":\"function_call\",\"id\":\"fn-overlay\",\"call_id\":\"fn-overlay-call\",\"name\":\"terminal-name\",\"arguments\":\"terminal-value\"}]}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [(name, arguments)
+            | FunctionCallItem FunctionCall { name, arguments } <- response.output
+            ] `shouldBe` [("terminal-name", "terminal-value")]
+
+    it "retains the lowest duplicate identity and updates changed indexes" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-duplicates\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"duplicate\",\"call_id\":\"call-0\",\"name\":\"first\",\"arguments\":\"\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"id\":\"duplicate\",\"call_id\":\"call-1\",\"name\":\"second\",\"arguments\":\"\"}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"duplicate\",\"delta\":\"lowest\"}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"changed\",\"call_id\":\"call-0\",\"name\":\"first\",\"arguments\":\"first-final\"}}"
+            , sseBlock "response.function_call_arguments.delta"
+                "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"duplicate\",\"delta\":\"remaining\"}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-duplicates\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [arguments | FunctionCallItem FunctionCall { arguments } <- response.output]
+            `shouldBe` ["first-final", "remaining"]
+
+    it "removes changed pending types from their old type index" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-types\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"custom_tool_call\",\"id\":\"old-custom\",\"call_id\":\"old-call\",\"name\":\"old\",\"input\":\"\"}}"
+            , sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"function\",\"call_id\":\"function-call\",\"name\":\"function\",\"arguments\":\"{}\"}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"id\":\"new-custom\",\"call_id\":\"new-call\",\"name\":\"new\",\"input\":\"payload\"}}"
+            , sseBlock "response.completed"
+                "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp-types\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        [name | FunctionCallItem FunctionCall { name } <- response.output]
+            `shouldBe` ["function"]
+        [name | CustomToolCallItem CustomToolCall { name } <- response.output]
+            `shouldBe` ["new"]
+
     it "uses provider classifiers when no terminal response is present" do
         streamEvents <- expectRight $ parseSseEvents $ sseBlock "error"
             "{\"type\":\"error\",\"error\":{\"message\":\"stream broke\"}}"

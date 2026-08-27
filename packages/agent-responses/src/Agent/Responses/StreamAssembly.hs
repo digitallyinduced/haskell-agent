@@ -19,6 +19,12 @@ module Agent.Responses.StreamAssembly
 import Agent.Error (ApiError(..))
 import Agent.Responses.ResponseMerge (mergeDoneResponse)
 import Agent.Responses.Types
+import Agent.TextBuffer
+    ( TextBuffer
+    , appendTextBuffer
+    , textBufferFromText
+    , textBufferToText
+    )
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -26,6 +32,10 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
+import qualified Data.IntSet as IntSet
+import Data.IntSet (IntSet)
+import qualified Data.Map.Strict as Map
+import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -57,7 +67,17 @@ data ResponseFailure = ResponseFailure
 data ItemProgress = ItemProgress
     { itemValue :: !Aeson.Value
     , itemDone  :: !Bool
+    , itemBuffers :: !ItemBuffers
     }
+
+data ItemBuffers = ItemBuffers
+    { inputBuffer :: !(Maybe TextBuffer)
+    , argumentsBuffer :: !(Maybe TextBuffer)
+    , summaryBuffers :: !(IntMap TextBuffer)
+    }
+
+emptyItemBuffers :: ItemBuffers
+emptyItemBuffers = ItemBuffers Nothing Nothing IntMap.empty
 
 -- | Incremental state shared by HTTP/SSE and reusable WebSocket transports.
 -- Lifecycle response objects are overlaid in wire order; output items are
@@ -65,12 +85,16 @@ data ItemProgress = ItemProgress
 data StreamAssemblyState = StreamAssemblyState
     { responseObject :: !Aeson.Object
     , outputItems    :: !(IntMap ItemProgress)
+    , identityIndexes :: !(Map Text IntSet)
+    , pendingTypeIndexes :: !(Map Text IntSet)
     }
 
 emptyStreamAssemblyState :: StreamAssemblyState
 emptyStreamAssemblyState = StreamAssemblyState
     { responseObject = KeyMap.empty
     , outputItems = IntMap.empty
+    , identityIndexes = Map.empty
+    , pendingTypeIndexes = Map.empty
     }
 
 applyStreamEvent :: StreamAssemblyState -> ResponseStreamEvent -> StreamAssemblyState
@@ -96,7 +120,7 @@ applyStreamEvent state event = case event of
                     updateCustomToolInput outputIndex
                         streamItemId
                         streamCallId
-                        (appendInput inputDelta)
+                        (AppendInput inputDelta)
                         state
                 _ -> state
     ResponseCustomToolInputDoneEvent
@@ -109,7 +133,7 @@ applyStreamEvent state event = case event of
                     updateCustomToolInput outputIndex
                         streamItemId
                         streamCallId
-                        (setInput finalInput)
+                        (SetInput finalInput)
                         state
                 _ -> state
     ResponseFunctionCallArgumentsDeltaEvent
@@ -120,7 +144,7 @@ applyStreamEvent state event = case event of
                 (Just argumentsDelta, Just outputIndex) ->
                     updateFunctionCallArguments outputIndex
                         streamItemId
-                        (appendArguments argumentsDelta)
+                        (AppendArguments argumentsDelta)
                         state
                 _ -> state
     ResponseFunctionCallArgumentsDoneEvent
@@ -129,7 +153,7 @@ applyStreamEvent state event = case event of
                 Just outputIndex ->
                     updateFunctionCallArguments outputIndex
                         streamItemId
-                        (setArguments arguments functionName)
+                        (SetArguments arguments functionName)
                         state
                 Nothing -> state
     ResponseReasoningSummaryPartAddedEvent
@@ -141,7 +165,7 @@ applyStreamEvent state event = case event of
                     updateReasoningSummary outputIndex
                         (fromMaybe "" streamItemId)
                         index
-                        (maybe id const partValue)
+                        (maybe KeepSummary ReplaceSummary partValue)
                         state
                 _ -> state
     ResponseReasoningSummaryTextDoneEvent
@@ -154,7 +178,7 @@ applyStreamEvent state event = case event of
                     updateReasoningSummary outputIndex
                         (fromMaybe "" streamItemId)
                         index
-                        (setObjectText finalText)
+                        (SetSummaryText finalText)
                         state
                 _ -> state
     OtherResponseStreamEvent
@@ -174,7 +198,7 @@ applyStreamEvent state event = case event of
                                 (fromMaybe ""
                                     (textField "item_id" eventExtraFields))
                                 summaryIndex
-                                (appendObjectText delta)
+                                (AppendSummaryText delta)
                                 state
                         Nothing -> state
                 _ -> state
@@ -381,19 +405,117 @@ updateItem
     -> StreamAssemblyState
     -> StreamAssemblyState
 updateItem outputIndex done newValue state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . mergeProgress)
-                outputIndex
-                state.outputItems
-        }
+    alterProgress outputIndex (Just . mergeProgress) state
   where
-    mergeProgress Nothing = ItemProgress newValue done
+    mergeProgress Nothing = ItemProgress newValue done emptyItemBuffers
     mergeProgress (Just old) = ItemProgress
         { itemValue = mergeObjects old.itemValue newValue
         , itemDone = old.itemDone || done
+        , itemBuffers = clearOverlaidBuffers newValue old.itemBuffers
         }
+
+alterProgress
+    :: Int
+    -> (Maybe ItemProgress -> Maybe ItemProgress)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+alterProgress outputIndex update state =
+    let oldProgress = IntMap.lookup outputIndex state.outputItems
+        newProgress = update oldProgress
+        newItems = IntMap.alter (const newProgress) outputIndex state.outputItems
+        withNew = updateProgressIndexes
+            outputIndex oldProgress newProgress state
+    in withNew { outputItems = newItems }
+
+-- Content deltas do not change an existing object's identity, type, or done
+-- status. Avoid rebuilding those secondary indexes on the hot path; creation
+-- and recovery from a non-object value still go through the checked updater.
+alterItemContent
+    :: Int
+    -> (Maybe ItemProgress -> ItemProgress)
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+alterItemContent outputIndex update state =
+    case IntMap.lookup outputIndex state.outputItems of
+        Just old@ItemProgress { itemValue = Aeson.Object{} } ->
+            state
+                { outputItems =
+                    IntMap.insert outputIndex (update (Just old)) state.outputItems
+                }
+        _ ->
+            alterProgress outputIndex (Just . update) state
+
+updateProgressIndexes
+    :: Int
+    -> Maybe ItemProgress
+    -> Maybe ItemProgress
+    -> StreamAssemblyState
+    -> StreamAssemblyState
+updateProgressIndexes outputIndex oldProgress newProgress state =
+    state
+        { identityIndexes =
+            foldl'
+                (\indexes identity -> addIndex identity outputIndex indexes)
+                (foldl'
+                    (\indexes identity ->
+                        removeIndex identity outputIndex indexes)
+                    state.identityIndexes
+                    removedIdentities)
+                addedIdentities
+        , pendingTypeIndexes =
+            maybe id
+                (\itemType -> addIndex itemType outputIndex)
+                newPending
+            $ maybe id
+                (\itemType -> removeIndex itemType outputIndex)
+                oldPending
+            $ state.pendingTypeIndexes
+        }
+  where
+    oldIdentities = maybe [] (itemIdentities . (.itemValue)) oldProgress
+    newIdentities = maybe [] (itemIdentities . (.itemValue)) newProgress
+    removedIdentities =
+        [identity | identity <- oldIdentities, identity `notElem` newIdentities]
+    addedIdentities =
+        [identity | identity <- newIdentities, identity `notElem` oldIdentities]
+    oldPendingCandidate = pendingType =<< oldProgress
+    newPendingCandidate = pendingType =<< newProgress
+    (oldPending, newPending)
+        | oldPendingCandidate == newPendingCandidate = (Nothing, Nothing)
+        | otherwise = (oldPendingCandidate, newPendingCandidate)
+    pendingType progress
+        | progress.itemDone = Nothing
+        | otherwise = objectTextField "type" progress.itemValue
+
+addIndex :: Ord key => key -> Int -> Map key IntSet -> Map key IntSet
+addIndex key outputIndex =
+    Map.insertWith IntSet.union key (IntSet.singleton outputIndex)
+
+removeIndex :: Ord key => key -> Int -> Map key IntSet -> Map key IntSet
+removeIndex key outputIndex =
+    Map.update
+        (\indexes ->
+            let remaining = IntSet.delete outputIndex indexes
+            in if IntSet.null remaining then Nothing else Just remaining)
+        key
+
+clearOverlaidBuffers :: Aeson.Value -> ItemBuffers -> ItemBuffers
+clearOverlaidBuffers (Aeson.Object overlay) buffers =
+    buffers
+        { inputBuffer =
+            if KeyMap.member "input" overlay
+                then Nothing
+                else buffers.inputBuffer
+        , argumentsBuffer =
+            if KeyMap.member "arguments" overlay
+                then Nothing
+                else buffers.argumentsBuffer
+        , summaryBuffers =
+            if KeyMap.member "summary" overlay
+                then IntMap.empty
+                else buffers.summaryBuffers
+        }
+clearOverlaidBuffers _ _ = emptyItemBuffers
 
 updateStreamItem
     :: Maybe Int
@@ -427,14 +549,7 @@ resolveOutputIndex explicitIndex identities state =
 
 findIdentityIndex :: Text -> StreamAssemblyState -> Maybe Int
 findIdentityIndex wanted state =
-    fst <$> IntMap.lookupMin
-        (IntMap.filter (matchesIdentity wanted . (.itemValue)) state.outputItems)
-  where
-    matchesIdentity wanted = \case
-        Aeson.Object object ->
-            textField "id" object == Just wanted
-                || textField "call_id" object == Just wanted
-        _ -> False
+    setMinimum =<< Map.lookup wanted state.identityIndexes
 
 findItemIndex :: Aeson.Value -> StreamAssemblyState -> Maybe Int
 findItemIndex value state =
@@ -445,16 +560,12 @@ findItemIndex value state =
 
 findPendingItemIndex :: Aeson.Value -> StreamAssemblyState -> Maybe Int
 findPendingItemIndex value state =
-    case wantedType of
-        Nothing -> Nothing
-        Just _ ->
-            fst <$> IntMap.lookupMin
-                (IntMap.filter matchesPending state.outputItems)
-  where
-    wantedType = objectTextField "type" value
-    matchesPending progress =
-        not progress.itemDone
-            && objectTextField "type" progress.itemValue == wantedType
+    objectTextField "type" value
+        >>= (\wantedType ->
+            setMinimum =<< Map.lookup wantedType state.pendingTypeIndexes)
+
+setMinimum :: IntSet -> Maybe Int
+setMinimum indexes = fst <$> IntSet.minView indexes
 
 nextOutputIndex :: StreamAssemblyState -> Int
 nextOutputIndex state =
@@ -480,21 +591,19 @@ nonEmpty :: Maybe Text -> Maybe Text
 nonEmpty value = value >>= \text ->
     if Text.null text then Nothing else Just text
 
+data InputUpdate
+    = AppendInput !Text
+    | SetInput !Text
+
 updateCustomToolInput
     :: Int
     -> Maybe Text
     -> Maybe Text
-    -> (Aeson.Object -> Aeson.Object)
+    -> InputUpdate
     -> StreamAssemblyState
     -> StreamAssemblyState
 updateCustomToolInput outputIndex itemId callId updateInput state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . updateProgress)
-                outputIndex
-                state.outputItems
-        }
+    alterItemContent outputIndex updateProgress state
   where
     baseObject =
         maybe id
@@ -508,29 +617,52 @@ updateCustomToolInput outputIndex itemId callId updateInput state =
             , ("input", Aeson.String "")
             ]
     updateProgress Nothing =
-        ItemProgress (Aeson.Object (updateInput baseObject)) False
+        applyInputUpdate updateInput
+            (ItemProgress (Aeson.Object baseObject) False emptyItemBuffers)
     updateProgress (Just progress) =
-        progress
-            { itemValue = case progress.itemValue of
-                Aeson.Object object -> Aeson.Object (updateInput object)
-                _ -> Aeson.Object (updateInput baseObject)
-            }
+        applyInputUpdate updateInput
+            progress
+                { itemValue = case progress.itemValue of
+                    Aeson.Object object -> Aeson.Object object
+                    _ -> Aeson.Object baseObject
+                }
+
+applyInputUpdate :: InputUpdate -> ItemProgress -> ItemProgress
+applyInputUpdate inputUpdate progress =
+    case inputUpdate of
+        AppendInput delta ->
+            let current = case progress.itemBuffers.inputBuffer of
+                    Just buffered -> buffered
+                    Nothing ->
+                        textBufferFromText
+                            (fromMaybe "" (objectTextField "input" progress.itemValue))
+            in progress
+                { itemBuffers = progress.itemBuffers
+                    { inputBuffer = Just (appendTextBuffer delta current) }
+                }
+        SetInput input ->
+            progress
+                { itemValue = mapObject
+                    (KeyMap.insert "input" (Aeson.String input))
+                    progress.itemValue
+                , itemBuffers = progress.itemBuffers { inputBuffer = Nothing }
+                }
+
+data SummaryUpdate
+    = KeepSummary
+    | ReplaceSummary !Aeson.Value
+    | SetSummaryText !Text
+    | AppendSummaryText !Text
 
 updateReasoningSummary
     :: Int
     -> Text
     -> Int
-    -> (Aeson.Value -> Aeson.Value)
+    -> SummaryUpdate
     -> StreamAssemblyState
     -> StreamAssemblyState
 updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . updateProgress)
-                outputIndex
-                state.outputItems
-        }
+    alterItemContent outputIndex updateProgress state
   where
     baseObject = KeyMap.fromList
         [ ("type", Aeson.String "reasoning")
@@ -538,29 +670,101 @@ updateReasoningSummary outputIndex itemId summaryIndex updatePart state =
         , ("summary", Aeson.Array Vector.empty)
         ]
     updateProgress Nothing =
-        ItemProgress (Aeson.Object (updateSummary baseObject)) False
+        applySummaryUpdate summaryIndex updatePart
+            (ItemProgress
+                (Aeson.Object (ensureSummaryIndex summaryIndex baseObject))
+                False
+                emptyItemBuffers)
     updateProgress (Just progress) =
-        progress
-            { itemValue = case progress.itemValue of
-                Aeson.Object object -> Aeson.Object (updateSummary object)
-                _ -> Aeson.Object (updateSummary baseObject)
+        applySummaryUpdate summaryIndex updatePart
+            progress
+                { itemValue = case progress.itemValue of
+                    Aeson.Object object ->
+                        Aeson.Object (ensureSummaryIndex summaryIndex object)
+                    _ ->
+                        Aeson.Object (ensureSummaryIndex summaryIndex baseObject)
+                }
+
+ensureSummaryIndex :: Int -> Aeson.Object -> Aeson.Object
+ensureSummaryIndex summaryIndex object =
+    let current = case KeyMap.lookup "summary" object of
+            Just (Aeson.Array values) -> values
+            _ -> Vector.empty
+        updated = updateVectorAt summaryIndex id current
+    in KeyMap.insert "summary" (Aeson.Array updated) object
+
+applySummaryUpdate :: Int -> SummaryUpdate -> ItemProgress -> ItemProgress
+applySummaryUpdate summaryIndex summaryUpdate progress
+    | summaryIndex < 0 = progress
+    | otherwise =
+        case summaryUpdate of
+            KeepSummary -> progress
+            ReplaceSummary value ->
+                setSummaryPart value progress
+            SetSummaryText text ->
+                setSummaryPart
+                    (setObjectText text (summaryPart summaryIndex progress.itemValue))
+                    progress
+            AppendSummaryText delta ->
+                let existingBuffer =
+                        fromMaybe
+                            (textBufferFromText
+                                (fromMaybe ""
+                                    (objectTextField "text"
+                                        (summaryPart summaryIndex progress.itemValue))))
+                            (IntMap.lookup summaryIndex
+                                progress.itemBuffers.summaryBuffers)
+                in progress
+                    { itemBuffers = progress.itemBuffers
+                        { summaryBuffers =
+                            IntMap.insert
+                                summaryIndex
+                                (appendTextBuffer delta existingBuffer)
+                                progress.itemBuffers.summaryBuffers
+                        }
+                    }
+  where
+    setSummaryPart value current =
+        current
+            { itemValue = mapObject
+                (\object ->
+                    let summary = case KeyMap.lookup "summary" object of
+                            Just (Aeson.Array values) -> values
+                            _ -> Vector.empty
+                    in KeyMap.insert "summary"
+                        (Aeson.Array
+                            (updateVectorAt summaryIndex (const value) summary))
+                        object)
+                current.itemValue
+            , itemBuffers = current.itemBuffers
+                { summaryBuffers =
+                    IntMap.delete summaryIndex current.itemBuffers.summaryBuffers
+                }
             }
-    updateSummary object =
-        let current = case KeyMap.lookup "summary" object of
-                Just (Aeson.Array values) -> values
-                _ -> Vector.empty
-            updated = updateVectorAt summaryIndex updatePart current
-        in KeyMap.insert "summary" (Aeson.Array updated) object
+
+summaryPart :: Int -> Aeson.Value -> Aeson.Value
+summaryPart summaryIndex = \case
+    Aeson.Object object ->
+        case KeyMap.lookup "summary" object of
+            Just (Aeson.Array summary)
+                | summaryIndex >= 0
+                , summaryIndex < Vector.length summary ->
+                    summary Vector.! summaryIndex
+            _ -> emptySummaryPart
+    _ -> emptySummaryPart
+  where
+    emptySummaryPart =
+        Aeson.object ["type" Aeson..= ("summary_text" :: Text)]
 
 assembledOutput :: StreamAssemblyState -> Aeson.Object -> [Aeson.Value]
 assembledOutput state response =
     map (.itemValue) . IntMap.elems $
         IntMap.unionWith combine
-            state.outputItems
+            (materializeProgress <$> state.outputItems)
             terminalItems
   where
     terminalItems = IntMap.fromList
-        [ (index, ItemProgress value True)
+        [ (index, ItemProgress value True emptyItemBuffers)
         | (index, value) <- zip [0 ..] finalItems
         ]
     finalItems = case KeyMap.lookup "output" response of
@@ -571,10 +775,48 @@ assembledOutput state response =
             ItemProgress
                 (mergeObjects terminal.itemValue streamed.itemValue)
                 True
+                emptyItemBuffers
         | otherwise =
             ItemProgress
                 (mergeObjects streamed.itemValue terminal.itemValue)
                 True
+                emptyItemBuffers
+
+materializeProgress :: ItemProgress -> ItemProgress
+materializeProgress progress =
+    progress
+        { itemValue =
+            materializeSummaries progress.itemBuffers.summaryBuffers
+                $ maybe id
+                    (setTextField "arguments" . textBufferToText)
+                    progress.itemBuffers.argumentsBuffer
+                $ maybe id
+                    (setTextField "input" . textBufferToText)
+                    progress.itemBuffers.inputBuffer
+                $ progress.itemValue
+        , itemBuffers = emptyItemBuffers
+        }
+  where
+    setTextField fieldName text =
+        mapObject (KeyMap.insert fieldName (Aeson.String text))
+
+    materializeSummaries buffers value =
+        IntMap.foldlWithKey'
+            (\value summaryIndex buffer ->
+                mapObject
+                    (\object ->
+                        let summary = case KeyMap.lookup "summary" object of
+                                Just (Aeson.Array values) -> values
+                                _ -> Vector.empty
+                        in KeyMap.insert "summary"
+                            (Aeson.Array
+                                (updateVectorAt summaryIndex
+                                    (setObjectText (textBufferToText buffer))
+                                    summary))
+                            object)
+                    value)
+            value
+            buffers
 
 -- | Does a response fragment already carry a terminal lifecycle status? Only
 -- @completed@/@incomplete@/@failed@/@cancelled@ count; a leftover
@@ -608,29 +850,18 @@ insertMissing key value object
     | KeyMap.member key object = object
     | otherwise = KeyMap.insert key value object
 
-appendInput :: Text -> Aeson.Object -> Aeson.Object
-appendInput delta object =
-    let current = fromMaybe "" (textField "input" object)
-    in KeyMap.insert "input" (Aeson.String (current <> delta)) object
-
-setInput :: Text -> Aeson.Object -> Aeson.Object
-setInput input =
-    KeyMap.insert "input" (Aeson.String input)
+data ArgumentsUpdate
+    = AppendArguments !Text
+    | SetArguments !(Maybe Text) !(Maybe Text)
 
 updateFunctionCallArguments
     :: Int
     -> Maybe Text
-    -> (Aeson.Object -> Aeson.Object)
+    -> ArgumentsUpdate
     -> StreamAssemblyState
     -> StreamAssemblyState
 updateFunctionCallArguments outputIndex itemId updateArgs state =
-    state
-        { outputItems =
-            IntMap.alter
-                (Just . updateProgress)
-                outputIndex
-                state.outputItems
-        }
+    alterItemContent outputIndex updateProgress state
   where
     baseObject =
         maybe id
@@ -641,24 +872,53 @@ updateFunctionCallArguments outputIndex itemId updateArgs state =
             , ("arguments", Aeson.String "")
             ]
     updateProgress Nothing =
-        ItemProgress (Aeson.Object (updateArgs baseObject)) False
+        applyArgumentsUpdate updateArgs
+            (ItemProgress (Aeson.Object baseObject) False emptyItemBuffers)
     updateProgress (Just progress) =
-        progress
-            { itemValue = case progress.itemValue of
-                Aeson.Object object -> Aeson.Object (updateArgs object)
-                _ -> Aeson.Object (updateArgs baseObject)
-            }
+        applyArgumentsUpdate updateArgs
+            progress
+                { itemValue = case progress.itemValue of
+                    Aeson.Object object -> Aeson.Object object
+                    _ -> Aeson.Object baseObject
+                }
 
-appendArguments :: Text -> Aeson.Object -> Aeson.Object
-appendArguments delta object =
-    let current = fromMaybe "" (textField "arguments" object)
-    in KeyMap.insert "arguments" (Aeson.String (current <> delta)) object
+applyArgumentsUpdate :: ArgumentsUpdate -> ItemProgress -> ItemProgress
+applyArgumentsUpdate argumentsUpdate progress =
+    case argumentsUpdate of
+        AppendArguments delta ->
+            let current = case progress.itemBuffers.argumentsBuffer of
+                    Just buffered -> buffered
+                    Nothing ->
+                        textBufferFromText
+                            (fromMaybe ""
+                                (objectTextField "arguments" progress.itemValue))
+            in progress
+                { itemBuffers = progress.itemBuffers
+                    { argumentsBuffer = Just (appendTextBuffer delta current) }
+                }
+        SetArguments arguments functionName ->
+            progress
+                { itemValue =
+                    mapObject
+                        (maybe id
+                            (KeyMap.insert "name" . Aeson.String)
+                            functionName
+                        . maybe id
+                            (KeyMap.insert "arguments" . Aeson.String)
+                            arguments)
+                        progress.itemValue
+                , itemBuffers = progress.itemBuffers
+                    { argumentsBuffer =
+                        case arguments of
+                            Just _ -> Nothing
+                            Nothing -> progress.itemBuffers.argumentsBuffer
+                    }
+                }
 
-setArguments :: Maybe Text -> Maybe Text -> Aeson.Object -> Aeson.Object
-setArguments arguments functionName object =
-    maybe id (KeyMap.insert "name" . Aeson.String) functionName $
-        maybe id (KeyMap.insert "arguments" . Aeson.String) arguments
-            object
+mapObject :: (Aeson.Object -> Aeson.Object) -> Aeson.Value -> Aeson.Value
+mapObject update = \case
+    Aeson.Object object -> Aeson.Object (update object)
+    value -> value
 
 setObjectText :: Text -> Aeson.Value -> Aeson.Value
 setObjectText text = \case
@@ -667,17 +927,6 @@ setObjectText text = \case
     _ -> Aeson.object
         [ "type" Aeson..= ("summary_text" :: Text)
         , "text" Aeson..= text
-        ]
-
-appendObjectText :: Text -> Aeson.Value -> Aeson.Value
-appendObjectText delta = \case
-    Aeson.Object object ->
-        let current = fromMaybe "" (textField "text" object)
-        in Aeson.Object
-            (KeyMap.insert "text" (Aeson.String (current <> delta)) object)
-    _ -> Aeson.object
-        [ "type" Aeson..= ("summary_text" :: Text)
-        , "text" Aeson..= delta
         ]
 
 updateVectorAt
