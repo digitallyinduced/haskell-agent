@@ -111,7 +111,10 @@ import Agent.CLI.Skills
     ( installSkillCatalogWithOmissions, installSkillToolRoots
     , loadSkillsCatalogQuiet, reservedSlashNames
     )
-import Agent.CLI.StartupContext (loadAgentsContext)
+import Agent.CLI.StartupContext
+    ( AgentsContextNotice(..)
+    , loadAgentsContext
+    )
 import Agent.CLI.Startup.Auth
     ( learnAboutUserOnboardingPrompt
     , markStartupStage
@@ -607,6 +610,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 loadAgentsContext
                     stderrHandle
                     fullscreen
+                    SuppressAgentsContextLoaded
                     options
                     dialect
                     home

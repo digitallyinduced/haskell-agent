@@ -217,7 +217,10 @@ import Agent.CLI.Startup.Auth
       recordStartupTiming,
       setStartupNotice,
       startupDie )
-import Agent.CLI.StartupContext ( loadAgentsContext )
+import Agent.CLI.StartupContext
+    ( AgentsContextNotice(..)
+    , loadAgentsContext
+    )
 import Agent.CLI.Style
     ( cliWindowTitle,
       glyphSession,
@@ -2145,10 +2148,16 @@ runAgentInitializedWithLock
             startupWindowTitle = cliWindowTitle cwd titleHint
         setWindowTitle startupWindowTitle
         markStartupStage startup "Loading instructions…"
+        let agentsContextNotice
+                | isNothing resumed && isNothing transition =
+                    ReportAgentsContextLoaded
+                | otherwise =
+                    SuppressAgentsContextLoaded
         startupContext <-
             loadAgentsContext
                 stderrHandle
                 fullscreen
+                agentsContextNotice
                 options
                 dialect
                 home
