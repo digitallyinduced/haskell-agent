@@ -99,6 +99,18 @@ spec = describe "Responses SSE decoder" do
                         Text.isInfixOf "\"x-codex-turn-state\":\"direct\""
             [] -> expectationFailure "expected turn-state events"
 
+    it "round-trips typed Codex rate limits through Aeson encoding" do
+        let payload =
+                "{\"type\":\"codex.rate_limits\",\"sequence_number\":7,"
+                <> "\"rate_limits\":{\"allowed\":true,\"limit_reached\":false,"
+                <> "\"primary\":{\"used_percent\":12.5},"
+                <> "\"secondary\":{\"used_percent\":3.0}}}"
+        event <- expectRight $
+            Codec.decodeResponseStreamEvent payload
+        Codec.decodeResponseStreamEvent
+            (LBS.toStrict (Aeson.encode event))
+            `shouldBe` Right event
+
     it "decodes provider provenance on function calls and outputs" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.output_item.added"
