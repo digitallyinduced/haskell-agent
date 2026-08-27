@@ -67,6 +67,7 @@ import Agent.CLI.Terminal ( TerminalCapabilities(..)
     , kittyAltCsiBodies
     , kittyCtrlCsiBodies
     , kittyCtrlUnderscoreCsiBodies
+    , kittyEscapeCsiBodies
     , kittyKeyboardDisambiguatePush
     , kittyKeyboardPop
     , kittySuperVCsiBodies
@@ -713,6 +714,13 @@ fullscreenVtyConfig =
     V.defaultConfig
         { V.configPreferredColorMode = Just V.FullColor
         , V.configInputMap =
+            [ ( Nothing
+              , "\ESC[" <> body
+              , V.EvKey V.KEsc []
+              )
+            | body <- kittyEscapeCsiBodies
+            ]
+            <>
             [ ( Nothing
               , "\ESC[" <> body
               , V.EvKey V.KEnter [V.MShift]

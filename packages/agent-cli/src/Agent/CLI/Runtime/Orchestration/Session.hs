@@ -83,9 +83,12 @@ import Agent.CLI.Session
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History
-    ( foldSessionItems,
+    ( currentLiveTranscriptGeneration,
+      durableTranscriptCheckpoint,
+      evictLiveTranscript,
+      foldSessionItems,
       readLiveTranscript,
-      LiveConversation(liveTranscript, livePreviousResponseId) )
+      replaceLiveConversation )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
@@ -94,14 +97,16 @@ import Agent.CLI.Session.Runtime.Types
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
-                     conversationRef, initialTurns, persist, startupWindowTitle,
+                     conversationRef, needsInitialContext, persist,
+                     startupWindowTitle,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
                      generatedContextReloadRef, skillsRef, skillInvocationsRef,
                      escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
                      accountRef, accountIdRef, selectionRef, accountLabel,
                      selectAccount, onPersisted, compactRunner, codeModeNestedSlot),
-      StartupRuntime(startupBackground, startupSessionState) )
+      StartupRuntime(startupBackground, startupDatabaseStore,
+                     startupSessionState) )
 import Agent.CLI.Session.Selection ()
 import Agent.CLI.SessionAdmin ()
 import Agent.CLI.SessionEnv ()
@@ -153,7 +158,7 @@ import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
 import Agent.Responses.Types ( ResponseCreateParams(model) )
 import Agent.Skills ()
-import Agent.Store.Postgres ()
+import Agent.Store.Postgres ( trustedPool )
 import Agent.Store.Types ()
 import Agent.Subagents ()
 import Agent.Subagents.TaskPath ()
@@ -173,11 +178,10 @@ import Control.Concurrent.MVar ()
 import Control.Concurrent.STM ( retry )
 import Control.Exception ()
 import Control.Exception.Safe ( mask_, finally )
-import Control.Monad ( when )
+import Control.Monad ( forM_, void, when )
 import Data.Functor ( (<&>) )
 import Data.IORef
     ( modifyIORef',
-      atomicModifyIORef',
       newIORef,
       readIORef,
       writeIORef )
@@ -191,6 +195,7 @@ import System.Directory.OsPath ()
 import System.Environment ( getProgName )
 import System.Exit ()
 import System.IO ( stderr )
+import System.Mem ( performMajorGC )
 import System.OsPath ()
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
@@ -269,6 +274,7 @@ runAgentSession
     resolveActiveAccountLabel
     resumeTargetChanged
     resumed
+    root
     rootTurnRef
     selectHttpAccount
     selectableTokenProvider
@@ -417,13 +423,9 @@ runAgentSession
                 , subagentOpenAiChild = openaiChild
                 }
         let conversationRef = startup.startupSessionState.sessionConversation
-        atomicModifyIORef' conversationRef \state ->
-            ( state
-                { livePreviousResponseId = initialPrevious
-                , liveTranscript = initialItems
-                }
-            , ()
-            )
+        void $
+            replaceLiveConversation
+                conversationRef initialPrevious initialItems
         contextTokensRef <- newIORef Nothing
         writeIORef subagentForkSource (Just (readLiveTranscript conversationRef))
         let titleHint = case resumed of
@@ -462,6 +464,18 @@ runAgentSession
         usageRef <- newIORef $ case resumed of
             Just (meta, turns) -> sessionUsageFromTurns meta turns
             Nothing -> emptyTokenUsage
+        forM_ resumed \(meta, _) -> do
+            generation <-
+                currentLiveTranscriptGeneration conversationRef
+            evicted <-
+                evictLiveTranscript
+                    conversationRef
+                    generation
+                    (durableTranscriptCheckpoint
+                        (trustedPool startup.startupDatabaseStore)
+                        root
+                        meta.metaId)
+            when evicted performMajorGC
         let recordCompactionUsage usage =
                 when (usage /= emptyTokenUsage) $
                     mask_ do
@@ -527,7 +541,10 @@ runAgentSession
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
-                                , initialTurns
+                                , needsInitialContext =
+                                    resumeNeedsFreshContext
+                                        || (null initialTurns
+                                            && isNothing initialPrevious)
                                 , persist
                                 , startupWindowTitle
                                 , projectRoot

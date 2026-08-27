@@ -200,6 +200,7 @@ library
                     , Agent.CLI.ReplMode
                     , Agent.CLI.Resume
                     , Agent.CLI.Session
+                    , Agent.CLI.Session.ConversationStore
                     , Agent.CLI.Session.History
                     , Agent.CLI.Session.StoreCodec
                     , Agent.CLI.SessionEnv
@@ -284,9 +285,8 @@ executable agent-cli
     import:           common-options
     hs-source-dirs:   app
     main-is:          Main.hs
-    -- Keep the heap ceiling without multiplying a large allocation area by
-    -- every host core. Four capabilities cover the agent's concurrent I/O;
-    -- leave -A at the GHC RTS default.
+    -- Keep enough capabilities for concurrent agent work without multiplying
+    -- the RTS allocation area by every host core.
     ghc-options:      -threaded -rtsopts "-with-rtsopts=-N4 -M8G"
     build-depends:    agent-cli
                     , base >= 4.17 && < 5
@@ -322,9 +322,25 @@ benchmark subagent-retention-bench
                     , agent-core
                     , agent-store
                     , agent-responses
+                    , agent-responses-types
                     , aeson
                     , base >= 4.17 && < 5
                     , containers
+                    , text
+
+benchmark conversation-retention-bench
+    import:           common-options
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          ConversationRetention.hs
+    ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
+    build-depends:    agent-responses-types
+                    , aeson
+                    , base >= 4.17 && < 5
+                    , bytestring
+                    , directory
+                    , filepath
+                    , safe-exceptions
                     , text
 
 benchmark history-retention-bench
@@ -373,6 +389,7 @@ test-suite agent-cli-test
                     , Agent.CLI.CommandSpec
                     , Agent.CLI.ConfigSpec
                     , Agent.CLI.CompactionSpec
+                    , Agent.CLI.ConversationStoreSpec
                     , Agent.CLI.ConnectivitySpec
                     , Agent.CLI.CredentialStoreSpec
                     , Agent.CLI.DialectsSpec

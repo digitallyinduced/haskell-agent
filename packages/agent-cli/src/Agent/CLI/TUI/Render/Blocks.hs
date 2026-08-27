@@ -98,7 +98,8 @@ import Agent.TUI.Markdown
       markdownWidgetWithLinks,
       markdownWidgetWithSyntaxHighlightingAndLinks )
 import Agent.TUI.Model
-    ( conversationIsEmpty,
+    ( blockCodeLanguage,
+      conversationIsEmpty,
       reduceUi,
       visibleTodoList,
       BlockId,
@@ -507,12 +508,9 @@ codeBlockHeader
     -> Int
     -> Text
     -> Widget Name
-codeBlockHeader state target blockId codeIndex language =
+codeBlockHeader state target blockId codeIndex _language =
     hBox
-        [ if Text.null language
-            then emptyWidget
-            else withAttr Theme.mutedAttr (terminalTxt language)
-        , vLimit 1 (fill ' ')
+        [ vLimit 1 (fill ' ')
         , clickable name $
             withAttr
                 (Composer.controlAttr state name Theme.controlLinkAttr)
@@ -631,7 +629,10 @@ accentCodeBlock
     code
     body =
     accentBlockWithSections state target ui block waveElapsed accent title $
-        [ codeWidgetWithSyntaxHighlighting syntaxHighlighter "haskell" code
+        [ codeWidgetWithSyntaxHighlighting
+            syntaxHighlighter
+            (fromMaybe "text" (blockCodeLanguage block))
+            code
         | not (Text.null (Text.strip code))
         ]
             <> [ terminalTxtWrap body

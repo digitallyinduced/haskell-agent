@@ -100,6 +100,7 @@ library
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
                     , Agent.Tools.CodeMode.Host.Types
+                    , Agent.Tools.CodeMode.Host.Availability
                     , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
@@ -186,6 +187,18 @@ benchmark concurrent-discovery-bench
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
                     , base >= 4.14 && < 5
+
+benchmark code-mode-pool-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          CodeModePool.hs
+    ghc-options:      -O2
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , safe-exceptions
+                    , text
+                    , time
 
 test-suite agent-core-test
     import:           common-opts

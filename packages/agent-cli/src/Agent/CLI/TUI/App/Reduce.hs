@@ -601,8 +601,8 @@ syntaxLanguagesForBlock block =
                 (resolveFenceLanguage . (.fencedInfo))
                 (fencedBlocks block.blockBody)
         BlockShell
-            | not (Text.null (Text.strip block.blockDetail)) ->
-                ["haskell"]
+            | Just language <- blockCodeLanguage block ->
+                [language]
         _ -> []
 
 resumeNativeProgressIfRunning :: EventM Name AppState ()

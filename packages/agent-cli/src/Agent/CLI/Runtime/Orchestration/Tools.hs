@@ -898,6 +898,7 @@ runAgentTools
         resolveActiveAccountLabel
         resumeTargetChanged
         resumed
+        root
         rootTurnRef
         selectHttpAccount
         selectableTokenProvider

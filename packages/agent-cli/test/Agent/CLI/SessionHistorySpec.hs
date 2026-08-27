@@ -1,25 +1,27 @@
 module Agent.CLI.SessionHistorySpec (spec) where
 
-import Agent.CLI.Session.History
-    ( LiveConversation(..)
-    , hydrateUiHistory
-    , resetLiveConversationState
-    , resetLiveConversationWith
-    )
 import Agent.CLI.Session
     ( SessionTurn(..)
     , TranscriptEffect(..)
     )
-import Agent.Loop (ImageAttachment(..))
+import Agent.CLI.Session.ConversationStore (newConversationStore)
+import Agent.CLI.Session.History
+    ( hydrateUiHistory
+    , readLiveAttachments
+    , readLivePreviousResponseId
+    , readLiveTranscript
+    , resetLiveConversationState
+    , resetLiveConversationWith
+    )
+import Agent.Loop (ImageAttachment(..), TurnInput(..))
 import Agent.Responses.LoopBackend (turnInputsToItems)
-import Agent.Loop (TurnInput(..))
+import Agent.Tools.PlanMode (newPlanModeEnv)
 import Agent.TUI.Model (BlockKind(..), UiBlock(..), UiState(..))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.Foldable as Foldable
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import Data.Time (UTCTime(..), fromGregorian)
-import Agent.Tools.PlanMode (newPlanModeEnv)
 import System.OsPath (unsafeEncodeUtf)
 import Test.Hspec (Spec, describe, it, shouldBe, shouldReturn)
 
@@ -27,35 +29,30 @@ spec :: Spec
 spec = do
     describe "LiveConversation" do
       it "resets all coordinated fields together" do
-        let state = LiveConversation
-                { livePreviousResponseId = Just "resp-1"
-                , liveTranscript = turnInputsToItems [UserMessage "hello"]
-                , liveAttachments =
-                    [ImageAttachment "image/png" (ByteString.pack "bytes")]
-                }
-        resetLiveConversationState state `shouldBe`
-            LiveConversation
-                { livePreviousResponseId = Nothing
-                , liveTranscript = []
-                , liveAttachments = []
-                }
+        state <- newConversationStore
+            (Just "resp-1")
+            (turnInputsToItems [UserMessage "hello"])
+            [ImageAttachment "image/png" (ByteString.pack "bytes")]
+        stateRef <- newIORef state
+        resetLiveConversationState state
+        readLivePreviousResponseId stateRef `shouldReturn` Nothing
+        readLiveTranscript stateRef `shouldReturn` []
+        readLiveAttachments stateRef `shouldReturn` []
 
       it "is idempotent" do
-        let state = LiveConversation
-                { livePreviousResponseId = Just "resp-1"
-                , liveTranscript = []
-                , liveAttachments = []
-                }
-            reset = resetLiveConversationState state
-        resetLiveConversationState reset `shouldBe` reset
+        state <- newConversationStore (Just "resp-1") [] []
+        stateRef <- newIORef state
+        resetLiveConversationState state
+        resetLiveConversationState state
+        readLivePreviousResponseId stateRef `shouldReturn` Nothing
+        readLiveTranscript stateRef `shouldReturn` []
+        readLiveAttachments stateRef `shouldReturn` []
 
       it "clears provider-owned transcript state at the same reset boundary" do
         let transcript = turnInputsToItems [UserMessage "old context"]
-        conversationRef <- newIORef LiveConversation
-            { livePreviousResponseId = Just "resp-1"
-            , liveTranscript = transcript
-            , liveAttachments = []
-            }
+        conversation <-
+            newConversationStore (Just "resp-1") transcript []
+        conversationRef <- newIORef conversation
         providerTranscriptRef <- newIORef transcript
         planMode <- newPlanModeEnv (unsafeEncodeUtf "/tmp/session-reset") Nothing
         resetLiveConversationWith
@@ -63,12 +60,9 @@ spec = do
             conversationRef
             planMode
         readIORef providerTranscriptRef `shouldReturn` []
-        readIORef conversationRef `shouldReturn`
-            LiveConversation
-                { livePreviousResponseId = Nothing
-                , liveTranscript = []
-                , liveAttachments = []
-                }
+        readLivePreviousResponseId conversationRef `shouldReturn` Nothing
+        readLiveTranscript conversationRef `shouldReturn` []
+        readLiveAttachments conversationRef `shouldReturn` []
 
     describe "hydrateUiHistory" do
       it "keeps pre-compaction blocks scrollable while appending the summary" do

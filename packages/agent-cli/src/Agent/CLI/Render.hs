@@ -776,6 +776,7 @@ toolChrome name = case canonicalToolName name of
     "shell_command" -> ToolChromeShell
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
+    "exec" -> ToolChrome "$ exec" ToolDetailNone
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
@@ -810,6 +811,7 @@ formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
     "search_replace" ->
         formatSearchReplaceDiffRelative color workspace call.arguments
+    "exec" -> roleToolCommand color call.arguments
     _ -> ""
 
 -- | Compact unified-diff preview for @search_replace@ arguments.

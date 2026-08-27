@@ -2,11 +2,33 @@ import vm from "node:vm";
 import readline from "node:readline";
 
 const pendingCalls = new Map();
+const retiredCallIds = new Set();
+const retiredCallOrder = [];
 let nextCallId = 0;
 let executionStarted = false;
 
+function retirePendingCalls() {
+  for (const id of pendingCalls.keys()) {
+    retiredCallIds.add(id);
+    retiredCallOrder.push(id);
+  }
+  pendingCalls.clear();
+  while (retiredCallOrder.length > 4096) {
+    retiredCallIds.delete(retiredCallOrder.shift());
+  }
+}
+
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function sendFlushed(message) {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(message)}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 function fail(id, message) {
@@ -89,6 +111,7 @@ async function execute(id, params) {
     typeof params.image_detail_visible !== "boolean"
   ) {
     fail(id, "invalid exec parameters");
+    executionStarted = false;
     return;
   }
 
@@ -443,6 +466,7 @@ async function execute(id, params) {
     codeGeneration: { strings: false, wasm: false },
   });
 
+  let response;
   try {
     const module = new vm.SourceTextModule(params.source, {
       context,
@@ -459,14 +483,14 @@ async function execute(id, params) {
     } catch (error) {
       if (error !== exitSignal) throw error;
     }
-    send({
+    response = {
       jsonrpc: "2.0",
       id,
       result: drainContent(),
       stored_value_writes: storedValueWrites,
-    });
+    };
   } catch (error) {
-    send({
+    response = {
       jsonrpc: "2.0",
       id,
       error: {
@@ -475,18 +499,22 @@ async function execute(id, params) {
       },
       partial_result: drainContent(),
       stored_value_writes: storedValueWrites,
-    });
+    };
   } finally {
     for (const nativeTimeout of activeTimeouts.values()) {
       safeClearTimeout(nativeTimeout);
     }
     activeTimeouts.clear();
+    retirePendingCalls();
+    executionStarted = false;
   }
+  await sendFlushed(response);
 }
 
 function handleResponse(message) {
   const pending = pendingCalls.get(message.id);
   if (!pending) {
+    if (retiredCallIds.delete(message.id)) return;
     throw new Error(`unexpected response id: ${message.id}`);
   }
   pendingCalls.delete(message.id);

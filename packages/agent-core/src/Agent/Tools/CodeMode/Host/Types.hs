@@ -26,28 +26,30 @@ data ImageDetailVisibility
     deriving (Eq, Show)
 
 data CodeModeConfig = CodeModeConfig
-    { nodeExecutable :: !FilePath
+    { bunExecutable :: !FilePath
     , workerScript :: !FilePath
     , startupTimeoutMs :: !Int
     , maxActiveCells :: !Int
     , maxSourceBytes :: !Int
-    , maxOldSpaceMb :: !Int
     , toolHandler :: !CodeModeToolHandler
     , notifyHandler :: !(Text -> IO ())
     , imageDetailVisibility :: !ImageDetailVisibility
+    -- | Maximum idle Bun processes retained between cells. Set to zero to
+    -- retain the legacy one-process-per-cell behavior.
+    , workerPoolSize :: !Int
     }
 
 defaultCodeModeConfig :: FilePath -> CodeModeToolHandler -> CodeModeConfig
 defaultCodeModeConfig script handler = CodeModeConfig
-    { nodeExecutable = "node"
+    { bunExecutable = "bun"
     , workerScript = script
     , startupTimeoutMs = 3000
     , maxActiveCells = 64
     , maxSourceBytes = 1024 * 1024
-    , maxOldSpaceMb = 128
     , toolHandler = handler
     , notifyHandler = \_ -> pure ()
     , imageDetailVisibility = ImageDetailVisible
+    , workerPoolSize = 2
     }
 
 data CodeModeError
@@ -107,9 +109,24 @@ data Cell = Cell
     , cellObservation :: !(MVar CellObservation)
     }
 
+data IdleWorker = IdleWorker
+    !Handle
+    !Handle
+    !Handle
+    !ProcessHandle
+    !(MVar ())
+    !(Async Text)
+
+data WorkerPool = WorkerPool
+    { poolIdle :: ![IdleWorker]
+    , poolFiller :: !(Maybe (Async ()))
+    , poolClosed :: !Bool
+    }
+
 data CodeModeHost = CodeModeHost
     { hostConfig :: !CodeModeConfig
     , hostCells :: !(MVar (Map.Map Text Cell))
     , hostNextId :: !(IORef Int)
     , hostStoredValues :: !(MVar (Map.Map Text Value))
+    , hostWorkerPool :: !(MVar WorkerPool)
     }
