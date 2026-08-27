@@ -13,8 +13,8 @@ import Agent.Responses.Types.Common
     , objectWith
     , optionalField
     , optionalAtKey
-    , aesonObjectDecoder
-    , aesonValueDecoder
+    , RawJson
+    , rawJsonDecoder
     )
 import Agent.Responses.Types.Items
     ( ResponseInput
@@ -71,33 +71,33 @@ instance ToJSON ResponseStatus where
 data ResponseError = ResponseError
     { code        :: !Text
     , message     :: !Text
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseError where
-    toJSON ResponseError { code, message, extraFields } = objectWith extraFields
+    toJSON ResponseError { code, message } = objectWith
         [Just (field "code" code), Just (field "message" message)]
 
 
 data IncompleteDetails = IncompleteDetails
     { reason      :: !Text
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON IncompleteDetails where
-    toJSON IncompleteDetails { reason, extraFields } =
-        objectWith extraFields [Just (field "reason" reason)]
+    toJSON IncompleteDetails { reason } =
+        objectWith [Just (field "reason" reason)]
 
 
 data TokenDetails = TokenDetails
     { cachedTokens    :: !(Maybe Int)
     , reasoningTokens :: !(Maybe Int)
-    , extraFields     :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON TokenDetails where
-    toJSON TokenDetails { cachedTokens, reasoningTokens, extraFields } =
-        objectWith extraFields
+    toJSON TokenDetails { cachedTokens, reasoningTokens } =
+        objectWith
             [ optionalField "cached_tokens" cachedTokens
             , optionalField "reasoning_tokens" reasoningTokens
             ]
@@ -109,7 +109,7 @@ data ResponseUsage = ResponseUsage
     , outputTokens        :: !Int
     , outputTokensDetails :: !(Maybe TokenDetails)
     , totalTokens         :: !Int
-    , extraFields         :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseUsage where
@@ -119,8 +119,8 @@ instance ToJSON ResponseUsage where
         , outputTokens
         , outputTokensDetails
         , totalTokens
-        , extraFields
-        } = objectWith extraFields
+
+        } = objectWith
             [ Just (field "input_tokens" inputTokens)
             , optionalField "input_tokens_details" inputTokensDetails
             , Just (field "output_tokens" outputTokens)
@@ -135,7 +135,7 @@ data Response = Response
     , error                :: !(Maybe ResponseError)
     , incompleteDetails    :: !(Maybe IncompleteDetails)
     , instructions         :: !(Maybe ResponseInput)
-    , metadata             :: !(Maybe Aeson.Object)
+    , metadata             :: !(Maybe RawJson)
     , model                :: !Text
     , object               :: !Text
     , output               :: ![ResponseItem]
@@ -149,7 +149,7 @@ data Response = Response
     , conversation         :: !(Maybe Conversation)
     , maxOutputTokens      :: !(Maybe Int)
     , maxToolCalls         :: !(Maybe Int)
-    , moderation           :: !(Maybe Aeson.Value)
+    , moderation           :: !(Maybe RawJson)
     , previousResponseId   :: !(Maybe Text)
     , prompt               :: !(Maybe Prompt)
     , promptCacheKey       :: !(Maybe Text)
@@ -164,7 +164,7 @@ data Response = Response
     , truncation           :: !(Maybe Text)
     , usage                :: !(Maybe ResponseUsage)
     , user                 :: !(Maybe Text)
-    , extraFields          :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON Response where
@@ -203,8 +203,8 @@ instance ToJSON Response where
         , truncation
         , usage
         , user
-        , extraFields
-        } = objectWith extraFields
+
+        } = objectWith
             [ Just (field "id" responseId)
             , Just (field "created_at" createdAt)
             , Just (field "error" error)
@@ -257,20 +257,17 @@ responseErrorDecoder = Hermes.object $
     ResponseError
         <$> (maybe "" id <$> optionalAtKey "code" Hermes.text)
         <*> (maybe "" id <$> optionalAtKey "message" Hermes.text)
-        <*> pure mempty
 
 incompleteDetailsDecoder :: Hermes.Decoder IncompleteDetails
 incompleteDetailsDecoder = Hermes.object $
     IncompleteDetails
         <$> Hermes.atKey "reason" Hermes.text
-        <*> pure mempty
 
 tokenDetailsDecoder :: Hermes.Decoder TokenDetails
 tokenDetailsDecoder = Hermes.object $
     TokenDetails
         <$> optionalAtKey "cached_tokens" Hermes.int
         <*> optionalAtKey "reasoning_tokens" Hermes.int
-        <*> pure mempty
 
 responseUsageDecoder :: Hermes.Decoder ResponseUsage
 responseUsageDecoder = Hermes.object $
@@ -280,18 +277,17 @@ responseUsageDecoder = Hermes.object $
         <*> Hermes.atKey "output_tokens" Hermes.int
         <*> optionalAtKey "output_tokens_details" tokenDetailsDecoder
         <*> Hermes.atKey "total_tokens" Hermes.int
-        <*> pure mempty
 
 responseDecoder :: Hermes.Decoder Response
 responseDecoder = Hermes.object $
     Response
-        <$> Hermes.atKey "id" Hermes.text
-        <*> Hermes.atKey "created_at" Hermes.scientific
+        <$> (maybe "" id <$> optionalAtKey "id" Hermes.text)
+        <*> (maybe 0 id <$> optionalAtKey "created_at" Hermes.scientific)
         <*> optionalAtKey "error" responseErrorDecoder
         <*> optionalAtKey "incomplete_details" incompleteDetailsDecoder
         <*> optionalAtKey "instructions" responseInputDecoder
-        <*> optionalAtKey "metadata" aesonObjectDecoder
-        <*> Hermes.atKey "model" Hermes.text
+        <*> optionalAtKey "metadata" rawJsonDecoder
+        <*> (maybe "" id <$> optionalAtKey "model" Hermes.text)
         <*> (maybe "response" id <$> optionalAtKey "object" Hermes.text)
         <*> (maybe [] id <$> optionalAtKey
             "output"
@@ -306,7 +302,7 @@ responseDecoder = Hermes.object $
         <*> optionalAtKey "conversation" conversationDecoder
         <*> optionalAtKey "max_output_tokens" Hermes.int
         <*> optionalAtKey "max_tool_calls" Hermes.int
-        <*> optionalAtKey "moderation" aesonValueDecoder
+        <*> optionalAtKey "moderation" rawJsonDecoder
         <*> optionalAtKey "previous_response_id" Hermes.text
         <*> optionalAtKey "prompt" promptDecoder
         <*> optionalAtKey "prompt_cache_key" Hermes.text
@@ -315,10 +311,10 @@ responseDecoder = Hermes.object $
         <*> optionalAtKey "reasoning" reasoningConfigDecoder
         <*> optionalAtKey "safety_identifier" Hermes.text
         <*> optionalAtKey "service_tier" Hermes.text
-        <*> Hermes.atKey "status" responseStatusDecoder
+        <*> (maybe ResponseInProgress id
+            <$> optionalAtKey "status" responseStatusDecoder)
         <*> optionalAtKey "text" responseTextConfigDecoder
         <*> optionalAtKey "top_logprobs" Hermes.int
         <*> optionalAtKey "truncation" Hermes.text
         <*> optionalAtKey "usage" responseUsageDecoder
         <*> optionalAtKey "user" Hermes.text
-        <*> pure mempty

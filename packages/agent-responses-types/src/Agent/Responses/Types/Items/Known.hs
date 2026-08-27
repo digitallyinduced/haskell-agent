@@ -125,18 +125,18 @@ parseResponseItemType value = case value of
 
 data InternalChatMetadata = InternalChatMetadata
     { turnId            :: !(Maybe Text)
-    , createTime        :: !(Maybe Aeson.Value)
+    , createTime        :: !(Maybe RawJson)
     , contentItemKinds  :: !(Maybe [Text])
-    , executedToolCalls :: !(Maybe Aeson.Value)
-    , extraFields       :: !Aeson.Object
+    , executedToolCalls :: !(Maybe RawJson)
+
     }
     deriving stock (Eq, Show)
 
 instance ToJSON InternalChatMetadata where
     toJSON InternalChatMetadata
         { turnId, createTime, contentItemKinds, executedToolCalls
-        , extraFields } =
-            objectWith extraFields
+         } =
+            objectWith
                 [ optionalField "turn_id" turnId
                 , optionalField "create_time" createTime
                 , optionalField "content_item_kinds" contentItemKinds
@@ -148,7 +148,6 @@ internalChatMetadataDecoder :: Hermes.Decoder InternalChatMetadata
 internalChatMetadataDecoder = Hermes.object $
     InternalChatMetadata
         <$> optionalAtKey "turn_id" Hermes.text
-        <*> optionalAtKey "create_time" aesonValueDecoder
+        <*> optionalAtKey "create_time" rawJsonDecoder
         <*> optionalAtKey "content_item_kinds" (Hermes.list Hermes.text)
-        <*> optionalAtKey "executed_tool_calls" aesonValueDecoder
-        <*> pure mempty
+        <*> optionalAtKey "executed_tool_calls" rawJsonDecoder

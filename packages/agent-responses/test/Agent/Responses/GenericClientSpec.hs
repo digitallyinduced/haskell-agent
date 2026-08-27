@@ -24,24 +24,22 @@ spec = do
             projected.stream `shouldBe` Just True
             projected.previousResponseId `shouldBe` Nothing
 
-        it "preserves standard tools and endpoint extension fields" do
+        it "preserves standard tools" do
             let tool = FunctionToolValue FunctionTool
                     { name = "read_file"
                     , description = Nothing
                     , parameters = Nothing
                     , strict = Nothing
-                    , extraFields = KeyMap.empty
+
                     }
-                requestExtras = KeyMap.singleton "custom" "value"
                 request = case defaultResponseCreateParams of
                     ResponseCreateParams{..} -> ResponseCreateParams
                         { tools = Just [tool]
-                        , extraFields = requestExtras
+
                         , ..
                         }
                 projected = buildRequest options request
             projected.tools `shouldBe` Just [tool]
-            projected.extraFields `shouldBe` requestExtras
 
     describe "classifyFailure" do
         it "decodes OpenAI error envelopes and preserves Retry-After" do

@@ -1,4 +1,4 @@
--- | Lossless wire types for the OpenAI Responses API.
+-- | Known wire fields for the OpenAI Responses API.
 module Agent.Responses.Types
     ( -- * Create request
       ResponseCreateParams(..)
@@ -48,7 +48,6 @@ module Agent.Responses.Types
     , ReasoningSummaryPart(..)
     , ItemReference(..)
     , TaggedObject(..)
-    , aesonValueDecoder
 
       -- * Tools
     , ResponseTool(..)

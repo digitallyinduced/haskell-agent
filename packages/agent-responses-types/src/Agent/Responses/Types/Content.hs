@@ -78,15 +78,15 @@ messageContentDecoder =
 data ResponseContentPart
     = InputTextPart
         { text                  :: !Text
-        , promptCacheBreakpoint :: !(Maybe Aeson.Value)
-        , extraFields           :: !Aeson.Object
+        , promptCacheBreakpoint :: !(Maybe RawJson)
+
         }
     | InputImagePart
         { detail                :: !(Maybe Text)
         , fileId                :: !(Maybe Text)
         , imageUrl              :: !(Maybe Text)
-        , promptCacheBreakpoint :: !(Maybe Aeson.Value)
-        , extraFields           :: !Aeson.Object
+        , promptCacheBreakpoint :: !(Maybe RawJson)
+
         }
     | InputFilePart
         { detail                :: !(Maybe Text)
@@ -94,56 +94,56 @@ data ResponseContentPart
         , fileId                :: !(Maybe Text)
         , fileUrl               :: !(Maybe Text)
         , filename              :: !(Maybe Text)
-        , promptCacheBreakpoint :: !(Maybe Aeson.Value)
-        , extraFields           :: !Aeson.Object
+        , promptCacheBreakpoint :: !(Maybe RawJson)
+
         }
     | InputAudioPart
-        { inputAudio  :: !Aeson.Value
-        , extraFields :: !Aeson.Object
+        { inputAudio  :: !RawJson
+
         }
     | OutputTextPart
         { text        :: !Text
-        , annotations :: !(Maybe [Aeson.Value])
-        , logprobs    :: !(Maybe [Aeson.Value])
-        , extraFields :: !Aeson.Object
+        , annotations :: !(Maybe [RawJson])
+        , logprobs    :: !(Maybe [RawJson])
+
         }
     | RefusalPart
         { refusal     :: !Text
-        , extraFields :: !Aeson.Object
+
         }
     | ReasoningTextPart
         { text        :: !Text
-        , extraFields :: !Aeson.Object
+
         }
     | SummaryTextPart
         { text        :: !Text
-        , extraFields :: !Aeson.Object
+
         }
     | EncryptedContentPart
         { encryptedContent :: !Text
-        , extraFields      :: !Aeson.Object
+
         }
     | PlainTextPart
         { text        :: !Text
-        , extraFields :: !Aeson.Object
+
         }
     | UnknownContentPart !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON ResponseContentPart where
-    toJSON InputTextPart { text, promptCacheBreakpoint, extraFields } = objectWith extraFields
+    toJSON InputTextPart { text, promptCacheBreakpoint } = objectWith
         [ Just (field "type" ("input_text" :: Text))
         , Just (field "text" text)
         , optionalField "prompt_cache_breakpoint" promptCacheBreakpoint
         ]
-    toJSON InputImagePart { detail, fileId, imageUrl, promptCacheBreakpoint, extraFields } = objectWith extraFields
+    toJSON InputImagePart { detail, fileId, imageUrl, promptCacheBreakpoint } = objectWith
         [ Just (field "type" ("input_image" :: Text))
         , optionalField "detail" detail
         , optionalField "file_id" fileId
         , optionalField "image_url" imageUrl
         , optionalField "prompt_cache_breakpoint" promptCacheBreakpoint
         ]
-    toJSON InputFilePart { detail, fileData, fileId, fileUrl, filename, promptCacheBreakpoint, extraFields } = objectWith extraFields
+    toJSON InputFilePart { detail, fileData, fileId, fileUrl, filename, promptCacheBreakpoint } = objectWith
         [ Just (field "type" ("input_file" :: Text))
         , optionalField "detail" detail
         , optionalField "file_data" fileData
@@ -152,28 +152,28 @@ instance ToJSON ResponseContentPart where
         , optionalField "filename" filename
         , optionalField "prompt_cache_breakpoint" promptCacheBreakpoint
         ]
-    toJSON InputAudioPart { inputAudio, extraFields } = objectWith extraFields
+    toJSON InputAudioPart { inputAudio } = objectWith
         [ Just (field "type" ("input_audio" :: Text))
         , Just (field "input_audio" inputAudio)
         ]
-    toJSON OutputTextPart { text, annotations, logprobs, extraFields } = objectWith extraFields
+    toJSON OutputTextPart { text, annotations, logprobs } = objectWith
         [ Just (field "type" ("output_text" :: Text))
         , Just (field "text" text)
         , optionalField "annotations" annotations
         , optionalField "logprobs" logprobs
         ]
-    toJSON RefusalPart { refusal, extraFields } = objectWith extraFields
+    toJSON RefusalPart { refusal } = objectWith
         [Just (field "type" ("refusal" :: Text)), Just (field "refusal" refusal)]
-    toJSON ReasoningTextPart { text, extraFields } = objectWith extraFields
+    toJSON ReasoningTextPart { text } = objectWith
         [Just (field "type" ("reasoning_text" :: Text)), Just (field "text" text)]
-    toJSON SummaryTextPart { text, extraFields } = objectWith extraFields
+    toJSON SummaryTextPart { text } = objectWith
         [Just (field "type" ("summary_text" :: Text)), Just (field "text" text)]
-    toJSON EncryptedContentPart { encryptedContent, extraFields } =
-        objectWith extraFields
+    toJSON EncryptedContentPart { encryptedContent } =
+        objectWith
             [ Just (field "type" ("encrypted_content" :: Text))
             , Just (field "encrypted_content" encryptedContent)
             ]
-    toJSON PlainTextPart { text, extraFields } = objectWith extraFields
+    toJSON PlainTextPart { text } = objectWith
         [Just (field "type" ("text" :: Text)), Just (field "text" text)]
     toJSON (UnknownContentPart tagged) = toJSON tagged
 
@@ -185,13 +185,11 @@ responseContentPartDecoder =
             "input_text" -> InputTextPart
                 <$> Hermes.atKey "text" Hermes.text
                 <*> optionalAtKey "prompt_cache_breakpoint" rawValue
-                <*> pure mempty
             "input_image" -> InputImagePart
                 <$> optionalAtKey "detail" Hermes.text
                 <*> optionalAtKey "file_id" Hermes.text
                 <*> optionalAtKey "image_url" Hermes.text
                 <*> optionalAtKey "prompt_cache_breakpoint" rawValue
-                <*> pure mempty
             "input_file" -> InputFilePart
                 <$> optionalAtKey "detail" Hermes.text
                 <*> optionalAtKey "file_data" Hermes.text
@@ -199,32 +197,24 @@ responseContentPartDecoder =
                 <*> optionalAtKey "file_url" Hermes.text
                 <*> optionalAtKey "filename" Hermes.text
                 <*> optionalAtKey "prompt_cache_breakpoint" rawValue
-                <*> pure mempty
             "input_audio" -> InputAudioPart
                 <$> Hermes.atKey "input_audio" rawValue
-                <*> pure mempty
             "output_text" -> OutputTextPart
                 <$> Hermes.atKey "text" Hermes.text
                 <*> optionalAtKey "annotations" (Hermes.list rawValue)
                 <*> optionalAtKey "logprobs" (Hermes.list rawValue)
-                <*> pure mempty
             "refusal" -> RefusalPart
                 <$> Hermes.atKey "refusal" Hermes.text
-                <*> pure mempty
             "reasoning_text" -> ReasoningTextPart
                 <$> Hermes.atKey "text" Hermes.text
-                <*> pure mempty
             "summary_text" -> SummaryTextPart
                 <$> Hermes.atKey "text" Hermes.text
-                <*> pure mempty
             "encrypted_content" -> EncryptedContentPart
                 <$> Hermes.atKey "encrypted_content" Hermes.text
-                <*> pure mempty
             "text" -> PlainTextPart
                 <$> Hermes.atKey "text" Hermes.text
-                <*> pure mempty
             _ -> UnknownContentPart
-                <$> (TaggedObject tag mempty <$ consumeObject)
+                <$> (TaggedObject tag <$ consumeObject)
   where
-    rawValue = aesonValueDecoder
+    rawValue = rawJsonDecoder
     consumeObject = pure ()

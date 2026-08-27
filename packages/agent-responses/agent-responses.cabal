@@ -87,6 +87,7 @@ test-suite agent-responses-test
                     , Agent.Responses.StreamAssemblySpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json
                     , agent-responses
                     , agent-responses-types
                     , aeson >= 2.0

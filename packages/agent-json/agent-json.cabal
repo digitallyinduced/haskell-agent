@@ -45,6 +45,7 @@ library
         , hermes-json >= 0.8 && < 0.9
         , safe-exceptions >= 0.1.7 && < 0.2
         , text >= 2.0 && < 2.2
+        , vector
 
 test-suite agent-json-test
     import:          common-options

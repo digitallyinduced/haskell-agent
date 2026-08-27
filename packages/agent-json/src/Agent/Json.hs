@@ -11,13 +11,12 @@ module Agent.Json
     , rawJsonDecoder
     ) where
 
-import qualified Data.Aeson.Encoding.Internal as Aeson
 import Agent.Json.Internal (RawJson(..))
+import qualified Data.Aeson.Encoding.Internal as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Hermes as Hermes
-
 rawJsonBytes :: RawJson -> BS.ByteString
 rawJsonBytes (RawJson bytes) = bytes
 
@@ -35,3 +34,4 @@ rawJsonDecoder =
     Hermes.withRawJsonByteString \bytes -> do
         let owned = BS.copy bytes
         owned `seq` pure (RawJson owned)
+

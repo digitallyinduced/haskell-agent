@@ -77,13 +77,20 @@ emptyStreamAssemblyState = StreamAssemblyState
 
 applyStreamEvent :: StreamAssemblyState -> ResponseStreamEvent -> StreamAssemblyState
 applyStreamEvent state event = case event of
-    ResponseCreatedEvent { responseValue } -> overlayLifecycle responseValue state
-    ResponseInProgressEvent { responseValue } -> overlayLifecycle responseValue state
-    ResponseQueuedEvent { responseValue } -> overlayLifecycle responseValue state
-    ResponseCompletedEvent { responseValue } -> overlayLifecycle responseValue state
-    ResponseDoneEvent { responseValue } -> overlayLifecycle responseValue state
-    ResponseFailedEvent { responseValue } -> overlayLifecycle responseValue state
-    ResponseIncompleteEvent { responseValue } -> overlayLifecycle responseValue state
+    ResponseCreatedEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
+    ResponseInProgressEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
+    ResponseQueuedEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
+    ResponseCompletedEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
+    ResponseDoneEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
+    ResponseFailedEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
+    ResponseIncompleteEvent { responseValue } ->
+        overlayLifecycle (Aeson.toJSON responseValue) state
     ResponseOutputItemAddedEvent { item, outputIndex } ->
         updateStreamItem outputIndex False (Aeson.toJSON item) state
     ResponseOutputItemDoneEvent { item, outputIndex } ->
@@ -101,6 +108,22 @@ applyStreamEvent state event = case event of
                         (appendInput inputDelta)
                         state
                 _ -> state
+    OtherResponseStreamEvent
+        { otherEventType = EventReasoningSummaryTextDelta
+        , summaryIndex = Just index
+        , eventDelta = Just delta
+        , streamItemId
+        , streamOutputIndex
+        } ->
+            case resolveOutputIndex
+                    streamOutputIndex [streamItemId] state of
+                Just outputIndex ->
+                    updateReasoningSummary outputIndex
+                        (fromMaybe "" streamItemId)
+                        index
+                        (appendObjectText delta)
+                        state
+                Nothing -> state
     ResponseCustomToolInputDoneEvent
         { inputText, streamItemId, streamCallId, streamOutputIndex } ->
             case ( inputText
@@ -143,7 +166,7 @@ applyStreamEvent state event = case event of
                     updateReasoningSummary outputIndex
                         (fromMaybe "" streamItemId)
                         index
-                        (maybe id const partValue)
+                        (maybe id (const . Aeson.toJSON) partValue)
                         state
                 _ -> state
     ResponseReasoningSummaryTextDoneEvent
@@ -158,27 +181,6 @@ applyStreamEvent state event = case event of
                         index
                         (setObjectText finalText)
                         state
-                _ -> state
-    OtherResponseStreamEvent
-        { otherEventType = EventReasoningSummaryTextDelta
-        , eventExtraFields
-        } ->
-            case ( intField "summary_index" eventExtraFields
-                 , textField "delta" eventExtraFields
-                 ) of
-                (Just summaryIndex, Just delta) ->
-                    case resolveOutputIndex
-                            (intField "output_index" eventExtraFields)
-                            [textField "item_id" eventExtraFields]
-                            state of
-                        Just outputIndex ->
-                            updateReasoningSummary outputIndex
-                                (fromMaybe ""
-                                    (textField "item_id" eventExtraFields))
-                                summaryIndex
-                                (appendObjectText delta)
-                                state
-                        Nothing -> state
                 _ -> state
     _ -> state
 
@@ -207,7 +209,7 @@ finishStreamResponse modelHint state terminalEvent = do
         -- "in_progress"/"queued" status copied from the response.created frame.
         -- Preserving it there would leak a running status into a finished
         -- response and make a dropped connection look like a completed turn.
-        withStatus = case terminalFragment of
+        withStatus = case Aeson.toJSON <$> terminalFragment of
             Just (Aeson.Object object)
                 | fragmentHasTerminalStatus object -> state.responseObject
             _ -> KeyMap.insert "status" (Aeson.String terminalStatus)
@@ -242,11 +244,14 @@ finishAssembledIncomplete
     -> StreamAssemblyState
     -> Either ApiError Response
 finishAssembledIncomplete modelHint state =
-    finishStreamResponse modelHint state
-        (ResponseIncompleteEvent
-            (Aeson.Object state.responseObject)
-            Nothing
-            KeyMap.empty)
+    case ResponsesCodec.decodeResponse
+            (LBS.toStrict (Aeson.encode (Aeson.Object state.responseObject))) of
+        Left err -> Left $ JsonDecodeError
+            (Text.pack err)
+            (jsonPreview (Aeson.Object state.responseObject))
+        Right response ->
+            finishStreamResponse modelHint state
+                (ResponseIncompleteEvent response Nothing)
 
 -- | Build a response without a request-model hint. This remains the shared
 -- entry point used by provider SSE transports.
@@ -367,17 +372,25 @@ responseFailureFromState state =
             reason <- textField "reason" details
             pure IncompleteDetails
                 { reason
-                , extraFields = KeyMap.empty
                 }
         , failureResponseValue = value
         }
 
 overlayLifecycle :: Aeson.Value -> StreamAssemblyState -> StreamAssemblyState
-overlayLifecycle (Aeson.Object fragment) state =
+overlayLifecycle (Aeson.Object rawFragment) state =
     state
         { responseObject =
             KeyMap.foldrWithKey KeyMap.insert state.responseObject fragment
         }
+  where
+    fragment =
+        removeEmptyText "id"
+            $ removeEmptyText "model"
+            $ rawFragment
+    removeEmptyText key object =
+        case KeyMap.lookup key object of
+            Just (Aeson.String "") -> KeyMap.delete key object
+            _ -> object
 overlayLifecycle _ state = state
 
 updateItem
@@ -593,7 +606,7 @@ fragmentHasTerminalStatus object =
             status `elem` ["completed", "incomplete", "failed", "cancelled"]
         _ -> False
 
-responseValueFor :: ResponseStreamEvent -> Maybe Aeson.Value
+responseValueFor :: ResponseStreamEvent -> Maybe Response
 responseValueFor = \case
     ResponseCreatedEvent { responseValue } -> Just responseValue
     ResponseInProgressEvent { responseValue } -> Just responseValue

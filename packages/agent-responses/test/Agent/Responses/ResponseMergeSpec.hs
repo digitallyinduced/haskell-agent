@@ -35,7 +35,7 @@ spec = describe "mergeCompletedResponseOutput" do
                     , Responses.arguments = "{\"text\":\"ok\"}"
                     , Responses.encryptedFunctionArgs = Nothing
                     , Responses.status = Nothing
-                    , Responses.extraFields = mempty
+
                     }
                 ]
 
@@ -92,13 +92,13 @@ spec = describe "mergeCompletedResponseOutput" do
                             { Responses.text = "thinking..."
                             , Responses.annotations = Nothing
                             , Responses.logprobs = Nothing
-                            , Responses.extraFields = mempty
+
                             }
                         ]
                     , Responses.status = Nothing
                     , Responses.phase = Nothing
                     , Responses.passthrough = Nothing
-                    , Responses.extraFields = mempty
+
                     }
                 , Responses.FunctionCallItem
                     Responses.FunctionCall
@@ -109,7 +109,7 @@ spec = describe "mergeCompletedResponseOutput" do
                     , Responses.arguments = "{\"text\":\"ok\"}"
                     , Responses.encryptedFunctionArgs = Nothing
                     , Responses.status = Nothing
-                    , Responses.extraFields = mempty
+
                     }
                 ]
 
@@ -125,7 +125,7 @@ spec = describe "mergeCompletedResponseOutput" do
                     , Responses.arguments = "{\"text\":\"ok\"}"
                     , Responses.encryptedFunctionArgs = Nothing
                     , Responses.status = Nothing
-                    , Responses.extraFields = mempty
+
                     }
                 ]
 

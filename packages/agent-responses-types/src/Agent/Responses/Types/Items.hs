@@ -47,13 +47,13 @@ data ResponseMessage = ResponseMessage
     , status      :: !(Maybe ItemStatus)
     , phase       :: !(Maybe Text)
     , passthrough :: !(Maybe InternalChatMetadata)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseMessage where
     toJSON ResponseMessage
-        { messageId, content, role, status, phase, passthrough, extraFields } =
-            objectWith extraFields
+        { messageId, content, role, status, phase, passthrough } =
+            objectWith
                 [ Just (field "type" ("message" :: Text))
                 , optionalField "id" messageId
                 , Just (field "content" content)
@@ -74,14 +74,14 @@ data FunctionCall = FunctionCall
     , arguments              :: !Text
     , encryptedFunctionArgs  :: !(Maybe [Text])
     , status                 :: !(Maybe ItemStatus)
-    , extraFields            :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCall where
     toJSON FunctionCall
         { itemId, callId, name, namespace, arguments, encryptedFunctionArgs
-        , status, extraFields } =
-            objectWith extraFields
+        , status } =
+            objectWith
                 [ Just (field "type" ("function_call" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
@@ -98,15 +98,15 @@ data FunctionCallOutput = FunctionCallOutput
     , callId      :: !Text
     , name        :: !(Maybe Text)
     , namespace   :: !(Maybe Text)
-    , output      :: !Aeson.Value
+    , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCallOutput where
     toJSON FunctionCallOutput
-        { itemId, callId, name, namespace, output, status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, namespace, output, status } =
+            objectWith
                 [ Just (field "type" ("function_call_output" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
@@ -124,13 +124,13 @@ data CustomToolCall = CustomToolCall
     , namespace   :: !(Maybe Text)
     , input       :: !Text
     , status      :: !(Maybe ItemStatus)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCall where
     toJSON CustomToolCall
-        { itemId, callId, name, namespace, input, status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, namespace, input, status } =
+            objectWith
                 [ Just (field "type" ("custom_tool_call" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
@@ -145,15 +145,15 @@ data CustomToolCallOutput = CustomToolCallOutput
     { itemId      :: !(Maybe Text)
     , callId      :: !Text
     , name        :: !(Maybe Text)
-    , output      :: !Aeson.Value
+    , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCallOutput where
     toJSON CustomToolCallOutput
-        { itemId, callId, name, output, status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, output, status } =
+            objectWith
                 [ Just (field "type" ("custom_tool_call_output" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
@@ -166,12 +166,12 @@ instance ToJSON CustomToolCallOutput where
 data ReasoningSummaryPart = ReasoningSummaryPart
     { partType    :: !Text
     , text        :: !(Maybe Text)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ReasoningSummaryPart where
-    toJSON ReasoningSummaryPart { partType, text, extraFields } =
-        objectWith extraFields
+    toJSON ReasoningSummaryPart { partType, text } =
+        objectWith
             [Just (field "type" partType), optionalField "text" text]
 
 
@@ -181,7 +181,7 @@ data ReasoningItem = ReasoningItem
     , content          :: !(Maybe [ResponseContentPart])
     , encryptedContent :: !(Maybe Text)
     , status           :: !(Maybe ItemStatus)
-    , extraFields      :: !Aeson.Object
+
     } deriving stock (Eq)
 
 -- Keep opaque encrypted reasoning payloads out of logs while retaining enough
@@ -194,13 +194,12 @@ instance Show ReasoningItem where
             <> ", encryptedContent = "
             <> maybe "Nothing" (const "Just <redacted>") item.encryptedContent
             <> ", status = " <> show item.status
-            <> ", extraFields = " <> show item.extraFields
             <> " }"
 
 instance ToJSON ReasoningItem where
     toJSON ReasoningItem
-        { itemId, summary, content, encryptedContent, status, extraFields } =
-            objectWith extraFields
+        { itemId, summary, content, encryptedContent, status } =
+            objectWith
                 [ Just (field "type" ("reasoning" :: Text))
                 , optionalField "id" itemId
                 , Just (field "summary" summary)
@@ -212,12 +211,12 @@ instance ToJSON ReasoningItem where
 
 data ItemReference = ItemReference
     { itemId      :: !Text
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ItemReference where
-    toJSON ItemReference { itemId, extraFields } =
-        objectWith extraFields
+    toJSON ItemReference { itemId } =
+        objectWith
             [ Just (field "type" ("item_reference" :: Text))
             , Just (field "id" itemId)
             ]
@@ -229,13 +228,13 @@ data ResponseAgentMessage = ResponseAgentMessage
     , recipient   :: !(Maybe Text)
     , content     :: ![ResponseContentPart]
     , passthrough :: !(Maybe InternalChatMetadata)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseAgentMessage where
     toJSON ResponseAgentMessage
-        { messageId, author, recipient, content, passthrough, extraFields } =
-            objectWith extraFields
+        { messageId, author, recipient, content, passthrough } =
+            objectWith
                 [ Just (field "type" ("agent_message" :: Text))
                 , optionalField "id" messageId
                 , optionalField "author" author
@@ -250,13 +249,13 @@ instance ToJSON ResponseAgentMessage where
 data AdditionalToolsItem = AdditionalToolsItem
     { itemId      :: !(Maybe Text)
     , role        :: !Text
-    , tools       :: ![Aeson.Value]
-    , extraFields :: !Aeson.Object
+    , tools       :: ![RawJson]
+
     } deriving stock (Eq, Show)
 
 instance ToJSON AdditionalToolsItem where
-    toJSON AdditionalToolsItem { itemId, role, tools, extraFields } =
-        objectWith extraFields
+    toJSON AdditionalToolsItem { itemId, role, tools } =
+        objectWith
             [ Just (field "type" ("additional_tools" :: Text))
             , optionalField "id" itemId
             , Just (field "role" role)
@@ -269,17 +268,17 @@ data LocalShellAction
         { command           :: ![Text]
         , timeoutMs         :: !(Maybe Integer)
         , workingDirectory  :: !(Maybe Text)
-        , env               :: !(Maybe Aeson.Object)
+        , env               :: !(Maybe RawJson)
         , user              :: !(Maybe Text)
-        , extraFields       :: !Aeson.Object
+
         }
     | LocalShellActionOther !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON LocalShellAction where
     toJSON LocalShellExec
-        { command, timeoutMs, workingDirectory, env, user, extraFields } =
-            objectWith extraFields
+        { command, timeoutMs, workingDirectory, env, user } =
+            objectWith
                 [ Just (field "type" ("exec" :: Text))
                 , Just (field "command" command)
                 , optionalField "timeout_ms" timeoutMs
@@ -295,12 +294,12 @@ data LocalShellCall = LocalShellCall
     , callId      :: !(Maybe Text)
     , status      :: !(Maybe ItemStatus)
     , action      :: !(Maybe LocalShellAction)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON LocalShellCall where
-    toJSON LocalShellCall { itemId, callId, status, action, extraFields } =
-        objectWith extraFields
+    toJSON LocalShellCall { itemId, callId, status, action } =
+        objectWith
             [ Just (field "type" ("local_shell_call" :: Text))
             , optionalField "id" itemId
             , optionalField "call_id" callId
@@ -314,14 +313,14 @@ data ToolSearchCall = ToolSearchCall
     , callId      :: !(Maybe Text)
     , status      :: !(Maybe Text)
     , execution   :: !(Maybe Text)
-    , arguments   :: !(Maybe Aeson.Value)
-    , extraFields :: !Aeson.Object
+    , arguments   :: !(Maybe RawJson)
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ToolSearchCall where
     toJSON ToolSearchCall
-        { itemId, callId, status, execution, arguments, extraFields } =
-            objectWith extraFields
+        { itemId, callId, status, execution, arguments } =
+            objectWith
                 [ Just (field "type" ("tool_search_call" :: Text))
                 , optionalField "id" itemId
                 , optionalField "call_id" callId
@@ -336,14 +335,14 @@ data ToolSearchOutput = ToolSearchOutput
     , callId      :: !(Maybe Text)
     , status      :: !(Maybe Text)
     , execution   :: !(Maybe Text)
-    , tools       :: ![Aeson.Value]
-    , extraFields :: !Aeson.Object
+    , tools       :: ![RawJson]
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ToolSearchOutput where
     toJSON ToolSearchOutput
-        { itemId, callId, status, execution, tools, extraFields } =
-            objectWith extraFields
+        { itemId, callId, status, execution, tools } =
+            objectWith
                 [ Just (field "type" ("tool_search_output" :: Text))
                 , optionalField "id" itemId
                 , optionalField "call_id" callId
@@ -357,34 +356,34 @@ data WebSearchAction
     = WebSearchQuery
         { query       :: !(Maybe Text)
         , queries     :: !(Maybe [Text])
-        , extraFields :: !Aeson.Object
+
         }
     | WebSearchOpenPage
         { url         :: !(Maybe Text)
-        , extraFields :: !Aeson.Object
+
         }
     | WebSearchFindInPage
         { url         :: !(Maybe Text)
         , pattern     :: !(Maybe Text)
-        , extraFields :: !Aeson.Object
+
         }
     | WebSearchActionOther !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON WebSearchAction where
-    toJSON WebSearchQuery { query, queries, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchQuery { query, queries } =
+        objectWith
             [ Just (field "type" ("search" :: Text))
             , optionalField "query" query
             , optionalField "queries" queries
             ]
-    toJSON WebSearchOpenPage { url, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchOpenPage { url } =
+        objectWith
             [ Just (field "type" ("open_page" :: Text))
             , optionalField "url" url
             ]
-    toJSON WebSearchFindInPage { url, pattern, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchFindInPage { url, pattern } =
+        objectWith
             [ Just (field "type" ("find_in_page" :: Text))
             , optionalField "url" url
             , optionalField "pattern" pattern
@@ -396,12 +395,12 @@ data WebSearchCall = WebSearchCall
     { itemId      :: !(Maybe Text)
     , status      :: !(Maybe Text)
     , action      :: !(Maybe WebSearchAction)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON WebSearchCall where
-    toJSON WebSearchCall { itemId, status, action, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchCall { itemId, status, action } =
+        objectWith
             [ Just (field "type" ("web_search_call" :: Text))
             , optionalField "id" itemId
             , optionalField "status" status
@@ -414,13 +413,13 @@ data ImageGenerationCall = ImageGenerationCall
     , status         :: !(Maybe Text)
     , revisedPrompt  :: !(Maybe Text)
     , result         :: !(Maybe Text)
-    , extraFields    :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ImageGenerationCall where
     toJSON ImageGenerationCall
-        { itemId, status, revisedPrompt, result, extraFields } =
-            objectWith extraFields
+        { itemId, status, revisedPrompt, result } =
+            objectWith
                 [ Just (field "type" ("image_generation_call" :: Text))
                 , optionalField "id" itemId
                 , optionalField "status" status
@@ -432,12 +431,12 @@ instance ToJSON ImageGenerationCall where
 data CompactionItem = CompactionItem
     { itemId            :: !(Maybe Text)
     , encryptedContent  :: !(Maybe Text)
-    , extraFields       :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON CompactionItem where
-    toJSON CompactionItem { itemId, encryptedContent, extraFields } =
-        objectWith extraFields
+    toJSON CompactionItem { itemId, encryptedContent } =
+        objectWith
             [ Just (field "type" ("compaction" :: Text))
             , optionalField "id" itemId
             , optionalField "encrypted_content" encryptedContent
@@ -445,24 +444,23 @@ instance ToJSON CompactionItem where
 
 
 data CompactionTriggerItem = CompactionTriggerItem
-    { extraFields :: !Aeson.Object
-    } deriving stock (Eq, Show)
+    deriving stock (Eq, Show)
 
 instance ToJSON CompactionTriggerItem where
-    toJSON CompactionTriggerItem { extraFields } =
-        objectWith extraFields
+    toJSON CompactionTriggerItem {} =
+        objectWith
             [Just (field "type" ("compaction_trigger" :: Text))]
 
 
 data ContextCompactionItem = ContextCompactionItem
     { itemId           :: !(Maybe Text)
     , encryptedContent :: !(Maybe Text)
-    , extraFields      :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ContextCompactionItem where
-    toJSON ContextCompactionItem { itemId, encryptedContent, extraFields } =
-        objectWith extraFields
+    toJSON ContextCompactionItem { itemId, encryptedContent } =
+        objectWith
             [ Just (field "type" ("context_compaction" :: Text))
             , optionalField "id" itemId
             , optionalField "encrypted_content" encryptedContent
@@ -562,9 +560,9 @@ responseItemDecoder =
             ItemContextCompaction ->
                 ContextCompactionItemValue <$> contextCompactionItemDecoder
             ItemUnknownType{} ->
-                pure (UnknownResponseItem (TaggedObject wireType mempty))
+                pure (UnknownResponseItem (TaggedObject wireType))
             itemType ->
-                pure (KnownResponseItem itemType (TaggedObject wireType mempty))
+                pure (KnownResponseItem itemType (TaggedObject wireType))
 
 responseMessageDecoder :: Hermes.Decoder ResponseMessage
 responseMessageDecoder = Hermes.object $
@@ -577,7 +575,6 @@ responseMessageDecoder = Hermes.object $
         <*> optionalAtKey
             "internal_chat_message_metadata_passthrough"
             internalChatMetadataDecoder
-        <*> pure mempty
 
 functionCallDecoder :: Hermes.Decoder FunctionCall
 functionCallDecoder = Hermes.object $
@@ -589,7 +586,6 @@ functionCallDecoder = Hermes.object $
         <*> Hermes.atKey "arguments" Hermes.text
         <*> optionalAtKey "encrypted_function_args" (Hermes.list Hermes.text)
         <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure mempty
 
 functionCallOutputDecoder :: Hermes.Decoder FunctionCallOutput
 functionCallOutputDecoder = Hermes.object $
@@ -598,9 +594,8 @@ functionCallOutputDecoder = Hermes.object $
         <*> Hermes.atKey "call_id" Hermes.text
         <*> optionalAtKey "name" Hermes.text
         <*> optionalAtKey "namespace" Hermes.text
-        <*> Hermes.atKey "output" aesonValueDecoder
+        <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure mempty
 
 customToolCallDecoder :: Hermes.Decoder CustomToolCall
 customToolCallDecoder = Hermes.object $
@@ -611,7 +606,6 @@ customToolCallDecoder = Hermes.object $
         <*> optionalAtKey "namespace" Hermes.text
         <*> Hermes.atKey "input" Hermes.text
         <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure mempty
 
 customToolCallOutputDecoder :: Hermes.Decoder CustomToolCallOutput
 customToolCallOutputDecoder = Hermes.object $
@@ -619,16 +613,14 @@ customToolCallOutputDecoder = Hermes.object $
         <$> optionalAtKey "id" Hermes.text
         <*> Hermes.atKey "call_id" Hermes.text
         <*> optionalAtKey "name" Hermes.text
-        <*> Hermes.atKey "output" aesonValueDecoder
+        <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure mempty
 
 reasoningSummaryPartDecoder :: Hermes.Decoder ReasoningSummaryPart
 reasoningSummaryPartDecoder = Hermes.object $
     ReasoningSummaryPart
         <$> Hermes.atKey "type" Hermes.text
         <*> optionalAtKey "text" Hermes.text
-        <*> pure mempty
 
 reasoningItemDecoder :: Hermes.Decoder ReasoningItem
 reasoningItemDecoder = Hermes.object $
@@ -643,13 +635,11 @@ reasoningItemDecoder = Hermes.object $
             (Hermes.list responseContentPartDecoder)
         <*> optionalAtKey "encrypted_content" Hermes.text
         <*> optionalAtKey "status" itemStatusDecoder
-        <*> pure mempty
 
 itemReferenceDecoder :: Hermes.Decoder ItemReference
 itemReferenceDecoder = Hermes.object $
     ItemReference
         <$> Hermes.atKey "id" Hermes.text
-        <*> pure mempty
 
 responseAgentMessageDecoder :: Hermes.Decoder ResponseAgentMessage
 responseAgentMessageDecoder = Hermes.object $
@@ -663,7 +653,6 @@ responseAgentMessageDecoder = Hermes.object $
         <*> optionalAtKey
             "internal_chat_message_metadata_passthrough"
             internalChatMetadataDecoder
-        <*> pure mempty
 
 additionalToolsItemDecoder :: Hermes.Decoder AdditionalToolsItem
 additionalToolsItemDecoder = Hermes.object $
@@ -672,8 +661,7 @@ additionalToolsItemDecoder = Hermes.object $
         <*> (maybe "developer" id <$> optionalAtKey "role" Hermes.text)
         <*> (maybe [] id <$> optionalAtKey
             "tools"
-            (Hermes.list aesonValueDecoder))
-        <*> pure mempty
+            (Hermes.list rawJsonDecoder))
 
 localShellActionDecoder :: Hermes.Decoder LocalShellAction
 localShellActionDecoder =
@@ -686,12 +674,11 @@ localShellActionDecoder =
                     (Hermes.list Hermes.text))
                 <*> optionalAtKey "timeout_ms" integerDecoder
                 <*> optionalAtKey "working_directory" Hermes.text
-                <*> optionalAtKey "env" aesonObjectDecoder
+                <*> optionalAtKey "env" rawJsonDecoder
                 <*> optionalAtKey "user" Hermes.text
-                <*> pure mempty
             _ -> pure $
                 LocalShellActionOther
-                    (TaggedObject (maybe "" id wireType) mempty)
+                    (TaggedObject (maybe "" id wireType))
 
 localShellCallDecoder :: Hermes.Decoder LocalShellCall
 localShellCallDecoder = Hermes.object $
@@ -700,7 +687,6 @@ localShellCallDecoder = Hermes.object $
         <*> optionalAtKey "call_id" Hermes.text
         <*> optionalAtKey "status" itemStatusDecoder
         <*> optionalAtKey "action" localShellActionDecoder
-        <*> pure mempty
 
 toolSearchCallDecoder :: Hermes.Decoder ToolSearchCall
 toolSearchCallDecoder = Hermes.object $
@@ -709,8 +695,7 @@ toolSearchCallDecoder = Hermes.object $
         <*> optionalAtKey "call_id" Hermes.text
         <*> optionalAtKey "status" Hermes.text
         <*> optionalAtKey "execution" Hermes.text
-        <*> optionalAtKey "arguments" aesonValueDecoder
-        <*> pure mempty
+        <*> optionalAtKey "arguments" rawJsonDecoder
 
 toolSearchOutputDecoder :: Hermes.Decoder ToolSearchOutput
 toolSearchOutputDecoder = Hermes.object $
@@ -721,8 +706,7 @@ toolSearchOutputDecoder = Hermes.object $
         <*> optionalAtKey "execution" Hermes.text
         <*> (maybe [] id <$> optionalAtKey
             "tools"
-            (Hermes.list aesonValueDecoder))
-        <*> pure mempty
+            (Hermes.list rawJsonDecoder))
 
 webSearchActionDecoder :: Hermes.Decoder WebSearchAction
 webSearchActionDecoder =
@@ -732,17 +716,14 @@ webSearchActionDecoder =
             Just "search" -> WebSearchQuery
                 <$> optionalAtKey "query" Hermes.text
                 <*> optionalAtKey "queries" (Hermes.list Hermes.text)
-                <*> pure mempty
             Just "open_page" -> WebSearchOpenPage
                 <$> optionalAtKey "url" Hermes.text
-                <*> pure mempty
             Just "find_in_page" -> WebSearchFindInPage
                 <$> optionalAtKey "url" Hermes.text
                 <*> optionalAtKey "pattern" Hermes.text
-                <*> pure mempty
             _ -> pure $
                 WebSearchActionOther
-                    (TaggedObject (maybe "" id wireType) mempty)
+                    (TaggedObject (maybe "" id wireType))
 
 webSearchCallDecoder :: Hermes.Decoder WebSearchCall
 webSearchCallDecoder = Hermes.object $
@@ -750,7 +731,6 @@ webSearchCallDecoder = Hermes.object $
         <$> optionalAtKey "id" Hermes.text
         <*> optionalAtKey "status" Hermes.text
         <*> optionalAtKey "action" webSearchActionDecoder
-        <*> pure mempty
 
 imageGenerationCallDecoder :: Hermes.Decoder ImageGenerationCall
 imageGenerationCallDecoder = Hermes.object $
@@ -759,25 +739,22 @@ imageGenerationCallDecoder = Hermes.object $
         <*> optionalAtKey "status" Hermes.text
         <*> optionalAtKey "revised_prompt" Hermes.text
         <*> optionalAtKey "result" Hermes.text
-        <*> pure mempty
 
 compactionItemDecoder :: Hermes.Decoder CompactionItem
 compactionItemDecoder = Hermes.object $
     CompactionItem
         <$> optionalAtKey "id" Hermes.text
         <*> optionalAtKey "encrypted_content" Hermes.text
-        <*> pure mempty
 
 compactionTriggerItemDecoder :: Hermes.Decoder CompactionTriggerItem
 compactionTriggerItemDecoder =
-    CompactionTriggerItem mempty <$ Hermes.object (pure ())
+    CompactionTriggerItem <$ Hermes.object (pure ())
 
 contextCompactionItemDecoder :: Hermes.Decoder ContextCompactionItem
 contextCompactionItemDecoder = Hermes.object $
     ContextCompactionItem
         <$> optionalAtKey "id" Hermes.text
         <*> optionalAtKey "encrypted_content" Hermes.text
-        <*> pure mempty
 
 integerDecoder :: Hermes.Decoder Integer
 integerDecoder = do

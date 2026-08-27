@@ -2,6 +2,7 @@ module Agent.Responses.SSESpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
+import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.Types
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
@@ -193,21 +194,24 @@ genLifecycleEvent index = do
     status <-
         elements ["completed", "incomplete", "failed"]
             :: Gen Text
-    let response =
+    let responseValue =
             Aeson.object
                 [ "id" .= ("resp-" <> Text.pack (show index))
                 , "created_at" .= index
                 , "model" .= model
                 , "status" .= status
                 ]
+        response = either error id
+            (Codec.decodeResponse
+                (LBS.toStrict (Aeson.encode responseValue)))
     elements
-        [ ResponseCreatedEvent response (Just index) KeyMap.empty
-        , ResponseInProgressEvent response (Just index) KeyMap.empty
-        , ResponseCompletedEvent response (Just index) KeyMap.empty
-        , ResponseDoneEvent response (Just index) KeyMap.empty
-        , ResponseFailedEvent response (Just index) KeyMap.empty
-        , ResponseIncompleteEvent response (Just index) KeyMap.empty
-        , ResponseQueuedEvent response (Just index) KeyMap.empty
+        [ ResponseCreatedEvent response (Just index)
+        , ResponseInProgressEvent response (Just index)
+        , ResponseCompletedEvent response (Just index)
+        , ResponseDoneEvent response (Just index)
+        , ResponseFailedEvent response (Just index)
+        , ResponseIncompleteEvent response (Just index)
+        , ResponseQueuedEvent response (Just index)
         ]
 
 genOutputItemEvent :: Int -> Gen ResponseStreamEvent
@@ -222,20 +226,20 @@ genOutputItemEvent index = do
                             { text = body
                             , annotations = Nothing
                             , logprobs = Nothing
-                            , extraFields = KeyMap.empty
+
                             }
                         ]
                 , role = RoleAssistant
                 , status = Just ItemCompleted
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
+
                 }
     elements
         [ ResponseOutputItemAddedEvent
-            item (Just index) (Just index) KeyMap.empty
+            item (Just index) (Just index)
         , ResponseOutputItemDoneEvent
-            item (Just index) (Just index) KeyMap.empty
+            item (Just index) (Just index)
         ]
 
 genCustomToolDelta :: Int -> Gen ResponseStreamEvent
@@ -245,9 +249,9 @@ genCustomToolDelta index = do
         callId = Just ("call-" <> Text.pack (show index))
     elements
         [ ResponseCustomToolInputDeltaEvent
-            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+            (Just delta) itemId callId (Just index) (Just index)
         , ResponseCustomToolInputDoneEvent
-            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+            (Just delta) itemId callId (Just index) (Just index)
         ]
 
 genText :: Gen Text

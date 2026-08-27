@@ -13,6 +13,7 @@ module Agent.Responses.Types.Streaming
 
 import Agent.Responses.Types.Common
 import Agent.Responses.Types.Items (ResponseItem, responseItemDecoder)
+import Agent.Responses.Types.Response (Response, responseDecoder)
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -234,12 +235,12 @@ data ResponseStreamError = ResponseStreamError
     , message     :: !Text
     , param       :: !(Maybe Text)
     , retryAfter  :: !(Maybe Int)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseStreamError where
-    toJSON ResponseStreamError { errorType, code, message, param, retryAfter, extraFields } =
-        objectWith extraFields
+    toJSON ResponseStreamError { errorType, code, message, param, retryAfter } =
+        objectWith
             [ optionalField "type" errorType
             , optionalField "code" code
             , Just (field "message" message)
@@ -250,58 +251,58 @@ instance ToJSON ResponseStreamError where
 
 data ResponseStreamEvent
     = ResponseCreatedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseInProgressEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseCompletedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseDoneEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseFailedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseIncompleteEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseQueuedEvent
-        { responseValue     :: !Aeson.Value
+        { responseValue     :: !Response
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseOutputItemAddedEvent
         { item             :: !ResponseItem
         , outputIndex      :: !(Maybe Int)
         , sequenceNumber   :: !(Maybe Int)
-        , eventExtraFields :: !Aeson.Object
+
         }
     | ResponseOutputItemDoneEvent
         { item             :: !ResponseItem
         , outputIndex      :: !(Maybe Int)
         , sequenceNumber   :: !(Maybe Int)
-        , eventExtraFields :: !Aeson.Object
+
         }
     | ResponseFunctionCallArgumentsDeltaEvent
         { delta             :: !(Maybe Text)
         , streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseFunctionCallArgumentsDoneEvent
         { arguments         :: !(Maybe Text)
@@ -309,7 +310,7 @@ data ResponseStreamEvent
         , streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseCustomToolInputDeltaEvent
         { delta             :: !(Maybe Text)
@@ -317,7 +318,7 @@ data ResponseStreamEvent
         , streamCallId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseCustomToolInputDoneEvent
         { inputText         :: !(Maybe Text)
@@ -325,15 +326,15 @@ data ResponseStreamEvent
         , streamCallId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseReasoningSummaryPartAddedEvent
         { streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , summaryIndex      :: !(Maybe Int)
-        , partValue         :: !(Maybe Aeson.Value)
+        , partValue         :: !(Maybe RawJson)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseReasoningSummaryTextDoneEvent
         { streamItemId      :: !(Maybe Text)
@@ -341,22 +342,25 @@ data ResponseStreamEvent
         , summaryIndex      :: !(Maybe Int)
         , text              :: !(Maybe Text)
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseErrorEvent
         { streamError       :: !ResponseStreamError
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | ResponseNestedErrorEvent
         { streamError       :: !ResponseStreamError
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+
         }
     | OtherResponseStreamEvent
         { otherEventType    :: !StreamEventType
         , sequenceNumber    :: !(Maybe Int)
-        , eventExtraFields  :: !Aeson.Object
+        , eventDelta        :: !(Maybe Text)
+        , streamItemId      :: !(Maybe Text)
+        , streamOutputIndex :: !(Maybe Int)
+        , summaryIndex      :: !(Maybe Int)
         }
     deriving stock (Eq, Show)
 
@@ -388,85 +392,91 @@ responseStreamEventSequenceNumber event = event.sequenceNumber
 
 instance ToJSON ResponseStreamEvent where
     toJSON = \case
-        ResponseCreatedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.created" responseValue sequenceNumber eventExtraFields
-        ResponseInProgressEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.in_progress" responseValue sequenceNumber eventExtraFields
-        ResponseCompletedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.completed" responseValue sequenceNumber eventExtraFields
-        ResponseDoneEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            objectWith eventExtraFields
+        ResponseCreatedEvent { responseValue, sequenceNumber } ->
+            lifecycleEvent "response.created" responseValue sequenceNumber
+        ResponseInProgressEvent { responseValue, sequenceNumber } ->
+            lifecycleEvent "response.in_progress" responseValue sequenceNumber
+        ResponseCompletedEvent { responseValue, sequenceNumber } ->
+            lifecycleEvent "response.completed" responseValue sequenceNumber
+        ResponseDoneEvent { responseValue, sequenceNumber } ->
+            objectWith
                 [ Just (field "type" ("response.done" :: Text))
                 , optionalField "sequence_number" sequenceNumber
                 , Just (field "response" responseValue)
                 ]
-        ResponseFailedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.failed" responseValue sequenceNumber eventExtraFields
-        ResponseIncompleteEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.incomplete" responseValue sequenceNumber eventExtraFields
-        ResponseQueuedEvent { responseValue, sequenceNumber, eventExtraFields } ->
-            lifecycleEvent "response.queued" responseValue sequenceNumber eventExtraFields
-        ResponseOutputItemAddedEvent { item, outputIndex, sequenceNumber, eventExtraFields } ->
-            outputItemEvent "response.output_item.added" item outputIndex sequenceNumber eventExtraFields
-        ResponseOutputItemDoneEvent { item, outputIndex, sequenceNumber, eventExtraFields } ->
-            outputItemEvent "response.output_item.done" item outputIndex sequenceNumber eventExtraFields
-        ResponseFunctionCallArgumentsDeltaEvent { delta, streamItemId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
+        ResponseFailedEvent { responseValue, sequenceNumber } ->
+            lifecycleEvent "response.failed" responseValue sequenceNumber
+        ResponseIncompleteEvent { responseValue, sequenceNumber } ->
+            lifecycleEvent "response.incomplete" responseValue sequenceNumber
+        ResponseQueuedEvent { responseValue, sequenceNumber } ->
+            lifecycleEvent "response.queued" responseValue sequenceNumber
+        ResponseOutputItemAddedEvent { item, outputIndex, sequenceNumber } ->
+            outputItemEvent "response.output_item.added" item outputIndex sequenceNumber
+        ResponseOutputItemDoneEvent { item, outputIndex, sequenceNumber } ->
+            outputItemEvent "response.output_item.done" item outputIndex sequenceNumber
+        ResponseFunctionCallArgumentsDeltaEvent { delta, streamItemId, streamOutputIndex, sequenceNumber } ->
             indexedItemEvent "response.function_call_arguments.delta"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
+                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber
                 [optionalField "delta" delta]
-        ResponseFunctionCallArgumentsDoneEvent { arguments, functionName, streamItemId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
+        ResponseFunctionCallArgumentsDoneEvent { arguments, functionName, streamItemId, streamOutputIndex, sequenceNumber } ->
             indexedItemEvent "response.function_call_arguments.done"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
+                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber
                 [ optionalField "name" functionName
                 , optionalField "arguments" arguments
                 ]
-        ResponseCustomToolInputDeltaEvent { delta, streamItemId, streamCallId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
+        ResponseCustomToolInputDeltaEvent { delta, streamItemId, streamCallId, streamOutputIndex, sequenceNumber } ->
             indexedItemEvent "response.custom_tool_call_input.delta"
-                streamItemId streamCallId streamOutputIndex sequenceNumber eventExtraFields
+                streamItemId streamCallId streamOutputIndex sequenceNumber
                 [optionalField "delta" delta]
-        ResponseCustomToolInputDoneEvent { inputText, streamItemId, streamCallId, streamOutputIndex, sequenceNumber, eventExtraFields } ->
+        ResponseCustomToolInputDoneEvent { inputText, streamItemId, streamCallId, streamOutputIndex, sequenceNumber } ->
             indexedItemEvent "response.custom_tool_call_input.done"
-                streamItemId streamCallId streamOutputIndex sequenceNumber eventExtraFields
+                streamItemId streamCallId streamOutputIndex sequenceNumber
                 [optionalField "input" inputText]
-        ResponseReasoningSummaryPartAddedEvent { streamItemId, streamOutputIndex, summaryIndex, partValue, sequenceNumber, eventExtraFields } ->
+        ResponseReasoningSummaryPartAddedEvent { streamItemId, streamOutputIndex, summaryIndex, partValue, sequenceNumber } ->
             indexedItemEvent "response.reasoning_summary_part.added"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
+                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber
                 [ optionalField "summary_index" summaryIndex
                 , optionalField "part" partValue
                 ]
-        ResponseReasoningSummaryTextDoneEvent { streamItemId, streamOutputIndex, summaryIndex, text, sequenceNumber, eventExtraFields } ->
+        ResponseReasoningSummaryTextDoneEvent { streamItemId, streamOutputIndex, summaryIndex, text, sequenceNumber } ->
             indexedItemEvent "response.reasoning_summary_text.done"
-                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber eventExtraFields
+                streamItemId (Nothing :: Maybe Text) streamOutputIndex sequenceNumber
                 [ optionalField "summary_index" summaryIndex
                 , optionalField "text" text
                 ]
-        ResponseErrorEvent { streamError, sequenceNumber, eventExtraFields } ->
-            topLevelErrorEvent streamError sequenceNumber eventExtraFields
-        ResponseNestedErrorEvent { streamError, sequenceNumber, eventExtraFields } ->
-            objectWith eventExtraFields
+        ResponseErrorEvent { streamError, sequenceNumber } ->
+            topLevelErrorEvent streamError sequenceNumber
+        ResponseNestedErrorEvent { streamError, sequenceNumber } ->
+            objectWith
                 [ Just (field "type" ("error" :: Text))
                 , optionalField "sequence_number" sequenceNumber
                 , Just (field "error" streamError)
                 ]
-        OtherResponseStreamEvent { otherEventType, sequenceNumber, eventExtraFields } ->
-            objectWith eventExtraFields
+        OtherResponseStreamEvent
+            { otherEventType, sequenceNumber, eventDelta, streamItemId
+            , streamOutputIndex, summaryIndex } ->
+            objectWith
                 [ Just (field "type" (streamEventTypeText otherEventType))
                 , optionalField "sequence_number" sequenceNumber
+                , optionalField "delta" eventDelta
+                , optionalField "item_id" streamItemId
+                , optionalField "output_index" streamOutputIndex
+                , optionalField "summary_index" summaryIndex
                 ]
       where
-        lifecycleEvent eventType response sequenceNumber extras = objectWith extras
+        lifecycleEvent eventType response sequenceNumber = objectWith
             [ Just (field "type" (eventType :: Text))
             , optionalField "sequence_number" sequenceNumber
             , Just (field "response" response)
             ]
-        outputItemEvent eventType item outputIndex sequenceNumber extras = objectWith extras
+        outputItemEvent eventType item outputIndex sequenceNumber = objectWith
             [ Just (field "type" (eventType :: Text))
             , optionalField "sequence_number" sequenceNumber
             , optionalField "output_index" outputIndex
             , Just (field "item" item)
             ]
-        indexedItemEvent eventType itemId callId outputIndex sequenceNumber extras payloadFields =
-            objectWith extras
+        indexedItemEvent eventType itemId callId outputIndex sequenceNumber payloadFields =
+            objectWith
                 ( [ Just (field "type" (eventType :: Text))
                   , optionalField "sequence_number" sequenceNumber
                   , optionalField "item_id" itemId
@@ -475,8 +485,8 @@ instance ToJSON ResponseStreamEvent where
                   ]
                     <> payloadFields
                 )
-        topLevelErrorEvent streamError sequenceNumber extras =
-            objectWith (KeyMap.union extras streamError.extraFields)
+        topLevelErrorEvent streamError sequenceNumber =
+            objectWith
                 [ Just (field "type" ("error" :: Text))
                 , optionalField "sequence_number" sequenceNumber
                 , optionalField "code" streamError.code
@@ -542,7 +552,6 @@ eventDecoder wireType = Hermes.object do
                 <*> optionalAtKey "item_id" Hermes.text
                 <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure mempty
         EventFunctionCallArgumentsDone ->
             ResponseFunctionCallArgumentsDoneEvent
                 <$> optionalAtKey "arguments" Hermes.text
@@ -550,7 +559,6 @@ eventDecoder wireType = Hermes.object do
                 <*> optionalAtKey "item_id" Hermes.text
                 <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure mempty
         EventCustomToolInputDelta ->
             ResponseCustomToolInputDeltaEvent
                 <$> optionalAtKey "delta" Hermes.text
@@ -558,7 +566,6 @@ eventDecoder wireType = Hermes.object do
                 <*> optionalAtKey "call_id" Hermes.text
                 <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure mempty
         EventCustomToolInputDone ->
             ResponseCustomToolInputDoneEvent
                 <$> optionalAtKey "input" Hermes.text
@@ -566,15 +573,13 @@ eventDecoder wireType = Hermes.object do
                 <*> optionalAtKey "call_id" Hermes.text
                 <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure mempty
         EventReasoningSummaryPartAdded ->
             ResponseReasoningSummaryPartAddedEvent
                 <$> optionalAtKey "item_id" Hermes.text
                 <*> optionalAtKey "output_index" Hermes.int
                 <*> optionalAtKey "summary_index" Hermes.int
-                <*> optionalAtKey "part" aesonValueDecoder
+                <*> optionalAtKey "part" rawJsonDecoder
                 <*> pure sequenceNumber
-                <*> pure mempty
         EventReasoningSummaryTextDone ->
             ResponseReasoningSummaryTextDoneEvent
                 <$> optionalAtKey "item_id" Hermes.text
@@ -582,14 +587,13 @@ eventDecoder wireType = Hermes.object do
                 <*> optionalAtKey "summary_index" Hermes.int
                 <*> optionalAtKey "text" Hermes.text
                 <*> pure sequenceNumber
-                <*> pure mempty
         EventError -> do
             nested <- optionalAtKey "error" responseStreamErrorDecoder
             case nested of
                 Just streamError -> pure ResponseNestedErrorEvent
                     { streamError
                     , sequenceNumber
-                    , eventExtraFields = mempty
+
                     }
                 Nothing -> do
                     streamError <- ResponseStreamError
@@ -599,29 +603,28 @@ eventDecoder wireType = Hermes.object do
                             <$> optionalAtKey "message" Hermes.text)
                         <*> optionalAtKey "param" Hermes.text
                         <*> optionalAtKey "resets_in_seconds" Hermes.int
-                        <*> pure mempty
                     pure ResponseErrorEvent
                         { streamError
                         , sequenceNumber
-                        , eventExtraFields = mempty
+
                         }
-        eventType -> pure OtherResponseStreamEvent
-            { otherEventType = eventType
-            , sequenceNumber
-            , eventExtraFields = mempty
-            }
+        eventType -> OtherResponseStreamEvent
+            <$> pure eventType
+            <*> pure sequenceNumber
+            <*> optionalAtKey "delta" Hermes.text
+            <*> optionalAtKey "item_id" Hermes.text
+            <*> optionalAtKey "output_index" Hermes.int
+            <*> optionalAtKey "summary_index" Hermes.int
   where
     lifecycle constructor sequenceNumber =
         constructor
-            <$> Hermes.atKey "response" aesonValueDecoder
+            <$> Hermes.atKey "response" responseDecoder
             <*> pure sequenceNumber
-            <*> pure mempty
     outputItem constructor sequenceNumber =
         constructor
             <$> Hermes.atKey "item" responseItemDecoder
             <*> optionalAtKey "output_index" Hermes.int
             <*> pure sequenceNumber
-            <*> pure mempty
 
 responseStreamErrorDecoder :: Hermes.Decoder ResponseStreamError
 responseStreamErrorDecoder = Hermes.object $
@@ -631,7 +634,6 @@ responseStreamErrorDecoder = Hermes.object $
         <*> (maybe "" id <$> optionalAtKey "message" Hermes.text)
         <*> optionalAtKey "param" Hermes.text
         <*> optionalAtKey "resets_in_seconds" Hermes.int
-        <*> pure mempty
 
 decoderForType :: Text -> Hermes.Decoder ResponseStreamEvent
 decoderForType wireType =
@@ -655,12 +657,11 @@ decoderForType wireType =
         eventType -> otherEventDecoder eventType
 
 otherEventDecoder :: StreamEventType -> Hermes.Decoder ResponseStreamEvent
-otherEventDecoder eventType = do
-    fields <- aesonObjectDecoder
-    pure OtherResponseStreamEvent
-        { otherEventType = eventType
-        , sequenceNumber = case KeyMap.lookup "sequence_number" fields of
-            Just (Aeson.Number value) -> toBoundedInteger value
-            _ -> Nothing
-        , eventExtraFields = KeyMap.delete "type" fields
-        }
+otherEventDecoder eventType = Hermes.object $
+    OtherResponseStreamEvent
+        <$> pure eventType
+        <*> optionalAtKey "sequence_number" Hermes.int
+        <*> optionalAtKey "delta" Hermes.text
+        <*> optionalAtKey "item_id" Hermes.text
+        <*> optionalAtKey "output_index" Hermes.int
+        <*> optionalAtKey "summary_index" Hermes.int

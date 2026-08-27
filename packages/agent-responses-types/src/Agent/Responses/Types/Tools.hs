@@ -81,15 +81,15 @@ parseResponseToolType value = case value of
 data FunctionTool = FunctionTool
     { name        :: !Text
     , description :: !(Maybe Text)
-    , parameters  :: !(Maybe Aeson.Value)
+    , parameters  :: !(Maybe RawJson)
     , strict      :: !(Maybe Bool)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionTool where
     toJSON FunctionTool
-        { name, description, parameters, strict, extraFields } =
-            objectWith extraFields
+        { name, description, parameters, strict } =
+            objectWith
                 [ Just (field "type" ("function" :: Text))
                 , Just (field "name" name)
                 , optionalField "description" description
@@ -106,17 +106,14 @@ data ResponseTool
 
 -- | Hosted or built-in Responses tool whose wire @type@ comes from
 -- 'ResponseToolType', not a caller-supplied tag string.
-knownResponseTool :: ResponseToolType -> Aeson.Object -> ResponseTool
-knownResponseTool toolType fields =
-    KnownResponseTool toolType TaggedObject
-        { tag = responseToolTypeText toolType
-        , fields
-        }
+knownResponseTool :: ResponseToolType -> ResponseTool
+knownResponseTool toolType =
+    KnownResponseTool toolType (TaggedObject (responseToolTypeText toolType))
 
 instance ToJSON ResponseTool where
     toJSON (FunctionToolValue value) = toJSON value
-    toJSON (KnownResponseTool toolType TaggedObject { fields }) =
-        objectWith fields [Just (field "type" (responseToolTypeText toolType))]
+    toJSON (KnownResponseTool toolType _) =
+        objectWith [Just (field "type" (responseToolTypeText toolType))]
     toJSON (UnknownResponseTool value) = toJSON value
 
 
@@ -128,18 +125,17 @@ responseToolDecoder =
             case parseResponseToolType wireType of
                 ToolFunction -> FunctionToolValue <$> functionToolDecoder
                 ToolUnknownType{} ->
-                    pure (UnknownResponseTool (TaggedObject wireType mempty))
+                    pure (UnknownResponseTool (TaggedObject wireType))
                 toolType ->
                     pure
                         (KnownResponseTool
                             toolType
-                            (TaggedObject wireType mempty))
+                            (TaggedObject wireType))
 
 functionToolDecoder :: Hermes.Decoder FunctionTool
 functionToolDecoder = Hermes.object $
     FunctionTool
         <$> Hermes.atKey "name" Hermes.text
         <*> optionalAtKey "description" Hermes.text
-        <*> optionalAtKey "parameters" aesonValueDecoder
+        <*> optionalAtKey "parameters" rawJsonDecoder
         <*> optionalAtKey "strict" Hermes.bool
-        <*> pure mempty

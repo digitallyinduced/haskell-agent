@@ -15,8 +15,8 @@ mkDerivation {
     vector
   ];
   testHaskellDepends = [
-    aeson agent-core agent-responses-types base bytestring containers
-    hspec QuickCheck retry text
+    aeson agent-core agent-json agent-responses-types base bytestring
+    containers hspec QuickCheck retry text
   ];
   benchmarkHaskellDepends = [
     aeson agent-responses-types base bytestring text
