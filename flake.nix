@@ -76,6 +76,7 @@
                     root = ./packages/agent-responses-types;
                     include = [
                         "src"
+                        "test"
                         "agent-responses-types.cabal"
                         "LICENSE"
                         "README.md"
