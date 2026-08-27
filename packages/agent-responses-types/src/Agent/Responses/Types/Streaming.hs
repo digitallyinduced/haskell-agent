@@ -236,6 +236,25 @@ data ResponseStreamError = ResponseStreamError
 
     } deriving stock (Eq, Show)
 
+instance ToJSON CodexRateLimits where
+    toJSON CodexRateLimits
+            { allowed, limitReached
+            , primaryUsedPercent, secondaryUsedPercent } =
+        objectWith
+            [ optionalField "allowed" allowed
+            , optionalField "limit_reached" limitReached
+            , fmap
+                (field "primary" . rateLimitWindow)
+                primaryUsedPercent
+            , fmap
+                (field "secondary" . rateLimitWindow)
+                secondaryUsedPercent
+            ]
+      where
+        rateLimitWindow usedPercent =
+            objectWith
+                [Just (field "used_percent" usedPercent)]
+
 data CodexRateLimits = CodexRateLimits
     { allowed              :: !(Maybe Bool)
     , limitReached         :: !(Maybe Bool)
@@ -463,10 +482,11 @@ instance ToJSON ResponseStreamEvent where
                 , optionalField "sequence_number" sequenceNumber
                 , Just (field "error" streamError)
                 ]
-        ResponseCodexRateLimitsEvent { sequenceNumber } ->
+        ResponseCodexRateLimitsEvent { rateLimits, sequenceNumber } ->
             objectWith
                 [ Just (field "type" ("codex.rate_limits" :: Text))
                 , optionalField "sequence_number" sequenceNumber
+                , Just (field "rate_limits" rateLimits)
                 ]
         OtherResponseStreamEvent
             { otherEventType, sequenceNumber, eventDelta, streamItemId

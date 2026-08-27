@@ -11,14 +11,11 @@ import Agent.OpenAI.WebSocketClient (CodexConn, sendWsRequestWithRawEvents, with
 
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import Data.IORef
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import System.Environment (lookupEnv)
 
@@ -79,7 +76,7 @@ runWebSearchTurn conn model = do
     Text.toLower (fromMaybe "" (extractAssistantText response))
         `shouldSatisfy` Text.isInfixOf "openai.com"
   where
-    isWebSearchCall (OpenAI.KnownResponseItem OpenAI.ItemWebSearchCall _) = True
+    isWebSearchCall OpenAI.WebSearchCallItem{} = True
     isWebSearchCall _ = False
 
 runCodexTurn ::
@@ -124,7 +121,8 @@ helloRequest model prompt =
     OpenAI.defaultResponseCreateParams
         { OpenAI.model = Just model
         , OpenAI.instructions = Just "You are a functional test responder. Do not use tools. Return only the exact requested text."
-        , OpenAI.input = Just (OpenAI.ResponseInputText prompt)
+        , OpenAI.input = Just
+            (OpenAI.ResponseInputItems [userMessage prompt])
         , OpenAI.tools = Just []
         , OpenAI.reasoning = Just (reasoning "low")
         , OpenAI.include = Just []
@@ -137,7 +135,8 @@ functionToolRequest model =
     OpenAI.defaultResponseCreateParams
         { OpenAI.model = Just model
         , OpenAI.instructions = Just "You are a functional test responder. You must call echo_text exactly once with text='codex functional tool ok'. Do not answer directly before the tool result."
-        , OpenAI.input = Just (OpenAI.ResponseInputText "Call echo_text now.")
+        , OpenAI.input = Just (OpenAI.ResponseInputItems
+            [userMessage "Call echo_text now."])
         , OpenAI.tools = Just [echoTextTool]
         , OpenAI.reasoning = Just (reasoning "low")
         , OpenAI.include = Just []
@@ -172,6 +171,7 @@ echoTextTool =
                     ]
                 ]
             , "required" Aeson..= (["text"] :: [Text])
+            , "additionalProperties" Aeson..= False
             ])))
         , OpenAI.strict = Just True
         }
@@ -181,7 +181,9 @@ webSearchRequest model =
     OpenAI.defaultResponseCreateParams
         { OpenAI.model = Just model
         , OpenAI.instructions = Just "You are a functional test responder. You must use the web_search tool before answering. Answer exactly with the official domain openai.com."
-        , OpenAI.input = Just (OpenAI.ResponseInputText "Use web search to confirm the official OpenAI website domain, then answer exactly with the domain.")
+        , OpenAI.input = Just (OpenAI.ResponseInputItems
+            [userMessage
+                "Use web search to confirm the official OpenAI website domain, then answer exactly with the domain."])
         , OpenAI.tools = Just
             [OpenAI.KnownResponseTool OpenAI.ToolWebSearch]
         , OpenAI.reasoning = Just (reasoning "low")
@@ -208,6 +210,17 @@ functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCall
         rawJsonFromEncoding (Aeson.toEncoding (Aeson.String output))
     , OpenAI.status = Nothing
     }
+
+userMessage :: Text -> OpenAI.ResponseItem
+userMessage content =
+    OpenAI.MessageItem OpenAI.ResponseMessage
+        { OpenAI.messageId = Nothing
+        , OpenAI.content = OpenAI.MessageContentText content
+        , OpenAI.role = OpenAI.RoleUser
+        , OpenAI.status = Nothing
+        , OpenAI.phase = Nothing
+        , OpenAI.passthrough = Nothing
+        }
 
 functionCallArgumentText :: Text -> Text -> Text
 functionCallArgumentText key arguments =
