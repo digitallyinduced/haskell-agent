@@ -21,6 +21,13 @@ personDecoder =
             <$> Json.atKey "name" Json.text
             <*> Json.atKey "age" Json.int
 
+optionalPersonDecoder :: Json.Decoder (Maybe Text, Int)
+optionalPersonDecoder =
+    Json.object $
+        (,)
+            <$> Json.optionalKey "nickname" Json.text
+            <*> Json.defaultKey 0 "score" Json.int
+
 main :: IO ()
 main = hspec do
     describe "Hermes JSON boundary" do
@@ -40,6 +47,13 @@ main = hspec do
                 `shouldBe` Right 42
             Json.decodeEither Json.bool "true"
                 `shouldBe` Right True
+
+        it "treats missing and null optional fields alike" do
+            Json.decodeEither optionalPersonDecoder "{}"
+                `shouldBe` Right (Nothing, 0)
+            Json.decodeEither optionalPersonDecoder
+                "{\"nickname\":null,\"score\":null}"
+                `shouldBe` Right (Nothing, 0)
 
         it "rejects malformed and trailing input" do
             Json.decodeEither personDecoder

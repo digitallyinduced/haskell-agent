@@ -12,9 +12,15 @@ module Agent.Json.Decode
     , withDecoderSession
     , decodeIO
     , decodeTextIO
+    , optionalKey
+    , defaultKey
+    , discriminatedObject
+    , validateRawJson
     ) where
 
+import Agent.Json (RawJson, rawJsonDecoder)
 import Control.Exception.Safe (tryAny)
+import Control.Monad (join)
 import qualified Data.ByteString as BS
 import Data.Hermes as Hermes hiding (decodeEither)
 import qualified Data.Hermes as Hermes
@@ -66,6 +72,39 @@ decodeTextIO
     -> IO (Either JsonError a)
 decodeTextIO session decoder =
     decodeIO session decoder . Text.encodeUtf8
+
+-- | Decode an object field where both a missing key and an explicit null mean
+-- 'Nothing'.
+optionalKey
+    :: Text
+    -> Hermes.Decoder a
+    -> Hermes.FieldsDecoder (Maybe a)
+optionalKey key decoder =
+    join <$> Hermes.atKeyOptional key (Hermes.nullable decoder)
+
+-- | Decode an object field with the same default for missing and null.
+defaultKey
+    :: a
+    -> Text
+    -> Hermes.Decoder a
+    -> Hermes.FieldsDecoder a
+defaultKey fallback key decoder =
+    maybe fallback id <$> optionalKey key decoder
+
+-- | Select and decode an object shape by a textual discriminator without
+-- materialising a generic object.
+discriminatedObject
+    :: Text
+    -> (Text -> Hermes.Decoder a)
+    -> Hermes.Decoder a
+discriminatedObject discriminator select =
+    Hermes.object do
+        tag <- Hermes.atKey discriminator Hermes.text
+        Hermes.liftObjectDecoder (select tag)
+
+validateRawJson :: BS.ByteString -> Either JsonError RawJson
+validateRawJson =
+    decodeEither rawJsonDecoder
 
 firstJsonError :: Show error => Either error a -> Either JsonError a
 firstJsonError =
