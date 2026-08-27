@@ -12,6 +12,7 @@ module Agent.Json.Decoder.Backend
     , matchPlannedField
     , capturePlannedExtension
     , markPlannedFieldPresent
+    , deletePlannedExtension
     , finishObjectPlan
     , objectPlanRequiresRawCapture
     , objectPlanCapturesExtensions
@@ -20,6 +21,7 @@ module Agent.Json.Decoder.Backend
 
 import Agent.Json
     ( Extensions
+    , deleteExtension
     , insertExtension
     , markExtensionFieldPresent
     )
@@ -53,6 +55,9 @@ data Decoder a where
         :: (a -> Either Text b)
         -> Decoder a
         -> Decoder b
+    WithRawDecoder
+        :: Decoder a
+        -> Decoder (a, RawJson)
 
 -- | Backend-only constructor for bytes fully validated by a JSON parser.
 --
@@ -149,6 +154,20 @@ markPlannedFieldPresent key = \case
             (markPlannedFieldPresent key functions)
             (markPlannedFieldPresent key argument)
 
+deletePlannedExtension
+    :: Text
+    -> ObjectPlan result
+    -> ObjectPlan result
+deletePlannedExtension key = \case
+    PlanPure result -> PlanPure result
+    PlanExtensions fields ->
+        PlanExtensions (deleteExtension key fields)
+    PlanField field -> PlanField field
+    PlanApply functions argument ->
+        PlanApply
+            (deletePlannedExtension key functions)
+            (deletePlannedExtension key argument)
+
 finishObjectPlan :: ObjectPlan a -> Either Text a
 finishObjectPlan = \case
     PlanPure value -> Right value
@@ -188,6 +207,7 @@ objectPlanRequiresRawCapture = \case
         RawJsonDecoder -> True
         SkipDecoder -> False
         MapDecoder _ decoder -> decoderRequiresRaw decoder
+        WithRawDecoder{} -> True
     namedRequiresRaw (NamedField _ decoder _) = decoderRequiresRaw decoder
     unknownRequiresRaw (UnknownField decoder _) = decoderRequiresRaw decoder
 

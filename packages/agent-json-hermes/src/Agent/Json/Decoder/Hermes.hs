@@ -92,7 +92,7 @@ toHermes = \case
                                     (unsafeRawJsonFromValidatedBytes
                                         "null")
                                     rebuilt
-                                else rebuilt
+                                else deletePlannedExtension key rebuilt
                 Nothing
                     | objectPlanCapturesExtensions current ->
                         (\raw ->
@@ -120,6 +120,19 @@ toHermes = \case
     MapDecoder transform inner -> do
         value <- toHermes inner
         either (fail . Text.unpack) pure (transform value)
+    WithRawDecoder inner ->
+        Hermes.withRawJsonByteString \bytes ->
+            case DecoderAPI.decode inner (BS.copy bytes) of
+                Left err ->
+                    fail
+                        (Text.unpack
+                            (DecoderAPI.renderDecodeError err))
+                Right value ->
+                    pure
+                        ( value
+                        , unsafeRawJsonFromValidatedBytes
+                            (BS.copy bytes)
+                        )
 
 hermesObjectField
     :: Text.Text

@@ -256,6 +256,18 @@ main = hspec do
                     decoded.plannedExtensions
                 `shouldBe` Just "null"
 
+        it "removes a prior null when a duplicate value follows" do
+            decoded <- expectRight $
+                Decoder.decode plannedDecoder
+                    ( "{\"name\":\"Ada\",\"enabled\":null,"
+                        <> "\"enabled\":true}"
+                    )
+            decoded.plannedEnabled `shouldBe` Just True
+            lookupExtension
+                "enabled"
+                decoded.plannedExtensions
+                `shouldBe` Nothing
+
         it "selects tagged object codecs without a generic object" do
             Decoder.decode taggedDecoder
                 "{\"value\":\"first\",\"type\":\"text\"}"
