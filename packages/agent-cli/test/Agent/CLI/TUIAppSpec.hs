@@ -286,6 +286,13 @@ spec = do
             after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
 
     describe "fullscreenVtyConfig" do
+        it "maps the Kitty-encoded Esc key so its payload cannot leak" do
+            let mappings = V.configInputMap fullscreenVtyConfig
+            mapM_
+                (\body -> mappings `shouldContain`
+                    [(Nothing, "\ESC[" <> body, V.EvKey V.KEsc [])])
+                ["27u", "27;1u", "27;1:1u", "27;2u", "27;5:1u"]
+
         it "maps enhanced-keyboard sequences before Vty decodes them" do
             let mappings = V.configInputMap fullscreenVtyConfig
             mappings `shouldContain`
