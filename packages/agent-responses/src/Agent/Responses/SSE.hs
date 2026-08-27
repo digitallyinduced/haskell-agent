@@ -11,7 +11,6 @@ module Agent.Responses.SSE
 import Agent.Error (ApiError(..))
 import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.Types (ResponseStreamEvent)
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.Maybe as Maybe
@@ -179,24 +178,19 @@ isDonePayload bytes =
 -- hard errors because there is no safe way to recover their boundaries.
 decodeEvent :: Maybe Text -> BS.ByteString -> Either ApiError (Maybe ResponseStreamEvent)
 decodeEvent eventType dataBytes =
-    case Aeson.eitherDecodeStrict' dataBytes of
+    case decoded of
+        -- An invalid/partial event payload is skippable. Unknown event types
+        -- still decode to OtherResponseStreamEvent and are preserved.
         Left _ -> Right Nothing
-        Right value ->
-            let decoded = case eventType of
-                    Just suppliedType ->
-                        ResponsesCodec.decodeResponseStreamEventWithType
-                            suppliedType
-                            value
-                    Nothing ->
-                        case ResponsesCodec.decodeResponseStreamEventValue value of
-                            Aeson.Success event -> Right event
-                            Aeson.Error err -> Left err
-            in case decoded of
-                -- A valid JSON object with an invalid/partial event payload
-                -- is also skippable. Unknown event types still decode to
-                -- OtherResponseStreamEvent and are therefore preserved.
-                Left _ -> Right Nothing
-                Right event -> Right (Just event)
+        Right event -> Right (Just event)
+  where
+    decoded = case eventType of
+        Just suppliedType ->
+            ResponsesCodec.decodeResponseStreamEventWithType
+                suppliedType
+                dataBytes
+        Nothing ->
+            ResponsesCodec.decodeResponseStreamEvent dataBytes
 
 dropTrailingCarriageReturn :: BS.ByteString -> BS.ByteString
 dropTrailingCarriageReturn bytes = case BS.unsnoc bytes of

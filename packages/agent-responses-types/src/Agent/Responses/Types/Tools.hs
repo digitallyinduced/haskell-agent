@@ -5,11 +5,13 @@ module Agent.Responses.Types.Tools
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , responseToolDecoder
     ) where
 
 import Agent.Responses.Types.Common
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
+import qualified Data.Hermes as Hermes
 import Data.Text (Text)
 
 data ResponseToolType
@@ -95,15 +97,6 @@ instance ToJSON FunctionTool where
                 , optionalField "strict" strict
                 ]
 
-instance FromJSON FunctionTool where
-    parseJSON = withObject "FunctionTool" $ \o -> FunctionTool
-        <$> o .: "name"
-        <*> o .:? "description"
-        <*> o .:? "parameters"
-        <*> o .:? "strict"
-        <*> pure
-            (without
-                ["type", "name", "description", "parameters", "strict"] o)
 
 data ResponseTool
     = FunctionToolValue !FunctionTool
@@ -126,10 +119,27 @@ instance ToJSON ResponseTool where
         objectWith fields [Just (field "type" (responseToolTypeText toolType))]
     toJSON (UnknownResponseTool value) = toJSON value
 
-instance FromJSON ResponseTool where
-    parseJSON value = withObject "ResponseTool" (\o -> do
-        tag <- o .: "type"
-        case parseResponseToolType tag of
-            ToolFunction -> FunctionToolValue <$> parseJSON value
-            ToolUnknownType{} -> UnknownResponseTool <$> parseJSON value
-            toolType -> KnownResponseTool toolType <$> parseJSON value) value
+
+responseToolDecoder :: Hermes.Decoder ResponseTool
+responseToolDecoder =
+    Hermes.object do
+        wireType <- Hermes.atKey "type" Hermes.text
+        Hermes.liftObjectDecoder $
+            case parseResponseToolType wireType of
+                ToolFunction -> FunctionToolValue <$> functionToolDecoder
+                ToolUnknownType{} ->
+                    pure (UnknownResponseTool (TaggedObject wireType mempty))
+                toolType ->
+                    pure
+                        (KnownResponseTool
+                            toolType
+                            (TaggedObject wireType mempty))
+
+functionToolDecoder :: Hermes.Decoder FunctionTool
+functionToolDecoder = Hermes.object $
+    FunctionTool
+        <$> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "description" Hermes.text
+        <*> optionalAtKey "parameters" aesonValueDecoder
+        <*> optionalAtKey "strict" Hermes.bool
+        <*> pure mempty

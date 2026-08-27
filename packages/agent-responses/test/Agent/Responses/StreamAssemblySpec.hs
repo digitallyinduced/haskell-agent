@@ -619,10 +619,7 @@ toResponseItem fragment =
         , arguments = fragment.fragmentArguments
         , encryptedFunctionArgs = Nothing
         , status = fragment.fragmentStatus
-        , extraFields =
-            KeyMap.singleton
-                "model_test_marker"
-                (Aeson.String fragment.fragmentMarker)
+        , extraFields = KeyMap.empty
         }
 
 applyExpected :: StreamModel -> IndexedOperation -> StreamModel

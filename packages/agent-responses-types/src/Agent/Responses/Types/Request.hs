@@ -1,6 +1,7 @@
 -- | Parameters and primitives for creating a response.
 module Agent.Responses.Types.Request
     ( ResponseCreateParams(..)
+    , responseCreateParamsDecoder
     , defaultResponseCreateParams
     , ResponseInclude(..)
     , ContextManagement(..)
@@ -13,15 +14,22 @@ module Agent.Responses.Types.Request
     , StreamOptions(..)
     , ToolChoice(..)
     , ToolChoiceMode(..)
+    , conversationDecoder
+    , promptDecoder
+    , promptCacheOptionsDecoder
+    , reasoningConfigDecoder
+    , responseTextConfigDecoder
+    , toolChoiceDecoder
     ) where
 
 import Agent.Responses.Types.Common
-import Agent.Responses.Types.Items (ResponseInput)
-import Agent.Responses.Types.Tools (ResponseTool)
+import Agent.Responses.Types.Items (ResponseInput, responseInputDecoder)
+import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
 import Control.Applicative ((<|>))
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Hermes as Hermes
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 
@@ -32,8 +40,6 @@ instance ToJSON ResponseInclude where
     toJSON ResponseInclude { unResponseInclude } =
         Aeson.String unResponseInclude
 
-instance FromJSON ResponseInclude where
-    parseJSON = withText "ResponseInclude" (pure . ResponseInclude)
 
 data ContextManagement = ContextManagement
     { contextType      :: !Text
@@ -49,11 +55,6 @@ instance ToJSON ContextManagement where
                 , optionalField "compact_threshold" compactThreshold
                 ]
 
-instance FromJSON ContextManagement where
-    parseJSON = withObject "ContextManagement" $ \o -> ContextManagement
-        <$> o .: "type"
-        <*> o .:? "compact_threshold"
-        <*> pure (without ["type", "compact_threshold"] o)
 
 data Conversation
     = ConversationId !Text
@@ -68,11 +69,6 @@ instance ToJSON Conversation where
     toJSON ConversationObject { conversationId, extraFields } =
         objectWith extraFields [Just (field "id" conversationId)]
 
-instance FromJSON Conversation where
-    parseJSON (Aeson.String value) = pure (ConversationId value)
-    parseJSON value = withObject "Conversation" (\o -> ConversationObject
-        <$> o .: "id"
-        <*> pure (without ["id"] o)) value
 
 data Prompt = Prompt
     { promptId        :: !Text
@@ -90,12 +86,6 @@ instance ToJSON Prompt where
                 , optionalField "version" promptVersion
                 ]
 
-instance FromJSON Prompt where
-    parseJSON = withObject "Prompt" $ \o -> Prompt
-        <$> o .: "id"
-        <*> o .:? "variables"
-        <*> o .:? "version"
-        <*> pure (without ["id", "variables", "version"] o)
 
 data PromptCacheOptions = PromptCacheOptions
     { mode        :: !(Maybe Text)
@@ -108,11 +98,6 @@ instance ToJSON PromptCacheOptions where
         objectWith extraFields
             [optionalField "mode" mode, optionalField "ttl" ttl]
 
-instance FromJSON PromptCacheOptions where
-    parseJSON = withObject "PromptCacheOptions" $ \o -> PromptCacheOptions
-        <$> o .:? "mode"
-        <*> o .:? "ttl"
-        <*> pure (without ["mode", "ttl"] o)
 
 data ReasoningConfig = ReasoningConfig
     { context         :: !(Maybe Text)
@@ -135,16 +120,6 @@ instance ToJSON ReasoningConfig where
                 , optionalField "summary" summary
                 ]
 
-instance FromJSON ReasoningConfig where
-    parseJSON = withObject "ReasoningConfig" $ \o -> ReasoningConfig
-        <$> o .:? "context"
-        <*> o .:? "effort"
-        <*> o .:? "generate_summary"
-        <*> o .:? "mode"
-        <*> o .:? "summary"
-        <*> pure
-            (without
-                ["context", "effort", "generate_summary", "mode", "summary"] o)
 
 data ResponseFormat
     = ResponseFormatText
@@ -178,23 +153,6 @@ instance ToJSON ResponseFormat where
                 ]
     toJSON (ResponseFormatUnknown tagged) = toJSON tagged
 
-instance FromJSON ResponseFormat where
-    parseJSON value = withObject "ResponseFormat" (\o -> do
-        tag <- o .: "type"
-        case (tag :: Text) of
-            "text" -> pure ResponseFormatText
-                { extraFields = without ["type"] o }
-            "json_object" -> pure ResponseFormatJsonObject
-                { extraFields = without ["type"] o }
-            "json_schema" -> ResponseFormatJsonSchema
-                <$> o .: "name"
-                <*> o .:? "description"
-                <*> o .: "schema"
-                <*> o .:? "strict"
-                <*> pure
-                    (without
-                        ["type", "name", "description", "schema", "strict"] o)
-            _ -> ResponseFormatUnknown <$> parseJSON value) value
 
 data ResponseTextConfig = ResponseTextConfig
     { format      :: !(Maybe ResponseFormat)
@@ -209,11 +167,6 @@ instance ToJSON ResponseTextConfig where
             , optionalField "verbosity" verbosity
             ]
 
-instance FromJSON ResponseTextConfig where
-    parseJSON = withObject "ResponseTextConfig" $ \o -> ResponseTextConfig
-        <$> (o .:? "format" <|> o .:? "format_")
-        <*> o .:? "verbosity"
-        <*> pure (without ["format", "format_", "verbosity"] o)
 
 data StreamOptions = StreamOptions
     { includeObfuscation :: !(Maybe Bool)
@@ -225,10 +178,6 @@ instance ToJSON StreamOptions where
         objectWith extraFields
             [optionalField "include_obfuscation" includeObfuscation]
 
-instance FromJSON StreamOptions where
-    parseJSON = withObject "StreamOptions" $ \o -> StreamOptions
-        <$> o .:? "include_obfuscation"
-        <*> pure (without ["include_obfuscation"] o)
 
 data ToolChoiceMode
     = ToolChoiceNone
@@ -261,10 +210,6 @@ instance ToJSON ToolChoice where
         Aeson.String (toolChoiceModeText choice)
     toJSON (ToolChoiceObject tagged) = toJSON tagged
 
-instance FromJSON ToolChoice where
-    parseJSON (Aeson.String value) =
-        pure (ToolChoiceMode (parseToolChoiceMode value))
-    parseJSON value = ToolChoiceObject <$> parseJSON value
 
 data ResponseCreateParams = ResponseCreateParams
     { background           :: !(Maybe Bool)
@@ -337,17 +282,6 @@ defaultResponseCreateParams = ResponseCreateParams
     , extraFields = KeyMap.empty
     }
 
-responseCreateFieldNames :: [Text]
-responseCreateFieldNames =
-    [ "background", "context_management", "conversation", "include", "input"
-    , "instructions", "max_output_tokens", "max_tool_calls", "metadata", "model"
-    , "moderation", "parallel_tool_calls", "previous_response_id", "prompt"
-    , "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention"
-    , "reasoning", "safety_identifier", "service_tier", "store", "stream"
-    , "stream_options", "temperature", "text", "tool_choice", "tools"
-    , "top_logprobs", "top_p", "truncation", "user"
-    ]
-
 instance ToJSON ResponseCreateParams where
     toJSON ResponseCreateParams
         { background, contextManagement, conversation, include, input
@@ -391,37 +325,128 @@ instance ToJSON ResponseCreateParams where
                 , optionalField "user" user
                 ]
 
-instance FromJSON ResponseCreateParams where
-    parseJSON = withObject "ResponseCreateParams" $ \o -> ResponseCreateParams
-        <$> o .:? "background"
-        <*> o .:? "context_management"
-        <*> o .:? "conversation"
-        <*> o .:? "include"
-        <*> o .:? "input"
-        <*> o .:? "instructions"
-        <*> o .:? "max_output_tokens"
-        <*> o .:? "max_tool_calls"
-        <*> o .:? "metadata"
-        <*> o .:? "model"
-        <*> o .:? "moderation"
-        <*> o .:? "parallel_tool_calls"
-        <*> o .:? "previous_response_id"
-        <*> o .:? "prompt"
-        <*> o .:? "prompt_cache_key"
-        <*> o .:? "prompt_cache_options"
-        <*> o .:? "prompt_cache_retention"
-        <*> o .:? "reasoning"
-        <*> o .:? "safety_identifier"
-        <*> o .:? "service_tier"
-        <*> o .:? "store"
-        <*> o .:? "stream"
-        <*> o .:? "stream_options"
-        <*> o .:? "temperature"
-        <*> o .:? "text"
-        <*> o .:? "tool_choice"
-        <*> o .:? "tools"
-        <*> o .:? "top_logprobs"
-        <*> o .:? "top_p"
-        <*> o .:? "truncation"
-        <*> o .:? "user"
-        <*> pure (without responseCreateFieldNames o)
+
+responseIncludeDecoder :: Hermes.Decoder ResponseInclude
+responseIncludeDecoder = ResponseInclude <$> Hermes.text
+
+contextManagementDecoder :: Hermes.Decoder ContextManagement
+contextManagementDecoder = Hermes.object $
+    ContextManagement
+        <$> Hermes.atKey "type" Hermes.text
+        <*> optionalAtKey "compact_threshold" Hermes.int
+        <*> pure mempty
+
+conversationDecoder :: Hermes.Decoder Conversation
+conversationDecoder =
+    Hermes.getType >>= \case
+        Hermes.VString -> ConversationId <$> Hermes.text
+        Hermes.VObject -> Hermes.object $
+            ConversationObject
+                <$> Hermes.atKey "id" Hermes.text
+                <*> pure mempty
+        _ -> fail "Conversation: expected string or object"
+
+promptDecoder :: Hermes.Decoder Prompt
+promptDecoder = Hermes.object $
+    Prompt
+        <$> Hermes.atKey "id" Hermes.text
+        <*> optionalAtKey "variables" aesonObjectDecoder
+        <*> optionalAtKey "version" Hermes.text
+        <*> pure mempty
+
+promptCacheOptionsDecoder :: Hermes.Decoder PromptCacheOptions
+promptCacheOptionsDecoder = Hermes.object $
+    PromptCacheOptions
+        <$> optionalAtKey "mode" Hermes.text
+        <*> optionalAtKey "ttl" Hermes.text
+        <*> pure mempty
+
+reasoningConfigDecoder :: Hermes.Decoder ReasoningConfig
+reasoningConfigDecoder = Hermes.object $
+    ReasoningConfig
+        <$> optionalAtKey "context" Hermes.text
+        <*> optionalAtKey "effort" Hermes.text
+        <*> optionalAtKey "generate_summary" Hermes.text
+        <*> optionalAtKey "mode" Hermes.text
+        <*> optionalAtKey "summary" Hermes.text
+        <*> pure mempty
+
+responseFormatDecoder :: Hermes.Decoder ResponseFormat
+responseFormatDecoder =
+    Hermes.object do
+        wireType <- Hermes.atKey "type" Hermes.text
+        Hermes.liftObjectDecoder $ Hermes.object $ case wireType of
+            "text" -> pure (ResponseFormatText mempty)
+            "json_object" -> pure (ResponseFormatJsonObject mempty)
+            "json_schema" -> ResponseFormatJsonSchema
+                <$> Hermes.atKey "name" Hermes.text
+                <*> optionalAtKey "description" Hermes.text
+                <*> Hermes.atKey "schema" aesonValueDecoder
+                <*> optionalAtKey "strict" Hermes.bool
+                <*> pure mempty
+            _ -> pure
+                (ResponseFormatUnknown (TaggedObject wireType mempty))
+
+responseTextConfigDecoder :: Hermes.Decoder ResponseTextConfig
+responseTextConfigDecoder = Hermes.object do
+    format <- optionalAtKey "format" responseFormatDecoder
+    legacyFormat <- optionalAtKey "format_" responseFormatDecoder
+    verbosity <- optionalAtKey "verbosity" Hermes.text
+    pure ResponseTextConfig
+        { format = format <|> legacyFormat
+        , verbosity
+        , extraFields = mempty
+        }
+
+streamOptionsDecoder :: Hermes.Decoder StreamOptions
+streamOptionsDecoder = Hermes.object $
+    StreamOptions
+        <$> optionalAtKey "include_obfuscation" Hermes.bool
+        <*> pure mempty
+
+toolChoiceDecoder :: Hermes.Decoder ToolChoice
+toolChoiceDecoder =
+    Hermes.getType >>= \case
+        Hermes.VString ->
+            ToolChoiceMode . parseToolChoiceMode <$> Hermes.text
+        Hermes.VObject ->
+            ToolChoiceObject <$> taggedObjectDecoder
+        _ -> fail "ToolChoice: expected string or object"
+
+responseCreateParamsDecoder :: Hermes.Decoder ResponseCreateParams
+responseCreateParamsDecoder = Hermes.object $
+    ResponseCreateParams
+        <$> optionalAtKey "background" Hermes.bool
+        <*> optionalAtKey
+            "context_management"
+            (Hermes.list contextManagementDecoder)
+        <*> optionalAtKey "conversation" conversationDecoder
+        <*> optionalAtKey "include" (Hermes.list responseIncludeDecoder)
+        <*> optionalAtKey "input" responseInputDecoder
+        <*> optionalAtKey "instructions" Hermes.text
+        <*> optionalAtKey "max_output_tokens" Hermes.int
+        <*> optionalAtKey "max_tool_calls" Hermes.int
+        <*> optionalAtKey "metadata" aesonObjectDecoder
+        <*> optionalAtKey "model" Hermes.text
+        <*> optionalAtKey "moderation" aesonValueDecoder
+        <*> optionalAtKey "parallel_tool_calls" Hermes.bool
+        <*> optionalAtKey "previous_response_id" Hermes.text
+        <*> optionalAtKey "prompt" promptDecoder
+        <*> optionalAtKey "prompt_cache_key" Hermes.text
+        <*> optionalAtKey "prompt_cache_options" promptCacheOptionsDecoder
+        <*> optionalAtKey "prompt_cache_retention" Hermes.text
+        <*> optionalAtKey "reasoning" reasoningConfigDecoder
+        <*> optionalAtKey "safety_identifier" Hermes.text
+        <*> optionalAtKey "service_tier" Hermes.text
+        <*> optionalAtKey "store" Hermes.bool
+        <*> optionalAtKey "stream" Hermes.bool
+        <*> optionalAtKey "stream_options" streamOptionsDecoder
+        <*> optionalAtKey "temperature" Hermes.scientific
+        <*> optionalAtKey "text" responseTextConfigDecoder
+        <*> optionalAtKey "tool_choice" toolChoiceDecoder
+        <*> optionalAtKey "tools" (Hermes.list responseToolDecoder)
+        <*> optionalAtKey "top_logprobs" Hermes.int
+        <*> optionalAtKey "top_p" Hermes.scientific
+        <*> optionalAtKey "truncation" Hermes.text
+        <*> optionalAtKey "user" Hermes.text
+        <*> pure mempty

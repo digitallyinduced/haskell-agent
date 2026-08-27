@@ -5,11 +5,13 @@ module Agent.Responses.Types.Items.Known
     , parseResponseItemType
     , responseItemTypeText
     , InternalChatMetadata(..)
+    , internalChatMetadataDecoder
     ) where
 
 import Agent.Responses.Types.Common
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
+import qualified Data.Hermes as Hermes
 import Data.Text (Text)
 
 data ResponseItemType
@@ -141,16 +143,12 @@ instance ToJSON InternalChatMetadata where
                 , optionalField "executed_tool_calls" executedToolCalls
                 ]
 
-instance FromJSON InternalChatMetadata where
-    parseJSON = withObject "InternalChatMetadata" $ \o ->
-        InternalChatMetadata
-            <$> o .:? "turn_id"
-            <*> o .:? "create_time"
-            <*> o .:? "content_item_kinds"
-            <*> o .:? "executed_tool_calls"
-            <*> pure
-                (without
-                    [ "turn_id", "create_time", "content_item_kinds"
-                    , "executed_tool_calls"
-                    ]
-                    o)
+
+internalChatMetadataDecoder :: Hermes.Decoder InternalChatMetadata
+internalChatMetadataDecoder = Hermes.object $
+    InternalChatMetadata
+        <$> optionalAtKey "turn_id" Hermes.text
+        <*> optionalAtKey "create_time" aesonValueDecoder
+        <*> optionalAtKey "content_item_kinds" (Hermes.list Hermes.text)
+        <*> optionalAtKey "executed_tool_calls" aesonValueDecoder
+        <*> pure mempty

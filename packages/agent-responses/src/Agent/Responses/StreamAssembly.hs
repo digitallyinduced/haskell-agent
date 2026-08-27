@@ -18,6 +18,7 @@ module Agent.Responses.StreamAssembly
 
 import Agent.Error (ApiError(..))
 import Agent.Responses.ResponseMerge (mergeDoneResponse)
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.Responses.Types
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
@@ -27,6 +28,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
 import Data.Maybe (fromMaybe)
+import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -222,9 +224,10 @@ finishStreamResponse modelHint state terminalEvent = do
         assembled = Aeson.Object withOutput
     case KeyMap.lookup "id" withOutput of
         Just (Aeson.String responseId) | not (Text.null responseId) ->
-            case Aeson.fromJSON assembled of
-                Aeson.Success response -> Right response
-                Aeson.Error err -> Left $ JsonDecodeError
+            case ResponsesCodec.decodeResponse
+                    (LBS.toStrict (Aeson.encode assembled)) of
+                Right response -> Right response
+                Left err -> Left $ JsonDecodeError
                     (Text.pack err)
                     (jsonPreview assembled)
         _ -> Left $ JsonDecodeError
@@ -302,9 +305,10 @@ assembleDoneResponse baseResponse doneItems doneResponse =
             (Aeson.toJSON <$> baseResponse)
             doneItems
             doneResponse
-    in case Aeson.fromJSON merged of
-        Aeson.Success response -> Right response
-        Aeson.Error err -> Left $ JsonDecodeError
+    in case ResponsesCodec.decodeResponse
+            (LBS.toStrict (Aeson.encode merged)) of
+        Right response -> Right response
+        Left err -> Left $ JsonDecodeError
             (Text.pack err)
             (jsonPreview merged)
 
@@ -348,21 +352,23 @@ failedStreamResponseMessage failure =
 responseFailureFromState :: StreamAssemblyState -> ResponseFailure
 responseFailureFromState state =
     let value = Aeson.Object state.responseObject
-        parseOptional fieldName = case KeyMap.lookup fieldName state.responseObject of
-            Just fieldValue -> case Aeson.fromJSON fieldValue of
-                Aeson.Success parsed -> Just parsed
-                Aeson.Error _ -> Nothing
-            Nothing -> Nothing
         nestedText objectName fieldName = do
             Aeson.Object object <-
                 KeyMap.lookup objectName state.responseObject
             textField fieldName object
     in ResponseFailure
-        { failureStatus = parseOptional "status"
+        { failureStatus = textField "status" state.responseObject
         , failureErrorType = nestedText "error" "type"
         , failureErrorCode = nestedText "error" "code"
         , failureErrorMessage = nestedText "error" "message"
-        , failureIncompleteDetails = parseOptional "incomplete_details"
+        , failureIncompleteDetails = do
+            Aeson.Object details <-
+                KeyMap.lookup "incomplete_details" state.responseObject
+            reason <- textField "reason" details
+            pure IncompleteDetails
+                { reason
+                , extraFields = KeyMap.empty
+                }
         , failureResponseValue = value
         }
 
@@ -707,10 +713,12 @@ textField name object =
 intField :: Text -> Aeson.Object -> Maybe Int
 intField name object =
     case KeyMap.lookup (Key.fromText name) object of
-        Just value -> case Aeson.fromJSON value of
-            Aeson.Success int -> Just int
-            Aeson.Error _ -> Nothing
-        Nothing -> Nothing
+        Just (Aeson.Number value) ->
+            either
+                (const Nothing)
+                Just
+                (floatingOrInteger value :: Either Double Int)
+        _ -> Nothing
 
 jsonPreview :: Aeson.ToJSON value => value -> Text
 jsonPreview =

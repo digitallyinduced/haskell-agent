@@ -58,6 +58,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-json            >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , aeson                 >= 2.0
                     , base64-bytestring
@@ -66,6 +67,7 @@ library
                     , http-client
                     , http-client-tls
                     , http-conduit
+                    , hermes-json
                     , retry
                     , safe-exceptions
                     , scientific

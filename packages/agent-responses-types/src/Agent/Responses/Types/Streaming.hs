@@ -6,15 +6,18 @@ module Agent.Responses.Types.Streaming
     , responseStreamEventSequenceNumber
     , streamEventTypeText
     , parseStreamEventWithType
+    , responseStreamEventDecoder
+    , responseStreamEventDecoderWithType
     , unparsedStreamEventTypeText
     ) where
 
 import Agent.Responses.Types.Common
-import Agent.Responses.Types.Items (ResponseItem)
+import Agent.Responses.Types.Items (ResponseItem, responseItemDecoder)
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (Parser)
+import qualified Data.Hermes as Hermes
+import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -244,17 +247,6 @@ instance ToJSON ResponseStreamError where
             , optionalField "resets_in_seconds" retryAfter
             ]
 
-instance FromJSON ResponseStreamError where
-    parseJSON = withObject "ResponseStreamError" $ \o -> ResponseStreamError
-        <$> o .:? "type"
-        <*> o .:? "code"
-        -- Some Responses gateways emit code/type without a human-readable
-        -- message. Keep the wire shape permissive so those errors can still
-        -- be classified instead of aborting event decoding.
-        <*> o .:? "message" .!= ""
-        <*> o .:? "param"
-        <*> o .:? "resets_in_seconds"
-        <*> pure (without ["message"] o)
 
 data ResponseStreamEvent
     = ResponseCreatedEvent
@@ -493,157 +485,182 @@ instance ToJSON ResponseStreamEvent where
                 , optionalField "resets_in_seconds" streamError.retryAfter
                 ]
 
-instance FromJSON ResponseStreamEvent where
-    parseJSON = withObject "ResponseStreamEvent" $ \o -> do
-        tag <- o .: "type"
-        sequenceNumber <- o .:? "sequence_number"
-        case parseStreamEventType tag of
-            EventResponseCreated -> lifecycle ResponseCreatedEvent sequenceNumber o
-            EventResponseInProgress -> lifecycle ResponseInProgressEvent sequenceNumber o
-            EventResponseCompleted -> lifecycle ResponseCompletedEvent sequenceNumber o
-            EventResponseDone -> ResponseDoneEvent
-                <$> o .: "response"
-                <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type", "response"]
-                    $ withoutNonNull ["sequence_number"] o
-                    )
-            EventResponseFailed -> lifecycle ResponseFailedEvent sequenceNumber o
-            EventResponseIncomplete -> lifecycle ResponseIncompleteEvent sequenceNumber o
-            EventResponseQueued -> lifecycle ResponseQueuedEvent sequenceNumber o
-            EventOutputItemAdded -> outputItem ResponseOutputItemAddedEvent sequenceNumber o
-            EventOutputItemDone -> outputItem ResponseOutputItemDoneEvent sequenceNumber o
-            EventFunctionCallArgumentsDelta ->
-                ResponseFunctionCallArgumentsDeltaEvent
-                    <$> o .:? "delta"
-                    <*> o .:? "item_id"
-                    <*> o .:? "output_index"
-                    <*> pure sequenceNumber
-                    <*> pure
-                        ( without ["type"]
-                        $ withoutNonNull
-                            ["sequence_number", "delta", "item_id", "output_index"]
-                            o
+
+responseStreamEventDecoder :: Hermes.Decoder ResponseStreamEvent
+responseStreamEventDecoder =
+    Hermes.object do
+        wireType <- Hermes.atKey "type" Hermes.text
+        Hermes.liftObjectDecoder (decoderForType wireType)
+
+responseStreamEventDecoderWithType
+    :: Text
+    -> Hermes.Decoder ResponseStreamEvent
+responseStreamEventDecoderWithType suppliedType =
+    Hermes.object do
+        payloadType <- optionalAtKey "type" Hermes.text
+        case payloadType of
+            Just actual
+                | actual /= suppliedType ->
+                    fail
+                        ( "SSE event type " <> Text.unpack suppliedType
+                        <> " disagrees with JSON type " <> Text.unpack actual
                         )
-            EventFunctionCallArgumentsDone ->
-                ResponseFunctionCallArgumentsDoneEvent
-                    <$> o .:? "arguments"
-                    <*> o .:? "name"
-                    <*> o .:? "item_id"
-                    <*> o .:? "output_index"
-                    <*> pure sequenceNumber
-                    <*> pure
-                        ( without ["type"]
-                        $ withoutNonNull
-                            [ "sequence_number"
-                            , "arguments"
-                            , "name"
-                            , "item_id"
-                            , "output_index"
-                            ]
-                            o
-                        )
-            EventCustomToolInputDelta -> ResponseCustomToolInputDeltaEvent
-                <$> o .:? "delta"
-                <*> o .:? "item_id"
-                <*> o .:? "call_id"
-                <*> o .:? "output_index"
+            _ -> Hermes.liftObjectDecoder (decoderForType suppliedType)
+
+-- Retained as a source-compatible name for callers which supplied the SSE
+-- discriminator separately.
+parseStreamEventWithType
+    :: Text
+    -> Hermes.Decoder ResponseStreamEvent
+parseStreamEventWithType = responseStreamEventDecoderWithType
+
+eventDecoder :: Text -> Hermes.Decoder ResponseStreamEvent
+eventDecoder wireType = Hermes.object do
+    sequenceNumber <- optionalAtKey "sequence_number" Hermes.int
+    case parseStreamEventType wireType of
+        EventResponseCreated ->
+            lifecycle ResponseCreatedEvent sequenceNumber
+        EventResponseInProgress ->
+            lifecycle ResponseInProgressEvent sequenceNumber
+        EventResponseCompleted ->
+            lifecycle ResponseCompletedEvent sequenceNumber
+        EventResponseDone ->
+            lifecycle ResponseDoneEvent sequenceNumber
+        EventResponseFailed ->
+            lifecycle ResponseFailedEvent sequenceNumber
+        EventResponseIncomplete ->
+            lifecycle ResponseIncompleteEvent sequenceNumber
+        EventResponseQueued ->
+            lifecycle ResponseQueuedEvent sequenceNumber
+        EventOutputItemAdded ->
+            outputItem ResponseOutputItemAddedEvent sequenceNumber
+        EventOutputItemDone ->
+            outputItem ResponseOutputItemDoneEvent sequenceNumber
+        EventFunctionCallArgumentsDelta ->
+            ResponseFunctionCallArgumentsDeltaEvent
+                <$> optionalAtKey "delta" Hermes.text
+                <*> optionalAtKey "item_id" Hermes.text
+                <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "delta", "item_id", "call_id", "output_index"]
-                        o
-                    )
-            EventCustomToolInputDone -> ResponseCustomToolInputDoneEvent
-                <$> o .:? "input"
-                <*> o .:? "item_id"
-                <*> o .:? "call_id"
-                <*> o .:? "output_index"
+                <*> pure mempty
+        EventFunctionCallArgumentsDone ->
+            ResponseFunctionCallArgumentsDoneEvent
+                <$> optionalAtKey "arguments" Hermes.text
+                <*> optionalAtKey "name" Hermes.text
+                <*> optionalAtKey "item_id" Hermes.text
+                <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "input", "item_id", "call_id", "output_index"]
-                        o
-                    )
-            EventReasoningSummaryPartAdded -> ResponseReasoningSummaryPartAddedEvent
-                <$> o .:? "item_id"
-                <*> o .:? "output_index"
-                <*> o .:? "summary_index"
-                <*> o .:? "part"
+                <*> pure mempty
+        EventCustomToolInputDelta ->
+            ResponseCustomToolInputDeltaEvent
+                <$> optionalAtKey "delta" Hermes.text
+                <*> optionalAtKey "item_id" Hermes.text
+                <*> optionalAtKey "call_id" Hermes.text
+                <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "item_id", "output_index", "summary_index", "part"]
-                        o
-                    )
-            EventReasoningSummaryTextDone -> ResponseReasoningSummaryTextDoneEvent
-                <$> o .:? "item_id"
-                <*> o .:? "output_index"
-                <*> o .:? "summary_index"
-                <*> o .:? "text"
+                <*> pure mempty
+        EventCustomToolInputDone ->
+            ResponseCustomToolInputDoneEvent
+                <$> optionalAtKey "input" Hermes.text
+                <*> optionalAtKey "item_id" Hermes.text
+                <*> optionalAtKey "call_id" Hermes.text
+                <*> optionalAtKey "output_index" Hermes.int
                 <*> pure sequenceNumber
-                <*> pure
-                    ( without ["type"]
-                    $ withoutNonNull
-                        ["sequence_number", "item_id", "output_index", "summary_index", "text"]
-                        o
-                    )
-            EventError -> parseErrorEvent sequenceNumber o
-            eventType -> pure OtherResponseStreamEvent
-                { otherEventType = eventType
-                , sequenceNumber
-                , eventExtraFields =
-                    without ["type"] (withoutNonNull ["sequence_number"] o)
-                }
-      where
-        lifecycle constructor sequenceNumber object = constructor
-            <$> object .: "response"
-            <*> pure sequenceNumber
-            <*> pure
-                ( without ["type", "response"]
-                $ withoutNonNull ["sequence_number"] object
-                )
-        outputItem constructor sequenceNumber object = constructor
-            <$> object .: "item"
-            <*> object .:? "output_index"
-            <*> pure sequenceNumber
-            <*> pure
-                ( without ["type", "item"]
-                $ withoutNonNull ["sequence_number", "output_index"] object
-                )
-        parseErrorEvent sequenceNumber object = do
-            nestedError <- object .:? "error"
-            case nestedError of
+                <*> pure mempty
+        EventReasoningSummaryPartAdded ->
+            ResponseReasoningSummaryPartAddedEvent
+                <$> optionalAtKey "item_id" Hermes.text
+                <*> optionalAtKey "output_index" Hermes.int
+                <*> optionalAtKey "summary_index" Hermes.int
+                <*> optionalAtKey "part" aesonValueDecoder
+                <*> pure sequenceNumber
+                <*> pure mempty
+        EventReasoningSummaryTextDone ->
+            ResponseReasoningSummaryTextDoneEvent
+                <$> optionalAtKey "item_id" Hermes.text
+                <*> optionalAtKey "output_index" Hermes.int
+                <*> optionalAtKey "summary_index" Hermes.int
+                <*> optionalAtKey "text" Hermes.text
+                <*> pure sequenceNumber
+                <*> pure mempty
+        EventError -> do
+            nested <- optionalAtKey "error" responseStreamErrorDecoder
+            case nested of
                 Just streamError -> pure ResponseNestedErrorEvent
                     { streamError
                     , sequenceNumber
-                    , eventExtraFields =
-                        without ["type", "error"]
-                            (withoutNonNull ["sequence_number"] object)
+                    , eventExtraFields = mempty
                     }
                 Nothing -> do
                     streamError <- ResponseStreamError
                         <$> pure Nothing
-                        <*> object .:? "code"
-                        <*> object .:? "message" .!= ""
-                        <*> object .:? "param"
-                        <*> object .:? "resets_in_seconds"
-                        <*> pure (without ["type", "sequence_number", "message"] object)
+                        <*> optionalAtKey "code" Hermes.text
+                        <*> (maybe "" id
+                            <$> optionalAtKey "message" Hermes.text)
+                        <*> optionalAtKey "param" Hermes.text
+                        <*> optionalAtKey "resets_in_seconds" Hermes.int
+                        <*> pure mempty
                     pure ResponseErrorEvent
                         { streamError
                         , sequenceNumber
-                        , eventExtraFields =
-                            without ["type", "code", "message", "param", "resets_in_seconds"]
-                                (withoutNonNull ["sequence_number"] object)
+                        , eventExtraFields = mempty
                         }
+        eventType -> pure OtherResponseStreamEvent
+            { otherEventType = eventType
+            , sequenceNumber
+            , eventExtraFields = mempty
+            }
+  where
+    lifecycle constructor sequenceNumber =
+        constructor
+            <$> Hermes.atKey "response" aesonValueDecoder
+            <*> pure sequenceNumber
+            <*> pure mempty
+    outputItem constructor sequenceNumber =
+        constructor
+            <$> Hermes.atKey "item" responseItemDecoder
+            <*> optionalAtKey "output_index" Hermes.int
+            <*> pure sequenceNumber
+            <*> pure mempty
 
-parseStreamEventWithType :: Text -> Aeson.Value -> Parser ResponseStreamEvent
-parseStreamEventWithType suppliedType = withObject "ResponseStreamEvent" $ \o -> do
-    payloadType <- o .:? "type"
-    case payloadType of
-        Just actual | actual /= suppliedType ->
-            fail ("SSE event type " <> Text.unpack suppliedType <> " disagrees with JSON type " <> Text.unpack actual)
-        _ -> parseJSON (Aeson.Object (KeyMap.insert "type" (Aeson.String suppliedType) o))
+responseStreamErrorDecoder :: Hermes.Decoder ResponseStreamError
+responseStreamErrorDecoder = Hermes.object $
+    ResponseStreamError
+        <$> optionalAtKey "type" Hermes.text
+        <*> optionalAtKey "code" Hermes.text
+        <*> (maybe "" id <$> optionalAtKey "message" Hermes.text)
+        <*> optionalAtKey "param" Hermes.text
+        <*> optionalAtKey "resets_in_seconds" Hermes.int
+        <*> pure mempty
+
+decoderForType :: Text -> Hermes.Decoder ResponseStreamEvent
+decoderForType wireType =
+    case parseStreamEventType wireType of
+        EventResponseCreated -> eventDecoder wireType
+        EventResponseInProgress -> eventDecoder wireType
+        EventResponseCompleted -> eventDecoder wireType
+        EventResponseDone -> eventDecoder wireType
+        EventResponseFailed -> eventDecoder wireType
+        EventResponseIncomplete -> eventDecoder wireType
+        EventResponseQueued -> eventDecoder wireType
+        EventOutputItemAdded -> eventDecoder wireType
+        EventOutputItemDone -> eventDecoder wireType
+        EventFunctionCallArgumentsDelta -> eventDecoder wireType
+        EventFunctionCallArgumentsDone -> eventDecoder wireType
+        EventCustomToolInputDelta -> eventDecoder wireType
+        EventCustomToolInputDone -> eventDecoder wireType
+        EventReasoningSummaryPartAdded -> eventDecoder wireType
+        EventReasoningSummaryTextDone -> eventDecoder wireType
+        EventError -> eventDecoder wireType
+        eventType -> otherEventDecoder eventType
+
+otherEventDecoder :: StreamEventType -> Hermes.Decoder ResponseStreamEvent
+otherEventDecoder eventType = do
+    fields <- aesonObjectDecoder
+    pure OtherResponseStreamEvent
+        { otherEventType = eventType
+        , sequenceNumber = case KeyMap.lookup "sequence_number" fields of
+            Just (Aeson.Number value) -> toBoundedInteger value
+            _ -> Nothing
+        , eventExtraFields = KeyMap.delete "type" fields
+        }

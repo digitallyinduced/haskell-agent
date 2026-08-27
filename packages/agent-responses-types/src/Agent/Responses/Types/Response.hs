@@ -1,5 +1,6 @@
 module Agent.Responses.Types.Response
     ( Response(..)
+    , responseDecoder
     , ResponseStatus(..)
     , ResponseError(..)
     , IncompleteDetails(..)
@@ -11,11 +12,15 @@ import Agent.Responses.Types.Common
     ( field
     , objectWith
     , optionalField
-    , without
+    , optionalAtKey
+    , aesonObjectDecoder
+    , aesonValueDecoder
     )
 import Agent.Responses.Types.Items
     ( ResponseInput
     , ResponseItem
+    , responseInputDecoder
+    , responseItemDecoder
     )
 import Agent.Responses.Types.Request
     ( Conversation
@@ -24,11 +29,18 @@ import Agent.Responses.Types.Request
     , ReasoningConfig
     , ResponseTextConfig
     , ToolChoice
+    , conversationDecoder
+    , promptDecoder
+    , promptCacheOptionsDecoder
+    , reasoningConfigDecoder
+    , responseTextConfigDecoder
+    , toolChoiceDecoder
     )
 import Agent.Responses.Types.Tools
-    ( ResponseTool )
+    ( ResponseTool, responseToolDecoder )
 import Data.Aeson
 import qualified Data.Aeson as Aeson
+import qualified Data.Hermes as Hermes
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 
@@ -55,15 +67,6 @@ responseStatusText = \case
 instance ToJSON ResponseStatus where
     toJSON = Aeson.String . responseStatusText
 
-instance FromJSON ResponseStatus where
-    parseJSON = withText "ResponseStatus" $ pure . \case
-        "completed" -> ResponseCompleted
-        "failed" -> ResponseFailed
-        "in_progress" -> ResponseInProgress
-        "cancelled" -> ResponseCancelled
-        "queued" -> ResponseQueued
-        "incomplete" -> ResponseIncomplete
-        value -> ResponseStatusUnknown value
 
 data ResponseError = ResponseError
     { code        :: !Text
@@ -75,14 +78,6 @@ instance ToJSON ResponseError where
     toJSON ResponseError { code, message, extraFields } = objectWith extraFields
         [Just (field "code" code), Just (field "message" message)]
 
-instance FromJSON ResponseError where
-    parseJSON = withObject "ResponseError" $ \o -> ResponseError
-        -- Failed responses are occasionally reduced to only one of these
-        -- fields. Treat both as optional on input while retaining the stable
-        -- non-optional public representation.
-        <$> o .:? "code" .!= ""
-        <*> o .:? "message" .!= ""
-        <*> pure (without ["code", "message"] o)
 
 data IncompleteDetails = IncompleteDetails
     { reason      :: !Text
@@ -93,10 +88,6 @@ instance ToJSON IncompleteDetails where
     toJSON IncompleteDetails { reason, extraFields } =
         objectWith extraFields [Just (field "reason" reason)]
 
-instance FromJSON IncompleteDetails where
-    parseJSON = withObject "IncompleteDetails" $ \o -> IncompleteDetails
-        <$> o .: "reason"
-        <*> pure (without ["reason"] o)
 
 data TokenDetails = TokenDetails
     { cachedTokens    :: !(Maybe Int)
@@ -111,11 +102,6 @@ instance ToJSON TokenDetails where
             , optionalField "reasoning_tokens" reasoningTokens
             ]
 
-instance FromJSON TokenDetails where
-    parseJSON = withObject "TokenDetails" $ \o -> TokenDetails
-        <$> o .:? "cached_tokens"
-        <*> o .:? "reasoning_tokens"
-        <*> pure (without ["cached_tokens", "reasoning_tokens"] o)
 
 data ResponseUsage = ResponseUsage
     { inputTokens         :: !Int
@@ -142,23 +128,6 @@ instance ToJSON ResponseUsage where
             , Just (field "total_tokens" totalTokens)
             ]
 
-instance FromJSON ResponseUsage where
-    parseJSON = withObject "ResponseUsage" $ \o -> ResponseUsage
-        <$> o .: "input_tokens"
-        <*> o .:? "input_tokens_details"
-        <*> o .: "output_tokens"
-        <*> o .:? "output_tokens_details"
-        <*> o .: "total_tokens"
-        <*> pure
-            (without
-                [ "input_tokens"
-                , "input_tokens_details"
-                , "output_tokens"
-                , "output_tokens_details"
-                , "total_tokens"
-                ]
-                o
-            )
 
 data Response = Response
     { responseId           :: !Text
@@ -197,16 +166,6 @@ data Response = Response
     , user                 :: !(Maybe Text)
     , extraFields          :: !Aeson.Object
     } deriving stock (Eq, Show)
-
-responseFieldNames :: [Text]
-responseFieldNames =
-    [ "id", "created_at", "error", "incomplete_details", "instructions", "metadata", "model"
-    , "object", "output", "parallel_tool_calls", "temperature", "tool_choice", "tools", "top_p"
-    , "background", "completed_at", "conversation", "max_output_tokens", "max_tool_calls"
-    , "moderation", "previous_response_id", "prompt", "prompt_cache_key", "prompt_cache_options"
-    , "prompt_cache_retention", "reasoning", "safety_identifier", "service_tier", "status", "text"
-    , "top_logprobs", "truncation", "usage", "user"
-    ]
 
 instance ToJSON Response where
     toJSON Response
@@ -282,40 +241,84 @@ instance ToJSON Response where
             , optionalField "user" user
             ]
 
-instance FromJSON Response where
-    parseJSON = withObject "Response" $ \o -> Response
-        <$> o .: "id"
-        <*> o .: "created_at"
-        <*> o .:? "error"
-        <*> o .:? "incomplete_details"
-        <*> o .:? "instructions"
-        <*> o .:? "metadata"
-        <*> o .: "model"
-        <*> o .:? "object" .!= "response"
-        <*> o .:? "output" .!= []
-        <*> o .:? "parallel_tool_calls"
-        <*> o .:? "temperature"
-        <*> o .:? "tool_choice"
-        <*> o .:? "tools"
-        <*> o .:? "top_p"
-        <*> o .:? "background"
-        <*> o .:? "completed_at"
-        <*> o .:? "conversation"
-        <*> o .:? "max_output_tokens"
-        <*> o .:? "max_tool_calls"
-        <*> o .:? "moderation"
-        <*> o .:? "previous_response_id"
-        <*> o .:? "prompt"
-        <*> o .:? "prompt_cache_key"
-        <*> o .:? "prompt_cache_options"
-        <*> o .:? "prompt_cache_retention"
-        <*> o .:? "reasoning"
-        <*> o .:? "safety_identifier"
-        <*> o .:? "service_tier"
-        <*> o .: "status"
-        <*> o .:? "text"
-        <*> o .:? "top_logprobs"
-        <*> o .:? "truncation"
-        <*> o .:? "usage"
-        <*> o .:? "user"
-        <*> pure (without responseFieldNames o)
+
+responseStatusDecoder :: Hermes.Decoder ResponseStatus
+responseStatusDecoder = fmap (\case
+    "completed" -> ResponseCompleted
+    "failed" -> ResponseFailed
+    "in_progress" -> ResponseInProgress
+    "cancelled" -> ResponseCancelled
+    "queued" -> ResponseQueued
+    "incomplete" -> ResponseIncomplete
+    value -> ResponseStatusUnknown value) Hermes.text
+
+responseErrorDecoder :: Hermes.Decoder ResponseError
+responseErrorDecoder = Hermes.object $
+    ResponseError
+        <$> (maybe "" id <$> optionalAtKey "code" Hermes.text)
+        <*> (maybe "" id <$> optionalAtKey "message" Hermes.text)
+        <*> pure mempty
+
+incompleteDetailsDecoder :: Hermes.Decoder IncompleteDetails
+incompleteDetailsDecoder = Hermes.object $
+    IncompleteDetails
+        <$> Hermes.atKey "reason" Hermes.text
+        <*> pure mempty
+
+tokenDetailsDecoder :: Hermes.Decoder TokenDetails
+tokenDetailsDecoder = Hermes.object $
+    TokenDetails
+        <$> optionalAtKey "cached_tokens" Hermes.int
+        <*> optionalAtKey "reasoning_tokens" Hermes.int
+        <*> pure mempty
+
+responseUsageDecoder :: Hermes.Decoder ResponseUsage
+responseUsageDecoder = Hermes.object $
+    ResponseUsage
+        <$> Hermes.atKey "input_tokens" Hermes.int
+        <*> optionalAtKey "input_tokens_details" tokenDetailsDecoder
+        <*> Hermes.atKey "output_tokens" Hermes.int
+        <*> optionalAtKey "output_tokens_details" tokenDetailsDecoder
+        <*> Hermes.atKey "total_tokens" Hermes.int
+        <*> pure mempty
+
+responseDecoder :: Hermes.Decoder Response
+responseDecoder = Hermes.object $
+    Response
+        <$> Hermes.atKey "id" Hermes.text
+        <*> Hermes.atKey "created_at" Hermes.scientific
+        <*> optionalAtKey "error" responseErrorDecoder
+        <*> optionalAtKey "incomplete_details" incompleteDetailsDecoder
+        <*> optionalAtKey "instructions" responseInputDecoder
+        <*> optionalAtKey "metadata" aesonObjectDecoder
+        <*> Hermes.atKey "model" Hermes.text
+        <*> (maybe "response" id <$> optionalAtKey "object" Hermes.text)
+        <*> (maybe [] id <$> optionalAtKey
+            "output"
+            (Hermes.list responseItemDecoder))
+        <*> optionalAtKey "parallel_tool_calls" Hermes.bool
+        <*> optionalAtKey "temperature" Hermes.scientific
+        <*> optionalAtKey "tool_choice" toolChoiceDecoder
+        <*> optionalAtKey "tools" (Hermes.list responseToolDecoder)
+        <*> optionalAtKey "top_p" Hermes.scientific
+        <*> optionalAtKey "background" Hermes.bool
+        <*> optionalAtKey "completed_at" Hermes.scientific
+        <*> optionalAtKey "conversation" conversationDecoder
+        <*> optionalAtKey "max_output_tokens" Hermes.int
+        <*> optionalAtKey "max_tool_calls" Hermes.int
+        <*> optionalAtKey "moderation" aesonValueDecoder
+        <*> optionalAtKey "previous_response_id" Hermes.text
+        <*> optionalAtKey "prompt" promptDecoder
+        <*> optionalAtKey "prompt_cache_key" Hermes.text
+        <*> optionalAtKey "prompt_cache_options" promptCacheOptionsDecoder
+        <*> optionalAtKey "prompt_cache_retention" Hermes.text
+        <*> optionalAtKey "reasoning" reasoningConfigDecoder
+        <*> optionalAtKey "safety_identifier" Hermes.text
+        <*> optionalAtKey "service_tier" Hermes.text
+        <*> Hermes.atKey "status" responseStatusDecoder
+        <*> optionalAtKey "text" responseTextConfigDecoder
+        <*> optionalAtKey "top_logprobs" Hermes.int
+        <*> optionalAtKey "truncation" Hermes.text
+        <*> optionalAtKey "usage" responseUsageDecoder
+        <*> optionalAtKey "user" Hermes.text
+        <*> pure mempty

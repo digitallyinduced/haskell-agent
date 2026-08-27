@@ -103,12 +103,9 @@ runWorkload workload = go checksumSeed
 
 decodePayload :: BS.ByteString -> ResponseStreamEvent
 decodePayload payload =
-    case Aeson.eitherDecodeStrict' payload of
+    case Codec.decodeResponseStreamEvent payload of
         Left err -> error err
-        Right value ->
-            case Codec.decodeResponseStreamEventValue value of
-                Aeson.Error err -> error err
-                Aeson.Success event -> event
+        Right event -> event
 
 eventDeltaLength :: ResponseStreamEvent -> Int
 eventDeltaLength = \case

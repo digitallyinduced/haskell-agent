@@ -524,30 +524,10 @@ data CodexRateLimitDetails = CodexRateLimitDetails
 data CodexRateLimitWindow = CodexRateLimitWindow
     { usedPercent :: !Double }
 
-instance Aeson.FromJSON CodexRateLimitsPayload where
-    parseJSON = Aeson.withObject "Codex rate limits payload" \object ->
-        CodexRateLimitsPayload
-            <$> object Aeson..:? "rate_limits"
-
-instance Aeson.FromJSON CodexRateLimitDetails where
-    parseJSON = Aeson.withObject "Codex rate limit details" \object ->
-        CodexRateLimitDetails
-            <$> object Aeson..:? "allowed"
-            <*> object Aeson..:? "limit_reached"
-            <*> object Aeson..:? "primary"
-            <*> object Aeson..:? "secondary"
-
-instance Aeson.FromJSON CodexRateLimitWindow where
-    parseJSON = Aeson.withObject "Codex rate limit window" \object ->
-        CodexRateLimitWindow
-            <$> object Aeson..: "used_percent"
-
 codexRateLimitsWarning :: Aeson.Object -> Maybe Text
-codexRateLimitsWarning fields =
-    case Aeson.fromJSON (Aeson.Object fields)
-        :: Aeson.Result CodexRateLimitsPayload of
-        Aeson.Error _ -> Nothing
-        Aeson.Success payload -> do
+codexRateLimitsWarning fields = do
+    payload <- codexRateLimitsPayload fields
+    do
             details <- payload.rateLimits
             let reportedWindows =
                     [ ("primary", window)
@@ -584,6 +564,34 @@ codexRateLimitsWarning fields =
                     in Just
                         (headline <> detail
                             <> ". Check /usage for reset details.")
+
+codexRateLimitsPayload :: Aeson.Object -> Maybe CodexRateLimitsPayload
+codexRateLimitsPayload object =
+    pure (CodexRateLimitsPayload (objectField "rate_limits" object >>= details))
+  where
+    details fields = Just CodexRateLimitDetails
+        { allowed = boolField "allowed" fields
+        , limitReached = boolField "limit_reached" fields
+        , primary = objectField "primary" fields >>= window
+        , secondary = objectField "secondary" fields >>= window
+        }
+    window fields =
+        CodexRateLimitWindow <$> numberField "used_percent" fields
+
+objectField :: Text -> Aeson.Object -> Maybe Aeson.Object
+objectField name object = case KeyMap.lookup (Key.fromText name) object of
+    Just (Aeson.Object value) -> Just value
+    _ -> Nothing
+
+boolField :: Text -> Aeson.Object -> Maybe Bool
+boolField name object = case KeyMap.lookup (Key.fromText name) object of
+    Just (Aeson.Bool value) -> Just value
+    _ -> Nothing
+
+numberField :: Text -> Aeson.Object -> Maybe Double
+numberField name object = case KeyMap.lookup (Key.fromText name) object of
+    Just (Aeson.Number value) -> Just (realToFrac value)
+    _ -> Nothing
 
 formatRateLimitWindow :: (Text, CodexRateLimitWindow) -> Text
 formatRateLimitWindow (label, window) =

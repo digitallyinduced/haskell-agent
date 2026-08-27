@@ -1,8 +1,10 @@
 module Agent.Responses.ResponseMergeSpec (spec) where
 
 import qualified Agent.Responses.Types as Responses
+import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.ResponseMerge
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
 import Data.Aeson ((.=))
 import Data.List (nub)
 import Data.Text (Text)
@@ -129,9 +131,10 @@ spec = describe "mergeCompletedResponseOutput" do
 
 decodedOutput :: Aeson.Value -> [Responses.ResponseItem]
 decodedOutput value =
-    case Aeson.fromJSON value of
-        Aeson.Success (response :: Responses.Response) -> response.output
-        Aeson.Error err -> error err
+    case Codec.decodeResponse
+            (LBS.toStrict (Aeson.encode value)) of
+        Right response -> response.output
+        Left err -> error err
 
 completedResponse :: [Aeson.Value] -> Aeson.Value
 completedResponse output =

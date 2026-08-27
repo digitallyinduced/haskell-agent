@@ -3,6 +3,7 @@ module Agent.Responses.Types
     ( -- * Create request
       ResponseCreateParams(..)
     , defaultResponseCreateParams
+    , responseCreateParamsDecoder
     , ResponseInput(..)
     , ResponseInclude(..)
     , ContextManagement(..)
@@ -47,6 +48,7 @@ module Agent.Responses.Types
     , ReasoningSummaryPart(..)
     , ItemReference(..)
     , TaggedObject(..)
+    , aesonValueDecoder
 
       -- * Tools
     , ResponseTool(..)
@@ -57,6 +59,7 @@ module Agent.Responses.Types
 
       -- * Response
     , Response(..)
+    , responseDecoder
     , ResponseStatus(..)
     , ResponseError(..)
     , IncompleteDetails(..)
@@ -71,6 +74,8 @@ module Agent.Responses.Types
     , responseStreamEventSequenceNumber
     , streamEventTypeText
     , parseStreamEventWithType
+    , responseStreamEventDecoder
+    , responseStreamEventDecoderWithType
     , unparsedStreamEventTypeText
     ) where
 

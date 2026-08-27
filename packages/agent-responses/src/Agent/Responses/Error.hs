@@ -8,13 +8,14 @@ module Agent.Responses.Error
     ) where
 
 import Agent.Error
+import Agent.Json.Decode (decodeText, jsonErrorMessage)
+import Agent.Responses.Types (aesonValueDecoder)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Scientific (toBoundedInteger)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 
 data ProviderErrorPayload = ProviderErrorPayload
     { payloadType :: !(Maybe Text)
@@ -106,7 +107,10 @@ classifyHttpFailure status body =
 
 decodeProviderErrorPayload :: Text -> Either String ProviderErrorPayload
 decodeProviderErrorPayload body = do
-    value <- Aeson.eitherDecodeStrict' (Text.encodeUtf8 body)
+    value <- either
+        (Left . Text.unpack . jsonErrorMessage)
+        Right
+        (decodeText aesonValueDecoder body)
     maybe (Left "JSON body contains no provider error") Right (payloadFromValue value)
 
 payloadFromValue :: Aeson.Value -> Maybe ProviderErrorPayload

@@ -1,12 +1,17 @@
 module Agent.Responses.Types.Content
     ( ResponseRole(..)
+    , responseRoleDecoder
     , ItemStatus(..)
+    , itemStatusDecoder
     , MessageContent(..)
+    , messageContentDecoder
     , ResponseContentPart(..)
+    , responseContentPartDecoder
     ) where
 
 import qualified Data.Aeson as Aeson
-import Data.Aeson
+import Data.Aeson hiding (TaggedObject)
+import qualified Data.Hermes as Hermes
 import Data.Text (Text)
 
 import Agent.Responses.Types.Common
@@ -25,13 +30,13 @@ responseRoleText = \case
 instance ToJSON ResponseRole where
     toJSON = Aeson.String . responseRoleText
 
-instance FromJSON ResponseRole where
-    parseJSON = withText "ResponseRole" $ pure . \case
+responseRoleDecoder :: Hermes.Decoder ResponseRole
+responseRoleDecoder = fmap (\case
         "user" -> RoleUser
         "assistant" -> RoleAssistant
         "system" -> RoleSystem
         "developer" -> RoleDeveloper
-        value -> RoleUnknown value
+        value -> RoleUnknown value) Hermes.text
 
 data ItemStatus = ItemInProgress | ItemCompleted | ItemIncomplete | ItemStatusUnknown !Text
     deriving stock (Eq, Show)
@@ -46,12 +51,12 @@ itemStatusText = \case
 instance ToJSON ItemStatus where
     toJSON = Aeson.String . itemStatusText
 
-instance FromJSON ItemStatus where
-    parseJSON = withText "ItemStatus" $ pure . \case
+itemStatusDecoder :: Hermes.Decoder ItemStatus
+itemStatusDecoder = fmap (\case
         "in_progress" -> ItemInProgress
         "completed" -> ItemCompleted
         "incomplete" -> ItemIncomplete
-        value -> ItemStatusUnknown value
+        value -> ItemStatusUnknown value) Hermes.text
 
 data MessageContent
     = MessageContentText !Text
@@ -62,10 +67,13 @@ instance ToJSON MessageContent where
     toJSON (MessageContentText value) = Aeson.String value
     toJSON (MessageContentParts value) = toJSON value
 
-instance FromJSON MessageContent where
-    parseJSON (Aeson.String value) = pure (MessageContentText value)
-    parseJSON value@(Aeson.Array _) = MessageContentParts <$> parseJSON value
-    parseJSON value = fail ("MessageContent: expected string or array, got " <> show value)
+messageContentDecoder :: Hermes.Decoder MessageContent
+messageContentDecoder =
+    Hermes.getType >>= \case
+        Hermes.VString -> MessageContentText <$> Hermes.text
+        Hermes.VArray ->
+            MessageContentParts <$> Hermes.list responseContentPartDecoder
+        _ -> fail "MessageContent: expected string or array"
 
 data ResponseContentPart
     = InputTextPart
@@ -169,49 +177,54 @@ instance ToJSON ResponseContentPart where
         [Just (field "type" ("text" :: Text)), Just (field "text" text)]
     toJSON (UnknownContentPart tagged) = toJSON tagged
 
-instance FromJSON ResponseContentPart where
-    parseJSON value = withObject "ResponseContentPart" (\o -> do
-        tag <- o .: "type"
-        case (tag :: Text) of
+responseContentPartDecoder :: Hermes.Decoder ResponseContentPart
+responseContentPartDecoder =
+    Hermes.object do
+        tag <- Hermes.atKey "type" Hermes.text
+        Hermes.liftObjectDecoder $ Hermes.object $ case tag of
             "input_text" -> InputTextPart
-                <$> o .: "text"
-                <*> o .:? "prompt_cache_breakpoint"
-                <*> pure (without ["type", "text", "prompt_cache_breakpoint"] o)
+                <$> Hermes.atKey "text" Hermes.text
+                <*> optionalAtKey "prompt_cache_breakpoint" rawValue
+                <*> pure mempty
             "input_image" -> InputImagePart
-                <$> o .:? "detail"
-                <*> o .:? "file_id"
-                <*> o .:? "image_url"
-                <*> o .:? "prompt_cache_breakpoint"
-                <*> pure (without ["type", "detail", "file_id", "image_url", "prompt_cache_breakpoint"] o)
+                <$> optionalAtKey "detail" Hermes.text
+                <*> optionalAtKey "file_id" Hermes.text
+                <*> optionalAtKey "image_url" Hermes.text
+                <*> optionalAtKey "prompt_cache_breakpoint" rawValue
+                <*> pure mempty
             "input_file" -> InputFilePart
-                <$> o .:? "detail"
-                <*> o .:? "file_data"
-                <*> o .:? "file_id"
-                <*> o .:? "file_url"
-                <*> o .:? "filename"
-                <*> o .:? "prompt_cache_breakpoint"
-                <*> pure (without ["type", "detail", "file_data", "file_id", "file_url", "filename", "prompt_cache_breakpoint"] o)
+                <$> optionalAtKey "detail" Hermes.text
+                <*> optionalAtKey "file_data" Hermes.text
+                <*> optionalAtKey "file_id" Hermes.text
+                <*> optionalAtKey "file_url" Hermes.text
+                <*> optionalAtKey "filename" Hermes.text
+                <*> optionalAtKey "prompt_cache_breakpoint" rawValue
+                <*> pure mempty
             "input_audio" -> InputAudioPart
-                <$> o .: "input_audio"
-                <*> pure (without ["type", "input_audio"] o)
+                <$> Hermes.atKey "input_audio" rawValue
+                <*> pure mempty
             "output_text" -> OutputTextPart
-                <$> o .: "text"
-                <*> o .:? "annotations"
-                <*> o .:? "logprobs"
-                <*> pure (without ["type", "text", "annotations", "logprobs"] o)
+                <$> Hermes.atKey "text" Hermes.text
+                <*> optionalAtKey "annotations" (Hermes.list rawValue)
+                <*> optionalAtKey "logprobs" (Hermes.list rawValue)
+                <*> pure mempty
             "refusal" -> RefusalPart
-                <$> o .: "refusal"
-                <*> pure (without ["type", "refusal"] o)
+                <$> Hermes.atKey "refusal" Hermes.text
+                <*> pure mempty
             "reasoning_text" -> ReasoningTextPart
-                <$> o .: "text"
-                <*> pure (without ["type", "text"] o)
+                <$> Hermes.atKey "text" Hermes.text
+                <*> pure mempty
             "summary_text" -> SummaryTextPart
-                <$> o .: "text"
-                <*> pure (without ["type", "text"] o)
+                <$> Hermes.atKey "text" Hermes.text
+                <*> pure mempty
             "encrypted_content" -> EncryptedContentPart
-                <$> o .: "encrypted_content"
-                <*> pure (without ["type", "encrypted_content"] o)
+                <$> Hermes.atKey "encrypted_content" Hermes.text
+                <*> pure mempty
             "text" -> PlainTextPart
-                <$> o .: "text"
-                <*> pure (without ["type", "text"] o)
-            _ -> UnknownContentPart <$> parseJSON value) value
+                <$> Hermes.atKey "text" Hermes.text
+                <*> pure mempty
+            _ -> UnknownContentPart
+                <$> (TaggedObject tag mempty <$ consumeObject)
+  where
+    rawValue = aesonValueDecoder
+    consumeObject = pure ()
