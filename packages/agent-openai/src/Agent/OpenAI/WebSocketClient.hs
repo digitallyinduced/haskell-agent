@@ -731,9 +731,23 @@ receiveWsResponseWithActions modelHint actions onEvent =
                             _ -> loop assembly' frames' bytes'
 
     finishTerminal label assembly frames bytes event = do
-        logStreamStats label frames bytes
-        actions.completeRequest
-        pure (finishStreamResponse modelHint assembly event)
+        case finishStreamResponse modelHint assembly event of
+            Right response ->
+                case rejectFailedCodexResponse response of
+                    Right accepted -> do
+                        logStreamStats label frames bytes
+                        actions.completeRequest
+                        pure (Right accepted)
+                    Left err -> do
+                        logStreamStats label frames bytes
+                        actions.invalidateRequest
+                            "WebSocket terminal response failed"
+                        pure (Left err)
+            Left err -> do
+                logStreamStats label frames bytes
+                actions.invalidateRequest
+                    "WebSocket terminal response failed"
+                pure (Left err)
 
     finishIncomplete assembly frames bytes event =
         case finishStreamResponse modelHint assembly event of

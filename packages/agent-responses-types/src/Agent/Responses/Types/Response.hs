@@ -1,5 +1,6 @@
 module Agent.Responses.Types.Response
-    ( Response(..), responseEncoder, responseDecoder, responseFragmentDecoder
+    ( Response(..), responseEncoder, responseDecoder
+    , responseFragmentEncoder, responseFragmentDecoder
     , ResponseStatus(..), responseStatusEncoder, responseStatusDecoder
     , ResponseError(..), responseErrorEncoder, responseErrorDecoder
     , IncompleteDetails(..), incompleteDetailsEncoder, incompleteDetailsDecoder
@@ -9,6 +10,7 @@ module Agent.Responses.Types.Response
 
 import Agent.Json
     ( Extensions, RawJson, emptyExtensions, insertExtension
+    , extensionFieldWasPresent
     , markExtensionFieldPresent
     )
 import Agent.Json.Decoder.Backend (NamedField(..))
@@ -159,6 +161,9 @@ responseUsageDecoderWith permitMissing =
             <*> Right f
     req name = maybe (Left ("missing required field " <> name)) Right
 
+fragmentMarker :: Text
+fragmentMarker = "$agent.response_fragment"
+
 data Response = Response
     { responseId :: !Text, createdAt :: !Scientific, error :: !(Maybe ResponseError)
     , incompleteDetails :: !(Maybe IncompleteDetails), instructions :: !(Maybe ResponseInput)
@@ -180,7 +185,25 @@ data Response = Response
     } deriving stock (Eq, Show)
 
 responseEncoder :: E.Encoder Response
-responseEncoder = E.objectWithExtensions (.extraFields)
+responseEncoder = E.objectWithExtensions (.extraFields) responseFields
+
+responseFragmentEncoder :: E.Encoder Response
+responseFragmentEncoder =
+    E.choose \response ->
+        if extensionFieldWasPresent
+            fragmentMarker
+            response.extraFields
+            then E.objectWithExtensionsWhen
+                (.extraFields)
+                (\value key ->
+                    extensionFieldWasPresent
+                        key
+                        value.extraFields)
+                responseFields
+            else responseEncoder
+
+responseFields :: [E.Field Response]
+responseFields =
     [ E.field "id" E.text (.responseId), E.field "created_at" E.scientific (.createdAt)
     , E.nullableField "error" responseErrorEncoder (.error)
     , E.nullableField
@@ -293,7 +316,10 @@ responseDecoderWith permitMissing = D.object empty fields unknown finish
         , truncation = s.rsTruncation
         , usage = s.rsUsage
         , user = s.rsUser
-        , extraFields = s.rsExtraFields
+        , extraFields =
+            markExtensionFieldPresent
+                fragmentMarker
+                s.rsExtraFields
         }
         | otherwise = Response
             <$> req "id" s.rsId

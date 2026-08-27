@@ -2,9 +2,11 @@ module Agent.Responses.StreamAssemblySpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Json (emptyExtensions)
+import qualified Agent.Json.Decoder as Decoder
 import Agent.Responses.StreamAssembly
 import Agent.Responses.Types
 import Control.Applicative ((<|>))
+import Data.ByteString (ByteString)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -46,6 +48,23 @@ spec = describe "typed stream assembly" do
             , ResponseFunctionCallArgumentsDoneEvent
                 (Just "{\"value\":1}") (Just "echo")
                 (Just "fc_1") (Just 0) Nothing emptyExtensions
+            , completed (response [])
+            ]
+        [arguments | FunctionCallItem FunctionCall { arguments } <- result.output]
+            `shouldBe` ["{\"value\":1}"]
+
+    it "keeps output_item.done authoritative over an earlier partial" do
+        let doneCall =
+                case toolCall of
+                    FunctionCallItem value ->
+                        FunctionCallItem
+                            value { arguments = "{\"value\":1}" }
+                    other -> other
+        result <- expectRight $ buildStreamResponse config
+            [ ResponseFunctionCallArgumentsDeltaEvent
+                (Just "{") (Just "fc_1") (Just 0)
+                Nothing emptyExtensions
+            , outputDone 0 doneCall
             , completed (response [])
             ]
         [arguments | FunctionCallItem FunctionCall { arguments } <- result.output]
@@ -153,6 +172,47 @@ spec = describe "typed stream assembly" do
             other ->
                 expectationFailure ("unexpected output: " <> show other)
 
+    it "retains terminal-only fields while giving done conflicts precedence" do
+        let done = renameCall "done" toolCall
+            terminal =
+                case renameCall "terminal" toolCall of
+                    FunctionCallItem value ->
+                        FunctionCallItem value
+                            { namespace = Just "terminal-only" }
+                    other -> other
+        result <- expectRight $ buildStreamResponse config
+            [ outputDone 0 done
+            , completed (response [terminal])
+            ]
+        case result.output of
+            [FunctionCallItem call] -> do
+                call.name `shouldBe` "done"
+                call.namespace `shouldBe` Just "terminal-only"
+            other ->
+                expectationFailure ("unexpected output: " <> show other)
+
+    it "lets output_item.done explicitly clear an added optional field" do
+        added <- decodeItem
+            ( "{\"type\":\"function_call\",\"call_id\":\"c\","
+                <> "\"name\":\"n\",\"arguments\":\"{}\","
+                <> "\"namespace\":\"tools\"}"
+            )
+        done <- decodeItem
+            ( "{\"type\":\"function_call\",\"call_id\":\"c\","
+                <> "\"name\":\"n\",\"arguments\":\"{}\","
+                <> "\"namespace\":null}"
+            )
+        result <- expectRight $ buildStreamResponse config
+            [ outputAdded 0 added
+            , outputDone 0 done
+            , completed (response [])
+            ]
+        case result.output of
+            [FunctionCallItem call] ->
+                call.namespace `shouldBe` Nothing
+            other ->
+                expectationFailure ("unexpected output: " <> show other)
+
     it "classifies terminal failures from typed response fields" do
         buildStreamResponse config
             [ ResponseFailedEvent
@@ -216,7 +276,8 @@ spec = describe "typed stream assembly" do
                             ("unexpected assembly failure: " <> show err)
                             False
                     Right result ->
-                        result.output === [lateItem]
+                        result.output ===
+                            [mergeExpectedItem terminalItem lateItem]
 
     modifyMaxSuccess (const 300) $
         prop "ignores all events after the first terminal lifecycle event" $
@@ -347,6 +408,15 @@ expectRight = \case
     Left err -> do
         expectationFailure ("expected Right, got " <> show err)
         error "expectRight: unreachable"
+
+decodeItem :: ByteString -> IO ResponseItem
+decodeItem bytes =
+    case Decoder.decode responseItemDecoder bytes of
+        Left err -> do
+            expectationFailure
+                (Text.unpack (Decoder.renderDecodeError err))
+            pure toolCall
+        Right value -> pure value
 
 data CallFragment = CallFragment
     { fragmentItemId :: !(Maybe Text)

@@ -24,6 +24,7 @@ module Agent.Json.Encoder
     , rawJson
     , object
     , objectWithExtensions
+    , objectWithExtensionsWhen
     , field
     , optionalField
     , nullableField
@@ -143,6 +144,24 @@ objectWithExtensions
     -> Encoder a
 objectWithExtensions getExtensions fields =
     object (fields <> [extensionsField getExtensions])
+
+objectWithExtensionsWhen
+    :: (a -> Extensions)
+    -> (a -> Text -> Bool)
+    -> [Field a]
+    -> Encoder a
+objectWithExtensionsWhen getExtensions include fields =
+    object (map gated fields <> [extensionsField getExtensions])
+  where
+    gated fieldValue@Field{fieldName = Nothing} = fieldValue
+    gated Field{fieldName = Just key, renderField} =
+        Field
+            { fieldName = Just key
+            , renderField = \value ->
+                if include value key
+                    then renderField value
+                    else []
+            }
 
 field
     :: Text

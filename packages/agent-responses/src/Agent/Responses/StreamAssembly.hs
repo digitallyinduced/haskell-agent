@@ -193,7 +193,10 @@ finishStreamResponse
     -> Either ApiError Response
 finishStreamResponse modelHint state terminalEvent =
     case terminalEvent of
-        ResponseCompletedEvent{} -> finishState modelHint ResponseCompleted state
+        ResponseCompletedEvent { responseValue } ->
+            finishState modelHint
+                (terminalStatus ResponseCompleted responseValue)
+                state
         ResponseDoneEvent { responseValue }
             | extensionFieldWasPresent
                 "status"
@@ -203,11 +206,24 @@ finishStreamResponse modelHint state terminalEvent =
                 finishState modelHint responseValue.status state
             | otherwise ->
                 finishState modelHint ResponseCompleted state
-        ResponseIncompleteEvent{} -> finishState modelHint ResponseIncomplete state
-        ResponseFailedEvent{} -> finishState modelHint ResponseFailed state
+        ResponseIncompleteEvent { responseValue } ->
+            finishState modelHint
+                (terminalStatus ResponseIncomplete responseValue)
+                state
+        ResponseFailedEvent { responseValue } ->
+            finishState modelHint
+                (terminalStatus ResponseFailed responseValue)
+                state
         _ -> Left $ JsonDecodeError
             "Cannot assemble a non-terminal response event"
             (preview terminalEvent)
+  where
+    terminalStatus fallback responseValue
+        | extensionFieldWasPresent
+            "status"
+            responseValue.extraFields =
+                responseValue.status
+        | otherwise = fallback
 
 finishState
     :: Maybe Text
@@ -380,14 +396,239 @@ updateItem outputIndex done newValue state =
                     ParsedItem oldValue ->
                         ParsedItem
                             (mergeParsedItems oldValue newValue)
-                    partial ->
-                        mergePartialItem partial newValue
+                    _ ->
+                        ParsedItem newValue
                 else mergePartialItem old.itemValue newValue
         , itemDone = old.itemDone || done
         }
 
 mergeParsedItems :: ResponseItem -> ResponseItem -> ResponseItem
 mergeParsedItems oldValue newValue =
+    case (oldValue, newValue) of
+        (MessageItem old, MessageItem new) ->
+            MessageItem ResponseMessage
+                { messageId = pick "id" new.extraFields
+                    new.messageId old.messageId
+                , content = new.content
+                , role = new.role
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , phase = pick "phase" new.extraFields
+                    new.phase old.phase
+                , passthrough =
+                    pick "internal_chat_message_metadata_passthrough"
+                        new.extraFields
+                        new.passthrough
+                        old.passthrough
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (ItemReferenceValue old, ItemReferenceValue new) ->
+            ItemReferenceValue new
+                { extraFields = old.extraFields <> new.extraFields }
+        (AdditionalToolsItemValue old, AdditionalToolsItemValue new) ->
+            AdditionalToolsItemValue new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , role =
+                    if present "role" new.extraFields
+                        || new.role /= "developer"
+                        then new.role
+                        else old.role
+                , tools =
+                    if present "tools" new.extraFields
+                        || not (null new.tools)
+                        then new.tools
+                        else old.tools
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (LocalShellCallItem old, LocalShellCallItem new) ->
+            LocalShellCallItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , callId = pick "call_id" new.extraFields
+                    new.callId old.callId
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , action = pick "action" new.extraFields
+                    new.action old.action
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (ToolSearchCallItem old, ToolSearchCallItem new) ->
+            ToolSearchCallItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , callId = pick "call_id" new.extraFields
+                    new.callId old.callId
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , execution = pick "execution" new.extraFields
+                    new.execution old.execution
+                , arguments = pick "arguments" new.extraFields
+                    new.arguments old.arguments
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (ToolSearchOutputItem old, ToolSearchOutputItem new) ->
+            ToolSearchOutputItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , callId = pick "call_id" new.extraFields
+                    new.callId old.callId
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , execution = pick "execution" new.extraFields
+                    new.execution old.execution
+                , tools =
+                    if present "tools" new.extraFields
+                        || not (null new.tools)
+                        then new.tools
+                        else old.tools
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (WebSearchCallItem old, WebSearchCallItem new) ->
+            WebSearchCallItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , action = pick "action" new.extraFields
+                    new.action old.action
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (ImageGenerationCallItem old, ImageGenerationCallItem new) ->
+            ImageGenerationCallItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , revisedPrompt = pick "revised_prompt" new.extraFields
+                    new.revisedPrompt old.revisedPrompt
+                , result = pick "result" new.extraFields
+                    new.result old.result
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (CompactionItemValue old, CompactionItemValue new) ->
+            CompactionItemValue new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , encryptedContent =
+                    pick "encrypted_content" new.extraFields
+                        new.encryptedContent old.encryptedContent
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (CompactionTriggerItemValue old, CompactionTriggerItemValue new) ->
+            CompactionTriggerItemValue new
+                { extraFields = old.extraFields <> new.extraFields }
+        (ContextCompactionItemValue old, ContextCompactionItemValue new) ->
+            ContextCompactionItemValue new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , encryptedContent =
+                    pick "encrypted_content" new.extraFields
+                        new.encryptedContent old.encryptedContent
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (FunctionCallItem old, FunctionCallItem new) ->
+            FunctionCallItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , namespace = pick "namespace" new.extraFields
+                    new.namespace old.namespace
+                , encryptedFunctionArgs =
+                    pick "encrypted_function_args" new.extraFields
+                        new.encryptedFunctionArgs
+                        old.encryptedFunctionArgs
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (FunctionCallOutputItem old, FunctionCallOutputItem new) ->
+            FunctionCallOutputItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , name = pick "name" new.extraFields
+                    new.name old.name
+                , namespace = pick "namespace" new.extraFields
+                    new.namespace old.namespace
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (CustomToolCallItem old, CustomToolCallItem new) ->
+            CustomToolCallItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , namespace = pick "namespace" new.extraFields
+                    new.namespace old.namespace
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (CustomToolCallOutputItem old, CustomToolCallOutputItem new) ->
+            CustomToolCallOutputItem new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , name = pick "name" new.extraFields
+                    new.name old.name
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (ReasoningItemValue old, ReasoningItemValue new) ->
+            ReasoningItemValue new
+                { itemId = pick "id" new.extraFields
+                    new.itemId old.itemId
+                , summary =
+                    if present "summary" new.extraFields
+                        || not (null new.summary)
+                        then new.summary
+                        else old.summary
+                , content = pick "content" new.extraFields
+                    new.content old.content
+                , encryptedContent =
+                    pick "encrypted_content" new.extraFields
+                        new.encryptedContent
+                        old.encryptedContent
+                , status = pick "status" new.extraFields
+                    new.status old.status
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (AgentMessageItem old, AgentMessageItem new) ->
+            AgentMessageItem ResponseAgentMessage
+                { messageId = pick "id" new.extraFields
+                    new.messageId old.messageId
+                , author = pick "author" new.extraFields
+                    new.author old.author
+                , recipient = pick "recipient" new.extraFields
+                    new.recipient old.recipient
+                , content =
+                    if present "content" new.extraFields
+                        || not (null new.content)
+                        then new.content
+                        else old.content
+                , passthrough =
+                    pick "internal_chat_message_metadata_passthrough"
+                        new.extraFields
+                        new.passthrough
+                        old.passthrough
+                , extraFields = old.extraFields <> new.extraFields
+                }
+        (UnknownResponseItem old, UnknownResponseItem new)
+            | old.tag == new.tag ->
+                UnknownResponseItem new
+                    { fields = old.fields <> new.fields }
+        (KnownResponseItem oldType old, KnownResponseItem newType new)
+            | oldType == newType && old.tag == new.tag ->
+                KnownResponseItem newType new
+                    { fields = old.fields <> new.fields }
+        _ -> mergeEncodedItems oldValue newValue
+  where
+    present = extensionFieldWasPresent
+    pick key fields new old
+        | present key fields = new
+        | otherwise = new <|> old
+
+mergeEncodedItems :: ResponseItem -> ResponseItem -> ResponseItem
+mergeEncodedItems oldValue newValue =
     fromMaybe newValue do
         oldFields <- either (const Nothing) Just $
             Decoder.decode extensionObjectDecoder
@@ -628,13 +869,28 @@ assembledOutput state =
     combine streamed terminal
         | streamed.itemDone =
             ItemProgress
-                (mergeProgressItems terminal.itemValue streamed.itemValue)
+                (case (terminal.itemValue, streamed.itemValue) of
+                    (ParsedItem terminalValue, ParsedItem streamedValue) ->
+                        ParsedItem
+                            (mergeParsedItems terminalValue streamedValue)
+                    _ ->
+                        mergeProgressItems
+                            terminal.itemValue
+                            streamed.itemValue)
                 True
         | otherwise =
             -- A terminal response is authoritative when no item-level done
             -- frame established a stronger value. Partial deltas must not
             -- overwrite a complete terminal item.
-            terminal
+            case (streamed.itemValue, terminal.itemValue) of
+                (ParsedItem streamedValue, ParsedItem terminalValue) ->
+                    ItemProgress
+                        (ParsedItem
+                            (mergeParsedItems
+                                streamedValue
+                                terminalValue))
+                        True
+                _ -> terminal
 
 mergePartialItem :: PartialResponseItem -> ResponseItem -> PartialResponseItem
 mergePartialItem partial item = mergeProgressItems partial (ParsedItem item)

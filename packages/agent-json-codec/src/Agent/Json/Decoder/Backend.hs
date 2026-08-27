@@ -11,6 +11,7 @@ module Agent.Json.Decoder.Backend
     , PlannedFieldMatch(..)
     , matchPlannedField
     , capturePlannedExtension
+    , markPlannedFieldPresent
     , finishObjectPlan
     , objectPlanRequiresRawCapture
     , objectPlanCapturesExtensions
@@ -20,6 +21,7 @@ module Agent.Json.Decoder.Backend
 import Agent.Json
     ( Extensions
     , insertExtension
+    , markExtensionFieldPresent
     )
 import Agent.Json.Internal (RawJson(..))
 import qualified Data.ByteString as BS
@@ -132,6 +134,20 @@ capturePlannedExtension key value = \case
         PlanApply
             (capturePlannedExtension key value functions)
             (capturePlannedExtension key value argument)
+
+markPlannedFieldPresent
+    :: Text
+    -> ObjectPlan result
+    -> ObjectPlan result
+markPlannedFieldPresent key = \case
+    PlanPure result -> PlanPure result
+    PlanExtensions fields ->
+        PlanExtensions (markExtensionFieldPresent key fields)
+    PlanField field -> PlanField field
+    PlanApply functions argument ->
+        PlanApply
+            (markPlannedFieldPresent key functions)
+            (markPlannedFieldPresent key argument)
 
 finishObjectPlan :: ObjectPlan a -> Either Text a
 finishObjectPlan = \case

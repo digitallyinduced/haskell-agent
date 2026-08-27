@@ -685,8 +685,11 @@ streamOutputObserved event = case event of
     ResponseCustomToolInputDeltaEvent{} -> True
     ResponseCustomToolInputDoneEvent{} -> True
     ResponseReasoningSummaryPartAddedEvent{} -> True
+    ResponseReasoningSummaryPartDoneEvent{} -> True
     ResponseOutputTextDeltaEvent{} -> True
+    ResponseOutputTextDoneEvent{} -> True
     ResponseReasoningTextDeltaEvent{} -> True
+    ResponseReasoningTextDoneEvent{} -> True
     ResponseReasoningSummaryTextDeltaEvent{} -> True
     ResponseReasoningSummaryTextDoneEvent{} -> True
     OtherResponseStreamEvent { otherEventType }

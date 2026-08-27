@@ -95,6 +95,34 @@ main = hspec do
                     delta `shouldBe` Just "last"
                 _ -> expectationFailure "unexpected event constructor"
 
+        it "re-encodes lifecycle response fragments without invented fields" do
+            let payload =
+                    "{\"type\":\"response.done\",\"response\":"
+                        <> "{\"status\":\"completed\","
+                        <> "\"vendor\":{\"x\":1}}}"
+            event <- expectDecode responseStreamEventDecoder payload
+            decodeAeson
+                (Encoder.encode responseStreamEventEncoder event)
+                `shouldBe` decodeAeson payload
+
+        it "lets a duplicate null clear an earlier optional value" do
+            event <- expectDecode responseStreamEventDecoder
+                ( "{\"type\":\"response.output_text.delta\","
+                    <> "\"delta\":\"first\",\"delta\":null}"
+                )
+            case event of
+                ResponseOutputTextDeltaEvent
+                    { delta
+                    , eventExtraFields
+                    } -> do
+                        delta `shouldBe` Nothing
+                        rawJsonBytes
+                            <$> lookupExtension
+                                "delta"
+                                eventExtraFields
+                            `shouldBe` Just "null"
+                _ -> expectationFailure "unexpected event constructor"
+
         it "retains a complete nested unknown extension" do
             event <- expectDecode responseStreamEventDecoder
                 ( "{\"type\":\"response.output_text.delta\","

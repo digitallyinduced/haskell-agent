@@ -7,6 +7,7 @@ import Agent.Json
     ( Extensions
     , RawJson
     , emptyExtensions
+    , deleteExtension
     , insertExtension
     )
 import Agent.Json.Decoder.Backend
@@ -37,38 +38,35 @@ textDeltaEventDecoder expectedType = do
         \key state -> case key of
             "sequence_number" ->
                 optional key Hermes.int
-                    (\value -> state { sequenceNumber = Just value })
+                    (\value -> state { sequenceNumber = value })
                     state
             "item_id" ->
                 optional key Hermes.text
-                    (\value -> state { itemId = Just value })
+                    (\value -> state { itemId = value })
                     state
             "output_index" ->
                 optional key Hermes.int
-                    (\value -> state { outputIndex = Just value })
+                    (\value -> state { outputIndex = value })
                     state
             "content_index" ->
                 optional key Hermes.int
-                    (\value -> state { contentIndex = Just value })
+                    (\value -> state { contentIndex = value })
                     state
             "delta" ->
                 optional key Hermes.text
-                    (\value -> state { delta = Just value })
+                    (\value -> state { delta = value })
                     state
             "logprobs" ->
-                optional key rawJsonValue
-                    (\value -> state { logprobs = Just value })
-                    state
+                if expectedType == "response.output_text.delta"
+                    then optional key rawJsonValue
+                        (\value -> state { logprobs = value })
+                        state
+                    else captureExtension key state
             "type" ->
                 (\value -> state { wireType = value })
                     <$> Hermes.nullable Hermes.text
             _ ->
-                (\value ->
-                    state
-                        { extensions =
-                            insertExtension key value state.extensions
-                        })
-                    <$> rawJsonValue
+                captureExtension key state
     case fields.wireType of
         Just actual
             | actual /= expectedType ->
@@ -78,21 +76,35 @@ textDeltaEventDecoder expectedType = do
                     )
         _ -> pure fields
   where
-    optional key decoder setValue state = do
+    optional key decoder setValue _state = do
         value <- Hermes.nullable decoder
         pure $ case value of
-            Just present -> setValue present
+            Just present ->
+                (setValue (Just present))
+                    { extensions =
+                        deleteExtension
+                            key
+                            (setValue (Just present)).extensions
+                    }
             Nothing ->
-                state
+                (setValue Nothing)
                     { extensions =
                         insertExtension
                             key
                             rawNull
-                            state.extensions
+                            (setValue Nothing).extensions
                     }
 
     rawNull =
         unsafeRawJsonFromValidatedBytes (pack "null")
+
+    captureExtension key state =
+        (\value ->
+            state
+                { extensions =
+                    insertExtension key value state.extensions
+                })
+            <$> rawJsonValue
 
 rawJsonValue :: Hermes.Decoder RawJson
 rawJsonValue =

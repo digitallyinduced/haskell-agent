@@ -149,6 +149,10 @@ mergeResponseFragment base overlay = Response
         | otherwise = overlayValue <|> baseValue
     chooseText key overlayValue baseValue
         | present key = overlayValue
+        | extensionFieldWasPresent
+            "$agent.response_fragment"
+            overlay.extraFields =
+                baseValue
         | otherwise = nonEmptyText overlayValue baseValue
 
 mergeOutputItems :: [ResponseItem] -> [ResponseItem] -> [ResponseItem]

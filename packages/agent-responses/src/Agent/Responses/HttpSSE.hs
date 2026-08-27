@@ -201,6 +201,7 @@ retainForResponse = \case
     ResponseReasoningTextDoneEvent {} -> True
     ResponseReasoningSummaryTextDeltaEvent {} -> True
     ResponseReasoningSummaryPartAddedEvent {} -> True
+    ResponseReasoningSummaryPartDoneEvent {} -> True
     ResponseReasoningSummaryTextDoneEvent {} -> True
     ResponseCompletedEvent {} -> True
     ResponseDoneEvent {} -> True

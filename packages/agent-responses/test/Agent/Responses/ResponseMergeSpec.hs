@@ -76,6 +76,14 @@ spec = describe "typed response merging" do
         (.user) <$> merged `shouldBe` Just Nothing
         (.usage) <$> merged `shouldBe` Just Nothing
 
+    it "does not let an omitted fragment object replace an earlier value" do
+        base <- decodeFragment
+            "{\"object\":\"custom_response\"}"
+        terminal <- decodeFragment
+            "{\"status\":\"completed\"}"
+        (.object) <$> mergeResponseFragments [base, terminal]
+            `shouldBe` Just "custom_response"
+
     modifyMaxSuccess (const 300) $
         prop "overlaying typed lifecycle responses is associative" $
             \(ResponseFragments (first, second, third)) ->

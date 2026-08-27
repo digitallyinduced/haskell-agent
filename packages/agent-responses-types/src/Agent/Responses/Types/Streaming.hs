@@ -15,6 +15,7 @@ import Agent.Json
     ( Extensions
     , RawJson
     , emptyExtensions
+    , deleteExtension
     , extensionsToList
     , insertExtension
     )
@@ -28,7 +29,7 @@ import Agent.Responses.Types.Items
 import Agent.Responses.Types.Response
     ( Response
     , responseFragmentDecoder
-    , responseEncoder
+    , responseFragmentEncoder
     )
 import Data.Text (Text)
 
@@ -521,7 +522,11 @@ responseStreamEventEncoder = Encoder.choose \case
 
     lifecycleEncoder eventType =
         eventEncoder eventType
-            [Encoder.field "response" responseEncoder (.responseValue)]
+            [ Encoder.field
+                "response"
+                responseFragmentEncoder
+                (.responseValue)
+            ]
 
     outputItemEncoder eventType =
         eventEncoder eventType
@@ -679,8 +684,8 @@ textDeltaDecoder expectedType =
         (TextDeltaState
             Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
             emptyExtensions)
-        ( [ field "type" Decoder.text \value state ->
-            state { textDeltaType = Just value }
+        ( [ field "type" (Decoder.nullable Decoder.text) \value state ->
+            state { textDeltaType = value }
         , optionalField "sequence_number" Decoder.int \value state ->
             state { textDeltaSequenceNumber = value }
         , optionalField "item_id" Decoder.text \value state ->
@@ -760,7 +765,7 @@ textDeltaDecoder expectedType =
         Decoder.field key (wireOptionalDecoder decoder) \wire state ->
             Right $ case wire of
                 WireNull raw ->
-                    state
+                    (update Nothing state)
                         { textDeltaExtensions =
                             insertExtension
                                 key
@@ -768,7 +773,14 @@ textDeltaDecoder expectedType =
                                 state.textDeltaExtensions
                         }
                 WireValue value ->
-                    update (Just value) state
+                    update
+                        (Just value)
+                        state
+                            { textDeltaExtensions =
+                                deleteExtension
+                                    key
+                                    state.textDeltaExtensions
+                            }
 
 directEventDecoderFor
     :: StreamEventType
@@ -776,8 +788,8 @@ directEventDecoderFor
 directEventDecoderFor eventType =
     Decoder.object
         emptyDirectEvent
-        ( [ field "type" Decoder.text \value state ->
-            state { directType = Just value }
+        ( [ field "type" (Decoder.nullable Decoder.text) \value state ->
+            state { directType = value }
         , optionalField "sequence_number" Decoder.int \value state ->
             state { directSequenceNumber = value }
           ] <> eventFields eventType
@@ -796,7 +808,7 @@ directEventDecoderFor eventType =
         Decoder.field key (wireOptionalDecoder decoder) \wire state ->
             Right $ case wire of
                 WireNull raw ->
-                    state
+                    (update Nothing state)
                         { directExtensions =
                             insertExtension
                                 key
@@ -804,7 +816,14 @@ directEventDecoderFor eventType =
                                 state.directExtensions
                         }
                 WireValue value ->
-                    update (Just value) state
+                    update
+                        (Just value)
+                        state
+                            { directExtensions =
+                                deleteExtension
+                                    key
+                                    state.directExtensions
+                            }
 
     eventFields = \case
         EventResponseCreated -> lifecycleFields
