@@ -348,13 +348,31 @@ hasGrokAccessToken object =
     isJust (textField "key" object <|> textField "access_token" object)
 
 grokEmailFromAuthJson :: Text -> Maybe Text
-grokEmailFromAuthJson raw = do
-    fields <- either (const Nothing) Just $
-        Hermes.decodeEither grokDocumentDecoder (TextEncoding.encodeUtf8 raw)
-    fields.grokFieldEmail
-        <|> (fields.grokFieldIdToken >>= XAIAuth.emailFromToken)
-        <|> (fields.grokFieldAccessToken >>= XAIAuth.emailFromToken)
-        <|> (fields.grokFieldKey >>= XAIAuth.emailFromToken)
+grokEmailFromAuthJson raw =
+    either (const Nothing) id $
+        Hermes.decodeEither grokEmailDocumentDecoder
+            (TextEncoding.encodeUtf8 raw)
+
+-- Email lookup deliberately does not require the same object to contain an
+-- access token: grok's auth map may keep profile data in a sibling entry.
+grokEmailDocumentDecoder :: Hermes.Decoder (Maybe Text)
+grokEmailDocumentDecoder =
+    Hermes.object do
+        fields <- grokFieldsFieldsDecoder
+        nested <- Hermes.liftObjectDecoder $
+            Hermes.objectFold Nothing \_ found ->
+                Hermes.withRawJsonByteString \raw ->
+                    pure $ found <|>
+                        either (const Nothing) id
+                            (Hermes.decodeEither
+                                grokEmailDocumentDecoder
+                                (BS.copy raw))
+        pure $
+            fields.grokFieldEmail
+                <|> (fields.grokFieldIdToken >>= XAIAuth.emailFromToken)
+                <|> (fields.grokFieldAccessToken >>= XAIAuth.emailFromToken)
+                <|> (fields.grokFieldKey >>= XAIAuth.emailFromToken)
+                <|> nested
 
 textField :: Text -> Aeson.Object -> Maybe Text
 textField name object = case KeyMap.lookup (Key.fromText name) object of
