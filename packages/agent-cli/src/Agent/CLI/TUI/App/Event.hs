@@ -464,6 +464,7 @@ handleEventInner event = case event of
             invalidateCache
             resolveConversationFollow
             queueConversationReflow
+    AppEvent (AppAgentSnapshot selected entries) -> do
         state <- get
         let normalized =
                 Bridge.normalizeAgentSelection selected entries
