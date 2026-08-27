@@ -13,9 +13,10 @@ module Agent.OpenAI.Models.Client
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Error (classifyHttpFailure)
 import Agent.OpenAI.Models.Cache (ModelsCacheKey(..))
-import Agent.OpenAI.Models.Types (ModelsResponse)
+import Agent.OpenAI.Models.Types (ModelsResponse, modelsResponseDecoder)
 import Agent.Provider
     ( BillingMode(..)
     , Credential(..)
@@ -26,7 +27,6 @@ import Agent.Provider
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (intercalate)
@@ -185,9 +185,10 @@ listModelsWithCredentialAt baseUrl clientVersion knownEtag credential =
                 , cacheKey = responseCacheKey
                 }
             _ | status >= 200 && status < 300 ->
-                case Aeson.eitherDecode body of
+                case Json.decodeEither modelsResponseDecoder (LBS.toStrict body) of
                     Left err -> Left $ JsonDecodeError
-                        ("Invalid Codex models response: " <> Text.pack err)
+                        ("Invalid Codex models response: "
+                            <> Json.jsonErrorMessage err)
                         (bodyText body)
                     Right catalog -> Right ModelsFetched
                         { catalog

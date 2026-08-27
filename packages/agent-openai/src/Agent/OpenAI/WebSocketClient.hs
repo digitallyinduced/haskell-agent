@@ -835,9 +835,7 @@ outerRetryAfter outerFields = do
 
 jsonInt :: Aeson.Value -> Maybe Int
 jsonInt = \case
-    Aeson.Number value -> case Aeson.fromJSON (Aeson.Number value) of
-        Aeson.Success parsed -> Just parsed
-        Aeson.Error _ -> Nothing
+    Aeson.Number value -> Just (round value)
     Aeson.String value -> case TextRead.decimal value of
         Right (parsed, remainder) | Text.null remainder -> Just parsed
         _ -> Nothing

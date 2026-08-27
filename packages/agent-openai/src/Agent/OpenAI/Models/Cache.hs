@@ -10,10 +10,13 @@ module Agent.OpenAI.Models.Cache
     ) where
 
 import Agent.FileRetry (writeLazyFileAtomically)
-import Agent.OpenAI.Models.Types (ModelInfo)
+import qualified Agent.Json.Decode as Json
+import Agent.OpenAI.Models.Types (ModelInfo, modelInfoDecoder)
+import Control.Monad (join)
 import Control.Exception.Safe (SomeException, try)
 import Data.Aeson (Object)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -33,13 +36,6 @@ data ModelsCacheKey = ModelsCacheKey
     , accountId :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance Aeson.FromJSON ModelsCacheKey where
-    parseJSON = Aeson.withObject "ModelsCacheKey" \value ->
-        ModelsCacheKey
-            <$> value Aeson..:? "provider_id" Aeson..!= ""
-            <*> value Aeson..:? "base_url" Aeson..!= ""
-            <*> value Aeson..:? "account_id"
-
 instance Aeson.ToJSON ModelsCacheKey where
     toJSON key = Aeson.object
         [ "provider_id" Aeson..= key.providerId
@@ -55,16 +51,6 @@ data ModelsCacheEntry = ModelsCacheEntry
     , models :: ![ModelInfo]
     , catalogExtraFields :: !Object
     } deriving (Eq, Show)
-
-instance Aeson.FromJSON ModelsCacheEntry where
-    parseJSON = Aeson.withObject "ModelsCacheEntry" \value ->
-        ModelsCacheEntry
-            <$> value Aeson..: "fetched_at"
-            <*> value Aeson..:? "etag"
-            <*> value Aeson..:? "client_version"
-            <*> value Aeson..:? "cache_key"
-            <*> value Aeson..: "models"
-            <*> value Aeson..:? "catalog_extra_fields" Aeson..!= mempty
 
 instance Aeson.ToJSON ModelsCacheEntry where
     toJSON entry = Aeson.object
@@ -151,8 +137,10 @@ loadModelsCache path =
             then pure Nothing
             else do
                 bytes <- LBS.readFile path
-                case Aeson.eitherDecode bytes of
-                    Left err -> ioError (userError err)
+                case Json.decodeEither modelsCacheEntryDecoder (LBS.toStrict bytes) of
+                    Left err -> ioError
+                        (userError
+                            (Text.unpack (Json.jsonErrorMessage err)))
                     Right entry -> pure (Just entry)
     >>= \case
         Left err -> pure (Left (cacheError err))
@@ -160,3 +148,47 @@ loadModelsCache path =
 
 cacheError :: Show error => error -> ModelsCacheError
 cacheError = ModelsCacheError . Text.pack . show
+
+modelsCacheEntryDecoder :: Json.Decoder ModelsCacheEntry
+modelsCacheEntryDecoder = Json.object do
+    fetchedAt <- Json.atKey "fetched_at" Json.utcTime
+    etag <- optionalField "etag" Json.text
+    clientVersion <- optionalField "client_version" Json.text
+    cacheKey <- optionalField "cache_key" modelsCacheKeyDecoder
+    models <- Json.atKey "models" (Json.list modelInfoDecoder)
+    catalogExtraFields <-
+        maybe mempty id <$> Json.atKeyOptional
+            "catalog_extra_fields"
+            catalogExtraFieldsDecoder
+    pure ModelsCacheEntry
+        { .. }
+
+modelsCacheKeyDecoder :: Json.Decoder ModelsCacheKey
+modelsCacheKeyDecoder = Json.object $
+    ModelsCacheKey
+        <$> defaultField "provider_id" Json.text ""
+        <*> defaultField "base_url" Json.text ""
+        <*> optionalField "account_id" Json.text
+
+optionalField
+    :: Text
+    -> Json.Decoder value
+    -> Json.FieldsDecoder (Maybe value)
+optionalField key decoder =
+    join <$> Json.atKeyOptional key (Json.nullable decoder)
+
+defaultField
+    :: Text
+    -> Json.Decoder value
+    -> value
+    -> Json.FieldsDecoder value
+defaultField key decoder fallback =
+    maybe fallback id <$> optionalField key decoder
+
+catalogExtraFieldsDecoder :: Json.Decoder Object
+catalogExtraFieldsDecoder = Json.object do
+    catalogGeneration <-
+        optionalField "catalog_generation" Json.scientific
+    pure $ maybe mempty
+        (KeyMap.singleton "catalog_generation" . Aeson.Number)
+        catalogGeneration
