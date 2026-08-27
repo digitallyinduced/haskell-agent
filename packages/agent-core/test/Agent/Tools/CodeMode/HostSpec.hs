@@ -40,7 +40,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "code-mode Node host" do
+spec = describe "code-mode Bun host" do
     it "resolves the bundled worker independently of the current directory" do
         worker <- bundledCodeModeWorkerPath
         doesFileExist worker `shouldReturn` True
@@ -187,7 +187,7 @@ spec = describe "code-mode Node host" do
                 }
         closeCodeModeHost host
 
-    it "does not expose Node globals" do
+    it "does not expose runtime globals" do
         let config = defaultCodeModeConfig
                 "data/code-mode/worker.mjs"
                 (\_ _ -> pure $ Left "no tools")

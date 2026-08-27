@@ -24,6 +24,27 @@
             system:
             let
                 pkgs = import nixpkgs { inherit system; };
+                bun_1_4 = pkgs.bun.overrideAttrs (_old: {
+                    version = "1.4.0";
+                    src = pkgs.fetchurl {
+                        url = {
+                            aarch64-darwin = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-aarch64.zip";
+                            x86_64-darwin = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64.zip";
+                            aarch64-linux = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip";
+                            x86_64-linux = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip";
+                        }.${system};
+                        hash = {
+                            aarch64-darwin = "sha256-xmnpf2Fk4cluBwF0jbmN+ndJKQjL2DlMdVcTSnNd44E=";
+                            x86_64-darwin = "sha256-HQIRuPHcmRGCNEaHrRXnLuhvFUhFpff6R3mUzTQd2bA=";
+                            aarch64-linux = "sha256-SxozLuhhmD65O8/m93D/+U4+MbLDiL2uo8jtNeWO7Q4=";
+                            x86_64-linux = "sha256-GE+0WV8NQBohfPfHjBvEMLqDMU2reouUgFurv3+nCX8=";
+                        }.${system};
+                    };
+                    sourceRoot = {
+                        aarch64-darwin = "bun-darwin-aarch64";
+                        x86_64-darwin = "bun-darwin-x64";
+                    }.${system} or null;
+                });
 
                 # Codex upstream model catalog and fallback instructions.
                 # Fetched at build time (pinned by content hash) instead of
@@ -328,7 +349,7 @@
                             })
                             [
                                 pkgs.git
-                                pkgs.nodejs_22
+                                bun_1_4
                                 pkgs.ripgrep
                             ]);
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
@@ -402,7 +423,7 @@
                             })
                             [
                                 pkgs.git
-                                pkgs.nodejs_22
+                                bun_1_4
                                 pkgs.postgresql_18
                             ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
@@ -449,7 +470,7 @@
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.ffmpeg
-                                                pkgs.nodejs_22
+                                                bun_1_4
                                                 pkgs.postgresql_18
                                                 haskellPackages.ghc
                                             ]}"
@@ -669,7 +690,7 @@
                         ++ (with pkgs; [
                             cabal2nix
                             ffmpeg
-                            nodejs_22
+                            bun_1_4
                             postgresql_18
                             ripgrep
                         ])
