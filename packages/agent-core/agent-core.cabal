@@ -92,6 +92,10 @@ library
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Loop.Internal
+                    , Agent.MCP.Client
+                    , Agent.MCP.Fleet
+                    , Agent.MCP.Supervisor
+                    , Agent.MCP.Types
                     , Agent.Tools.CodeMode.Host.Types
                     , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_core
