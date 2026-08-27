@@ -19,6 +19,7 @@ import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
     , decodeToolArguments
+    , textTool
     , typedStreamingTool
     , typedTool
     )
@@ -303,13 +304,11 @@ commandBody out err
 -- apply_patch
 --------------------------------------------------------------------------------
 
-newtype ApplyPatchArgs = ApplyPatchArgs { patch :: Text }
-
-applyPatchArgsDecoder :: Json.Decoder ApplyPatchArgs
+applyPatchArgsDecoder :: Json.Decoder Text
 applyPatchArgsDecoder = Json.withType \case
-    Json.VString -> ApplyPatchArgs <$> Json.text
+    Json.VString -> Json.text
     Json.VObject -> Json.object $
-        ApplyPatchArgs <$> firstPresentText ["input", "patch", "command"]
+        firstPresentText ["input", "patch", "command"]
     _ -> fail "apply_patch expects freeform patch text"
 
 applyPatchTool :: ToolEnv -> AppTool
@@ -317,7 +316,7 @@ applyPatchTool env =
     withToolResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
-        (typedTool "apply_patch" applyPatchArgsDecoder (runApplyPatch env))
+        (textTool "apply_patch" (applyPatch env))
 
 applyPatchResourceClaims
     :: ToolEnv
@@ -326,8 +325,8 @@ applyPatchResourceClaims
 applyPatchResourceClaims env call =
     case decodeApplyPatchArguments call of
         Left err -> pure (Left err)
-        Right args ->
-            case parsePatch args.patch of
+        Right patch ->
+            case parsePatch patch of
                 Left err -> pure (Left err)
                 Right hunks -> do
                     claims <- traverse (claimsForHunk env) hunks
@@ -369,12 +368,9 @@ applyPatchDescription =
     \*** Delete File: path\n\
     \*** End Patch"
 
-runApplyPatch :: ToolEnv -> ApplyPatchArgs -> IO (Either Text Text)
-runApplyPatch env args = applyPatch env args.patch
-
-decodeApplyPatchArguments :: ToolCall -> Either Text ApplyPatchArgs
+decodeApplyPatchArguments :: ToolCall -> Either Text Text
 decodeApplyPatchArguments call = case call.callKind of
-    CustomCallKind -> Right (ApplyPatchArgs call.arguments)
+    CustomCallKind -> Right call.arguments
     FunctionCallKind -> decodeToolArguments applyPatchArgsDecoder call.arguments
 
 --------------------------------------------------------------------------------
