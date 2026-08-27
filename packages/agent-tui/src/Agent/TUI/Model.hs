@@ -37,6 +37,7 @@ module Agent.TUI.Model
     , uiTokensPerSecond
     , warningNotice
     , advanceUiTime
+    , blockCodeLanguage
     ) where
 
 import Agent.TUI.Presentation
@@ -1395,7 +1396,7 @@ isTodoTool name =
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName
-    | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci"] =
+    | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci", "exec"] =
         BlockShell
     | name `elem` ["search_replace", "apply_patch"] =
         BlockEdit
@@ -1404,6 +1405,16 @@ toolBlockKind rawName
     | otherwise = BlockTool
   where
     name = canonicalToolName rawName
+
+-- | Syntax grammar for code carried in a shell-style tool block.
+-- The title is retained alongside the source after the original call leaves
+-- the live-tool map, so it also identifies exec's JavaScript code here.
+blockCodeLanguage :: UiBlock -> Maybe Text
+blockCodeLanguage block
+    | block.blockKind /= BlockShell = Nothing
+    | Text.null (Text.strip block.blockDetail) = Nothing
+    | block.blockTitle == "$ exec" = Just "javascript"
+    | otherwise = Just "haskell"
 
 outputLooksFailed :: Text -> Bool
 outputLooksFailed output =
