@@ -182,8 +182,8 @@ webSearchRequest model =
         { OpenAI.model = Just model
         , OpenAI.instructions = Just "You are a functional test responder. You must use the web_search tool before answering. Answer exactly with the official domain openai.com."
         , OpenAI.input = Just (OpenAI.ResponseInputText "Use web search to confirm the official OpenAI website domain, then answer exactly with the domain.")
-        , OpenAI.tools = Just [OpenAI.KnownResponseTool OpenAI.ToolWebSearch
-            (OpenAI.TaggedObject "web_search")]
+        , OpenAI.tools = Just
+            [OpenAI.KnownResponseTool OpenAI.ToolWebSearch]
         , OpenAI.reasoning = Just (reasoning "low")
         , OpenAI.include = Just []
         , OpenAI.promptCacheKey = Just "codex-hs-functional-test-web-search"
