@@ -142,6 +142,7 @@ spec = do
                     , callId = "call-oversized"
                     , name = "apply_patch"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments =
                         Text.replicate
                             (remoteCompactionMaxStringLength + 1)
@@ -206,6 +207,7 @@ spec = do
                     , callId = "call-portable"
                     , name = "portable_tool"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
@@ -243,6 +245,7 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
@@ -497,6 +500,7 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
+                    , provider = Nothing
                     , output = raw (Aeson.String (Text.replicate 10_000 "x"))
                     , status = Just ItemCompleted
                     }
@@ -520,6 +524,7 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
+                    , provider = Nothing
                     , output = raw (Aeson.String "ok")
                     , status = Just ItemCompleted
                     }
@@ -549,6 +554,7 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
+                    , provider = Nothing
                     , output = raw (Aeson.String (Text.replicate 20_000 "y"))
                     , status = Just ItemCompleted
                     }
@@ -1116,6 +1122,7 @@ spec = do
         , callId = "call-image"
         , name = Nothing
         , namespace = Nothing
+        , provider = Nothing
         , output
         , status = Just ItemCompleted
         }

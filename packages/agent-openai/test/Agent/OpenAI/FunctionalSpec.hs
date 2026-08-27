@@ -203,6 +203,7 @@ functionOutput callId output = OpenAI.FunctionCallOutputItem OpenAI.FunctionCall
     , OpenAI.callId = callId
     , OpenAI.name = Nothing
     , OpenAI.namespace = Nothing
+    , OpenAI.provider = Nothing
     , OpenAI.output =
         rawJsonFromEncoding (Aeson.toEncoding (Aeson.String output))
     , OpenAI.status = Nothing

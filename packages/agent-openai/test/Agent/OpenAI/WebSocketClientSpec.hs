@@ -32,6 +32,7 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted

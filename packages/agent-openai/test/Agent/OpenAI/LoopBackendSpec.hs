@@ -323,6 +323,7 @@ spec = do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe`
                     Just
@@ -337,6 +338,7 @@ spec = do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe`
                     Just
@@ -353,6 +355,7 @@ spec = do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
             streamEventToLoopEvent event
                 `shouldBe`
@@ -407,6 +410,7 @@ spec = do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe` Nothing
 
@@ -423,6 +427,7 @@ spec = do
                     , streamItemId = Nothing
                     , streamOutputIndex = Nothing
                     , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe` Nothing
             streamEventToLoopEvent (ResponseOutputItemDoneEvent
@@ -1515,6 +1520,9 @@ functionCallItemWithExtras callId name arguments extraFields =
     , namespace = case KeyMap.lookup "namespace" extraFields of
         Just (Aeson.String value) -> Just value
         _ -> Nothing
+    , provider = case KeyMap.lookup "provider" extraFields of
+        Just (Aeson.String value) -> Just value
+        _ -> Nothing
     , arguments
     , encryptedFunctionArgs =
         case KeyMap.lookup "encrypted_function_args" extraFields of
@@ -1585,6 +1593,7 @@ deltaEvent otherEventType delta = OtherResponseStreamEvent
     , streamItemId = Nothing
     , streamOutputIndex = Nothing
     , summaryIndex = Nothing
+    , turnState = Nothing
     }
 
 codexRateLimitsEvent :: Aeson.Value -> ResponseStreamEvent
