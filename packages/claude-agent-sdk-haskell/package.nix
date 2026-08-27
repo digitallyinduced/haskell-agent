@@ -16,7 +16,6 @@ mkDerivation {
     aeson base bytestring containers directory filepath hspec
     safe-exceptions scientific text unix
   ];
-  benchmarkHaskellDepends = [ base bytestring ];
   description = "Haskell SDK for the Claude Agent SDK stream protocol";
   license = lib.meta.getLicenseFromSpdxId "MIT";
 }
