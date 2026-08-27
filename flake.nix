@@ -29,6 +29,7 @@
                     root = ./packages/agent-openai;
                     include = [
                         "app"
+                        "benchmark"
                         "src"
                         "test"
                         "agent-openai.cabal"

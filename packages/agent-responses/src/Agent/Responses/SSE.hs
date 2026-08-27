@@ -5,6 +5,7 @@ module Agent.Responses.SSE
     , feedSseDecoder
     , finishSseDecoder
     , parseSseEvents
+    , parseSseEventsBytes
     ) where
 
 import Agent.Error (ApiError(..))
@@ -80,8 +81,13 @@ finishSseDecoder decoder = do
 
 -- | Decode a complete SSE body into the canonical typed Responses event union.
 parseSseEvents :: Text -> Either ApiError [ResponseStreamEvent]
-parseSseEvents sseText = do
-    (decoder, events) <- feedSseDecoder newSseDecoder (Text.encodeUtf8 sseText)
+parseSseEvents = parseSseEventsBytes . Text.encodeUtf8
+
+-- | Decode a complete SSE body without converting its validated wire bytes
+-- through 'Text' first.
+parseSseEventsBytes :: BS.ByteString -> Either ApiError [ResponseStreamEvent]
+parseSseEventsBytes bytes = do
+    (decoder, events) <- feedSseDecoder newSseDecoder bytes
     trailing <- finishSseDecoder decoder
     pure (events <> trailing)
 

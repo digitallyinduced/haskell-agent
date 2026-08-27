@@ -18,6 +18,25 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "decodeCompactBodyBytes" do
+        it "decodes compacted items directly from wire bytes" do
+            let bytes = LBS.toStrict . Aeson.encode $ Aeson.object
+                    [ "output" .=
+                        [ Aeson.object
+                            [ "type" .= ("message" :: Text.Text)
+                            , "id" .= ("msg-1" :: Text.Text)
+                            , "role" .= ("assistant" :: Text.Text)
+                            , "content" .= ("compacted" :: Text.Text)
+                            ]
+                        ]
+                    ]
+            case decodeCompactBodyBytes bytes of
+                Right [MessageItem message] ->
+                    message.content `shouldBe` MessageContentText "compacted"
+                Right other ->
+                    expectationFailure ("unexpected items: " <> show other)
+                Left err -> expectationFailure (show err)
+
     describe "remote compaction v2" do
         it "builds an exact final compaction trigger and preserves request controls" do
             let reasoningConfig = ReasoningConfig
