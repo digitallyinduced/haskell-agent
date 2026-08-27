@@ -316,7 +316,9 @@ commitLiveHistoryTurn durableTurn commit state =
         , appNextHistoryBlockId = nextBlockId
         , appConversationAnchor = Nothing
         , appCompletionFlashes =
-            retainExistingFlashes ui state.appCompletionFlashes
+            Map.filterWithKey
+                (\blockId _ -> any ((== blockId) . (.blockId)) (toList ui.uiBlocks))
+                state.appCompletionFlashes
         }
 
 truncateUiBlocks :: Int -> UiState -> UiState

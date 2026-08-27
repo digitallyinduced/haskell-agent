@@ -171,6 +171,8 @@ import System.Process (callProcess)
 import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.Reduce
+import Agent.CLI.TUI.App.Navigation
+    ( mouseScrollLines, historyBlock, selectedBlock )
 
 handleResumeKey :: V.Event -> EventM Name AppState ()
 handleResumeKey event = do
@@ -727,3 +729,17 @@ resolveTextPrompt confirmed = do
             }
     resumeNativeProgressIfRunning
 
+
+handleCtrlC :: EventM Name AppState CtrlCDecision
+handleCtrlC = do
+    state <- get
+    decision <- liftIO state.appRuntime.runtimeCtrlC
+    case decision of
+        SoftCancel ->
+            applyLocalUiEvent $ UiSetNotice $
+                Just $ warningNotice "Interrupted; press Ctrl-C again to exit."
+        WarnExit ->
+            applyLocalUiEvent $ UiSetNotice $
+                Just $ warningNotice "Press Ctrl-C again to exit."
+        ForceExit -> liftIO (throwIO UserInterrupt)
+    pure decision

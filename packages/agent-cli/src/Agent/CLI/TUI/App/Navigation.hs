@@ -171,7 +171,8 @@ import System.Process (callProcess)
 import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.History
-import Agent.CLI.TUI.App.Reduce
+import Agent.CLI.TUI.App.Reduce hiding
+    ( queueConversationReflow, conversationBlocks )
 
 handleNormalKey :: V.Event -> EventM Name AppState ()
 handleNormalKey event = do
@@ -923,3 +924,15 @@ mapHistoryBlock ident update window =
                     })
             window.historyWindowTurns)
         window
+
+handleCtrlC :: EventM Name AppState CtrlCDecision
+handleCtrlC = do
+    state <- get
+    decision <- liftIO state.appRuntime.runtimeCtrlC
+    case decision of
+        SoftCancel -> applyLocalUiEvent $ UiSetNotice $
+            Just $ warningNotice "Interrupted; press Ctrl-C again to exit."
+        WarnExit -> applyLocalUiEvent $ UiSetNotice $
+            Just $ warningNotice "Press Ctrl-C again to exit."
+        ForceExit -> liftIO (throwIO UserInterrupt)
+    pure decision

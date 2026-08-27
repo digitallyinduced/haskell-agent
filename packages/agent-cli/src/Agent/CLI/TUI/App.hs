@@ -79,6 +79,9 @@ module Agent.CLI.TUI.App
 
 
 import Agent.CLI.TUI.Types
+import Agent.CLI.TUI.Motion
+import Agent.CLI.TUI.Render
+import Agent.CLI.TUI.LambdaArt
 import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.History

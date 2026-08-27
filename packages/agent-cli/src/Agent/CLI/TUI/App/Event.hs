@@ -171,9 +171,9 @@ import System.Process (callProcess)
 import Agent.CLI.TUI.App.Runtime
 import Agent.CLI.TUI.App.Mailbox
 import Agent.CLI.TUI.App.History
-import Agent.CLI.TUI.App.Reduce
-import Agent.CLI.TUI.App.Overlay
-import Agent.CLI.TUI.App.Navigation
+import Agent.CLI.TUI.App.Reduce hiding (queueConversationReflow)
+import Agent.CLI.TUI.App.Overlay hiding (handleCtrlC)
+import Agent.CLI.TUI.App.Navigation hiding (handleCtrlC)
 
 fullscreenApp :: App AppState AppEvent Name
 fullscreenApp = App

@@ -931,6 +931,11 @@ telegramReplyUserIdFromPrompt prompt = do
     digits <- Text.stripPrefix ", user " afterUser
     parsePositiveUserId (Text.takeWhile isDigit digits)
 
+parsePositiveUserId :: Text -> Maybe Integer
+parsePositiveUserId text = do
+    userId <- readMaybe (Text.unpack text)
+    if userId > 0 then Just userId else Nothing
+
 checkpointPendingVoiceTranscript
     :: Integer
     -> Text

@@ -2,6 +2,8 @@
 {-# OPTIONS_GHC -O0 -Wno-unused-imports #-}
 module Agent.CLI.TUI.App.Runtime where
 
+import Agent.CLI.TUI.App.Mailbox (enqueueAppEvent)
+
 import Agent.CLI.Clipboard ( formatImageSize )
 import Agent.CLI.Dictation ( DictationControl(..)
     , DictationResult(..)

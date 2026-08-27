@@ -307,7 +307,7 @@ import qualified Graphics.Vty.CrossPlatform as Vty ()
 import Agent.CLI.TUI.Render.Blocks (todoStatusAttr)
 import Agent.CLI.TUI.Render.Overlays
     ( drawNotice, drawFollowStatus, drawFooter, drawPermission, drawResume
-    , drawChoice, choiceRowColumns, onboardingVisibleRowIndices
+    , drawChoice, drawTextPrompt, choiceRowColumns, onboardingVisibleRowIndices
     , normalizeTextOverlayInsertion, maskedSecretText, textOverlayDisplayText
     , resumeSearchCursorColumn )
 import Agent.CLI.TUI.Render.Transcript

@@ -618,3 +618,45 @@ resumeNativeProgressIfRunning = do
                     current.appUi.uiElapsedMillis `div` 5000
                 }
 
+
+conversationUnpaddedContentHeight :: EventM Name AppState Int
+conversationUnpaddedContentHeight =
+    lookupViewport ConversationViewport >>= \case
+        Just (VP _ _ _ (_, contentHeight)) -> do
+            reserveRows <- lookupExtent ConversationReserve >>= \case
+                Just (Extent _ _ (_, rows)) -> pure rows
+                Nothing -> pure 0
+            pure (max 0 (contentHeight - reserveRows))
+        Nothing -> pure 0
+
+queueConversationReflow :: EventM Name AppState ()
+queueConversationReflow = do
+    state <- get
+    unless state.appConversationReflowQueued do
+        modify' \current -> current { appConversationReflowQueued = True }
+        liftIO $ enqueueAppEvent state.appRuntime AppConversationReflow
+
+clearSubmittedImagePlacements :: FullscreenRuntime -> EventM Name AppState ()
+clearSubmittedImagePlacements runtime = do
+    previous <- liftIO $ readIORef runtime.runtimeSubmittedImagePlacements
+    when (not (null previous)) $
+        liftIO do
+            writeIORef runtime.runtimeSubmittedImagePlacements []
+            modifyIORef' runtime.runtimeImagePreviewRevision (+ 1)
+
+isSubmittedPrompt :: UiEvent -> Bool
+isSubmittedPrompt = \case
+    UiUserSubmitted _ -> True
+    _ -> False
+
+conversationBlocks :: AgentTarget -> AppState -> [UiBlock]
+conversationBlocks target state =
+    case target of
+        AgentRoot ->
+            concatMap (toList . (.historyTurnBlocks))
+                (toList state.appHistoryWindow.historyWindowTurns)
+                <> toList state.appUi.uiBlocks
+        AgentChild _ ->
+            maybe [] (toList . (.uiBlocks)) (conversationUiForTarget target state)
+        AgentNative _ ->
+            maybe [] (toList . (.uiBlocks)) (conversationUiForTarget target state)
