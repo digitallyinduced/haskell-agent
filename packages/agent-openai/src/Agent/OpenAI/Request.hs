@@ -71,6 +71,16 @@ stripContentItemKindsItem = \case
     CustomToolCallOutputItem value ->
         CustomToolCallOutputItem value
             { extraFields = stripContentItemKindsFields value.extraFields }
+    ComputerCallItem value ->
+        ComputerCallItem value
+            { computerCallExtra =
+                stripContentItemKindsFields value.computerCallExtra
+            }
+    ComputerCallOutputItem value ->
+        ComputerCallOutputItem value
+            { computerOutputExtra =
+                stripContentItemKindsFields value.computerOutputExtra
+            }
     ReasoningItemValue value ->
         ReasoningItemValue value
             { extraFields = stripContentItemKindsFields value.extraFields }

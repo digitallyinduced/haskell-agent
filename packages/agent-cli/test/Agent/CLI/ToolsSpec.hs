@@ -38,6 +38,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "advertises the reserved computer tool as a built-in" do
+        let computer = jsonAppTool "computer" "Control this computer" []
+                AlwaysPrompt
+                (noArgsTool "computer" (pure (Right "ok")))
+        schemasFromAppTools codexDialect [computer]
+            `shouldBe`
+                [ webSearchTool
+                , knownResponseTool ToolComputer KeyMap.empty
+                ]
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch tagged : _ -> do

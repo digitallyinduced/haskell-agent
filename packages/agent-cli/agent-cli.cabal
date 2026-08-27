@@ -106,6 +106,7 @@ library
                     , Agent.CLI.Compaction
                     , Agent.CLI.Connectivity
                     , Agent.CLI.Command
+                    , Agent.CLI.ComputerUse
                     , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
                     , Agent.CLI.Database

@@ -206,6 +206,7 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallKind(..)
     , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , canonicalToolName
@@ -831,7 +832,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , loopTools = toolRegistry
             , loopDispatch =
                 defaultLoopDispatch
-                    { toolDispatchFinalizeOutput = finalizeToolOutput toolEnv }
+                    { toolDispatchFinalizeOutput = \call output ->
+                        if call.callKind == ComputerCallKind
+                            then pure output
+                            else finalizeToolOutput toolEnv call output
+                    }
             , loopMaxTurns = options.optMaxTurns
             , loopOnEvent = emitLoop
             , loopApprove = \call ->

@@ -40,6 +40,10 @@ import qualified Data.Text.Encoding as TextEncoding
 data ToolCallKind
     = FunctionCallKind
     | CustomCallKind
+    -- | A provider-native computer call. Its arguments are the encoded
+    -- action list, and its result is encoded by the provider adapter as a
+    -- structured screenshot output rather than a function output string.
+    | ComputerCallKind
     deriving (Eq, Show)
 
 -- | Provider-neutral function or custom tool call emitted by a model transport.

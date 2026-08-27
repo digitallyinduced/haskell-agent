@@ -40,6 +40,7 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
+    , ComputerCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , ItemStatus(..)
@@ -474,6 +475,12 @@ renderResponseItem = \case
         labelled
             ("Tool result " <> output.callId)
             (renderJsonValue output.output)
+    ComputerCallItem item ->
+        labelled "Assistant computer call" (renderJsonValue (Aeson.toJSON item))
+    ComputerCallOutputItem item ->
+        labelled
+            ("Computer result " <> item.computerOutputCallId)
+            (renderJsonValue (Aeson.toJSON item))
     -- Reasoning is deliberately excluded from imported history. In
     -- particular, never copy private chain-of-thought into a Claude prompt.
     ReasoningItemValue{} ->

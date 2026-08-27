@@ -448,6 +448,8 @@ responseItemKind = \case
     FunctionCallOutputItem{} -> "function output"
     CustomToolCallItem{} -> "custom call"
     CustomToolCallOutputItem{} -> "custom output"
+    ComputerCallItem{} -> "computer call"
+    ComputerCallOutputItem{} -> "computer output"
     ReasoningItemValue{} -> "reasoning"
     ItemReferenceValue{} -> "reference"
     AgentMessageItem{} -> "agent message"
