@@ -71,6 +71,7 @@ data FunctionCall = FunctionCall
     , callId                 :: !Text
     , name                   :: !Text
     , namespace              :: !(Maybe Text)
+    , provider               :: !(Maybe Text)
     , arguments              :: !Text
     , encryptedFunctionArgs  :: !(Maybe [Text])
     , status                 :: !(Maybe ItemStatus)
@@ -79,7 +80,7 @@ data FunctionCall = FunctionCall
 
 instance ToJSON FunctionCall where
     toJSON FunctionCall
-        { itemId, callId, name, namespace, arguments, encryptedFunctionArgs
+        { itemId, callId, name, namespace, provider, arguments, encryptedFunctionArgs
         , status } =
             objectWith
                 [ Just (field "type" ("function_call" :: Text))
@@ -87,6 +88,8 @@ instance ToJSON FunctionCall where
                 , Just (field "call_id" callId)
                 , Just (field "name" name)
                 , optionalField "namespace" namespace
+                , optionalField "provider" provider
+                , optionalField "provider" provider
                 , Just (field "arguments" arguments)
                 , optionalField "encrypted_function_args" encryptedFunctionArgs
                 , optionalField "status" status
@@ -98,6 +101,7 @@ data FunctionCallOutput = FunctionCallOutput
     , callId      :: !Text
     , name        :: !(Maybe Text)
     , namespace   :: !(Maybe Text)
+    , provider    :: !(Maybe Text)
     , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
 
@@ -105,7 +109,7 @@ data FunctionCallOutput = FunctionCallOutput
 
 instance ToJSON FunctionCallOutput where
     toJSON FunctionCallOutput
-        { itemId, callId, name, namespace, output, status } =
+        { itemId, callId, name, namespace, provider, output, status } =
             objectWith
                 [ Just (field "type" ("function_call_output" :: Text))
                 , optionalField "id" itemId
@@ -583,6 +587,7 @@ functionCallDecoder = Hermes.object $
         <*> Hermes.atKey "call_id" Hermes.text
         <*> Hermes.atKey "name" Hermes.text
         <*> optionalAtKey "namespace" Hermes.text
+        <*> optionalAtKey "provider" Hermes.text
         <*> Hermes.atKey "arguments" Hermes.text
         <*> optionalAtKey "encrypted_function_args" (Hermes.list Hermes.text)
         <*> optionalAtKey "status" itemStatusDecoder
@@ -594,6 +599,7 @@ functionCallOutputDecoder = Hermes.object $
         <*> Hermes.atKey "call_id" Hermes.text
         <*> optionalAtKey "name" Hermes.text
         <*> optionalAtKey "namespace" Hermes.text
+        <*> optionalAtKey "provider" Hermes.text
         <*> Hermes.atKey "output" rawJsonDecoder
         <*> optionalAtKey "status" itemStatusDecoder
 

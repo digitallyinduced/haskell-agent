@@ -272,6 +272,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
+                , provider = Nothing
                 , output = toolOutputValue
                 , status = Nothing
 
@@ -392,6 +393,7 @@ functionCallAdded functionItemId functionCallId functionName =
             , callId = functionCallId
             , name = functionName
             , namespace = Nothing
+            , provider = Nothing
             , arguments = ""
             , encryptedFunctionArgs = Nothing
             , status = Nothing

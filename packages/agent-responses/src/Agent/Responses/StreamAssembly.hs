@@ -390,6 +390,7 @@ mapFunctionCall itemId update = \case
             , callId = identifier
             , name = ""
             , namespace = Nothing
+            , provider = Nothing
             , arguments = ""
             , encryptedFunctionArgs = Nothing
             , status = Nothing

@@ -186,6 +186,7 @@ stripResponsesLiteImageDetails = \case
             , callId = callOutput.callId
             , name = callOutput.name
             , namespace = callOutput.namespace
+            , provider = callOutput.provider
             , output = callOutput.output
             , status = callOutput.status
 
@@ -369,6 +370,7 @@ toolResultToItem result = case result.callKind of
         , callId = result.callId
         , name = Nothing
         , namespace = Nothing
+        , provider = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding result.output)
         , status = Nothing
 

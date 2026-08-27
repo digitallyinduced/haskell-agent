@@ -614,6 +614,7 @@ toResponseItem fragment =
         , callId = fragment.fragmentCallId
         , name = fragment.fragmentName
         , namespace = fragment.fragmentNamespace
+        , provider = Nothing
         , arguments = fragment.fragmentArguments
         , encryptedFunctionArgs = Nothing
         , status = fragment.fragmentStatus

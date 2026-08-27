@@ -79,6 +79,25 @@ spec = describe "Responses SSE decoder" do
         eventTypes events
             `shouldBe` [StreamEventUnknown "response.future_event", EventResponseCompleted]
 
+    it "decodes provider provenance on function calls and outputs" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"Task\",\"provider\":\"claude-code\",\"arguments\":\"{}\"}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"provider\":\"claude-code\",\"output\":\"ok\"}}"
+            ]
+        case events of
+            [ ResponseOutputItemAddedEvent
+                { item = FunctionCallItem FunctionCall { provider = callProvider } }
+              , ResponseOutputItemDoneEvent
+                { item = FunctionCallOutputItem
+                    FunctionCallOutput { provider = outputProvider } }
+              ] -> do
+                callProvider `shouldBe` Just "claude-code"
+                outputProvider `shouldBe` Just "claude-code"
+            other -> expectationFailure
+                ("unexpected provider-tagged events: " <> show other)
+
     it "rejects invalid UTF-8 only after a complete event block arrives" do
         (decoder, events) <- expectRight $
             feedSseDecoder newSseDecoder "data: \xc3"

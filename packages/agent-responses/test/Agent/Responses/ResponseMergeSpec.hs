@@ -68,6 +68,7 @@ functionCall callId = FunctionCallItem FunctionCall
     , callId
     , name = "echo"
     , namespace = Nothing
+    , provider = Nothing
     , arguments = "{}"
     , encryptedFunctionArgs = Nothing
     , status = Nothing
