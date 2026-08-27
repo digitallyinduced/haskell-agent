@@ -1,11 +1,12 @@
 module Agent.Tools.CodeMode.ProtocolSpec (spec) where
 
 import Agent.Tools.CodeMode.Protocol
+import qualified Agent.Json.Decode as Json
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
+import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
@@ -95,23 +96,28 @@ spec = describe "code-mode worker protocol" do
                 "text(load(\"answer\"));"
                 [ CodeModeToolMetadata "inspect" "Inspect a value." ]
                 (Map.singleton "answer" (Aeson.Number 42))
-        case Aeson.decodeStrict' encoded of
-            Just (Aeson.Object request) ->
-                case KeyMap.lookup "params" request of
-                    Just (Aeson.Object params) -> do
-                        KeyMap.lookup "tools" params `shouldBe`
-                            Just (Aeson.toJSON
-                                [ object
-                                    [ "name" .= ("inspect" :: String)
-                                    , "description" .=
-                                        ("Inspect a value." :: String)
-                                    ]
-                                ])
-                        KeyMap.lookup "stored_values" params `shouldBe`
-                            Just (object ["answer" .= (42 :: Int)])
-                        KeyMap.lookup "image_detail_visible" params
-                            `shouldBe` Just (Aeson.Bool True)
-                    other -> expectationFailure
-                        ("expected params object, got " <> show other)
-            other -> expectationFailure
-                ("expected request object, got " <> show other)
+        Json.decodeEither execRequestProjection encoded
+            `shouldBe`
+                Right
+                    ( [ ("inspect", "Inspect a value.") ]
+                    , Map.singleton "answer" 42
+                    , True
+                    )
+
+execRequestProjection
+    :: Json.Decoder ([(Text, Text)], Map.Map Text Int, Bool)
+execRequestProjection =
+    Json.object $
+        Json.atKey "params" $
+            (\tools storedValues imageDetailVisible ->
+                (tools, storedValues, imageDetailVisible)
+            )
+                <$> Json.atKey "tools" (Json.list toolProjection)
+                <*> Json.atKey "stored_values" (Json.objectAsMap pure Json.int)
+                <*> Json.atKey "image_detail_visible" Json.bool
+  where
+    toolProjection =
+        Json.object $
+            (,)
+                <$> Json.atKey "name" Json.text
+                <*> Json.atKey "description" Json.text

@@ -7,6 +7,7 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.ToolDSL (PropertySchema(..))
+import qualified Agent.Json.Decode as Json
 import Agent.Tools.Secret
 import Agent.Tools.Types
     ( AppTool(..)
@@ -16,10 +17,6 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Exception.Safe (bracket, throwString)
-import Data.Aeson (Value(..))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.Bits ((.&.))
 import Data.IORef
@@ -164,12 +161,9 @@ runTool tool arguments = do
 
 resultSecretPath :: Text -> IO FilePath
 resultSecretPath output =
-    case Aeson.decodeStrict' (Text.encodeUtf8 output) of
-        Just (Object value)
-            | Just (String path) <-
-                KeyMap.lookup (Key.fromText "secret_file") value ->
-                    pure (Text.unpack path)
-        _ -> expectationFailure ("missing secret_file in output: " <> Text.unpack output)
+    case Json.decodeText (Json.object (Json.atKey "secret_file" Json.text)) output of
+        Right path -> pure (Text.unpack path)
+        Left _ -> expectationFailure ("missing secret_file in output: " <> Text.unpack output)
             >> pure ""
 
 modeOf :: FilePath -> IO Integer
