@@ -1,59 +1,44 @@
 -- | CLI-owned runtime state and provider adapters for child agents.
 module Agent.CLI.Subagents.Runtime
-    ( SubagentRuntime(..)
-    , SubagentSession(..)
-    , SubagentStoreRoot
-    , flushAllSubagentSnapshots
-    , freshOpenAiBackend
-    , lookupOrCreateSubagentSession
-    , persistAndEvictSubagentSessionWithStatus
-    , persistSubagentSnapshotWithStatus
-    , prepareCollaborationSpawn
-    , restoreAgentFromDisk
-    , resolveChildModelAndEffort
-    , runCodexSubagent
-    , runHttpSubagent
-    , runXaiParentSubagent
-    , grokSpawnedChildIdentity
-    , usesOpenAiChildTransport
-    , validatePersistedSubagentTarget
+    ( SubagentRuntime(..), SubagentSession(..), SubagentStoreRoot
+    , flushAllSubagentSnapshots, freshOpenAiBackend
+    , lookupOrCreateSubagentSession, persistAndEvictSubagentSessionWithStatus
+    , persistSubagentSnapshotWithStatus, prepareCollaborationSpawn
+    , restoreAgentFromDisk, resolveChildModelAndEffort, runCodexSubagent
+    , runHttpSubagent, runXaiParentSubagent, grokSpawnedChildIdentity
+    , usesOpenAiChildTransport, validatePersistedSubagentTarget
     ) where
-
 import Agent.CLI.Approval (childApprove)
 import Agent.CLI.Btw (trimDanglingToolSuffix)
 import Agent.CLI.Compaction
-    ( OccupancySnapshot
-    , autoCompactOpenAiBackendWithSender
-    )
+    ( autoCompactOpenAiBackendWithSender )
 import Agent.CLI.Connectivity (withConnectionRecovery)
-import Agent.CLI.Options
-    ( ApprovalPolicy
-    , CliOptions(..)
-    , defaultEffortFor
-    )
-import Agent.CLI.Prompt
-    ( sessionTempGuidance
-    , systemPrompt
-    , systemPromptForTools
-    )
+import Agent.CLI.Options (CliOptions(..), defaultEffortFor)
+import Agent.CLI.Prompt (sessionTempGuidance, systemPrompt, systemPromptForTools)
 import Agent.CLI.Request (requestParams)
 import Agent.CLI.Session (LegacySubagentTarget(..))
 import Agent.CLI.SubagentStore
-    ( LegacySubagentTargetFields(..)
-    , SubagentDiskFields(..)
+    ( SubagentDiskFields(..)
     , SubagentDiskMeta(..)
-    , SubagentStateSnapshot(..)
     , SubagentTarget(..)
     , forkSubagentTranscript
     , loadSubagentState
-    , saveSubagentState
     , subagentDiskFields
     )
+import Agent.CLI.Subagents.Runtime.Types
+    (PreparedChild(..), SubagentRuntime(..), SubagentSession(..), SubagentStoreRoot)
+import Agent.CLI.Subagents.Runtime.Storage
+    (flushAllSubagentSnapshots, persistAndEvictSubagentSessionWithStatus,
+     persistSubagentSnapshotWithStatus, syncStoreRootFromPlan)
+import Agent.CLI.Subagents.Runtime.Identity
+    (grokSpawnedChildIdentity, inheritedGrokChildModel, usesOpenAiChildTransport)
+import Agent.CLI.Subagents.Runtime.Target
+    (activeSubagentTargetError, unsupportedDialectMessage,
+     validatePersistedSubagentTarget)
+import Agent.CLI.Subagents.Runtime.OpenAI
+    (freshOpenAiBackend, freshOpenAiBackendWithTurnState)
 import Agent.CLI.Tools
-    ( hostedSearchToolNames
-    , requireToolRegistry
-    , schemasFromAppTools
-    )
+    (hostedSearchToolNames, requireToolRegistry, schemasFromAppTools)
 import Agent.CLI.Dialects
     ( CodingTools(..)
     , codingToolsFor
@@ -63,49 +48,23 @@ import Agent.CLI.Dialects
     )
 import Agent.Codex.Dialect.Subagent (codexSubagentSuffix)
 import Agent.Dialect
-    ( ChildAgentProtocol(..)
-    , Dialect
-    , DialectId
-    , codexDialect
-    , dialectChildAgentProtocol
-    , dialectForId
-    , dialectId
-    , dialectIdForModel
-    , dialectSlug
-    , providerSupportsDialect
-    )
-import Agent.InterAgentMessage
-    ( InterAgentMessage
-    , interAgentMessagePayload
-    )
+    (ChildAgentProtocol(..), Dialect, DialectId, codexDialect,
+     dialectChildAgentProtocol, dialectForId, dialectId, dialectIdForModel,
+     dialectSlug, providerSupportsDialect)
+import Agent.InterAgentMessage (InterAgentMessage, interAgentMessagePayload)
 import Agent.Loop
-    ( Backend(..)
-    , BackendStateStore(..)
-    , LoopConfig(..)
-    , LoopError(..)
-    , LoopEvent
-    , LoopResult(..)
-    , TurnInput(..)
-    , defaultLoopDispatch
-    , runLoop
-    , runLoopInputs
-    )
+    (Backend(..), BackendStateStore(..), LoopConfig(..), LoopError(..),
+     LoopEvent, LoopResult(..), TurnInput(..), defaultLoopDispatch, runLoop,
+     runLoopInputs)
 import Agent.ToolDispatch (ToolDispatchConfig(..))
 import Agent.Tools.OutputArtifact (finalizeToolOutput)
 import qualified Agent.OpenAI.Client as OpenAI
 import Agent.OpenAI.LoopBackend
-    ( openAiBackendWithRawReasoning
-    , openAiBackendWithReasoningVisibility
-    , openAiBackendWithTransportFallback
+    ( openAiBackendWithTransportFallback
     , withCodexTurnStateScope
     )
 import Agent.OpenAI.WebSocketClient
-    ( CodexTurnState
-    , newCodexTurnState
-    , sendWsRequestWithEvents
-    , withCodexWsRetrying
-    , withCodexWsRetryingUsingTurnState
-    )
+    ( newCodexTurnState )
 import System.OsPath (OsPath)
 import Agent.Provider (Provider(..), TokenProvider, providerSlug)
 import Agent.ReasoningEffort (reasoningEffortText)
@@ -113,36 +72,16 @@ import Agent.Responses.LoopBackend
     ( statelessResponsesBackendWithRawReasoning
     )
 import Agent.Responses.Types
-    ( ReasoningConfig(..)
-    , ResponseCreateParams(..)
-    , ResponseItem
-    )
+    (ReasoningConfig(..), ResponseCreateParams(..), ResponseItem)
 import Agent.Subagents
-    ( RunSubagent
-    , SubagentId(..)
-    , SubagentIdentity(..)
-    , SubagentRegistry
-    , SubagentSpawnEnv(..)
-    , SubagentStatus(..)
-    , getPreviousResponseId
-    , getStatus
-    , getSubagentCwd
-    , getSubagentIdentity
-    , getTaskPath
-    , restoreSubagent
-    , restoreSubagentAtStatus
-    , restoreSubagentAtWithCwdStatus
-    , restoreSubagentWithCwd
-    , setPreviousResponseId
-    )
-import Agent.Subagents.TaskPath
-    ( parseTaskPath
-    , taskPathRoot
-    )
+    (RunSubagent, SubagentId(..), SubagentIdentity(..), SubagentRegistry,
+     SubagentSpawnEnv(..), SubagentStatus(..), getStatus, getSubagentCwd,
+     getSubagentIdentity, getTaskPath, restoreSubagent, restoreSubagentAtStatus,
+     restoreSubagentAtWithCwdStatus, restoreSubagentWithCwd,
+     setPreviousResponseId)
+import Agent.Subagents.TaskPath (parseTaskPath, taskPathRoot)
 import Agent.GrokBuild.Dialect.Prompt
-    ( codingGrokPromptTools
-    , grokSubagentSystemPrompt
-    )
+    (codingGrokPromptTools, grokSubagentSystemPrompt)
 import Agent.GrokBuild.Dialect.Task
     ( GrokSubagentSpec(..)
     , GrokSubagentSpecs
@@ -156,11 +95,8 @@ import Agent.GrokBuild.Dialect.Task
     , recordAgentSpec
     )
 import Agent.Tools.MultiAgents
-    ( CollaborationSpawnOptions(..)
-    , MultiAgentContext(..)
-    , SubagentWorktree
-    )
-import Agent.Tools.PlanMode (PlanModeEnv(..), PlanModeHooks)
+    (CollaborationSpawnOptions(..), MultiAgentContext(..), SubagentWorktree)
+import Agent.Tools.PlanMode (PlanModeEnv(..))
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
@@ -169,12 +105,7 @@ import Agent.Tools.Types
     , setToolSessionTmp
     )
 import Control.Concurrent.MVar
-    ( MVar
-    , modifyMVar
-    , modifyMVar_
-    , newMVar
-    , withMVar
-    )
+    (modifyMVar, modifyMVar_, newMVar, withMVar)
 import Control.Exception.Safe (finally, throwIO)
 import Control.Monad (unless, void, when)
 import Data.IORef
@@ -186,65 +117,6 @@ import qualified Data.Text as Text
 import Data.Time.Clock (getCurrentTime, utctDay)
 import System.Environment (lookupEnv)
 import qualified System.Info as SystemInfo
-
-data SubagentSession = SubagentSession
-    { subSessionTranscript :: !(IORef [ResponseItem])
-    , subSessionContextTokens :: !(IORef (Maybe OccupancySnapshot))
-    , subSessionProvider :: !Provider
-    , subSessionConnection :: !Text
-    , subSessionEffectiveModel :: !Text
-    , subSessionDialect :: !DialectId
-    , subSessionPinned :: !(IORef Bool)
-    , subSessionHydrated :: !(MVar Bool)
-    }
-
--- | Optional on-disk root for child transcripts (@sessionDir/agents/<id>@).
-type SubagentStoreRoot = IORef (Maybe OsPath)
-
--- | Provider-neutral dependencies shared by all child-agent backends.
-data SubagentRuntime = SubagentRuntime
-    { subagentOptions :: !CliOptions
-    , subagentGhciEnabled :: !(IORef Bool)
-    , subagentBashEnabled :: !(IORef Bool)
-    , subagentPolicy :: !ApprovalPolicy
-    , subagentPlanHooks :: !PlanModeHooks
-    , subagentSkillRoots :: !(IORef [OsPath])
-    , subagentSessionTmp :: !(IORef (Maybe OsPath))
-    , subagentMcpTools :: ![AppTool]
-    , subagentParams :: !(IORef ResponseCreateParams)
-    , subagentRegistry :: !SubagentRegistry
-    , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
-    , subagentStoreRoot :: !SubagentStoreRoot
-    , subagentTypes :: !GrokSubagentSpecs
-    , subagentLegacyTarget :: !(Maybe LegacySubagentTarget)
-    , subagentConnection :: !Text
-    , subagentMapModel :: !(Text -> Text)
-    , subagentCreateWorktree
-        :: !(Maybe (OsPath -> IO (Either Text SubagentWorktree)))
-    , subagentSpawnModelGuidance :: !(Maybe Text)
-    , subagentAllowedChildModels :: !(Maybe [Text])
-    , subagentOpenAiChild :: !(Maybe TokenProvider)
-    }
-
-data PreparedChild = PreparedChild
-    { preparedParentParams :: !ResponseCreateParams
-    , preparedSession :: !SubagentSession
-    , preparedToolEnv :: !ToolEnv
-    , preparedMultiContext :: !MultiAgentContext
-    }
-
--- | Prefer an explicit store root; otherwise fall back to planMode's session dir.
-syncStoreRootFromPlan :: SubagentStoreRoot -> PlanModeEnv -> IO ()
-syncStoreRootFromPlan storeRootRef planMode = do
-    mroot <- readIORef storeRootRef
-    case mroot of
-        Just _ -> pure ()
-        Nothing -> do
-            sessionDir <- readIORef planMode.planSessionDir
-            case sessionDir of
-                Just dir -> writeIORef storeRootRef (Just dir)
-                Nothing -> pure ()
-
 prepareCollaborationSpawn
     :: Provider
     -> Text
@@ -295,136 +167,6 @@ prepareCollaborationSpawn
     sourceItems <- maybe (pure []) id source
     writeIORef session.subSessionTranscript
         (forkSubagentTranscript spawnOptions.collaborationForkTurns sourceItems)
-
-persistSubagentSnapshot
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> SubagentSession
-    -> IO ()
-persistSubagentSnapshot
-        storeRootRef registry typesRef agentId session = do
-    status <- getStatus registry agentId
-    persistSubagentSnapshotWithStatus
-        storeRootRef registry typesRef agentId status session
-
-persistSubagentSnapshotWithStatus
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> SubagentStatus
-    -> SubagentSession
-    -> IO ()
-persistSubagentSnapshotWithStatus
-        storeRootRef registry typesRef agentId status session = do
-    mroot <- readIORef storeRootRef
-    case mroot of
-        Nothing -> pure ()
-        Just sessionDir ->
-            void $
-                saveSubagentSnapshotWithStatus
-                    sessionDir registry typesRef agentId status session
-
--- | Persist a final snapshot, then release its parsed transcript payload.
---
--- The stable 'SubagentSession' object stays installed so a concurrent follow-up
--- cannot split history across two session objects. A failed or disabled save
--- leaves the resident transcript untouched.
-persistAndEvictSubagentSessionWithStatus
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> SubagentStatus
-    -> SubagentSession
-    -> IO (Either Text Bool)
-persistAndEvictSubagentSessionWithStatus
-        storeRootRef registry typesRef agentId status session =
-    modifyMVar session.subSessionHydrated \hydrated ->
-        if not hydrated || not (evictableStatus status)
-            then pure (hydrated, Right False)
-            else readIORef storeRootRef >>= \case
-                Nothing -> pure (True, Right False)
-                Just sessionDir ->
-                    saveSubagentSnapshotWithStatus
-                        sessionDir registry typesRef agentId status session >>= \case
-                            Left err -> pure (True, Left err)
-                            Right () -> do
-                                pinned <- readIORef session.subSessionPinned
-                                if pinned
-                                    then pure (True, Right False)
-                                    else do
-                                        writeIORef session.subSessionTranscript []
-                                        writeIORef
-                                            session.subSessionContextTokens
-                                            Nothing
-                                        pure (False, Right True)
-  where
-    evictableStatus = \case
-        Completed{} -> True
-        Errored{} -> True
-        Interrupted -> True
-        Closed -> True
-        Pending -> False
-        Running -> False
-        NotFound -> False
-
-saveSubagentSnapshotWithStatus
-    :: OsPath
-    -> SubagentRegistry
-    -> GrokSubagentSpecs
-    -> SubagentId
-    -> SubagentStatus
-    -> SubagentSession
-    -> IO (Either Text ())
-saveSubagentSnapshotWithStatus
-        sessionDir registry typesRef agentId status session = do
-    items <-
-        trimDanglingToolSuffix
-            <$> readIORef session.subSessionTranscript
-    previous <- getPreviousResponseId registry agentId
-    agentType <- lookupAgentType typesRef agentId
-    agentModel <- lookupAgentModel typesRef agentId
-    reasoningEffort <- lookupAgentReasoningEffort typesRef agentId
-    agentCwd <- getSubagentCwd registry agentId
-    identity <- getSubagentIdentity registry agentId
-    saveSubagentState
-        sessionDir
-        agentId
-        SubagentStateSnapshot
-            { snapshotItems = items
-            , snapshotPreviousResponseId = previous
-            , snapshotStatus = status
-            , snapshotTarget = SubagentTarget
-                { targetProvider = session.subSessionProvider
-                , targetConnection = session.subSessionConnection
-                , targetEffectiveModel = session.subSessionEffectiveModel
-                , targetDialect = session.subSessionDialect
-                }
-            , snapshotAgentType = agentType
-            , snapshotAgentModel = agentModel
-            , snapshotReasoningEffort = reasoningEffort
-            , snapshotCwd = agentCwd
-            , snapshotIdentity = identity
-            }
-
-flushAllSubagentSnapshots
-    :: SubagentStoreRoot
-    -> SubagentRegistry
-    -> IORef (Map SubagentId SubagentSession)
-    -> GrokSubagentSpecs
-    -> IO ()
-flushAllSubagentSnapshots storeRootRef registry sessionsRef typesRef = do
-    sessions <- readIORef sessionsRef
-    mapM_
-        (\(agentId, session) ->
-            withMVar session.subSessionHydrated \hydrated ->
-                when hydrated $
-                    persistSubagentSnapshot
-                        storeRootRef registry typesRef agentId session)
-        (Map.toList sessions)
 
 -- | Rehydrate a closed/missing agent from @sessionDir/agents/<id>@ so
 -- 'resume_agent' / 'resume_from' can continue the prior transcript.
@@ -597,101 +339,6 @@ restoreAgentFromDisk
         pure $ case restored of
             Left err -> Left err
             Right _ -> Right ()
-
--- | Use a disposable WebSocket for side questions so cancellation cannot
--- leave abandoned response frames queued on the main conversation connection.
-freshOpenAiBackend
-    :: Bool
-    -> TokenProvider
-    -> IO ResponseCreateParams
-    -> Backend
-freshOpenAiBackend showRawReasoning provider getParams =
-    Backend \state previous inputs onEvent ->
-        withCodexWsRetrying provider \conn _credential ->
-            let Backend submit =
-                    openAiBackendWithRawReasoning
-                        showRawReasoning
-                        conn
-                        getParams
-            in submit state previous inputs onEvent
-
--- | Cancellation-safe Codex backend whose disposable sockets all participate
--- in one logical turn's sticky-routing scope.
-freshOpenAiBackendWithTurnState
-    :: Bool
-    -> CodexTurnState
-    -> TokenProvider
-    -> IO ResponseCreateParams
-    -> Backend
-freshOpenAiBackendWithTurnState showRawReasoning turnState provider getParams =
-    Backend \state previous inputs onEvent ->
-        withCodexWsRetryingUsingTurnState provider turnState
-            \conn _credential ->
-                let Backend submit =
-                        openAiBackendWithReasoningVisibility
-                            showRawReasoning
-                            (\request previousResponseId onStreamEvent ->
-                                sendWsRequestWithEvents
-                                    conn
-                                    request
-                                    previousResponseId
-                                    onStreamEvent)
-                            getParams
-                in submit state previous inputs onEvent
-
--- | Identity for a Grok-root child, including OpenAI Luna when requested.
-grokSpawnedChildIdentity
-    :: Provider
-    -> Text
-    -> (Text -> Text)
-    -> Text
-    -> DialectId
-    -> Maybe Text
-    -> (Provider, Text, Text, DialectId)
-grokSpawnedChildIdentity
-        parentProvider parentConnection mapModel parentModel parentDialect childModel =
-    case childModel >>= canonicalizeGrokChildModel of
-        Just model
-            | isLunaSubagentModel model ->
-                ( OpenAIProvider
-                , providerSlug OpenAIProvider
-                , lunaSubagentModel
-                , dialectId codexDialect
-                )
-            | otherwise ->
-                (parentProvider, parentConnection, model, parentDialect)
-        Nothing ->
-            ( parentProvider
-            , parentConnection
-            , maybe parentModel mapModel childModel
-            , maybe
-                parentDialect
-                (dialectIdForModel parentProvider . mapModel)
-                childModel
-            )
-
-inheritedGrokChildModel :: SubagentRuntime -> Text -> Text
-inheritedGrokChildModel runtime parentModel =
-    case runtime.subagentAllowedChildModels of
-        Nothing -> parentModel
-        Just allowed ->
-            case canonicalizeGrokChildModel parentModel of
-                Just slug | slug `elem` allowed -> slug
-                _ -> fromMaybe parentModel (listToMaybe allowed)
-
--- | Luna requests and already-OpenAI descendants stay on Codex/OpenAI.
--- An omitted or non-Luna override from a Luna child must not fall through
--- to the xAI HTTP runner.
-usesOpenAiChildTransport
-    :: Maybe Provider
-    -> Maybe Provider
-    -> Maybe Text
-    -> Bool
-usesOpenAiChildTransport childSessionProvider parentSessionProvider childModel =
-    childSessionProvider == Just OpenAIProvider
-        || parentSessionProvider == Just OpenAIProvider
-        || maybe False isLunaSubagentModel
-            (childModel >>= canonicalizeGrokChildModel)
 
 -- | XAI parent runner: Grok children stay on xAI; Luna and its descendants
 -- use Codex/OpenAI.
@@ -1203,12 +850,10 @@ runPreparedChild runtime env session toolEnv toolRegistry backend onEvent runChi
                 loopResult.finalResponseId
         Left _ ->
             modifyIORef' session.subSessionTranscript trimDanglingToolSuffix
-    persistSubagentSnapshot
-        runtime.subagentStoreRoot
-        runtime.subagentRegistry
-        runtime.subagentTypes
-        env.subId
-        session
+    status <- getStatus runtime.subagentRegistry env.subId
+    persistSubagentSnapshotWithStatus
+        runtime.subagentStoreRoot runtime.subagentRegistry
+        runtime.subagentTypes env.subId status session
     pure result
 
 genericSubagentSuffix :: Text -> SubagentId -> Text
@@ -1351,137 +996,3 @@ recordPersistedAgentSpec typesRef agentId fields =
                 , reasoningEffortOverride = fields.diskReasoningEffort
                 }
         Nothing -> pure ()
-
-validatePersistedSubagentTarget
-    :: Provider
-    -> Text
-    -> Text
-    -> DialectId
-    -> Maybe LegacySubagentTarget
-    -> SubagentDiskMeta
-    -> Either Text SubagentTarget
-validatePersistedSubagentTarget
-        provider connection expectedEffectiveModel expectedDialect legacyTarget meta = do
-    let expectedTarget = SubagentTarget
-            { targetProvider = provider
-            , targetConnection = connection
-            , targetEffectiveModel = expectedEffectiveModel
-            , targetDialect = expectedDialect
-            }
-    storedTarget <- normalizePersistedSubagentTarget
-        legacyTarget
-        expectedTarget
-        meta
-    case subagentTargetError expectedTarget storedTarget of
-        Just err -> Left err
-        Nothing -> Right ()
-    Right storedTarget
-
-normalizePersistedSubagentTarget
-    :: Maybe LegacySubagentTarget
-    -> SubagentTarget
-    -> SubagentDiskMeta
-    -> Either Text SubagentTarget
-normalizePersistedSubagentTarget legacyTarget expectedTarget = \case
-    CurrentSubagentDiskMeta _ storedTarget ->
-        Right storedTarget
-    LegacySubagentDiskMeta _ legacyFields -> do
-        legacyDialect <- case
-                legacyDialectForTarget legacyTarget expectedTarget
-                of
-            Just dialect -> Right dialect
-            Nothing ->
-                Left
-                    "cannot restore a legacy subagent with incomplete target \
-                    \metadata after changing the session target; reopen the \
-                    \parent session under its original target first"
-        Right SubagentTarget
-            { targetProvider =
-                fromMaybe
-                    expectedTarget.targetProvider
-                    legacyFields.legacyDiskProvider
-            , targetConnection =
-                fromMaybe
-                    expectedTarget.targetConnection
-                    legacyFields.legacyDiskConnection
-            , targetEffectiveModel =
-                fromMaybe
-                    expectedTarget.targetEffectiveModel
-                    legacyFields.legacyDiskEffectiveModel
-            , targetDialect =
-                fromMaybe legacyDialect legacyFields.legacyDiskDialect
-            }
-
-legacyDialectForTarget
-    :: Maybe LegacySubagentTarget
-    -> SubagentTarget
-    -> Maybe DialectId
-legacyDialectForTarget target expectedTarget = do
-    legacy <- target
-    if legacy.legacyTargetProvider == expectedTarget.targetProvider
-        && legacy.legacyTargetConnection == expectedTarget.targetConnection
-        && legacy.legacyTargetEffectiveModel
-            == expectedTarget.targetEffectiveModel
-        && legacy.legacyTargetDialect == expectedTarget.targetDialect
-        then Just expectedTarget.targetDialect
-        else Nothing
-
-activeSubagentTargetError
-    :: Provider
-    -> Text
-    -> Text
-    -> SubagentSession
-    -> Maybe Text
-activeSubagentTargetError provider connection effectiveModel session =
-    subagentTargetError
-        SubagentTarget
-            { targetProvider = provider
-            , targetConnection = connection
-            , targetEffectiveModel = effectiveModel
-            , targetDialect = session.subSessionDialect
-            }
-        SubagentTarget
-            { targetProvider = session.subSessionProvider
-            , targetConnection = session.subSessionConnection
-            , targetEffectiveModel = session.subSessionEffectiveModel
-            , targetDialect = session.subSessionDialect
-            }
-
-subagentTargetError
-    :: SubagentTarget
-    -> SubagentTarget
-    -> Maybe Text
-subagentTargetError expected stored
-    | stored.targetProvider /= expected.targetProvider =
-        Just
-            ( "cannot continue subagent created for the "
-                <> providerSlug stored.targetProvider
-                <> " transport under "
-                <> providerSlug expected.targetProvider
-            )
-    | stored.targetConnection /= expected.targetConnection =
-        Just
-            ( "cannot continue subagent created for connection "
-                <> stored.targetConnection
-                <> " under connection "
-                <> expected.targetConnection
-            )
-    | stored.targetEffectiveModel /= expected.targetEffectiveModel =
-        Just
-            ( "cannot continue subagent after its effective model changed \
-                \from "
-                <> stored.targetEffectiveModel
-                <> " to "
-                <> expected.targetEffectiveModel
-            )
-    | otherwise = Nothing
-
-unsupportedDialectMessage :: Provider -> SubagentId -> DialectId -> Text
-unsupportedDialectMessage provider agentId storedDialect =
-    "cannot restore subagent "
-        <> agentId.unSubagentId
-        <> ": dialect "
-        <> dialectSlug storedDialect
-        <> " is not supported by the current "
-        <> providerSlug provider
-        <> " transport"

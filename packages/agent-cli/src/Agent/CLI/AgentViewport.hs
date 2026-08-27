@@ -34,6 +34,10 @@ module Agent.CLI.AgentViewport
     ) where
 
 import Agent.CLI.Render (summarizeToolCallRelative)
+import Agent.CLI.AgentViewport.Status
+    ( agentStatusGlyph
+    , formatAgentStatus
+    )
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -114,30 +118,6 @@ data AgentEntry = AgentEntry
     , agentConversation :: !UiState
     }
     deriving (Eq, Show)
-
-formatAgentStatus :: SubagentStatus -> Text
-formatAgentStatus status = case status of
-    Pending -> "pending"
-    Running -> "running"
-    Completed _ -> "done"
-    Errored _ -> "error"
-    Interrupted -> "interrupted"
-    Closed -> "closed"
-    NotFound -> "missing"
-
-agentStatusGlyph :: Text -> Text
-agentStatusGlyph status = case Text.toLower status of
-    "active" -> "●"
-    "running" -> "●"
-    "ready" -> "○"
-    "pending" -> "○"
-    "done" -> "✓"
-    "error" -> "✕"
-    "interrupted" -> "■"
-    "cancelled" -> "■"
-    "closed" -> "×"
-    "missing" -> "?"
-    _ -> "·"
 
 data AgentViewportEnv = AgentViewportEnv
     { viewportSelected :: !(IORef AgentTarget)
