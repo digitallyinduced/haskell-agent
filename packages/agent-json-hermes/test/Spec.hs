@@ -28,6 +28,18 @@ envelopeDecoder =
         Envelope
             <$> Decoder.requiredField "name" Decoder.text
             <*> Decoder.extensionFields
+
+taggedTextDecoder :: Decoder.Decoder Text
+taggedTextDecoder =
+    Decoder.discriminatedObject "type" \case
+        "text" ->
+            Decoder.objectFields $
+                Decoder.requiredField "value" Decoder.text
+                    <* Decoder.defaultField () "type" (() <$ Decoder.text)
+        tag ->
+            Decoder.mapEither
+                (const (Left ("unknown tag " <> tag)))
+                Decoder.skip
 data PersonState = PersonState
     { stateName :: !(Maybe Text)
     , stateAge :: !(Maybe Int)
@@ -111,3 +123,9 @@ main = hspec do
                                 envelope.envelopeExtensions
                             `shouldBe`
                                 Just "{\"nested\":[1,true,null]}"
+
+        it "decodes unordered discriminated objects without a DOM" do
+            Hermes.withDecoderSession \session -> do
+                Hermes.decodeIO session taggedTextDecoder
+                    "{\"value\":\"ok\",\"type\":\"text\"}"
+                    `shouldReturn` Right "ok"
