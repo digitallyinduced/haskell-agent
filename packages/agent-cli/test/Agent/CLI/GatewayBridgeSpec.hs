@@ -43,10 +43,10 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     call)
                 \running -> do
                     bridgeRequest <- waitForBridgeRequest request
-                    bridgeRequest.decodedRequestKind `shouldBe` "send_document"
+                    bridgeRequest.bridgeRequestKind `shouldBe` "send_document"
                     writeManagedBridgeResponse request ManagedBridgeResponse
                         { bridgeResponseVersion = 1
-                        , bridgeResponseId = bridgeRequest.decodedRequestId
+                        , bridgeResponseId = bridgeRequest.bridgeRequestId
                         , bridgeResponseOk = True
                         , bridgeResponseResult = Just (String "sent")
                         , bridgeResponseError = Nothing
@@ -69,10 +69,10 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     "*** Begin Patch"
             withAsync (requestManagedApproval request call) \running -> do
                 bridgeRequest <- waitForBridgeRequest request
-                bridgeRequest.decodedRequestKind `shouldBe` "approval"
+                bridgeRequest.bridgeRequestKind `shouldBe` "approval"
                 writeManagedBridgeResponse request ManagedBridgeResponse
                     { bridgeResponseVersion = 1
-                    , bridgeResponseId = bridgeRequest.decodedRequestId
+                    , bridgeResponseId = bridgeRequest.bridgeRequestId
                     , bridgeResponseOk = True
                     , bridgeResponseResult = Just (String "allow_once")
                     , bridgeResponseError = Nothing
@@ -118,7 +118,7 @@ withBridgeRequest action =
             (unsafeToFilePath (managedBridgeResponsesDirectory request))
         action request
 
-waitForBridgeRequest :: ManagedTurnRequest -> IO DecodedBridgeRequest
+waitForBridgeRequest :: ManagedTurnRequest -> IO ManagedBridgeRequest
 waitForBridgeRequest request = go (100 :: Int)
   where
     directory =

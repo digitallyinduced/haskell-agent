@@ -1,7 +1,6 @@
 -- | Private request/response bridge for gateway-owned agent turns.
 module Agent.CLI.GatewayBridge
     ( ManagedBridgeRequest(..)
-    , DecodedBridgeRequest(..)
     , managedBridgeRequestDecoder
     , ManagedBridgeResponse(..)
     , managedBridgeResponseDecoder
@@ -35,6 +34,7 @@ import Agent.Json
     , rawJsonBytes
     , rawJsonDecoder
     , rawJsonFromEncoding
+    , rawJsonEncoding
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
@@ -82,27 +82,28 @@ data ManagedBridgeRequest = ManagedBridgeRequest
     { bridgeRequestVersion :: !Int
     , bridgeRequestId :: !Text
     , bridgeRequestKind :: !Text
-    , bridgeRequestPayload :: !Value
+    , bridgeRequestPayload :: !RawJson
     } deriving (Eq, Show)
 
 instance ToJSON ManagedBridgeRequest where
-    toJSON request = object
-        [ "version" .= request.bridgeRequestVersion
-        , "id" .= request.bridgeRequestId
-        , "kind" .= request.bridgeRequestKind
-        , "payload" .= request.bridgeRequestPayload
-        ]
+    toJSON _ =
+        error "ManagedBridgeRequest supports Aeson encoding only"
+    toEncoding request = Aeson.pairs
+        ( "version" .= request.bridgeRequestVersion
+        <> "id" .= request.bridgeRequestId
+        <> "kind" .= request.bridgeRequestKind
+        <> "payload" .= EncodedRawJson request.bridgeRequestPayload
+        )
 
-data DecodedBridgeRequest = DecodedBridgeRequest
-    { decodedRequestVersion :: !Int
-    , decodedRequestId :: !Text
-    , decodedRequestKind :: !Text
-    , decodedRequestPayload :: !RawJson
-    } deriving (Eq, Show)
+newtype EncodedRawJson = EncodedRawJson RawJson
 
-managedBridgeRequestDecoder :: Hermes.Decoder DecodedBridgeRequest
+instance ToJSON EncodedRawJson where
+    toJSON _ = error "EncodedRawJson supports Aeson encoding only"
+    toEncoding (EncodedRawJson raw) = rawJsonEncoding raw
+
+managedBridgeRequestDecoder :: Hermes.Decoder ManagedBridgeRequest
 managedBridgeRequestDecoder = Hermes.object $
-    DecodedBridgeRequest
+    ManagedBridgeRequest
         <$> Hermes.defaultKey bridgeSchemaVersion "version" Hermes.int
         <*> Hermes.atKey "id" Hermes.text
         <*> Hermes.atKey "kind" Hermes.text
@@ -556,7 +557,8 @@ performBridgeRequest request callId kind payload timeoutMicros =
                     { bridgeRequestVersion = bridgeSchemaVersion
                     , bridgeRequestId = requestId
                     , bridgeRequestKind = kind
-                    , bridgeRequestPayload = payload
+                    , bridgeRequestPayload =
+                        rawJsonFromEncoding (Aeson.toEncoding payload)
                     }
             writeLazyFileAtomically requestPath 0o600 (encode bridgeRequest)
             waitForBridgeResponse responsePath timeoutMicros
