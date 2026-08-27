@@ -578,21 +578,19 @@ formatAgentList output = do
 
   where
     agentRowDecoder =
-        Hermes.withRawJsonByteString \bytes ->
-            pure $ either (const Nothing) id
-                (Hermes.decodeEither agentObjectDecoder bytes)
-      where
-        agentObjectDecoder =
-            Hermes.object do
-                name <- Hermes.atKeyOptional "agent_name" Hermes.text
-                status <- Hermes.atKeyOptional "agent_status" Hermes.text
-                pure $ case name of
-                    Just value
-                        | not (Text.null (Text.strip value)) ->
-                            Just $ maybe (Text.strip value)
-                                (\s -> Text.strip value <> " · " <> Text.strip s)
-                                status
-                    _ -> Nothing
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object do
+                    name <- Hermes.atKeyOptional "agent_name" Hermes.text
+                    status <- Hermes.atKeyOptional "agent_status" Hermes.text
+                    pure $ case name of
+                        Just value
+                            | not (Text.null (Text.strip value)) ->
+                                Just $ maybe (Text.strip value)
+                                    (\s -> Text.strip value <> " · " <> Text.strip s)
+                                    status
+                        _ -> Nothing
+            _ -> pure Nothing
 
 firstPatchPath :: Text -> Maybe Text
 firstPatchPath patch =
