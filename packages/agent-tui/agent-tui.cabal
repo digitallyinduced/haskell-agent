@@ -54,16 +54,6 @@ library
                     , text >= 2.0 && < 2.2
                     , vty >= 6.4 && < 7
 
-benchmark markdown-accumulators-bench
-    import:           common-options
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          MarkdownAccumulators.hs
-    ghc-options:      -O2 -rtsopts "-with-rtsopts=-T"
-    build-depends:    agent-tui
-                    , base >= 4.17 && < 5
-                    , text >= 2.0 && < 2.2
-
 test-suite agent-tui-test
     import:           common-options
     type:             exitcode-stdio-1.0

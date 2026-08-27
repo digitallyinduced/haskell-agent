@@ -124,18 +124,15 @@ styledSpan previous marker constructor text = do
 -- remaining @**@ closes its surrounding strong span.
 findClosing :: Text -> Maybe Char -> Text -> Maybe (Text, Text)
 findClosing marker initialPrevious input =
-    scan initialPrevious [] input
+    scan initialPrevious "" input
   where
-    -- Keep the last consumed character separately from the reverse chunk
-    -- list. In particular, checking a delimiter must not flatten the chunks
-    -- merely to discover the preceding character.
-    scan lastSeen consumed remaining
+    scan previous consumed remaining
         | Text.null remaining = Nothing
         | Text.any (== '\n') (Text.take 1 remaining) = Nothing
         | marker `Text.isPrefixOf` remaining
-        , canClose marker lastSeen (Text.drop (Text.length marker) remaining) =
+        , canClose marker previous (Text.drop (Text.length marker) remaining) =
             Just
-                ( Text.concat (reverse consumed)
+                ( consumed
                 , Text.drop (Text.length marker) remaining
                 )
         | Just (_, rest) <- escapedPunctuation remaining =
@@ -159,15 +156,15 @@ findClosing marker initialPrevious input =
             let consumedLength = Text.length remaining - Text.length rest
                 chunk = Text.take consumedLength remaining
             in scan
-                (lastCharacter chunk <|> lastSeen)
-                (chunk : consumed)
+                (lastCharacter chunk <|> previous)
+                (consumed <> chunk)
                 rest
 
         completeStyled nestedMarker source = do
             afterOpen <- Text.stripPrefix nestedMarker source
-            if canOpen nestedMarker lastSeen afterOpen
+            if canOpen nestedMarker previous afterOpen
                 then do
-                    (_, rest) <- findClosing nestedMarker lastSeen afterOpen
+                    (_, rest) <- findClosing nestedMarker previous afterOpen
                     pure rest
                 else Nothing
 
@@ -177,7 +174,7 @@ codeSpan text =
         tickCount = Text.length ticks
     in if tickCount == 0
         then Nothing
-        else findClose tickCount [] afterOpen
+        else findClose tickCount "" afterOpen
   where
     findClose tickCount body remaining
         | Text.null remaining = Nothing
@@ -189,23 +186,23 @@ codeSpan text =
                 else
                     let (run, afterRun) = Text.span (== '`') atTicks
                     in if Text.length run == tickCount
-                        then Just (Text.concat (reverse (before : body)), afterRun)
+                        then Just (body <> before, afterRun)
                         else findClose
                             tickCount
-                            (run : before : body)
+                            (body <> before <> run)
                             afterRun
 
 linkSpan :: Text -> Maybe (Text, Text, Text)
 linkSpan text = do
     afterOpen <- Text.stripPrefix "[" text
-    (label, afterLabel) <- takeLinkLabel 0 [] afterOpen
+    (label, afterLabel) <- takeLinkLabel 0 "" afterOpen
     afterDestinationOpen <- Text.stripPrefix "(" afterLabel
-    (url, rest) <- takeDestination 0 [] afterDestinationOpen
+    (url, rest) <- takeDestination 0 "" afterDestinationOpen
     if Text.null label
         then Nothing
         else Just (url, label, rest)
 
-takeLinkLabel :: Int -> [Char] -> Text -> Maybe (Text, Text)
+takeLinkLabel :: Int -> Text -> Text -> Maybe (Text, Text)
 takeLinkLabel depth consumed remaining =
     case Text.uncons remaining of
         Nothing -> Nothing
@@ -215,21 +212,23 @@ takeLinkLabel depth consumed remaining =
                 Just (escaped, rest)
                     | isAsciiPunctuation escaped ->
                         takeLinkLabel depth
-                            (escaped : '\\' : consumed)
+                            (consumed <> Text.pack ['\\', escaped])
                             rest
-                _ -> takeLinkLabel depth ('\\' : consumed) afterSlash
+                _ -> takeLinkLabel depth (consumed <> "\\") afterSlash
         Just ('[', rest) ->
-            takeLinkLabel (depth + 1) ('[' : consumed) rest
+            takeLinkLabel (depth + 1) (consumed <> "[") rest
         Just (']', rest)
             | depth == 0
             , Text.isPrefixOf "(" rest ->
-                Just (Text.pack (reverse consumed), rest)
+                Just (consumed, rest)
             | depth > 0 ->
-                takeLinkLabel (depth - 1) (']' : consumed) rest
+                takeLinkLabel (depth - 1) (consumed <> "]") rest
         Just (character, rest) ->
-            takeLinkLabel depth (character : consumed) rest
+            takeLinkLabel depth
+                (consumed <> Text.singleton character)
+                rest
 
-takeDestination :: Int -> [Char] -> Text -> Maybe (Text, Text)
+takeDestination :: Int -> Text -> Text -> Maybe (Text, Text)
 takeDestination depth consumed remaining =
     case Text.uncons remaining of
         Nothing -> Nothing
@@ -239,17 +238,19 @@ takeDestination depth consumed remaining =
                 Just (escaped, rest)
                     | isAsciiPunctuation escaped ->
                         takeDestination depth
-                            (escaped : consumed)
+                            (consumed <> Text.singleton escaped)
                             rest
-                _ -> takeDestination depth ('\\' : consumed) afterSlash
+                _ -> takeDestination depth (consumed <> "\\") afterSlash
         Just ('(', rest) ->
-            takeDestination (depth + 1) ('(' : consumed) rest
+            takeDestination (depth + 1) (consumed <> "(") rest
         Just (')', rest)
-            | depth == 0 -> Just (Text.pack (reverse consumed), rest)
+            | depth == 0 -> Just (consumed, rest)
             | otherwise ->
-                takeDestination (depth - 1) (')' : consumed) rest
+                takeDestination (depth - 1) (consumed <> ")") rest
         Just (character, rest) ->
-            takeDestination depth (character : consumed) rest
+            takeDestination depth
+                (consumed <> Text.singleton character)
+                rest
 
 bareUrlSpan :: Text -> Maybe (Text, Text)
 bareUrlSpan text = do
@@ -362,17 +363,8 @@ lastCharacter :: Text -> Maybe Char
 lastCharacter text = snd <$> Text.unsnoc text
 
 coalesceText :: [Inline] -> [Inline]
-coalesceText = go
+coalesceText = foldr step []
   where
-    go [] = []
-    go (InlineText first : rest) =
-        let (adjacent, remaining) = List.span isText rest
-            chunks =
-                first
-                    : [text | InlineText text <- adjacent]
-        in InlineText (Text.concat chunks) : go remaining
-    go (inline : rest) = inline : go rest
-
-    isText = \case
-        InlineText _ -> True
-        _ -> False
+    step (InlineText left) (InlineText right : rest) =
+        InlineText (left <> right) : rest
+    step inline rest = inline : rest
