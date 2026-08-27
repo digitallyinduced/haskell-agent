@@ -57,6 +57,17 @@ spec = describe "buildStreamResponse" do
         [name | FunctionCallItem FunctionCall { name } <- response.output]
             `shouldBe` ["shell_command"]
 
+    it "preserves a cancelled status carried by response.done" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-cancelled\"}}"
+            , sseBlock "response.done"
+                "{\"type\":\"response.done\",\"response\":{\"status\":\"cancelled\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        response.status `shouldBe` ResponseCancelled
+
     it "assembles minimal created and completed lifecycle fragments" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
@@ -85,6 +96,25 @@ spec = describe "buildStreamResponse" do
             `shouldBe`
                 Left (ConnectionError
                     "failed: response.incomplete: max_output_tokens")
+
+    it "recovers a dropped stream after response.created as incomplete" do
+        -- A real response.created frame carries status "in_progress". When the
+        -- socket dies mid-stream the recovery path must force an "incomplete"
+        -- status rather than leaking the stale "in_progress" through, which
+        -- would otherwise be classified as a completed turn.
+        let created = ResponseCreatedEvent
+                (Aeson.object
+                    [ "id" Aeson..= ("resp-dropped" :: Text)
+                    , "created_at" Aeson..= (0 :: Int)
+                    , "model" Aeson..= ("test" :: Text)
+                    , "status" Aeson..= ("in_progress" :: Text)
+                    ])
+                Nothing
+                mempty
+            state = applyStreamEvent emptyStreamAssemblyState created
+        response <- expectRight (finishAssembledIncomplete (Just "test") state)
+        response.status `shouldBe` ResponseIncomplete
+        response.responseId `shouldBe` "resp-dropped"
 
     it "replaces indexed added items with done items without duplicates" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""

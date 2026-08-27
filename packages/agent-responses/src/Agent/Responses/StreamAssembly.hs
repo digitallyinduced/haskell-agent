@@ -198,9 +198,16 @@ finishStreamResponse modelHint state terminalEvent = do
             "Cannot assemble a non-terminal response event"
             (jsonPreview terminalEvent)
     let terminalFragment = responseValueFor terminalEvent
+        -- Only trust a status carried by the terminal fragment when it is
+        -- itself a terminal status. The socket-death recovery path
+        -- (finishAssembledIncomplete) feeds the accumulated stream object back
+        -- in as the fragment, and that object still holds the non-terminal
+        -- "in_progress"/"queued" status copied from the response.created frame.
+        -- Preserving it there would leak a running status into a finished
+        -- response and make a dropped connection look like a completed turn.
         withStatus = case terminalFragment of
             Just (Aeson.Object object)
-                | KeyMap.member "status" object -> state.responseObject
+                | fragmentHasTerminalStatus object -> state.responseObject
             _ -> KeyMap.insert "status" (Aeson.String terminalStatus)
                     state.responseObject
         withDefaults =
@@ -568,6 +575,17 @@ assembledOutput state response =
             ItemProgress
                 (mergeObjects streamed.itemValue terminal.itemValue)
                 True
+
+-- | Does a response fragment already carry a terminal lifecycle status? Only
+-- @completed@/@incomplete@/@failed@/@cancelled@ count; a leftover
+-- @in_progress@/@queued@ status from an earlier streaming frame must be
+-- overwritten with the status implied by the terminal event.
+fragmentHasTerminalStatus :: Aeson.Object -> Bool
+fragmentHasTerminalStatus object =
+    case KeyMap.lookup "status" object of
+        Just (Aeson.String status) ->
+            status `elem` ["completed", "incomplete", "failed", "cancelled"]
+        _ -> False
 
 responseValueFor :: ResponseStreamEvent -> Maybe Aeson.Value
 responseValueFor = \case
