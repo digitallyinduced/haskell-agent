@@ -12,7 +12,6 @@ import Agent.Json (RawJson)
 import qualified Data.ByteString as BS
 import qualified Data.Hermes as Hermes
 import qualified Data.Text as Text
-import Data.Text (Text)
 import Data.Word (Word8)
 import Control.Exception.Safe (tryAny)
 
