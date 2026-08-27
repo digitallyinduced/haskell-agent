@@ -42,6 +42,10 @@ import Agent.OpenAI.Features (remoteCompactionV2Feature)
 import Agent.OpenAI.Http (rejectFailedCodexResponse)
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
+import Agent.Responses.LoopBackend
+    ( runawayToolArgumentAbortChars
+    , streamEventArgumentChars
+    )
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
     , applyStreamEvent
@@ -645,9 +649,9 @@ receiveWsResponseWithActions
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 receiveWsResponseWithActions modelHint actions onEvent =
-    loop emptyStreamAssemblyState 0 0
+    loop emptyStreamAssemblyState 0 0 0
   where
-    loop assembly frames bytes = do
+    loop assembly frames bytes argumentChars = do
         msgResult <- actions.receiveFrame
         case msgResult of
             Left e ->
@@ -670,7 +674,7 @@ receiveWsResponseWithActions modelHint actions onEvent =
                         -- or tool-call frame can leave the loop in thinking.
                         logStreamStats "json_decode_error" frames' bytes'
                         onEvent (unparsedStreamEvent err msgBytes)
-                        loop assembly frames' bytes'
+                        loop assembly frames' bytes' argumentChars
                     Right event -> do
                         onEvent event
                         let assembly' = applyStreamEvent assembly event
@@ -705,8 +709,27 @@ receiveWsResponseWithActions modelHint actions onEvent =
                                             { failureStatus = Just "failed" }))
 
                             -- Ignore other event variants (added, content
-                            -- deltas, and future event types).
-                            _ -> loop assembly' frames' bytes'
+                            -- deltas, and future event types) — but hard-stop
+                            -- a degenerate sample that keeps streaming
+                            -- tool-call arguments. Observed runaways repeat a
+                            -- filler token to the provider's 128k output cap
+                            -- over 30-60 minutes; without this guard the
+                            -- request only ends there.
+                            _ -> do
+                                let argumentChars' =
+                                        argumentChars
+                                            + streamEventArgumentChars event
+                                if argumentChars' > runawayToolArgumentAbortChars
+                                    then do
+                                        logStreamStats "runaway_arguments"
+                                            frames' bytes'
+                                        actions.invalidateRequest
+                                            "runaway tool-call arguments"
+                                        pure $ Left
+                                            (runawayToolArgumentsError
+                                                argumentChars')
+                                    else loop assembly' frames' bytes'
+                                        argumentChars'
 
     finishTerminal label assembly frames bytes event = do
         logStreamStats label frames bytes
@@ -753,6 +776,18 @@ receiveWsResponseWithActions modelHint actions onEvent =
                     (failedStreamResponseMessage failure)
                     failure.failureErrorCode
                     Nothing
+
+-- | Typed as a non-retryable provider failure: inline retry, account
+-- failover, and connection replacement must all leave it alone so the turn
+-- fails immediately with this explanation instead of replaying the sample.
+runawayToolArgumentsError :: Int -> ApiError
+runawayToolArgumentsError chars =
+    ProviderError (UnknownErrorType "runaway_tool_arguments")
+        ("Aborted the response after the model streamed "
+            <> Text.pack (show (chars `div` 1000))
+            <> "k characters of tool-call arguments; this is almost"
+            <> " certainly a runaway repetition loop. Retry the message.")
+        Nothing
 
 unparsedStreamEvent :: String -> LBS.ByteString -> ResponseStreamEvent
 unparsedStreamEvent err bytes =

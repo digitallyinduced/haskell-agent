@@ -10,8 +10,10 @@ module Agent.Responses.LoopBackend
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
     , newStreamEventToLoopEvents
+    , streamEventArgumentChars
     , toolArgumentActivityChunkChars
     , runawayToolArgumentWarningChars
+    , runawayToolArgumentAbortChars
     , streamOutputObserved
     , hasRecoverableIncompleteOutput
     , assistantTextFromResponse
@@ -678,6 +680,25 @@ toolArgumentActivityChunkChars = 8192
 runawayToolArgumentWarningChars :: Int
 runawayToolArgumentWarningChars = 100000
 
+-- | Transport-level hard stop: abort a response once it has streamed this
+-- many argument characters. Every observed runaway sample crossed this long
+-- before the provider's output-token cap would have ended it (after 30-60
+-- minutes), while the largest legitimate call seen so far is an order of
+-- magnitude smaller.
+runawayToolArgumentAbortChars :: Int
+runawayToolArgumentAbortChars = 300000
+
+-- | Streamed tool-call argument characters carried by one event. This is the
+-- shared definition of what counts toward argument-progress activity and the
+-- runaway abort threshold.
+streamEventArgumentChars :: ResponseStreamEvent -> Int
+streamEventArgumentChars = \case
+    ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText } ->
+        Text.length deltaText
+    ResponseCustomToolInputDeltaEvent { delta = Just deltaText } ->
+        Text.length deltaText
+    _ -> 0
+
 data ToolArgumentStreamState = ToolArgumentStreamState
     { toolNamesById :: !(Map Text Text)
     , currentToolName :: !(Maybe Text)
@@ -708,16 +729,16 @@ toolArgumentStreamStep event state = case event of
         announceToolCall call.name
             (maybeToList call.itemId <> [call.callId])
             state
-    ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText, streamItemId } ->
+    ResponseFunctionCallArgumentsDeltaEvent { delta = Just _, streamItemId } ->
         countToolArgumentChars
             (resolveToolName [streamItemId] state)
-            (Text.length deltaText)
+            (streamEventArgumentChars event)
             state
     ResponseCustomToolInputDeltaEvent
-        { delta = Just deltaText, streamItemId, streamCallId } ->
+        { delta = Just _, streamItemId, streamCallId } ->
             countToolArgumentChars
                 (resolveToolName [streamItemId, streamCallId] state)
-                (Text.length deltaText)
+                (streamEventArgumentChars event)
                 state
     _ -> (state, [])
 

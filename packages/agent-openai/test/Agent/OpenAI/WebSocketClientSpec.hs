@@ -13,6 +13,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Foldable (toList)
 import Data.IORef
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 spec :: Spec
 spec = do
@@ -490,6 +491,78 @@ spec = do
             other -> expectationFailure ("expected recovered response, got " <> show other)
         readIORef completeCount `shouldReturn` 1
         readIORef invalidations `shouldReturn` []
+
+    it "aborts a runaway argument stream and invalidates the request" do
+        -- Seven 50k-char deltas cross the 300k abort threshold on the
+        -- seventh frame; the trailing frames must never be consumed.
+        frames <- newIORef $
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , functionCallAddedFrame
+            ]
+            <> replicate 10 (argumentsDeltaFrame (Text.replicate 50000 "x"))
+        completeCount <- newIORef (0 :: Int)
+        invalidations <- newIORef ([] :: [Text])
+        let actions = WebSocketReceiveActions
+                { receiveFrame = atomicModifyIORef' frames \case
+                    frame : rest -> (rest, Right frame)
+                    [] -> error "receive loop ran past the abort threshold"
+                , completeRequest = modifyIORef' completeCount (+ 1)
+                , invalidateRequest = \reason ->
+                    modifyIORef' invalidations (<> [reason])
+                }
+
+        result <- receiveWsResponseWithActions
+            (Just "gpt-test") actions (const (pure ()))
+
+        case result of
+            Left (ProviderError (UnknownErrorType "runaway_tool_arguments") message Nothing) ->
+                message `shouldSatisfy` Text.isInfixOf "runaway repetition loop"
+            other -> expectationFailure
+                ("expected runaway abort, got " <> show other)
+        readIORef completeCount `shouldReturn` 0
+        readIORef invalidations `shouldReturn`
+            ["runaway tool-call arguments"]
+        remainingFrames <- readIORef frames
+        length remainingFrames `shouldBe` 3
+
+    it "keeps large but below-threshold argument streams alive" do
+        testPartialTerminalResponse
+            ( [ lifecycleFrame "response.created"
+                    (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+              , functionCallAddedFrame
+              ]
+                <> replicate 4 (argumentsDeltaFrame (Text.replicate 50000 "x"))
+                <> [lifecycleFrame "response.completed" (Aeson.object [])]
+            )
+            ( [EventResponseCreated, EventOutputItemAdded]
+                <> replicate 4 EventFunctionCallArgumentsDelta
+                <> [EventResponseCompleted]
+            )
+            \response ->
+                [name | FunctionCallItem FunctionCall { name } <- response.output]
+                    `shouldBe` ["shell_command"]
+
+functionCallAddedFrame :: LBS.ByteString
+functionCallAddedFrame = Aeson.encode $ Aeson.object
+    [ "type" Aeson..= ("response.output_item.added" :: Text)
+    , "output_index" Aeson..= (0 :: Int)
+    , "item" Aeson..= Aeson.object
+        [ "type" Aeson..= ("function_call" :: Text)
+        , "id" Aeson..= ("fc-1" :: Text)
+        , "call_id" Aeson..= ("call-test" :: Text)
+        , "name" Aeson..= ("shell_command" :: Text)
+        , "arguments" Aeson..= ("" :: Text)
+        ]
+    ]
+
+argumentsDeltaFrame :: Text -> LBS.ByteString
+argumentsDeltaFrame deltaText = Aeson.encode $ Aeson.object
+    [ "type" Aeson..= ("response.function_call_arguments.delta" :: Text)
+    , "item_id" Aeson..= ("fc-1" :: Text)
+    , "output_index" Aeson..= (0 :: Int)
+    , "delta" Aeson..= deltaText
+    ]
 
 testPartialTerminalResponse
     :: [LBS.ByteString]
