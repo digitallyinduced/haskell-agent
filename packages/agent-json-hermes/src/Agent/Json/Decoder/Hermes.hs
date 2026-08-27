@@ -4,18 +4,11 @@ module Agent.Json.Decoder.Hermes
     , withDecoderSession
     , decodeIO
     , decodeHermesIO
-    , textDeltaEventDecoder
-    , TextDeltaFields(..)
     ) where
 
 import qualified Agent.Json.Decoder as DecoderAPI
 import Agent.Json.Decoder.Backend
-import Agent.Json
-    ( Extensions
-    , RawJson
-    , emptyExtensions
-    , insertExtension
-    )
+import Agent.Json (RawJson)
 import qualified Data.ByteString as BS
 import qualified Data.Hermes as Hermes
 import qualified Data.Text as Text
@@ -167,58 +160,6 @@ isWhitespace byte =
 openBrace, openBracket :: Word8
 openBrace = 0x7b
 openBracket = 0x5b
-
--- | Optimized decoder for the common Responses text-delta wire shape.
---
--- It is intentionally domain-neutral: callers supply the already validated
--- event name from the transport and receive only the fields needed by stream
--- assembly. Unknown members are recursively validated and skipped.
-data TextDeltaFields = TextDeltaFields
-    { sequenceNumber :: !(Maybe Int)
-    , itemId :: !(Maybe Text)
-    , outputIndex :: !(Maybe Int)
-    , contentIndex :: !(Maybe Int)
-    , delta :: !(Maybe Text)
-    , logprobs :: !(Maybe RawJson)
-    , extensions :: !Extensions
-    }
-
-textDeltaEventDecoder :: Hermes.Decoder TextDeltaFields
-textDeltaEventDecoder =
-    Hermes.objectFold
-        (TextDeltaFields
-            Nothing Nothing Nothing Nothing Nothing Nothing
-            emptyExtensions)
-        \key state -> case key of
-            "sequence_number" ->
-                (\value -> state { sequenceNumber = Just value })
-                    <$> Hermes.int
-            "item_id" ->
-                (\value -> state { itemId = Just value })
-                    <$> Hermes.text
-            "output_index" ->
-                (\value -> state { outputIndex = Just value })
-                    <$> Hermes.int
-            "content_index" ->
-                (\value -> state { contentIndex = Just value })
-                    <$> Hermes.int
-            "delta" ->
-                (\value -> state { delta = Just value })
-                    <$> Hermes.text
-            "logprobs" ->
-                (\value -> state { logprobs = Just value })
-                    <$> rawJsonValue
-            "type" -> state <$ Hermes.text
-            _ ->
-                (\value ->
-                    state
-                        { extensions =
-                            insertExtension
-                                key
-                                value
-                                state.extensions
-                        })
-                    <$> rawJsonValue
 
 rawJsonValue :: Hermes.Decoder RawJson
 rawJsonValue =
