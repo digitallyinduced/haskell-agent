@@ -133,21 +133,20 @@ data ResponseTool
     = FunctionToolValue !FunctionTool
     | CustomToolValue !CustomTool
     | NamespaceToolValue !NamespaceTool
-    | KnownResponseTool !ResponseToolType !TaggedObject
+    | KnownResponseTool !ResponseToolType
     | UnknownResponseTool !TaggedObject
     deriving stock (Eq, Show)
 
 -- | Hosted or built-in Responses tool whose wire @type@ comes from
 -- 'ResponseToolType', not a caller-supplied tag string.
 knownResponseTool :: ResponseToolType -> ResponseTool
-knownResponseTool toolType =
-    KnownResponseTool toolType (TaggedObject (responseToolTypeText toolType))
+knownResponseTool = KnownResponseTool
 
 instance ToJSON ResponseTool where
     toJSON (FunctionToolValue value) = toJSON value
     toJSON (CustomToolValue value) = toJSON value
     toJSON (NamespaceToolValue value) = toJSON value
-    toJSON (KnownResponseTool toolType _) =
+    toJSON (KnownResponseTool toolType) =
         objectWith [Just (field "type" (responseToolTypeText toolType))]
     toJSON (UnknownResponseTool value) = toJSON value
 
@@ -164,10 +163,7 @@ responseToolDecoder =
                 ToolUnknownType{} ->
                     pure (UnknownResponseTool (TaggedObject wireType))
                 toolType ->
-                    pure
-                        (KnownResponseTool
-                            toolType
-                            (TaggedObject wireType))
+                    pure (KnownResponseTool toolType)
 
 functionToolDecoder :: Hermes.Decoder FunctionTool
 functionToolDecoder = Hermes.object $
