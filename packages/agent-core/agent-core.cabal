@@ -177,6 +177,18 @@ benchmark concurrent-discovery-bench
     build-depends:    agent-core
                     , base >= 4.14 && < 5
 
+benchmark code-mode-pool-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          CodeModePool.hs
+    ghc-options:      -O2
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , safe-exceptions
+                    , text
+                    , time
+
 test-suite agent-core-test
     import:           common-opts
     type:             exitcode-stdio-1.0
