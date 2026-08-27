@@ -565,8 +565,16 @@ responseStreamEventEncoder = Encoder.choose \case
                 "sequence_number" Encoder.int (.sequenceNumber)
             , Encoder.optionalField "code" Encoder.text
                 (\event -> event.streamError.code)
-            , Encoder.field "message" Encoder.text
-                (\event -> event.streamError.message)
+            , Encoder.optionalField "message" Encoder.text
+                (\event ->
+                    if lookupExtension
+                        "message"
+                        (mergeExtensions
+                            event.eventExtraFields
+                            event.streamError.extraFields)
+                        /= Nothing
+                        then Nothing
+                        else Just event.streamError.message)
             , Encoder.optionalField "param" Encoder.text
                 (\event -> event.streamError.param)
             , Encoder.optionalField "resets_in_seconds" Encoder.int

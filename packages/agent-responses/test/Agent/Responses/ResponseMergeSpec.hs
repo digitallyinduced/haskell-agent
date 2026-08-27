@@ -2,6 +2,7 @@ module Agent.Responses.ResponseMergeSpec (spec) where
 
 import Agent.Json (emptyExtensions)
 import qualified Agent.Json.Decoder as Decoder
+import qualified Agent.Json.Encoder as Encoder
 import Agent.Responses.ResponseMerge
 import Agent.Responses.Types
 import Data.ByteString (ByteString)
@@ -83,6 +84,19 @@ spec = describe "typed response merging" do
             "{\"status\":\"completed\"}"
         (.object) <$> mergeResponseFragments [base, terminal]
             `shouldBe` Just "custom_response"
+
+    it "does not re-emit a stale raw source after merging fragments" do
+        first <- decodeFragment "{\"id\":\"first\"}"
+        second <- decodeFragment "{\"id\":\"second\"}"
+        merged <- case mergeResponseFragments [first, second] of
+            Just value -> pure value
+            Nothing -> expectationFailure "missing merged response"
+                >> pure first
+        Decoder.decode responseFragmentDecoder
+            (Encoder.encode responseFragmentEncoder merged)
+            `shouldSatisfy` \case
+                Right response -> response.responseId == "second"
+                Left{} -> False
 
     modifyMaxSuccess (const 300) $
         prop "overlaying typed lifecycle responses is associative" $

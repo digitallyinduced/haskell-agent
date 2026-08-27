@@ -128,6 +128,15 @@ main = hspec do
                 (Encoder.encode responseStreamEventEncoder event)
                 `shouldBe` decodeAeson payload
 
+        it "preserves an evolving top-level error message shape" do
+            let payload =
+                    "{\"type\":\"error\","
+                        <> "\"message\":{\"vendor\":1}}"
+            event <- expectDecode responseStreamEventDecoder payload
+            decodeAeson
+                (Encoder.encode responseStreamEventEncoder event)
+                `shouldBe` decodeAeson payload
+
         it "preserves an explicit null nested-error message" do
             let payload =
                     "{\"type\":\"error\",\"error\":{\"message\":null}}"

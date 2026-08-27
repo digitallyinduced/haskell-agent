@@ -8,11 +8,10 @@ module Agent.Responses.ResponseMerge
 
 import Agent.Json
     ( Extensions
-    , extensionsToList
-    , insertExtension
     , lookupExtension
     , rawJsonBytes
     , extensionFieldWasPresent
+    , clearExtensionsSourceRaw
     )
 import qualified Agent.Json.Decoder as Decoder
 import Agent.Responses.Types
@@ -253,7 +252,4 @@ nonEmptyText newer older
 
 mergeExtensions :: Extensions -> Extensions -> Extensions
 mergeExtensions base overlay =
-    foldl'
-        (\fields (key, value) -> insertExtension key value fields)
-        base
-        (extensionsToList overlay)
+    clearExtensionsSourceRaw (base <> overlay)
