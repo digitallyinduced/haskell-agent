@@ -1,11 +1,16 @@
 module Agent.Responses.GenericClientSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
+import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.GenericClient
 import Agent.Responses.Types
 import Control.Retry (constantDelay, limitRetries)
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson as Aeson
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Char8 as BS
 import Data.IORef
+import Data.Text (Text)
 import Test.Hspec
 
 spec :: Spec
@@ -40,6 +45,45 @@ spec = do
                         }
                 projected = buildRequest options request
             projected.tools `shouldBe` Just [tool]
+
+        it "preserves custom grammar and namespace tool fields" do
+            let grammar = rawJsonFromEncoding $ Aeson.pairs $
+                    "type" Aeson..= ("grammar" :: Text)
+                        <> "syntax" Aeson..= ("root: /.+/" :: Text)
+                custom = CustomToolValue CustomTool
+                    { name = "shell"
+                    , description = Just "Run a command"
+                    , format = Just grammar
+                    }
+                namespace = NamespaceToolValue NamespaceTool
+                    { name = "tools"
+                    , description = Just "Available tools"
+                    , tools = [custom]
+                    }
+                request = withTools [namespace] defaultResponseCreateParams
+                encoded = Codec.encodeResponseCreateParams request
+            case Codec.decodeResponseCreateParams (LBS.toStrict encoded) of
+                Right ResponseCreateParams
+                    { tools =
+                        Just
+                            [ NamespaceToolValue NamespaceTool
+                                { name = "tools"
+                                , description = Just "Available tools"
+                                , tools =
+                                    [ CustomToolValue CustomTool
+                                        { name = "shell"
+                                        , description = Just "Run a command"
+                                        , format = Just decodedGrammar
+                                        }
+                                    ]
+                                }
+                            ]
+                    } ->
+                        rawJsonBytes decodedGrammar
+                            `shouldSatisfy`
+                                BS.isInfixOf "\"syntax\":\"root: /.+/\""
+                other -> expectationFailure
+                    ("unexpected tool round trip: " <> show other)
 
     describe "classifyFailure" do
         it "decodes OpenAI error envelopes and preserves Retry-After" do
@@ -87,3 +131,6 @@ spec = do
         , bearerToken = Nothing
         , requestTimeoutSeconds = 60
         }
+
+withTools :: [ResponseTool] -> ResponseCreateParams -> ResponseCreateParams
+withTools value request = request { tools = Just value }

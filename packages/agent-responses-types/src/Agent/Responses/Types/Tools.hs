@@ -5,6 +5,8 @@ module Agent.Responses.Types.Tools
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , CustomTool(..)
+    , NamespaceTool(..)
     , responseToolDecoder
     ) where
 
@@ -97,9 +99,40 @@ instance ToJSON FunctionTool where
                 , optionalField "strict" strict
                 ]
 
+data CustomTool = CustomTool
+    { name        :: !Text
+    , description :: !(Maybe Text)
+    , format      :: !(Maybe RawJson)
+    } deriving stock (Eq, Show)
+
+instance ToJSON CustomTool where
+    toJSON CustomTool { name, description, format } =
+        objectWith
+            [ Just (field "type" ("custom" :: Text))
+            , Just (field "name" name)
+            , optionalField "description" description
+            , optionalField "format" format
+            ]
+
+data NamespaceTool = NamespaceTool
+    { name        :: !Text
+    , description :: !(Maybe Text)
+    , tools       :: ![ResponseTool]
+    } deriving stock (Eq, Show)
+
+instance ToJSON NamespaceTool where
+    toJSON NamespaceTool { name, description, tools } =
+        objectWith
+            [ Just (field "type" ("namespace" :: Text))
+            , Just (field "name" name)
+            , optionalField "description" description
+            , Just (field "tools" tools)
+            ]
 
 data ResponseTool
     = FunctionToolValue !FunctionTool
+    | CustomToolValue !CustomTool
+    | NamespaceToolValue !NamespaceTool
     | KnownResponseTool !ResponseToolType !TaggedObject
     | UnknownResponseTool !TaggedObject
     deriving stock (Eq, Show)
@@ -112,6 +145,8 @@ knownResponseTool toolType =
 
 instance ToJSON ResponseTool where
     toJSON (FunctionToolValue value) = toJSON value
+    toJSON (CustomToolValue value) = toJSON value
+    toJSON (NamespaceToolValue value) = toJSON value
     toJSON (KnownResponseTool toolType _) =
         objectWith [Just (field "type" (responseToolTypeText toolType))]
     toJSON (UnknownResponseTool value) = toJSON value
@@ -124,6 +159,8 @@ responseToolDecoder =
         Hermes.liftObjectDecoder $
             case parseResponseToolType wireType of
                 ToolFunction -> FunctionToolValue <$> functionToolDecoder
+                ToolCustom -> CustomToolValue <$> customToolDecoder
+                ToolNamespace -> NamespaceToolValue <$> namespaceToolDecoder
                 ToolUnknownType{} ->
                     pure (UnknownResponseTool (TaggedObject wireType))
                 toolType ->
@@ -139,3 +176,18 @@ functionToolDecoder = Hermes.object $
         <*> optionalAtKey "description" Hermes.text
         <*> optionalAtKey "parameters" rawJsonDecoder
         <*> optionalAtKey "strict" Hermes.bool
+
+customToolDecoder :: Hermes.Decoder CustomTool
+customToolDecoder = Hermes.object $
+    CustomTool
+        <$> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "description" Hermes.text
+        <*> optionalAtKey "format" rawJsonDecoder
+
+namespaceToolDecoder :: Hermes.Decoder NamespaceTool
+namespaceToolDecoder = Hermes.object $
+    NamespaceTool
+        <$> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "description" Hermes.text
+        <*> (maybe [] id
+            <$> optionalAtKey "tools" (Hermes.list responseToolDecoder))
