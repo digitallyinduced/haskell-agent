@@ -5,18 +5,9 @@
 -- open for forwards-compatible Responses API fields.
 module Agent.ReasoningEffort
     ( ReasoningEffort(..)
-    , OpenAIReasoningEffort(..)
-    , GrokReasoningEffort(..)
-    , ClaudeReasoningEffort(..)
     , reasoningEfforts
     , reasoningEffortText
     , parseReasoningEffort
-    , openAIReasoningEffort
-    , openAIReasoningEffortText
-    , grokReasoningEffort
-    , grokReasoningEffortText
-    , claudeReasoningEffort
-    , claudeReasoningEffortText
     ) where
 
 import Data.Aeson (FromJSON(..), ToJSON(..), withText)
@@ -64,84 +55,3 @@ instance ToJSON ReasoningEffort where
 instance FromJSON ReasoningEffort where
     parseJSON = withText "ReasoningEffort" $
         either (fail . Text.unpack) pure . parseReasoningEffort
-
-data OpenAIReasoningEffort
-    = OpenAINone
-    | OpenAILow
-    | OpenAIMedium
-    | OpenAIHigh
-    | OpenAIXHigh
-    | OpenAIMax
-    deriving (Eq, Ord, Show)
-
-openAIReasoningEffort :: ReasoningEffort -> OpenAIReasoningEffort
-openAIReasoningEffort = \case
-    EffortNone -> OpenAINone
-    EffortLow -> OpenAILow
-    EffortMedium -> OpenAIMedium
-    EffortHigh -> OpenAIHigh
-    EffortXHigh -> OpenAIXHigh
-    EffortMax -> OpenAIMax
-
-openAIReasoningEffortText :: OpenAIReasoningEffort -> Text
-openAIReasoningEffortText = \case
-    OpenAINone -> "none"
-    OpenAILow -> "low"
-    OpenAIMedium -> "medium"
-    OpenAIHigh -> "high"
-    OpenAIXHigh -> "xhigh"
-    OpenAIMax -> "max"
-
-data GrokReasoningEffort
-    = GrokNone
-    | GrokLow
-    | GrokMedium
-    | GrokHigh
-    | GrokXHigh
-    deriving (Eq, Ord, Show)
-
--- | Grok has no @max@ value. Resumed or inherited @max@ state is normalized
--- to @high@ at this final defensive boundary.
-grokReasoningEffort :: ReasoningEffort -> GrokReasoningEffort
-grokReasoningEffort = \case
-    EffortNone -> GrokNone
-    EffortLow -> GrokLow
-    EffortMedium -> GrokMedium
-    EffortHigh -> GrokHigh
-    EffortXHigh -> GrokXHigh
-    EffortMax -> GrokHigh
-
-grokReasoningEffortText :: GrokReasoningEffort -> Text
-grokReasoningEffortText = \case
-    GrokNone -> "low"
-    GrokLow -> "low"
-    GrokMedium -> "medium"
-    GrokHigh -> "high"
-    GrokXHigh -> "xhigh"
-
-data ClaudeReasoningEffort
-    = ClaudeDefault
-    | ClaudeLow
-    | ClaudeMedium
-    | ClaudeHigh
-    | ClaudeXHigh
-    | ClaudeMax
-    deriving (Eq, Ord, Show)
-
-claudeReasoningEffort :: ReasoningEffort -> ClaudeReasoningEffort
-claudeReasoningEffort = \case
-    EffortNone -> ClaudeDefault
-    EffortLow -> ClaudeLow
-    EffortMedium -> ClaudeMedium
-    EffortHigh -> ClaudeHigh
-    EffortXHigh -> ClaudeXHigh
-    EffortMax -> ClaudeMax
-
-claudeReasoningEffortText :: ClaudeReasoningEffort -> Maybe Text
-claudeReasoningEffortText = \case
-    ClaudeDefault -> Nothing
-    ClaudeLow -> Just "low"
-    ClaudeMedium -> Just "medium"
-    ClaudeHigh -> Just "high"
-    ClaudeXHigh -> Just "xhigh"
-    ClaudeMax -> Just "max"

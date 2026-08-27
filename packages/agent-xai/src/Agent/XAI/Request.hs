@@ -12,9 +12,11 @@ import Agent.Responses.Request
     )
 import Agent.ReasoningEffort
     ( ReasoningEffort(..)
-    , grokReasoningEffort
-    , grokReasoningEffortText
     , parseReasoningEffort
+    )
+import Agent.XAI.ReasoningEffort
+    ( grokReasoningEffort
+    , grokReasoningEffortText
     )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))

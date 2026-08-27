@@ -57,6 +57,7 @@ library
                     , Agent.OpenAI.Usage
                     , Agent.OpenAI.Client
                     , Agent.OpenAI.Request
+                    , Agent.OpenAI.ReasoningEffort
                     , Agent.OpenAI.Features
                     , Agent.OpenAI.ModelMetadata
                     , Agent.OpenAI.WebSocketClient

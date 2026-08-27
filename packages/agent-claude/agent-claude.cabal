@@ -41,6 +41,7 @@ library
                     , Agent.Claude.Auth
                     , Agent.Claude.LoopBackend
                     , Agent.Claude.Options
+                    , Agent.Claude.ReasoningEffort
     other-modules:    Agent.Claude.Internal.Environment
                     , Agent.Claude.Internal.Messages
     build-depends:    base                  >= 4.14 && < 5
