@@ -18,7 +18,8 @@ import Agent.Loop
     , TurnInput(..)
     )
 import Agent.Concurrent (mapConcurrentlyBounded)
-import Agent.CLI.Json (defaultKey, decodeLazy, integer, optionalKey)
+import Agent.CLI.Json (decodeLazy, integer)
+import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)

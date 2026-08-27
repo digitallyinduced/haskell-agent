@@ -23,7 +23,8 @@ module Agent.CLI.Project
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
-import Agent.CLI.Json (defaultKey, decodeLazy, optionalKey)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect

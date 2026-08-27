@@ -32,7 +32,8 @@ import Agent.Dialect
     , providerSupportsDialect
     )
 import Agent.FileRetry (retryOnFileBusy)
-import Agent.CLI.Json (defaultKey, decodeLazy, optionalKey)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)

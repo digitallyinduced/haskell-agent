@@ -16,7 +16,8 @@ module Agent.CLI.CredentialStore
     ) where
 
 import Agent.CLI.Error (formatException)
-import Agent.CLI.Json (defaultKey, decodeLazy)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (defaultKey)
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (toText, unsafeToFilePath)

@@ -24,7 +24,8 @@ import Agent.TextBuffer
     , emptyTextBuffer
     , textBufferToText
     )
-import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
+import Agent.Json.Decode (optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -188,7 +189,7 @@ managedGatewayTools request =
             ]
             True
             TurnSequential
-            (typedToolWithCall name \call args ->
+            (typedToolWithCall name sendPathArgsDecoder \call args ->
                 bridgeTool request call kind (toPathPayload args))
 
     reactTool =
@@ -202,7 +203,8 @@ managedGatewayTools request =
             ]
             True
             TurnSequential
-            (typedToolWithCall "react_to_telegram_message" \call args ->
+            (typedToolWithCall "react_to_telegram_message" reactionArgsDecoder
+                \call args ->
                 bridgeTool request call "react" (toReactionPayload args))
 
     choiceTool =
@@ -216,7 +218,7 @@ managedGatewayTools request =
             ]
             True
             TurnSequential
-            (typedToolWithCall "ask_telegram_choice" \call args ->
+            (typedToolWithCall "ask_telegram_choice" choiceArgsDecoder \call args ->
                 bridgeTool request call "ask_choice" (toChoicePayload args))
 
     allowUserTool =
@@ -230,7 +232,7 @@ managedGatewayTools request =
             ]
             True
             TurnSequential
-            (typedToolWithCall "allow_telegram_user" \call args ->
+            (typedToolWithCall "allow_telegram_user" allowlistArgsDecoder \call args ->
                 bridgeTool request call "allow_user" (toAllowlistPayload args))
 
     denyUserTool =
@@ -244,7 +246,7 @@ managedGatewayTools request =
             ]
             True
             TurnSequential
-            (typedToolWithCall "deny_telegram_user" \call args ->
+            (typedToolWithCall "deny_telegram_user" allowlistArgsDecoder \call args ->
                 bridgeTool request call "deny_user" (toAllowlistPayload args))
 
     listUsersTool =
@@ -254,7 +256,7 @@ managedGatewayTools request =
             []
             True
             TurnSequential
-            (typedToolWithCall "list_telegram_users" \call (_ :: Value) ->
+            (typedToolWithCall "list_telegram_users" emptyArgsDecoder \call () ->
                 bridgeTool request call "list_users" (object []))
 
 data SendPathArgs = SendPathArgs
@@ -263,12 +265,12 @@ data SendPathArgs = SendPathArgs
     , sendFilename :: !(Maybe Text)
     }
 
-instance FromJSON SendPathArgs where
-    parseJSON = objectArgs \input ->
+sendPathArgsDecoder :: Hermes.Decoder SendPathArgs
+sendPathArgsDecoder = Hermes.object $
         SendPathArgs
-            <$> reqText input "path"
-            <*> optText input "caption"
-            <*> optText input "filename"
+            <$> Hermes.atKey "path" Hermes.text
+            <*> optionalKey "caption" Hermes.text
+            <*> optionalKey "filename" Hermes.text
 
 toPathPayload :: SendPathArgs -> Value
 toPathPayload args = object
@@ -282,11 +284,11 @@ data ReactionArgs = ReactionArgs
     , reactionMessageId :: !(Maybe Int)
     }
 
-instance FromJSON ReactionArgs where
-    parseJSON = objectArgs \input ->
+reactionArgsDecoder :: Hermes.Decoder ReactionArgs
+reactionArgsDecoder = Hermes.object $
         ReactionArgs
-            <$> reqText input "emoji"
-            <*> optInt input "message_id"
+            <$> Hermes.atKey "emoji" Hermes.text
+            <*> optionalKey "message_id" Hermes.int
 
 toReactionPayload :: ReactionArgs -> Value
 toReactionPayload args = object
@@ -299,9 +301,11 @@ data ChoiceArgs = ChoiceArgs
     , choiceOptions :: ![Text]
     }
 
-instance FromJSON ChoiceArgs where
-    parseJSON = withObject "ChoiceArgs" \o ->
-        ChoiceArgs <$> o .: "question" <*> o .: "options"
+choiceArgsDecoder :: Hermes.Decoder ChoiceArgs
+choiceArgsDecoder = Hermes.object $
+    ChoiceArgs
+        <$> Hermes.atKey "question" Hermes.text
+        <*> Hermes.atKey "options" (Hermes.list Hermes.text)
 
 toChoicePayload :: ChoiceArgs -> Value
 toChoicePayload args = object
@@ -314,11 +318,14 @@ data AllowlistArgs = AllowlistArgs
     , allowlistUserId :: !(Maybe Int)
     }
 
-instance FromJSON AllowlistArgs where
-    parseJSON = objectArgs \input ->
+allowlistArgsDecoder :: Hermes.Decoder AllowlistArgs
+allowlistArgsDecoder = Hermes.object $
         AllowlistArgs
-            <$> optText input "query"
-            <*> optInt input "user_id"
+            <$> optionalKey "query" Hermes.text
+            <*> optionalKey "user_id" Hermes.int
+
+emptyArgsDecoder :: Hermes.Decoder ()
+emptyArgsDecoder = Hermes.object (pure ())
 
 toAllowlistPayload :: AllowlistArgs -> Value
 toAllowlistPayload args = object

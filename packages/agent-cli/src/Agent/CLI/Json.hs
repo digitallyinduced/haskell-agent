@@ -1,17 +1,9 @@
 module Agent.CLI.Json
-    ( optionalKey
-    , defaultKey
-    , integer
+    ( integer
     , decodeLazy
     ) where
 
-import Agent.Json.Decode
-    ( Decoder
-    , JsonError(..)
-    , decodeEither
-    , defaultKey
-    , optionalKey
-    )
+import Agent.Json.Decode (Decoder, JsonError(..), decodeEither)
 import qualified Agent.Json.Decode as Hermes
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
