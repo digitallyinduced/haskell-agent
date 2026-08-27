@@ -4,6 +4,7 @@ import Agent.Json
 import qualified Agent.Json.Decode as Json
 import Control.Concurrent.Async (concurrently)
 import qualified Data.Aeson.Encoding.Internal as Aeson
+import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import Test.Hspec
@@ -88,6 +89,16 @@ main = hspec do
                     (Aeson.pairs
                         (Aeson.pair "raw" (rawJsonEncoding raw))))
                 `shouldBe` "{\"raw\":{\"answer\":42}}"
+
+        it "materialises Aeson encoder values through Hermes" do
+            fmap Aeson.toJSON (Json.validateRawJson "true")
+                `shouldBe` Right (Aeson.Bool True)
+            fmap Aeson.toJSON
+                (Json.validateRawJson "{\"answer\":42}")
+                `shouldBe`
+                    Right
+                        (Aeson.object
+                            ["answer" Aeson..= (42 :: Int)])
 
         it "uses independent environments for concurrent streams" do
             let decodeMany label =
