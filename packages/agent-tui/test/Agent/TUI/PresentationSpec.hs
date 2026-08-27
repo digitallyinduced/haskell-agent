@@ -67,6 +67,17 @@ spec = describe "tool presentation" do
         formatToolOutputRelative workspace readCall absolute
             `shouldBe` absolute
 
+    it "keeps computer-call secrets out of approval chrome" do
+        let call =
+                functionToolCall
+                    "computer-call"
+                    "computer"
+                    "{\"actions\":[{\"type\":\"click\",\"x\":10,\"y\":20},{\"type\":\"type\",\"text\":\"password\"}]}"
+        summarizeToolCall call
+            `shouldBe` "Control computer click, type 8 chars"
+        permissionToolCallPrompt call
+            `shouldSatisfy` (not . Text.isInfixOf "password")
+
     it "extracts tool details from function and custom calls" do
         toolDetail
             (functionToolCall "read" "read_file"

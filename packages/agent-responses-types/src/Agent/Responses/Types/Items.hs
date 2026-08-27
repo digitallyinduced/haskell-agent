@@ -424,7 +424,6 @@ instance ToJSON ComputerCallOutput where
                 , Just (field "output" (object
                     [ "type" .= ("computer_screenshot" :: Text)
                     , "image_url" .= screenshotDataUrl
-                    , "detail" .= ("original" :: Text)
                     ]))
                 , optionalField "acknowledged_safety_checks"
                     (nonEmpty acknowledgedChecks)
@@ -437,8 +436,10 @@ instance ToJSON ComputerCallOutput where
 instance FromJSON ComputerCallOutput where
     parseJSON = withObject "ComputerCallOutput" $ \o -> do
         outputValue <- o .:? "output" .!= Aeson.Null
-        image <- withObject "Computer screenshot output" (.: "image_url")
-            outputValue
+        image <- case outputValue of
+            Aeson.Object outputObject ->
+                outputObject .:? "image_url" .!= ""
+            _ -> pure ""
         ComputerCallOutput
             <$> o .:? "id"
             <*> o .: "call_id"

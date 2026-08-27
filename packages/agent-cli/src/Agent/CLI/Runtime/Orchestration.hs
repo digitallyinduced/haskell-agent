@@ -35,7 +35,6 @@ import Agent.CLI.Compaction
       installLiveCompactOutcome,
       runProviderCompactWith,
       runResponsesCompactWithContextWindow )
-import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Config
     ( HarnessConfig(..),
       McpServerConfig(..),

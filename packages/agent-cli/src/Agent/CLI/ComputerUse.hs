@@ -130,7 +130,7 @@ jxaPrelude = Text.unlines
     , "let last=$.CGPointMake(0,0);"
     , "function post(t,x,y,b){last=$.CGPointMake(x,y); const e=$.CGEventCreateMouseEvent(null,t,last,b); $.CGEventPost(tap,e); }"
     , "function move(x,y){post($.kCGEventMouseMoved,x,y,left);}"
-    , "function click(x,y,b){const d=b===1?$.kCGEventRightMouseDown:$.kCGEventLeftMouseDown; const u=b===1?$.kCGEventRightMouseUp:$.kCGEventLeftMouseUp; post(d,x,y,b); post(u,x,y,b);}"
+    , "function click(x,y,b){const d=b===1?$.kCGEventRightMouseDown:b===2?$.kCGEventOtherMouseDown:$.kCGEventLeftMouseDown; const u=b===1?$.kCGEventRightMouseUp:b===2?$.kCGEventOtherMouseUp:$.kCGEventLeftMouseUp; post(d,x,y,b); post(u,x,y,b);}"
     , "function scroll(dx,dy){const e=$.CGEventCreateScrollWheelEvent(null,$.kCGScrollEventUnitPixel,2,dy,dx); $.CGEventPost(tap,e);}"
     , "function down(x,y){post($.kCGEventLeftMouseDown,x,y,left);}"
     , "function drag(x,y){post($.kCGEventLeftMouseDragged,x,y,left);}"
@@ -141,22 +141,22 @@ keyCombinationScript :: [Text] -> Maybe Text
 keyCombinationScript [] = Nothing
 keyCombinationScript rawKeys = do
     let keys = map (Text.toLower . Text.strip) rawKeys
-        modifiers = concatMap modifier (init keys)
-        suffix = case modifiers of
+    modifiers <- traverse modifier (init keys)
+    let suffix = case modifiers of
             [] -> ""
             values -> " using {" <> Text.intercalate ", " values <> "}"
     command <- keyCommand (last keys)
     pure ("tell application \"System Events\" to " <> command <> suffix)
   where
     modifier = \case
-        "cmd" -> ["command down"]
-        "command" -> ["command down"]
-        "ctrl" -> ["control down"]
-        "control" -> ["control down"]
-        "alt" -> ["option down"]
-        "option" -> ["option down"]
-        "shift" -> ["shift down"]
-        _ -> []
+        "cmd" -> Just "command down"
+        "command" -> Just "command down"
+        "ctrl" -> Just "control down"
+        "control" -> Just "control down"
+        "alt" -> Just "option down"
+        "option" -> Just "option down"
+        "shift" -> Just "shift down"
+        _ -> Nothing
     keyCommand = \case
         "enter" -> Just "key code 36"
         "return" -> Just "key code 36"
@@ -241,6 +241,7 @@ ints = Text.intercalate "," . map (Text.pack . show)
 jxaButton :: Text -> Text
 jxaButton button
     | Text.toLower button == "right" = "1"
+    | Text.toLower button == "middle" = "2"
     | otherwise = "0"
 
 appleString :: Text -> Text

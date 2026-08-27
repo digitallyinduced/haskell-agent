@@ -615,6 +615,8 @@ isPromotedKnownItem :: ResponseItemType -> Bool
 isPromotedKnownItem = \case
     ItemAgentMessage -> True
     ItemAdditionalTools -> True
+    ItemComputerCall -> True
+    ItemComputerCallOutput -> True
     ItemLocalShellCall -> True
     ItemToolSearchCall -> True
     ItemToolSearchOutput -> True

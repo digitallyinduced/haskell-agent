@@ -113,6 +113,39 @@ toolCallInput call = case canonicalToolName call.name of
     "run_ghci" -> jsonTextFieldDefault "expression" call.arguments
     _ -> ""
 
+-- Computer-call arguments can contain secrets in @type@ and @keypress@
+-- actions. Keep approval/activity chrome structural: report action kinds and
+-- text lengths, never the text or complete JSON payload.
+computerActionDetail :: Text -> Text
+computerActionDetail input =
+    case Aeson.decodeStrict (TextEncoding.encodeUtf8 input) of
+        Just (Aeson.Object object) ->
+            case KeyMap.lookup "actions" object of
+                Just (Aeson.Array actions)
+                    | not (null actions) ->
+                        Text.intercalate ", " (map actionSummary (toList actions))
+                _ -> "computer action"
+        _ -> "computer action"
+  where
+    actionSummary (Aeson.Object action) =
+        case KeyMap.lookup "type" action of
+            Just (Aeson.String "click") -> "click"
+            Just (Aeson.String "double_click") -> "double-click"
+            Just (Aeson.String "screenshot") -> "screenshot"
+            Just (Aeson.String "scroll") -> "scroll"
+            Just (Aeson.String "move") -> "move"
+            Just (Aeson.String "drag") -> "drag"
+            Just (Aeson.String "wait") -> "wait"
+            Just (Aeson.String "type") ->
+                maybe "type" (\value -> "type " <> tshow (Text.length value) <> " chars")
+                    (jsonObjectText "text" action)
+            Just (Aeson.String "keypress") -> "keypress"
+            _ -> "unknown action"
+    actionSummary _ = "unknown action"
+
+    tshow :: Show a => a -> Text
+    tshow = Text.pack . show
+
 data SearchReplaceAction
     = SearchReplaceCreate
     | SearchReplaceDelete
@@ -415,6 +448,7 @@ firstPlanStepFromArguments arguments = fromMaybe "" do
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
+    "computer" -> "Control computer"
     "read_file" -> "Read"
     "list_dir" -> "Listed"
     "grep" -> "Searched"
@@ -455,6 +489,7 @@ toolVerb name = case canonicalToolName name of
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of
+    "computer" -> computerActionDetail call.arguments
     "read_file" -> jsonTextFieldDefault "target_file" call.arguments
     "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
     "search_replace" -> jsonTextFieldDefault "file_path" call.arguments

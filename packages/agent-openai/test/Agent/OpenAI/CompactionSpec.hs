@@ -666,6 +666,32 @@ spec = do
                         [call, output, recent]
             trimmed `shouldBe` [output, recent]
 
+        it "drops a typed computer output with its oversized call" do
+            let call = ComputerCallItem ComputerCall
+                    { computerCallItemId = Just "item-1"
+                    , computerCallId = "computer-1"
+                    , computerActions =
+                        [ TypeAction (Text.replicate 20_000 "x") ]
+                    , pendingSafetyChecks = []
+                    , computerCallStatus = Nothing
+                    , computerCallExtra = KeyMap.empty
+                    }
+                output = ComputerCallOutputItem ComputerCallOutput
+                    { computerOutputItemId = Nothing
+                    , computerOutputCallId = "computer-1"
+                    , screenshotDataUrl = "data:image/png;base64,AA=="
+                    , acknowledgedChecks = []
+                    , computerOutputStatus = Just ItemCompleted
+                    , computerOutputExtra = KeyMap.empty
+                    }
+                recent = user "recent"
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        200
+                        Nothing
+                        [call, output, recent]
+            trimmed `shouldBe` [recent]
+
         it "drops paired tagged outputs with their oversized calls" do
             let call = KnownResponseItem ItemShellCall TaggedObject
                     { tag = "shell_call"

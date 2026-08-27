@@ -490,6 +490,28 @@ contentPartKind = \case
 spec :: Spec
 spec = describe "Agent.CLI.Session" do
     describe "pure compatibility helpers" do
+        it "round-trips typed computer calls through storage" do
+            let items =
+                    [ ComputerCallItem ComputerCall
+                        { computerCallItemId = Just "item-1"
+                        , computerCallId = "call-1"
+                        , computerActions = [ClickAction 12 34 "left"]
+                        , pendingSafetyChecks = []
+                        , computerCallStatus = Nothing
+                        , computerCallExtra = KeyMap.empty
+                        }
+                    , ComputerCallOutputItem ComputerCallOutput
+                        { computerOutputItemId = Nothing
+                        , computerOutputCallId = "call-1"
+                        , screenshotDataUrl = "data:image/png;base64,AA=="
+                        , acknowledgedChecks = []
+                        , computerOutputStatus = Nothing
+                        , computerOutputExtra = KeyMap.empty
+                        }
+                    ]
+            traverse fromStoredResponseItem (map toStoredResponseItem items)
+                `shouldBe` Right items
+
         it "stores inline image and file payloads as binary data" do
             let imageUrl = "data:image/png;base64,cG5nLWJ5dGVz"
                 fileData = "data:text/plain;base64,ZmlsZS1ieXRlcw=="
