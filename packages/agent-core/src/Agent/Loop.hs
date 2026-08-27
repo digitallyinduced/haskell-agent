@@ -54,7 +54,7 @@ import Agent.ToolDispatch
     )
 import Agent.Tools.Scheduling
     ( ToolSchedulingPlan(..)
-    , schedulingPlansConflict
+    , toolSchedulingWaves
     )
 import Agent.Tools.Types
     ( ToolRegistry
@@ -106,7 +106,6 @@ import qualified Data.ByteString as ByteString
 import Data.IORef (newIORef, readIORef, writeIORef)
 import qualified Data.IntMap.Strict as IntMap
 import Data.IntMap.Strict (IntMap)
-import qualified Data.IntSet as IntSet
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -841,7 +840,10 @@ runToolCalls :: LoopConfig -> [ToolCall] -> IO [ToolCallResult]
 runToolCalls config calls = do
     prepared <- prepareIndexedToolCalls config (zip [0..] calls)
     scheduled <- traverse schedule prepared
-    go scheduled IntMap.empty
+    go
+        (toolSchedulingWaves
+            [(call, call.plan) | call <- scheduled])
+        IntMap.empty
   where
     schedule
         :: IndexedPreparedToolCall
@@ -855,19 +857,12 @@ runToolCalls config calls = do
             }
 
     go
-        :: [PreparedScheduledToolCall]
+        :: [[PreparedScheduledToolCall]]
         -> IntMap ToolCallResult
         -> IO [ToolCallResult]
     go [] completed =
         pure (IntMap.elems completed)
-    go remaining completed = do
-        let ready = readyCalls remaining
-            readyIndexes = IntSet.fromList (map (.index) ready)
-            pending =
-                filter
-                    (\scheduled ->
-                        IntSet.notMember scheduled.index readyIndexes)
-                    remaining
+    go (ready : pending) completed = do
         batchResults <-
             mapConcurrently
                 (\scheduled -> do
@@ -899,18 +894,6 @@ data PreparedScheduledToolCall = PreparedScheduledToolCall
     , plan :: !ToolSchedulingPlan
     , prepared :: !PreparedToolCall
     }
-
-readyCalls :: [PreparedScheduledToolCall] -> [PreparedScheduledToolCall]
-readyCalls calls =
-    [ call
-    | call <- calls
-    , not
-        (any
-            (\earlier ->
-                earlier.index < call.index
-                    && schedulingPlansConflict earlier.plan call.plan)
-            calls)
-    ]
 
 prepareIndexedToolCalls
     :: LoopConfig

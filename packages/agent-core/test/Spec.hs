@@ -30,6 +30,7 @@ import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
+import qualified Agent.Tools.SchedulingSpec as SchedulingSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
 import Test.Hspec (hspec)
 
@@ -64,5 +65,6 @@ main = hspec do
     MultiAgentsSpec.spec
     PlanModeSpec.spec
     SecretSpec.spec
+    SchedulingSpec.spec
     DangerousSpec.spec
     WebSocketSpec.spec

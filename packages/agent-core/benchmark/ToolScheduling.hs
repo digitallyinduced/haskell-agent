@@ -20,6 +20,9 @@ import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
     , ToolResourceClaim(..)
+    , ToolSchedulingPlan(..)
+    , toolSchedulingWaves
+    , toolSchedulingWavesLegacy
     )
 import Agent.Tools.Types
     ( AppTool
@@ -60,6 +63,14 @@ data Workload
     | NewDisjointPaths
     | NewConflicting
     | ExistingParallel
+    | LegacyDisjoint
+    | IndexedDisjoint
+    | LegacyConflicting
+    | IndexedConflicting
+    | LegacyPath
+    | IndexedPath
+    | LegacyMixed
+    | IndexedMixed
     deriving (Eq, Show)
 
 data Sample = Sample
@@ -80,8 +91,21 @@ main = do
             callCount <- parsePositive "call count" callCountArg
             delayMicros <- parseNonNegative "delay microseconds" delayArg
             sampleCount <- parsePositive "sample count" sampleCountArg
-            samples <- forM [1 .. sampleCount] \_ ->
-                measure (runWorkload workload callCount delayMicros)
+            let preparedSamples =
+                    [ schedulingBenchmark workload callCount sampleSeed
+                    | sampleSeed <- [1 .. sampleCount]
+                    ]
+            validateSchedulingBenchmark preparedSamples
+            samples <- forM
+                (zip [1 :: Int ..] preparedSamples)
+                \(sampleSeed, prepared) ->
+                measure
+                    (runWorkload
+                        workload
+                        callCount
+                        delayMicros
+                        sampleSeed
+                        prepared)
             let result = median samples
             printf
                 "%s,%d,%d,%.3f,%.3f,%d\n"
@@ -96,6 +120,9 @@ main = do
                 "usage: tool-scheduling-bench WORKLOAD CALLS DELAY_US SAMPLES\n"
                     <> "workloads: old-sequential, new-disjoint, "
                     <> "new-disjoint-paths, new-conflicting, existing-parallel"
+                    <> ", legacy-disjoint, indexed-disjoint, "
+                    <> "legacy-conflicting, indexed-conflicting, "
+                    <> "legacy-path, indexed-path, legacy-mixed, indexed-mixed"
 
 parseWorkload :: String -> IO Workload
 parseWorkload = \case
@@ -104,6 +131,14 @@ parseWorkload = \case
     "new-disjoint-paths" -> pure NewDisjointPaths
     "new-conflicting" -> pure NewConflicting
     "existing-parallel" -> pure ExistingParallel
+    "legacy-disjoint" -> pure LegacyDisjoint
+    "indexed-disjoint" -> pure IndexedDisjoint
+    "legacy-conflicting" -> pure LegacyConflicting
+    "indexed-conflicting" -> pure IndexedConflicting
+    "legacy-path" -> pure LegacyPath
+    "indexed-path" -> pure IndexedPath
+    "legacy-mixed" -> pure LegacyMixed
+    "indexed-mixed" -> pure IndexedMixed
     other -> die ("unknown workload: " <> other)
 
 parsePositive :: String -> String -> IO Int
@@ -120,8 +155,19 @@ parseNonNegative label raw =
             | value >= 0 -> pure value
         _ -> die ("invalid " <> label <> ": " <> raw)
 
-runWorkload :: Workload -> Int -> Int -> IO Int
-runWorkload workload callCount delayMicros = do
+runWorkload
+    :: Workload
+    -> Int
+    -> Int
+    -> Int
+    -> Maybe (Scheduler, SchedulingInput)
+    -> IO Int
+runWorkload workload callCount delayMicros sampleSeed prepared
+    | Just (implementation, input) <- prepared =
+        pure
+            (waveChecksum (implementation input)
+                + sampleSeed)
+    | otherwise = do
     turnIndex <- newIORef (0 :: Int)
     state <- newIORef []
     cancel <- newCancelFlag
@@ -169,6 +215,112 @@ runWorkload workload callCount delayMicros = do
     pure $ case result of
         Right LoopResult { turnsUsed } -> turnsUsed + callCount
         Left err -> error (show err)
+
+type Scheduler =
+    [(Int, ToolSchedulingPlan)] -> [[Int]]
+
+type SchedulingInput = [(Int, ToolSchedulingPlan)]
+
+schedulingBenchmark
+    :: Workload
+    -> Int
+    -> Int
+    -> Maybe (Scheduler, SchedulingInput)
+schedulingBenchmark workload count sampleSeed =
+    case workload of
+        LegacyDisjoint -> benchmark toolSchedulingWavesLegacy disjointPlans
+        IndexedDisjoint -> benchmark toolSchedulingWaves disjointPlans
+        LegacyConflicting -> benchmark toolSchedulingWavesLegacy conflictingPlans
+        IndexedConflicting -> benchmark toolSchedulingWaves conflictingPlans
+        LegacyPath -> benchmark toolSchedulingWavesLegacy pathPlans
+        IndexedPath -> benchmark toolSchedulingWaves pathPlans
+        LegacyMixed -> benchmark toolSchedulingWavesLegacy mixedPlans
+        IndexedMixed -> benchmark toolSchedulingWaves mixedPlans
+        _ -> Nothing
+  where
+    benchmark implementation plans =
+        Just
+            ( implementation
+            , zip [0 :: Int ..] (take count plans)
+            )
+    suffix = "-sample-" <> Text.pack (show sampleSeed)
+    disjointPlans =
+        [ ToolResourceClaims
+            [namedClaim ToolWrite ("resource-" <> number <> suffix)]
+        | index <- [1 :: Int ..]
+        , let number = Text.pack (show index)
+        ]
+    conflictingPlans =
+        repeat
+            (ToolResourceClaims
+                [namedClaim ToolWrite ("shared" <> suffix)])
+    pathPlans =
+        [ ToolResourceClaims
+            [ ToolResourceClaim ToolWrite
+                (ToolPath (unsafeEncodeUtf
+                    ("/workspace-" <> show sampleSeed
+                        <> "/file-" <> show index)))
+            ]
+        | index <- [1 :: Int ..]
+        ]
+    mixedPlans =
+        [ mixedPlan index
+        | index <- [1 :: Int ..]
+        ]
+    mixedPlan index =
+        case index `mod` 11 of
+            0 -> ToolExclusive
+            1 -> ToolUnconstrained
+            2 -> ToolResourceClaims
+                [ToolResourceClaim ToolRead ToolAllPaths]
+            3 -> ToolResourceClaims
+                [ToolResourceClaim ToolWrite
+                    (ToolPathTree
+                        (unsafeEncodeUtf
+                            ("/workspace-" <> show sampleSeed <> "/src")))]
+            4 -> ToolResourceClaims
+                [ToolResourceClaim ToolRead
+                    (ToolPath (unsafeEncodeUtf
+                        ("/workspace-" <> show sampleSeed
+                            <> "/src/File-" <> show (index `mod` 17))))]
+            _ -> ToolResourceClaims
+                [namedClaim
+                    (if even index then ToolRead else ToolWrite)
+                    ("resource-" <> Text.pack (show (index `mod` 23))
+                        <> suffix)]
+
+validateSchedulingBenchmark
+    :: [Maybe (Scheduler, SchedulingInput)]
+    -> IO ()
+validateSchedulingBenchmark =
+    mapM_ validate
+  where
+    validate Nothing = pure ()
+    validate (Just (_, input)) =
+        let legacy = toolSchedulingWavesLegacy input
+            indexed = toolSchedulingWaves input
+        in if legacy == indexed
+            then evaluate (waveChecksum legacy) >> pure ()
+            else die "legacy and indexed scheduling differ"
+
+namedClaim :: ToolAccess -> Text -> ToolResourceClaim
+namedClaim access =
+    ToolResourceClaim access . ToolNamedResource
+
+waveChecksum :: [[Int]] -> Int
+waveChecksum =
+    foldl'
+        (\checksum (wave, values) ->
+            foldl'
+                (\acc (position, value) ->
+                    acc * 16777619
+                        + wave * 65537
+                        + position * 257
+                        + value)
+                (checksum * 31 + wave)
+                (zip [1 :: Int ..] values))
+        2166136261
+        . zip [1 :: Int ..]
 
 benchmarkTool :: Workload -> Int -> Int -> Text -> AppTool
 benchmarkTool workload delayMicros index name =
