@@ -29,7 +29,7 @@ import Agent.Responses.Types
     )
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.STM
-import Control.Exception.Safe (displayException, tryAny)
+import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Control.Monad (forever, void)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -169,7 +169,7 @@ shouldRequestSessionTitle milestone refreshIndex
 titleWorker :: (SessionTitleEvent -> IO ()) -> SessionTitleManager -> IO ()
 titleWorker onEvent manager = forever do
     job <- atomically (readTQueue manager.titleJobs)
-    generated <- tryAny (generateTitle manager job)
+    generated <- generateTitleWithRetry manager job
     accepted <- atomically do
         modifyTVar' manager.titleRequested
             (Set.delete
@@ -206,6 +206,16 @@ titleWorker onEvent manager = forever do
                         , failureGeneration = job.jobGeneration
                         }))
     mapM_ (void . tryAny . onEvent) accepted
+
+generateTitleWithRetry
+    :: SessionTitleManager
+    -> SessionTitleJob
+    -> IO (Either SomeException (Either Text Text))
+generateTitleWithRetry manager job = do
+    firstAttempt <- tryAny (generateTitle manager job)
+    case firstAttempt of
+        Right (Right _) -> pure firstAttempt
+        _ -> tryAny (generateTitle manager job)
 
 generateTitle :: SessionTitleManager -> SessionTitleJob -> IO (Either Text Text)
 generateTitle manager job = do
