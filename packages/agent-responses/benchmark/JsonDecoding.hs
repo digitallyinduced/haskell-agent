@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns #-}
 
 module Main (main) where
-
+import Agent.Json (RawJson, rawJsonFromEncoding)
 import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.StreamAssembly
     ( applyStreamEvent
@@ -11,6 +11,8 @@ import Agent.Responses.StreamAssembly
 import Agent.Responses.Types
 import Control.Exception (evaluate)
 import Control.Monad (forM)
+import qualified Data.Aeson as Aeson
+import Data.Aeson.Types (Pair)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -23,14 +25,12 @@ import System.Environment (getArgs)
 import System.Exit (die)
 import System.Mem (performGC)
 import Text.Printf (printf)
-
 data Sample = Sample
     { wallMillis :: !Double
     , cpuMillis :: !Double
     , allocatedBytes :: !Integer
     , checksum :: !Int
     }
-
 main :: IO ()
 main = do
     enabled <- getRTSStatsEnabled
@@ -55,12 +55,10 @@ main = do
         _ -> die $
             "usage: responses-json-bench stream EVENTS DELTA_BYTES SAMPLES\n"
                 <> "   or: responses-json-bench request ITERATIONS SAMPLES"
-
 positive :: String -> String -> IO Int
 positive label raw = case reads raw of
     [(value, "")] | value > 0 -> pure value
     _ -> die ("invalid " <> label <> ": " <> raw)
-
 report :: String -> Int -> Int -> [Sample] -> IO ()
 report mode count bytes samples =
     printf "%s,%d,%d,%d,%.3f,%.3f,%d,%d\n"
@@ -69,10 +67,8 @@ report mode count bytes samples =
         (median (map (.cpuMillis) samples))
         (median (map (.allocatedBytes) samples))
         (median (map (.checksum) samples))
-
 median :: Ord value => [value] -> value
 median values = sort values !! (length values `div` 2)
-
 runStream
     :: (BS.ByteString -> IO (Either String ResponseStreamEvent))
     -> [BS.ByteString]
@@ -88,7 +84,6 @@ runStream decode = go emptyStreamAssemblyState
                 Left err -> error (show err)
                 Right response -> evaluate (responseChecksum response)
             _ -> go next rest
-
 runRequests :: Int -> IO Int
 runRequests count = go count checksumSeed
   where
@@ -99,7 +94,6 @@ runRequests count = go count checksumSeed
                 (\value byte -> value * 33 + fromIntegral byte)
                 checksum bytes
         checksum' `seq` go (remaining - 1) checksum'
-
 requestParams :: Int -> ResponseCreateParams
 requestParams iteration = defaultResponseCreateParams
     { model = Just "gpt-5"
@@ -110,12 +104,12 @@ requestParams iteration = defaultResponseCreateParams
         [ CustomToolValue CustomTool
             { name = "apply_patch"
             , description = Just "Apply a patch to files."
-            , format = Nothing
+            , format = Just patchFormat
             }
         , FunctionToolValue FunctionTool
             { name = "shell_command"
             , description = Just "Run a shell command."
-            , parameters = Nothing
+            , parameters = Just shellSchema
             , strict = Just True
             }
         , NamespaceToolValue NamespaceTool
@@ -125,14 +119,44 @@ requestParams iteration = defaultResponseCreateParams
                 [ FunctionToolValue FunctionTool
                     { name = "read_file"
                     , description = Just "Read a file."
-                    , parameters = Nothing
+                    , parameters = Just readSchema
                     , strict = Just True
                     }
                 ]
             }
         ]
     }
-
+shellSchema, readSchema, patchFormat :: RawJson
+shellSchema = objectSchema
+    [ "command" Aeson..= jsonType "string"
+    , "yield_time_ms" Aeson..= jsonType "integer"
+    ] ["command"]
+readSchema = objectSchema
+    [ "target_file" Aeson..= jsonType "string"
+    , "offset" Aeson..= integerMin
+    , "limit" Aeson..= integerMin
+    ] ["target_file"]
+patchFormat = rawJson
+    [ "type" Aeson..= ("grammar" :: Text.Text)
+    , "syntax" Aeson..= ("lark" :: Text.Text)
+    , "definition" Aeson..=
+        ("start: begin hunk+ end\nbegin: \"*** Begin Patch\"\n\
+         \hunk: /[^\\n]+/ NEWLINE\nend: \"*** End Patch\"" :: Text.Text)
+    ]
+rawJson :: [Pair] -> RawJson
+rawJson = rawJsonFromEncoding . Aeson.toEncoding . Aeson.object
+objectSchema :: [Pair] -> [Text.Text] -> RawJson
+objectSchema properties required = rawJson
+    [ "type" Aeson..= ("object" :: Text.Text)
+    , "properties" Aeson..= Aeson.object properties
+    , "required" Aeson..= required
+    , "additionalProperties" Aeson..= False
+    ]
+jsonType :: Text.Text -> Aeson.Value
+jsonType value = Aeson.object ["type" Aeson..= value]
+integerMin :: Aeson.Value
+integerMin = Aeson.object
+    ["type" Aeson..= ("integer" :: Text.Text), "minimum" Aeson..= (1 :: Int)]
 streamPayloads :: Int -> Int -> [BS.ByteString]
 streamPayloads eventCount deltaBytes =
     [lifecycle "response.created" "in_progress", lifecycle
@@ -215,7 +239,6 @@ streamPayloads eventCount deltaBytes =
             _ -> ("response.custom_tool_call_input.delta",
                     ",\"item_id\":\"ct-1\",\"call_id\":\"call-c\",\
                     \\"output_index\":3")
-
 responseChecksum :: Response -> Int
 responseChecksum response =
     textChecksum response.responseId
@@ -249,14 +272,11 @@ responseChecksum response =
         NamespaceToolValue tool ->
             textChecksum tool.name + sum (map toolChecksum tool.tools)
         _ -> 1
-
 textChecksum :: Text.Text -> Int
 textChecksum = Text.foldl' (\value character -> value * 33 + fromEnum character)
     checksumSeed
-
 checksumSeed :: Int
 checksumSeed = 5381
-
 measure :: IO Int -> IO Sample
 measure action = do
     performGC
@@ -266,6 +286,9 @@ measure action = do
     result <- action >>= evaluate
     afterWall <- getMonotonicTimeNSec
     afterCPU <- getCPUTime
+    -- Flush the current nursery into allocated_bytes without charging this GC
+    -- to the wall/CPU sample.
+    performGC
     afterStats <- getRTSStats
     pure Sample
         { wallMillis = fromIntegral (afterWall - beforeWall) / 1.0e6

@@ -105,6 +105,7 @@ benchmark responses-json-bench
     main-is:          JsonDecoding.hs
     ghc-options:      -O2 -rtsopts
     build-depends:    aeson >= 2.0
+                    , agent-json
                     , agent-responses
                     , agent-responses-types
                     , base >= 4.14 && < 5
