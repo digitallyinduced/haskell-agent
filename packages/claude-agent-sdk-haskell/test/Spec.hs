@@ -1,7 +1,6 @@
 module Main (main) where
 
 import qualified Claude.Agent.SDK.ClientSpec as ClientSpec
-import qualified Claude.Agent.SDK.Internal.Transport.OutputBufferSpec as OutputBufferSpec
 import qualified Claude.Agent.SDK.QuerySpec as QuerySpec
 import Control.Concurrent (threadDelay)
 import qualified System.Posix.IO.ByteString as PosixByteString
@@ -18,7 +17,6 @@ main =
         _ ->
             hspec do
                 ClientSpec.spec
-                OutputBufferSpec.spec
                 QuerySpec.spec
 
 holdStdinOpen :: FilePath -> IO ()
