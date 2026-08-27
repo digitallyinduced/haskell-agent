@@ -15,6 +15,7 @@ import Agent.Loop
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolCallKind(..)
+    , customToolCall
     , functionToolCall
     )
 import qualified Data.Foldable as Foldable
@@ -431,6 +432,18 @@ spec = describe "fullscreen UI reducer" do
                     `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
                 state.uiActivity `shouldBe` "$ ghci"
             _ -> expectationFailure "expected one running GHCi block"
+
+    it "stores exec source as JavaScript code" do
+        let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"
+            call = customToolCall "c1" "exec" source
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ exec"
+                block.blockDetail `shouldBe` source
+                blockCodeLanguage block `shouldBe` Just "javascript"
+            _ -> expectationFailure "expected one running exec block"
 
     it "renders the public Grok terminal alias as a shell block" do
         let call = functionToolCall

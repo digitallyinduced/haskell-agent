@@ -38,6 +38,16 @@ library
     import:           common-options
     hs-source-dirs:   src
     other-modules:    Agent.Telegram.Classify
+                    , Agent.Telegram.Classify.Media
+                    , Agent.Telegram.Classify.User
+                    , Agent.Telegram.Internal.Allowlist
+                    , Agent.Telegram.Internal.App
+                    , Agent.Telegram.Internal.Launch
+                    , Agent.Telegram.Internal.Poll
+                    , Agent.Telegram.Internal.Runtime.Types
+                    , Agent.Telegram.Internal.Support
+                    , Agent.Telegram.Internal.Text
+                    , Agent.Telegram.Internal.Turn
     exposed-modules:  Agent.Telegram
                     , Agent.Telegram.Bridge
                     , Agent.Telegram.Client

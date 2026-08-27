@@ -72,6 +72,7 @@ import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , customToolCall
     , functionToolCall
     )
 import Agent.TUI.Model
@@ -105,6 +106,19 @@ spec = do
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.fromList ["haskell", "python"]
+
+        it "requests the JavaScript grammar for exec source" do
+            let conversation =
+                    reduceUi
+                        (UiLoop
+                            (ToolStarted
+                                (customToolCall
+                                    "exec-1"
+                                    "exec"
+                                    "const answer = 42;")))
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.singleton "javascript"
 
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
@@ -286,6 +300,20 @@ spec = do
             after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
 
     describe "fullscreenVtyConfig" do
+        it "maps the Kitty-encoded Esc key so its payload cannot leak" do
+            let mappings = V.configInputMap fullscreenVtyConfig
+            mapM_
+                (\body -> mappings `shouldContain`
+                    [(Nothing, "\ESC[" <> body, V.EvKey V.KEsc [])])
+                [ "27u"
+                , "27;1u"
+                , "27;1:1u"
+                , "27;2u"
+                , "27;5:1u"
+                , "27;65u"
+                , "27;256:1u"
+                ]
+
         it "maps enhanced-keyboard sequences before Vty decodes them" do
             let mappings = V.configInputMap fullscreenVtyConfig
             mappings `shouldContain`

@@ -14,6 +14,7 @@ import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
+import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
@@ -89,6 +90,7 @@ main = hspec do
     CommandSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec
+    ConversationStoreSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
     DialectsSpec.spec

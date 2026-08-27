@@ -24,7 +24,7 @@ mkDerivation {
   ];
   benchmarkHaskellDepends = [
     aeson base bytestring directory filepath safe-exceptions text
-    text-builder unix
+    text-builder time unix
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";
