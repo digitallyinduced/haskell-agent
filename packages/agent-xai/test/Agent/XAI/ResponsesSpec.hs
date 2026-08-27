@@ -11,6 +11,7 @@ import Agent.XAI.Options
 import Agent.XAI.Request
 import Agent.XAI.Stream
 import Agent.Responses.Types
+import Agent.Json (rawJsonFromEncoding)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -88,19 +89,15 @@ spec = do
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields =
-                        KeyMap.singleton "status" (Aeson.String "completed")
                     }
                 message = MessageItem ResponseMessage
                     { messageId = Just "msg_1"
                     , content = MessageContentParts
-                        [InputTextPart "hello" Nothing KeyMap.empty]
+                        [InputTextPart "hello" Nothing]
                     , role = RoleUser
                     , status = Just ItemCompleted
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields =
-                        KeyMap.singleton "status" (Aeson.String "completed")
                     }
                 request = setInstructions Nothing $
                     setInput
@@ -125,13 +122,10 @@ spec = do
                         [ InputTextPart
                             "Message Type: MESSAGE\nSender: researcher\nPayload:\nFound it."
                             Nothing
-                            KeyMap.empty
                         , EncryptedContentPart
                             "opaque-provider-payload"
-                            KeyMap.empty
                         ]
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 request = setInstructions Nothing $
                     setInput
@@ -175,7 +169,6 @@ spec = do
         it "serializes hosted tools from ResponseToolType, not a tag string" do
             let mismatched = KnownResponseTool ToolXSearch TaggedObject
                     { tag = "web_search"
-                    , fields = KeyMap.empty
                     }
             Aeson.toJSON mismatched `shouldBe` Aeson.object
                 ["type" .= ("x_search" :: Text)]
@@ -269,7 +262,6 @@ spec = do
                     , message = "prompt is too long"
                     , param = Nothing
                     , retryAfter = Nothing
-                    , extraFields = mempty
                     }
             classifyStreamError streamError
                 `shouldBe` ProviderError ContextWindowExceeded
@@ -287,7 +279,6 @@ spec = do
                     , message
                     , param = Nothing
                     , retryAfter = Nothing
-                    , extraFields = mempty
                     }
             classifyStreamError streamError
                 `shouldBe` ProviderError OverloadedError message (Just 30)
@@ -355,24 +346,22 @@ sampleRequest = defaultResponseCreateParams
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , role = RoleUser
-            , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
+            , content = MessageContentParts [InputTextPart "hello" Nothing]
             , status = Nothing
             , phase = Nothing
             , passthrough = Nothing
-            , extraFields = mempty
             }
         ])
     , tools = Just
         [ FunctionToolValue FunctionTool
             { name = "echo_text"
             , description = Just "Echo the text back"
-            , parameters = Just (Aeson.object [])
+            , parameters = Just $
+                rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))
             , strict = Nothing
-            , extraFields = mempty
             }
         , knownResponseTool ToolWebSearch
-            (KeyMap.singleton "external_web_access" (Aeson.Bool True))
-        , knownResponseTool ToolComputer mempty
+        , knownResponseTool ToolComputer
         ]
     , reasoning = Just (reasoningConfig "high")
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
@@ -386,7 +375,6 @@ reasoningConfig effort = ReasoningConfig
     , generateSummary = Nothing
     , reasoningMode = Nothing
     , summary = Nothing
-    , extraFields = mempty
     }
 
 withEffort :: Text -> ResponseCreateParams -> ResponseCreateParams

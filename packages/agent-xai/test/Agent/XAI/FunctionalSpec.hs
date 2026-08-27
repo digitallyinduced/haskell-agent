@@ -17,6 +17,7 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import Agent.Json (rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
 import Data.IORef
@@ -107,9 +108,9 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing
-            , output = Aeson.object ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
+            , output = rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
+                ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
             , status = Nothing
-            , extraFields = mempty
             }
         , userMessage "The tool ran. Reply with exactly: done"
         ]))
@@ -122,30 +123,28 @@ echoTool :: ResponseTool
 echoTool = FunctionToolValue FunctionTool
     { name = "echo_text"
     , description = Just "Echo the given text back to the caller."
-    , parameters = Just (Aeson.object
+    , parameters = Just $ rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
         [ "type" Aeson..= ("object" :: Text)
         , "properties" Aeson..= Aeson.object
             [ "text" Aeson..= Aeson.object [ "type" Aeson..= ("string" :: Text) ] ]
         , "required" Aeson..= [ "text" :: Text ]
         , "additionalProperties" Aeson..= False
-        ])
+        ]
     , strict = Just True
-    , extraFields = mempty
     }
 
 userMessage :: Text -> ResponseItem
 userMessage text = MessageItem ResponseMessage
     { messageId = Nothing
     , role = RoleUser
-    , content = MessageContentParts [InputTextPart text Nothing mempty]
+    , content = MessageContentParts [InputTextPart text Nothing]
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = mempty
     }
 
 lowReasoning :: ReasoningConfig
-lowReasoning = ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing mempty
+lowReasoning = ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing
 
 assistantText :: Response -> Maybe Text
 assistantText response = case

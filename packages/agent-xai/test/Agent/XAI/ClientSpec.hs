@@ -431,7 +431,7 @@ helloRequest prompt = defaultResponseCreateParams
     , instructions = Just "You are a test agent."
     , input = Just (ResponseInputText prompt)
     , tools = Just []
-    , reasoning = Just (ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing mempty)
+    , reasoning = Just (ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing)
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     }
 
