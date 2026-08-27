@@ -51,6 +51,7 @@ import Agent.Responses.StreamAssembly
     , finishStreamResponse
     , responseFailureFromState
     )
+import Agent.Responses.LoopBackend (responseNeedsLoopContinuation)
 import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Agent.Transport.WebSocket as WebSocket
 import Agent.Provider
@@ -96,7 +97,8 @@ import qualified Wuss
 -- | Turn-scoped sticky-routing state shared by every physical transport used
 -- during one logical Codex turn. Codex treats this as a first-write-wins token:
 -- once received from response headers/metadata, it must be replayed unchanged
--- on tool continuations, reconnects, HTTP fallback, and inline compaction.
+-- on tool and empty-model continuations, reconnects, HTTP fallback, and inline
+-- compaction.
 newtype CodexTurnState = CodexTurnState (IORef (Maybe Text))
 
 data CodexConn = CodexWsConn
@@ -124,10 +126,12 @@ resetCodexTurnState (CodexTurnState turnState) =
     atomicModifyIORef' turnState (const (Nothing, ()))
 
 -- | End a normal model request. Tool calls keep the turn open for their output
--- continuation; every other successful response closes the routing scope.
+-- continuation, and empty model steps keep it open for the loop's
+-- previous-response continuation. Every other successful response closes the
+-- routing scope.
 finishCodexTurnStateResponse :: CodexTurnState -> Response -> IO ()
 finishCodexTurnStateResponse turnState response
-    | responseHasToolContinuation response = pure ()
+    | responseKeepsTurnOpen response = pure ()
     | otherwise = resetCodexTurnState turnState
 
 -- | Close a reusable Codex connection before its owning callback returns.
@@ -534,9 +538,10 @@ captureTurnState turnState callback event = do
         Nothing -> pure ()
     callback event
 
-responseHasToolContinuation :: Response -> Bool
-responseHasToolContinuation response =
+responseKeepsTurnOpen :: Response -> Bool
+responseKeepsTurnOpen response =
     any isToolCall response.output
+        || responseNeedsLoopContinuation response
   where
     isToolCall = \case
         FunctionCallItem{} -> True

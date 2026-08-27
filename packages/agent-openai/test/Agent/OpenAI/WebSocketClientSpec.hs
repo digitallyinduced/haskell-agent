@@ -17,7 +17,7 @@ import Data.Text (Text)
 spec :: Spec
 spec = do
   describe "CodexTurnState" do
-    it "keeps the first token through tool calls and clears it at turn end" do
+    it "keeps the first token through continuations and clears it at turn end" do
         turnState <- newCodexTurnState
         recordCodexTurnState turnState " "
         recordCodexTurnState turnState "ts-first"
@@ -40,7 +40,46 @@ spec = do
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
 
         finishCodexTurnStateResponse turnState
+            ((responseWithOutput
+                [ ReasoningItemValue ReasoningItem
+                    { itemId = Just "rs-1"
+                    , summary = []
+                    , content = Nothing
+                    , encryptedContent = Nothing
+                    , status = Just ItemCompleted
+                    , extraFields = KeyMap.empty
+                    }
+                ])
+                { status = ResponseIncomplete
+                , incompleteDetails = Just IncompleteDetails
+                    { reason = "max_output_tokens"
+                    , extraFields = KeyMap.empty
+                    }
+                })
+        readCodexTurnState turnState `shouldReturn` Just "ts-first"
+
+        finishCodexTurnStateResponse turnState
             (responseWithOutput [])
+        readCodexTurnState turnState `shouldReturn` Just "ts-first"
+
+        finishCodexTurnStateResponse turnState
+            (responseWithOutput
+                [ MessageItem ResponseMessage
+                    { messageId = Just "msg-1"
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "done"
+                            Nothing
+                            Nothing
+                            KeyMap.empty
+                        ]
+                    , role = RoleAssistant
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+                ])
         readCodexTurnState turnState `shouldReturn` Nothing
 
   describe "buildCodexWsHeaders" do

@@ -1,5 +1,6 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
+import Agent.Cancel (newCancelFlag)
 import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
@@ -13,9 +14,13 @@ import Agent.OpenAI.WebSocketClient
     , readCodexTurnState
     , recordCodexTurnState
     )
-import Agent.Responses.LoopBackend (streamOutputObserved)
+import Agent.Responses.LoopBackend
+    ( responseNeedsLoopContinuation
+    , streamOutputObserved
+    )
 import Agent.Responses.Types
 import Agent.ToolDispatch
+import Agent.Tools.Types (ToolRegistry, mkToolRegistry)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
@@ -258,6 +263,51 @@ spec = do
                 , incompleteReasoningTokens = Just 32000
                 }
             turn.tokenUsage.outputTokens `shouldBe` 32768
+
+        it "continues reasoning-only max-output stops on the response chain" do
+            let turn = responseToTurnOutput reasoningIncompleteResponse
+            turn.completion `shouldBe` TurnCompleted
+            turn.toolCalls `shouldBe` []
+            turn.assistantText `shouldBe` Nothing
+            turn.tokenUsage.outputTokens `shouldBe` 128000
+
+        it "continues only successful empty response steps" do
+            let cancelled = testResponse "resp-cancelled" []
+            responseNeedsLoopContinuation reasoningIncompleteResponse
+                `shouldBe` True
+            responseNeedsLoopContinuation (testResponse "resp-empty" [])
+                `shouldBe` True
+            responseNeedsLoopContinuation
+                (cancelled
+                    { status = ResponseCancelled
+                    , incompleteDetails = Nothing
+                    })
+                `shouldBe` False
+
+        it "keeps filtered or partially actionable incomplete output terminal" do
+            let incomplete reason output =
+                    (testResponse "resp-incomplete" output)
+                        { status = ResponseIncomplete
+                        , incompleteDetails = Just IncompleteDetails
+                            { reason
+                            , extraFields = KeyMap.empty
+                            }
+                        }
+                filtered = responseToTurnOutput
+                    (incomplete "content_filter" [reasoningItem "rs-filtered"])
+                partialCall = responseToTurnOutput
+                    (incomplete "max_output_tokens"
+                        [ reasoningItem "rs-partial"
+                        , functionCallItem "call-partial" "echo" "{}"
+                        ])
+            filtered.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "content_filter"
+                , incompleteReasoningTokens = Nothing
+                }
+            partialCall.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "max_output_tokens"
+                , incompleteReasoningTokens = Nothing
+                }
 
     describe "streamEventToLoopEvent" do
         it "maps output and summary deltas but hides raw reasoning" do
@@ -520,6 +570,36 @@ spec = do
                 ]
 
     describe "openAiBackendWith" do
+        it "continues a reasoning-only incomplete response by response id" do
+            seenPrevious <- newIORef []
+            remaining <- newIORef
+                [ reasoningIncompleteResponse
+                , testResponse "resp-final" [assistantItem "done"]
+                ]
+            let send _request previous _onEvent = do
+                    modifyIORef' seenPrevious (<> [previous])
+                    atomicModifyIORef' remaining \case
+                        response : rest -> (rest, Right response)
+                        [] -> error "unexpected extra response submission"
+                backend = openAiBackendWith send (pure baseParams)
+            config <- loopConfig backend
+
+            result <- runLoop config Nothing "investigate"
+
+            result `shouldBe` Right LoopResult
+                { finalResponseId = "resp-final"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = TokenUsage
+                    { inputTokens = 64000
+                    , outputTokens = 128000
+                    , cachedTokens = 0
+                    }
+                }
+            readIORef seenPrevious `shouldReturn`
+                [Nothing, Just "resp-reasoning-incomplete"]
+            readIORef remaining `shouldReturn` []
+
         it "shows raw reasoning only when explicitly enabled" do
             let send _request _previous onEvent = do
                     onEvent (deltaEvent EventReasoningTextDelta "raw")
@@ -1329,6 +1409,30 @@ submitWithState stateRef backend previous inputs onEvent = do
             writeIORef stateRef backendState
             pure (Right backendOutput)
 
+loopConfig :: Backend -> IO LoopConfig
+loopConfig backend = do
+    state <- newIORef []
+    cancel <- newCancelFlag
+    pure LoopConfig
+        { loopBackend = backend
+        , loopBackendState = BackendStateStore
+            { readBackendState = readIORef state
+            , commitBackendState = writeIORef state
+            }
+        , loopTools = emptyRegistry
+        , loopDispatch = defaultLoopDispatch
+        , loopMaxTurns = defaultLoopMaxTurns
+        , loopOnEvent = const (pure ())
+        , loopApprove = const (pure (Right True))
+        , loopReadSteering = pure []
+        , loopCommitSteering = const (pure ())
+        , loopCancel = cancel
+        }
+
+emptyRegistry :: ToolRegistry
+emptyRegistry =
+    either (error . Text.unpack) id (mkToolRegistry [])
+
 baseParams :: ResponseCreateParams
 baseParams = withModel (Just "gpt-5.6-luna") defaultResponseCreateParams
 
@@ -1444,6 +1548,36 @@ assistantItem text = MessageItem ResponseMessage
     , passthrough = Nothing
     , extraFields = KeyMap.empty
     }
+
+reasoningItem :: Text -> ResponseItem
+reasoningItem itemId = ReasoningItemValue ReasoningItem
+    { itemId = Just itemId
+    , summary = []
+    , content = Nothing
+    , encryptedContent = Just "opaque"
+    , status = Just ItemCompleted
+    , extraFields = KeyMap.empty
+    }
+
+reasoningIncompleteResponse :: Response
+reasoningIncompleteResponse =
+    (testResponseWithUsage
+        "resp-reasoning-incomplete"
+        [reasoningItem "rs-1"]
+        (Aeson.object
+            [ "input_tokens" Aeson..= (64000 :: Int)
+            , "output_tokens" Aeson..= (128000 :: Int)
+            , "total_tokens" Aeson..= (192000 :: Int)
+            , "output_tokens_details" Aeson..= Aeson.object
+                [ "reasoning_tokens" Aeson..= (53 :: Int)
+                ]
+            ]))
+        { status = ResponseIncomplete
+        , incompleteDetails = Just IncompleteDetails
+            { reason = "max_output_tokens"
+            , extraFields = KeyMap.empty
+            }
+        }
 
 compactionItem :: Text -> ResponseItem
 compactionItem _ = CompactionItemValue CompactionItem
