@@ -259,6 +259,16 @@
                                         (pkgs.haskell.lib.disableSharedLibraries
                                             (pkgs.haskell.lib.disableLibraryProfiling package)));
                     in {
+                        hermes-json =
+                            pkgs.haskell.lib.overrideSrc previous.hermes-json {
+                                src = pkgs.fetchFromGitHub {
+                                    owner = "mpscholten";
+                                    repo = "hermes";
+                                    rev = "f70adba535051516b51b1aff8147bc77bac4f335";
+                                    hash = "sha256-BZEIcQrQTYE7Vf3FVq1EOaeH/dLnFvU+INZZNNQSMcw=";
+                                    fetchSubmodules = true;
+                                };
+                            };
                         pqi = pkgs.haskell.lib.dontCheck
                             (final.callHackageDirect {
                                 pkg = "pqi";

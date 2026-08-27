@@ -18,6 +18,11 @@ packages:
     packages/claude-agent-sdk-haskell
     packages/agent-claude
 
+source-repository-package
+    type: git
+    location: https://github.com/mpscholten/hermes.git
+    tag: f70adba535051516b51b1aff8147bc77bac4f335
+
 tests: True
 multi-repl: True
 
