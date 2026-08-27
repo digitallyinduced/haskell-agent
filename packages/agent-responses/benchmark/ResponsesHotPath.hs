@@ -274,13 +274,14 @@ fixtureRequest eventCount deltaBytes =
         }
 
 varyRequest :: Int -> ResponseCreateParams -> ResponseCreateParams
-varyRequest sampleIndex request =
-    request
+varyRequest sampleIndex request@ResponseCreateParams{..} =
+    ResponseCreateParams
         { input = case request.input of
             Just (ResponseInputText value) ->
                 Just (ResponseInputText
                     (value <> Text.pack (show sampleIndex)))
             other -> other
+        , ..
         }
 
 ascii :: Int -> BS.ByteString

@@ -29,12 +29,12 @@ Apple M3 Max, GHC 9.10.3, `-O2`, median of nine samples:
 |:---|---:|---:|---:|
 | Direct Hermes SSE | 10,000 × 16 B delta | 17.85 ms | 63.3 MB |
 | Aeson typed SSE | 10,000 × 16 B delta | 10.25 ms | 79.9 MB |
-| Direct Hermes SSE | 2,000 × 1 KiB delta | 3.85 ms | 17.9 MB |
-| Aeson typed SSE | 2,000 × 1 KiB delta | 4.71 ms | 21.8 MB |
+| Direct Hermes SSE | 2,000 × 1 KiB delta | 3.48 ms | 17.9 MB |
+| Aeson typed SSE | 2,000 × 1 KiB delta | 4.31 ms | 21.8 MB |
 | Direct Hermes SSE | 2,000 × 1 KiB + raw extension | 4.89 ms | 22.8 MB |
 | Aeson typed SSE | 2,000 × 1 KiB + raw extension | 4.93 ms | 26.3 MB |
-| Direct request | 2 MiB input | 2.27 ms | 0 B reported |
-| Aeson `Value` request | 2 MiB input | 2.55 ms | 6.3 MB |
+| Direct request | 2 MiB input | 2.17 ms | 0 B reported |
+| Aeson `Value` request | 2 MiB input | 2.34 ms | 6.3 MB |
 
 The no-DOM implementation materially reduces Haskell allocation and wins the
 large-event SSE and request cases, including opaque extension retention. Tiny
