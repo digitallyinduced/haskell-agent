@@ -19,6 +19,7 @@ import Agent.CLI.Compaction
     )
 import Agent.CLI.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json.Decode qualified as Hermes
 import Agent.Loop
 import Agent.OpenAI.Compaction
     ( assistantSummaryItem
@@ -2001,7 +2002,7 @@ responseWithoutCompaction =
 
 responseWithOutput :: [Aeson.Value] -> Response
 responseWithOutput output =
-    case Aeson.fromJSON $ Aeson.object
+    decodeResponseFixture $ Aeson.object
         [ "id" .= ("resp-compact" :: Text)
         , "created_at" .= (0 :: Int)
         , "status" .= ("completed" :: Text)
@@ -2016,9 +2017,14 @@ responseWithOutput output =
                 [ "cached_tokens" .= compactionUsage.cachedTokens
                 ]
             ]
-        ] of
-        Aeson.Success response -> response
-        Aeson.Error err -> error err
+        ]
+
+decodeResponseFixture :: Aeson.Value -> Response
+decodeResponseFixture fixture =
+    case Hermes.decodeEither responseDecoder
+            (LBS.toStrict (Aeson.encode fixture)) of
+        Right response -> response
+        Left err -> error (Text.unpack (Hermes.jsonErrorMessage err))
 
 compactionUsage :: TokenUsage
 compactionUsage = TokenUsage
@@ -2037,7 +2043,7 @@ summaryResponse summary =
 
 summaryResponseWithStatus :: Text -> Text -> Response
 summaryResponseWithStatus responseStatus summary =
-    case Aeson.fromJSON $ Aeson.object
+    decodeResponseFixture $ Aeson.object
         [ "id" .= ("resp-summary" :: Text)
         , "created_at" .= (0 :: Int)
         , "status" .= responseStatus
@@ -2054,6 +2060,4 @@ summaryResponseWithStatus responseStatus summary =
                     ]
                 ]
             ]
-        ] of
-        Aeson.Success response -> response
-        Aeson.Error err -> error err
+        ]

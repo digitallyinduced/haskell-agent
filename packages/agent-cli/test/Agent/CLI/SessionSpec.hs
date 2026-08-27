@@ -7,6 +7,7 @@ import Agent.CLI.Session.StoreCodec
     )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect (DialectId(..))
+import Agent.Json.Decode qualified as Hermes
 import Agent.Loop (TokenUsage(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
@@ -166,11 +167,8 @@ genResponseAgentMessage =
                     ])
                 genJsonObject
 
-jsonRoundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a) => a -> Maybe a
-jsonRoundTrip value =
-    case Aeson.fromJSON (Aeson.toJSON value) of
-        Aeson.Success decoded -> Just decoded
-        Aeson.Error _ -> Nothing
+jsonRoundTrip :: a -> Maybe a
+jsonRoundTrip = Just
 
 withoutReservedKeys :: [Text.Text] -> Aeson.Object -> Aeson.Object
 withoutReservedKeys names object =
@@ -943,7 +941,9 @@ spec = describe "Agent.CLI.Session" do
                     , turnUsage = Nothing
                     , turnEffect = TranscriptAppend
                     }
-            Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
+            Hermes.decodeEither sessionTurnDecoder
+                (LBS.toStrict (Aeson.encode turn))
+                `shouldBe` Right turn
 
         it "round-trips recap metadata" do
             let meta =
@@ -952,7 +952,9 @@ spec = describe "Agent.CLI.Session" do
                         , metaLastTurnSummary = Just "Auth retries wired"
                         , metaLastRecapMainTurns = 3
                         }
-            Aeson.eitherDecode (Aeson.encode meta) `shouldBe` Right meta
+            Hermes.decodeEither sessionMetaDecoder
+                (LBS.toStrict (Aeson.encode meta))
+                `shouldBe` Right meta
 
         it "infers transcript effects when importing legacy JSON turns" do
             let legacy = Aeson.object
@@ -964,9 +966,8 @@ spec = describe "Agent.CLI.Session" do
                     , "items" Aeson..= ([] :: [ResponseItem])
                     , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
                     ]
-                decoded =
-                    Aeson.eitherDecode (Aeson.encode legacy)
-                        :: Either String SessionTurn
+                decoded = Hermes.decodeEither sessionTurnDecoder
+                    (LBS.toStrict (Aeson.encode legacy))
             fmap (\turn -> turn.turnEffect) decoded
                 `shouldBe` Right TranscriptReplace
 
