@@ -9,6 +9,7 @@ module Agent.ToolDispatch
     , typedTool
     , typedToolWithCall
     , typedStreamingTool
+    , textTool
     , streamingTextTool
     , noArgsTool
     , functionToolCall
@@ -98,6 +99,7 @@ data ToolHandler
     = forall args. TypedTool Text (Decoder args) (args -> IO (Either Text Text))
     | forall args. TypedToolWithCall Text (Decoder args) (ToolCall -> args -> IO (Either Text Text))
     | forall args. TypedStreamingTool Text (Decoder args) ((Text -> IO ()) -> args -> IO (Either Text Text))
+    | TextTool Text (Text -> IO (Either Text Text))
     | StreamingTextTool Text ((Text -> IO ()) -> Text -> IO (Either Text Text))
     | NoArgsTool Text (IO (Either Text Text))
 
@@ -115,6 +117,13 @@ typedStreamingTool
     -> ((Text -> IO ()) -> args -> IO (Either Text Text))
     -> ToolHandler
 typedStreamingTool = TypedStreamingTool
+
+-- | A freeform tool whose input is plain text rather than JSON.
+textTool
+    :: Text
+    -> (Text -> IO (Either Text Text))
+    -> ToolHandler
+textTool = TextTool
 
 -- | A streaming freeform tool. Its input is not JSON, so no JSON decoder is
 -- involved.
@@ -234,6 +243,7 @@ handlerName = \case
     TypedTool name _ _ -> name
     TypedToolWithCall name _ _ -> name
     TypedStreamingTool name _ _ -> name
+    TextTool name _ -> name
     StreamingTextTool name _ -> name
     NoArgsTool name _ -> name
 
@@ -247,6 +257,7 @@ runHandler emitOutput call value = \case
     TypedTool _ decoder run -> decodeAndRun decoder value run
     TypedToolWithCall _ decoder run -> decodeAndRun decoder value (run call)
     TypedStreamingTool _ decoder run -> decodeAndRun decoder value (run emitOutput)
+    TextTool _ run -> run value
     StreamingTextTool _ run -> run emitOutput value
     NoArgsTool _ run ->
         run
