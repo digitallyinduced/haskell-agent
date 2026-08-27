@@ -14,7 +14,7 @@ import Agent.Responses.SSE
     , newSseDecoder
     )
 import Agent.Responses.Types
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (Exception, throwIO, tryAny)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -24,8 +24,22 @@ import qualified Data.Text.Encoding.Error as Text (lenientDecode)
 import qualified Network.HTTP.Client as HttpClient
 import qualified Network.HTTP.Client.TLS as HttpTls
 import Network.HTTP.Simple hiding (Response)
+import qualified System.Timeout as Timeout
 
 type StreamEventCallback = ResponseStreamEvent -> IO ()
+
+-- | Raised when a streaming body read stalls for longer than the configured
+-- timeout. http-client's responseTimeout only bounds connection setup and
+-- header receipt, so without this the body reader could block forever when the
+-- network path dies without a FIN/RST after headers arrived.
+newtype StreamStalled = StreamStalled Int
+
+instance Show StreamStalled where
+    show (StreamStalled seconds) =
+        "streaming response stalled: no data received for "
+            <> show seconds <> "s"
+
+instance Exception StreamStalled
 
 -- | Provider-specific hooks around the shared Responses HTTP/SSE mechanics.
 data HttpSseConfig = HttpSseConfig
@@ -80,6 +94,19 @@ performResponsesHttpSse
             HttpClient.responseTimeoutMicro (timeoutSeconds * 1_000_000)
         }
 
+    -- Bound each body read so a mid-stream stall cannot hang the turn forever.
+    -- responseTimeout above only covers header receipt; this extends the same
+    -- budget to the streaming body. A timeout throws StreamStalled, which the
+    -- outer tryAny maps to a retryable ConnectionError. A non-positive timeout
+    -- means "no timeout", matching responseTimeoutMicro's semantics.
+    readChunkWithin body
+        | timeoutSeconds <= 0 = HttpClient.brRead body
+        | otherwise =
+            Timeout.timeout (timeoutSeconds * 1_000_000)
+                (HttpClient.brRead body) >>= \case
+                    Just chunk -> pure chunk
+                    Nothing -> throwIO (StreamStalled timeoutSeconds)
+
     handleResponse response = do
         let status = getResponseStatusCode response
         if status >= 200 && status < 300
@@ -97,7 +124,7 @@ performResponsesHttpSse
     consumeSse body = go newSseDecoder []
       where
         go decoder reversedEvents = do
-            chunk <- HttpClient.brRead body
+            chunk <- readChunkWithin body
             if BS.null chunk
                 then case finishSseDecoder decoder of
                     Left err -> pure (Left err)
@@ -121,7 +148,7 @@ performResponsesHttpSse
     consumeBody body = LBS.fromChunks <$> readChunks []
       where
         readChunks reversedChunks = do
-            chunk <- HttpClient.brRead body
+            chunk <- readChunkWithin body
             if BS.null chunk
                 then pure (reverse reversedChunks)
                 else readChunks (chunk : reversedChunks)
