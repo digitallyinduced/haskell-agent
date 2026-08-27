@@ -91,9 +91,17 @@ library
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Subagents.Registry.Internal.Core
+    other-modules:    Agent.Loop.Internal
+                    , Agent.MCP.Client
+                    , Agent.MCP.Fleet
+                    , Agent.MCP.Supervisor
+                    , Agent.MCP.Types
+                    , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
+                    , Agent.Tools.CodeMode.Host.Types
+                    , Agent.Tools.CodeMode.Host.Availability
+                    , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
     hs-source-dirs:   src
