@@ -3,13 +3,23 @@ module Agent.Json.Decoder.Hermes
     ( DecoderSession
     , withDecoderSession
     , decodeIO
+    , decodeHermesIO
+    , textDeltaEventDecoder
+    , TextDeltaFields(..)
     ) where
 
 import qualified Agent.Json.Decoder as DecoderAPI
 import Agent.Json.Decoder.Backend
+import Agent.Json
+    ( Extensions
+    , RawJson
+    , emptyExtensions
+    , insertExtension
+    )
 import qualified Data.ByteString as BS
 import qualified Data.Hermes as Hermes
 import qualified Data.Text as Text
+import Data.Text (Text)
 import Data.Word (Word8)
 import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
@@ -30,6 +40,7 @@ decodeIO (DecoderSession environment) decoder bytes =
     case decoderRequiresRawCapture decoder of
         True ->
             pure (DecoderAPI.decode decoder bytes)
+<<<<<<< ours
         False -> case firstNonWhitespace bytes of
             Just byte
                 | byte /= openBrace && byte /= openBracket ->
@@ -83,6 +94,33 @@ namedFieldRequiresRawCapture (NamedField _ decoder _) =
 unknownFieldRequiresRawCapture :: UnknownField state -> Bool
 unknownFieldRequiresRawCapture (UnknownField decoder _) =
     decoderRequiresRawCapture decoder
+=======
+        _ -> do
+            result <- decodeHermesIO
+                (DecoderSession environment)
+                (toHermes decoder)
+                bytes
+            pure $ case result of
+                Left _ ->
+                    DecoderAPI.decode decoder bytes
+                right -> right
+
+decodeHermesIO
+    :: DecoderSession
+    -> Hermes.Decoder a
+    -> BS.ByteString
+    -> IO (Either DecoderAPI.DecodeError a)
+decodeHermesIO (DecoderSession environment) decoder bytes = do
+    result <- tryAny $
+        Hermes.parseByteStringIO environment decoder bytes
+    pure $ case result of
+        Left err ->
+            Left (DecoderAPI.DecodeError
+                0
+                []
+                (Text.pack (show err)))
+        Right value -> Right value
+>>>>>>> theirs
 
 toHermes :: Decoder a -> Hermes.Decoder a
 toHermes = \case
@@ -114,7 +152,11 @@ toHermes = \case
         valueType <- hermesJsonType
         toHermes (select valueType)
     RawJsonDecoder ->
+<<<<<<< ours
         fail "RawJson requires the portable direct backend"
+=======
+        rawJsonValue
+>>>>>>> theirs
     SkipDecoder ->
         validateValue
     MapDecoder transform inner -> do
@@ -177,3 +219,60 @@ isWhitespace byte =
 openBrace, openBracket :: Word8
 openBrace = 0x7b
 openBracket = 0x5b
+
+-- | Optimized decoder for the common Responses text-delta wire shape.
+--
+-- It is intentionally domain-neutral: callers supply the already validated
+-- event name from the transport and receive only the fields needed by stream
+-- assembly. Unknown members are recursively validated and skipped.
+data TextDeltaFields = TextDeltaFields
+    { sequenceNumber :: !(Maybe Int)
+    , itemId :: !(Maybe Text)
+    , outputIndex :: !(Maybe Int)
+    , contentIndex :: !(Maybe Int)
+    , delta :: !(Maybe Text)
+    , logprobs :: !(Maybe RawJson)
+    , extensions :: !Extensions
+    }
+
+textDeltaEventDecoder :: Hermes.Decoder TextDeltaFields
+textDeltaEventDecoder =
+    Hermes.objectFold
+        (TextDeltaFields
+            Nothing Nothing Nothing Nothing Nothing Nothing
+            emptyExtensions)
+        \key state -> case key of
+            "sequence_number" ->
+                (\value -> state { sequenceNumber = Just value })
+                    <$> Hermes.int
+            "item_id" ->
+                (\value -> state { itemId = Just value })
+                    <$> Hermes.text
+            "output_index" ->
+                (\value -> state { outputIndex = Just value })
+                    <$> Hermes.int
+            "content_index" ->
+                (\value -> state { contentIndex = Just value })
+                    <$> Hermes.int
+            "delta" ->
+                (\value -> state { delta = Just value })
+                    <$> Hermes.text
+            "logprobs" ->
+                (\value -> state { logprobs = Just value })
+                    <$> rawJsonValue
+            "type" -> state <$ Hermes.text
+            _ ->
+                (\value ->
+                    state
+                        { extensions =
+                            insertExtension
+                                key
+                                value
+                                state.extensions
+                        })
+                    <$> rawJsonValue
+
+rawJsonValue :: Hermes.Decoder RawJson
+rawJsonValue =
+    Hermes.withRawJsonByteString \bytes ->
+        pure (unsafeRawJsonFromValidatedBytes (BS.copy bytes))

@@ -47,8 +47,6 @@ direct encoder wraps Jsonifier's private exact-size write program; no generic
 JSON value is exposed or constructed.
 
 Hermes wins for larger typed records but remains slower for tiny objects in
-this generic codec interpreter. A dedicated dependent object-fold primitive in
-Hermes is the next optimization: the current 0.8 API materializes an update
-list. Codecs retaining opaque `RawJson` currently use the portable backend
-because Hermes 0.8 exposes only `raw_json_token()`, not the complete raw bytes
-for nested arrays and objects.
+this generic codec interpreter. The production Responses path now uses the
+dependent object-fold and complete raw-value extension proposed upstream in
+`velveteer/hermes#33`; this table predates that focused event specialization.

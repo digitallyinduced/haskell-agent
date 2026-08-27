@@ -5,6 +5,7 @@ Hermes/simdjson backend for `agent-json-codec`.
 Sessions are mutable and single-threaded. Allocate one session per concurrent
 stream with `withDecoderSession`.
 
-Hermes 0.8 exposes only `raw_json_token()`, which is not a complete nested
-array or object. Codecs that retain `RawJson` therefore use the portable direct
-backend until Hermes exposes a complete dependent object fold/raw-value API.
+This package currently pins the small Hermes extension proposed upstream in
+[velveteer/hermes#33](https://github.com/velveteer/hermes/pull/33). It adds a
+stateful dependent object fold and complete `raw_json()` access, allowing typed
+fields and opaque nested extensions to be decoded in one forward pass.
