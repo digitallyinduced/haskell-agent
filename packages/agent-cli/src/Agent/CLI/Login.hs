@@ -12,6 +12,7 @@ module Agent.CLI.Login
     , discoverLoginAccounts
     , discoverSelectableLoginAccounts
     , formatLoginAccounts
+    , formatCurrencyAmount
     , initialLoginState
     , loginAccountSelectionId
     , refreshLoginAccount
@@ -89,6 +90,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Containers.ListUtils (nubOrdOn)
 import Data.Maybe (catMaybes, fromMaybe, isJust)
+import Data.Scientific (Scientific, FPFormat(Fixed), formatScientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -959,7 +961,11 @@ refreshLoginAccount account
                         "Use `claude auth status` for Claude Code subscription auth."
                 }
   where
-    formatAmount = fmap (("$" <>) . Text.pack . show)
+    formatAmount = fmap formatCurrencyAmount
+
+formatCurrencyAmount :: Scientific -> Text
+formatCurrencyAmount =
+    ("$" <>) . Text.pack . formatScientific Fixed (Just 2)
 
 openAIUsage :: OpenAI.UsageSnapshot -> AccountUsage
 openAIUsage snapshot = AccountUsage
