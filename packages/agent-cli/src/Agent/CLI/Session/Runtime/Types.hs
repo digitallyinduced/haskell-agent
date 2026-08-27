@@ -23,6 +23,7 @@ import Agent.CLI.Options
     , CliOptions
     )
 import Agent.CLI.ProviderTransition (PendingTurn)
+import Agent.CLI.PendingInputs (PendingInputs)
 import Agent.CLI.Session
     ( LegacySubagentTarget
     , Persistence
@@ -43,7 +44,6 @@ import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
     ( Backend
     , TokenUsage
-    , TurnInput
     )
 import qualified Agent.MCP as MCP
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -129,7 +129,7 @@ data SessionRequest = SessionRequest
     , multiCtx :: !(Maybe MultiAgentContext)
     , rootTurnRef :: !(IORef (Maybe RootTurnId))
     , subagentSessions :: !(IORef (Map SubagentId SubagentSession))
-    , pendingNotices :: !(IORef [TurnInput])
+    , pendingNotices :: !PendingInputs
     , storeRoot :: !SubagentStoreRoot
     , agentTypes :: !GrokSubagentSpecs
     , legacyTarget :: !(Maybe LegacySubagentTarget)

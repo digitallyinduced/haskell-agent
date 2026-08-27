@@ -302,9 +302,11 @@ benchmark concurrency-bench
                     , agent-core
                     , base >= 4.17 && < 5
                     , bytestring
+                    , containers
                     , directory
                     , filepath
                     , safe-exceptions
+                    , text
                     , time
 
 test-suite agent-cli-test

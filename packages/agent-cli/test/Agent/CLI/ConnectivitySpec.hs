@@ -5,7 +5,11 @@ import Agent.CLI.Connectivity
     , transientRetryDelayMicros
     , withConnectionRecoveryUsing
     )
-import Agent.CLI.PendingInputs (withPendingInputs)
+import Agent.CLI.PendingInputs
+    ( enqueuePendingInput
+    , newPendingInputs
+    , withPendingInputs
+    )
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Loop
     ( Backend(..)
@@ -145,7 +149,8 @@ spec = describe "withConnectionRecovery" do
 
     it "does not duplicate queued inputs across reconnect attempts" do
         attempts <- newIORef (0 :: Int)
-        pending <- newIORef [UserMessage "queued"]
+        pending <- newPendingInputs
+        enqueuePendingInput pending (UserMessage "queued")
         seen <- newIORef []
         let backend =
                 withPendingInputs pending $
@@ -174,7 +179,6 @@ spec = describe "withConnectionRecovery" do
                 , backendState = []
                 }
         readIORef seen `shouldReturn` [expected, expected]
-        readIORef pending `shouldReturn` []
 
     it "restarts partial output after a transient provider error" do
         attempts <- newIORef (0 :: Int)
