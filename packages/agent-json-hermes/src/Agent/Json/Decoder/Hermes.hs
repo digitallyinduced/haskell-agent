@@ -77,7 +77,22 @@ toHermes = \case
         plan <- Hermes.objectFold initialPlan \key current ->
             case matchPlannedField key current of
                 Just (PlannedFieldMatch decoder rebuild) ->
-                    rebuild <$> toHermes decoder
+                    do
+                        isNull <- Hermes.isNull
+                        value <- toHermes decoder
+                        let rebuilt =
+                                markPlannedFieldPresent
+                                    key
+                                    (rebuild value)
+                        pure $
+                            if isNull
+                                && objectPlanCapturesExtensions rebuilt
+                                then capturePlannedExtension
+                                    key
+                                    (unsafeRawJsonFromValidatedBytes
+                                        "null")
+                                    rebuilt
+                                else rebuilt
                 Nothing
                     | objectPlanCapturesExtensions current ->
                         (\raw ->

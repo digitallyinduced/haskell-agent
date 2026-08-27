@@ -242,6 +242,18 @@ main = hspec do
                     planned.plannedExtensions
                 `shouldBe` Just "{\"x\":1}"
 
+        it "tracks known field presence and retains explicit null" do
+            decoded <- expectRight $
+                Decoder.decode plannedDecoder
+                    "{\"name\":\"Ada\",\"active\":null}"
+            extensionFieldWasPresent
+                "active"
+                decoded.extensions
+                `shouldBe` True
+            rawJsonBytes
+                <$> lookupExtension "active" decoded.extensions
+                `shouldBe` Just "null"
+
         it "selects tagged object codecs without a generic object" do
             Decoder.decode taggedDecoder
                 "{\"value\":\"first\",\"type\":\"text\"}"

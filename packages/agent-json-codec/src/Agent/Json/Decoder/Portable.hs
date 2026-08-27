@@ -248,8 +248,30 @@ parsePlannedObject initialPlan initial = do
         (updatedPlan, afterValue) <-
             case matchPlannedField key plan of
                 Just (PlannedFieldMatch decoder rebuild) -> do
+                    let valueStart = (skipWhitespace nested).position
+                        isExplicitNull =
+                            literalAt "null" (skipWhitespace nested)
                     (value, decodedCursor) <- runDecoder decoder nested
-                    pure (rebuild value, leave decodedCursor)
+                    let rebuilt =
+                            markPlannedFieldPresent key (rebuild value)
+                        withNull
+                            | isExplicitNull
+                                && objectPlanCapturesExtensions rebuilt =
+                                capturePlannedExtension
+                                    key
+                                    (unsafeRawJsonFromValidatedBytes
+                                        (BS.copy
+                                            (BS.take
+                                                ( decodedCursor.position
+                                                    - valueStart
+                                                )
+                                                (BS.drop
+                                                    valueStart
+                                                    decodedCursor.input))))
+                                    rebuilt
+                            | otherwise = rebuilt
+                    pure
+                        (withNull, leave decodedCursor)
                 Nothing
                     | objectPlanCapturesExtensions plan -> do
                         (value, decodedCursor) <-
