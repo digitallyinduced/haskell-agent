@@ -62,6 +62,7 @@ module Agent.CLI.TUI.App
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
+    , fullscreenApp
     , wrapFullscreenKeyboardVty
     , withTrackedVtyBuilder
     , setFullscreenImagePreviews
