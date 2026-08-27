@@ -10,6 +10,7 @@ module Agent.Store.Postgres.Session
     , StoredTurn(..)
     , LegacySession(..)
     , ConversationSearchResult(..)
+    , SessionReadImplementation(..)
     , sessionSchemaStatements
     , sessionSearchIndexStatements
     , createSession
@@ -17,9 +18,11 @@ module Agent.Store.Postgres.Session
     , appendSessionTurn
     , appendSessionTurnIndexed
     , loadSession
+    , loadSessionWithImplementation
     , loadSessions
     , loadSessionMetadata
     , loadActiveSession
+    , loadActiveSessionWithImplementation
     , SessionTurnPage(..)
     , SessionResumeStats(..)
     , loadRecentSessionTurns

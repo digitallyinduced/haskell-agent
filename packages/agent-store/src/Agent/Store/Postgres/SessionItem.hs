@@ -9,11 +9,15 @@ module Agent.Store.Postgres.SessionItem
     ( sessionItemSchemaStatements
     , insertResponseItems
     , loadResponseItems
+    , loadResponseItemsPerItem
     ) where
 
 import qualified Data.ByteString as ByteString
 
-import Agent.Store.Postgres.SessionItem.Read (loadResponseItems)
+import Agent.Store.Postgres.SessionItem.Read
+    ( loadResponseItems
+    , loadResponseItemsPerItem
+    )
 import Agent.Store.Postgres.SessionItem.Write (insertResponseItems)
 
 sessionItemSchemaStatements :: [ByteString.ByteString]
