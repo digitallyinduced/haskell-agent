@@ -162,5 +162,25 @@ spec = describe "PoolCache" do
         closePoolCache cache
         sort <$> readIORef closes `shouldReturn` ["one", "two"]
 
+    it "reports close exceptions in input order despite completion order" do
+        cache <- newPoolCache
+            2
+            ("closed" :: Text)
+            exceptionText
+            (pure . Right)
+            (\resource -> do
+                -- Resource 2 fails first, but resource 1 is first in the
+                -- ordered close workload and therefore determines the
+                -- surfaced exception.
+                if resource == (1 :: Int)
+                    then threadDelay 20_000
+                    else pure ()
+                fail ("close-" <> show resource))
+        acquirePoolCache cache 1 `shouldReturn` Right 1
+        acquirePoolCache cache 2 `shouldReturn` Right 2
+        closePoolCache cache
+            `shouldThrow` \exception ->
+                "close-1" `Text.isInfixOf` exceptionText exception
+
 exceptionText :: Exception.SomeException -> Text
 exceptionText = Text.pack . Exception.displayException

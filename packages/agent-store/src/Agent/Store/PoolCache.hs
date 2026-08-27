@@ -13,6 +13,7 @@ import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import qualified Control.Exception as Exception
+import Control.Exception (evaluate)
 import Control.Monad (forM_, replicateM_, void)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -243,22 +244,20 @@ mapConcurrentlyBounded _ _ [] = pure []
 mapConcurrentlyBounded limit action values = do
     let workerCount = min (max 1 limit) (length values)
     queue <- newTQueueIO
-    results <- newTVarIO Map.empty
+    slots <- mapM (const newEmptyTMVarIO) values
     atomically do
-        forM_ (zip [0 :: Int ..] values) $
+        forM_ (zip slots values) $
             writeTQueue queue . Just
         replicateM_ workerCount (writeTQueue queue Nothing)
     let worker =
             atomically (readTQueue queue) >>= \case
                 Nothing -> pure ()
-                Just (index, value) -> do
+                Just (slot, value) -> do
                     result <- action value
-                    atomically $
-                        modifyTVar' results (Map.insert index result)
+                    -- Preserve the strictness of the old Map.Strict result
+                    -- table: publish only after forcing the result to WHNF.
+                    result' <- evaluate result
+                    atomically (putTMVar slot result')
                     worker
     replicateConcurrently_ workerCount worker
-    completed <- readTVarIO results
-    pure
-        [ completed Map.! index
-        | index <- [0 .. length values - 1]
-        ]
+    mapM (atomically . readTMVar) slots

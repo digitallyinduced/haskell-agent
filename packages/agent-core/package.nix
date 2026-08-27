@@ -22,8 +22,8 @@ mkDerivation {
     retry safe-exceptions stm text time tls unix websockets yaml
   ];
   benchmarkHaskellDepends = [
-    aeson base bytestring directory filepath safe-exceptions text
-    text-builder unix
+    aeson async base bytestring containers directory filepath
+    safe-exceptions stm text text-builder unix
   ];
   description = "Provider-neutral infrastructure for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

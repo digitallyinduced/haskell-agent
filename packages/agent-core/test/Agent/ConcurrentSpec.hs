@@ -64,6 +64,12 @@ spec = describe "bounded concurrency" do
             `shouldReturn` []
         readIORef invoked `shouldReturn` False
 
+    it "forces each result to WHNF before publishing it" do
+        mapConcurrentlyBounded 1
+            (\() -> pure (error "lazy result" :: Int))
+            [()]
+            `shouldThrow` anyException
+
 bracketActive :: IORef Int -> IORef Int -> IO a -> IO a
 bracketActive active peak action = do
     current <- atomicModifyIORef' active \count ->

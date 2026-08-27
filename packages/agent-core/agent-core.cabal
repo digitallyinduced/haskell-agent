@@ -164,7 +164,10 @@ benchmark concurrent-discovery-bench
     main-is:          ConcurrentDiscovery.hs
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
+                    , async
                     , base >= 4.14 && < 5
+                    , containers
+                    , stm
 
 test-suite agent-core-test
     import:           common-opts

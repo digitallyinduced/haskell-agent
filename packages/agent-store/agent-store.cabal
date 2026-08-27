@@ -108,13 +108,14 @@ library
 benchmark pool-cache-bench
     import:           common-opts
     type:             exitcode-stdio-1.0
-    ghc-options:      -O2 -threaded
+    ghc-options:      -O2 -threaded -rtsopts
     hs-source-dirs:   benchmark
     main-is:          PoolCache.hs
     build-depends:    agent-store
                     , async
                     , base >= 4.14 && < 5
                     , containers
+                    , stm
                     , time
 
 benchmark custom-catalog-inspection-bench

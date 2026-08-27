@@ -17,8 +17,8 @@ mkDerivation {
     time
   ];
   benchmarkHaskellDepends = [
-    async base containers contravariant hasql safe-exceptions temporary
-    text time vector
+    async base containers contravariant hasql safe-exceptions stm
+    temporary text time vector
   ];
   description = "PostgreSQL persistence for the agent harness";
   license = lib.meta.getLicenseFromSpdxId "MIT";

@@ -2,8 +2,19 @@ module Main (main) where
 
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (replicateConcurrently_)
 import Control.Exception (evaluate)
-import Control.Monad (forM, forM_)
+import Control.Monad (forM, forM_, replicateM_)
+import Control.Concurrent.STM
+    ( atomically
+    , modifyTVar'
+    , newTQueueIO
+    , newTVarIO
+    , readTQueue
+    , readTVarIO
+    , writeTQueue
+    )
+import qualified Data.Map.Strict as Map
 import Data.List (sort)
 import GHC.Clock (getMonotonicTimeNSec)
 import GHC.Stats
@@ -42,13 +53,18 @@ data Scenario = Scenario
 main :: IO ()
 main = do
     statsEnabled <- getRTSStatsEnabled
+    if statsEnabled
+        then pure ()
+        else die "concurrent-discovery-bench requires +RTS -T"
     scenarios <- getArgs >>= parseScenarios
     putStrLn "mode,tasks,limit,delay_us,samples,elapsed_ms,cpu_ms,allocated_bytes"
     forM_ scenarios \scenario -> do
         serial <- measureMany scenario.sampleCount statsEnabled (runSerial scenario)
-        bounded <- measureMany scenario.sampleCount statsEnabled (runBounded scenario)
+        oldMap <- measureMany scenario.sampleCount statsEnabled (runLegacy scenario)
+        bounded <- measureMany scenario.sampleCount statsEnabled (runSlots scenario)
         printResult "serial" scenario serial
-        printResult "bounded" scenario bounded
+        printResult "old-map" scenario oldMap
+        printResult "new-slots" scenario bounded
 
 parseScenarios :: [String] -> IO [Scenario]
 parseScenarios [] =
@@ -86,13 +102,48 @@ runSerial :: Scenario -> IO Int
 runSerial scenario =
     consumeResults <$> mapM (discover scenario.delayMicros) [1 .. scenario.taskCount]
 
-runBounded :: Scenario -> IO Int
-runBounded scenario =
+runSlots :: Scenario -> IO Int
+runSlots scenario =
     consumeResults
         <$> mapConcurrentlyBounded
             scenario.workerLimit
             (discover scenario.delayMicros)
             [1 .. scenario.taskCount]
+
+-- Keep the former result-table implementation in the benchmark so allocation
+-- and CPU deltas can be measured against the slot-based implementation.
+runLegacy :: Scenario -> IO Int
+runLegacy scenario =
+    consumeResults
+        <$> legacyMapConcurrentlyBounded
+            scenario.workerLimit
+            (discover scenario.delayMicros)
+            [1 .. scenario.taskCount]
+
+legacyMapConcurrentlyBounded :: Int -> (a -> IO b) -> [a] -> IO [b]
+legacyMapConcurrentlyBounded _ _ [] = pure []
+legacyMapConcurrentlyBounded requested action values = do
+    let workerCount = min (max 1 requested) (length values)
+    queue <- newTQueueIO
+    results <- newTVarIO Map.empty
+    atomically do
+        forM_ (zip [0 :: Int ..] values) $
+            writeTQueue queue . Just
+        replicateM_ workerCount (writeTQueue queue Nothing)
+    let worker =
+            atomically (readTQueue queue) >>= \case
+                Nothing -> pure ()
+                Just (index, value) -> do
+                    result <- action value
+                    atomically $
+                        modifyTVar' results (Map.insert index result)
+                    worker
+    replicateConcurrently_ workerCount worker
+    completed <- readTVarIO results
+    pure
+        [ completed Map.! index
+        | index <- [0 .. length values - 1]
+        ]
 
 discover :: Int -> Int -> IO DiscoveryResult
 discover delayMicros index = do
@@ -127,6 +178,7 @@ measureOne statsEnabled action = do
     evaluate result
     afterWall <- getMonotonicTimeNSec
     afterCpu <- getCPUTime
+    performGC
     afterStats <- if statsEnabled then Just <$> getRTSStats else pure Nothing
     pure
         Sample
