@@ -336,7 +336,11 @@ execTool host nestedTools description =
         "lark"
         codeModeExecGrammar
         AlwaysReadOnly
-        ParallelSafe
+        -- The JavaScript source is opaque to the outer scheduler and may
+        -- invoke any projected tool, including mutating tools. Treat the
+        -- wrapper as an exclusive call; concurrency requested inside the
+        -- cell remains explicit in the JavaScript (for example Promise.all).
+        TurnSequential
         (typedStreamingTool "exec" (\_emit -> runExec host nestedTools))
 
 runExec

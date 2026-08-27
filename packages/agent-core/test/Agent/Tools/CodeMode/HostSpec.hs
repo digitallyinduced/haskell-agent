@@ -556,6 +556,8 @@ spec = describe "code-mode Node host" do
             pure
             created
         toolSet.codeModeNestedToolNames `shouldBe` ["double"]
+        map (.appToolExecution) toolSet.codeModeTools
+            `shouldBe` [TurnSequential, ParallelSafe]
         result <- runRegisteredExec toolSet
             "text(await tools.double({\"value\": 21}));"
         result `shouldSatisfy` Text.isInfixOf "42"
