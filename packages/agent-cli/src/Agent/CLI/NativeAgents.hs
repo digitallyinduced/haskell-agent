@@ -6,6 +6,7 @@ module Agent.CLI.NativeAgents
     ) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.Json.Decode qualified as Hermes
 import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
 import Agent.Responses.Types
     ( FunctionCall(..)
@@ -22,7 +23,6 @@ import Agent.TUI.Model
     )
 import qualified Data.Map.Strict as Map
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Maybe (fromMaybe)
@@ -178,9 +178,10 @@ isClaudeNativeItem fields =
 
 argumentText :: Text -> Text -> Maybe Text
 argumentText key raw = do
-    Aeson.Object object <-
-        Aeson.decodeStrict (TextEncoding.encodeUtf8 raw)
-    Aeson.String value <- KeyMap.lookup (Key.fromText key) object
+    value <- either (const Nothing) Just $
+        Hermes.decodeEither
+            (Hermes.object (Hermes.atKey key Hermes.text))
+            (TextEncoding.encodeUtf8 raw)
     let stripped = Text.strip value
     if Text.null stripped then Nothing else Just stripped
 

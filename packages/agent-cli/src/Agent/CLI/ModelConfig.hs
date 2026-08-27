@@ -32,18 +32,12 @@ import Agent.Dialect
     , providerSupportsDialect
     )
 import Agent.FileRetry (retryOnFileBusy)
+import Agent.CLI.Json (defaultKey, decodeLazy, optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, when)
-import Data.Aeson
-    ( FromJSON(..)
-    , (.:)
-    , (.:?)
-    , (.!=)
-    , withObject
-    )
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlpha, isAlphaNum, isSpace)
 import Data.Foldable (traverse_)
@@ -126,34 +120,38 @@ data ModelFile = ModelFile
     }
     deriving (Eq, Show)
 
-instance FromJSON ConfigFile where
-    parseJSON = withObject "model catalog" \object ->
+configFileDecoder :: Hermes.Decoder ConfigFile
+configFileDecoder =
+    Hermes.object $
         ConfigFile
-            <$> object .: "version"
-            <*> object .:? "connections" .!= Map.empty
-            <*> object .:? "models" .!= []
+            <$> Hermes.atKey "version" Hermes.int
+            <*> defaultKey Map.empty "connections"
+                (Hermes.objectAsMap pure connectionFileDecoder)
+            <*> defaultKey [] "models" (Hermes.list modelFileDecoder)
 
-instance FromJSON ConnectionFile where
-    parseJSON = withObject "model connection" \object ->
+connectionFileDecoder :: Hermes.Decoder ConnectionFile
+connectionFileDecoder =
+    Hermes.object $
         ConnectionFile
-            <$> object .: "api"
-            <*> object .:? "provider"
-            <*> object .:? "base_url"
-            <*> object .:? "api_key_env"
-            <*> object .:? "api_key_optional" .!= False
-            <*> object .:? "request_timeout_seconds" .!= 600
+            <$> Hermes.atKey "api" Hermes.text
+            <*> optionalKey "provider" Hermes.text
+            <*> optionalKey "base_url" Hermes.text
+            <*> optionalKey "api_key_env" Hermes.text
+            <*> defaultKey False "api_key_optional" Hermes.bool
+            <*> defaultKey 600 "request_timeout_seconds" Hermes.int
 
-instance FromJSON ModelFile where
-    parseJSON = withObject "catalog model" \object ->
+modelFileDecoder :: Hermes.Decoder ModelFile
+modelFileDecoder =
+    Hermes.object $
         ModelFile
-            <$> object .: "id"
-            <*> object .: "connection"
-            <*> object .:? "model"
-            <*> object .: "dialect"
-            <*> object .:? "context_window"
-            <*> object .:? "label"
-            <*> object .:? "default" .!= False
-            <*> object .:? "fallback_priority"
+            <$> Hermes.atKey "id" Hermes.text
+            <*> Hermes.atKey "connection" Hermes.text
+            <*> optionalKey "model" Hermes.text
+            <*> Hermes.atKey "dialect" Hermes.text
+            <*> optionalKey "context_window" Hermes.int
+            <*> optionalKey "label" Hermes.text
+            <*> defaultKey False "default" Hermes.bool
+            <*> optionalKey "fallback_priority" Hermes.int
 
 modelCatalogUserPath :: OsPath -> OsPath
 modelCatalogUserPath home =
@@ -321,9 +319,9 @@ readConfigFile source path =
 
 decodeConfigFile :: Text -> LBS.ByteString -> Either Text ConfigFile
 decodeConfigFile source bytes =
-    case Aeson.eitherDecode' bytes of
+    case decodeLazy configFileDecoder bytes of
         Left err ->
-            Left ("invalid model config " <> source <> ": " <> Text.pack err)
+            Left ("invalid model config " <> source <> ": " <> err)
         Right config
             | config.configVersion /= 1 ->
                 Left

@@ -155,13 +155,13 @@ spec =
                         Right
                             (MetadataSnapshot
                                 1
-                                [updatedAccount, sibling])
+                                (map Aeson.toJSON [updatedAccount, sibling]))
                 readSecretsSnapshot home
                     `shouldReturn`
                         Right
                             (SecretsSnapshot
                                 1
-                                [updatedSecret, siblingSecret])
+                                (map Aeson.toJSON [updatedSecret, siblingSecret]))
 
         it "rejects mismatched metadata and secret ids" $
             withTempHome \_ ->
@@ -202,7 +202,7 @@ siblingSecret = ManagedSecret
 
 data MetadataSnapshot = MetadataSnapshot
     !Int
-    ![ManagedCredential]
+    ![Aeson.Value]
     deriving (Eq, Show)
 
 instance Aeson.FromJSON MetadataSnapshot where
@@ -213,7 +213,7 @@ instance Aeson.FromJSON MetadataSnapshot where
 
 data SecretsSnapshot = SecretsSnapshot
     !Int
-    ![ManagedSecret]
+    ![Aeson.Value]
     deriving (Eq, Show)
 
 instance Aeson.FromJSON SecretsSnapshot where

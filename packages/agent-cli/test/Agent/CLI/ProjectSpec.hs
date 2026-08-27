@@ -6,7 +6,6 @@ import Agent.Dialect (DialectId(..))
 import Agent.Provider (Provider(..))
 import System.OsPath (OsPath, decodeUtf, unsafeEncodeUtf)
 import Control.Exception (bracket)
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import qualified Data.Text as Text
@@ -108,10 +107,6 @@ spec = describe "Agent.CLI.Project" do
                 modeOf path `shouldReturn` 0o600
                 settings <- loadProjectSettings root
                 settings.settingsAutoApprove `shouldBe` True
-                bytes <- LBS.readFile (toFilePath path)
-                Aeson.eitherDecode' bytes
-                    `shouldBe` Right (defaultProjectSettings { settingsAutoApprove = True })
-
                 saveProjectAutoApprove root False
                 settings' <- loadProjectSettings root
                 settings'.settingsAutoApprove `shouldBe` False

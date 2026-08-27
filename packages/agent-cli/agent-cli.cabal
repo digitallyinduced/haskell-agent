@@ -48,6 +48,7 @@ library
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
                     , Agent.CLI.Command.Types
+                    , Agent.CLI.Json
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
@@ -189,6 +190,7 @@ library
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
