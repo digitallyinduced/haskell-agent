@@ -104,7 +104,7 @@ spec = do
                             }
                     }
                 body = renderLoginFrame False (initialLoginState [account])
-            body `shouldSatisfy` Text.isInfixOf "credits $5.32"
+            body `shouldSatisfy` Text.isInfixOf "credits remaining $5.32"
             body `shouldSatisfy` Text.isInfixOf "used $3369.68"
 
 openai :: LoginAccount

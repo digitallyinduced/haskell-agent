@@ -10,7 +10,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.List (sortOn)
+import Data.List (sort)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import GHC.Clock (getMonotonicTimeNSec)
@@ -50,12 +50,13 @@ main = do
             _ <- evaluate (sum (map BS.length payloads))
             samples <- forM [1 .. sampleCount] \_ ->
                 measure (runWorkload workload payloads)
-            let middle = sortOn (.wallMillis) samples
-                    !! (length samples `div` 2)
+            let medianWall = median (map (.wallMillis) samples)
+                medianCPU = median (map (.cpuMillis) samples)
+                medianAllocation = median (map (.allocatedBytes) samples)
             printf
                 "%s,%d,%d,%d,%.3f,%.3f,%d\n"
                 workloadArg eventCount deltaBytes sampleCount
-                middle.wallMillis middle.cpuMillis middle.allocatedBytes
+                medianWall medianCPU medianAllocation
         _ -> die $
             "usage: responses-json-bench WORKLOAD EVENTS DELTA_BYTES SAMPLES\n"
                 <> "workloads: utf8-round-trip, direct-bytes, "
@@ -73,6 +74,9 @@ positive :: String -> String -> IO Int
 positive label raw = case reads raw of
     [(value, "")] | value > 0 -> pure value
     _ -> die ("invalid " <> label <> ": " <> raw)
+
+median :: Ord a => [a] -> a
+median values = sort values !! (length values `div` 2)
 
 runWorkload :: Workload -> [BS.ByteString] -> IO Int
 runWorkload workload = go checksumSeed
