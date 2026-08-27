@@ -51,8 +51,10 @@ library
                     , Agent.GrokBuild.Dialect.Tools
                     , Agent.GrokBuild.Dialect.WebFetch
                     , Agent.GrokBuild.Dialect.Workflow
+    other-modules:    Agent.GrokBuild.Dialect.Json
     hs-source-dirs:   src
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
                     , aeson >= 2.0
                     , async
                     , base >= 4.14 && < 5

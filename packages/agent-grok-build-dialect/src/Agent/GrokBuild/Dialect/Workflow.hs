@@ -29,6 +29,13 @@ import Agent.Subagents
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
+import qualified Agent.Json.Decode as Json
+import Agent.GrokBuild.Dialect.Json
+    ( optionalBool
+    , optionalInt
+    , optionalText
+    , optionalTextValue
+    )
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Control.Concurrent.MVar
@@ -37,16 +44,8 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Data.Aeson
-    ( FromJSON(..)
-    , Value(..)
-    , object
-    , withObject
-    , (.:?)
-    , (.=)
-    )
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import Control.Monad (join)
+import Data.Aeson (Value, object, (.=))
 import qualified Data.Aeson.Text as Aeson
 import Data.List (sortOn)
 import Data.Map.Strict (Map)
@@ -115,20 +114,21 @@ data WorkflowArgs = WorkflowArgs
     , name :: !(Maybe Text)
     , script :: !(Maybe Text)
     , scriptPath :: !(Maybe Text)
-    , workflowInputArgs :: !(Maybe Value)
+    , workflowInputArgs :: !(Maybe WorkflowInput)
     , resumeFromRunId :: !(Maybe Text)
     , validateOnly :: !Bool
     }
 
-instance FromJSON WorkflowArgs where
-    parseJSON = withObject "workflow" \object_ -> do
-        agentBudget <- object_ .:? "agent_budget"
-        name <- object_ .:? "name"
-        script <- object_ .:? "script"
-        scriptPath <- object_ .:? "script_path"
-        workflowInputArgs <- object_ .:? "args"
-        resumeFromRunId <- object_ .:? "resume_from_run_id"
-        validateOnly <- maybe False id <$> object_ .:? "validate_only"
+workflowArgsDecoder :: Json.Decoder WorkflowArgs
+workflowArgsDecoder = Json.object do
+        agentBudget <- optionalInt "agent_budget"
+        name <- optionalText "name"
+        script <- optionalText "script"
+        scriptPath <- optionalText "script_path"
+        workflowInputArgs <-
+            join <$> Json.atKeyOptional "args" (Json.nullable workflowInputDecoder)
+        resumeFromRunId <- optionalText "resume_from_run_id"
+        validateOnly <- maybe False id <$> optionalBool "validate_only"
         pure WorkflowArgs
             { agentBudget
             , name
@@ -161,7 +161,7 @@ workflowTool runtime =
         ]
         False
         TurnSequential
-        (typedTool "workflow" (runWorkflow runtime))
+        (typedTool "workflow" workflowArgsDecoder (runWorkflow runtime))
 
 workflowDescription :: Text
 workflowDescription =
@@ -230,20 +230,16 @@ validateWorkflowInput args
     sourceCount =
         length (catMaybes [args.name, args.script, args.scriptPath])
 
-extractDeepResearchObjective :: Maybe Value -> Either Text Text
+extractDeepResearchObjective :: Maybe WorkflowInput -> Either Text Text
 extractDeepResearchObjective = \case
     Nothing ->
         Left
             "workflow_invalid_args: deep-research requires a non-empty query."
-    Just (String query) ->
-        requireQuery query
-    Just (Object object_) ->
-        case firstText ["query", "objective"] object_ of
-            Nothing ->
-                Left
-                    "workflow_invalid_args: deep-research args must include query or objective."
-            Just query -> requireQuery query
-    Just _ ->
+    Just (WorkflowQuery query) -> requireQuery query
+    Just WorkflowInputMissing ->
+        Left
+            "workflow_invalid_args: deep-research args must include query or objective."
+    Just WorkflowInputInvalid ->
         Left
             "workflow_invalid_args: deep-research args must be a string or an object with query or objective."
   where
@@ -255,14 +251,20 @@ extractDeepResearchObjective = \case
                     "workflow_invalid_args: deep-research requires a non-empty query."
             else Right stripped
 
-firstText :: [Text] -> KeyMap.KeyMap Value -> Maybe Text
-firstText keys object_ =
-    foldr choose Nothing keys
-  where
-    choose key rest =
-        case KeyMap.lookup (Key.fromText key) object_ of
-            Just (String value) -> Just value
-            _ -> rest
+data WorkflowInput
+    = WorkflowQuery Text
+    | WorkflowInputMissing
+    | WorkflowInputInvalid
+
+workflowInputDecoder :: Json.Decoder WorkflowInput
+workflowInputDecoder = Json.withType \case
+    Json.VString -> WorkflowQuery <$> Json.text
+    Json.VObject -> Json.object do
+        query <- optionalTextValue "query"
+        objective <- optionalTextValue "objective"
+        pure $ maybe WorkflowInputMissing WorkflowQuery
+            (case query of Just value -> Just value; Nothing -> objective)
+    _ -> pure WorkflowInputInvalid
 
 launchWorkflow
     :: WorkflowRuntime

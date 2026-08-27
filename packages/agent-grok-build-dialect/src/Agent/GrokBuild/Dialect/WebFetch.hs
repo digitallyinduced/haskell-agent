@@ -5,10 +5,10 @@ module Agent.GrokBuild.Dialect.WebFetch
     ) where
 
 import Agent.GrokBuild.Dialect.Common (jsonTool)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
-import Data.Aeson (FromJSON(..), withObject, (.:))
 import Data.Text (Text)
 
 data WebFetchRequest = WebFetchRequest
@@ -16,9 +16,9 @@ data WebFetchRequest = WebFetchRequest
     }
     deriving (Eq, Show)
 
-instance FromJSON WebFetchRequest where
-    parseJSON = withObject "web_fetch" \object ->
-        WebFetchRequest <$> object .: "url"
+webFetchRequestDecoder :: Json.Decoder WebFetchRequest
+webFetchRequestDecoder = Json.object $
+    WebFetchRequest <$> Json.atKey "url" Json.text
 
 webFetchTool
     :: (WebFetchRequest -> IO (Either Text Text))
@@ -32,7 +32,7 @@ webFetchTool run =
         ]
         True
         ParallelSafe
-        (typedTool "web_fetch" run)
+        (typedTool "web_fetch" webFetchRequestDecoder run)
 
 webFetchDescription :: Text
 webFetchDescription =
