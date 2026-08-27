@@ -248,10 +248,12 @@ main = hspec do
                     "{\"name\":\"Ada\",\"active\":null}"
             extensionFieldWasPresent
                 "active"
-                decoded.extensions
+                decoded.plannedExtensions
                 `shouldBe` True
             rawJsonBytes
-                <$> lookupExtension "active" decoded.extensions
+                <$> lookupExtension
+                    "active"
+                    decoded.plannedExtensions
                 `shouldBe` Just "null"
 
         it "selects tagged object codecs without a generic object" do
