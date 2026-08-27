@@ -1,6 +1,6 @@
 -- | A fail-closed host for short-lived JavaScript code-mode cells.
 --
--- Every cell gets a fresh Node process. The process can only request effects
+-- Every cell gets a fresh Bun process. The process can only request effects
 -- through the typed 'CodeModeToolHandler' callback; malformed or unexpected
 -- protocol messages terminate the cell.
 {-# LANGUAGE TemplateHaskell #-}
@@ -127,7 +127,6 @@ import Language.Haskell.TH.Syntax
     , runIO
     )
 import System.Posix.Process (getProcessID)
-import Text.Read (readMaybe)
 
 type CodeModeToolHandler =
     Text -> Value -> IO (Either Text Value)
@@ -138,12 +137,11 @@ data ImageDetailVisibility
     deriving (Eq, Show)
 
 data CodeModeConfig = CodeModeConfig
-    { nodeExecutable :: !FilePath
+    { bunExecutable :: !FilePath
     , workerScript :: !FilePath
     , startupTimeoutMs :: !Int
     , maxActiveCells :: !Int
     , maxSourceBytes :: !Int
-    , maxOldSpaceMb :: !Int
     , toolHandler :: !CodeModeToolHandler
     , notifyHandler :: !(Text -> IO ())
     , imageDetailVisibility :: !ImageDetailVisibility
@@ -151,12 +149,11 @@ data CodeModeConfig = CodeModeConfig
 
 defaultCodeModeConfig :: FilePath -> CodeModeToolHandler -> CodeModeConfig
 defaultCodeModeConfig script handler = CodeModeConfig
-    { nodeExecutable = "node"
+    { bunExecutable = "bun"
     , workerScript = script
     , startupTimeoutMs = 3000
     , maxActiveCells = 64
     , maxSourceBytes = 1024 * 1024
-    , maxOldSpaceMb = 128
     , toolHandler = handler
     , notifyHandler = \_ -> pure ()
     , imageDetailVisibility = ImageDetailVisible
@@ -199,9 +196,9 @@ embeddedCodeModeWorkerSource =
 -- creates a private file and renames it into place.
 materializeEmbeddedWorker :: IO FilePath
 materializeEmbeddedWorker = do
-    -- Node's permission model implicitly allows reading the entry script by
-    -- its real path. Canonicalize the target directory so a symlinked
-    -- temporary directory (such as macOS @/tmp@) cannot defeat that grant.
+    -- Canonicalize the target directory so Bun receives the stable real path
+    -- even when the platform temporary directory (such as macOS @/tmp@) is a
+    -- symlink.
     tmpDir <- getTemporaryDirectory >>= canonicalizePath
     let bytes = Text.encodeUtf8 embeddedCodeModeWorkerSource
         target =
@@ -306,16 +303,16 @@ newCodeModeHost config =
 -- than an advertised tool that is guaranteed to fail on first use.
 checkCodeModeAvailability :: CodeModeConfig -> IO (Either Text ())
 checkCodeModeAvailability config = do
-    executable <- resolveNodeExecutable config.nodeExecutable
+    executable <- resolveBunExecutable config.bunExecutable
     worker <- resolveWorkerScript config.workerScript
     runtime <- case executable of
         Nothing -> pure Nothing
-        Just path -> Just <$> inspectNode path
+        Just path -> Just <$> inspectBun path
     pure $ case (runtime, worker) of
         (Nothing, _) ->
             Left $
-                "Node/V8 runtime executable was not found: "
-                    <> Text.pack config.nodeExecutable
+                "Bun runtime executable was not found: "
+                    <> Text.pack config.bunExecutable
         (Just (Left err), _) -> Left err
         (_, Nothing) ->
             Left $
@@ -323,39 +320,36 @@ checkCodeModeAvailability config = do
                     <> Text.pack config.workerScript
         (Just (Right ()), Just _) -> Right ()
   where
-    inspectNode executable = do
+    inspectBun executable = do
         checked <- try @_ @SomeException $
-            readProcessWithExitCode executable ["--version"] ""
+            readProcessWithExitCode executable bunFeatureProbe ""
         pure $ case checked of
             Left err ->
                 Left $
-                    "failed to inspect Node/V8 runtime: "
+                    "failed to inspect Bun runtime: "
                         <> Text.pack (displayException err)
             Right (ExitFailure code, _, stderrText) ->
                 Left $
-                    "failed to inspect Node/V8 runtime (exit "
+                    "Bun lacks the vm sandbox features required by code mode (exit "
                         <> Text.pack (show code)
                         <> "): "
                         <> Text.strip (Text.pack stderrText)
-            Right (ExitSuccess, stdoutText, _) ->
-                case nodeMajorVersion (Text.strip (Text.pack stdoutText)) of
-                    Just major
-                        | major >= 22 -> Right ()
-                        | otherwise -> Left $
-                            "code mode requires Node.js 22 or later; found "
-                                <> Text.pack (show major)
-                    Nothing -> Left $
-                        "unable to parse Node.js version: "
-                            <> Text.strip (Text.pack stdoutText)
+            Right (ExitSuccess, _, _) -> Right ()
 
-    nodeMajorVersion :: Text -> Maybe Int
-    nodeMajorVersion raw = do
-        version <- Text.stripPrefix "v" raw
-        let (major, _) = Text.breakOn "." version
-        readMaybe (Text.unpack major)
+bunFeatureProbe :: [String]
+bunFeatureProbe =
+    [ "--smol"
+    , "--no-install"
+    , "--no-env-file"
+    , "--no-addons"
+    , "-e"
+    , "import vm from 'node:vm';"
+        <> "if (typeof vm.createContext !== 'function' || "
+        <> "typeof vm.SourceTextModule !== 'function') process.exit(1);"
+    ]
 
-resolveNodeExecutable :: FilePath -> IO (Maybe FilePath)
-resolveNodeExecutable executable
+resolveBunExecutable :: FilePath -> IO (Maybe FilePath)
+resolveBunExecutable executable
     | any isPathSeparator executable = do
         exists <- doesFileExist executable
         pure (if exists then Just executable else Nothing)
@@ -506,11 +500,11 @@ startCell
     -> [CodeModeToolMetadata]
     -> IO (Either CodeModeError Cell)
 startCell host identifier tools = do
-    resolveNodeExecutable host.hostConfig.nodeExecutable >>= \case
+    resolveBunExecutable host.hostConfig.bunExecutable >>= \case
         Nothing ->
             pure $ Left $ CodeModeStartupError $
-                "Node/V8 runtime executable was not found: "
-                    <> Text.pack host.hostConfig.nodeExecutable
+                "Bun runtime executable was not found: "
+                    <> Text.pack host.hostConfig.bunExecutable
         Just executable -> do
             resolveWorkerScript host.hostConfig.workerScript >>= \case
                 Nothing ->
@@ -520,13 +514,10 @@ startCell host identifier tools = do
                 Just worker -> do
                     started <- try @_ @SomeException $ createProcess $
                         (proc executable
-                            [ "--experimental-permission"
-                            , "--disallow-code-generation-from-strings"
-                            , "--disable-proto=delete"
-                            , "--experimental-vm-modules"
-                            , "--max-old-space-size="
-                                <> show
-                                    (max 16 host.hostConfig.maxOldSpaceMb)
+                            [ "--smol"
+                            , "--no-install"
+                            , "--no-env-file"
+                            , "--no-addons"
                             , worker
                             ])
                             { std_in = CreatePipe
