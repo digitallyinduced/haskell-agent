@@ -99,6 +99,22 @@ expectRight = \case
     Left err -> expectationFailure (show err) >> error "unreachable"
     Right value -> pure value
 
+data Planned = Planned
+    { plannedName :: !Text
+    , plannedCount :: !Int
+    , plannedEnabled :: !(Maybe Bool)
+    , plannedExtensions :: !Extensions
+    }
+
+plannedDecoder :: Decoder.Decoder Planned
+plannedDecoder =
+    Decoder.objectFields $
+        Planned
+            <$> Decoder.requiredField "name" Decoder.text
+            <*> Decoder.defaultField 0 "count" Decoder.int
+            <*> Decoder.optionalField "enabled" Decoder.bool
+            <*> Decoder.extensionFields
+
 main :: IO ()
 main = hspec do
     describe "portable direct decoder" do
@@ -176,6 +192,21 @@ main = hspec do
             Decoder.decode Decoder.scientific "-12.5e2"
                 `shouldBe` Right (-1250)
             Decoder.decode (Decoder.nullValue ()) "null" `shouldBe` Right ()
+
+        it "decodes heterogeneous object fields applicatively in one pass" do
+            planned <- expectRight $
+                Decoder.decode plannedDecoder
+                    ( "{\"name\":\"first\",\"count\":1,\"name\":\"last\","
+                        <> "\"enabled\":null,\"future\":{\"x\":1}}"
+                    )
+            planned.plannedName `shouldBe` "last"
+            planned.plannedCount `shouldBe` 1
+            planned.plannedEnabled `shouldBe` Nothing
+            rawJsonBytes
+                <$> lookupExtension
+                    "future"
+                    planned.plannedExtensions
+                `shouldBe` Just "{\"x\":1}"
 
     describe "direct encoder" do
         it "round-trips domain values without a JSON tree" do

@@ -4,6 +4,7 @@ module Agent.Json.Internal
     ) where
 
 import qualified Data.ByteString as BS
+import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 
@@ -19,3 +20,10 @@ instance Show RawJson where
 -- the previous value (the wire policy is last-key-wins).
 newtype Extensions = Extensions (Map Text RawJson)
     deriving stock (Eq, Show)
+
+instance Semigroup Extensions where
+    Extensions left <> Extensions right =
+        Extensions (Map.union right left)
+
+instance Monoid Extensions where
+    mempty = Extensions Map.empty

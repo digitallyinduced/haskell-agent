@@ -4,6 +4,7 @@ module Main (main) where
 
 import qualified Agent.Json.Decoder as Decoder
 import qualified Agent.Json.Decoder.Hermes as Hermes
+import Agent.Json (Extensions, lookupExtension, rawJsonBytes)
 import Control.Concurrent.Async (concurrently)
 import Data.Either (isLeft)
 import Data.Text (Text)
@@ -15,6 +16,18 @@ data Person = Person
     }
     deriving stock (Eq, Show)
 
+data Envelope = Envelope
+    { envelopeName :: !Text
+    , envelopeExtensions :: !Extensions
+    }
+    deriving stock (Eq, Show)
+
+envelopeDecoder :: Decoder.Decoder Envelope
+envelopeDecoder =
+    Decoder.objectFields $
+        Envelope
+            <$> Decoder.requiredField "name" Decoder.text
+            <*> Decoder.extensionFields
 data PersonState = PersonState
     { stateName :: !(Maybe Text)
     , stateAge :: !(Maybe Int)
@@ -84,3 +97,17 @@ main = hspec do
                 (decode "{\"name\":\"Grace\",\"age\":85}")
             first `shouldBe` Right (Person "Ada" 37)
             second `shouldBe` Right (Person "Grace" 85)
+
+        it "captures complete nested raw extensions in one Hermes pass" do
+            Hermes.withDecoderSession \session -> do
+                result <- Hermes.decodeIO session envelopeDecoder
+                    "{\"name\":\"Ada\",\"future\":{\"nested\":[1,true,null]}}"
+                case result of
+                    Left err -> expectationFailure (show err)
+                    Right envelope ->
+                        rawJsonBytes
+                            <$> lookupExtension
+                                "future"
+                                envelope.envelopeExtensions
+                            `shouldBe`
+                                Just "{\"nested\":[1,true,null]}"

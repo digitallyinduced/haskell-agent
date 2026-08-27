@@ -14,13 +14,15 @@ module Agent.Json.Decoder.Backend
     , finishObjectPlan
     , objectPlanRequiresRawCapture
     , objectPlanCapturesExtensions
+    , unsafeRawJsonFromValidatedBytes
     ) where
 
 import Agent.Json
     ( Extensions
-    , RawJson
     , insertExtension
     )
+import Agent.Json.Internal (RawJson(..))
+import qualified Data.ByteString as BS
 import Data.Scientific (Scientific)
 import Data.Text (Text)
 
@@ -45,6 +47,14 @@ data Decoder a where
         :: (a -> Either Text b)
         -> Decoder a
         -> Decoder b
+
+-- | Backend-only constructor for bytes fully validated by a JSON parser.
+--
+-- Application code must use 'Agent.Json.Decoder.validateRawJson'. A backend
+-- must copy input-backed bytes before calling this function if its parser
+-- reuses the input buffer.
+unsafeRawJsonFromValidatedBytes :: BS.ByteString -> RawJson
+unsafeRawJsonFromValidatedBytes = RawJson
 
 data ObjectPlan a where
     PlanPure :: a -> ObjectPlan a
