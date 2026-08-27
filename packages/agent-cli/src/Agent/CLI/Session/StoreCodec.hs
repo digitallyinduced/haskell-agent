@@ -195,7 +195,6 @@ fromStoredResponseItem = \case
             , name = call.storedFunctionCallName
             , namespace
             , provider
-            , provider
             , arguments = call.storedFunctionCallArguments
             , encryptedFunctionArgs
             , status
@@ -218,6 +217,7 @@ fromStoredResponseItem = \case
             , callId = output.storedFunctionCallOutputCallId
             , name
             , namespace
+            , provider
             , output = value
             , status
             }

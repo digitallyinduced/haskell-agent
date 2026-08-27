@@ -477,6 +477,7 @@ functionCallItem callId name input =
         , callId
         , name
         , namespace = Nothing
+        , provider = Just "claude-code"
         , arguments = rawJsonText input
         , encryptedFunctionArgs = Nothing
         , status = Just ItemCompleted
@@ -493,6 +494,7 @@ functionOutputItem callId content isError =
         , callId
         , name = Nothing
         , namespace = Nothing
+        , provider = Just "claude-code"
         , output =
             maybe
                 (rawJsonFromEncoding Aeson.null_)
