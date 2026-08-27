@@ -46,6 +46,7 @@ import Agent.CLI.Command
     , slashMenuForCatalog
     )
 import Agent.CLI.Input.Display
+import Agent.CLI.Input.Approval
 import Agent.CLI.Input.History
 import Agent.CLI.Input.KeyDecoder
 import Agent.CLI.Input.Paste
@@ -91,9 +92,7 @@ import System.Console.ANSI
     , hShowCursor
     )
 import System.Console.ANSI.Codes
-    ( clearLineCode
-    , cursorUpCode
-    )
+    ( cursorUpCode )
 import System.Console.Haskeline.History
     ( addHistory
     , emptyHistory
@@ -106,7 +105,6 @@ import System.Directory
     )
 import System.IO
     ( BufferMode(..)
-    , Handle
     , hFlush
     , hGetBuffering
     , hGetChar
@@ -114,7 +112,6 @@ import System.IO
     , hSetBuffering
     , hWaitForInput
     , isEOF
-    , stderr
     , stdin
     , stdout
     )
@@ -126,7 +123,6 @@ import System.Posix.Terminal
     , getTerminalAttributes
     , setTerminalAttributes
     , withMinInput
-    , withMode
     , withTime
     , withoutMode
     )
@@ -877,210 +873,6 @@ renderMenuRow width selected start localIndex suggestion =
 visibleWidth :: Text -> Int
 visibleWidth = terminalTextWidth . stripAnsi
 
--- | Read a one-shot approval answer. The question is always written to
--- stderr (matching the historical behavior) so redirected stdout does
--- not swallow the prompt. Does not touch REPL history.
---
--- On a TTY, a single keypress submits immediately (@y@ / @n@ / @a@, or
--- Enter for the default deny) so the user does not need a trailing Enter.
--- Non-TTY keeps cooked 'getLine' for scripts that pipe a full line.
-readApprovalLine :: Text -> IO (Maybe Text)
-readApprovalLine prompt = do
-    Text.hPutStr stderr prompt
-    hFlush stderr
-    isTty <- hIsTerminalDevice stdin
-    if isTty
-        then readApprovalKey
-        else readAnswerOnly
-
--- | Interactive multiple-choice picker on a TTY. Writes the menu to
--- @stderr@. ↑ / ↓ (or j / k) move, Enter selects, digits 1–9 jump, Esc / q
--- cancel. Returns 'Nothing' on cancel, EOF, empty @options@, or non-TTY.
---
--- @formatLine selected label@ styles each row; a muted hint is shown under
--- the list.
-readChoiceSelection
-    :: (Bool -> Text -> Text)
-    -> [Text]
-    -> IO (Maybe Text)
-readChoiceSelection formatLine options = do
-    isTty <- hIsTerminalDevice stdin
-    case options of
-        [] -> pure Nothing
-        _
-            | not isTty -> pure Nothing
-            | otherwise -> withChoiceRawStdin $
-                bracket
-                    (hHideCursor stderr)
-                    (\_ -> hShowCursor stderr)
-                    \() -> do
-                        let len = length options
-                            menuLines = len + 1
-                        drawMenu formatLine options 0
-                        pickLoop formatLine options len menuLines 0
-
-pickLoop
-    :: (Bool -> Text -> Text)
-    -> [Text]
-    -> Int
-    -> Int
-    -> Int
-    -> IO (Maybe Text)
-pickLoop formatLine options len menuLines idx = do
-    mkey <- readChoiceKey
-    case mkey of
-        Nothing -> pure Nothing
-        Just ChoiceCancel -> pure Nothing
-        Just ChoiceEnter -> do
-            redrawMenu formatLine options menuLines idx
-            pure (Just (options !! idx))
-        Just (ChoiceDigit n)
-            | n >= 1 && n <= len -> do
-                let idx' = n - 1
-                redrawMenu formatLine options menuLines idx'
-                pure (Just (options !! idx'))
-            | otherwise ->
-                pickLoop formatLine options len menuLines idx
-        Just key -> do
-            let idx' = choiceMoveIndex len idx key
-            when (idx' /= idx) $
-                redrawMenu formatLine options menuLines idx'
-            pickLoop formatLine options len menuLines idx'
-
-redrawMenu
-    :: (Bool -> Text -> Text)
-    -> [Text]
-    -> Int
-    -> Int
-    -> IO ()
-redrawMenu formatLine options menuLines idx = do
-    Text.hPutStr stderr (Text.pack (cursorUpCode menuLines))
-    drawMenu formatLine options idx
-
-drawMenu
-    :: (Bool -> Text -> Text)
-    -> [Text]
-    -> Int
-    -> IO ()
-drawMenu formatLine options idx = do
-    mapM_
-        (\(i, opt) -> do
-            let selected = i == idx
-                marker = if selected then "> " else "  "
-                line = formatLine selected (marker <> opt)
-            putChoiceLine stderr line)
-        (zip [0 ..] options)
-    putChoiceLine stderr (formatLine False "  ↑/↓ move · Enter select · Esc cancel")
-
-putChoiceLine :: Handle -> Text -> IO ()
-putChoiceLine handle line = do
-    Text.hPutStr handle (Text.pack clearLineCode)
-    Text.hPutStrLn handle line
-    hFlush handle
-
--- | Single-key approval on a TTY: disable canonical input, read one byte,
--- echo it (except bare Enter), then restore the previous terminal state.
-readApprovalKey :: IO (Maybe Text)
-readApprovalKey =
-    withRawStdin do
-        result <- tryIO (hGetChar stdin)
-        case result of
-            Left err
-                | isEOFError err -> pure Nothing
-                | otherwise -> throwIO err
-            Right c -> do
-                let answer = approvalKeyText c
-                Text.hPutStrLn stderr answer
-                pure (Just answer)
-
--- | Read one picker key, absorbing CSI / SS3 arrow sequences.
-readChoiceKey :: IO (Maybe ChoiceKey)
-readChoiceKey = do
-    result <- tryIO (hGetChar stdin)
-    case result of
-        Left err
-            | isEOFError err -> pure Nothing
-            | otherwise -> throwIO err
-        Right '\ESC' -> do
-            ready <- hWaitForInput stdin 50
-            if not ready
-                then pure (Just ChoiceCancel)
-                else do
-                    c2 <- hGetChar stdin
-                    case c2 of
-                        '[' -> do
-                            c3 <- hGetChar stdin
-                            case parseChoiceKey ['\ESC', '[', c3] of
-                                Just key -> pure (Just key)
-                                Nothing -> drainCsiTail c3 >> readChoiceKey
-                        'O' -> do
-                            c3 <- hGetChar stdin
-                            case parseChoiceKey ['\ESC', 'O', c3] of
-                                Just key -> pure (Just key)
-                                Nothing -> readChoiceKey
-                        _ ->
-                            case parseChoiceKey ['\ESC', c2] of
-                                Just key -> pure (Just key)
-                                Nothing -> readChoiceKey
-        Right c ->
-            case parseChoiceKey [c] of
-                Just key -> pure (Just key)
-                Nothing -> readChoiceKey
-
--- | Finish reading a CSI sequence whose final byte may not have arrived yet.
-drainCsiTail :: Char -> IO ()
-drainCsiTail c
-    | c >= '@' && c <= '~' = pure ()
-    | otherwise = go
-  where
-    go = do
-        ready <- hWaitForInput stdin 50
-        when ready do
-            c' <- hGetChar stdin
-            if c' >= '@' && c' <= '~'
-                then pure ()
-                else go
-
--- | Approval raw mode: turn off echo but keep canonical/'ProcessInput' so
--- Ctrl-C stays SIGINT (same contract as the pre-picker approval path).
-withRawStdin :: IO a -> IO a
-withRawStdin action = do
-    oldTerm <- getTerminalAttributes stdInput
-    oldBuf <- hGetBuffering stdin
-    let enter = do
-            let raw =
-                    flip withMinInput 1
-                        . flip withTime 0
-                        . flip withoutMode EnableEcho
-                        $ oldTerm
-            setTerminalAttributes stdInput raw Immediately
-            hSetBuffering stdin NoBuffering
-        restore = do
-            setTerminalAttributes stdInput oldTerm Immediately
-            hSetBuffering stdin oldBuf
-    bracket enter (const restore) \() -> action
-
--- | Choice-picker raw mode: non-canonical so CSI arrows arrive as bytes,
--- no echo, and 'KeyboardInterrupts' so Ctrl-C still raises SIGINT.
-withChoiceRawStdin :: IO a -> IO a
-withChoiceRawStdin action = do
-    oldTerm <- getTerminalAttributes stdInput
-    oldBuf <- hGetBuffering stdin
-    let enter = do
-            let raw =
-                    flip withMinInput 1
-                        . flip withTime 0
-                        . flip withoutMode EnableEcho
-                        . flip withoutMode ProcessInput
-                        . flip withMode KeyboardInterrupts
-                        $ oldTerm
-            setTerminalAttributes stdInput raw Immediately
-            hSetBuffering stdin NoBuffering
-        restore = do
-            setTerminalAttributes stdInput oldTerm Immediately
-            hSetBuffering stdin oldBuf
-    bracket enter (const restore) \() -> action
-
 -- | Ask the terminal to wrap pastes in CSI 200~ … CSI 201~ so we can
 -- distinguish them from typed keystrokes. Restored on exit.
 withBracketedPaste :: IO a -> IO a
@@ -1097,11 +889,8 @@ withBracketedPaste action = do
         Text.hPutStr stdout "\ESC[?2004l"
         hFlush stdout
 
-readAnswerOnly :: IO (Maybe Text)
-readAnswerOnly = fmap (fmap Text.strip) readRawLine
-
 -- | Read one line without changing whitespace. Prompt payloads can contain
--- indentation or trailing blank data; approval answers normalize separately.
+-- indentation or trailing blank data.
 readRawLine :: IO (Maybe Text)
 readRawLine = do
     done <- isEOF

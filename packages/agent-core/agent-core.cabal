@@ -91,7 +91,10 @@ library
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
-    other-modules:    Paths_agent_core
+    other-modules:    Agent.Subagents.Registry.Internal.Core
+                    , Agent.Subagents.Registry.Internal.Operations
+                    , Agent.Subagents.Registry.Internal.Types
+                    , Paths_agent_core
     autogen-modules:  Paths_agent_core
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5

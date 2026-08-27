@@ -43,7 +43,8 @@ library
                     , Claude.Agent.SDK.Query
                     , Claude.Agent.SDK.Transport
                     , Claude.Agent.SDK.Types
-    other-modules:    Claude.Agent.SDK.Internal.MessageParser
+    other-modules:    Claude.Agent.SDK.Internal.Client.Usage
+                    , Claude.Agent.SDK.Internal.MessageParser
                     , Claude.Agent.SDK.Internal.Process
                     , Claude.Agent.SDK.Internal.Query
                     , Claude.Agent.SDK.Internal.Transport.SubprocessCLI

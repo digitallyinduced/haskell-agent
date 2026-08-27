@@ -9,9 +9,7 @@ module Agent.Telegram.Bridge
     ) where
 
 import Agent.CLI.GatewayBridge
-    ( ManagedBridgeRequest(..)
-    , managedBridgeRequestDecoder
-    , ManagedActivity(..)
+    ( ManagedActivity(..)
     , ManagedBridgeResponse(..)
     , managedBridgeActivityPath
     , managedBridgeRequestsDirectory
@@ -19,7 +17,7 @@ import Agent.CLI.GatewayBridge
     , writeManagedBridgeResponseAt
     )
 import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
-import Agent.Json (rawJsonBytes)
+import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Concurrent (mapConcurrentlyBounded)
@@ -66,6 +64,12 @@ data TelegramBridgeEnv = TelegramBridgeEnv
     , telegramBridgeGrantUser :: !(Text -> IO Text)
     , telegramBridgeRevokeUser :: !(Text -> IO Text)
     , telegramBridgeListUsers :: !(IO Text)
+    }
+
+data BridgeRequest = BridgeRequest
+    { bridgeRequestId :: !Text
+    , bridgeRequestKind :: !Text
+    , bridgeRequestPayload :: !RawJson
     }
 
 data PathRequest = PathRequest
@@ -218,7 +222,7 @@ processBridgeRequestBatch seen files decode dispatch = do
 telegramBridgeConcurrency :: Int
 telegramBridgeConcurrency = 4
 
-decodeBridgeRequest :: FilePath -> IO (Either Text ManagedBridgeRequest)
+decodeBridgeRequest :: FilePath -> IO (Either Text BridgeRequest)
 decodeBridgeRequest path =
     try @_ @SomeException
         (retryOnFileBusy (LBS.readFile path)) >>= \case
@@ -235,7 +239,7 @@ decodeBridgeRequest path =
                     Right request ->
                         Right request
 
-processBridgeRequest :: TelegramBridgeEnv -> ManagedBridgeRequest -> IO ()
+processBridgeRequest :: TelegramBridgeEnv -> BridgeRequest -> IO ()
 processBridgeRequest env request =
     try @_ @SomeException (dispatch request) >>= \case
         Left err ->
@@ -326,7 +330,7 @@ processBridgeRequest env request =
 
 withPayload
     :: Hermes.Decoder a
-    -> ManagedBridgeRequest
+    -> BridgeRequest
     -> (a -> IO (Either Text (Maybe Value)))
     -> IO (Either Text (Maybe Value))
 withPayload decoder request use =
@@ -347,9 +351,18 @@ defaultField key fallback decoder =
 integerDecoder :: Hermes.Decoder Integer
 integerDecoder = fromIntegral <$> Hermes.int
 
+managedBridgeRequestDecoder :: Hermes.Decoder BridgeRequest
+managedBridgeRequestDecoder = Hermes.object do
+    version <- defaultField "version" 1 Hermes.int
+    when (version /= 1) (fail "unsupported managed bridge request version")
+    BridgeRequest
+        <$> Hermes.atKey "id" Hermes.text
+        <*> Hermes.atKey "kind" Hermes.text
+        <*> Hermes.atKey "payload" rawJsonDecoder
+
 registerChoice
     :: TelegramBridgeEnv
-    -> ManagedBridgeRequest
+    -> BridgeRequest
     -> Text
     -> [(Text, Text)]
     -> IO (Either Text (Maybe Value))
@@ -604,7 +617,7 @@ escapeDraftText =
         '\'' -> "&#39;"
         character -> Text.singleton character
 
-respondOk :: TelegramBridgeEnv -> ManagedBridgeRequest -> Value -> IO ()
+respondOk :: TelegramBridgeEnv -> BridgeRequest -> Value -> IO ()
 respondOk env request result =
     writeManagedBridgeResponse env.telegramBridgeRequest ManagedBridgeResponse
         { bridgeResponseVersion = 1
@@ -614,7 +627,7 @@ respondOk env request result =
         , bridgeResponseError = Nothing
         }
 
-respondError :: TelegramBridgeEnv -> ManagedBridgeRequest -> Text -> IO ()
+respondError :: TelegramBridgeEnv -> BridgeRequest -> Text -> IO ()
 respondError env request err =
     writeManagedBridgeResponse env.telegramBridgeRequest ManagedBridgeResponse
         { bridgeResponseVersion = 1

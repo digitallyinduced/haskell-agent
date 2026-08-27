@@ -44,14 +44,23 @@ library
     hs-source-dirs:   src
     autogen-modules:  Paths_agent_cli
     other-modules:    Agent.CLI.AccountPicker
+                    , Agent.CLI.AgentSessions.Render
+                    , Agent.CLI.AgentViewport.Status
                     , Agent.CLI.Auth.Grok
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
                     , Agent.CLI.Command.Types
                     , Agent.CLI.Json
+                    , Agent.CLI.Command.Catalog
+                    , Agent.CLI.Command.Instructions
+                    , Agent.CLI.Compaction.Continuation
+                    , Agent.CLI.Compaction.Projection
+                    , Agent.CLI.Compaction.Types
                     , Agent.CLI.Clipboard.Linux
                     , Agent.CLI.Clipboard.MacOS
                     , Agent.CLI.McpStatus
+                    , Agent.CLI.Input.Approval
+                    , Agent.CLI.Login.Types
                     , Agent.CLI.PromptHooks
                     , Agent.CLI.Provider.OpenAI
                     , Agent.CLI.Provider.Switch
@@ -61,8 +70,13 @@ library
                     , Agent.CLI.Runtime.Orchestration
                     , Agent.CLI.Runtime.Orchestration.Background
                     , Agent.CLI.Runtime.Orchestration.Concurrent
+                    , Agent.CLI.Runtime.Orchestration.Flow
+                    , Agent.CLI.Runtime.Orchestration.Initialized
+                    , Agent.CLI.Runtime.Orchestration.Providers
                     , Agent.CLI.Runtime.Orchestration.Restart
+                    , Agent.CLI.Runtime.Orchestration.Session
                     , Agent.CLI.Runtime.Orchestration.Startup
+                    , Agent.CLI.Runtime.Orchestration.Tools
                     , Agent.CLI.Runtime.Orchestration.Types
                     , Agent.CLI.Runtime.HistorySource
                     , Agent.CLI.Runtime.Persistence
@@ -74,12 +88,18 @@ library
                     , Agent.CLI.Runtime.Repl.Session
                     , Agent.CLI.Runtime.Repl.Workflow
                     , Agent.CLI.Runtime.Types
+                    , Agent.CLI.Render.MarkdownStream
+                    , Agent.CLI.Render.Status
                     , Agent.CLI.Session.Attachments
                     , Agent.CLI.Session.Choices
                     , Agent.CLI.Session.Interaction
                     , Agent.CLI.Session.Lifecycle
                     , Agent.CLI.Session.Retry
                     , Agent.CLI.Session.Runner
+                    , Agent.CLI.Session.Codec
+                    , Agent.CLI.Session.Types
+                    , Agent.CLI.Session.Runner.Execution
+                    , Agent.CLI.Session.Runner.Types
                     , Agent.CLI.Session.Selection
                     , Agent.CLI.Session.Runtime.Types
                     , Agent.CLI.SessionAdmin
@@ -88,9 +108,29 @@ library
                     , Agent.CLI.Startup.Format
                     , Agent.CLI.TUI.Composer.Buffer
                     , Agent.CLI.TUI.Composer.Edit
+                    , Agent.CLI.Subagents.Runtime.Identity
+                    , Agent.CLI.Subagents.Runtime.OpenAI
+                    , Agent.CLI.Subagents.Runtime.Storage
+                    , Agent.CLI.Subagents.Runtime.Target
+                    , Agent.CLI.Subagents.Runtime.Types
+                    , Agent.CLI.TUI.App.Event
+                    , Agent.CLI.TUI.App.History
+                    , Agent.CLI.TUI.App.Mailbox
+                    , Agent.CLI.TUI.App.Navigation
+                    , Agent.CLI.TUI.App.Overlay
+                    , Agent.CLI.TUI.App.Reduce
+                    , Agent.CLI.TUI.App.Run
+                    , Agent.CLI.TUI.App.Runtime
+                    , Agent.CLI.TUI.Composer.Logic
+                    , Agent.CLI.TUI.Composer.Render
                     , Agent.CLI.TUI.LambdaArt
                     , Agent.CLI.TUI.Motion
                     , Agent.CLI.TUI.Render
+                    , Agent.CLI.TUI.Render.Blocks
+                    , Agent.CLI.TUI.Render.Internal
+                    , Agent.CLI.TUI.Render.Overlays
+                    , Agent.CLI.TUI.Render.Transcript
+                    , Agent.CLI.TUI.Render.Workspace
                     , Paths_agent_cli
     exposed-modules:  Agent.CLI
                     , Agent.CLI.AccountSelection
@@ -277,6 +317,7 @@ benchmark subagent-retention-bench
     main-is:          SubagentRetention.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
+                    , agent-json
                     , agent-core
                     , agent-store
                     , agent-responses
@@ -292,8 +333,8 @@ benchmark conversation-retention-bench
     hs-source-dirs:   benchmark
     main-is:          ConversationRetention.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
-    build-depends:    agent-responses-types
-                    , agent-json
+    build-depends:    agent-json
+                    , agent-responses-types
                     , aeson
                     , base >= 4.17 && < 5
                     , bytestring
@@ -411,7 +452,6 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
-                    , agent-json
                     , agent-codex-dialect
                     , agent-grok-build-dialect
                     , agent-store
