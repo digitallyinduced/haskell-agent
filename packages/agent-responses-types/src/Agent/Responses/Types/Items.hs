@@ -424,6 +424,10 @@ instance ToJSON ComputerCallOutput where
                 , Just (field "output" (object
                     [ "type" .= ("computer_screenshot" :: Text)
                     , "image_url" .= screenshotDataUrl
+                    -- The Responses API requires the screenshot detail
+                    -- discriminator.  Computer-use screenshots are always
+                    -- sent at their native resolution.
+                    , "detail" .= ("original" :: Text)
                     ]))
                 , optionalField "acknowledged_safety_checks"
                     (nonEmpty acknowledgedChecks)
