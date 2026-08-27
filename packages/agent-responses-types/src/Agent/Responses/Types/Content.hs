@@ -21,7 +21,8 @@ import Agent.Json
     )
 import qualified Agent.Json.Decoder as Decoder
 import qualified Agent.Json.Encoder as Encoder
-import Agent.Responses.Types.Common (TaggedObject(..))
+import Agent.Responses.Types.Common
+    ( TaggedObject(..), taggedObjectDecoder )
 import Data.Text (Text)
 
 data ResponseRole = RoleUser | RoleAssistant | RoleSystem | RoleDeveloper | RoleUnknown !Text
@@ -156,110 +157,82 @@ data ResponseContentPart
     | UnknownContentPart !TaggedObject
     deriving stock (Eq, Show)
 
-data ParsedPart = ParsedPart
-    { parsedType :: !Text
-    , parsedText :: !(Maybe Text)
-    , parsedPromptCacheBreakpoint :: !(Maybe RawJson)
-    , parsedDetail :: !(Maybe Text)
-    , parsedFileData :: !(Maybe Text)
-    , parsedFileId :: !(Maybe Text)
-    , parsedFileUrl :: !(Maybe Text)
-    , parsedImageUrl :: !(Maybe Text)
-    , parsedFilename :: !(Maybe Text)
-    , parsedInputAudio :: !(Maybe RawJson)
-    , parsedAnnotations :: !(Maybe [RawJson])
-    , parsedLogprobs :: !(Maybe [RawJson])
-    , parsedRefusal :: !(Maybe Text)
-    , parsedEncryptedContent :: !(Maybe Text)
-    , parsedExtensions :: !Extensions
-    }
-
 partDecoder :: Decoder.Decoder ResponseContentPart
 partDecoder =
-    Decoder.mapEither finish $
-        Decoder.objectFields $
-            ParsedPart
-                <$> Decoder.requiredField "type" Decoder.text
-                <*> Decoder.optionalField "text" Decoder.text
+    Decoder.discriminatedObject "type" \case
+        "input_text" -> directPart $
+            InputTextPart
+                <$> Decoder.requiredField "text" Decoder.text
                 <*> Decoder.optionalField
                     "prompt_cache_breakpoint"
                     Decoder.rawJson
-                <*> Decoder.optionalField "detail" Decoder.text
+                <*> Decoder.extensionFields
+        "input_image" -> directPart $
+            InputImagePart
+                <$> Decoder.optionalField "detail" Decoder.text
+                <*> Decoder.optionalField "file_id" Decoder.text
+                <*> Decoder.optionalField "image_url" Decoder.text
+                <*> Decoder.optionalField
+                    "prompt_cache_breakpoint"
+                    Decoder.rawJson
+                <*> Decoder.extensionFields
+        "input_file" -> directPart $
+            InputFilePart
+                <$> Decoder.optionalField "detail" Decoder.text
                 <*> Decoder.optionalField "file_data" Decoder.text
                 <*> Decoder.optionalField "file_id" Decoder.text
                 <*> Decoder.optionalField "file_url" Decoder.text
-                <*> Decoder.optionalField "image_url" Decoder.text
                 <*> Decoder.optionalField "filename" Decoder.text
-                <*> Decoder.optionalField "input_audio" Decoder.rawJson
+                <*> Decoder.optionalField
+                    "prompt_cache_breakpoint"
+                    Decoder.rawJson
+                <*> Decoder.extensionFields
+        "input_audio" -> directPart $
+            InputAudioPart
+                <$> Decoder.requiredField
+                    "input_audio"
+                    Decoder.rawJson
+                <*> Decoder.extensionFields
+        "output_text" -> directPart $
+            OutputTextPart
+                <$> Decoder.requiredField "text" Decoder.text
                 <*> Decoder.optionalField
                     "annotations"
                     (Decoder.array Decoder.rawJson)
                 <*> Decoder.optionalField
                     "logprobs"
                     (Decoder.array Decoder.rawJson)
-                <*> Decoder.optionalField "refusal" Decoder.text
-                <*> Decoder.optionalField "encrypted_content" Decoder.text
                 <*> Decoder.extensionFields
+        "refusal" -> directPart $
+            RefusalPart
+                <$> Decoder.requiredField "refusal" Decoder.text
+                <*> Decoder.extensionFields
+        "reasoning_text" -> directPart $
+            ReasoningTextPart
+                <$> Decoder.requiredField "text" Decoder.text
+                <*> Decoder.extensionFields
+        "summary_text" -> directPart $
+            SummaryTextPart
+                <$> Decoder.requiredField "text" Decoder.text
+                <*> Decoder.extensionFields
+        "encrypted_content" -> directPart $
+            EncryptedContentPart
+                <$> Decoder.requiredField
+                    "encrypted_content"
+                    Decoder.text
+                <*> Decoder.extensionFields
+        "text" -> directPart $
+            PlainTextPart
+                <$> Decoder.requiredField "text" Decoder.text
+                <*> Decoder.extensionFields
+        _ -> UnknownContentPart <$> taggedObjectDecoder
   where
-    finish ParsedPart{..} =
-        case parsedType of
-            "input_text" ->
-                InputTextPart
-                    <$> require "text" parsedText
-                    <*> Right parsedPromptCacheBreakpoint
-                    <*> Right parsedExtensions
-            "input_image" ->
-                Right (InputImagePart
-                    parsedDetail
-                    parsedFileId
-                    parsedImageUrl
-                    parsedPromptCacheBreakpoint
-                    parsedExtensions)
-            "input_file" ->
-                Right (InputFilePart
-                    parsedDetail
-                    parsedFileData
-                    parsedFileId
-                    parsedFileUrl
-                    parsedFilename
-                    parsedPromptCacheBreakpoint
-                    parsedExtensions)
-            "input_audio" ->
-                InputAudioPart
-                    <$> require "input_audio" parsedInputAudio
-                    <*> Right parsedExtensions
-            "output_text" ->
-                OutputTextPart
-                    <$> require "text" parsedText
-                    <*> Right parsedAnnotations
-                    <*> Right parsedLogprobs
-                    <*> Right parsedExtensions
-            "refusal" ->
-                RefusalPart
-                    <$> require "refusal" parsedRefusal
-                    <*> Right parsedExtensions
-            "reasoning_text" ->
-                ReasoningTextPart
-                    <$> require "text" parsedText
-                    <*> Right parsedExtensions
-            "summary_text" ->
-                SummaryTextPart
-                    <$> require "text" parsedText
-                    <*> Right parsedExtensions
-            "encrypted_content" ->
-                EncryptedContentPart
-                    <$> require "encrypted_content" parsedEncryptedContent
-                    <*> Right parsedExtensions
-            "text" ->
-                PlainTextPart
-                    <$> require "text" parsedText
-                    <*> Right parsedExtensions
-            tag ->
-                Right (UnknownContentPart
-                    (TaggedObject tag parsedExtensions))
-
-    require name =
-        maybe (Left ("missing required field " <> name)) Right
+    directPart plan =
+        Decoder.objectFields $
+            plan <* Decoder.defaultField
+                ()
+                "type"
+                (() <$ Decoder.text)
 
 responseContentPartDecoder :: Decoder.Decoder ResponseContentPart
 responseContentPartDecoder = partDecoder

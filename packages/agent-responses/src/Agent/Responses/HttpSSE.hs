@@ -138,13 +138,13 @@ performResponsesHttpSse
                         fmap (fmap toOutputTextDelta) $
                             Hermes.decodeHermesIO
                                 session
-                                ResponsesHermes.textDeltaEventDecoder
+                                (ResponsesHermes.textDeltaEventDecoder eventType)
                                 sseFrameData
                     | eventType == "response.reasoning_text.delta" ->
                         fmap (fmap toReasoningTextDelta) $
                             Hermes.decodeHermesIO
                                 session
-                                ResponsesHermes.textDeltaEventDecoder
+                                (ResponsesHermes.textDeltaEventDecoder eventType)
                                 sseFrameData
                 _ -> Hermes.decodeIO
                     session
@@ -195,11 +195,13 @@ retainForResponse = \case
     ResponseCustomToolInputDoneEvent {} -> True
     ResponseFunctionCallArgumentsDeltaEvent {} -> True
     ResponseFunctionCallArgumentsDoneEvent {} -> True
+    ResponseOutputTextDeltaEvent {} -> True
+    ResponseOutputTextDoneEvent {} -> True
+    ResponseReasoningTextDeltaEvent {} -> True
+    ResponseReasoningTextDoneEvent {} -> True
+    ResponseReasoningSummaryTextDeltaEvent {} -> True
     ResponseReasoningSummaryPartAddedEvent {} -> True
     ResponseReasoningSummaryTextDoneEvent {} -> True
-    event
-        | responseStreamEventType event
-            == EventReasoningSummaryTextDelta -> True
     ResponseCompletedEvent {} -> True
     ResponseDoneEvent {} -> True
     ResponseIncompleteEvent {} -> True

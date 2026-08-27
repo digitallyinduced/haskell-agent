@@ -20,10 +20,12 @@ import Agent.Error (ApiError(..))
 import Agent.Json
     ( RawJson
     , emptyExtensions
+    , extensionFieldWasPresent
     , lookupExtension
     , rawJsonBytes
     )
 import qualified Agent.Json.Decoder as Decoder
+import qualified Agent.Json.Encoder as JsonEncoder
 import Agent.Responses.ResponseMerge
     ( mergeDoneResponse
     , mergeResponseFragments
@@ -192,7 +194,15 @@ finishStreamResponse
 finishStreamResponse modelHint state terminalEvent =
     case terminalEvent of
         ResponseCompletedEvent{} -> finishState modelHint ResponseCompleted state
-        ResponseDoneEvent{} -> finishState modelHint ResponseCompleted state
+        ResponseDoneEvent { responseValue }
+            | extensionFieldWasPresent
+                "status"
+                responseValue.extraFields ->
+                    finishState modelHint responseValue.status state
+            | responseValue.status /= ResponseInProgress ->
+                finishState modelHint responseValue.status state
+            | otherwise ->
+                finishState modelHint ResponseCompleted state
         ResponseIncompleteEvent{} -> finishState modelHint ResponseIncomplete state
         ResponseFailedEvent{} -> finishState modelHint ResponseFailed state
         _ -> Left $ JsonDecodeError
@@ -283,7 +293,17 @@ assembleDoneResponse
     -> Response
     -> Either ApiError Response
 assembleDoneResponse baseResponse doneItems doneResponse =
-    Right (mergeDoneResponse baseResponse doneItems doneResponse)
+    let merged =
+            mergeDoneResponse baseResponse doneItems doneResponse
+    in if Text.null merged.responseId
+        then Left $ JsonDecodeError
+            "Streamed response did not contain a response id"
+            (preview merged)
+        else if Text.null merged.model
+            then Left $ JsonDecodeError
+                "Streamed response did not contain a model"
+                (preview merged)
+            else Right merged
 
 responseFragmentHasOutput :: Response -> Bool
 responseFragmentHasOutput = not . null . (.output)
@@ -356,10 +376,33 @@ updateItem outputIndex done newValue state =
     mergeProgress (Just old) = ItemProgress
         { itemValue =
             if done
-                then ParsedItem newValue
+                then case old.itemValue of
+                    ParsedItem oldValue ->
+                        ParsedItem
+                            (mergeParsedItems oldValue newValue)
+                    partial ->
+                        mergePartialItem partial newValue
                 else mergePartialItem old.itemValue newValue
         , itemDone = old.itemDone || done
         }
+
+mergeParsedItems :: ResponseItem -> ResponseItem -> ResponseItem
+mergeParsedItems oldValue newValue =
+    fromMaybe newValue do
+        oldFields <- either (const Nothing) Just $
+            Decoder.decode extensionObjectDecoder
+                (JsonEncoder.encode responseItemEncoder oldValue)
+        newFields <- either (const Nothing) Just $
+            Decoder.decode extensionObjectDecoder
+                (JsonEncoder.encode responseItemEncoder newValue)
+        either (const Nothing) Just $
+            Decoder.decode responseItemDecoder $
+                JsonEncoder.encode
+                    (JsonEncoder.objectWithExtensions id [])
+                    (oldFields <> newFields)
+  where
+    extensionObjectDecoder =
+        Decoder.objectFields Decoder.extensionFields
 
 updateStreamItem
     :: Maybe Int
@@ -588,9 +631,10 @@ assembledOutput state =
                 (mergeProgressItems terminal.itemValue streamed.itemValue)
                 True
         | otherwise =
-            ItemProgress
-                (mergeProgressItems streamed.itemValue terminal.itemValue)
-                True
+            -- A terminal response is authoritative when no item-level done
+            -- frame established a stronger value. Partial deltas must not
+            -- overwrite a complete terminal item.
+            terminal
 
 mergePartialItem :: PartialResponseItem -> ResponseItem -> PartialResponseItem
 mergePartialItem partial item = mergeProgressItems partial (ParsedItem item)

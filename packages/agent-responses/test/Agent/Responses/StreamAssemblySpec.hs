@@ -51,6 +51,23 @@ spec = describe "typed stream assembly" do
         [arguments | FunctionCallItem FunctionCall { arguments } <- result.output]
             `shouldBe` ["{\"value\":1}"]
 
+    it "keeps a full terminal item over an incomplete streamed delta" do
+        let terminalCall =
+                case toolCall of
+                    FunctionCallItem value ->
+                        FunctionCallItem
+                            value { arguments = "{\"value\":1}" }
+                    other -> other
+        result <- expectRight $ buildStreamResponse config
+            [ outputAdded 0 toolCall
+            , ResponseFunctionCallArgumentsDeltaEvent
+                (Just "{") (Just "fc_1") (Just 0)
+                Nothing emptyExtensions
+            , completed (response [terminalCall])
+            ]
+        [arguments | FunctionCallItem FunctionCall { arguments } <- result.output]
+            `shouldBe` ["{\"value\":1}"]
+
     it "accumulates custom-tool input deltas by call id" do
         result <- expectRight $ buildStreamResponse config
             [ outputAdded 0 customCall
@@ -109,6 +126,32 @@ spec = describe "typed stream assembly" do
             ]
         [name | FunctionCallItem FunctionCall { name } <- result.output]
             `shouldBe` ["late-added"]
+
+    it "retains fields present only on output_item.added" do
+        let added = case toolCall of
+                FunctionCallItem value ->
+                    FunctionCallItem value
+                        { namespace = Just "tools" }
+                other -> other
+            done = case toolCall of
+                FunctionCallItem value ->
+                    FunctionCallItem value
+                        { name = "done"
+                        , namespace = Nothing
+                        , extraFields = emptyExtensions
+                        }
+                other -> other
+        result <- expectRight $ buildStreamResponse config
+            [ outputAdded 0 added
+            , outputDone 0 done
+            , completed (response [])
+            ]
+        case result.output of
+            [FunctionCallItem call] -> do
+                call.name `shouldBe` "done"
+                call.namespace `shouldBe` Just "tools"
+            other ->
+                expectationFailure ("unexpected output: " <> show other)
 
     it "classifies terminal failures from typed response fields" do
         buildStreamResponse config
@@ -388,8 +431,28 @@ applyExpected model operation =
                 then fst <$> Map.lookupMin (Map.filter (not . snd) model)
                 else Nothing
     update Nothing = Just (newItem, operation.operationDone)
-    update (Just (_, wasDone)) =
-        Just (newItem, wasDone || operation.operationDone)
+    update (Just (oldItem, wasDone)) =
+        Just
+            ( if operation.operationDone
+                then mergeExpectedItem oldItem newItem
+                else newItem
+            , wasDone || operation.operationDone
+            )
+
+mergeExpectedItem :: ResponseItem -> ResponseItem -> ResponseItem
+mergeExpectedItem
+    (FunctionCallItem old)
+    (FunctionCallItem new) =
+        FunctionCallItem new
+            { itemId = new.itemId <|> old.itemId
+            , namespace = new.namespace <|> old.namespace
+            , encryptedFunctionArgs =
+                new.encryptedFunctionArgs
+                    <|> old.encryptedFunctionArgs
+            , status = new.status <|> old.status
+            , extraFields = old.extraFields <> new.extraFields
+            }
+mergeExpectedItem _ new = new
 
 findMatchingIndex :: ResponseItem -> StreamModel -> Maybe Int
 findMatchingIndex (FunctionCallItem wanted) model =

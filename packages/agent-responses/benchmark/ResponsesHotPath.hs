@@ -157,7 +157,7 @@ directStep session (Right (decoder, total)) chunk = do
                 | eventType == "response.output_text.delta" -> do
                     value <- Hermes.decodeHermesIO
                         session
-                        ResponsesHermes.textDeltaEventDecoder
+                        (ResponsesHermes.textDeltaEventDecoder eventType)
                         frame.sseFrameData
                     pure $ case value of
                         Left _ -> Nothing

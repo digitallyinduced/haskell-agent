@@ -59,6 +59,16 @@ spec = do
                 `shouldBe`
                     ProviderError RateLimitError "slow" (Just 12)
 
+        it "uses a nested provider type when the message is absent" do
+            classifyFailure
+                429
+                Nothing
+                "{\"error\":{\"type\":\"rate_limit_error\"}}"
+                `shouldBe`
+                    ProviderError RateLimitError
+                        "rate_limit_error"
+                        Nothing
+
     describe "retryTransientResultWithPolicy" do
         it "retries transient failures before any event is emitted" do
             attempts <- newIORef (0 :: Int)

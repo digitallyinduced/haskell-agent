@@ -73,6 +73,7 @@ module Agent.Responses.Types
     , Response(..)
     , responseEncoder
     , responseDecoder
+    , responseFragmentDecoder
     , ResponseStatus(..)
     , ResponseError(..)
     , IncompleteDetails(..)

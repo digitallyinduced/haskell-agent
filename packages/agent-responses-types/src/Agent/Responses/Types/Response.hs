@@ -7,7 +7,11 @@ module Agent.Responses.Types.Response
     , TokenDetails(..), tokenDetailsEncoder, tokenDetailsDecoder
     ) where
 
-import Agent.Json (Extensions, RawJson, emptyExtensions, insertExtension)
+import Agent.Json
+    ( Extensions, RawJson, emptyExtensions, insertExtension
+    , markExtensionFieldPresent
+    )
+import Agent.Json.Decoder.Backend (NamedField(..))
 import qualified Agent.Json.Decoder as D
 import qualified Agent.Json.Encoder as E
 import Agent.Responses.Types.Items
@@ -178,10 +182,13 @@ data Response = Response
 responseEncoder :: E.Encoder Response
 responseEncoder = E.objectWithExtensions (.extraFields)
     [ E.field "id" E.text (.responseId), E.field "created_at" E.scientific (.createdAt)
-    , E.optionalField "error" responseErrorEncoder (.error)
-    , E.optionalField "incomplete_details" incompleteDetailsEncoder (.incompleteDetails)
+    , E.nullableField "error" responseErrorEncoder (.error)
+    , E.nullableField
+        "incomplete_details"
+        incompleteDetailsEncoder
+        (.incompleteDetails)
     , E.optionalField "instructions" responseInputEncoder (.instructions)
-    , E.optionalField "metadata" extensionsEncoder (.metadata)
+    , E.nullableField "metadata" extensionsEncoder (.metadata)
     , E.field "model" E.text (.model)
     , E.optionalField "object" E.text
         (\response ->
@@ -203,7 +210,7 @@ responseEncoder = E.objectWithExtensions (.extraFields)
     , E.optionalField "safety_identifier" E.text (.safetyIdentifier), E.optionalField "service_tier" E.text (.serviceTier)
     , E.field "status" responseStatusEncoder (.status), E.optionalField "text" responseTextConfigEncoder (.text)
     , E.optionalField "top_logprobs" E.int (.topLogprobs), E.optionalField "truncation" E.text (.truncation)
-    , E.optionalField "usage" responseUsageEncoder (.usage), E.optionalField "user" E.text (.user)
+    , E.nullableField "usage" responseUsageEncoder (.usage), E.optionalField "user" E.text (.user)
     ]
 
 -- Decoder state uses Maybe for required/defaulted fields and preserves unknown
@@ -219,11 +226,11 @@ responseDecoderWith :: Bool -> D.Decoder Response
 responseDecoderWith permitMissing = D.object empty fields unknown finish
   where
     empty = ResponseState Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing emptyExtensions
-    fields =
+    fields = map markPresent
       [ D.field "id" D.text (\v s -> Right s { rsId = Just v }), D.field "created_at" D.scientific (\v s -> Right s { rsCreatedAt = Just v })
       , D.field "error" (D.nullable responseErrorDecoder) (\v s -> Right s { rsError = v }), D.field "incomplete_details" (D.nullable incompleteDetailsDecoder) (\v s -> Right s { rsIncompleteDetails = v })
       , D.field "instructions" (D.nullable responseInputDecoder) (\v s -> Right s { rsInstructions = v }), D.field "metadata" (D.nullable extensionsDecoder) (\v s -> Right s { rsMetadata = v })
-      , D.field "model" D.text (\v s -> Right s { rsModel = Just v }), D.field "object" D.text (\v s -> Right s { rsObject = Just v }), D.field "output" (D.array responseItemDecoder) (\v s -> Right s { rsOutput = Just v })
+      , D.field "model" D.text (\v s -> Right s { rsModel = Just v }), D.field "object" (D.nullable D.text) (\v s -> Right s { rsObject = v }), D.field "output" (D.nullable (D.array responseItemDecoder)) (\v s -> Right s { rsOutput = v })
       , D.field "parallel_tool_calls" (D.nullable D.bool) (\v s -> Right s { rsParallelToolCalls = v }), D.field "temperature" (D.nullable D.scientific) (\v s -> Right s { rsTemperature = v })
       , D.field "tool_choice" (D.nullable toolChoiceDecoder) (\v s -> Right s { rsToolChoice = v }), D.field "tools" (D.nullable (D.array responseToolDecoder)) (\v s -> Right s { rsTools = v })
       , D.field "top_p" (D.nullable D.scientific) (\v s -> Right s { rsTopP = v }), D.field "background" (D.nullable D.bool) (\v s -> Right s { rsBackground = v })
@@ -237,6 +244,15 @@ responseDecoderWith permitMissing = D.object empty fields unknown finish
       , D.field "text" (D.nullable responseTextConfigDecoder) (\v s -> Right s { rsText = v }), D.field "top_logprobs" (D.nullable D.int) (\v s -> Right s { rsTopLogprobs = v })
       , D.field "truncation" (D.nullable D.text) (\v s -> Right s { rsTruncation = v }), D.field "usage" (D.nullable usageDecoder) (\v s -> Right s { rsUsage = v })
       , D.field "user" (D.nullable D.text) (\v s -> Right s { rsUser = v }) ]
+    markPresent (NamedField name decoder update) =
+        NamedField name decoder \value state -> do
+            updated <- update value state
+            Right updated
+                { rsExtraFields =
+                    markExtensionFieldPresent
+                        name
+                        updated.rsExtraFields
+                }
     unknown = D.unknownField D.rawJson (\k v s -> Right s { rsExtraFields = insertExtension k v s.rsExtraFields })
     usageDecoder
         | permitMissing = responseUsageFragmentDecoder

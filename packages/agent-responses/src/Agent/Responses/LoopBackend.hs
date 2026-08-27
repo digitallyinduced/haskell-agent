@@ -46,7 +46,9 @@ import Agent.Json
     ( Extensions
     , RawJson
     , emptyExtensions
+    , extensionsFromList
     , extensionsToList
+    , deleteExtension
     , lookupExtension
     , rawJsonBytes
     )
@@ -210,14 +212,38 @@ stripResponsesLiteImageDetails = \case
 
 stripInputImageDetailValue :: RawJson -> RawJson
 stripInputImageDetailValue raw =
-    case JsonDecoder.decode
-        responseContentPartDecoder
-        (rawJsonBytes raw) of
-        Right part@InputImagePart{} ->
+    case JsonDecoder.decode rawContainerDecoder (rawJsonBytes raw) of
+        Right (Just (Left fields)) ->
+            let transformed =
+                    extensionsFromList
+                        [ (key, stripInputImageDetailValue value)
+                        | (key, value) <- extensionsToList fields
+                        ]
+                withoutDetail =
+                    case lookupExtension "type" transformed
+                        >>= decodeRaw JsonDecoder.text of
+                        Just "input_image" ->
+                            deleteExtension "detail" transformed
+                        _ -> transformed
+            in encodeRaw
+                (JsonEncoder.objectWithExtensions id [])
+                withoutDetail
+        Right (Just (Right values)) ->
             encodeRaw
-                responseContentPartEncoder
-                part { detail = Nothing }
+                (JsonEncoder.list JsonEncoder.rawJson)
+                (map stripInputImageDetailValue values)
         _ -> raw
+  where
+    rawContainerDecoder =
+        JsonDecoder.byType \case
+            JsonDecoder.JsonObject ->
+                Just . Left
+                    <$> JsonDecoder.objectFields
+                        JsonDecoder.extensionFields
+            JsonDecoder.JsonArray ->
+                Just . Right
+                    <$> JsonDecoder.array JsonDecoder.rawJson
+            _ -> Nothing <$ JsonDecoder.skip
 
 -- Older local compaction snapshots accidentally persisted assistant summaries
 -- as input_text. Responses input accepts assistant history, but its content
@@ -599,6 +625,14 @@ streamEventToLoopEventWithRawReasoning
     -> ResponseStreamEvent
     -> Maybe LoopEvent
 streamEventToLoopEventWithRawReasoning showRawReasoning = \case
+    ResponseOutputTextDeltaEvent { delta = Just text } ->
+        Just (TextDelta text)
+    ResponseReasoningTextDeltaEvent { delta = Just text }
+        | showRawReasoning ->
+            Just (ReasoningDelta text)
+        | otherwise -> Nothing
+    ResponseReasoningSummaryTextDeltaEvent { delta = Just text } ->
+        Just (ReasoningDelta text)
     ResponseReasoningSummaryPartAddedEvent
         { summaryIndex = Just index }
         | index > 0 ->
@@ -651,6 +685,9 @@ streamOutputObserved event = case event of
     ResponseCustomToolInputDeltaEvent{} -> True
     ResponseCustomToolInputDoneEvent{} -> True
     ResponseReasoningSummaryPartAddedEvent{} -> True
+    ResponseOutputTextDeltaEvent{} -> True
+    ResponseReasoningTextDeltaEvent{} -> True
+    ResponseReasoningSummaryTextDeltaEvent{} -> True
     ResponseReasoningSummaryTextDoneEvent{} -> True
     OtherResponseStreamEvent { otherEventType }
         | streamEventTypeText otherEventType == unparsedStreamEventTypeText ->

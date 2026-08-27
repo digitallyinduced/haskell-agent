@@ -21,6 +21,15 @@ main = hspec do
             Decoder.decode responseCreateParamsDecoder "[]"
                 `shouldSatisfy` isLeft
 
+        it "preserves legacy null defaults for object and output" do
+            response <- expectDecode responseDecoder
+                ( "{\"id\":\"r\",\"created_at\":0,\"model\":\"m\","
+                    <> "\"status\":\"completed\",\"object\":null,"
+                    <> "\"output\":null}"
+                )
+            response.object `shouldBe` "response"
+            response.output `shouldBe` []
+
     describe "direct Responses response codec" do
         it "round-trips output items, usage, and unknown fields" do
             assertSemanticRoundTrip
@@ -134,7 +143,8 @@ requestFixture :: BS.ByteString
 requestFixture =
     "{\"model\":\"gpt-5\",\"input\":[{\"type\":\"message\","
         <> "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
-        <> "\"text\":\"hello\",\"vendor_part\":1}],\"vendor_item\":true}],"
+        <> "\"text\":\"hello\",\"detail\":1,\"vendor_part\":1}],"
+        <> "\"vendor_item\":true}],"
         <> "\"tools\":[{\"type\":\"function\",\"name\":\"lookup\","
         <> "\"parameters\":{\"type\":\"object\",\"properties\":{}}}],"
         <> "\"metadata\":{\"trace\":\"abc\"},\"vendor_request\":{\"x\":1}}"
@@ -142,18 +152,22 @@ requestFixture =
 responseFixture :: BS.ByteString
 responseFixture =
     "{\"id\":\"resp_1\",\"created_at\":1,\"model\":\"gpt-5\","
-        <> "\"status\":\"completed\",\"output\":[{\"type\":\"message\","
+        <> "\"error\":null,\"incomplete_details\":null,"
+        <> "\"metadata\":null,"
+        <> "\"usage\":{\"input_tokens\":2,\"output_tokens\":3,"
+        <> "\"total_tokens\":5},\"status\":\"completed\","
+        <> "\"output\":[{\"type\":\"message\","
         <> "\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\","
         <> "\"content\":[{\"type\":\"output_text\",\"text\":\"hello\","
         <> "\"annotations\":[],\"vendor_part\":true}]}],"
-        <> "\"usage\":{\"input_tokens\":2,\"output_tokens\":3,"
-        <> "\"total_tokens\":5},\"vendor_response\":{\"x\":1}}"
+        <> "\"vendor_response\":{\"x\":1}}"
 
 outputDeltaFixture :: BS.ByteString
 outputDeltaFixture =
     "{\"type\":\"response.output_text.delta\",\"sequence_number\":1,"
         <> "\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,"
-        <> "\"delta\":\"hel\",\"vendor_event\":true}"
+        <> "\"delta\":\"hel\",\"arguments\":{\"x\":1},"
+        <> "\"vendor_event\":true}"
 
 reasoningDeltaFixture :: BS.ByteString
 reasoningDeltaFixture =

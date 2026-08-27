@@ -15,8 +15,9 @@ mkDerivation {
     scientific text vector
   ];
   testHaskellDepends = [
-    aeson agent-core agent-json-codec agent-responses-types base
-    bytestring containers hspec QuickCheck retry text
+    aeson agent-core agent-json-codec agent-json-hermes
+    agent-responses-types base bytestring containers hspec QuickCheck
+    retry text
   ];
   benchmarkHaskellDepends = [
     aeson agent-core agent-json-codec agent-json-hermes

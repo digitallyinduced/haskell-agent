@@ -761,7 +761,6 @@ normalizeDirectExpected = \case
             (KeyMap.map normalizeDirectExpected
                 (KeyMap.filterWithKey keep object))
       where
-        keep _ Aeson.Null = False
         keep key (Aeson.String "response") = key /= "object"
         keep _ _ = True
     Aeson.Array values -> Aeson.Array (fmap normalizeDirectExpected values)

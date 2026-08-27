@@ -1,8 +1,10 @@
 module Agent.Responses.ResponseMergeSpec (spec) where
 
 import Agent.Json (emptyExtensions)
+import qualified Agent.Json.Decoder as Decoder
 import Agent.Responses.ResponseMerge
 import Agent.Responses.Types
+import Data.ByteString (ByteString)
 import Data.List (nub)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -53,6 +55,26 @@ spec = describe "typed response merging" do
             done = (response []) { status = ResponseInProgress }
         (mergeDoneResponse Nothing [] done).status
             `shouldBe` ResponseCompleted
+
+    it "preserves an explicit failed status on response.done" do
+        done <- decodeFragment
+            ( "{\"status\":\"failed\",\"error\":"
+                <> "{\"message\":\"boom\"}}"
+            )
+        (mergeDoneResponse Nothing [] done).status
+            `shouldBe` ResponseFailed
+
+    it "lets an explicit null clear an earlier lifecycle field" do
+        base <- decodeFragment
+            ( "{\"user\":\"earlier\",\"usage\":"
+                <> "{\"input_tokens\":1,\"output_tokens\":2,"
+                <> "\"total_tokens\":3}}"
+            )
+        terminal <- decodeFragment
+            "{\"user\":null,\"usage\":null}"
+        let merged = mergeResponseFragments [base, terminal]
+        (.user) <$> merged `shouldBe` Just Nothing
+        (.usage) <$> merged `shouldBe` Just Nothing
 
     modifyMaxSuccess (const 300) $
         prop "overlaying typed lifecycle responses is associative" $
@@ -125,6 +147,15 @@ response items = Response
     , user = Nothing
     , extraFields = emptyExtensions
     }
+
+decodeFragment :: ByteString -> IO Response
+decodeFragment bytes =
+    case Decoder.decode responseFragmentDecoder bytes of
+        Left err ->
+            expectationFailure
+                (Text.unpack (Decoder.renderDecodeError err))
+                >> pure (response [])
+        Right value -> pure value
 
 usageValue :: ResponseUsage
 usageValue = ResponseUsage

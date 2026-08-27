@@ -99,11 +99,13 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
     it "forwards raw provider reasoning text to the UI loop" do
         events <- newIORef []
         let send _params onStreamEvent = do
-                onStreamEvent OtherResponseStreamEvent
-                    { otherEventType = EventReasoningTextDelta
+                onStreamEvent ResponseReasoningTextDeltaEvent
+                    { delta = Just "checking the implementation"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , contentIndex = Nothing
                     , sequenceNumber = Just 1
-                    , eventExtraFields =
-                        textExtensions "delta" "checking the implementation"
+                    , eventExtraFields = emptyExtensions
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -120,17 +122,21 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
     it "can hide raw reasoning while retaining reasoning summaries" do
         events <- newIORef []
         let send _params onStreamEvent = do
-                onStreamEvent OtherResponseStreamEvent
-                    { otherEventType = EventReasoningTextDelta
+                onStreamEvent ResponseReasoningTextDeltaEvent
+                    { delta = Just "raw"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , contentIndex = Nothing
                     , sequenceNumber = Just 1
-                    , eventExtraFields =
-                        textExtensions "delta" "raw"
+                    , eventExtraFields = emptyExtensions
                     }
-                onStreamEvent OtherResponseStreamEvent
-                    { otherEventType = EventReasoningSummaryTextDelta
+                onStreamEvent ResponseReasoningSummaryTextDeltaEvent
+                    { delta = Just "summary"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
                     , sequenceNumber = Just 2
-                    , eventExtraFields =
-                        textExtensions "delta" "summary"
+                    , eventExtraFields = emptyExtensions
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -153,11 +159,13 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     , sequenceNumber = Just 1
                     , eventExtraFields = emptyExtensions
                     }
-                onStreamEvent OtherResponseStreamEvent
-                    { otherEventType = EventReasoningSummaryTextDelta
+                onStreamEvent ResponseReasoningSummaryTextDeltaEvent
+                    { delta = Just "**Inspecting dependencies**"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
                     , sequenceNumber = Just 2
-                    , eventExtraFields =
-                        textExtensions "delta" "**Inspecting dependencies**"
+                    , eventExtraFields = emptyExtensions
                     }
                 onStreamEvent ResponseReasoningSummaryPartAddedEvent
                     { streamItemId = Just "reasoning-1"
@@ -167,11 +175,13 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                     , sequenceNumber = Just 3
                     , eventExtraFields = emptyExtensions
                     }
-                onStreamEvent OtherResponseStreamEvent
-                    { otherEventType = EventReasoningSummaryTextDelta
+                onStreamEvent ResponseReasoningSummaryTextDeltaEvent
+                    { delta = Just "**Planning the fix**"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
                     , sequenceNumber = Just 4
-                    , eventExtraFields =
-                        textExtensions "delta" "**Planning the fix**"
+                    , eventExtraFields = emptyExtensions
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -266,9 +276,18 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , name = Nothing
                 , namespace = Nothing
                 , output = rawFromAeson (Aeson.object
-                    [ "type" Aeson..= ("input_image" :: Text.Text)
-                    , "detail" Aeson..= ("high" :: Text.Text)
-                    , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
+                    [ "wrapper" Aeson..=
+                        [ Aeson.object
+                            [ "type" Aeson..=
+                                ("input_image" :: Text.Text)
+                            , "detail" Aeson..=
+                                ("high" :: Text.Text)
+                            , "image_url" Aeson..=
+                                ( "data:image/png;base64,AA=="
+                                    :: Text.Text
+                                )
+                            ]
+                        ]
                     ])
                 , status = Nothing
                 , extraFields = emptyExtensions
@@ -286,7 +305,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , FunctionCallOutputItem FunctionCallOutput{output}
                 ]) -> do
                     detail `shouldBe` Nothing
-                    jsonField "detail" output `shouldBe` Nothing
+                    collectTextFields "detail" output `shouldBe` []
             other -> expectationFailure
                 ("unexpected normalized Lite input: " <> show other)
 
@@ -379,13 +398,18 @@ developerMessage messageText contentItemKinds =
         , extraFields = emptyExtensions
         }
 
-jsonField :: Text.Text -> RawJson -> Maybe Aeson.Value
-jsonField fieldName raw = do
-    value <- Aeson.decodeStrict' (rawJsonBytes raw)
-    case value of
+collectTextFields :: Text.Text -> RawJson -> [Text.Text]
+collectTextFields fieldName raw =
+    maybe [] go (Aeson.decodeStrict' (rawJsonBytes raw))
+  where
+    go = \case
         Aeson.Object object ->
-            KeyMap.lookup (Key.fromText fieldName) object
-        _ -> Nothing
+            [ value
+            | Just (Aeson.String value) <-
+                [KeyMap.lookup (Key.fromText fieldName) object]
+            ] <> concatMap go object
+        Aeson.Array values -> concatMap go values
+        _ -> []
 
 textExtensions :: Text.Text -> Text.Text -> Extensions
 textExtensions key value =

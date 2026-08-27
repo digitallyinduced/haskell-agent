@@ -156,6 +156,12 @@ providerErrorValueDecoder =
 providerErrorObjectDecoder
     :: Decoder.Decoder (Maybe ProviderErrorPayload)
 providerErrorObjectDecoder =
+    providerErrorObjectDecoderWith False
+
+providerErrorObjectDecoderWith
+    :: Bool
+    -> Decoder.Decoder (Maybe ProviderErrorPayload)
+providerErrorObjectDecoderWith allowTypeMessage =
     Decoder.object
         emptyErrorObjectState
         [ textField "type" \value state ->
@@ -184,14 +190,14 @@ providerErrorObjectDecoder =
         (Right . finish)
   where
     textField name update =
-        Decoder.field name Decoder.text \value state ->
-            Right (update value state)
+        Decoder.field name tolerantTextDecoder \value state ->
+            Right (maybe state (`update` state) value)
     scalarField name update =
-        Decoder.field name scalarTextDecoder \value state ->
-            Right (update value state)
+        Decoder.field name tolerantScalarTextDecoder \value state ->
+            Right (maybe state (`update` state) value)
     retryField name update =
-        Decoder.field name retryAfterDecoder \value state ->
-            Right (update value state)
+        Decoder.field name tolerantRetryAfterDecoder \value state ->
+            Right (maybe state (`update` state) value)
 
     finish state =
         case state.stateError of
@@ -216,6 +222,9 @@ providerErrorObjectDecoder =
                     , state.stateDetail
                     , state.stateMsg
                     , state.stateDescription
+                    , if allowTypeMessage
+                        then state.stateType
+                        else Nothing
                     ]
                     >>= payload state
 
@@ -238,44 +247,48 @@ errorFieldDecoder =
         Decoder.JsonString ->
             ErrorFieldText <$> Decoder.text
         Decoder.JsonObject ->
-            ErrorFieldPayload <$> providerErrorObjectDecoder
+            ErrorFieldPayload
+                <$> providerErrorObjectDecoderWith True
         Decoder.JsonArray ->
             ErrorFieldPayload
                 . firstJust
                 <$> Decoder.array providerErrorValueDecoder
         _ -> ErrorFieldAbsent <$ Decoder.skip
 
-scalarTextDecoder :: Decoder.Decoder Text
-scalarTextDecoder =
+tolerantScalarTextDecoder :: Decoder.Decoder (Maybe Text)
+tolerantScalarTextDecoder =
     Decoder.byType \case
-        Decoder.JsonString -> Decoder.text
-        Decoder.JsonNumber ->
-            Text.pack . show <$> Decoder.scientific
-        Decoder.JsonBoolean ->
-            (\value -> if value then "true" else "false")
-                <$> Decoder.bool
-        _ -> "" <$ Decoder.skip
-
-retryAfterDecoder :: Decoder.Decoder Int
-retryAfterDecoder =
-    Decoder.byType \case
-        Decoder.JsonNumber ->
-            Decoder.mapEither
-                (\value ->
-                    maybe
-                        (Left "retry delay is not an integer")
-                        (Right . max 1)
-                        (toBoundedInteger value))
-                Decoder.scientific
         Decoder.JsonString ->
-            Decoder.mapEither
-                (\value -> case reads (Text.unpack value) of
-                    [(seconds, "")] -> Right (max 1 seconds)
-                    _ -> Left "invalid retry delay")
-                Decoder.text
-        _ -> Decoder.mapEither
-            (const (Left "invalid retry delay"))
-            Decoder.skip
+            (\value ->
+                if Text.null (Text.strip value)
+                    then Nothing
+                    else Just value)
+                <$> Decoder.text
+        Decoder.JsonNumber ->
+            Just . Text.pack . show <$> Decoder.scientific
+        Decoder.JsonBoolean ->
+            Just . (\value -> if value then "true" else "false")
+                <$> Decoder.bool
+        _ -> Nothing <$ Decoder.skip
+
+tolerantTextDecoder :: Decoder.Decoder (Maybe Text)
+tolerantTextDecoder =
+    Decoder.byType \case
+        Decoder.JsonString -> Just <$> Decoder.text
+        _ -> Nothing <$ Decoder.skip
+
+tolerantRetryAfterDecoder :: Decoder.Decoder (Maybe Int)
+tolerantRetryAfterDecoder =
+    Decoder.byType \case
+        Decoder.JsonNumber ->
+            (\value -> max 1 <$> toBoundedInteger value)
+                <$> Decoder.scientific
+        Decoder.JsonString ->
+            (\value -> case reads (Text.unpack value) of
+                [(seconds, "")] -> Just (max 1 seconds)
+                _ -> Nothing)
+                <$> Decoder.text
+        _ -> Nothing <$ Decoder.skip
 
 normalizedProviderType :: Maybe Text -> Maybe Text
 normalizedProviderType = \case

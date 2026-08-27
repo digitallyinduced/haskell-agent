@@ -6,6 +6,7 @@ module Agent.Json.Internal
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Set (Set)
 import Data.Text (Text)
 
 -- | A validated JSON value kept as bytes.  The constructor is private outside
@@ -18,12 +19,22 @@ instance Show RawJson where
 
 -- | Unknown object members, indexed by their key.  Inserting a key replaces
 -- the previous value (the wire policy is last-key-wins).
-newtype Extensions = Extensions (Map Text RawJson)
-    deriving stock (Eq, Show)
+data Extensions = Extensions
+    !(Map Text RawJson)
+    !(Set Text)
+
+instance Eq Extensions where
+    Extensions left _ == Extensions right _ = left == right
+
+instance Show Extensions where
+    showsPrec precedence (Extensions values _) =
+        showsPrec precedence values
 
 instance Semigroup Extensions where
-    Extensions left <> Extensions right =
-        Extensions (Map.union right left)
+    Extensions left leftPresent <> Extensions right rightPresent =
+        Extensions
+            (Map.union right left)
+            (leftPresent <> rightPresent)
 
 instance Monoid Extensions where
-    mempty = Extensions Map.empty
+    mempty = Extensions Map.empty mempty

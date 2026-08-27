@@ -12,6 +12,7 @@ import Agent.Json
     , insertExtension
     , lookupExtension
     , rawJsonBytes
+    , extensionFieldWasPresent
     )
 import qualified Agent.Json.Decoder as Decoder
 import Agent.Responses.Types
@@ -41,7 +42,15 @@ mergeDoneResponse
     -> Response
 mergeDoneResponse baseResponse streamedItems doneResponse =
     mergeCompletedResponseOutput streamedItems
-        mergedResponse { status = ResponseCompleted }
+        mergedResponse
+            { status =
+                if extensionFieldWasPresent
+                    "status"
+                    doneResponse.extraFields
+                    || doneResponse.status /= ResponseInProgress
+                    then doneResponse.status
+                    else ResponseCompleted
+            }
   where
     mergedResponse =
         maybe doneResponse
@@ -59,51 +68,88 @@ mergeResponseFragments (first : rest) =
 
 mergeResponseFragment :: Response -> Response -> Response
 mergeResponseFragment base overlay = Response
-    { responseId = nonEmptyText overlay.responseId base.responseId
+    { responseId = chooseText "id" overlay.responseId base.responseId
     , createdAt =
-        if overlay.createdAt == 0 then base.createdAt else overlay.createdAt
-    , error = overlay.error <|> base.error
+        if present "created_at" || overlay.createdAt /= 0
+            then overlay.createdAt
+            else base.createdAt
+    , error = chooseMaybe "error" overlay.error base.error
     , incompleteDetails =
-        overlay.incompleteDetails <|> base.incompleteDetails
-    , instructions = overlay.instructions <|> base.instructions
-    , metadata = overlay.metadata <|> base.metadata
-    , model = nonEmptyText overlay.model base.model
-    , object = nonEmptyText overlay.object base.object
+        chooseMaybe "incomplete_details"
+            overlay.incompleteDetails base.incompleteDetails
+    , instructions =
+        chooseMaybe "instructions" overlay.instructions base.instructions
+    , metadata = chooseMaybe "metadata" overlay.metadata base.metadata
+    , model = chooseText "model" overlay.model base.model
+    , object = chooseText "object" overlay.object base.object
     , output =
-        if null overlay.output then base.output else overlay.output
+        if present "output" || not (null overlay.output)
+            then overlay.output
+            else base.output
     , parallelToolCalls =
-        overlay.parallelToolCalls <|> base.parallelToolCalls
-    , temperature = overlay.temperature <|> base.temperature
-    , toolChoice = overlay.toolChoice <|> base.toolChoice
-    , tools = overlay.tools <|> base.tools
-    , topP = overlay.topP <|> base.topP
-    , background = overlay.background <|> base.background
-    , completedAt = overlay.completedAt <|> base.completedAt
-    , conversation = overlay.conversation <|> base.conversation
-    , maxOutputTokens = overlay.maxOutputTokens <|> base.maxOutputTokens
-    , maxToolCalls = overlay.maxToolCalls <|> base.maxToolCalls
-    , moderation = overlay.moderation <|> base.moderation
+        chooseMaybe "parallel_tool_calls"
+            overlay.parallelToolCalls base.parallelToolCalls
+    , temperature =
+        chooseMaybe "temperature" overlay.temperature base.temperature
+    , toolChoice =
+        chooseMaybe "tool_choice" overlay.toolChoice base.toolChoice
+    , tools = chooseMaybe "tools" overlay.tools base.tools
+    , topP = chooseMaybe "top_p" overlay.topP base.topP
+    , background =
+        chooseMaybe "background" overlay.background base.background
+    , completedAt =
+        chooseMaybe "completed_at" overlay.completedAt base.completedAt
+    , conversation =
+        chooseMaybe "conversation" overlay.conversation base.conversation
+    , maxOutputTokens =
+        chooseMaybe "max_output_tokens"
+            overlay.maxOutputTokens base.maxOutputTokens
+    , maxToolCalls =
+        chooseMaybe "max_tool_calls"
+            overlay.maxToolCalls base.maxToolCalls
+    , moderation =
+        chooseMaybe "moderation" overlay.moderation base.moderation
     , previousResponseId =
-        overlay.previousResponseId <|> base.previousResponseId
-    , prompt = overlay.prompt <|> base.prompt
-    , promptCacheKey = overlay.promptCacheKey <|> base.promptCacheKey
+        chooseMaybe "previous_response_id"
+            overlay.previousResponseId base.previousResponseId
+    , prompt = chooseMaybe "prompt" overlay.prompt base.prompt
+    , promptCacheKey =
+        chooseMaybe "prompt_cache_key"
+            overlay.promptCacheKey base.promptCacheKey
     , promptCacheOptions =
-        overlay.promptCacheOptions <|> base.promptCacheOptions
+        chooseMaybe "prompt_cache_options"
+            overlay.promptCacheOptions base.promptCacheOptions
     , promptCacheRetention =
-        overlay.promptCacheRetention <|> base.promptCacheRetention
-    , reasoning = overlay.reasoning <|> base.reasoning
+        chooseMaybe "prompt_cache_retention"
+            overlay.promptCacheRetention base.promptCacheRetention
+    , reasoning =
+        chooseMaybe "reasoning" overlay.reasoning base.reasoning
     , safetyIdentifier =
-        overlay.safetyIdentifier <|> base.safetyIdentifier
-    , serviceTier = overlay.serviceTier <|> base.serviceTier
-    , status = overlay.status
-    , text = overlay.text <|> base.text
-    , topLogprobs = overlay.topLogprobs <|> base.topLogprobs
-    , truncation = overlay.truncation <|> base.truncation
-    , usage = overlay.usage <|> base.usage
-    , user = overlay.user <|> base.user
+        chooseMaybe "safety_identifier"
+            overlay.safetyIdentifier base.safetyIdentifier
+    , serviceTier =
+        chooseMaybe "service_tier" overlay.serviceTier base.serviceTier
+    , status =
+        if present "status" then overlay.status else base.status
+    , text = chooseMaybe "text" overlay.text base.text
+    , topLogprobs =
+        chooseMaybe "top_logprobs" overlay.topLogprobs base.topLogprobs
+    , truncation =
+        chooseMaybe "truncation" overlay.truncation base.truncation
+    , usage = chooseMaybe "usage" overlay.usage base.usage
+    , user = chooseMaybe "user" overlay.user base.user
     , extraFields =
         mergeExtensions base.extraFields overlay.extraFields
     }
+  where
+    present key =
+        extensionFieldWasPresent key overlay.extraFields
+    chooseMaybe key overlayValue baseValue
+        | present key = overlayValue
+        | otherwise = overlayValue <|> baseValue
+    chooseText key overlayValue baseValue
+        | present key = overlayValue
+        | otherwise = nonEmptyText overlayValue baseValue
 
 mergeOutputItems :: [ResponseItem] -> [ResponseItem] -> [ResponseItem]
 mergeOutputItems finalItems streamedItems =

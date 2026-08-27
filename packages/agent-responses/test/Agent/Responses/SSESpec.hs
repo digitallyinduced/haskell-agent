@@ -2,8 +2,10 @@ module Agent.Responses.SSESpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
+import qualified Agent.Responses.Hermes as ResponsesHermes
 import Agent.Responses.Types
 import Agent.Json (emptyExtensions)
+import qualified Agent.Json.Decoder.Hermes as Hermes
 import qualified Agent.Json.Encoder as JsonEncoder
 import Control.Monad (foldM)
 import qualified Data.ByteString as BS
@@ -75,6 +77,21 @@ spec = describe "Responses SSE decoder" do
                     Text.encodeUtf8 "{\"delta\":\"héllo\"}"
                 }
             ]
+
+    it "rejects JSON type disagreement on the optimized Hermes path" do
+        Hermes.withDecoderSession \session -> do
+            result <- Hermes.decodeHermesIO
+                session
+                (ResponsesHermes.textDeltaEventDecoder
+                    "response.output_text.delta")
+                ( "{\"type\":\"response.reasoning_text.delta\","
+                    <> "\"delta\":\"x\"}"
+                )
+            case result of
+                Left _ -> pure ()
+                Right _ ->
+                    expectationFailure
+                        "accepted mismatched event types"
 
     it "skips malformed event payloads while preserving unknown events" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""

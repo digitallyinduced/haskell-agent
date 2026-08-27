@@ -613,35 +613,39 @@ data DirectEvent = DirectEvent
 
 -- | Decode an event whose type must be present in the JSON object.
 responseStreamEventDecoder :: Decoder.Decoder ResponseStreamEvent
-responseStreamEventDecoder = responseStreamEventDecoderWithType Nothing
+responseStreamEventDecoder =
+    Decoder.discriminatedObject "type" eventDecoderForType
 
 -- | Decode an event in one object traversal. A supplied transport type fills
 -- an omitted JSON type and must agree with it when both are present.
 responseStreamEventDecoderWithType
     :: Maybe Text
     -> Decoder.Decoder ResponseStreamEvent
-responseStreamEventDecoderWithType externalType =
-    case externalType of
-        Just "response.output_text.delta" ->
-            textDeltaDecoder EventOutputTextDelta
-        Just "response.reasoning_text.delta" ->
-            textDeltaDecoder EventReasoningTextDelta
-        Just "response.reasoning_summary_text.delta" ->
-            textDeltaDecoder EventReasoningSummaryTextDelta
-        _ -> Decoder.mapEither finish directEventDecoder
+responseStreamEventDecoderWithType = \case
+    Nothing -> responseStreamEventDecoder
+    Just eventTypeText -> eventDecoderForType eventTypeText
+
+eventDecoderForType :: Text -> Decoder.Decoder ResponseStreamEvent
+eventDecoderForType eventTypeText =
+    case eventType of
+        EventOutputTextDelta -> textDeltaDecoder eventType
+        EventReasoningTextDelta -> textDeltaDecoder eventType
+        EventReasoningSummaryTextDelta -> textDeltaDecoder eventType
+        _ ->
+            Decoder.mapEither finish
+                (directEventDecoderFor eventType)
   where
+    eventType = parseStreamEventType eventTypeText
     finish event = do
-        eventTypeText <- case (externalType, event.directType) of
-            (Nothing, Nothing) -> Left "missing required field type"
-            (Just supplied, Just actual)
-                | supplied /= actual ->
+        case event.directType of
+            Just actual
+                | actual /= eventTypeText ->
                     Left
-                        ( "SSE event type " <> supplied
+                        ( "SSE event type " <> eventTypeText
                         <> " disagrees with JSON type " <> actual
                         )
-            (Just supplied, _) -> Right supplied
-            (_, Just actual) -> Right actual
-        buildEvent (parseStreamEventType eventTypeText) event
+            _ -> Right ()
+        buildEvent eventType event
 
 data TextDeltaState = TextDeltaState
     { textDeltaType :: !(Maybe Text)
@@ -655,29 +659,38 @@ data TextDeltaState = TextDeltaState
     , textDeltaExtensions :: !Extensions
     }
 
+data WireOptional value
+    = WireNull !RawJson
+    | WireValue !value
+
+wireOptionalDecoder
+    :: Decoder.Decoder value
+    -> Decoder.Decoder (WireOptional value)
+wireOptionalDecoder decoder =
+    Decoder.byType \case
+        Decoder.JsonNull ->
+            WireNull <$> Decoder.rawJson
+        _ ->
+            WireValue <$> decoder
+
 textDeltaDecoder :: StreamEventType -> Decoder.Decoder ResponseStreamEvent
 textDeltaDecoder expectedType =
     Decoder.object
         (TextDeltaState
             Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
             emptyExtensions)
-        [ field "type" Decoder.text \value state ->
+        ( [ field "type" Decoder.text \value state ->
             state { textDeltaType = Just value }
-        , field "sequence_number" Decoder.int \value state ->
-            state { textDeltaSequenceNumber = Just value }
-        , field "item_id" Decoder.text \value state ->
-            state { textDeltaItemId = Just value }
-        , field "output_index" Decoder.int \value state ->
-            state { textDeltaOutputIndex = Just value }
-        , field "content_index" Decoder.int \value state ->
-            state { textDeltaContentIndex = Just value }
-        , field "summary_index" Decoder.int \value state ->
-            state { textDeltaSummaryIndex = Just value }
-        , field "delta" Decoder.text \value state ->
-            state { textDeltaValue = Just value }
-        , field "logprobs" Decoder.rawJson \value state ->
-            state { textDeltaLogprobs = Just value }
-        ]
+        , optionalField "sequence_number" Decoder.int \value state ->
+            state { textDeltaSequenceNumber = value }
+        , optionalField "item_id" Decoder.text \value state ->
+            state { textDeltaItemId = value }
+        , optionalField "output_index" Decoder.int \value state ->
+            state { textDeltaOutputIndex = value }
+        , optionalField "delta" Decoder.text \value state ->
+            state { textDeltaValue = value }
+          ] <> variantFields
+        )
         (Decoder.unknownField Decoder.rawJson \key value state ->
             Right state
                 { textDeltaExtensions =
@@ -686,6 +699,20 @@ textDeltaDecoder expectedType =
         finish
   where
     expectedText = streamEventTypeText expectedType
+    variantFields = case expectedType of
+        EventOutputTextDelta -> [contentIndexField, logprobsField]
+        EventReasoningTextDelta -> [contentIndexField]
+        EventReasoningSummaryTextDelta -> [summaryIndexField]
+        _ -> []
+    contentIndexField =
+        optionalField "content_index" Decoder.int \value state ->
+            state { textDeltaContentIndex = value }
+    summaryIndexField =
+        optionalField "summary_index" Decoder.int \value state ->
+            state { textDeltaSummaryIndex = value }
+    logprobsField =
+        optionalField "logprobs" Decoder.rawJson \value state ->
+            state { textDeltaLogprobs = value }
     finish state = do
         case state.textDeltaType of
             Just actual
@@ -729,54 +756,32 @@ textDeltaDecoder expectedType =
     field key decoder update =
         Decoder.field key decoder \value state ->
             Right (update value state)
+    optionalField key decoder update =
+        Decoder.field key (wireOptionalDecoder decoder) \wire state ->
+            Right $ case wire of
+                WireNull raw ->
+                    state
+                        { textDeltaExtensions =
+                            insertExtension
+                                key
+                                raw
+                                state.textDeltaExtensions
+                        }
+                WireValue value ->
+                    update (Just value) state
 
-directEventDecoder :: Decoder.Decoder DirectEvent
-directEventDecoder =
+directEventDecoderFor
+    :: StreamEventType
+    -> Decoder.Decoder DirectEvent
+directEventDecoderFor eventType =
     Decoder.object
         emptyDirectEvent
-        [ field "type" Decoder.text \value state ->
+        ( [ field "type" Decoder.text \value state ->
             state { directType = Just value }
         , optionalField "sequence_number" Decoder.int \value state ->
             state { directSequenceNumber = value }
-        , optionalField "response" responseFragmentDecoder \value state ->
-            state { directResponse = value }
-        , optionalField "item" responseItemDecoder \value state ->
-            state { directItem = value }
-        , optionalField "item_id" Decoder.text \value state ->
-            state { directItemId = value }
-        , optionalField "output_index" Decoder.int \value state ->
-            state { directOutputIndex = value }
-        , optionalField "content_index" Decoder.int \value state ->
-            state { directContentIndex = value }
-        , optionalField "summary_index" Decoder.int \value state ->
-            state { directSummaryIndex = value }
-        , optionalField "delta" Decoder.text \value state ->
-            state { directDelta = value }
-        , optionalField "text" Decoder.text \value state ->
-            state { directText = value }
-        , optionalField "logprobs" Decoder.rawJson \value state ->
-            state { directLogprobs = value }
-        , optionalField "arguments" Decoder.text \value state ->
-            state { directArguments = value }
-        , optionalField "name" Decoder.text \value state ->
-            state { directName = value }
-        , optionalField "call_id" Decoder.text \value state ->
-            state { directCallId = value }
-        , optionalField "input" Decoder.text \value state ->
-            state { directInput = value }
-        , optionalField "part" Decoder.rawJson \value state ->
-            state { directPart = value }
-        , optionalField "error" responseStreamErrorDecoder \value state ->
-            state { directNestedError = value }
-        , optionalField "code" Decoder.text \value state ->
-            state { directCode = value }
-        , optionalField "message" Decoder.text \value state ->
-            state { directMessage = value }
-        , optionalField "param" Decoder.text \value state ->
-            state { directParam = value }
-        , optionalField "resets_in_seconds" Decoder.int \value state ->
-            state { directRetryAfter = value }
-        ]
+          ] <> eventFields eventType
+        )
         (Decoder.unknownField Decoder.rawJson \key value state ->
             Right state
                 { directExtensions =
@@ -788,8 +793,108 @@ directEventDecoder =
         Decoder.field key decoder \value state ->
             Right (update value state)
     optionalField key decoder update =
-        Decoder.field key (Decoder.nullable decoder) \value state ->
-            Right (update value state)
+        Decoder.field key (wireOptionalDecoder decoder) \wire state ->
+            Right $ case wire of
+                WireNull raw ->
+                    state
+                        { directExtensions =
+                            insertExtension
+                                key
+                                raw
+                                state.directExtensions
+                        }
+                WireValue value ->
+                    update (Just value) state
+
+    eventFields = \case
+        EventResponseCreated -> lifecycleFields
+        EventResponseInProgress -> lifecycleFields
+        EventResponseCompleted -> lifecycleFields
+        EventResponseDone -> lifecycleFields
+        EventResponseFailed -> lifecycleFields
+        EventResponseIncomplete -> lifecycleFields
+        EventResponseQueued -> lifecycleFields
+        EventOutputItemAdded -> outputItemFields
+        EventOutputItemDone -> outputItemFields
+        EventOutputTextDone ->
+            textIdentityFields <> [textField]
+        EventFunctionCallArgumentsDelta ->
+            itemOutputFields <> [deltaField]
+        EventFunctionCallArgumentsDone ->
+            itemOutputFields <> [argumentsField, nameField]
+        EventCustomToolInputDelta ->
+            itemOutputFields <> [callIdField, deltaField]
+        EventCustomToolInputDone ->
+            itemOutputFields <> [callIdField, inputField]
+        EventReasoningSummaryPartAdded -> summaryPartFields
+        EventReasoningSummaryPartDone -> summaryPartFields
+        EventReasoningSummaryTextDone ->
+            summaryIdentityFields <> [textField]
+        EventReasoningTextDone ->
+            textIdentityFields <> [textField]
+        EventError -> errorFields
+        _ -> []
+
+    lifecycleFields =
+        [ optionalField "response" responseFragmentDecoder \value state ->
+            state { directResponse = value }
+        ]
+    outputItemFields =
+        [ optionalField "item" responseItemDecoder \value state ->
+            state { directItem = value }
+        , outputIndexField
+        ]
+    itemOutputFields = [itemIdField, outputIndexField]
+    textIdentityFields =
+        [itemIdField, outputIndexField, contentIndexField]
+    summaryIdentityFields =
+        [itemIdField, outputIndexField, summaryIndexField]
+    summaryPartFields = summaryIdentityFields <> [partField]
+    errorFields =
+        [ optionalField "error" responseStreamErrorDecoder \value state ->
+            state { directNestedError = value }
+        , optionalField "code" Decoder.text \value state ->
+            state { directCode = value }
+        , optionalField "message" Decoder.text \value state ->
+            state { directMessage = value }
+        , optionalField "param" Decoder.text \value state ->
+            state { directParam = value }
+        , optionalField "resets_in_seconds" Decoder.int \value state ->
+            state { directRetryAfter = value }
+        ]
+    itemIdField =
+        optionalField "item_id" Decoder.text \value state ->
+            state { directItemId = value }
+    outputIndexField =
+        optionalField "output_index" Decoder.int \value state ->
+            state { directOutputIndex = value }
+    contentIndexField =
+        optionalField "content_index" Decoder.int \value state ->
+            state { directContentIndex = value }
+    summaryIndexField =
+        optionalField "summary_index" Decoder.int \value state ->
+            state { directSummaryIndex = value }
+    deltaField =
+        optionalField "delta" Decoder.text \value state ->
+            state { directDelta = value }
+    textField =
+        optionalField "text" Decoder.text \value state ->
+            state { directText = value }
+    argumentsField =
+        optionalField "arguments" Decoder.text \value state ->
+            state { directArguments = value }
+    nameField =
+        optionalField "name" Decoder.text \value state ->
+            state { directName = value }
+    callIdField =
+        optionalField "call_id" Decoder.text \value state ->
+            state { directCallId = value }
+    inputField =
+        optionalField "input" Decoder.text \value state ->
+            state { directInput = value }
+    partField =
+        optionalField "part" Decoder.rawJson \value state ->
+            state { directPart = value }
 
 emptyDirectEvent :: DirectEvent
 emptyDirectEvent = DirectEvent
