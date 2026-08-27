@@ -145,6 +145,10 @@ sessionItemSchemaStatements =
       \ file_url text,\
       \ filename text,\
       \ image_url text,\
+      \ file_data_mime_type text,\
+      \ file_data_bytes bytea,\
+      \ image_mime_type text,\
+      \ image_bytes bytea,\
       \ input_audio_text text,\
       \ prompt_cache_breakpoint_text text,\
       \ annotations_text text,\

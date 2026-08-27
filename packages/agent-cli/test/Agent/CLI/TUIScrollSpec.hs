@@ -8,21 +8,25 @@ spec :: Spec
 spec = describe "fullscreen conversation scrolling" do
     describe "conversationScrollGesture" do
         it "ignores scrolling when an empty session has no viewport" do
-            conversationScrollGesture 3 Nothing
+            conversationScrollGesture False 3 Nothing
                 `shouldBe` IgnoreConversationScroll
 
-        it "does not pause following when scrolling up from the top" do
-            conversationScrollGesture (-3) (Just (0, 20, 10))
+        it "does not pause following when scrolling up from the top of a fully loaded short transcript" do
+            conversationScrollGesture False (-3) (Just (0, 20, 10))
                 `shouldBe` IgnoreConversationScroll
+
+        it "pauses following at the top when older persisted turns can still load" do
+            conversationScrollGesture True (-3) (Just (0, 20, 10))
+                `shouldBe` PauseAndScrollConversation
 
         it "pauses only when the viewport can move away from the tail" do
-            conversationScrollGesture (-3) (Just (12, 20, 60))
+            conversationScrollGesture False (-3) (Just (12, 20, 60))
                 `shouldBe` PauseAndScrollConversation
-            conversationScrollGesture 3 (Just (12, 20, 60))
+            conversationScrollGesture False 3 (Just (12, 20, 60))
                 `shouldBe` PauseAndScrollConversation
 
         it "resumes following when a downward scroll reaches the tail" do
-            conversationScrollGesture 10 (Just (31, 20, 60))
+            conversationScrollGesture False 10 (Just (31, 20, 60))
                 `shouldBe` ResumeConversationFollow
 
     describe "reconcileConversationFollow" do

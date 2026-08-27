@@ -214,7 +214,7 @@ spec = describe "PostgreSQL session schema" do
                         (closeStore store)
                 ) `finally` cleanup
 
-    it "pages the active transcript around the latest replacement checkpoint" $
+    it "keeps compaction as a model checkpoint while paging visual history across it" $
         withSystemTempDirectory "ha" \stateDirectory -> do
             let
                 config = defaultManagedPostgresConfig stateDirectory ""
@@ -280,8 +280,8 @@ spec = describe "PostgreSQL session schema" do
                                         (toList page.sessionPageTurns)
                                         `shouldBe` [4, 5]
                                     page.sessionPageGenerationStart
-                                        `shouldBe` 2
-                                    page.sessionPageTotal `shouldBe` 4
+                                        `shouldBe` 0
+                                    page.sessionPageTotal `shouldBe` 6
                                     page.sessionPageHasOlder `shouldBe` True
                                     page.sessionPageHasNewer `shouldBe` False
                                 other ->
@@ -292,7 +292,7 @@ spec = describe "PostgreSQL session schema" do
                                     map (.storedTurnIndex)
                                         (toList page.sessionPageTurns)
                                         `shouldBe` [2, 3]
-                                    page.sessionPageHasOlder `shouldBe` False
+                                    page.sessionPageHasOlder `shouldBe` True
                                     page.sessionPageHasNewer `shouldBe` True
                                 other ->
                                     expectationFailure
@@ -309,12 +309,15 @@ spec = describe "PostgreSQL session schema" do
                                         ("unexpected after page: " <> show other)
                             loadSessionTurnsBefore pool "session-1" 2 2 >>= \case
                                 Right (Just page) -> do
-                                    toList page.sessionPageTurns `shouldBe` []
+                                    map (.storedTurnIndex)
+                                        (toList page.sessionPageTurns)
+                                        `shouldBe` [0, 1]
                                     page.sessionPageHasOlder `shouldBe` False
                                     page.sessionPageHasNewer `shouldBe` True
                                 other ->
                                     expectationFailure
-                                        ("unexpected empty before page: " <> show other)
+                                        ("unexpected pre-compact before page: "
+                                            <> show other)
                             loadSessionTurnsAfter pool "session-1" 5 2 >>= \case
                                 Right (Just page) -> do
                                     toList page.sessionPageTurns `shouldBe` []
@@ -333,6 +336,79 @@ spec = describe "PostgreSQL session schema" do
                                 other ->
                                     expectationFailure
                                         ("unexpected resume stats: " <> show other)
+                        )
+                        (closeStore store)
+                ) `finally` cleanup
+
+    it "clips visual history at an explicit reset, not at compaction" $
+        withSystemTempDirectory "ha" \stateDirectory -> do
+            let
+                config = defaultManagedPostgresConfig stateDirectory ""
+                cleanup = do
+                    _ <- stopManagedPostgres config
+                    pure ()
+            (openStore config >>= \case
+                Left err -> expectationFailure ("could not open store: " <> show err)
+                Right store ->
+                    finally
+                        (do
+                            let pool = trustedPool store
+                                now = read "2026-08-23 12:00:00 UTC"
+                                metadata = testMetadata now
+                                append effect user =
+                                    appendSessionTurn pool
+                                        ((testTurn now)
+                                            { sessionTurnUserText = user
+                                            , sessionTurnAssistantText = Just "done"
+                                            , sessionTurnEffect = effect
+                                            })
+                                        metadata
+                            createSession pool metadata
+                                `shouldReturn` Right True
+                            append TranscriptAppend "/before-1"
+                                `shouldReturn` Right True
+                            append TranscriptReplace "/compact"
+                                `shouldReturn` Right True
+                            append TranscriptAppend "/after-compact"
+                                `shouldReturn` Right True
+                            append TranscriptReset "/clear"
+                                `shouldReturn` Right True
+                            append TranscriptAppend "/after-clear"
+                                `shouldReturn` Right True
+                            loadActiveSession pool "session-1" >>= \case
+                                Right (Just stored) ->
+                                    map
+                                        (\storedTurn ->
+                                            storedTurn.storedTurn.sessionTurnUserText
+                                        )
+                                        (toList stored.storedTurns)
+                                        `shouldBe` ["/clear", "/after-clear"]
+                                other ->
+                                    expectationFailure
+                                        ("unexpected active session: " <> show other)
+                            loadRecentSessionTurns pool "session-1" 10 >>= \case
+                                Right (Just page) -> do
+                                    map
+                                        (\storedTurn ->
+                                            storedTurn.storedTurn.sessionTurnUserText
+                                        )
+                                        (toList page.sessionPageTurns)
+                                        `shouldBe` ["/clear", "/after-clear"]
+                                    page.sessionPageGenerationStart
+                                        `shouldBe` 3
+                                    page.sessionPageTotal `shouldBe` 2
+                                    page.sessionPageHasOlder `shouldBe` False
+                                other ->
+                                    expectationFailure
+                                        ("unexpected recent page: " <> show other)
+                            loadSessionTurnsBefore pool "session-1" 3 10 >>= \case
+                                Right (Just page) -> do
+                                    toList page.sessionPageTurns `shouldBe` []
+                                    page.sessionPageHasOlder `shouldBe` False
+                                other ->
+                                    expectationFailure
+                                        ("unexpected before-reset page: "
+                                            <> show other)
                         )
                         (closeStore store)
                 ) `finally` cleanup
@@ -396,6 +472,21 @@ testTurn now = SessionTurn
                     { storedContentPartExtraFields =
                         StoredOpaqueObject
                             "{\"provider_extension\":true}"
+                    }
+                , (emptyContentPart "input_image")
+                    { storedContentPartImageBinary =
+                        Just StoredBinaryData
+                            { storedBinaryDataMimeType = "image/png"
+                            , storedBinaryDataBytes = "png-bytes"
+                            }
+                    }
+                , (emptyContentPart "input_file")
+                    { storedContentPartFilename = Just "notes.txt"
+                    , storedContentPartFileBinary =
+                        Just StoredBinaryData
+                            { storedBinaryDataMimeType = "text/plain"
+                            , storedBinaryDataBytes = "file-bytes"
+                            }
                     }
                 ]
             , storedMessageRole = "developer"
@@ -527,6 +618,8 @@ emptyContentPart partType = StoredContentPart
     , storedContentPartFileUrl = Nothing
     , storedContentPartFilename = Nothing
     , storedContentPartImageUrl = Nothing
+    , storedContentPartFileBinary = Nothing
+    , storedContentPartImageBinary = Nothing
     , storedContentPartInputAudio = Nothing
     , storedContentPartPromptCacheBreakpoint = Nothing
     , storedContentPartAnnotations = Nothing

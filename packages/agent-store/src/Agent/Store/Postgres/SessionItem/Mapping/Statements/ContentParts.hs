@@ -4,6 +4,7 @@ module Agent.Store.Postgres.SessionItem.Mapping.Statements.ContentParts
     , loadTurnContentPartsStatement
     ) where
 
+import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Hasql.Decoders as Decoders
 import qualified Hasql.Encoders as Encoders
@@ -21,6 +22,10 @@ data ContentPartRow = ContentPartRow
     , contentPartRowFileUrl :: !(Maybe Text)
     , contentPartRowFilename :: !(Maybe Text)
     , contentPartRowImageUrl :: !(Maybe Text)
+    , contentPartRowFileDataMimeType :: !(Maybe Text)
+    , contentPartRowFileDataBytes :: !(Maybe ByteString)
+    , contentPartRowImageMimeType :: !(Maybe Text)
+    , contentPartRowImageBytes :: !(Maybe ByteString)
     , contentPartRowInputAudio :: !(Maybe Text)
     , contentPartRowPromptCacheBreakpoint :: !(Maybe Text)
     , contentPartRowAnnotations :: !(Maybe Text)
@@ -31,7 +36,8 @@ data ContentPartRow = ContentPartRow
 loadContentPartsStatement :: Statement Text [ContentPartRow]
 loadContentPartsStatement = mkStatement
     "SELECT part_type, text_value, refusal_text, detail, file_data, file_id,\
-    \ file_url, filename, image_url, input_audio_text,\
+    \ file_url, filename, image_url, file_data_mime_type, file_data_bytes,\
+    \ image_mime_type, image_bytes, input_audio_text,\
     \ prompt_cache_breakpoint_text, annotations_text, logprobs_text,\
     \ extra_fields_text\
     \ FROM harness.session_response_content_parts\
@@ -46,7 +52,9 @@ loadTurnContentPartsStatement = mkStatement
     "SELECT child.response_item_id::text, child.part_type,\
     \ child.text_value, child.refusal_text, child.detail, child.file_data,\
     \ child.file_id, child.file_url, child.filename, child.image_url,\
-    \ child.input_audio_text, child.prompt_cache_breakpoint_text,\
+    \ child.file_data_mime_type, child.file_data_bytes,\
+    \ child.image_mime_type, child.image_bytes, child.input_audio_text,\
+    \ child.prompt_cache_breakpoint_text,\
     \ child.annotations_text, child.logprobs_text, child.extra_fields_text\
     \ FROM harness.session_response_content_parts child\
     \ WHERE child.response_item_id = ANY (ARRAY(\
@@ -74,6 +82,10 @@ contentPartRowDecoder =
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.bytea)
+        <*> Decoders.column (Decoders.nullable Decoders.text)
+        <*> Decoders.column (Decoders.nullable Decoders.bytea)
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)
         <*> Decoders.column (Decoders.nullable Decoders.text)

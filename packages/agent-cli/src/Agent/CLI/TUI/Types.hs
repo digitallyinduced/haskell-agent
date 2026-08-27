@@ -18,6 +18,7 @@ module Agent.CLI.TUI.Types
     , PendingAppEvent(..)
     , PendingUiEvent(..)
     , ResumeOverlay(..)
+    , SyntaxHighlighterState(..)
     , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
@@ -29,7 +30,10 @@ import Agent.CLI.Input.Types (ReplLine)
 import Agent.CLI.Interrupt (CtrlCDecision)
 import Agent.CLI.Permission (PermissionChoice)
 import Agent.CLI.Resume (ResumeBrowser, ResumeEntry)
-import Agent.CLI.TUI.ImagePreview (TuiImagePreview)
+import Agent.CLI.TUI.ImagePreview
+    ( NativePreviewPlacement
+    , TuiImagePreview
+    )
 import Agent.CLI.TUI.History
     ( HistoryGeneration
     , HistoryPage
@@ -60,7 +64,9 @@ import qualified Graphics.Vty as V
 
 data Name
     = ConversationViewport
+    | ConversationViewportExtent
     | ConversationReserve
+    | ConversationImage !BlockId !Int
     | OverlayViewport
     | ConversationBlock !AgentTarget !BlockId
     | ConversationChunkCache
@@ -138,7 +144,7 @@ data AppEvent
     | AppDictationFinished !(Either Text Text)
     | AppAgentSnapshot !AgentTarget ![AgentEntry]
     | AppSetWindowTitle !Text
-    | AppSyntaxHighlighterLoaded !(Maybe SyntaxHighlighter)
+    | AppSyntaxHighlighterChanged
     | AppHistoryReset !HistoryPage
     | AppHistoryLoaded
         !HistoryRequest
@@ -147,7 +153,9 @@ data AppEvent
         !HistoryGeneration
         !HistoryTurn
         !HistoryCommit
+    | AppHistoryLiveStarted
     | AppConversationReflow
+    | AppSyncSubmittedImagePlacements
     | AppMotionTick
     | AppRecapPoll
     | AppStop
@@ -169,6 +177,17 @@ data FullscreenInput = FullscreenInput
     , fullscreenInputQueued :: !Bool
     , fullscreenInputDisplay :: !(Maybe Text)
     }
+
+-- | Runtime ownership of the syntax grammar cache. Keeping the active bit and
+-- cache in one 'IORef' makes focus-loss eviction atomic with worker updates:
+-- an XML load which finishes late cannot restore a cache after the terminal
+-- has moved into the background.
+data SyntaxHighlighterState
+    = SyntaxHighlighterUnloaded !Word64
+      -- ^ Enabled, but the lightweight syntax index has not been loaded yet.
+    | SyntaxHighlighterActive !Word64 !(Maybe SyntaxHighlighter)
+      -- ^ Loading was attempted; 'Nothing' records a failed initializer.
+    | SyntaxHighlighterInactive !Word64
 
 newtype FullscreenInputBuffer =
     FullscreenInputBuffer (TVar (Seq FullscreenInput))
@@ -206,6 +225,8 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeMotionTickQueued :: !(TVar Bool)
     , runtimeMotionMode :: !MotionMode
     , runtimeImagePreviews :: !(IORef [(ImageAttachment, TuiImagePreview)])
+    , runtimeSubmittedImagePlacements
+        :: !(IORef [NativePreviewPlacement])
     , runtimeImagePreviewRevision :: !(IORef Int)
     , runtimeImagePreviewVisible :: !(IORef Bool)
     , runtimeImagePreviewIdBase :: !Int
@@ -217,7 +238,7 @@ data FullscreenRuntime = FullscreenRuntime
     , runtimeSyntaxLoadFinished :: !(NominalDiffTime -> IO ())
     , runtimeSyntaxRequests :: !(TQueue Text)
     , runtimeSyntaxHighlighter
-        :: !(IORef (Maybe SyntaxHighlighter))
+        :: !(IORef SyntaxHighlighterState)
     , runtimeInitial :: !UiState
     , runtimeSessionActions :: !(IORef FullscreenSessionActions)
     , runtimeHistoryRequests :: !(TQueue HistoryRequest)
