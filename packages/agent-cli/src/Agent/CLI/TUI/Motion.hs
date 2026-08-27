@@ -48,7 +48,6 @@ import Agent.TUI.Motion
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
-import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import Data.Word (Word64)
 
@@ -190,16 +189,18 @@ completionFlashTransitions :: UiState -> UiState -> [BlockId]
 completionFlashTransitions previous next =
     [ block.blockId
     | block <- toList next.uiBlocks
-    , Just oldBlock <- [previousBlock block.blockId]
+    , Just oldBlock <- [Map.lookup block.blockId previousById]
     , blockWasLive oldBlock.blockState
     , block.blockState == BlockComplete
     , block.blockKind
         `elem` [BlockThinking, BlockTool, BlockTodo, BlockShell, BlockEdit]
     ]
   where
-    previousBlock ident =
-        Map.lookup ident previous.uiBlockIndices
-            >>= (`Seq.lookup` previous.uiBlocks)
+    previousById =
+        Map.fromList
+            [ (block.blockId, block)
+            | block <- toList previous.uiBlocks
+            ]
     blockWasLive blockState =
         blockState `elem` [BlockRunning, BlockStreaming]
 

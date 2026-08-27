@@ -33,7 +33,6 @@ module Agent.CLI.TUI.History
     , historyWindowSetAnchors
     , historyWindowSetGeneration
     , historyWindowBlock
-    , historyWindowCursorForBlock
     , setHistoryWindowTurns
     , historyWindowTurn
     , historyWindowVisible
@@ -95,9 +94,6 @@ data HistoryWindow = HistoryWindow
     , historyWindowTurns :: !(Seq HistoryTurn)
     , historyWindowTurnsByCursor :: !(Map HistoryCursor HistoryTurn)
     , historyWindowBlocksById :: !(Map BlockId UiBlock)
-    -- | Indexed membership and durable-turn lookup for retained blocks
-    -- (O(log n) with the strict map, rather than a full window scan).
-    , historyWindowBlockCursors :: !(Map BlockId HistoryCursor)
     , historyWindowHasOlder :: !Bool
     , historyWindowHasNewer :: !Bool
     , historyWindowMaxTurns :: !Int
@@ -128,7 +124,6 @@ emptyHistoryWindow generation maxTurns maxBlocks maxBytes =
         , historyWindowTurns = Seq.empty
         , historyWindowTurnsByCursor = Map.empty
         , historyWindowBlocksById = Map.empty
-        , historyWindowBlockCursors = Map.empty
         , historyWindowHasOlder = False
         , historyWindowHasNewer = False
         , historyWindowMaxTurns = max 1 maxTurns
@@ -153,12 +148,6 @@ setHistoryWindowTurns turns window =
         , historyWindowBlocksById =
             Map.fromList
                 [ (block.blockId, block)
-                | turn <- toList turns
-                , block <- toList turn.historyTurnBlocks
-                ]
-        , historyWindowBlockCursors =
-            Map.fromListWith (flip const)
-                [ (block.blockId, turn.historyTurnCursor)
                 | turn <- toList turns
                 , block <- toList turn.historyTurnBlocks
                 ]
@@ -204,13 +193,6 @@ historyWindowBlock :: BlockId -> HistoryWindow -> Maybe UiBlock
 historyWindowBlock ident window =
     Map.lookup ident window.historyWindowBlocksById
 
-historyWindowCursorForBlock
-    :: BlockId
-    -> HistoryWindow
-    -> Maybe HistoryCursor
-historyWindowCursorForBlock ident window =
-    Map.lookup ident window.historyWindowBlockCursors
-
 historyWindowSetAnchors
     :: Maybe HistoryCursor
     -> Maybe HistoryCursor
@@ -224,11 +206,11 @@ historyWindowSetAnchors visible selected window =
   where
     keepLoaded cursor =
         cursor >>= \value ->
-            if Map.member value loaded
+            if value `Set.member` loaded
                 then Just value
                 else Nothing
 
-    loaded = window.historyWindowTurnsByCursor
+    loaded = Set.fromList (toList (historyWindowCursors window))
 
 -- | Switch to a new provider/session generation and discard all materialised
 -- blocks.  Budgets are intentionally retained across the switch.
