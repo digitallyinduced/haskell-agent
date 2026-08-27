@@ -159,16 +159,3 @@ test-suite agent-openai-test
                     , wai
                     , warp
 
-benchmark openai-json-decoding-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          JsonDecoding.hs
-    ghc-options:      -O2
-                      -rtsopts
-    build-depends:    base >= 4.14 && < 5
-                    , agent-openai
-                    , agent-responses-types
-                    , aeson
-                    , bytestring
-                    , text
