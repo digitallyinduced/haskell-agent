@@ -920,4 +920,3 @@ closeMcpFleet fleet =
                 clients <- Map.elems <$> readTVarIO fleet.mcpFleetClients
                 forConcurrentlyBounded_ 8 closeMcpClient clients
                 pure True
-

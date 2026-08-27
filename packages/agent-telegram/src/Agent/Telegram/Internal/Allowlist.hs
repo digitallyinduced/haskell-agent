@@ -365,4 +365,3 @@ persistAllowedUserIdsToConfig runtime = do
                         (Text.pack (displayException err))
                 ]
         Right () -> pure ()
-

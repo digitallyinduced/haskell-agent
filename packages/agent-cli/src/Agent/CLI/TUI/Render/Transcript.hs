@@ -576,4 +576,3 @@ drawQuickStartPanel state =
                 , withAttr Theme.mutedAttr (txt command)
                 , txt "  "
                 ]
-

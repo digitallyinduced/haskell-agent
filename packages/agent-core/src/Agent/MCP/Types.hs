@@ -280,4 +280,3 @@ emptyInputSchema = object
     , "properties" .= object []
     , "additionalProperties" .= False
     ]
-

@@ -897,4 +897,3 @@ newSubagentId registry = do
         hex = showHex (micros `mod` 0x100000000) ""
         pad = replicate (8 - length hex) '0' <> hex
     pure $ SubagentId $ Text.pack ("agent-" <> pad <> "-" <> show n)
-

@@ -537,4 +537,3 @@ closeMcpSupervisor supervisor = do
             void (waitCatch worker))
         pending
     forConcurrentlyBounded_ 4 closeMcpFleet fleets
-

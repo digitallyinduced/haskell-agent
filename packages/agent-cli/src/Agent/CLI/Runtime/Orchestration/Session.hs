@@ -638,7 +638,7 @@ runAgentSession
                         transition
                         transportModel
                         unavailableProviders
-        
+
 -- | On Ctrl-C, print a copy-pasteable --resume line when a session exists.
 withInterruptResume
     :: Maybe FullscreenRuntime
@@ -679,4 +679,3 @@ printResumeHint progName = \case
                 color <- resolveColor stderr
                 putTextLn stderr
                     (roleMuted color (resumeHint progName handle.sessionMeta.metaId))
-

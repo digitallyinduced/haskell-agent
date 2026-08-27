@@ -980,4 +980,3 @@ supportedTelegramReactions = Set.fromList
     , "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷"
     , "😡"
     ]
-

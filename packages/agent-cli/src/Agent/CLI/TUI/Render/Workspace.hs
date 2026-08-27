@@ -723,4 +723,3 @@ agentEntryWindow count selected entries
             min
                 (selectedIndex - count `div` 2)
                 (length entries - count)
-

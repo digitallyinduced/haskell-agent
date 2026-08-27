@@ -510,4 +510,3 @@ wrapNativePreviewVty runtime vty
             , V.shutdown =
                 clearNative `finally` V.shutdown vty
             }
-

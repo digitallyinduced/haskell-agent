@@ -679,5 +679,3 @@ telegramTurnUserId runtime key
             if Set.size allowedUsers == 1
                 then Set.findMin allowedUsers
                 else 0
-
-

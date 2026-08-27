@@ -833,4 +833,3 @@ handleCtrlC = do
         ForceExit ->
             liftIO (throwIO UserInterrupt)
     pure decision
-

@@ -429,4 +429,3 @@ initialFullscreenAppState runtime history initialAgent initialAgents initialCloc
         , appSyntaxRequested = Set.empty
         , appTerminalFocus = TerminalFocusUnknown
         }
-

@@ -352,4 +352,3 @@ data Persistence
 data PersistenceState
     = PersistencePending SessionCreate Text OsPath
     | PersistenceActive SessionHandle
-

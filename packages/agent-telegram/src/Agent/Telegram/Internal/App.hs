@@ -545,4 +545,3 @@ processIsAlive pid =
     try @_ @SomeException (signalProcess nullSignal pid) >>= \case
         Left _ -> pure False
         Right () -> pure True
-

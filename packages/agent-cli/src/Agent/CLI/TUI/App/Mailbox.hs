@@ -308,4 +308,3 @@ pendingUiEvent = \case
         UiLoop (TextDelta (Text.concat (toList deltas)))
     PendingReasoningDeltas deltas ->
         UiLoop (ReasoningDelta (Text.concat (toList deltas)))
-

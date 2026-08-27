@@ -738,4 +738,3 @@ trackCredentialAccount accountRef accountIdRef selectionRef resolveLabel provide
                     writeIORef selectionRef credential.accountId
                 resolveLabel credential >>= writeIORef accountRef
                 pure (Right credential)
-

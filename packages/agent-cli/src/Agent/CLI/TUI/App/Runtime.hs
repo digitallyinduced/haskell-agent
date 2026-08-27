@@ -900,4 +900,3 @@ allocateNativePreviewImageIdBase = do
     let availableBases = 4_294_967_293 :: Integer
     pure $
         fromInteger ((micros * 65_537 + pid) `mod` availableBases) + 1
-

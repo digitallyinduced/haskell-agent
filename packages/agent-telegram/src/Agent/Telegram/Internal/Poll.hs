@@ -631,4 +631,3 @@ rekeyPendingAction updateId = \case
         RunPendingMediaTurn pending { pendingMediaUpdateId = updateId }
     LeaveUnauthorizedChat pending ->
         LeaveUnauthorizedChat pending { pendingLeaveUpdateId = updateId }
-

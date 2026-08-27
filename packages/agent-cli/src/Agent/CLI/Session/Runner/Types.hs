@@ -35,4 +35,3 @@ data SessionRunnerContinuation = SessionRunnerContinuation
     , runnerRunSessionRecap :: Bool -> SessionEnv -> RecapKind -> IO ()
     , runnerRunSessionTurnSummary :: SessionEnv -> IO ()
     }
-

@@ -348,4 +348,3 @@ drawComposerStatus state =
     maybeToList = \case
         Nothing -> []
         Just value -> [value]
-

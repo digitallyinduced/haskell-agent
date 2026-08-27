@@ -801,4 +801,3 @@ blockFlashing :: AppState -> AgentTarget -> UiBlock -> Bool
 blockFlashing state target block =
     target == AgentRoot
         && Map.member block.blockId state.appCompletionFlashes
-

@@ -641,4 +641,3 @@ drawPromptActivity state
         | ui.uiCompletionRemainingMillis > 0 =
             maybe "" formatTokensPerSecond (uiTokensPerSecond ui)
         | otherwise = ""
-
