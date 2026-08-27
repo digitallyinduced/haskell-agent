@@ -7,6 +7,7 @@ module Agent.ToolArgs
     , extractMaybeInt
     , extractMaybeBool
     , objectArgs
+    , objectArgsExact
     , objectArgsLenient
     , reqText
     , reqTextList
@@ -16,6 +17,7 @@ module Agent.ToolArgs
     , optIntOrString
     , readExactInt
     , optBool
+    , optBoolStrict
     , intOr
     , optList
     , stripAesonPrefix
@@ -105,6 +107,26 @@ objectArgsLenient :: (Object -> Parser a) -> Value -> Parser a
 objectArgsLenient f (Object obj) = f obj
 objectArgsLenient f _            = f KeyMap.empty
 
+-- | 'objectArgs' that also rejects any key outside @allowed@. Use for
+-- protocol-style argument records where an unexpected field indicates a
+-- misunderstanding rather than harmless extra data.
+objectArgsExact :: [Text] -> (Object -> Parser a) -> Value -> Parser a
+objectArgsExact allowed f = objectArgs \obj -> do
+    rejectUnknownKeys allowed obj
+    f obj
+
+rejectUnknownKeys :: [Text] -> Object -> Parser ()
+rejectUnknownKeys allowed obj =
+    case filter (`notElem` allowed) present of
+        [] -> pure ()
+        unexpected ->
+            failText $
+                "Unexpected parameter"
+                    <> (if length unexpected == 1 then ": " else "s: ")
+                    <> Text.intercalate ", " unexpected
+  where
+    present = map Key.toText (KeyMap.keys obj)
+
 -- | Required string. Mirrors 'extractText'.
 reqText :: Object -> Text -> Parser Text
 reqText obj key =
@@ -175,6 +197,15 @@ readExactInt value = do
 -- | Optional boolean accepting stringy forms.
 optBool :: Object -> Text -> Parser (Maybe Bool)
 optBool obj key = pure (look obj key >>= boolValue)
+
+-- | Optional boolean that accepts only a real JSON boolean. Protocol-style
+-- arguments should fail on stringy forms instead of guessing.
+optBoolStrict :: Object -> Text -> Parser (Maybe Bool)
+optBoolStrict obj key = case look obj key of
+    Nothing -> pure Nothing
+    Just Null -> pure Nothing
+    Just (Bool value) -> pure (Just value)
+    Just _ -> failText ("Expected boolean for key: " <> key)
 
 -- | Exact, bounded integer with a default for an absent or null field.
 intOr :: Object -> Text -> Int -> Parser Int

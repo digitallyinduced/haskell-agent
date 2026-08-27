@@ -114,8 +114,18 @@ import Agent.CLI.Project
       resolveProjectRoot,
       saveRememberedModel,
       withInheritedLastModel )
+import Agent.CLI.CodeModeRuntime
+    ( CodeModeSessionRuntime(..)
+    , CodexCatalogSession(..)
+    , codeModeSessionRuntimeFor
+    , loadCodexCatalogModelInfo
+    )
 import Agent.CLI.Prompt
-    ( subscriptionSubagentModelGuidance, systemPromptForTools )
+    ( codexEnvironmentContext
+    , subscriptionSubagentModelGuidance
+    , systemPromptForCatalogModel
+    , systemPromptForTools
+    )
 import Agent.GrokBuild.Dialect.Task (grokRootChildModels)
 import Agent.CLI.PromptHooks
     ( fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
@@ -266,7 +276,8 @@ import Agent.CLI.Terminal
       reportTerminalCwd,
       resolveColor,
       TerminalCapabilities(terminalNativeProgress) )
-import Agent.CLI.Tools ( schemasFromAppTools )
+import Agent.CLI.Tools
+    ( schemasFromAppTools, schemasFromAppToolsCodeMode )
 import Agent.CLI.Turn ()
 import Agent.CLI.Usage ()
 import Agent.CLI.WebFetch
@@ -387,7 +398,8 @@ import Control.Exception.Safe
       onException,
       throwIO,
       try )
-import Control.Monad ( forM_, unless, void, when )
+import Control.Monad ( forM_, join, unless, void, when )
+import Data.Functor ( (<&>) )
 import Data.IORef
     ( IORef,
       modifyIORef',
@@ -1927,6 +1939,7 @@ runAgentInitializedWithLock
     bashEnabledRef <- newIORef options.optBash
     skillsRef <- newIORef (SkillCatalog [] [])
     skillInvocationsRef <- newIORef []
+    codeModeCloseRef <- newIORef (pure ())
     let claimCurrentSession handle = do
             let desired = sessionLockPath handle.sessionDir
             readIORef activeSessionLock >>= \case
@@ -2047,7 +2060,9 @@ runAgentInitializedWithLock
                                         `finally`
                                             (coding.codingClose
                                                 `finally`
-                                                    cleanupScratch))))
+                                                    (join (readIORef codeModeCloseRef)
+                                                        `finally`
+                                                            cleanupScratch)))))
     flip finally closeAll do
         case
                 mcpToolCollision
@@ -2065,16 +2080,58 @@ runAgentInitializedWithLock
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
-        let instructions =
-                systemPromptForTools
-                    dialect
-                    (map (.appToolName) tools)
-                    cwd
-                    (Just sessionTmp)
-                    today
-                    (isOneShot options)
+        -- Catalog models: per-model instructions template and, when the
+        -- catalog selects code_mode_only, the exec/wait tool surface. The
+        -- offline lookup never blocks startup on the network.
+        codexModelInfo <-
+            loadCodexCatalogModelInfo stateDirectory provider dialect model
+        codeModeRuntime <-
+            codeModeSessionRuntimeFor codexModelInfo tools >>= \case
+                Left err -> do
+                    reportStartupWarning startup
+                        ("code mode unavailable; falling back to direct tools: "
+                            <> err)
+                    pure Nothing
+                Right runtime -> pure runtime
+        writeIORef codeModeCloseRef
+            (maybe (pure ()) (.codeModeClose) codeModeRuntime)
+        let catalogSession = codexModelInfo <&> \info ->
+                CodexCatalogSession
+                    { catalogInstructionsFor = \toolNames sessionTmpDir ->
+                        systemPromptForCatalogModel
+                            dialect
+                            info
+                            toolNames
+                            sessionTmpDir
+                    , catalogEnvironmentContext =
+                        codexEnvironmentContext cwd today Nothing Nothing
+                    }
+            instructions = case catalogSession of
+                Just catalog ->
+                    catalog.catalogInstructionsFor
+                        (map (.appToolName) tools)
+                        (Just sessionTmp)
+                Nothing ->
+                    systemPromptForTools
+                        dialect
+                        (map (.appToolName) tools)
+                        cwd
+                        (Just sessionTmp)
+                        today
+                        (isOneShot options)
+            wireSchemas = case codeModeRuntime of
+                Just codeMode ->
+                    schemasFromAppToolsCodeMode
+                        dialect
+                        codeMode.codeModeWireTools
+                Nothing -> schemasFromAppTools dialect tools
+            environmentContextBlock =
+                (.catalogEnvironmentContext) <$> catalogSession
+            registryTools =
+                allTools
+                    <> maybe [] (.codeModeWireTools) codeModeRuntime
             params = requestParams provider model instructions
-                (schemasFromAppTools dialect tools) effortText
+                wireSchemas effortText
             initialItems = maybe [] (foldSessionItems . snd) resumed
             initialTurns = maybe [] snd resumed
             resumeNeedsFreshContext =
@@ -2166,6 +2223,7 @@ runAgentInitializedWithLock
                 (if refreshDialectContext || resumeNeedsFreshContext
                     then Nothing
                     else initialPrevious)
+                environmentContextBlock
         -- Fullscreen sessions load skills after Brick has taken over the
         -- terminal, so filesystem discovery cannot delay the first frame.
         -- Minimal and one-shot sessions still initialize them synchronously
@@ -2219,7 +2277,7 @@ runAgentInitializedWithLock
                                 , provider
                                 , dialect
                                 , policy
-                                , allTools
+                                , allTools = registryTools
                                 , suspendGhci = coding.codingSuspendGhci
                                 , grokRuntime = coding.codingGrokRuntime
                                 , mcpRegistrations =
@@ -2267,6 +2325,9 @@ runAgentInitializedWithLock
                                 , selectAccount = sessionSelectAccount
                                 , onPersisted = claimCurrentSession
                                 , compactRunner = sessionCompactRunner
+                                , codeModeNestedSlot =
+                                    (.codeModeNestedSlot) <$> codeModeRuntime
+                                , codexCatalogSession = catalogSession
                                 }
                     withStartupAvailability action
                         | shouldProbeAtStartup =

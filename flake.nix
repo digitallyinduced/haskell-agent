@@ -30,6 +30,7 @@
                     include = [
                         "app"
                         "benchmark"
+                        "data"
                         "src"
                         "test"
                         "agent-openai.cabal"
@@ -138,6 +139,7 @@
                 agentCoreSource = nix-filter.lib {
                     root = ./packages/agent-core;
                     include = [
+                        "data"
                         "src"
                         "test"
                         "agent-core.cabal"
@@ -312,6 +314,7 @@
                             })
                             [
                                 pkgs.git
+                                pkgs.nodejs_22
                                 pkgs.ripgrep
                             ]);
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
@@ -377,6 +380,7 @@
                             })
                             [
                                 pkgs.git
+                                pkgs.nodejs_22
                                 pkgs.postgresql_18
                             ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
@@ -423,6 +427,7 @@
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.ffmpeg
+                                                pkgs.nodejs_22
                                                 pkgs.postgresql_18
                                                 haskellPackages.ghc
                                             ]}"
@@ -635,6 +640,7 @@
                         ++ (with pkgs; [
                             cabal2nix
                             ffmpeg
+                            nodejs_22
                             postgresql_18
                             ripgrep
                         ])

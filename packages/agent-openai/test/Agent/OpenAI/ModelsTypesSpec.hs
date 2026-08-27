@@ -1,0 +1,231 @@
+module Agent.OpenAI.ModelsTypesSpec (spec) where
+
+import Agent.OpenAI.Models
+import qualified Agent.Tools.CodeMode.Tool as CoreTools
+import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Text as Text
+import qualified Data.Vector as Vector
+import Test.Hspec
+
+spec :: Spec
+spec = do
+    describe "bundled Codex model catalog" do
+        it "loads the current upstream catalog and selects Sol by priority" do
+            catalog <- loadBundledModelsOrThrow
+            length catalog.models `shouldBe` 10
+            defaultModelForCatalog True catalog
+                `shouldBe` Just "gpt-5.6-sol"
+            KeyMap.keys catalog.extraFields `shouldBe` []
+            let unmodeledFields =
+                    [ ( KeyMap.keys model.extraFields
+                      , maybe []
+                            (KeyMap.keys . (.extraFields))
+                            model.modelMessages
+                      )
+                    | model <- catalog.models
+                    ]
+            unmodeledFields `shouldBe` replicate 10 ([], [])
+            decodeOrFail (Aeson.toJSON catalog) `shouldBe` catalog
+
+        it "serializes legacy base instructions for older Codex clients" do
+            catalog <- loadBundledModelsOrThrow
+            case Aeson.toJSON catalog of
+                Aeson.Object response ->
+                    case KeyMap.lookup "models" response of
+                        Just (Aeson.Array models) ->
+                            all hasLegacyBaseInstructions (Vector.toList models)
+                                `shouldBe` True
+                        _ -> expectationFailure "models must be an array"
+                _ -> expectationFailure "catalog must be an object"
+
+        it "keeps hidden Daybreak models for lookup but excludes them from the picker" do
+            catalog <- loadBundledModelsOrThrow
+            map (.slug) catalog.models `shouldContain`
+                [ "gpt-daybreak-blue-latest"
+                , "gpt-daybreak-red-latest"
+                ]
+            let pickerModels = map (.model) (pickerModelPresets True catalog)
+            pickerModels `shouldBe`
+                [ "gpt-5.6-sol"
+                , "gpt-5.6-terra"
+                , "gpt-5.6-luna"
+                , "gpt-5.5"
+                , "gpt-5.2"
+                ]
+
+        it "exposes current 5.6 dialect selectors and reasoning defaults" do
+            catalog <- loadBundledModelsOrThrow
+            let sol = modelInfoForSlug "gpt-5.6-sol" catalog
+                terra = modelInfoForSlug "gpt-5.6-terra" catalog
+                luna = modelInfoForSlug "gpt-5.6-luna" catalog
+            sol.useResponsesLite `shouldBe` True
+            toolModeForInfo CoreTools.ConventionalToolMode sol
+                `shouldBe` CoreTools.CodeOnlyToolMode
+            sol.multiAgentVersion `shouldBe` Just MultiAgentV2
+            defaultReasoningEffortForInfo sol
+                `shouldBe` Just ReasoningEffortLow
+            defaultVerbosityForInfo sol `shouldBe` Just VerbosityLow
+            defaultVerbosityForInfo (sol { supportVerbosity = False })
+                `shouldBe` Nothing
+            modelSupportsReasoningEffort sol ReasoningEffortUltra
+                `shouldBe` True
+            terra.defaultReasoningLevel `shouldBe` Just ReasoningEffortMedium
+            terra.multiAgentVersion `shouldBe` Just MultiAgentV2
+            modelPresetSupportsFastMode (modelPresetFromInfo terra)
+                `shouldBe` True
+            modelServiceTierForRequest terra (Just "priority")
+                `shouldBe` Just "priority"
+            modelServiceTierForRequest terra (Just "default")
+                `shouldBe` Nothing
+            luna.defaultReasoningLevel `shouldBe` Just ReasoningEffortMedium
+            luna.multiAgentVersion `shouldBe` Just MultiAgentV1
+            modelSupportsReasoningEffort luna ReasoningEffortUltra
+                `shouldBe` False
+            let legacy = modelInfoForSlug "gpt-5.5" catalog
+            toolModeForInfo CoreTools.CodeToolMode legacy
+                `shouldBe` CoreTools.CodeToolMode
+            modelPresetForInfo sol `shouldBe` modelPresetFromInfo sol
+            defaultReasoningSummaryForInfo sol
+                `shouldBe` Just ReasoningSummaryNone
+            defaultReasoningSummaryForInfo
+                (sol { supportsReasoningSummaryParameter = False })
+                `shouldBe` Nothing
+
+        it "marks unknown models as fallback metadata with upstream instructions" do
+            let unknown = fallbackModelInfo "future-unknown"
+            unknown.usedFallbackModelMetadata `shouldBe` True
+            renderModelInstructions ModelPersonalityDefault unknown
+                `shouldBe` fallbackModelInstructions
+            Text.length fallbackModelInstructions
+                `shouldBe` 20_751
+            fallbackModelInstructions `shouldSatisfy`
+                Text.isPrefixOf
+                    "You are a coding agent running in the Codex CLI"
+            fallbackModelInstructions `shouldSatisfy`
+                Text.isInfixOf "# How you work"
+            fallbackModelInstructions `shouldSatisfy`
+                Text.isInfixOf "# AGENTS.md spec"
+
+        it "projects upgrade metadata into picker semantics" do
+            catalog <- loadBundledModelsOrThrow
+            let preset = modelPresetFromInfo
+                    (modelInfoForSlug "gpt-5.4" catalog)
+            preset.upgrade `shouldSatisfy` \case
+                Just upgrade ->
+                    upgrade.upgradeId == "gpt-5.6-terra"
+                        && upgrade.migrationConfigKey == "gpt-5.4"
+                Nothing -> False
+
+    describe "forward-compatible decoding" do
+        it "preserves unknown model fields and enum values" do
+            let encoded = Aeson.object
+                    [ "models" Aeson..=
+                        [ Aeson.object
+                            [ "slug" Aeson..= ("future-model" :: String)
+                            , "display_name" Aeson..= ("Future" :: String)
+                            , "shell_type" Aeson..= ("quantum_shell" :: String)
+                            , "tool_mode" Aeson..= ("future_mode" :: String)
+                            , "visibility" Aeson..= ("preview" :: String)
+                            , "base_instructions" Aeson..= ("future prompt" :: String)
+                            , "future_capability" Aeson..= Aeson.object
+                                ["enabled" Aeson..= True]
+                            ]
+                        ]
+                    , "catalog_generation" Aeson..= (42 :: Int)
+                    ]
+                decoded = decodeOrFail encoded :: ModelsResponse
+                model = modelInfoForSlug "future-model" decoded
+                roundtripped =
+                    decodeOrFail (Aeson.toJSON decoded) :: ModelsResponse
+                roundtrippedModel =
+                    modelInfoForSlug "future-model" roundtripped
+            model.shellType `shouldBe` ShellToolOther "quantum_shell"
+            model.toolMode `shouldBe` Just (ToolModeOther "future_mode")
+            model.visibility `shouldBe` ModelVisibilityOther "preview"
+            KeyMap.lookup "future_capability" model.extraFields
+                `shouldBe` KeyMap.lookup
+                    "future_capability"
+                    roundtrippedModel.extraFields
+            KeyMap.lookup "catalog_generation" decoded.extraFields
+                `shouldBe` KeyMap.lookup
+                    "catalog_generation"
+                    roundtripped.extraFields
+
+        it "accepts legacy shell aliases as unified exec" do
+            map (decodeOrFail . Aeson.String)
+                ["default", "local", "shell_command", "unified_exec"]
+                `shouldBe` replicate 4 ShellToolUnifiedExec
+
+        it "promotes legacy base instructions into an incomplete messages object" do
+            let model = decodeOrFail (Aeson.object
+                    [ "slug" Aeson..= ("legacy-model" :: String)
+                    , "base_instructions" Aeson..= ("legacy prompt" :: String)
+                    , "model_messages" Aeson..= Aeson.object
+                        [ "instructions_template" Aeson..= Aeson.Null
+                        , "approvals" Aeson..= Aeson.object
+                            ["never" Aeson..= ("approval prompt" :: String)]
+                        ]
+                    ]) :: ModelInfo
+            renderModelInstructions ModelPersonalityDefault model
+                `shouldBe` "legacy prompt"
+            (model.modelMessages >>= (.approvals) >>= (.never))
+                `shouldBe` Just "approval prompt"
+
+        it "rejects endpoint models without any instruction template" do
+            Aeson.fromJSON @ModelInfo
+                (Aeson.object
+                    [ "slug" Aeson..= ("missing-prompt" :: String)
+                    ])
+                `shouldSatisfy` \case
+                    Aeson.Error message ->
+                        "missing both base_instructions"
+                            `Text.isInfixOf` Text.pack message
+                    Aeson.Success _ -> False
+
+        it "treats an instruction template as literal when variables are absent" do
+            let model = decodeOrFail (Aeson.object
+                    [ "slug" Aeson..= ("literal-model" :: String)
+                    , "model_messages" Aeson..= Aeson.object
+                        [ "instructions_template" Aeson..=
+                            ("keep {{ personality }} literal" :: String)
+                        ]
+                    ]) :: ModelInfo
+            renderModelInstructions ModelPersonalityFriendly model
+                `shouldBe` "keep {{ personality }} literal"
+
+        it "uses longest-prefix and one-segment namespace matching" do
+            let catalog = ModelsResponse
+                    { models =
+                        [ fallbackModelInfo "gpt-5"
+                        , fallbackModelInfo "gpt-5.6"
+                        ]
+                    , extraFields = KeyMap.empty
+                    }
+            (.slug) <$> findModelInfo "gpt-5.6-2026-08-23" catalog
+                `shouldBe` Just "gpt-5.6"
+            (.slug) <$> findModelInfo "openai/gpt-5.6-latest" catalog
+                `shouldBe` Just "gpt-5.6"
+            findModelInfo "invalid/name/with/slashes" catalog
+                `shouldBe` Nothing
+
+    describe "model-owned instructions" do
+        it "renders personality variables only when the template supports them" do
+            catalog <- loadBundledModelsOrThrow
+            let model = modelInfoForSlug "gpt-5.5" catalog
+            modelSupportsPersonality model `shouldBe` True
+            renderModelInstructions ModelPersonalityPragmatic model
+                `shouldSatisfy` Text.isInfixOf "You are a deeply pragmatic"
+
+decodeOrFail :: Aeson.FromJSON value => Aeson.Value -> value
+decodeOrFail value =
+    case Aeson.fromJSON value of
+        Aeson.Error err -> error err
+        Aeson.Success decoded -> decoded
+
+hasLegacyBaseInstructions :: Aeson.Value -> Bool
+hasLegacyBaseInstructions (Aeson.Object object) =
+    case KeyMap.lookup "base_instructions" object of
+        Just (Aeson.String instructions) -> not (Text.null instructions)
+        _ -> False
+hasLegacyBaseInstructions _ = False

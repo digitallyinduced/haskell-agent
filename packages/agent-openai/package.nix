@@ -3,7 +3,8 @@
 , case-insensitive, containers, directory, exceptions, filepath
 , HsOpenSSL, hspec, http-client, http-conduit, http-streams
 , http-types, io-streams, lib, network-uri, retry, safe-exceptions
-, temporary, text, time, unix, vector, wai, warp, websockets, wuss
+, template-haskell, temporary, text, time, unix, vector, wai, warp
+, websockets, wuss
 }:
 mkDerivation {
   pname = "agent-openai";
@@ -11,11 +12,13 @@ mkDerivation {
   src = ./.;
   isLibrary = true;
   isExecutable = true;
+  enableSeparateDataOutput = true;
   libraryHaskellDepends = [
     aeson agent-core agent-responses agent-responses-types base
     bytestring containers directory exceptions filepath HsOpenSSL
     http-client http-conduit http-streams io-streams network-uri retry
-    safe-exceptions text time vector websockets wuss
+    safe-exceptions template-haskell text time unix vector websockets
+    wuss
   ];
   executableHaskellDepends = [
     agent-core base directory filepath text

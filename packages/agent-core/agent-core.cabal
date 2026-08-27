@@ -13,6 +13,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 extra-source-files: README.md
+data-files:         data/code-mode/worker.mjs
 
 common common-opts
     default-language: Haskell2010
@@ -66,6 +67,11 @@ library
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
+                    , Agent.Tools.CodeMode
+                    , Agent.Tools.CodeMode.Client
+                    , Agent.Tools.CodeMode.Host
+                    , Agent.Tools.CodeMode.Protocol
+                    , Agent.Tools.CodeMode.Tool
                     , Agent.Tools.Dangerous
                     , Agent.Tools.FileSystem
                     , Agent.Tools.FileSystem.GitIgnore
@@ -85,6 +91,8 @@ library
                     , Agent.Tools.ShellReadOnly
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
+    other-modules:    Paths_agent_core
+    autogen-modules:  Paths_agent_core
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
                     , agent-process >= 0.1 && < 0.2
@@ -103,6 +111,7 @@ library
                     , safe-exceptions
                     , scientific
                     , stm
+                    , template-haskell
                     , text
                     , time
                     , tls
@@ -175,6 +184,8 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.Auth.JWTSpec
                     , Agent.CancelSpec
+                    , Agent.Tools.CodeMode.HostSpec
+                    , Agent.Tools.CodeMode.ProtocolSpec
                     , Agent.ConcurrentSpec
                     , Agent.DialectSpec
                     , Agent.ErrorSpec

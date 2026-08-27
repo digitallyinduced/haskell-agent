@@ -3,6 +3,7 @@ module Agent.CLI.Tools
     ( requireToolRegistry
     , lookupAppTool
     , schemasFromAppTools
+    , schemasFromAppToolsCodeMode
     , hostedSearchToolNames
     , hostedSearchToolCollisions
     , webSearchTool
@@ -128,6 +129,14 @@ schemaFromAppTool dialect tool =
             case dialectFunctionSchemaStyle dialect of
                 NoFunctionSchemas -> Nothing
                 _ -> Just (applyPatchCustomTool tool.appToolName tool.appToolDescription)
+        FreeformGrammarSchema syntax definition ->
+            case dialectFunctionSchemaStyle dialect of
+                NoFunctionSchemas -> Nothing
+                _ -> Just (grammarCustomTool
+                    tool.appToolName
+                    tool.appToolDescription
+                    syntax
+                    definition)
   where
     buildSchema build parameters =
         let (name, description, projectedParameters) =
@@ -202,16 +211,31 @@ appToolJsonParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> parameters
     RawJsonFunctionSchema _ -> []
     FreeformApplyPatchSchema -> []
+    FreeformGrammarSchema _ _ -> []
 
 -- | Codex registers apply_patch as a Responses custom tool with a Lark grammar.
 applyPatchCustomTool :: Text -> Text -> ResponseTool
-applyPatchCustomTool name description = knownResponseTool ToolCustom $
-    KeyMap.fromList
-        [ (Key.fromText "name", Aeson.String name)
-        , (Key.fromText "description", Aeson.String description)
-        , (Key.fromText "format", Aeson.object
-            [ "type" .= ("grammar" :: Text)
-            , "syntax" .= ("lark" :: Text)
-            , "definition" .= applyPatchGrammar
-            ])
-        ]
+applyPatchCustomTool name description =
+    grammarCustomTool name description "lark" applyPatchGrammar
+
+-- | Freeform custom tool with an explicit provider grammar, matching the
+-- Codex wire shape for tools such as code-mode @exec@.
+grammarCustomTool :: Text -> Text -> Text -> Text -> ResponseTool
+grammarCustomTool name description syntax definition =
+    knownResponseTool ToolCustom $
+        KeyMap.fromList
+            [ (Key.fromText "name", Aeson.String name)
+            , (Key.fromText "description", Aeson.String description)
+            , (Key.fromText "format", Aeson.object
+                [ "type" .= ("grammar" :: Text)
+                , "syntax" .= syntax
+                , "definition" .= definition
+                ])
+            ]
+
+-- | Code-mode tool surface: the @exec@/@wait@ entry points first, hosted
+-- search tools last, matching the upstream Codex wire order.
+schemasFromAppToolsCodeMode :: Dialect -> [AppTool] -> [ResponseTool]
+schemasFromAppToolsCodeMode dialect tools =
+    mapMaybe (schemaFromAppTool dialect) tools
+        ++ hostedSearchTools dialect

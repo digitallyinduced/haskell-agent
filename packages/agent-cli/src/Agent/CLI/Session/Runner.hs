@@ -6,6 +6,10 @@ module Agent.CLI.Session.Runner
     , runSession
     ) where
 
+import Agent.CLI.CodeModeRuntime
+    ( CodexCatalogSession(..)
+    , setCodeModeNestedInvoke
+    )
 import Agent.CLI.AgentViewport
     ( AgentEntry(..)
     , AgentStep
@@ -202,6 +206,7 @@ import Agent.Subagents
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolDispatch
     ( ToolCall(..)
+    , ToolCallResult(..)
     , ToolDispatchConfig(..)
     , canonicalToolName
     )
@@ -214,6 +219,7 @@ import Agent.Tools.PlanMode
 import Agent.Tools.Types
     ( AppTool(..)
     , ToolEnv(..)
+    , dispatchRegisteredToolCall
     , setToolSessionTmp
     )
 import Agent.OsPath (toText)
@@ -623,6 +629,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     cwd
                     []
                     Nothing
+                    ((.catalogEnvironmentContext) <$> codexCatalogSession)
             freshSkills <- loadSkillsCatalogQuiet options home projectRoot cwd
             (omitted, _) <-
                 installSkills freshAgents True freshSkills
@@ -908,23 +915,32 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             ShellBash -> "bash"
             ShellBoth -> "ghci + bash"
             ShellNone -> "none"
-        refreshShellParams ghciEnabled bashEnabled = do
-            sessionTmp <- readIORef toolEnv.toolSessionTmp
-            today <- utctDay <$> getCurrentTime
-            let enabledTools = activeShellTools ghciEnabled bashEnabled
-                instructionText =
-                    systemPromptForTools
-                        dialect
-                        (map (.appToolName) enabledTools)
-                        cwd
-                        sessionTmp
-                        today
-                        (isOneShot options)
-                toolSchemas = schemasFromAppTools dialect enabledTools
-            modifyIORef' paramsRef
-                (setRequestInstructionsAndTools
-                    instructionText
-                    (Just toolSchemas))
+        refreshShellParams ghciEnabled bashEnabled
+            -- Code-mode sessions keep their static exec/wait wire surface;
+            -- /shell gating applies inside the nested dispatcher instead.
+            | isJust codeModeNestedSlot = pure ()
+            | otherwise = do
+                sessionTmp <- readIORef toolEnv.toolSessionTmp
+                today <- utctDay <$> getCurrentTime
+                let enabledTools = activeShellTools ghciEnabled bashEnabled
+                    enabledNames = map (.appToolName) enabledTools
+                    instructionText = case codexCatalogSession of
+                        Just catalog ->
+                            catalog.catalogInstructionsFor
+                                enabledNames sessionTmp
+                        Nothing ->
+                            systemPromptForTools
+                                dialect
+                                enabledNames
+                                cwd
+                                sessionTmp
+                                today
+                                (isOneShot options)
+                    toolSchemas = schemasFromAppTools dialect enabledTools
+                modifyIORef' paramsRef
+                    (setRequestInstructionsAndTools
+                        instructionText
+                        (Just toolSchemas))
         setShellMode mode = do
             let (ghciEnabled, bashEnabled) = shellModeFlags mode
             writeIORef ghciEnabledRef ghciEnabled
@@ -949,6 +965,25 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 Nothing -> pure ()
             saveProjectMaxConcurrentAgents projectRoot next
             pure ("concurrent agent limit: " <> Text.pack (show next))
+    forM_ codeModeNestedSlot \slot ->
+        setCodeModeNestedInvoke slot \call -> do
+            allowed <- shellToolAllowed call
+            if not allowed
+                then pure $ Left $
+                    "Tool " <> call.name
+                        <> " is disabled by the current /shell setting."
+                else approveRegisteredTool call >>= \case
+                    Left denial -> pure (Left denial)
+                    Right False ->
+                        pure (Left "Tool call rejected by user.")
+                    Right True -> do
+                        emitLoop (ToolStarted call)
+                        result <- dispatchRegisteredToolCall
+                            config.loopDispatch
+                            toolRegistry
+                            call
+                        emitLoop (ToolFinished result)
+                        pure (Right result.output)
     btwRequests <- newChan
     recapRequests <- newChan
     let
