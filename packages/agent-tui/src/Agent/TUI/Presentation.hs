@@ -410,10 +410,15 @@ firstTodoContentFromArguments arguments =
     firstTodoContentDecoder =
         Hermes.object do
             todos <- Hermes.atKeyOptional "todos" $
-                Hermes.list (Hermes.object (Hermes.atKeyOptional "content" Hermes.text))
+                Hermes.list todoDecoder
             pure $ case todos >>= listToMaybe of
                 Just (Just content) -> firstLine content
                 _ -> ""
+    todoDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object (Hermes.atKeyOptional "content" Hermes.text)
+            _ -> pure Nothing
 
 firstPlanStepFromArguments :: Text -> Text
 firstPlanStepFromArguments arguments =
@@ -422,10 +427,15 @@ firstPlanStepFromArguments arguments =
     firstPlanStepDecoder =
         Hermes.object do
             plan <- Hermes.atKeyOptional "plan" $
-                Hermes.list (Hermes.object (Hermes.atKeyOptional "step" Hermes.text))
+                Hermes.list planDecoder
             pure $ case plan >>= listToMaybe of
                 Just (Just step) -> firstLine step
                 _ -> ""
+    planDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object (Hermes.atKeyOptional "step" Hermes.text)
+            _ -> pure Nothing
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
@@ -615,10 +625,15 @@ askUserQuestionDetail arguments =
     questionDetailDecoder =
         Hermes.object do
             questions <- Hermes.atKeyOptional "questions" $
-                Hermes.list (Hermes.object (Hermes.atKeyOptional "question" Hermes.text))
+                Hermes.list questionDecoder
             pure $ case questions >>= listToMaybe of
                 Just (Just question) -> firstLine question
                 _ -> ""
+    questionDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object (Hermes.atKeyOptional "question" Hermes.text)
+            _ -> pure Nothing
 
 decodeMaybe :: Hermes.Decoder a -> Text -> Maybe a
 decodeMaybe decoder input =
