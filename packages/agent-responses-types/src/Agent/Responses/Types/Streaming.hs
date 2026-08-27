@@ -18,9 +18,11 @@ import Agent.Json
     , deleteExtension
     , extensionsToList
     , insertExtension
+    , lookupExtension
     )
 import qualified Agent.Json.Decoder as Decoder
 import qualified Agent.Json.Encoder as Encoder
+import Data.Scientific (toBoundedInteger)
 import Agent.Responses.Types.Items
     ( ResponseItem
     , responseItemDecoder
@@ -581,7 +583,16 @@ responseStreamErrorEncoder =
     Encoder.object
         [ Encoder.optionalField "type" Encoder.text (.errorType)
         , Encoder.optionalField "code" Encoder.text (.code)
-        , Encoder.field "message" Encoder.text (.message)
+        , Encoder.optionalField
+            "message"
+            Encoder.text
+            (\streamError ->
+                if lookupExtension
+                    "message"
+                    streamError.extraFields
+                    /= Nothing
+                    then Nothing
+                    else Just streamError.message)
         , Encoder.optionalField "param" Encoder.text (.param)
         , Encoder.optionalField "resets_in_seconds" Encoder.int (.retryAfter)
         , Encoder.extensionsField (.extraFields)
@@ -668,6 +679,10 @@ data WireOptional value
     = WireNull !RawJson
     | WireValue !value
 
+data WireOuter value
+    = WireOuterValue !value
+    | WireOuterRaw !RawJson
+
 wireOptionalDecoder
     :: Decoder.Decoder value
     -> Decoder.Decoder (WireOptional value)
@@ -677,6 +692,25 @@ wireOptionalDecoder decoder =
             WireNull <$> Decoder.rawJson
         _ ->
             WireValue <$> decoder
+
+wireOuterTextDecoder :: Decoder.Decoder (WireOuter Text)
+wireOuterTextDecoder =
+    Decoder.byType \case
+        Decoder.JsonString ->
+            WireOuterValue <$> Decoder.text
+        _ -> WireOuterRaw <$> Decoder.rawJson
+
+wireOuterIntDecoder :: Decoder.Decoder (WireOuter Int)
+wireOuterIntDecoder =
+    Decoder.byType \case
+        Decoder.JsonNumber ->
+            Decoder.mapEither
+                (\value -> maybe
+                    (Left "integer is outside Int bounds")
+                    (Right . WireOuterValue)
+                    (toBoundedInteger value))
+                Decoder.scientific
+        _ -> WireOuterRaw <$> Decoder.rawJson
 
 textDeltaDecoder :: StreamEventType -> Decoder.Decoder ResponseStreamEvent
 textDeltaDecoder expectedType =
@@ -872,15 +906,35 @@ directEventDecoderFor eventType =
     errorFields =
         [ optionalField "error" responseStreamErrorDecoder \value state ->
             state { directNestedError = value }
-        , optionalField "code" Decoder.text \value state ->
-            state { directCode = value }
-        , optionalField "message" Decoder.text \value state ->
-            state { directMessage = value }
-        , optionalField "param" Decoder.text \value state ->
-            state { directParam = value }
-        , optionalField "resets_in_seconds" Decoder.int \value state ->
-            state { directRetryAfter = value }
+        , outerField "code" wireOuterTextDecoder
+            (\value state -> state { directCode = value })
+        , outerField "message" wireOuterTextDecoder
+            (\value state -> state { directMessage = value })
+        , outerField "param" wireOuterTextDecoder
+            (\value state -> state { directParam = value })
+        , outerField "resets_in_seconds" wireOuterIntDecoder
+            (\value state -> state { directRetryAfter = value })
         ]
+    outerField key decoder update =
+        Decoder.field key decoder \wire state ->
+            Right $ case wire of
+                WireOuterValue value ->
+                    update
+                        (Just value)
+                        state
+                            { directExtensions =
+                                deleteExtension
+                                    key
+                                    state.directExtensions
+                            }
+                WireOuterRaw raw ->
+                    (update Nothing state)
+                        { directExtensions =
+                            insertExtension
+                                key
+                                raw
+                                (update Nothing state).directExtensions
+                        }
     itemIdField =
         optionalField "item_id" Decoder.text \value state ->
             state { directItemId = value }
@@ -1047,7 +1101,8 @@ buildEvent eventType event = case eventType of
         Just streamError -> Right ResponseNestedErrorEvent
             { streamError
             , sequenceNumber = event.directSequenceNumber
-            , eventExtraFields = event.directExtensions
+            , eventExtraFields =
+                insertOuterErrorFields event
             }
         Nothing -> Right ResponseErrorEvent
             { streamError = ResponseStreamError
@@ -1084,6 +1139,26 @@ buildEvent eventType event = case eventType of
         event.directPart
         event.directSequenceNumber
         event.directExtensions)
+
+insertOuterErrorFields :: DirectEvent -> Extensions
+insertOuterErrorFields event =
+    insertEncoded "code" Encoder.text event.directCode
+        $ insertEncoded "message" Encoder.text event.directMessage
+        $ insertEncoded "param" Encoder.text event.directParam
+        $ insertEncoded
+            "resets_in_seconds"
+            Encoder.int
+            event.directRetryAfter
+            event.directExtensions
+  where
+    insertEncoded key encoder value fields =
+        case value of
+            Nothing -> fields
+            Just present ->
+                case Decoder.validateRawJson
+                    (Encoder.encode encoder present) of
+                    Left _ -> fields
+                    Right raw -> insertExtension key raw fields
 
 responseStreamErrorDecoder :: Decoder.Decoder ResponseStreamError
 responseStreamErrorDecoder =

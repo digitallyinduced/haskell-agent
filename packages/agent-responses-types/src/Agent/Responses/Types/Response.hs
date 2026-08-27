@@ -12,6 +12,8 @@ import Agent.Json
     ( Extensions, RawJson, emptyExtensions, insertExtension
     , extensionFieldWasPresent
     , markExtensionFieldPresent
+    , setExtensionsSourceRaw
+    , extensionsSourceRaw
     )
 import Agent.Json.Decoder.Backend (NamedField(..))
 import qualified Agent.Json.Decoder as D
@@ -31,6 +33,7 @@ import Agent.Responses.Types.Request
     )
 import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder, responseToolEncoder)
 import Data.Scientific (Scientific)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 
 data ResponseStatus
@@ -70,8 +73,8 @@ responseErrorDecoder = D.object emptyState fields unknown finish
   where
     emptyState = (Nothing, Nothing, emptyExtensions)
     fields =
-        [ D.field "code" (D.nullable D.text) (\v (c,m,e) -> Right (maybe c Just v,m,e))
-        , D.field "message" (D.nullable D.text) (\v (c,m,e) -> Right (c,maybe m Just v,e))
+        [ D.field "code" (D.nullable D.text) (\v (_,m,e) -> Right (v,m,e))
+        , D.field "message" (D.nullable D.text) (\v (c,_,e) -> Right (c,v,e))
         ]
     unknown = D.unknownField D.rawJson (\k v (c,m,e) -> Right (c,m,insertExtension k v e))
     finish (c,m,e) = Right (ResponseError (maybe "" id c) (maybe "" id m) e)
@@ -117,7 +120,26 @@ data ResponseUsage = ResponseUsage
     } deriving stock (Eq, Show)
 
 responseUsageEncoder :: E.Encoder ResponseUsage
-responseUsageEncoder = E.objectWithExtensions (.extraFields)
+responseUsageEncoder =
+    E.objectWithExtensions (.extraFields) responseUsageFields
+
+responseUsageFragmentEncoder :: E.Encoder ResponseUsage
+responseUsageFragmentEncoder =
+    E.choose \usage ->
+        if extensionFieldWasPresent
+            usageFragmentMarker
+            usage.extraFields
+            then E.objectWithExtensionsWhen
+                (.extraFields)
+                (\value key ->
+                    extensionFieldWasPresent
+                        key
+                        value.extraFields)
+                responseUsageFields
+            else responseUsageEncoder
+
+responseUsageFields :: [E.Field ResponseUsage]
+responseUsageFields =
     [ E.field "input_tokens" E.int (.inputTokens)
     , E.optionalField "input_tokens_details" tokenDetailsEncoder (.inputTokensDetails)
     , E.field "output_tokens" E.int (.outputTokens)
@@ -135,13 +157,20 @@ responseUsageDecoderWith :: Bool -> D.Decoder ResponseUsage
 responseUsageDecoderWith permitMissing =
     D.object (Nothing,Nothing,Nothing,Nothing,Nothing,emptyExtensions) fields unknown finish
   where
-    fields =
+    fields = map markPresent
         [ D.field "input_tokens" D.int (\v (_,a,b,c,d,e) -> Right (Just v,a,b,c,d,e))
         , D.field "input_tokens_details" (D.nullable tokenDetailsDecoder) (\v (a,_,b,c,d,e) -> Right (a,v,b,c,d,e))
         , D.field "output_tokens" D.int (\v (a,b,_,c,d,e) -> Right (a,b,Just v,c,d,e))
         , D.field "output_tokens_details" (D.nullable tokenDetailsDecoder) (\v (a,b,c,_,d,e) -> Right (a,b,c,v,d,e))
         , D.field "total_tokens" D.int (\v (a,b,c,d,_,e) -> Right (a,b,c,d,Just v,e))
         ]
+    markPresent (NamedField name decoder update) =
+        NamedField name decoder \value state -> do
+            (a, b, c, d, e, fieldsValue) <- update value state
+            Right
+                ( a, b, c, d, e
+                , markExtensionFieldPresent name fieldsValue
+                )
     unknown = D.unknownField D.rawJson (\k v (a,b,c,d,e,f) -> Right (a,b,c,d,e,insertExtension k v f))
     finish (a,b,c,d,e,f)
         | permitMissing = Right ResponseUsage
@@ -150,7 +179,8 @@ responseUsageDecoderWith permitMissing =
             , outputTokens = maybe 0 id c
             , outputTokensDetails = d
             , totalTokens = maybe 0 id e
-            , extraFields = f
+            , extraFields =
+                markExtensionFieldPresent usageFragmentMarker f
             }
         | otherwise = ResponseUsage
             <$> req "input_tokens" a
@@ -163,6 +193,9 @@ responseUsageDecoderWith permitMissing =
 
 fragmentMarker :: Text
 fragmentMarker = "$agent.response_fragment"
+
+usageFragmentMarker :: Text
+usageFragmentMarker = "$agent.response_usage_fragment"
 
 data Response = Response
     { responseId :: !Text, createdAt :: !Scientific, error :: !(Maybe ResponseError)
@@ -185,25 +218,38 @@ data Response = Response
     } deriving stock (Eq, Show)
 
 responseEncoder :: E.Encoder Response
-responseEncoder = E.objectWithExtensions (.extraFields) responseFields
+responseEncoder =
+    E.objectWithExtensions
+        (.extraFields)
+        (responseFields responseUsageEncoder)
 
 responseFragmentEncoder :: E.Encoder Response
 responseFragmentEncoder =
     E.choose \response ->
-        if extensionFieldWasPresent
-            fragmentMarker
-            response.extraFields
-            then E.objectWithExtensionsWhen
+        case extensionsSourceRaw response.extraFields of
+            Just{} ->
+                E.contramap
+                    (\value -> fromMaybe
+                        (error "missing response fragment source")
+                        (extensionsSourceRaw value.extraFields))
+                    E.rawJson
+            Nothing
+                | extensionFieldWasPresent
+                    fragmentMarker
+                    response.extraFields ->
+                    E.objectWithExtensionsWhen
                 (.extraFields)
                 (\value key ->
                     extensionFieldWasPresent
                         key
                         value.extraFields)
-                responseFields
-            else responseEncoder
+                (responseFields responseUsageFragmentEncoder)
+                | otherwise -> responseEncoder
 
-responseFields :: [E.Field Response]
-responseFields =
+responseFields
+    :: E.Encoder ResponseUsage
+    -> [E.Field Response]
+responseFields usageEncoder =
     [ E.field "id" E.text (.responseId), E.field "created_at" E.scientific (.createdAt)
     , E.nullableField "error" responseErrorEncoder (.error)
     , E.nullableField
@@ -233,7 +279,7 @@ responseFields =
     , E.optionalField "safety_identifier" E.text (.safetyIdentifier), E.optionalField "service_tier" E.text (.serviceTier)
     , E.field "status" responseStatusEncoder (.status), E.optionalField "text" responseTextConfigEncoder (.text)
     , E.optionalField "top_logprobs" E.int (.topLogprobs), E.optionalField "truncation" E.text (.truncation)
-    , E.nullableField "usage" responseUsageEncoder (.usage), E.optionalField "user" E.text (.user)
+    , E.nullableField "usage" usageEncoder (.usage), E.optionalField "user" E.text (.user)
     ]
 
 -- Decoder state uses Maybe for required/defaulted fields and preserves unknown
@@ -243,7 +289,18 @@ responseDecoder = responseDecoderWith False
 
 -- | Decoder for partial lifecycle snapshots carried by streaming events.
 responseFragmentDecoder :: D.Decoder Response
-responseFragmentDecoder = responseDecoderWith True
+responseFragmentDecoder =
+    D.mapDecoder
+        (\(response, raw) -> setResponseSource raw response)
+        (D.withRaw (responseDecoderWith True))
+
+setResponseSource :: RawJson -> Response -> Response
+setResponseSource raw Response{..} =
+    Response
+        { extraFields =
+            setExtensionsSourceRaw raw extraFields
+        , ..
+        }
 
 responseDecoderWith :: Bool -> D.Decoder Response
 responseDecoderWith permitMissing = D.object empty fields unknown finish

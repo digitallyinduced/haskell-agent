@@ -233,7 +233,7 @@ spec = do
                         { outputIndex, sequenceNumber } -> do
                     outputIndex `shouldBe` Nothing
                     sequenceNumber `shouldBe` Nothing
-                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
+                    Aeson.toJSON event `shouldBe` original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -248,7 +248,7 @@ spec = do
                     Aeson.toJSON responseValue
                         `shouldBe` normalizeDirectExpected
                             (canonicalResponseJson "completed")
-                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
+                    Aeson.toJSON event `shouldBe` original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 
@@ -320,7 +320,7 @@ spec = do
                     Aeson.toJSON responseValue
                         `shouldBe` normalizeDirectExpected
                             (canonicalResponseJson "incomplete")
-                    Aeson.toJSON event `shouldBe` normalizeDirectExpected original
+                    Aeson.toJSON event `shouldBe` original
                 Aeson.Success other -> expectationFailure ("unexpected event: " <> show other)
                 Aeson.Error err -> expectationFailure err
 

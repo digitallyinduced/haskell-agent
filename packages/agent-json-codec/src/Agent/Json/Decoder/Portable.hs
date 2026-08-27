@@ -116,6 +116,19 @@ runDecoder decoder initial = case decoder of
         case transform value of
             Left err -> failure next err
             Right transformed -> pure (transformed, next)
+    WithRawDecoder inner -> do
+        let start = (skipWhitespace initial).position
+        (value, next) <- runDecoder inner initial
+        pure
+            ( ( value
+              , unsafeRawJsonFromValidatedBytes
+                    (BS.copy
+                        (BS.take
+                            (next.position - start)
+                            (BS.drop start next.input)))
+              )
+            , next
+            )
 
 jsonTypeAt :: Cursor -> Either DecodeError JsonType
 jsonTypeAt initial =
@@ -269,7 +282,8 @@ parsePlannedObject initialPlan initial = do
                                                     valueStart
                                                     decodedCursor.input))))
                                     rebuilt
-                            | otherwise = rebuilt
+                            | otherwise =
+                                deletePlannedExtension key rebuilt
                     pure
                         (withNull, leave decodedCursor)
                 Nothing

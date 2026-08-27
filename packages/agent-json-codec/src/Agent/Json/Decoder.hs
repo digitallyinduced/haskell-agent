@@ -39,6 +39,7 @@ module Agent.Json.Decoder
     , unknownField
     , mapEither
     , mapDecoder
+    , withRaw
     , decode
     , validateRawJson
     , renderDecodeError
@@ -217,6 +218,9 @@ mapEither = MapDecoder
 
 mapDecoder :: (a -> b) -> Decoder a -> Decoder b
 mapDecoder transform = mapEither (Right . transform)
+
+withRaw :: Decoder a -> Decoder (a, RawJson)
+withRaw = WithRawDecoder
 
 validateRawJson :: BS.ByteString -> Either DecodeError RawJson
 validateRawJson = decode rawJson

@@ -4,7 +4,8 @@ import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
 import qualified Agent.Responses.Hermes as ResponsesHermes
 import Agent.Responses.Types
-import Agent.Json (emptyExtensions)
+import Agent.Json
+    ( emptyExtensions, lookupExtension, rawJsonBytes )
 import qualified Agent.Json.Decoder.Hermes as Hermes
 import qualified Agent.Json.Encoder as JsonEncoder
 import Control.Monad (foldM)
@@ -92,6 +93,42 @@ spec = describe "Responses SSE decoder" do
                 Right _ ->
                     expectationFailure
                         "accepted mismatched event types"
+
+    it "accepts integral scientific spellings on the Hermes hot path" do
+        Hermes.withDecoderSession \session -> do
+            result <- Hermes.decodeHermesIO
+                session
+                (ResponsesHermes.textDeltaEventDecoder
+                    "response.output_text.delta")
+                ( "{\"type\":\"response.output_text.delta\","
+                    <> "\"sequence_number\":1.0,"
+                    <> "\"output_index\":1e0,\"delta\":\"x\"}"
+                )
+            case result of
+                Left err ->
+                    expectationFailure (show err)
+                Right fields -> do
+                    fields.sequenceNumber `shouldBe` Just 1
+                    fields.outputIndex `shouldBe` Just 1
+
+    it "uses final-key-wins for nulls on the Hermes hot path" do
+        Hermes.withDecoderSession \session -> do
+            result <- Hermes.decodeHermesIO
+                session
+                (ResponsesHermes.textDeltaEventDecoder
+                    "response.output_text.delta")
+                ( "{\"type\":\"response.output_text.delta\","
+                    <> "\"delta\":\"first\",\"delta\":null}"
+                )
+            case result of
+                Left err -> expectationFailure (show err)
+                Right fields -> do
+                    fields.delta `shouldBe` Nothing
+                    rawJsonBytes
+                        <$> lookupExtension
+                            "delta"
+                            fields.extensions
+                        `shouldBe` Just "null"
 
     it "skips malformed event payloads while preserving unknown events" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""

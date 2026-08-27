@@ -53,6 +53,34 @@ spec = describe "typed stream assembly" do
         [arguments | FunctionCallItem FunctionCall { arguments } <- result.output]
             `shouldBe` ["{\"value\":1}"]
 
+    it "fills reasoning content omitted from output_item.done" do
+        let doneReasoning =
+                ReasoningItemValue ReasoningItem
+                    { itemId = Just "reasoning-1"
+                    , summary = []
+                    , content = Nothing
+                    , encryptedContent = Nothing
+                    , status = Nothing
+                    , extraFields = emptyExtensions
+                    }
+        result <- expectRight $ buildStreamResponse config
+            [ ResponseReasoningTextDeltaEvent
+                (Just "reasoning") (Just "reasoning-1")
+                (Just 0) (Just 0) Nothing emptyExtensions
+            , outputDone 0 doneReasoning
+            , completed (response [])
+            ]
+        case result.output of
+            [ReasoningItemValue reasoning] ->
+                reasoning.content
+                    `shouldBe` Just
+                        [ ReasoningTextPart
+                            "reasoning"
+                            emptyExtensions
+                        ]
+            other ->
+                expectationFailure ("unexpected output: " <> show other)
+
     it "keeps output_item.done authoritative over an earlier partial" do
         let doneCall =
                 case toolCall of
@@ -227,6 +255,16 @@ spec = describe "typed stream assembly" do
                 Nothing emptyExtensions
             ]
             `shouldBe` Left (ConnectionError "failed: try later")
+
+    it "honors an explicit failed status on response.completed" do
+        terminal <- decodeEvent
+            ( "{\"type\":\"response.completed\",\"response\":"
+                <> "{\"id\":\"resp_1\",\"model\":\"gpt-test\","
+                <> "\"status\":\"failed\",\"error\":"
+                <> "{\"code\":\"bad\",\"message\":\"boom\"}}}"
+            )
+        buildStreamResponse config [terminal]
+            `shouldBe` Left (ConnectionError "failed: boom")
 
     it "finishes collected state as incomplete after transport loss" do
         let state = applyStreamEvent
@@ -416,6 +454,15 @@ decodeItem bytes =
             expectationFailure
                 (Text.unpack (Decoder.renderDecodeError err))
             pure toolCall
+        Right value -> pure value
+
+decodeEvent :: ByteString -> IO ResponseStreamEvent
+decodeEvent bytes =
+    case Decoder.decode responseStreamEventDecoder bytes of
+        Left err -> do
+            expectationFailure
+                (Text.unpack (Decoder.renderDecodeError err))
+            pure (completed (response []))
         Right value -> pure value
 
 data CallFragment = CallFragment

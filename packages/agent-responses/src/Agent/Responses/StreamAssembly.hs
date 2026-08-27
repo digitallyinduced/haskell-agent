@@ -284,15 +284,11 @@ buildStreamResponseWithModel config modelHint events =
         let nextState = applyStreamEvent state event
         in case event of
             ResponseCompletedEvent{} ->
-                finishStreamResponse modelHint nextState event
+                finishTerminal nextState event
             ResponseDoneEvent{} ->
-                finishStreamResponse modelHint nextState event
+                finishTerminal nextState event
             ResponseIncompleteEvent{} ->
-                if config.incompleteAsFailure
-                    then Left (config.classifyFailedResponse
-                        ((responseFailureFromState nextState)
-                            { failureStatus = Just "incomplete" }))
-                    else finishStreamResponse modelHint nextState event
+                finishTerminal nextState event
             ResponseFailedEvent{} ->
                 Left (config.classifyFailedResponse
                     ((responseFailureFromState nextState)
@@ -302,6 +298,20 @@ buildStreamResponseWithModel config modelHint events =
             ResponseNestedErrorEvent { streamError } ->
                 Left (config.classifyStreamError streamError)
             _ -> go nextState rest
+
+    finishTerminal state event = do
+        response <- finishStreamResponse modelHint state event
+        case response.status of
+            ResponseFailed ->
+                Left (config.classifyFailedResponse
+                    ((responseFailureFromState state)
+                        { failureStatus = Just "failed" }))
+            ResponseIncomplete
+                | config.incompleteAsFailure ->
+                    Left (config.classifyFailedResponse
+                        ((responseFailureFromState state)
+                            { failureStatus = Just "incomplete" }))
+            _ -> Right response
 
 assembleDoneResponse
     :: Maybe Response
@@ -396,11 +406,76 @@ updateItem outputIndex done newValue state =
                     ParsedItem oldValue ->
                         ParsedItem
                             (mergeParsedItems oldValue newValue)
-                    _ ->
-                        ParsedItem newValue
+                    partial ->
+                        ParsedItem
+                            (mergePartialIntoDone partial newValue)
                 else mergePartialItem old.itemValue newValue
         , itemDone = old.itemDone || done
         }
+
+mergePartialIntoDone
+    :: PartialResponseItem
+    -> ResponseItem
+    -> ResponseItem
+mergePartialIntoDone partial done =
+    case (partial, done) of
+        (PartialFunctionCall { partialItemId }, FunctionCallItem value) ->
+            FunctionCallItem value
+                { itemId =
+                    if extensionFieldWasPresent
+                        "id"
+                        value.extraFields
+                        then value.itemId
+                        else value.itemId <|> partialItemId
+                }
+        ( PartialCustomToolCall
+            { partialItemId, partialCallId }
+          , CustomToolCallItem value
+          ) ->
+            CustomToolCallItem value
+                { itemId =
+                    if extensionFieldWasPresent
+                        "id"
+                        value.extraFields
+                        then value.itemId
+                        else value.itemId <|> partialItemId
+                , callId =
+                    if extensionFieldWasPresent
+                        "call_id"
+                        value.extraFields
+                        then value.callId
+                        else fromMaybe value.callId partialCallId
+                }
+        (PartialReasoning { partialItemId }, ReasoningItemValue value) ->
+            let merged = case applyPartialToItem partial done of
+                    ParsedItem (ReasoningItemValue candidate) ->
+                        candidate
+                    _ -> value
+            in ReasoningItemValue value
+                { itemId =
+                    if extensionFieldWasPresent
+                        "id"
+                        value.extraFields
+                        then value.itemId
+                        else value.itemId <|> partialItemId
+                , summary = value.summary
+                , content =
+                    if extensionFieldWasPresent
+                        "content"
+                        value.extraFields
+                        then value.content
+                        else merged.content
+                }
+        (PartialMessage { partialItemId }, MessageItem value) ->
+            MessageItem value
+                { messageId =
+                    if extensionFieldWasPresent
+                        "id"
+                        value.extraFields
+                        then value.messageId
+                        else value.messageId <|> partialItemId
+                }
+        _ -> done
 
 mergeParsedItems :: ResponseItem -> ResponseItem -> ResponseItem
 mergeParsedItems oldValue newValue =

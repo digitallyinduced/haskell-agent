@@ -21,6 +21,15 @@ main = hspec do
             Decoder.decode responseCreateParamsDecoder "[]"
                 `shouldSatisfy` isLeft
 
+        it "lets duplicate null clear permissive error fields" do
+            let decoder = responseErrorDecoder
+            value <- expectDecode decoder
+                ( "{\"code\":\"overloaded\",\"code\":null,"
+                    <> "\"message\":\"old\",\"message\":null}"
+                )
+            value.code `shouldBe` ""
+            value.message `shouldBe` ""
+
         it "preserves legacy null defaults for object and output" do
             response <- expectDecode responseDecoder
                 ( "{\"id\":\"r\",\"created_at\":0,\"model\":\"m\","
@@ -95,11 +104,35 @@ main = hspec do
                     delta `shouldBe` Just "last"
                 _ -> expectationFailure "unexpected event constructor"
 
+        it "treats a null JSON type as omitted when SSE supplies it" do
+            event <- expectDecode
+                (responseStreamEventDecoderWithType
+                    (Just "response.completed"))
+                ( "{\"type\":null,\"response\":"
+                    <> "{\"id\":\"r\",\"model\":\"m\","
+                    <> "\"status\":\"completed\"}}"
+                )
+            responseStreamEventType event
+                `shouldBe` EventResponseCompleted
+
         it "re-encodes lifecycle response fragments without invented fields" do
             let payload =
                     "{\"type\":\"response.done\",\"response\":"
-                        <> "{\"status\":\"completed\","
+                        <> "{\"object\":null,\"output\":null,"
+                        <> "\"user\":null,\"usage\":{\"output_tokens\":2},"
+                        <> "\"error\":{\"code\":\"x\"},"
+                        <> "\"status\":\"completed\","
                         <> "\"vendor\":{\"x\":1}}}"
+            event <- expectDecode responseStreamEventDecoder payload
+            decodeAeson
+                (Encoder.encode responseStreamEventEncoder event)
+                `shouldBe` decodeAeson payload
+
+        it "preserves outer nested-error fields with evolving shapes" do
+            let payload =
+                    "{\"type\":\"error\",\"error\":{\"message\":\"boom\","
+                        <> "\"code\":null},\"code\":{\"vendor\":1},"
+                        <> "\"param\":null}"
             event <- expectDecode responseStreamEventDecoder payload
             decodeAeson
                 (Encoder.encode responseStreamEventEncoder event)

@@ -17,6 +17,7 @@ import qualified Data.ByteString as BS
 import Data.ByteString.Char8 (pack)
 import qualified Data.Hermes as Hermes
 import Data.Text (Text)
+import Data.Scientific (toBoundedInteger)
 
 data TextDeltaFields = TextDeltaFields
     { wireType :: !(Maybe Text)
@@ -37,7 +38,7 @@ textDeltaEventDecoder expectedType = do
             emptyExtensions)
         \key state -> case key of
             "sequence_number" ->
-                optional key Hermes.int
+                optional key integralInt
                     (\value -> state { sequenceNumber = value })
                     state
             "item_id" ->
@@ -45,11 +46,11 @@ textDeltaEventDecoder expectedType = do
                     (\value -> state { itemId = value })
                     state
             "output_index" ->
-                optional key Hermes.int
+                optional key integralInt
                     (\value -> state { outputIndex = value })
                     state
             "content_index" ->
-                optional key Hermes.int
+                optional key integralInt
                     (\value -> state { contentIndex = value })
                     state
             "delta" ->
@@ -97,6 +98,13 @@ textDeltaEventDecoder expectedType = do
 
     rawNull =
         unsafeRawJsonFromValidatedBytes (pack "null")
+
+    integralInt = do
+        value <- Hermes.scientific
+        maybe
+            (fail "expected an integral Int")
+            pure
+            (toBoundedInteger value)
 
     captureExtension key state =
         (\value ->

@@ -77,6 +77,8 @@ module Agent.Responses.Types
     , responseFragmentDecoder
     , ResponseStatus(..)
     , ResponseError(..)
+    , responseErrorEncoder
+    , responseErrorDecoder
     , IncompleteDetails(..)
     , ResponseUsage(..)
     , TokenDetails(..)

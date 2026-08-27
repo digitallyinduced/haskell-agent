@@ -22,19 +22,24 @@ instance Show RawJson where
 data Extensions = Extensions
     !(Map Text RawJson)
     !(Set Text)
+    !(Maybe RawJson)
 
 instance Eq Extensions where
-    Extensions left _ == Extensions right _ = left == right
+    Extensions left _ _ == Extensions right _ _ = left == right
 
 instance Show Extensions where
-    showsPrec precedence (Extensions values _) =
+    showsPrec precedence (Extensions values _ _) =
         showsPrec precedence values
 
 instance Semigroup Extensions where
-    Extensions left leftPresent <> Extensions right rightPresent =
+    Extensions left leftPresent leftSource
+        <> Extensions right rightPresent rightSource =
         Extensions
             (Map.union right left)
             (leftPresent <> rightPresent)
+            (case rightSource of
+                Just{} -> rightSource
+                Nothing -> leftSource)
 
 instance Monoid Extensions where
-    mempty = Extensions Map.empty mempty
+    mempty = Extensions Map.empty mempty Nothing
