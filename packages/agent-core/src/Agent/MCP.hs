@@ -36,7 +36,13 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
-import qualified Data.Aeson.Key as Key
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    , rawJsonEncoding
+    , rawJsonFromEncoding
+    )
 import Agent.ToolDispatch (typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
@@ -87,12 +93,14 @@ import Control.Exception.Safe
 import Control.Monad (forM, unless, void, when)
 import qualified Agent.Json.Decode as Json
 import Data.Aeson
-    ( Value(..)
+    ( ToJSON(toJSON)
+    , Value
     , object
     , (.=)
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Encoding as AesonEncoding
+import qualified Data.Aeson.Encoding.Internal as AesonEncodingInternal
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -108,13 +116,11 @@ import qualified Data.Map.Strict as Map
 import Data.List (find, sortOn)
 import Data.Maybe (catMaybes, isJust)
 import Data.Ord (Down(..))
-import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
-import qualified Data.Vector as Vector
 import System.Environment (getEnvironment)
 import System.Directory (getCurrentDirectory)
 import System.IO
@@ -712,7 +718,7 @@ data McpClient = McpClient
     , clientProcess :: !ProcessHandle
     , clientGroupId :: !(Maybe ProcessGroupID)
     , clientNextId :: !(IORef Int)
-    , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text Value))))
+    , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text RawJson))))
     , clientFailure :: !(TVar (Maybe Text))
     , clientWriteLock :: !(MVar ())
     , clientStderr :: !(IORef CapturedStderr)
@@ -744,35 +750,39 @@ stderrLimit = 16 * 1024
 data McpTool = McpTool
     { discoveredName :: !Text
     , discoveredDescription :: !Text
-    , discoveredInputSchema :: !Value
+    , discoveredInputSchema :: !RawJson
     , discoveredReadOnly :: !Bool
     }
 
-mcpToolFromValue :: Value -> Either Text McpTool
-mcpToolFromValue (Object fields) = do
-    discoveredName <- case KeyMap.lookup "name" fields of
-        Just (String value) -> Right value
-        _ -> Left "MCP tool omitted string name"
-    let discoveredDescription = case KeyMap.lookup "description" fields of
-            Just (String value) -> value
-            _ -> ""
-        discoveredInputSchema =
-            maybe emptyInputSchema id (KeyMap.lookup "inputSchema" fields)
-        discoveredReadOnly = case KeyMap.lookup "annotations" fields of
-            Just (Object annotations) ->
-                case KeyMap.lookup "readOnlyHint" annotations of
-                    Just (Bool value) -> value
-                    _ -> False
-            _ -> False
-    Right McpTool{..}
-mcpToolFromValue _ = Left "MCP tool must be an object"
+mcpToolDecoder :: Json.Decoder McpTool
+mcpToolDecoder = Json.object do
+    discoveredName <- Json.atKey "name" Json.text
+    rawDescription <- Json.optionalKey "description" rawJsonDecoder
+    let discoveredDescription =
+            maybe "" (projectRawOr "" Json.text) rawDescription
+    discoveredInputSchema <-
+        maybe emptyInputSchema id
+            <$> Json.atKeyOptional "inputSchema" rawJsonDecoder
+    rawAnnotations <- Json.optionalKey "annotations" rawJsonDecoder
+    let discoveredReadOnly =
+            maybe False (projectRawOr False annotationsDecoder) rawAnnotations
+    pure McpTool{..}
+  where
+    annotationsDecoder =
+        Json.object (Json.defaultKey False "readOnlyHint" Json.bool)
 
-emptyInputSchema :: Value
-emptyInputSchema = object
-    [ "type" .= ("object" :: Text)
-    , "properties" .= object []
-    , "additionalProperties" .= False
-    ]
+projectRawOr :: a -> Json.Decoder a -> RawJson -> a
+projectRawOr fallback decoder value =
+    either (const fallback) id $
+        Json.decodeEither decoder (rawJsonBytes value)
+
+emptyInputSchema :: RawJson
+emptyInputSchema =
+    rawJsonFromEncoding . Aeson.toEncoding $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object []
+        , "additionalProperties" .= False
+        ]
 
 -- | Start every server independently. Ordinary server failures become
 -- warnings so one unavailable integration does not disable healthy servers.
@@ -1085,10 +1095,10 @@ mcpSearchTool fleet = AppTool
             ]
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_search" aesonValueDecoder \arguments -> do
+    , appToolHandler = typedTool "mcp_search" searchArgumentsDecoder \arguments -> do
         entries <- readTVarIO fleet.mcpFleetCatalog
         statuses <- mcpFleetStatuses fleet
-        let (query, server, limit) = searchArguments arguments
+        let (query, server, limit) = arguments
             matches :: (Text, McpCatalogEntry) -> Bool
             matches (name, entry) =
                 maybe True
@@ -1149,10 +1159,8 @@ grokSearchTool fleet = AppTool
         , "required" .= (["query"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "search_tool" aesonValueDecoder \arguments ->
-        case grokSearchArguments arguments of
-            Left err -> pure (Left err)
-            Right (query, limit) -> do
+    , appToolHandler = typedTool "search_tool" grokSearchArgumentsDecoder
+        \(query, limit) -> do
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 statuses <- mcpFleetStatuses fleet
                 let queryTokens = searchTokens query
@@ -1251,7 +1259,7 @@ callCatalogEntryWithReconnect
     :: McpFleet
     -> Text
     -> McpCatalogEntry
-    -> Value
+    -> RawJson
     -> IO (Either Text Text)
 callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
     callDiscoveredTool entry.catalogClient entry.catalogTool arguments
@@ -1360,10 +1368,8 @@ mcpCallTool fleet = AppTool
         , "required" .= (["name"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_call" aesonValueDecoder \arguments ->
-        case callArguments arguments of
-            Left err -> pure (Left err)
-            Right (name, toolArguments) -> do
+    , appToolHandler = typedTool "mcp_call" callArgumentsDecoder
+        \(name, toolArguments) -> do
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 case Map.lookup name entries of
                     Just entry ->
@@ -1401,10 +1407,8 @@ grokUseTool fleet = AppTool
         , "required" .= (["tool_name", "tool_input"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "use_tool" aesonValueDecoder \arguments ->
-        case grokCallArguments arguments of
-            Left err -> pure (Left err)
-            Right (name, toolArguments) -> do
+    , appToolHandler = typedTool "use_tool" grokCallArgumentsDecoder
+        \(name, toolArguments) -> do
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 case Map.lookup name entries of
                     Just entry ->
@@ -1422,41 +1426,39 @@ grokUseTool fleet = AppTool
     , appToolResourceClaims = Nothing
     }
 
-searchArguments :: Value -> (Maybe Text, Maybe Text, Int)
-searchArguments (Object fields) =
-    ( textField "query"
-    , textField "server"
-    , case KeyMap.lookup "limit" fields >>= responseId of
-        Just value -> max 1 (min 50 value)
-        Nothing -> 20
-    )
-  where
-    textField name = case KeyMap.lookup name fields of
-        Just (String value)
-            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
-        _ -> Nothing
-searchArguments _ = (Nothing, Nothing, 20)
+searchArgumentsDecoder :: Json.Decoder (Maybe Text, Maybe Text, Int)
+searchArgumentsDecoder = Json.object do
+    query <- nonEmptyOptionalText "query"
+    server <- nonEmptyOptionalText "server"
+    limit <- max 1 . min 50 <$> Json.defaultKey 20 "limit" Json.int
+    pure (query, server, limit)
 
-grokSearchArguments :: Value -> Either Text (Text, Int)
-grokSearchArguments (Object fields) =
-    case KeyMap.lookup "query" fields of
-        Just (String raw)
-            | not (Text.null (Text.strip raw)) -> do
-                limit <- case KeyMap.lookup "limit" fields of
-                    Nothing -> Right 5
-                    Just Null -> Right 5
-                    Just value ->
-                        case responseId value of
-                            Just parsed
-                                | parsed >= 1 && parsed <= 255 ->
-                                    Right parsed
-                            _ ->
-                                Left
-                                    "search_tool limit must be an integer from 1 through 255"
-                Right (Text.strip raw, limit)
-        _ -> Left "search_tool requires a non-empty query"
-grokSearchArguments _ =
-    Left "search_tool arguments must be an object"
+grokSearchArgumentsDecoder :: Json.Decoder (Text, Int)
+grokSearchArgumentsDecoder = Json.object do
+    query <- Text.strip <$> Json.atKey "query" Json.text
+    when (Text.null query) $
+        fail "search_tool requires a non-empty query"
+    rawLimit <- Json.optionalKey "limit" rawJsonDecoder
+    limit <- case rawLimit of
+        Nothing -> pure 5
+        Just value ->
+            case Json.decodeEither Json.int (rawJsonBytes value) of
+                Right parsed -> pure parsed
+                Left _ ->
+                    fail
+                        "search_tool limit must be an integer from 1 through 255"
+    unless (limit >= 1 && limit <= 255) $
+        fail "search_tool limit must be an integer from 1 through 255"
+    pure (query, limit)
+
+nonEmptyOptionalText
+    :: Text
+    -> Json.FieldsDecoder (Maybe Text)
+nonEmptyOptionalText key =
+    fmap (Text.strip <$>) (Json.optionalKey key Json.text)
+        >>= \case
+            Just "" -> pure Nothing
+            value -> pure value
 
 searchTokens :: Text -> [Text]
 searchTokens =
@@ -1476,48 +1478,38 @@ truncateMcpDescription description
     | Text.length description <= 2048 = description
     | otherwise = Text.take 2034 description <> "… [truncated]"
 
-callArguments :: Value -> Either Text (Text, Value)
-callArguments (Object fields) =
-    case KeyMap.lookup "name" fields of
-        Just (String name)
-            | not (Text.null (Text.strip name)) ->
-                Right
-                    ( Text.strip name
-                    , maybe (object []) id (KeyMap.lookup "arguments" fields)
-                    )
-        _ -> Left "mcp_call requires a non-empty name"
-callArguments _ = Left "mcp_call arguments must be an object"
+callArgumentsDecoder :: Json.Decoder (Text, RawJson)
+callArgumentsDecoder = Json.object do
+    name <- Text.strip <$> Json.atKey "name" Json.text
+    when (Text.null name) $
+        fail "mcp_call requires a non-empty name"
+    arguments <- Json.defaultKey emptyObject "arguments" rawObjectDecoder
+    pure (name, arguments)
 
-grokCallArguments :: Value -> Either Text (Text, Value)
-grokCallArguments (Object fields) =
-    case KeyMap.lookup "tool_name" fields of
-        Just (String name)
-            | not (Text.null (Text.strip name))
-            , "__" `Text.isInfixOf` name ->
-                case KeyMap.lookup "tool_input" fields of
-                    Just value@(Object _) -> Right (Text.strip name, value)
-                    Nothing ->
-                        Left "use_tool requires tool_input"
-                    _ -> Left "use_tool tool_input must be an object"
-            | not (Text.null (Text.strip name)) ->
-                Left
-                    "use_tool tool_name must be a qualified server__tool name returned by search_tool"
-        _ -> Left "use_tool requires a non-empty tool_name"
-grokCallArguments _ = Left "use_tool arguments must be an object"
+grokCallArgumentsDecoder :: Json.Decoder (Text, RawJson)
+grokCallArgumentsDecoder = Json.object do
+    name <- Text.strip <$> Json.atKey "tool_name" Json.text
+    when (Text.null name) $
+        fail "use_tool requires a non-empty tool_name"
+    unless ("__" `Text.isInfixOf` name) $
+        fail
+            "use_tool tool_name must be a qualified server__tool name returned by search_tool"
+    rawArguments <- Json.optionalKey "tool_input" rawJsonDecoder
+        >>= maybe (fail "use_tool requires tool_input") pure
+    arguments <-
+        case Json.decodeEither rawObjectDecoder (rawJsonBytes rawArguments) of
+            Right value -> pure value
+            Left _ -> fail "use_tool tool_input must be an object"
+    pure (name, arguments)
 
--- MCP schemas and tool arguments are intentionally dynamic. Hermes performs
--- the wire decode; Aeson Value remains only the existing in-memory tree used
--- by request construction and schema rendering.
-aesonValueDecoder :: Json.Decoder Value
-aesonValueDecoder = Json.withType \case
-    Json.VArray -> Array . Vector.fromList <$> Json.list aesonValueDecoder
-    Json.VObject ->
-        Object . KeyMap.fromList
-            <$> Json.objectAsKeyValues (pure . Key.fromText) aesonValueDecoder
-    Json.VNumber -> Number <$> Json.scientific
-    Json.VString -> String <$> Json.text
-    Json.VBoolean -> Bool <$> Json.bool
-    Json.VNull -> pure Null
+rawObjectDecoder :: Json.Decoder RawJson
+rawObjectDecoder =
+    Json.getType >>= \case
+        Json.VObject -> rawJsonDecoder
+        _ -> fail "expected object"
+
+emptyObject :: RawJson
+emptyObject = rawJsonFromEncoding (Aeson.toEncoding (object []))
 
 statusJson :: McpServerStatus -> Value
 statusJson status = object
@@ -1725,11 +1717,13 @@ initializeClient client = do
                 , "version" .= ("0.1.0" :: Text)
                 ]
             ]
-    result <- requestMcp client timeoutMicros "initialize" parameters
+    result <- requestMcp client timeoutMicros "initialize"
+        (Aeson.toEncoding parameters)
     case result of
         Left err -> startupFailure client err
         Right _ ->
-            sendNotification client "notifications/initialized" (object [])
+            sendNotification client "notifications/initialized"
+                (Aeson.toEncoding (object []))
                 >>= either (startupFailure client) pure
 
 startupFailure :: McpClient -> Text -> IO a
@@ -1743,7 +1737,12 @@ discoverMcpTools :: McpClient -> IO ([McpTool], [Text])
 discoverMcpTools client = go Nothing [] []
   where
     go cursor tools warnings = do
-        let parameters = maybe (object []) (\value -> object ["cursor" .= value]) cursor
+        let parameters = maybe
+                (Aeson.toEncoding (object []))
+                (\value ->
+                    Aeson.pairs
+                        (AesonEncoding.pair "cursor" (rawJsonEncoding value)))
+                cursor
             timeoutMicros =
                 secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds
         requestMcp client timeoutMicros "tools/list" parameters >>= \case
@@ -1776,23 +1775,27 @@ discoverMcpTools client = go Nothing [] []
         | tool.discoveredReadOnly = (tool : allowed, skipped)
         | otherwise = (allowed, tool : skipped)
 
-    parsePage :: Value -> Either Text ([McpTool], Maybe Value)
-    parsePage (Object fields) = do
-        tools <- case KeyMap.lookup "tools" fields of
-            Nothing -> Right []
-            Just (Array values) ->
-                traverse mcpToolFromValue (Vector.toList values)
-            Just _ -> Left "tools must be an array"
-        pure (tools, KeyMap.lookup "nextCursor" fields)
-    parsePage _ = Left "tools/list result must be an object"
+    parsePage :: RawJson -> Either Text ([McpTool], Maybe RawJson)
+    parsePage raw =
+        case Json.decodeEither pageDecoder (rawJsonBytes raw) of
+            Left err -> Left err.jsonErrorMessage
+            Right page -> Right page
+
+    pageDecoder = Json.object $
+        (,)
+            <$> Json.defaultKey [] "tools" (Json.list mcpToolDecoder)
+            <*> Json.optionalKey "nextCursor" rawJsonDecoder
 
 appToolFor :: McpClient -> McpTool -> AppTool
 appToolFor client tool = AppTool
     { appToolName = qualifiedName
     , appToolDescription = tool.discoveredDescription
-    , appToolSchema = RawJsonFunctionSchema tool.discoveredInputSchema
+    -- Tool schemas enter the legacy Aeson-valued tool API here. Their wire
+    -- decode and storage remain RawJson.
+    , appToolSchema =
+        RawJsonFunctionSchema (toJSON tool.discoveredInputSchema)
     , appToolHandler =
-        typedTool qualifiedName aesonValueDecoder \arguments -> do
+        typedTool qualifiedName rawObjectDecoder \arguments -> do
             callDiscoveredTool client tool arguments
     , appToolApproval = AlwaysReadOnly
     , appToolExecution = ParallelSafe
@@ -1811,52 +1814,70 @@ qualifiedMcpToolName serverName toolName =
         Text.replace "__" "%5F%5F"
             . Text.replace "%" "%25"
 
-callDiscoveredTool :: McpClient -> McpTool -> Value -> IO (Either Text Text)
+callDiscoveredTool :: McpClient -> McpTool -> RawJson -> IO (Either Text Text)
 callDiscoveredTool client tool arguments = do
-    let parameters = object
-            [ "name" .= tool.discoveredName
-            , "arguments" .= arguments
-            ]
+    let encodedParameters = Aeson.pairs $
+            "name" .= tool.discoveredName
+                <> AesonEncoding.pair
+                    "arguments"
+                    (rawJsonEncoding arguments)
         timeoutMicros =
             secondsToMicros
                 client.clientConfig.mcpServerRequestTimeoutSeconds
-    requestMcp client timeoutMicros "tools/call" parameters >>= \case
+    requestMcp client timeoutMicros "tools/call" encodedParameters >>= \case
         Left err -> pure (Left err)
         Right result -> pure (normalizeMcpToolResult result)
 
-normalizeMcpToolResult :: Value -> Either Text Text
-normalizeMcpToolResult result@(Object fields) =
-    let isError = case KeyMap.lookup "isError" fields of
-            Just (Bool value) -> value
-            _ -> False
-        structured = KeyMap.lookup "structuredContent" fields
-        textParts = maybe [] extractTextParts (KeyMap.lookup "content" fields)
-        output
-            | isJust structured && not (null textParts) = compactJson result
-            | Just value <- structured = compactJson value
-            | not (null textParts) = Text.intercalate "\n" textParts
-            | otherwise = compactJson result
-    in if isError then Left output else Right output
-normalizeMcpToolResult result = Right (compactJson result)
+normalizeMcpToolResult :: RawJson -> Either Text Text
+normalizeMcpToolResult result =
+    case Json.decodeEither mcpToolResultDecoder (rawJsonBytes result) of
+        Left _ -> Right (compactRawJson result)
+        Right (isError, structured, textParts) ->
+            let output
+                    | isJust structured && not (null textParts) =
+                        compactRawJson result
+                    | Just value <- structured = compactRawJson value
+                    | not (null textParts) = Text.intercalate "\n" textParts
+                    | otherwise = compactRawJson result
+            in if isError then Left output else Right output
 
-extractTextParts :: Value -> [Text]
-extractTextParts (Array items) =
-    [ text
-    | Object item <- Vector.toList items
-    , Just (String "text") <- [KeyMap.lookup "type" item]
-    , Just (String text) <- [KeyMap.lookup "text" item]
-    ]
-extractTextParts _ = []
+mcpToolResultDecoder
+    :: Json.Decoder (Bool, Maybe RawJson, [Text])
+mcpToolResultDecoder = Json.object do
+    rawError <- Json.optionalKey "isError" rawJsonDecoder
+    structured <- Json.optionalKey "structuredContent" rawJsonDecoder
+    rawContent <- Json.optionalKey "content" rawJsonDecoder
+    let isError = maybe False (projectOr False Json.bool) rawError
+        textParts =
+            maybe [] (projectOr [] contentTextPartsDecoder) rawContent
+    pure (isError, structured, textParts)
+  where
+    projectOr fallback decoder value =
+        either (const fallback) id $
+            Json.decodeEither decoder (rawJsonBytes value)
+
+    contentTextPartsDecoder =
+        catMaybes <$> Json.list contentTextDecoder
+
+    contentTextDecoder = Json.object do
+        contentType <- Json.optionalKey "type" Json.text
+        text <- Json.optionalKey "text" Json.text
+        pure $ case (contentType, text) of
+            (Just "text", Just value) -> Just value
+            _ -> Nothing
 
 compactJson :: Value -> Text
 compactJson = TextEncoding.decodeUtf8 . LBS.toStrict . Aeson.encode
+
+compactRawJson :: RawJson -> Text
+compactRawJson = TextEncoding.decodeUtf8 . rawJsonBytes
 
 requestMcp
     :: McpClient
     -> Int
     -> Text
-    -> Value
-    -> IO (Either Text Value)
+    -> Aeson.Encoding
+    -> IO (Either Text RawJson)
 requestMcp client timeoutMicros method parameters = do
     failed <- readTVarIO client.clientFailure
     case failed of
@@ -1867,12 +1888,11 @@ requestMcp client timeoutMicros method parameters = do
             response <- newEmptyTMVarIO
             atomically $
                 modifyTVar' client.clientPending (IntMap.insert requestId response)
-            let message = object
-                    [ "jsonrpc" .= ("2.0" :: Text)
-                    , "id" .= requestId
-                    , "method" .= method
-                    , "params" .= parameters
-                    ]
+            let message = Aeson.pairs $
+                    "jsonrpc" .= ("2.0" :: Text)
+                        <> "id" .= requestId
+                        <> "method" .= method
+                        <> AesonEncoding.pair "params" parameters
             sendMessage client message >>= \case
                 Left err -> do
                     atomically $
@@ -1896,19 +1916,23 @@ requestMcp client timeoutMicros method parameters = do
                                             ((timeoutMicros + 999999) `div` 1000000))
                                     <> " seconds"
 
-sendNotification :: McpClient -> Text -> Value -> IO (Either Text ())
+sendNotification
+    :: McpClient
+    -> Text
+    -> Aeson.Encoding
+    -> IO (Either Text ())
 sendNotification client method parameters =
-    sendMessage client $ object
-        [ "jsonrpc" .= ("2.0" :: Text)
-        , "method" .= method
-        , "params" .= parameters
-        ]
+    sendMessage client . Aeson.pairs $
+        "jsonrpc" .= ("2.0" :: Text)
+            <> "method" .= method
+            <> AesonEncoding.pair "params" parameters
 
-sendMessage :: McpClient -> Value -> IO (Either Text ())
+sendMessage :: McpClient -> Aeson.Encoding -> IO (Either Text ())
 sendMessage client message =
     tryAny
         (withMVar client.clientWriteLock \_ -> do
-            LBS.hPutStr client.clientInput (Aeson.encode message <> "\n")
+            LBS.hPutStr client.clientInput
+                (AesonEncodingInternal.encodingToLazyByteString message <> "\n")
             hFlush client.clientInput)
         >>= \case
             Left exception -> do
@@ -1919,7 +1943,7 @@ sendMessage client message =
 
 readerLoop
     :: Handle
-    -> TVar (IntMap.IntMap (TMVar (Either Text Value)))
+    -> TVar (IntMap.IntMap (TMVar (Either Text RawJson)))
     -> TVar (Maybe Text)
     -> IO ()
 readerLoop output pending failure =
@@ -1928,20 +1952,36 @@ readerLoop output pending failure =
     loop = do
         line <- BS8.hGetLine output
         unless (BS.null line) $
-            case Json.decodeEither aesonValueDecoder line of
+            case Json.decodeEither responseEnvelopeDecoder line of
                 Left err ->
                     failPending pending failure
                         ("Invalid MCP JSON response: " <> err.jsonErrorMessage)
-                Right value ->
-                    routeResponse pending value
+                Right response ->
+                    routeResponse pending response
         loop
 
+data ResponseEnvelope = ResponseEnvelope
+    { envelopeId :: !(Maybe Int)
+    , envelopeError :: !(Maybe RawJson)
+    , envelopeResult :: !(Maybe RawJson)
+    }
+
+responseEnvelopeDecoder :: Json.Decoder ResponseEnvelope
+responseEnvelopeDecoder = Json.object do
+    rawId <- Json.optionalKey "id" rawJsonDecoder
+    envelopeError <- Json.optionalKey "error" rawJsonDecoder
+    envelopeResult <- Json.optionalKey "result" rawJsonDecoder
+    let envelopeId = rawId >>= \value ->
+            either (const Nothing) Just $
+                Json.decodeEither Json.int (rawJsonBytes value)
+    pure ResponseEnvelope{..}
+
 routeResponse
-    :: TVar (IntMap.IntMap (TMVar (Either Text Value)))
-    -> Value
+    :: TVar (IntMap.IntMap (TMVar (Either Text RawJson)))
+    -> ResponseEnvelope
     -> IO ()
-routeResponse pending (Object fields) =
-    case KeyMap.lookup "id" fields >>= responseId of
+routeResponse pending envelope =
+    case envelope.envelopeId of
         Nothing -> pure ()
         Just ident -> do
             destination <- atomically do
@@ -1952,19 +1992,11 @@ routeResponse pending (Object fields) =
                 Nothing -> pure ()
                 Just response ->
                     atomically . void . tryPutTMVar response $
-                        case KeyMap.lookup "error" fields of
-                            Just err -> Left ("MCP error: " <> compactJson err)
-                            Nothing -> case KeyMap.lookup "result" fields of
+                        case envelope.envelopeError of
+                            Just err -> Left ("MCP error: " <> compactRawJson err)
+                            Nothing -> case envelope.envelopeResult of
                                 Just result -> Right result
                                 Nothing -> Left "MCP response omitted result"
-routeResponse _ _ = pure ()
-
-responseId :: Value -> Maybe Int
-responseId (Number value) =
-    case floatingOrInteger value of
-        Right integer -> Just integer
-        Left (_ :: Double) -> Nothing
-responseId _ = Nothing
 
 stderrLoop :: Handle -> IORef CapturedStderr -> IO ()
 stderrLoop handle captured =
@@ -2001,14 +2033,14 @@ capturedStderrText captured =
                 <> body
 
 failClient
-    :: TVar (IntMap.IntMap (TMVar (Either Text Value)))
+    :: TVar (IntMap.IntMap (TMVar (Either Text RawJson)))
     -> TVar (Maybe Text)
     -> Text
     -> IO ()
 failClient = failPending
 
 failPending
-    :: TVar (IntMap.IntMap (TMVar (Either Text Value)))
+    :: TVar (IntMap.IntMap (TMVar (Either Text RawJson)))
     -> TVar (Maybe Text)
     -> Text
     -> IO ()

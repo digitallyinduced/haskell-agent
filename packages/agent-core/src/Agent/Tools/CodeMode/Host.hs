@@ -33,6 +33,7 @@ import Agent.Tools.CodeMode.Protocol
     , encodeToolFailure
     , encodeToolSuccess
     )
+import Agent.Json (RawJson)
 import Paths_agent_core (getDataFileName)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
@@ -75,7 +76,7 @@ import Control.Exception.Safe
     , try
     )
 import Control.Monad (void)
-import Data.Aeson (Value(..), object, (.=))
+import Data.Aeson (ToJSON(toJSON), Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
@@ -836,7 +837,8 @@ monitorWorker
                             atomically do
                                 values <- drainTQueue content
                                 writeTQueue yields $
-                                    preferStreamedContent values responseValue
+                                    preferStreamedContent values
+                                        (protocolValue responseValue)
                             loop True
                         | otherwise ->
                             failClosed False "yield received before ready"
@@ -848,7 +850,8 @@ monitorWorker
                             failClosed False "notification received before ready"
                     Right WorkerContent{..}
                         | hasStarted -> do
-                            atomically $ writeTQueue content contentValue
+                            atomically $
+                                writeTQueue content (protocolValue contentValue)
                             loop True
                         | otherwise ->
                             failClosed False "content received before ready"
@@ -856,13 +859,17 @@ monitorWorker
                         | hasStarted && responseId == "exec" ->
                             do
                                 modifyMVar_ storedValues $
-                                    pure . Map.union responseStoredValueWrites
+                                    pure
+                                        . Map.union
+                                            (Map.map protocolValue
+                                                responseStoredValueWrites)
                                 atomically do
                                     values <- drainTQueue content
                                     void $ tryPutTMVar result $
                                         Right (CellSucceeded
                                             (preferStreamedContent
-                                                values responseValue))
+                                                values
+                                                (protocolValue responseValue)))
                         | otherwise ->
                             failClosed hasStarted
                                 "unexpected execution response id"
@@ -870,13 +877,17 @@ monitorWorker
                         | hasStarted && responseId == "exec" ->
                             do
                                 modifyMVar_ storedValues $
-                                    pure . Map.union responseStoredValueWrites
+                                    pure
+                                        . Map.union
+                                            (Map.map protocolValue
+                                                responseStoredValueWrites)
                                 atomically do
                                     values <- drainTQueue content
                                     void $ tryPutTMVar result $
                                         Right (CellFailed
                                             (preferStreamedContent
-                                                values responseValue)
+                                                values
+                                                (protocolValue responseValue))
                                             responseError)
                         | otherwise ->
                             failClosed hasStarted
@@ -892,7 +903,7 @@ monitorWorker
                 handled <- try @_ @SomeException $
                     handler
                         invocation.invocationName
-                        invocation.invocationArguments
+                        (protocolValue invocation.invocationArguments)
                 case handled of
                     Left err ->
                         send $ encodeToolFailure invocation.invocationId $
@@ -1050,6 +1061,12 @@ resultContentItems value = [value]
 preferStreamedContent :: [Value] -> Value -> Value
 preferStreamedContent [] fallback = fallback
 preferStreamedContent values _ = contentResult values
+
+-- The host evaluator and public code-mode result API still operate on Aeson
+-- values. Keep that materialisation at this explicit boundary rather than in
+-- the worker protocol decoder.
+protocolValue :: RawJson -> Value
+protocolValue = toJSON
 
 cellOutcomeResult :: Text -> CellOutcome -> CodeModeResult
 cellOutcomeResult identifier = \case

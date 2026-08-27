@@ -1,12 +1,14 @@
 module Agent.Tools.CodeMode.ProtocolSpec (spec) where
 
-import Agent.Tools.CodeMode.Protocol
+import Agent.Json (RawJson, rawJsonDecoder)
 import qualified Agent.Json.Decode as Json
+import Agent.Tools.CodeMode.Protocol
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
-import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -45,22 +47,19 @@ spec = describe "code-mode worker protocol" do
             `shouldBe` Right WorkerReady
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"content\",\"params\":{\"value\":null,\"unexpected\":true}}"
-            `shouldBe` Right (WorkerContent Aeson.Null)
+            `shouldBe` Right (WorkerContent (raw "null"))
 
     it "decodes content, yield, and notification messages" do
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"content\",\"params\":{\"value\":{\"type\":\"text\",\"text\":\"partial\"}}}"
             `shouldBe`
                 Right (WorkerContent
-                    (object
-                        [ "type" .= ("text" :: String)
-                        , "text" .= ("partial" :: String)
-                        ]))
+                    (raw "{\"type\":\"text\",\"text\":\"partial\"}"))
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"yield\",\"params\":{\"value\":{\"content\":[]}}}"
             `shouldBe`
                 Right (WorkerYielded
-                    (object ["content" .= ([] :: [Aeson.Value])]))
+                    (raw "{\"content\":[]}"))
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"notify\",\"params\":{\"text\":\"working\"}}"
             `shouldBe` Right (WorkerNotification "working")
@@ -71,10 +70,9 @@ spec = describe "code-mode worker protocol" do
             `shouldBe`
                 Right WorkerExecSucceeded
                     { responseId = "exec"
-                    , responseValue =
-                        object ["content" .= ([] :: [Aeson.Value])]
+                    , responseValue = raw "{\"content\":[]}"
                     , responseStoredValueWrites =
-                        Map.singleton "answer" (Aeson.Number 42)
+                        Map.singleton "answer" (raw "42")
                     }
 
     it "decodes failed execution state without discarding partial effects" do
@@ -84,10 +82,9 @@ spec = describe "code-mode worker protocol" do
                 Right WorkerExecFailed
                     { responseId = "exec"
                     , responseError = "boom"
-                    , responseValue =
-                        object ["content" .= ([] :: [Aeson.Value])]
+                    , responseValue = raw "{\"content\":[]}"
                     , responseStoredValueWrites =
-                        Map.singleton "candidate" (Aeson.Bool True)
+                        Map.singleton "candidate" (raw "true")
                     }
 
     it "encodes enabled tool metadata and the session store" do
@@ -99,25 +96,29 @@ spec = describe "code-mode worker protocol" do
         Json.decodeEither execRequestProjection encoded
             `shouldBe`
                 Right
-                    ( [ ("inspect", "Inspect a value.") ]
-                    , Map.singleton "answer" 42
+                    ( [("inspect", "Inspect a value.")]
+                    , 42
                     , True
                     )
 
-execRequestProjection
-    :: Json.Decoder ([(Text, Text)], Map.Map Text Int, Bool)
+raw :: BS.ByteString -> RawJson
+raw bytes =
+    case Json.decodeEither rawJsonDecoder bytes of
+        Right value -> value
+        Left err -> error (Text.unpack err.jsonErrorMessage)
+
+execRequestProjection :: Json.Decoder ([(Text.Text, Text.Text)], Int, Bool)
 execRequestProjection =
     Json.object $
         Json.atKey "params" $
-            (\tools storedValues imageDetailVisible ->
-                (tools, storedValues, imageDetailVisible)
-            )
-                <$> Json.atKey "tools" (Json.list toolProjection)
-                <*> Json.atKey "stored_values" (Json.objectAsMap pure Json.int)
-                <*> Json.atKey "image_detail_visible" Json.bool
-  where
-    toolProjection =
-        Json.object $
-            (,)
-                <$> Json.atKey "name" Json.text
-                <*> Json.atKey "description" Json.text
+            Json.object $
+                (,,)
+                    <$> Json.atKey "tools"
+                        (Json.list $
+                            Json.object $
+                                (,)
+                                    <$> Json.atKey "name" Json.text
+                                    <*> Json.atKey "description" Json.text)
+                    <*> Json.atKey "stored_values"
+                        (Json.object (Json.atKey "answer" Json.int))
+                    <*> Json.atKey "image_detail_visible" Json.bool

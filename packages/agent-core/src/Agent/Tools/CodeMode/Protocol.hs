@@ -16,22 +16,24 @@ module Agent.Tools.CodeMode.Protocol
     ) where
 
 import qualified Agent.Json.Decode as Json
+import Agent.Json
+    ( RawJson
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
 import Data.Aeson
     ( ToJSON(..)
-    , Value(..)
+    , Value
     , encode
     , object
     , (.=)
     )
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Vector as Vector
 
 data CodeModeToolMetadata = CodeModeToolMetadata
     { toolMetadataName :: !Text
@@ -47,31 +49,31 @@ instance ToJSON CodeModeToolMetadata where
 data ToolInvocation = ToolInvocation
     { invocationId :: !Text
     , invocationName :: !Text
-    , invocationArguments :: !Value
+    , invocationArguments :: !RawJson
     } deriving (Eq, Show)
 
 data ProtocolMessage
     = WorkerReady
     | WorkerToolInvocation !ToolInvocation
     | WorkerYielded
-        { responseValue :: !Value
+        { responseValue :: !RawJson
         }
     | WorkerNotification
         { notificationText :: !Text
         }
     | WorkerContent
-        { contentValue :: !Value
+        { contentValue :: !RawJson
         }
     | WorkerExecSucceeded
         { responseId :: !Text
-        , responseValue :: !Value
-        , responseStoredValueWrites :: !(Map Text Value)
+        , responseValue :: !RawJson
+        , responseStoredValueWrites :: !(Map Text RawJson)
         }
     | WorkerExecFailed
         { responseId :: !Text
         , responseError :: !Text
-        , responseValue :: !Value
-        , responseStoredValueWrites :: !(Map Text Value)
+        , responseValue :: !RawJson
+        , responseStoredValueWrites :: !(Map Text RawJson)
         }
     deriving (Eq, Show)
 
@@ -93,28 +95,28 @@ protocolMessageDecoder = Json.object do
                         { invocationId = requestId }
                 Just "yield" ->
                     Json.atKey "params" $
-                        Json.object (WorkerYielded <$> Json.atKey "value" aesonValueDecoder)
+                        Json.object (WorkerYielded <$> Json.atKey "value" rawJsonDecoder)
                 Just "notify" ->
                     Json.atKey "params" $
                         Json.object (WorkerNotification <$> Json.atKey "text" Json.text)
                 Just "content" ->
                     Json.atKey "params" $
-                        Json.object (WorkerContent <$> Json.atKey "value" aesonValueDecoder)
+                        Json.object (WorkerContent <$> Json.atKey "value" rawJsonDecoder)
                 Just unknown ->
                     fail $ "unsupported worker method: " <> show unknown
                 Nothing -> do
                     requestId <- Json.atKey "id" Json.text
-                    result <- Json.atKeyOptional "result" aesonValueDecoder
+                    result <- Json.atKeyOptional "result" rawJsonDecoder
                     err <- Json.atKeyOptional "error" errorDecoder
                     writes <- maybe Map.empty id
                         <$> Json.atKeyOptional "stored_value_writes"
-                            (Json.objectAsMap pure aesonValueDecoder)
+                            (Json.objectAsMap pure rawJsonDecoder)
                     case (result, err) of
                         (Just value, Nothing) ->
                             pure (WorkerExecSucceeded requestId value writes)
                         (Nothing, Just message) -> do
-                            partial <- maybe (object ["content" .= ([] :: [Value])]) id
-                                <$> Json.atKeyOptional "partial_result" aesonValueDecoder
+                            partial <- maybe emptyResult id
+                                <$> Json.atKeyOptional "partial_result" rawJsonDecoder
                             pure (WorkerExecFailed requestId message partial writes)
                         _ -> fail "response must contain exactly one of result or error"
 
@@ -127,28 +129,16 @@ toolInvocationDecoder = Json.object $
         ToolInvocation
             <$> pure ""
             <*> Json.atKey "name" Json.text
-            <*> Json.atKey "arguments" aesonValueDecoder
+            <*> Json.atKey "arguments" rawJsonDecoder
 
 decodeProtocolMessage :: BS.ByteString -> Either String ProtocolMessage
 decodeProtocolMessage =
     either (Left . Text.unpack . (.jsonErrorMessage)) Right
         . Json.decodeEither protocolMessageDecoder
 
--- Code mode deliberately transports arbitrary JavaScript values. Decode that
--- dynamic protocol leaf with Hermes, while keeping Aeson only as the in-memory
--- representation used by the existing evaluator and encoder.
-aesonValueDecoder :: Json.Decoder Value
-aesonValueDecoder = Json.withType \case
-    Json.VArray -> Array . Vector.fromList <$> Json.list aesonValueDecoder
-    Json.VObject ->
-        Object . KeyMap.fromList
-            <$> Json.objectAsKeyValues
-                (pure . Key.fromText)
-                aesonValueDecoder
-    Json.VNumber -> Number <$> Json.scientific
-    Json.VString -> String <$> Json.text
-    Json.VBoolean -> Bool <$> Json.bool
-    Json.VNull -> pure Null
+emptyResult :: RawJson
+emptyResult =
+    rawJsonFromEncoding (toEncoding (object ["content" .= ([] :: [Value])]))
 
 encodeExecRequest :: Text -> Text -> [Text] -> BS.ByteString
 encodeExecRequest requestId source toolNames =

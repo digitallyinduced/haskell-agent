@@ -1,5 +1,6 @@
 module Agent.Tools.SecretSpec (spec) where
 
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolDispatchConfig(..)
@@ -7,7 +8,6 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import Agent.ToolDSL (PropertySchema(..))
-import qualified Agent.Json.Decode as Json
 import Agent.Tools.Secret
 import Agent.Tools.Types
     ( AppTool(..)
@@ -161,7 +161,9 @@ runTool tool arguments = do
 
 resultSecretPath :: Text -> IO FilePath
 resultSecretPath output =
-    case Json.decodeText (Json.object (Json.atKey "secret_file" Json.text)) output of
+    case Json.decodeText
+            (Json.object (Json.atKey "secret_file" Json.text))
+            output of
         Right path -> pure (Text.unpack path)
         Left _ -> expectationFailure ("missing secret_file in output: " <> Text.unpack output)
             >> pure ""
