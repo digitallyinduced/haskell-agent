@@ -8,11 +8,14 @@ module Agent.CLI.Request
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
+import Agent.Responses.Types.Tools (responseToolDecoder)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Provider (Provider(..))
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -300,9 +303,10 @@ liteToolValuesToConventional = concatMap flatten
     maybeToListDecoded value = maybe [] pure (decodeTool value)
 
 decodeTool :: Aeson.Value -> Maybe ResponseTool
-decodeTool value = case Aeson.fromJSON value of
-    Aeson.Success tool -> Just tool
-    Aeson.Error _ -> Nothing
+decodeTool value =
+    case Hermes.decodeEither responseToolDecoder (LBS.toStrict (Aeson.encode value)) of
+        Right tool -> Just tool
+        Left _ -> Nothing
 
 additionalToolsValues :: Maybe ResponseItem -> [Aeson.Value]
 additionalToolsValues = \case

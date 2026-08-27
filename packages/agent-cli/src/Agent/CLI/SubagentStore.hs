@@ -33,6 +33,7 @@ import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types
+import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolArgs (readExactInt)
@@ -350,8 +351,11 @@ loadSubagentState sessionDir agentId =
             Right value -> pure (Right value)
     decodeItemsFile path = do
         raw <- retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
-        case Aeson.eitherDecode raw of
+        case Hermes.decodeEither
+                (Hermes.list responseItemDecoder)
+                (LBS.toStrict raw) of
             Left err ->
                 pure $ Left $
-                    "failed to decode " <> toText path <> ": " <> Text.pack err
+                    "failed to decode " <> toText path <> ": "
+                        <> Hermes.jsonErrorMessage err
             Right value -> pure (Right value)

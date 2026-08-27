@@ -2,13 +2,16 @@
 module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
+    , sessionMetaDecoder
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
+    , sessionTurnDecoder
     , SessionTurnPage(..)
     , SessionResumeStats(..)
     , SessionActivity(..)
     , SessionTransfer(..)
+    , sessionTransferDecoder
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -83,6 +86,7 @@ import Agent.Dialect
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Responses.Types (ResponseItem)
+import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.OpenAI.Compaction
     ( hasCompactionCheckpoint
     , isClearSessionTurn
@@ -108,9 +112,8 @@ import Control.Monad.Trans.Except
     , runExceptT
     , throwE
     )
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
+import Data.Aeson (ToJSON(..), object, (.=))
 import qualified Data.Aeson as Aeson
-import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits (xor)
 import Data.Int (Int64)
@@ -190,9 +193,11 @@ instance ToJSON SessionTransfer where
         , "turns" .= transfer.transferTurns
         ]
 
-instance FromJSON SessionTransfer where
-    parseJSON = withObject "SessionTransfer" \o ->
-        SessionTransfer <$> o .: "meta" <*> o .: "turns"
+sessionTransferDecoder :: Hermes.Decoder SessionTransfer
+sessionTransferDecoder = Hermes.object $
+    SessionTransfer
+        <$> Hermes.atKey "meta" sessionMetaDecoder
+        <*> Hermes.atKey "turns" (Hermes.list sessionTurnDecoder)
 
 -- | Durable provenance for subagent transcripts written before child target
 -- metadata was persisted. Keeping this target separate from the mutable root
@@ -243,14 +248,6 @@ legacySubagentTargetDecoder = Hermes.object do
         LegacySubagentTarget provider connection
             <$> Hermes.atKey "effectiveModel" Hermes.text
             <*> pure dialect
-
--- Transitional compatibility for the legacy transfer decoder. Remove with
--- 'SessionTransfer' once response-item decoders are available in this branch.
-instance FromJSON LegacySubagentTarget where
-    parseJSON value =
-        either (fail . Text.unpack . Hermes.jsonErrorMessage) pure $
-            Hermes.decodeEither legacySubagentTargetDecoder
-                (LBS.toStrict (Aeson.encode value))
 
 instance ToJSON SessionMeta where
     toJSON meta = object
@@ -328,14 +325,6 @@ sessionMetaDecoder = Hermes.object do
             <*> optionalKey "lastTurnSummary" Hermes.text
             <*> Hermes.defaultKey 0 "lastRecapMainTurns" Hermes.int
 
--- Transitional compatibility for 'SessionTransfer'; direct metadata files
--- already use 'sessionMetaDecoder'.
-instance FromJSON SessionMeta where
-    parseJSON value =
-        either (fail . Text.unpack . Hermes.jsonErrorMessage) pure $
-            Hermes.decodeEither sessionMetaDecoder
-                (LBS.toStrict (Aeson.encode value))
-
 data SessionTurn = SessionTurn
     { turnAt :: !UTCTime
     , turnUserText :: !Text
@@ -374,36 +363,29 @@ instance ToJSON SessionTurn where
         , "usage" .= turn.turnUsage
         ]
 
-instance FromJSON SessionTurn where
-    parseJSON = withObject "SessionTurn" \o -> do
-        at <- o .: "at"
-        userText <- o .: "userText"
-        assistantText <- o .:? "assistantText"
-        turnErrorValue <- o .:? "error"
-        responseId <- o .:? "responseId"
-        items <- o .: "items"
-        usageValue <- o .:? "usage" :: Parser (Maybe Aeson.Value)
-        usage <- traverse
-            (either (fail . Text.unpack . Hermes.jsonErrorMessage) pure
-                . Hermes.decodeEither tokenUsageDecoder
-                . LBS.toStrict
-                . Aeson.encode)
-            usageValue
-        effect <- o .:? "effect" >>= \case
-            Nothing -> pure (inferTranscriptEffect userText items)
-            Just value ->
-                either (fail . Text.unpack) pure
-                    (parseTranscriptEffect value)
-        pure SessionTurn
-            { turnAt = at
-            , turnUserText = userText
-            , turnAssistantText = assistantText
-            , turnError = turnErrorValue
-            , turnResponseId = responseId
-            , turnEffect = effect
-            , turnItems = items
-            , turnUsage = usage
-            }
+sessionTurnDecoder :: Hermes.Decoder SessionTurn
+sessionTurnDecoder = Hermes.object do
+    at <- Hermes.atKey "at" Hermes.utcTime
+    userText <- Hermes.atKey "userText" Hermes.text
+    assistantText <- optionalKey "assistantText" Hermes.text
+    turnErrorValue <- optionalKey "error" Hermes.text
+    responseId <- optionalKey "responseId" Hermes.text
+    items <- Hermes.atKey "items" (Hermes.list responseItemDecoder)
+    usage <- optionalKey "usage" tokenUsageDecoder
+    effect <- optionalKey "effect" Hermes.text >>= \case
+        Nothing -> pure (inferTranscriptEffect userText items)
+        Just value ->
+            either (fail . Text.unpack) pure (parseTranscriptEffect value)
+    pure SessionTurn
+        { turnAt = at
+        , turnUserText = userText
+        , turnAssistantText = assistantText
+        , turnError = turnErrorValue
+        , turnResponseId = responseId
+        , turnEffect = effect
+        , turnItems = items
+        , turnUsage = usage
+        }
 
 transcriptEffectText :: TranscriptEffect -> Text
 transcriptEffectText = \case
@@ -1315,8 +1297,9 @@ loadTranscript path = do
 
 decodeTurnLine :: Text -> Either Text SessionTurn
 decodeTurnLine line =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 line) of
-        Left err -> Left ("invalid transcript line: " <> Text.pack err)
+    case Hermes.decodeEither sessionTurnDecoder (Text.encodeUtf8 line) of
+        Left err ->
+            Left ("invalid transcript line: " <> Hermes.jsonErrorMessage err)
         Right turn -> Right turn
 
 decodeFileEither

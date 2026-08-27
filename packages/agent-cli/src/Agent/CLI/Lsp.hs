@@ -13,6 +13,7 @@ import Agent.CLI.Config
     ( LspConfig(..)
     , LspServerConfig(..)
     )
+import Agent.CLI.Json (decodeLazy, valueDecoder)
 import Agent.CLI.FileUri
     ( fileUri
     , fileUriPath
@@ -404,7 +405,7 @@ initializeClient client = do
                     ]
                 , "capabilities" .= clientCapabilities
                 , "initializationOptions"
-                    .= fromMaybe Aeson.Null
+                    .= maybe Aeson.Null Aeson.toJSON
                         client.clientConfig.lspInitializationOptions
                 ]
     requestClient
@@ -435,7 +436,7 @@ initializeClient client = do
                                     client.clientConfig.lspStartupTimeoutMilliseconds
                                     "workspace/didChangeConfiguration"
                                     (Aeson.object
-                                        ["settings" .= settings]) >>= \case
+                                        ["settings" .= Aeson.toJSON settings]) >>= \case
                                             Left err ->
                                                 pure
                                                     (Left
@@ -968,11 +969,11 @@ readMessage handle = do
                                 | BS.length body /= bodyLength ->
                                     Left "LSP response ended before Content-Length"
                                 | otherwise ->
-                                    case Aeson.eitherDecodeStrict' body of
+                                    case decodeLazy valueDecoder (LBS.fromStrict body) of
                                         Left err ->
                                             Left
                                                 ( "LSP response was invalid JSON: "
-                                                    <> Text.pack err
+                                                    <> err
                                                 )
                                         Right value -> Right value
 

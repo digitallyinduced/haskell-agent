@@ -15,17 +15,13 @@ module Agent.CLI.Config
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.Json (RawJson, rawJsonDecoder)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode qualified as Hermes
+import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (displayException, tryIO)
 import Control.Monad (unless, when)
-import Data.Aeson
-    ( FromJSON(..)
-    , withText
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
-    )
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
@@ -97,8 +93,8 @@ data LspServerConfig = LspServerConfig
     , lspArgs :: ![Text]
     , lspEnv :: !(Map Text Text)
     , lspExtensionToLanguage :: !(Map Text Text)
-    , lspInitializationOptions :: !(Maybe Aeson.Value)
-    , lspSettings :: !(Maybe Aeson.Value)
+    , lspInitializationOptions :: !(Maybe RawJson)
+    , lspSettings :: !(Maybe RawJson)
     , lspWorkspaceFolder :: !(Maybe Text)
     , lspStartupTimeoutMilliseconds :: !Int
     , lspShutdownTimeoutMilliseconds :: !Int
@@ -142,15 +138,12 @@ useProgressiveMcp strategy oneShot = case strategy of
     McpInitProgressive -> True
     McpInitBlocking -> False
 
-instance FromJSON McpInitStrategy where
-    parseJSON = withText "McpInitStrategy" \case
-        "auto" -> pure McpInitAuto
-        "progressive" -> pure McpInitProgressive
-        "blocking" -> pure McpInitBlocking
-        value ->
-            fail
-                ("unknown MCP initialization strategy: "
-                    <> Text.unpack value)
+decodeMcpInitStrategy :: Hermes.Decoder McpInitStrategy
+decodeMcpInitStrategy = Hermes.text >>= \case
+    "auto" -> pure McpInitAuto
+    "progressive" -> pure McpInitProgressive
+    "blocking" -> pure McpInitBlocking
+    value -> fail ("unknown MCP initialization strategy: " <> Text.unpack value)
 
 instance Aeson.ToJSON McpInitStrategy where
     toJSON = Aeson.String . \case
@@ -265,75 +258,69 @@ defaultHarnessConfig = HarnessConfig
     , configMaxConcurrentAgents = Nothing
     }
 
-instance FromJSON McpServerConfig where
-    parseJSON = withObject "McpServerConfig" \object ->
-        McpServerConfig
-            <$> object .:? "enabled" .!= True
-            <*> object .: "command"
-            <*> object .:? "args" .!= []
-            <*> object .:? "cwd"
-            <*> object .:? "env" .!= Map.empty
-            <*> object .:? "startupTimeoutSeconds"
-                .!= defaultMcpStartupTimeoutSeconds
-            <*> object .:? "requestTimeoutSeconds"
-                .!= defaultMcpRequestTimeoutSeconds
+decodeMcpServerConfig :: Hermes.Decoder McpServerConfig
+decodeMcpServerConfig = Hermes.object $
+    McpServerConfig
+        <$> defaultKey True "enabled" Hermes.bool
+        <*> Hermes.atKey "command" Hermes.text
+        <*> defaultKey [] "args" (Hermes.list Hermes.text)
+        <*> optionalKey "cwd" Hermes.text
+        <*> defaultKey Map.empty "env" (Hermes.objectAsMap pure Hermes.text)
+        <*> defaultKey defaultMcpStartupTimeoutSeconds "startupTimeoutSeconds" Hermes.int
+        <*> defaultKey defaultMcpRequestTimeoutSeconds "requestTimeoutSeconds" Hermes.int
 
-instance FromJSON WebFetchConfig where
-    parseJSON = withObject "WebFetchConfig" \object ->
-        WebFetchConfig
-            <$> object .:? "enabled" .!= False
-            <*> object .:? "allowedDomains" .!= []
-            <*> object .:? "timeoutSeconds"
-                .!= defaultWebFetchTimeoutSeconds
-            <*> object .:? "maxContentBytes"
-                .!= defaultWebFetchMaxContentBytes
-            <*> object .:? "maxInlineBytes"
-                .!= defaultWebFetchMaxInlineBytes
+decodeWebFetchConfig :: Hermes.Decoder WebFetchConfig
+decodeWebFetchConfig = Hermes.object $
+    WebFetchConfig
+        <$> defaultKey False "enabled" Hermes.bool
+        <*> defaultKey [] "allowedDomains" (Hermes.list Hermes.text)
+        <*> defaultKey defaultWebFetchTimeoutSeconds "timeoutSeconds" Hermes.int
+        <*> defaultKey defaultWebFetchMaxContentBytes "maxContentBytes" Hermes.int
+        <*> defaultKey defaultWebFetchMaxInlineBytes "maxInlineBytes" Hermes.int
 
-instance FromJSON LspServerConfig where
-    parseJSON = withObject "LspServerConfig" \object -> do
-        transport <- object .:? "transport" .!= ("stdio" :: Text)
-        unless (Text.toLower (Text.strip transport) == "stdio") $
-            fail
-                "LSP transport is unsupported; this host currently supports stdio only"
-        restartOnCrash <-
-            object .:? "restartOnCrash" .!= False
-        when restartOnCrash $
-            fail
-                "LSP restartOnCrash=true is unsupported by this host"
-        maxRestarts <-
-            object .:? "maxRestarts" .!= Aeson.Null
-        unless (maxRestarts == Aeson.Null) $
-            fail
-                "LSP maxRestarts is unsupported by this host"
-        LspServerConfig
-            <$> object .: "command"
-            <*> object .:? "args" .!= []
-            <*> object .:? "env" .!= Map.empty
-            <*> object .:? "extensionToLanguage" .!= Map.empty
-            <*> object .:? "initializationOptions"
-            <*> object .:? "settings"
-            <*> object .:? "workspaceFolder"
-            <*> object .:? "startupTimeoutMilliseconds"
-                .!= defaultLspStartupTimeoutMilliseconds
-            <*> object .:? "shutdownTimeoutMilliseconds"
-                .!= defaultLspShutdownTimeoutMilliseconds
+decodeLspServerConfig :: Hermes.Decoder LspServerConfig
+decodeLspServerConfig = Hermes.object do
+    transport <- defaultKey "stdio" "transport" Hermes.text
+    unless (Text.toLower (Text.strip transport) == "stdio") $
+        fail "LSP transport is unsupported; this host currently supports stdio only"
+    restartOnCrash <- defaultKey False "restartOnCrash" Hermes.bool
+    when restartOnCrash $
+        fail "LSP restartOnCrash=true is unsupported by this host"
+    maxRestarts <- optionalKey "maxRestarts" Hermes.int
+    when (maxRestarts /= Nothing) $
+        fail "LSP maxRestarts is unsupported by this host"
+    LspServerConfig
+        <$> Hermes.atKey "command" Hermes.text
+        <*> defaultKey [] "args" (Hermes.list Hermes.text)
+        <*> defaultKey Map.empty "env" (Hermes.objectAsMap pure Hermes.text)
+        <*> defaultKey Map.empty "extensionToLanguage"
+            (Hermes.objectAsMap pure Hermes.text)
+        <*> optionalKey "initializationOptions" rawJsonDecoder
+        <*> optionalKey "settings" rawJsonDecoder
+        <*> optionalKey "workspaceFolder" Hermes.text
+        <*> defaultKey defaultLspStartupTimeoutMilliseconds
+            "startupTimeoutMilliseconds" Hermes.int
+        <*> defaultKey defaultLspShutdownTimeoutMilliseconds
+            "shutdownTimeoutMilliseconds" Hermes.int
 
-instance FromJSON LspConfig where
-    parseJSON = withObject "LspConfig" \object ->
-        LspConfig
-            <$> object .:? "enabled" .!= False
-            <*> object .:? "servers" .!= Map.empty
+decodeLspConfig :: Hermes.Decoder LspConfig
+decodeLspConfig = Hermes.object $
+    LspConfig
+        <$> defaultKey False "enabled" Hermes.bool
+        <*> defaultKey Map.empty "servers"
+            (Hermes.objectAsMap pure decodeLspServerConfig)
 
-instance FromJSON HarnessConfig where
-    parseJSON = withObject "HarnessConfig" \object ->
-        HarnessConfig
-            <$> object .:? "version" .!= harnessConfigSchemaVersion
-            <*> object .:? "mcpInitStrategy" .!= McpInitAuto
-            <*> object .:? "mcpServers" .!= Map.empty
-            <*> object .:? "webFetch" .!= defaultHarnessConfig.configWebFetch
-            <*> object .:? "lsp" .!= defaultHarnessConfig.configLsp
-            <*> object .:? "maxConcurrentAgents"
+decodeHarnessConfig :: Hermes.Decoder HarnessConfig
+decodeHarnessConfig = Hermes.object $
+    HarnessConfig
+        <$> defaultKey harnessConfigSchemaVersion "version" Hermes.int
+        <*> defaultKey McpInitAuto "mcpInitStrategy" decodeMcpInitStrategy
+        <*> defaultKey Map.empty "mcpServers"
+            (Hermes.objectAsMap pure decodeMcpServerConfig)
+        <*> defaultKey defaultHarnessConfig.configWebFetch "webFetch"
+            decodeWebFetchConfig
+        <*> defaultKey defaultHarnessConfig.configLsp "lsp" decodeLspConfig
+        <*> optionalKey "maxConcurrentAgents" Hermes.int
 
 -- | @~/.haskell-agent/config.json@ for a supplied home directory.
 harnessConfigPath :: OsPath -> OsPath
@@ -374,13 +361,13 @@ loadHarnessConfig home = do
                 config <-
                     if isBlankJson bytes
                         then Right defaultHarnessConfig
-                        else case Aeson.eitherDecode' bytes of
+                        else case decodeLazy decodeHarnessConfig bytes of
                             Left err ->
                                 Left
                                     ( "Invalid "
                                         <> Text.pack (unsafeToFilePath path)
                                         <> ": "
-                                        <> Text.pack err
+                                        <> err
                                     )
                             Right parsed -> Right parsed
                 validateHarnessConfig config
