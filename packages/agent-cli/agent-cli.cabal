@@ -293,6 +293,7 @@ benchmark conversation-retention-bench
     main-is:          ConversationRetention.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-responses-types
+                    , agent-json
                     , aeson
                     , base >= 4.17 && < 5
                     , bytestring
