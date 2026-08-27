@@ -13,6 +13,10 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.Session.History (LiveConversation)
 import Agent.CLI.Btw (BtwBackendFactory)
+import Agent.CLI.CodeModeRuntime
+    ( CodeModeNestedSlot
+    , CodexCatalogSession
+    )
 import Agent.CLI.Compaction (CompactOutcome)
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Interrupt (InterruptState)
@@ -141,6 +145,11 @@ data SessionRequest = SessionRequest
     , selectAccount :: !(Maybe (Text -> IO (Either ApiError Text)))
     , onPersisted :: !(SessionHandle -> IO ())
     , compactRunner :: !(Maybe Text -> IO (Either Text CompactOutcome))
+      -- | Late-bound nested dispatcher for code-mode sessions. The runner
+      -- installs the approval-aware invoke once its approval pipeline exists.
+    , codeModeNestedSlot :: !(Maybe CodeModeNestedSlot)
+      -- | Catalog-instruction context for OpenAI models with a catalog entry.
+    , codexCatalogSession :: !(Maybe CodexCatalogSession)
     }
 
 data StartupRuntime = StartupRuntime

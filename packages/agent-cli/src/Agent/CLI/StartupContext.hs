@@ -52,6 +52,10 @@ data AgentsContextNotice
 -- keep whatever instructions were already in history; callers pass an empty
 -- history after a persisted transcript-replacement boundary. Regeneration can
 -- suppress the successful-load notice while still reporting read warnings.
+--
+-- @extraContext@ carries additional generated context blocks — such as the
+-- @<environment_context>@ fragment for catalog models — appended after the
+-- AGENTS.md wrapper (or sent alone when no AGENTS.md applies).
 loadAgentsContext
     :: Handle
     -> Maybe FullscreenRuntime
@@ -62,11 +66,13 @@ loadAgentsContext
     -> OsPath
     -> [ResponseItem]
     -> Maybe Text
+    -> Maybe Text
     -> IO (IORef (Maybe Text))
 loadAgentsContext
-        stderrHandle fullscreen notice options dialect home cwd initialItems initialPrevious
-    | not options.optAgentsMd = newIORef Nothing
+        stderrHandle fullscreen notice options dialect home cwd
+        initialItems initialPrevious extraContext
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
+    | not options.optAgentsMd = newIORef extraContext
     | otherwise = do
         let discoverOptions = DiscoverOptions
                 { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
@@ -78,7 +84,7 @@ loadAgentsContext
             (loadedInstructionWarnings loaded)
         let files = loadedInstructionFiles loaded
         case formatAgentsMdForDialect dialect cwd loaded of
-            Nothing -> newIORef Nothing
+            Nothing -> newIORef extraContext
             Just text -> do
                 case notice of
                     SuppressAgentsContextLoaded -> pure ()
@@ -94,7 +100,8 @@ loadAgentsContext
                                     (roleMuted color (glyphSession <> message))
                             Just runtime ->
                                 emitUiEvent runtime (UiSystemMessage message)
-                newIORef (Just text)
+                newIORef
+                    (Just (text <> maybe "" ("\n\n" <>) extraContext))
 
 reportInstructionWarning
     :: Handle
