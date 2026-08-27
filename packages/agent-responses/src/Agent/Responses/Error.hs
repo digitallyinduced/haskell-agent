@@ -108,11 +108,17 @@ classifyHttpFailure status body =
     case decodeProviderErrorPayload body of
         Right payload ->
             mkOpenAIError
-                (maybe (errorTypeFromStatus status) errorTypeFromText payload.payloadType)
+                (maybe (errorTypeFromStatus status) errorTypeFromText
+                    (payload.payloadType >>= nonGenericErrorType))
                 payload.payloadMessage
                 payload.payloadCode
                 payload.payloadRetryAfter
         Left _ -> HttpError status (Text.take 1000 body)
+
+nonGenericErrorType :: Text -> Maybe Text
+nonGenericErrorType value
+    | Text.toLower value == "error" = Nothing
+    | otherwise = Just value
 
 decodeProviderErrorPayload :: Text -> Either String ProviderErrorPayload
 decodeProviderErrorPayload body =

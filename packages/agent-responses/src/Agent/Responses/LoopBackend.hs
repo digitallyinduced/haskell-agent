@@ -548,6 +548,7 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
                 ("Warning: unsupported provider event " <> eventType))
     OtherResponseStreamEvent { otherEventType, eventDelta } ->
         case eventDelta of
+            Just text | Text.null text -> Nothing
             Just text -> case otherEventType of
                 EventOutputTextDelta -> Just (TextDelta text)
                 EventReasoningTextDelta
@@ -578,17 +579,22 @@ codexRateLimitsWarning limits =
             || limits.allowed == Just False
             || any ((>= 100) . snd) windows
     headline
-        | reached = "Codex usage limit reached"
+        | reached =
+            "Codex usage limit reached. Check /usage for reset details."
         | otherwise = "Codex usage is low"
     nonEmpty [] = Nothing
     nonEmpty values = Just values
     formatWindows values =
         ": " <> Text.intercalate " · "
-            [ label <> " " <> Text.pack (show (max 0 (100 - round used) :: Int))
+            [ label <> " " <> formatRemaining (max 0 (100 - used))
                 <> "% left"
             | (label, used) <- values
             ]
             <> ". Check /usage for reset details."
+    formatRemaining value
+        | value == fromIntegral (round value :: Int) =
+            Text.pack (show (round value :: Int))
+        | otherwise = Text.pack (show value)
 
 -- | Stateful projection of one streamed response attempt into loop events.
 --
