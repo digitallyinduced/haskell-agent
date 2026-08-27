@@ -16,7 +16,8 @@ import Agent.Provider
     , tokenProvider
     )
 import Agent.Responses.LoopBackend
-    ( statelessResponsesBackend
+    ( newStreamEventToLoopEvents
+    , statelessResponsesBackend
     , statelessResponsesBackendWithRawReasoning
     , tokenProviderStatelessResponsesBackend
     , turnInputsToItems
@@ -24,6 +25,8 @@ import Agent.Responses.LoopBackend
     )
 import Agent.Responses.Types
     ( MessageContent(..)
+    , CustomToolCall(..)
+    , FunctionCall(..)
     , FunctionCallOutput(..)
     , InternalChatMetadata(..)
     , ReasoningItem(..)
@@ -46,7 +49,12 @@ import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
-spec = describe "tokenProviderStatelessResponsesBackend" do
+spec = do
+    backendSpec
+    streamProjectionSpec
+
+backendSpec :: Spec
+backendSpec = describe "tokenProviderStatelessResponsesBackend" do
     it "encodes file attachments as input_file parts" do
         let image = ImageAttachment "image/png" "png-bytes"
             file = FileAttachment (Just "notes.txt") "text/plain" "file-bytes"
@@ -184,9 +192,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 { tag = "additional_tools"
                 , fields = KeyMap.empty
                 }
-            params = defaultResponseCreateParams
-                { input = Just (ResponseInputItems [prefix])
-                }
+            params = paramsWithInputItems [prefix]
             request = withRequestInput params (turnInputsToItems [UserMessage "hello"])
         case request.input of
             Just (ResponseInputItems (first : second : _)) -> do
@@ -197,9 +203,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
     it "replaces arbitrary prior input instead of replaying it as a prefix" do
         let stale = turnInputsToItems [UserMessage "stale"]
             fresh = turnInputsToItems [UserMessage "fresh"]
-            params = defaultResponseCreateParams
-                { input = Just (ResponseInputItems stale)
-                }
+            params = paramsWithInputItems stale
             request = withRequestInput params fresh
         request.input `shouldBe` Just (ResponseInputItems fresh)
 
@@ -218,14 +222,12 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 [item] -> item
                 _ -> error "expected one stale user item"
             fresh = turnInputsToItems [UserMessage "fresh"]
-            params = defaultResponseCreateParams
-                { input = Just (ResponseInputItems
-                    [ additional
-                    , markedDeveloper
-                    , unmarkedDeveloper
-                    , stale
-                    ])
-                }
+            params = paramsWithInputItems
+                [ additional
+                , markedDeveloper
+                , unmarkedDeveloper
+                , stale
+                ]
             request = withRequestInput params fresh
         request.input `shouldBe` Just
             (ResponseInputItems (additional : markedDeveloper : fresh))
@@ -265,9 +267,7 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 , status = Nothing
                 , extraFields = KeyMap.empty
                 }
-            params = defaultResponseCreateParams
-                { input = Just (ResponseInputItems [additional])
-                }
+            params = paramsWithInputItems [additional]
             request = withRequestInput params [imageMessage, toolOutput]
         case request.input of
             Just (ResponseInputItems
@@ -313,6 +313,131 @@ spec = describe "tokenProviderStatelessResponsesBackend" do
                 <> turnInputsToItems [UserMessage "continue"]
             request = withRequestInput defaultResponseCreateParams items
         request.input `shouldBe` Just (ResponseInputItems items)
+
+-- | Streamed tool-call arguments map to no visible loop delta of their own.
+-- Without the projected activity below, a model writing a large call — or
+-- degenerating into a repetition loop inside one — looks like endless silent
+-- reasoning until the provider's output-token cap fails the turn.
+streamProjectionSpec :: Spec
+streamProjectionSpec = describe "newStreamEventToLoopEvents" do
+    it "announces a streamed function call by name" do
+        projectEvent <- newStreamEventToLoopEvents False
+        events <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        events `shouldBe` [ActivityUpdated "Writing shell_command call…"]
+
+    it "reports argument progress at chunk boundaries" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        quiet <- projectEvent
+            (argumentsDelta "fc-1" (Text.replicate 100 "x"))
+        quiet `shouldBe` []
+        loud <- projectEvent
+            (argumentsDelta "fc-1" (Text.replicate 9900 "y"))
+        loud `shouldBe`
+            [ActivityUpdated "Writing shell_command call… (10k chars)"]
+
+    it "warns once per runaway argument window" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        let bigDelta = Text.replicate 60000 "z"
+        first <- projectEvent (argumentsDelta "fc-1" bigDelta)
+        first `shouldBe`
+            [ActivityUpdated "Writing shell_command call… (60k chars)"]
+        second <- projectEvent (argumentsDelta "fc-1" bigDelta)
+        second `shouldBe`
+            [ ActivityUpdated "Writing shell_command call… (120k chars)"
+            , WarningRaised
+                ("The model has streamed 120k chars of shell_command "
+                    <> "arguments in one response; it may be stuck in a "
+                    <> "repetition loop.")
+            ]
+        third <- projectEvent (argumentsDelta "fc-1" bigDelta)
+        third `shouldBe`
+            [ActivityUpdated "Writing shell_command call… (180k chars)"]
+
+    it "counts custom tool input as argument streaming" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        loud <- projectEvent
+            (customInputDelta "ct-1" "call-9" (Text.replicate 10000 "p"))
+        loud `shouldBe`
+            [ActivityUpdated "Writing apply_patch call… (10k chars)"]
+
+    it "keeps plain deltas mapped through the pure projection" do
+        projectEvent <- newStreamEventToLoopEvents False
+        events <- projectEvent OtherResponseStreamEvent
+            { otherEventType = EventOutputTextDelta
+            , sequenceNumber = Just 1
+            , eventExtraFields =
+                KeyMap.singleton "delta" (Aeson.String "hi")
+            }
+        events `shouldBe` [TextDelta "hi"]
+
+functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
+functionCallAdded functionItemId functionCallId functionName =
+    ResponseOutputItemAddedEvent
+        { item = FunctionCallItem FunctionCall
+            { itemId = Just functionItemId
+            , callId = functionCallId
+            , name = functionName
+            , namespace = Nothing
+            , arguments = ""
+            , encryptedFunctionArgs = Nothing
+            , status = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 1
+        , eventExtraFields = KeyMap.empty
+        }
+
+customToolCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
+customToolCallAdded customItemId customCallId customName =
+    ResponseOutputItemAddedEvent
+        { item = CustomToolCallItem CustomToolCall
+            { itemId = Just customItemId
+            , callId = customCallId
+            , name = customName
+            , namespace = Nothing
+            , input = ""
+            , status = Nothing
+            , extraFields = KeyMap.empty
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 1
+        , eventExtraFields = KeyMap.empty
+        }
+
+argumentsDelta :: Text.Text -> Text.Text -> ResponseStreamEvent
+argumentsDelta deltaItemId deltaText =
+    ResponseFunctionCallArgumentsDeltaEvent
+        { delta = Just deltaText
+        , streamItemId = Just deltaItemId
+        , streamOutputIndex = Just 0
+        , sequenceNumber = Nothing
+        , eventExtraFields = KeyMap.empty
+        }
+
+customInputDelta :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
+customInputDelta deltaItemId deltaCallId deltaText =
+    ResponseCustomToolInputDeltaEvent
+        { delta = Just deltaText
+        , streamItemId = Just deltaItemId
+        , streamCallId = Just deltaCallId
+        , streamOutputIndex = Just 0
+        , sequenceNumber = Nothing
+        , eventExtraFields = KeyMap.empty
+        }
+
+-- | 'input' is also a field on 'CustomToolCall', so a record update on
+-- 'ResponseCreateParams' is ambiguous here. Rebuild from the constructor.
+paramsWithInputItems :: [ResponseItem] -> ResponseCreateParams
+paramsWithInputItems items = case defaultResponseCreateParams of
+    ResponseCreateParams{..} ->
+        ResponseCreateParams
+            { input = Just (ResponseInputItems items)
+            , ..
+            }
 
 credential :: String -> Credential
 credential label = Credential

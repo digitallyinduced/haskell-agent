@@ -9,6 +9,9 @@ module Agent.Responses.LoopBackend
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
+    , newStreamEventToLoopEvents
+    , toolArgumentActivityChunkChars
+    , runawayToolArgumentWarningChars
     , streamOutputObserved
     , hasRecoverableIncompleteOutput
     , assistantTextFromResponse
@@ -54,6 +57,9 @@ import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as LBS
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
+import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -82,12 +88,12 @@ statelessResponsesBackendWithRawReasoning
 statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
     Backend \history _previousResponseId inputs onEvent -> do
         baseParams <- getParams
+        projectEvent <- newStreamEventToLoopEvents showRawReasoning
         let newItems = turnInputsToItems inputs
             requestItems = history <> newItems
             request = withRequestInput baseParams requestItems
         result <- send request \event ->
-            mapM_ onEvent
-                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+            projectEvent event >>= mapM_ onEvent
         case result of
             Left err -> pure (Left err)
             Right response ->
@@ -634,6 +640,162 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
                 _ -> Nothing
             Nothing -> Nothing
     _ -> Nothing
+
+-- | Stateful projection of one streamed response attempt into loop events.
+--
+-- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces streamed
+-- tool-call arguments as live activity. Argument deltas map to no visible
+-- loop event on their own, so a model writing a large tool call — or stuck in
+-- a degenerate repetition loop inside one (observed as multi-minute
+-- 128k-output-token samples whose arguments repeat @\\u0000@ or a hallucinated
+-- path segment) — previously looked like endless silent reasoning until the
+-- provider's output-token cap ended the turn.
+--
+-- Build one projector per response attempt so counters describe a single
+-- provider sample.
+newStreamEventToLoopEvents
+    :: Bool
+    -> IO (ResponseStreamEvent -> IO [LoopEvent])
+newStreamEventToLoopEvents showRawReasoning = do
+    stateRef <- newIORef emptyToolArgumentStreamState
+    pure \event -> do
+        argumentEvents <- atomicModifyIORef' stateRef \state ->
+            toolArgumentStreamStep event state
+        pure $
+            maybeToList
+                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+                <> argumentEvents
+
+-- | Emit an updated argument-streaming activity after this many additional
+-- streamed argument characters.
+toolArgumentActivityChunkChars :: Int
+toolArgumentActivityChunkChars = 8192
+
+-- | Warn after every additional this many streamed argument characters in a
+-- single response. The largest legitimate call observed in practice is well
+-- under half of this; degenerate repetition loops run to the provider's
+-- output-token cap (hundreds of thousands of characters).
+runawayToolArgumentWarningChars :: Int
+runawayToolArgumentWarningChars = 100000
+
+data ToolArgumentStreamState = ToolArgumentStreamState
+    { toolNamesById :: !(Map Text Text)
+    , currentToolName :: !(Maybe Text)
+    , streamedArgumentChars :: !Int
+    , announcedArgumentChars :: !Int
+    , warnedArgumentChars :: !Int
+    }
+
+emptyToolArgumentStreamState :: ToolArgumentStreamState
+emptyToolArgumentStreamState = ToolArgumentStreamState
+    { toolNamesById = Map.empty
+    , currentToolName = Nothing
+    , streamedArgumentChars = 0
+    , announcedArgumentChars = 0
+    , warnedArgumentChars = 0
+    }
+
+toolArgumentStreamStep
+    :: ResponseStreamEvent
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+toolArgumentStreamStep event state = case event of
+    ResponseOutputItemAddedEvent { item = FunctionCallItem call } ->
+        announceToolCall call.name
+            (maybeToList call.itemId <> [call.callId])
+            state
+    ResponseOutputItemAddedEvent { item = CustomToolCallItem call } ->
+        announceToolCall call.name
+            (maybeToList call.itemId <> [call.callId])
+            state
+    ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText, streamItemId } ->
+        countToolArgumentChars
+            (resolveToolName [streamItemId] state)
+            (Text.length deltaText)
+            state
+    ResponseCustomToolInputDeltaEvent
+        { delta = Just deltaText, streamItemId, streamCallId } ->
+            countToolArgumentChars
+                (resolveToolName [streamItemId, streamCallId] state)
+                (Text.length deltaText)
+                state
+    _ -> (state, [])
+
+announceToolCall
+    :: Text
+    -> [Text]
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+announceToolCall name identities state =
+    ( state
+        { toolNamesById =
+            foldr (\identity -> Map.insert identity name)
+                state.toolNamesById
+                identities
+        , currentToolName = Just name
+        }
+    , [ActivityUpdated (writingToolCallActivity name Nothing)]
+    )
+
+resolveToolName :: [Maybe Text] -> ToolArgumentStreamState -> Text
+resolveToolName identities state =
+    fromMaybe (fromMaybe "tool" state.currentToolName) $
+        firstJust
+            [ Map.lookup identity state.toolNamesById
+            | Just identity <- identities
+            ]
+  where
+    firstJust = foldr (<|>) Nothing
+
+countToolArgumentChars
+    :: Text
+    -> Int
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+countToolArgumentChars name deltaChars state =
+    let total = state.streamedArgumentChars + deltaChars
+        announce =
+            total - state.announcedArgumentChars
+                >= toolArgumentActivityChunkChars
+        warn =
+            total - state.warnedArgumentChars
+                >= runawayToolArgumentWarningChars
+    in
+    ( state
+        { streamedArgumentChars = total
+        , announcedArgumentChars =
+            if announce then total else state.announcedArgumentChars
+        , warnedArgumentChars =
+            if warn then total else state.warnedArgumentChars
+        }
+    , [ ActivityUpdated (writingToolCallActivity name (Just total))
+      | announce
+      ]
+        <> [ WarningRaised (runawayToolArgumentWarning name total)
+           | warn
+           ]
+    )
+
+writingToolCallActivity :: Text -> Maybe Int -> Text
+writingToolCallActivity name total =
+    "Writing " <> name <> " call…"
+        <> foldMap
+            (\chars -> " (" <> formatCharCount chars <> ")")
+            total
+
+runawayToolArgumentWarning :: Text -> Int -> Text
+runawayToolArgumentWarning name total =
+    "The model has streamed "
+        <> formatCharCount total
+        <> " of "
+        <> name
+        <> " arguments in one response; it may be stuck in a repetition loop."
+
+formatCharCount :: Int -> Text
+formatCharCount chars
+    | chars >= 10000 =
+        Text.pack (show (chars `div` 1000)) <> "k chars"
+    | otherwise = Text.pack (show chars) <> " chars"
 
 -- | Whether a stream event proves the provider has begun producing response
 -- output. These events make replay unsafe even when they do not map to a
