@@ -96,7 +96,8 @@ import Agent.CLI.TUI.Types
                appTerminalFocus),
       FullscreenRuntime(runtimeMotionMode, runtimeNativeImagePreviews,
                        runtimeColor, runtimeWaveTrough),
-      Name(ChoiceRow, ConversationViewport, AgentRow, AgentPane,
+      Name(ChoiceRow, ConversationViewport, ConversationViewportExtent,
+           ConversationImage, AgentRow, AgentPane,
            AgentPopover, ConversationChunkCache, ConversationReserve,
            QuickStartWorktree, QuickStartResume, QuickStartCommands,
            QuickStartModel, CodeBlockCache, ConversationBlock,
@@ -465,7 +466,7 @@ drawImagePreviews native previews =
                 , hCenter $
                     withAttr Theme.mutedAttr $
                         terminalTxt $
-                            "🖼 "
+                            "[image] "
                                 <> preview.previewMime
                                 <> " · "
                                 <> Text.pack (show preview.previewSourceWidth)
@@ -518,10 +519,11 @@ drawConversationPane :: AppState -> Widget Name
 drawConversationPane state =
     case selectedChildEntry state of
         Just entry ->
-            withVScrollBarRenderer conversationScrollbarRenderer $
-                withVScrollBars OnRight $
-                    viewport ConversationViewport Vertical $
-                        padLeftRight 2 (drawAgentConversation state entry)
+            reportExtent ConversationViewportExtent $
+                withVScrollBarRenderer conversationScrollbarRenderer $
+                    withVScrollBars OnRight $
+                        viewport ConversationViewport Vertical $
+                            padLeftRight 2 (drawAgentConversation state entry)
         Nothing
             | conversationIsEmpty state.appUi
                 && Seq.null
@@ -534,12 +536,13 @@ drawConversationPane state =
             | otherwise ->
                 vBox $
                     historyRangeWidgets state
-                        <> [ withVScrollBarRenderer
-                                conversationScrollbarRenderer $
-                                withVScrollBars OnRight $
-                                    viewport ConversationViewport Vertical $
-                                        padLeftRight 2
-                                            (drawTranscript state)
+                        <> [ reportExtent ConversationViewportExtent $
+                                withVScrollBarRenderer
+                                    conversationScrollbarRenderer $
+                                    withVScrollBars OnRight $
+                                        viewport ConversationViewport Vertical $
+                                            padLeftRight 2
+                                                (drawTranscript state)
                            ]
 
 selectedChildEntry :: AppState -> Maybe AgentEntry
@@ -560,6 +563,9 @@ conversationUiForTarget :: AgentTarget -> AppState -> Maybe UiState
 conversationUiForTarget target state = case target of
     AgentRoot -> Just state.appUi
     AgentChild _ ->
+        (.agentConversation)
+            <$> lookupAgentEntry target state.appAgentEntries
+    AgentNative _ ->
         (.agentConversation)
             <$> lookupAgentEntry target state.appAgentEntries
 
@@ -1471,28 +1477,41 @@ submittedUserMessage state target block =
         [terminalTxtWrap block.blockBody]
             <> case target of
                 AgentChild _ -> []
+                AgentNative _ -> []
                 AgentRoot ->
-                    map submittedImage $
+                    zipWith submittedImage [0 ..] $
                         Map.findWithDefault
                             []
                             block.blockId
                             state.appSubmittedImagePreviews
   where
-    submittedImage preview =
+    submittedImage index preview =
         padTop (Pad 1) $
-            vBox
-                [ hLimit 36 (renderTuiImagePreview 36 12 preview)
-                , withAttr Theme.userMutedAttr $
-                    terminalTxt $
-                        "🖼 "
-                            <> preview.previewMime
-                            <> " · "
-                            <> Text.pack (show preview.previewSourceWidth)
-                            <> "×"
-                            <> Text.pack (show preview.previewSourceHeight)
-                            <> " · "
-                            <> formatImageSize preview.previewBytes
-                ]
+            vBox $
+                nativePlaceholder index preview
+                    <> [ withAttr Theme.userMutedAttr $
+                            terminalTxt (imageSummary preview)
+                       ]
+
+    nativePlaceholder index preview
+        | not state.appRuntime.runtimeNativeImagePreviews = []
+        | otherwise =
+            let (columns, rows) = previewCellSize 36 12 preview
+            in [ reportExtent
+                    (ConversationImage block.blockId index) $
+                    hLimit columns $
+                        vLimit rows (fill ' ')
+               ]
+
+    imageSummary preview =
+        "[image] "
+            <> preview.previewMime
+            <> " · "
+            <> Text.pack (show preview.previewSourceWidth)
+            <> "×"
+            <> Text.pack (show preview.previewSourceHeight)
+            <> " · "
+            <> formatImageSize preview.previewBytes
 
 timestampedMessage :: AttrName -> Text -> Widget Name -> Widget Name
 timestampedMessage timestampAttr timestamp body

@@ -721,6 +721,21 @@ publishCompletionSTM registry record status = do
     writeTVar record.recordLastUpdate (Just (updateSeq, status))
     routeCompletionSTM registry record status
 
+-- | Publish a status for a turn settled administratively before its
+-- supervisor starts.  This wakes untargeted waiters just like a normal
+-- completion, but deliberately does not route a completion message to the
+-- parent (there was no model turn to report).
+publishDirectUpdateSTM
+    :: SubagentRegistry
+    -> SubagentRecord
+    -> SubagentStatus
+    -> STM ()
+publishDirectUpdateSTM registry record status = do
+    nextSeq <- readTVar registry.registryNextUpdateSeq
+    let updateSeq = nextSeq + 1
+    writeTVar registry.registryNextUpdateSeq updateSeq
+    writeTVar record.recordLastUpdate (Just (updateSeq, status))
+
 routeCompletionSTM :: SubagentRegistry -> SubagentRecord -> SubagentStatus -> STM Bool
 routeCompletionSTM registry record status =
     case record.recordParent of
@@ -1628,15 +1643,36 @@ interruptSubagent
     :: SubagentRegistry
     -> SubagentId
     -> IO (Either Text SubagentStatus)
-interruptSubagent registry agentId = do
-    mrecord <- atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
-    case mrecord of
-        Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
-        Just record -> do
-            previous <- atomically $
-                phaseStatus <$> readTVar record.recordPhase
-            requestCancel record.recordCancel
-            pure (Right previous)
+interruptSubagent registry agentId =
+    -- Serialize pending settlement and its callback with lifecycle-mutating
+    -- operations, so a follow-up cannot race the transition or callback.
+    withMVar registry.registryLifecycle \_ -> do
+        mrecord <-
+            atomically $ Map.lookup agentId <$> readTVar registry.registryAgents
+        case mrecord of
+            Nothing -> pure (Left ("unknown agent id: " <> agentId.unSubagentId))
+            Just record -> do
+                (previous, settledPending) <- atomically do
+                    phase <- readTVar record.recordPhase
+                    case phase of
+                        AgentPending{} -> do
+                            releaseSlotSTM registry record
+                            tryReadTQueue record.recordMailbox >>= \case
+                                Just nextWork -> do
+                                    modifyTVar' registry.registryLiveCount (+ 1)
+                                    writeTVar record.recordPhase
+                                        (AgentPending nextWork)
+                                Nothing ->
+                                    writeTVar record.recordPhase
+                                        (AgentIdle Interrupted
+                                            (phaseRootTurnId phase))
+                            publishDirectUpdateSTM registry record Interrupted
+                            pure (phaseStatus phase, True)
+                        _ -> pure (phaseStatus phase, False)
+                if settledPending
+                    then notifySettled registry record.recordId Interrupted
+                    else requestCancel record.recordCancel
+                pure (Right previous)
 
 -- | Queue a message without starting a new turn when idle (v2 send_message).
 queueMessage

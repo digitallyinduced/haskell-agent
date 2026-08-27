@@ -43,6 +43,7 @@ library
                     , Agent.XAI.Error
                     , Agent.XAI.LoopBackend
                     , Agent.XAI.Options
+                    , Agent.XAI.ReasoningEffort
                     , Agent.XAI.Request
                     , Agent.XAI.Stream
                     , Agent.XAI.Transcription

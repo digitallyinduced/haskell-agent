@@ -16,6 +16,7 @@ import Agent.CLI.TUI.Types
     , AppEventMailbox(..)
     , FullscreenRuntime(..)
     , PendingAppEvent(..)
+    , SyntaxHighlighterState(..)
     )
 import Agent.TUI.Model
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
@@ -264,6 +265,9 @@ hasPendingUnavailableSyntax :: FullscreenRuntime -> IO Bool
 hasPendingUnavailableSyntax runtime = do
     let AppEventMailbox pendingRef = runtime.runtimeMailbox
     pending <- readTVarIO pendingRef
-    pure case toList pending of
-        [PendingEvent (AppSyntaxHighlighterLoaded Nothing)] -> True
+    syntaxState <- readIORef runtime.runtimeSyntaxHighlighter
+    pure case (toList pending, syntaxState) of
+        ( [PendingEvent AppSyntaxHighlighterChanged]
+            , SyntaxHighlighterActive _ Nothing
+            ) -> True
         _ -> False

@@ -10,6 +10,14 @@ import Agent.Responses.Request
     , mapResponseTools
     , selectConfiguredModel
     )
+import Agent.ReasoningEffort
+    ( ReasoningEffort(..)
+    , parseReasoningEffort
+    )
+import Agent.XAI.ReasoningEffort
+    ( grokReasoningEffort
+    , grokReasoningEffortText
+    )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
 import qualified Data.Aeson.Key as Key
@@ -111,19 +119,13 @@ hostedXSearchTool :: ResponseTool
 hostedXSearchTool = knownResponseTool ToolXSearch KeyMap.empty
 
 xaiReasoningEffort :: Maybe Text -> Text
-xaiReasoningEffort = \case
-    Nothing -> "high"
-    Just "low" -> "low"
-    Just "none" -> "low"
-    Just "minimal" -> "low"
-    Just "medium" -> "medium"
-    Just "high" -> "high"
-    Just "xhigh" -> "xhigh"
-    -- The shared UI supports OpenAI's @max@ effort, but Grok's proxy rejects
-    -- it. Keep this projection defensive for resumed sessions and callers
-    -- that construct canonical requests directly.
-    Just "max" -> "high"
-    _ -> "high"
+xaiReasoningEffort value =
+    grokReasoningEffortText . grokReasoningEffort $
+        case value of
+            Nothing -> EffortHigh
+            Just "minimal" -> EffortLow
+            Just raw ->
+                either (const EffortHigh) id (parseReasoningEffort raw)
 
 requestInputItems :: ResponseCreateParams -> [ResponseItem]
 requestInputItems request = case request.input of

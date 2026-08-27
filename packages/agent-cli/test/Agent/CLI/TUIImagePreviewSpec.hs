@@ -9,6 +9,7 @@ import Agent.CLI.TUI.ImagePreview
     , previewCountForWidth
     , previewCellSize
     , previewImageAt
+    , sameNativePreviewLayout
     )
 import Agent.Loop (ImageAttachment(..))
 import Codec.Picture
@@ -26,6 +27,32 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "sameNativePreviewLayout" do
+        let placement attachment =
+                NativePreviewPlacement
+                    { nativePreviewImageId = 7
+                    , nativePreviewRow = 2
+                    , nativePreviewColumn = 3
+                    , nativePreviewColumns = 20
+                    , nativePreviewRows = 6
+                    , nativePreviewAttachment = attachment
+                    }
+        it "ignores attachment contents when geometry is unchanged" do
+            sameNativePreviewLayout
+                [placement (ImageAttachment "image/png" "first")]
+                [placement (ImageAttachment "image/png" "second")]
+                `shouldBe` True
+
+        it "detects viewport movement" do
+            let moved =
+                    (placement (ImageAttachment "image/png" "bytes"))
+                        { nativePreviewRow = 3
+                        }
+            sameNativePreviewLayout
+                [placement (ImageAttachment "image/png" "bytes")]
+                [moved]
+                `shouldBe` False
+
     describe "imageDimensions" do
         it "reads PNG dimensions without decoding image data" do
             let headerOnlyPng = BS.pack

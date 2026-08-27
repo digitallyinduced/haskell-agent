@@ -17,6 +17,12 @@ import Agent.CLI.AgentViewport
     , responseItemStepPreviewsRelative
     , responseItemsToUiStateRelative
     )
+import Agent.CLI.NativeAgents
+    ( NativeAgentView(..)
+    , applyNativeAgentEvent
+    , nativeAgentEntries
+    , restoreNativeAgents
+    )
 import Agent.CLI.SessionTitle
     ( SessionTitleEvent(..)
     , SessionTitleFailure(..)
@@ -97,7 +103,10 @@ import Agent.CLI.Session.History
     , writeLiveTranscript
     )
 import Agent.CLI.SessionEnv (SessionEnv(..))
-import Agent.CLI.Session.Interaction (runBtwQuestion, setSessionEffort)
+import Agent.CLI.Session.Interaction
+    ( runBtwQuestion
+    , setSessionEffortText
+    )
 import Agent.CLI.Skills
     ( installSkillCatalogWithOmissions, installSkillToolRoots
     , loadSkillsCatalogQuiet, reservedSlashNames
@@ -323,6 +332,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
     lastFailedTurnRef <- newIORef Nothing
     titleTurnCount <- newIORef =<< sessionTitleTurnCountFromSlot persist
     selectedAgent <- newIORef AgentRoot
+    nativeAgentsRef <- newIORef (Map.empty :: Map.Map Text NativeAgentView)
     agentStepCache <- newIORef (Map.empty :: Map.Map AgentTarget AgentStepCache)
     let cachedAgentSteps target variant items build = do
             transcriptName <- makeStableName items
@@ -346,6 +356,10 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     pure steps
         loadAgentSnapshot includeSummaries = do
             rootItems <- readLiveTranscript conversationRef
+            nativeAgents <-
+                atomicModifyIORef' nativeAgentsRef \current ->
+                    let restored = restoreNativeAgents rootItems current
+                    in (restored, restored)
             agents <- case multiCtx of
                 Nothing -> pure []
                 Just ctx -> listAgents ctx.multiRegistry Nothing
@@ -354,6 +368,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                         : [ AgentChild agentId
                           | (_, agentId, _) <- agents
                           ]
+                        <> map (\view -> AgentNative view.nativeAgentId)
+                            (Map.elems nativeAgents)
             selected <-
                 atomicModifyIORef' selectedAgent \current ->
                     let reconciled =
@@ -372,6 +388,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                                 responseItemPreviewLines 12 items
                             | otherwise ->
                                 []
+                        AgentNative nativeId ->
+                            maybe [] (.nativeAgentTranscript)
+                                (Map.lookup nativeId nativeAgents)
                     | includeSummaries =
                         responseItemPreviewLines 0 items
                     | otherwise = []
@@ -379,6 +398,9 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     | includeSummaries = initialUiState
                     | target /= selected = initialUiState
                     | target == AgentRoot = initialUiState
+                    | AgentNative nativeId <- target =
+                        maybe initialUiState (.nativeAgentConversation)
+                            (Map.lookup nativeId nativeAgents)
                     | otherwise =
                         settleConversation items status $
                             responseItemsToUiStateRelative
@@ -446,7 +468,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                     conversationFor
                     sessions)
                 agents
-            pure (selected, rootEntry : children)
+            let nativeEntries = nativeAgentEntries nativeAgents
+            pure (selected, rootEntry : children <> nativeEntries)
           where
             materializeChild
                     transcriptLines
@@ -502,6 +525,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 releaseSelectedAgent previous
             case target of
                 AgentRoot -> pure ()
+                AgentNative _ -> pure ()
                 AgentChild agentId -> do
                     session <-
                         (Just <$>
@@ -525,6 +549,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             writeIORef selectedAgent target
         releaseSelectedAgent = \case
             AgentRoot -> pure ()
+            AgentNative _ -> pure ()
             AgentChild agentId -> do
                 sessions <- readIORef subagentSessions
                 forM_ (Map.lookup agentId sessions) \session -> do
@@ -714,6 +739,8 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , renderWorkspace = toText cwd
             }
         emitLoop event = do
+            atomicModifyIORef' nativeAgentsRef \current ->
+                (applyNativeAgentEvent event current, ())
             managedLoopPublisher event
             case fullscreen of
                 Nothing -> renderEvent render event
@@ -992,7 +1019,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             }
     writeIORef generatedContextReloadRef reloadGeneratedContextSafely
     writeIORef startup.startupRestartEffort \level -> do
-        setSessionEffort env level
+        setSessionEffortText env level
         writeIORef restartEffortRef (Just level)
         requestCancel toolEnv.toolCancel
     forM_ fullscreen \runtime ->

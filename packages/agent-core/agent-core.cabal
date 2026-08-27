@@ -46,6 +46,7 @@ library
                     , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Provider.Options
+                    , Agent.ReasoningEffort
                     , Agent.Loop
                     , Agent.MCP
                     , Agent.JsonText

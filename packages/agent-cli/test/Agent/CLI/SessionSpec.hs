@@ -10,6 +10,7 @@ import Agent.Dialect (DialectId(..))
 import Agent.Loop (TokenUsage(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.Store.SessionItem
 import Agent.Store.Postgres
     ( Store
     , closeStore
@@ -487,6 +488,86 @@ contentPartKind = \case
 spec :: Spec
 spec = describe "Agent.CLI.Session" do
     describe "pure compatibility helpers" do
+        it "stores inline image and file payloads as binary data" do
+            let imageUrl = "data:image/png;base64,cG5nLWJ5dGVz"
+                fileData = "data:text/plain;base64,ZmlsZS1ieXRlcw=="
+                item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputImagePart
+                            Nothing
+                            Nothing
+                            (Just imageUrl)
+                            Nothing
+                            KeyMap.empty
+                        , InputFilePart
+                            Nothing
+                            (Just fileData)
+                            Nothing
+                            Nothing
+                            (Just "notes.txt")
+                            Nothing
+                            KeyMap.empty
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+            case toStoredResponseItem item of
+                StoredMessageItem StoredMessage
+                    { storedMessageContent =
+                        StoredMessageParts [imagePart, filePart]
+                    } -> do
+                        imagePart.storedContentPartImageUrl
+                            `shouldBe` Nothing
+                        imagePart.storedContentPartImageBinary
+                            `shouldBe` Just StoredBinaryData
+                                { storedBinaryDataMimeType = "image/png"
+                                , storedBinaryDataBytes = "png-bytes"
+                                }
+                        filePart.storedContentPartFileData
+                            `shouldBe` Nothing
+                        filePart.storedContentPartFileBinary
+                            `shouldBe` Just StoredBinaryData
+                                { storedBinaryDataMimeType = "text/plain"
+                                , storedBinaryDataBytes = "file-bytes"
+                                }
+                stored ->
+                    expectationFailure
+                        ("unexpected stored item: " <> show stored)
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
+        it "keeps hosted and malformed attachment URLs as text" do
+            let item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputImagePart
+                            Nothing
+                            Nothing
+                            (Just "https://example.com/image.png")
+                            Nothing
+                            KeyMap.empty
+                        , InputFilePart
+                            Nothing
+                            (Just "data:text/plain;base64,not base64")
+                            Nothing
+                            Nothing
+                            Nothing
+                            Nothing
+                            KeyMap.empty
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    , extraFields = KeyMap.empty
+                    }
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
         it "keeps the legacy artifact root and safe ids" do
             sessionsRoot (fromFilePath "/home/marc")
                 `shouldBe` fromFilePath "/home/marc/.haskell-agent/sessions"

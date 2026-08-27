@@ -136,6 +136,7 @@ library
                     , Agent.CLI.McpManager
                     , Agent.CLI.ModelConfig
                     , Agent.CLI.Models
+                    , Agent.CLI.NativeAgents
                     , Agent.CLI.Notification
                     , Agent.CLI.Options
                     , Agent.CLI.Permission
@@ -342,6 +343,7 @@ test-suite agent-cli-test
                     , Agent.CLI.ModelPickerSpec
                     , Agent.CLI.ModelConfigSpec
                     , Agent.CLI.ModelsSpec
+                    , Agent.CLI.NativeAgentsSpec
                     , Agent.CLI.ManagedTurnSpec
                     , Agent.CLI.NotificationSpec
                     , Agent.CLI.OptionsSpec

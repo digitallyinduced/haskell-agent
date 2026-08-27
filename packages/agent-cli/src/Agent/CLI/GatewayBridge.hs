@@ -454,6 +454,18 @@ updateManagedActivity event state =
                 { accumulatorKind = "thinking"
                 , accumulatorMessage = "Thinking…"
                 }
+        ToolUpdated _ ->
+            state
+        ToolRetracted _ ->
+            state
+        ResponseAttemptDiscarded ->
+            emptyManagedActivityAccumulator
+        NativeAgentStarted{} ->
+            state
+        NativeAgentOutput{} ->
+            state
+        NativeAgentFinished{} ->
+            state
         TurnFinished _ ->
             state
                 { accumulatorKind = "finished"

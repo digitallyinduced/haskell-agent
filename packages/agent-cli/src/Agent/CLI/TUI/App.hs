@@ -54,6 +54,7 @@ module Agent.CLI.TUI.App
     , runFullscreen
     , commitFullscreenImagePreviews
     , commitFullscreenHistoryTurn
+    , beginFullscreenLiveHistory
     , clearFullscreenHistorySource
     , reloadFullscreenHistorySource
     , setFullscreenHistorySource
@@ -170,7 +171,9 @@ import Agent.CLI.TUI.History
     , clearHistoryRequest
     , emptyHistoryWindow
     , historyWindowBlock
+    , historyWindowOlderAvailable
     , historyWindowRequest
+    , unarchivedLiveStart
     , historyWindowSetAnchors
     , markHistoryRequest
     , setHistoryWindowTurns
@@ -223,6 +226,7 @@ import Agent.CLI.TUI.ImagePreview
     , previewCountForWidth
     , previewCellSize
     , renderTuiImagePreview
+    , sameNativePreviewLayout
     )
 import Agent.TUI.Markdown
     ( codeWidgetWithSyntaxHighlighting
@@ -405,11 +409,13 @@ newFullscreenRuntimeWithSyntaxLoader
         motionTickQueued <- newTVarIO False
         historyRequests <- newTQueueIO
         syntaxRequests <- newTQueueIO
-        syntaxHighlighter <- newIORef Nothing
+        syntaxHighlighter <-
+            newIORef (SyntaxHighlighterUnloaded 0)
         historySource <- newIORef Nothing
         historyGeneration <- newIORef 0
         dictationJobs <- newTQueueIO
         imagePreviews <- newIORef []
+        submittedImagePlacements <- newIORef []
         imagePreviewRevision <- newIORef 0
         imagePreviewVisible <- newIORef True
         imagePreviewIdBase <- allocateNativePreviewImageIdBase
@@ -460,6 +466,7 @@ newFullscreenRuntimeWithSyntaxLoader
             , runtimeMotionTickQueued = motionTickQueued
             , runtimeMotionMode = motionMode
             , runtimeImagePreviews = imagePreviews
+            , runtimeSubmittedImagePlacements = submittedImagePlacements
             , runtimeImagePreviewRevision = imagePreviewRevision
             , runtimeImagePreviewVisible = imagePreviewVisible
             , runtimeImagePreviewIdBase = imagePreviewIdBase
@@ -558,6 +565,13 @@ clearFullscreenHistorySource runtime = do
             , historyPageHasNewer = False
             })
 
+beginFullscreenLiveHistory :: FullscreenRuntime -> IO ()
+beginFullscreenLiveHistory runtime = do
+    source <- readIORef runtime.runtimeHistorySource
+    case source of
+        Nothing -> pure ()
+        Just _ -> enqueueAppEvent runtime AppHistoryLiveStarted
+
 commitFullscreenHistoryTurn
     :: FullscreenRuntime
     -> HistoryTurn
@@ -594,18 +608,25 @@ resetFullscreenHistory runtime initialPage = do
 
 loadSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
 loadSyntaxHighlighterForRuntime runtime = do
-    startedAt <- getMonotonicTimeNSec
-    result <- tryAny runtime.runtimeLoadSyntaxHighlighter
-    finishedAt <- getMonotonicTimeNSec
-    let highlighter = case result of
-            Left _ -> Nothing
-            Right loaded -> either (const Nothing) Just loaded
-    writeIORef runtime.runtimeSyntaxHighlighter highlighter
-    enqueueAppEvent runtime (AppSyntaxHighlighterLoaded highlighter)
-    void $
-        tryAny $
-            runtime.runtimeSyntaxLoadFinished
-                (nanosecondsToNominalDiffTime (finishedAt - startedAt))
+    readIORef runtime.runtimeSyntaxHighlighter >>= \case
+        SyntaxHighlighterInactive _ -> pure ()
+        state -> do
+            let generation = syntaxHighlighterGeneration state
+            startedAt <- getMonotonicTimeNSec
+            result <- tryAny runtime.runtimeLoadSyntaxHighlighter
+            finishedAt <- getMonotonicTimeNSec
+            let highlighter = case result of
+                    Left _ -> Nothing
+                    Right loaded -> either (const Nothing) Just loaded
+            published <-
+                publishSyntaxHighlighter runtime generation highlighter
+            when published $
+                enqueueAppEvent runtime AppSyntaxHighlighterChanged
+            void $
+                tryAny $
+                    runtime.runtimeSyntaxLoadFinished
+                        (nanosecondsToNominalDiffTime
+                            (finishedAt - startedAt))
 
 runSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
 runSyntaxHighlighterForRuntime runtime = do
@@ -615,16 +636,24 @@ runSyntaxHighlighterForRuntime runtime = do
             atomically $
                 (:) <$> readTQueue runtime.runtimeSyntaxRequests
                     <*> flushTQueue runtime.runtimeSyntaxRequests
+        ensureSyntaxHighlighterForRuntime runtime
         readIORef runtime.runtimeSyntaxHighlighter >>= \case
-            Nothing -> pure ()
-            Just highlighter -> do
+            SyntaxHighlighterInactive _ -> pure ()
+            SyntaxHighlighterUnloaded _ -> pure ()
+            SyntaxHighlighterActive _ Nothing -> pure ()
+            SyntaxHighlighterActive generation (Just highlighter) -> do
                 (changed, loaded) <-
                     foldSyntaxRequests highlighter languages
                 when changed do
-                    writeIORef runtime.runtimeSyntaxHighlighter (Just loaded)
-                    enqueueAppEvent
-                        runtime
-                        (AppSyntaxHighlighterLoaded (Just loaded))
+                    published <-
+                        publishSyntaxHighlighter
+                            runtime
+                            generation
+                            (Just loaded)
+                    when published $
+                        enqueueAppEvent
+                            runtime
+                            AppSyntaxHighlighterChanged
   where
     foldSyntaxRequests current = \case
         [] -> pure (False, current)
@@ -635,6 +664,36 @@ runSyntaxHighlighterForRuntime runtime = do
                 Right (Right loaded) -> do
                     (_, final) <- foldSyntaxRequests loaded remaining
                     pure (True, final)
+
+ensureSyntaxHighlighterForRuntime :: FullscreenRuntime -> IO ()
+ensureSyntaxHighlighterForRuntime runtime =
+    readIORef runtime.runtimeSyntaxHighlighter >>= \case
+        SyntaxHighlighterUnloaded _ ->
+            loadSyntaxHighlighterForRuntime runtime
+        SyntaxHighlighterActive{} -> pure ()
+        SyntaxHighlighterInactive _ -> pure ()
+
+publishSyntaxHighlighter
+    :: FullscreenRuntime
+    -> Word64
+    -> Maybe SyntaxHighlighter
+    -> IO Bool
+publishSyntaxHighlighter runtime generation highlighter =
+    atomicModifyIORef' runtime.runtimeSyntaxHighlighter \case
+        SyntaxHighlighterUnloaded current
+            | current == generation ->
+                (SyntaxHighlighterActive current highlighter, True)
+        SyntaxHighlighterActive current _
+            | current == generation ->
+                (SyntaxHighlighterActive current highlighter, True)
+        current ->
+            (current, False)
+
+syntaxHighlighterGeneration :: SyntaxHighlighterState -> Word64
+syntaxHighlighterGeneration = \case
+    SyntaxHighlighterUnloaded generation -> generation
+    SyntaxHighlighterActive generation _ -> generation
+    SyntaxHighlighterInactive generation -> generation
 
 nanosecondsToNominalDiffTime :: Word64 -> NominalDiffTime
 nanosecondsToNominalDiffTime nanoseconds =
@@ -684,12 +743,8 @@ commitFullscreenImagePreviews runtime images = do
         if map fst previous == images
             then pure previous
             else prepareFullscreenImagePreviews runtime images
-    -- Submitted images use the ANSI renderer even when the transient overlay
-    -- used Kitty placement, so finish sampling before the Brick render thread.
-    mapM_
-        (\(_, preview) ->
-            void $ pure $! pixelAt preview.previewSample 0 0)
-        prepared
+    -- Unsupported terminals render only the compact image summary. Native
+    -- terminals retain the encoded attachment for a viewport-aware placement.
     enqueueAppEvent runtime (AppCommitImagePreviews prepared)
 
 prepareFullscreenImagePreviews
@@ -1356,9 +1411,11 @@ commitLiveHistoryTurn durableTurn commit state =
             case state.appHistoryLiveStart of
                 Just index -> index
                 Nothing
-                    | commit == HistoryCommitAppend ->
-                        Seq.length state.appUi.uiBlocks
-                    | otherwise -> 0
+                    | commit == HistoryCommitReset -> 0
+                    | otherwise ->
+                        unarchivedLiveStart
+                            state.appUi.uiBlocks
+                            durableTurn.historyTurnBlocks
         (nextBlockId, remappedBlocks) =
             remapHistoryBlocks
                 state.appNextHistoryBlockId
@@ -1367,19 +1424,14 @@ commitLiveHistoryTurn durableTurn commit state =
             durableTurn { historyTurnBlocks = remappedBlocks }
         baseWindow =
             case commit of
-                HistoryCommitAppend -> state.appHistoryWindow
-                HistoryCommitReplace ->
-                    emptyHistoryWindow
-                        state.appHistoryWindow.historyWindowGeneration
-                        historyWindowTurnBudget
-                        historyWindowBlockBudget
-                        historyWindowByteBudget
                 HistoryCommitReset ->
                     emptyHistoryWindow
                         state.appHistoryWindow.historyWindowGeneration
                         historyWindowTurnBudget
                         historyWindowBlockBudget
                         historyWindowByteBudget
+                _ ->
+                    state.appHistoryWindow
         replacementPage =
             HistoryPage
                 { historyPageGeneration =
@@ -1394,13 +1446,13 @@ commitLiveHistoryTurn durableTurn commit state =
                 }
         window =
             case commit of
-                HistoryCommitAppend ->
-                    appendHistoryTurn remappedTurn baseWindow
-                _ ->
+                HistoryCommitReset ->
                     either
                         (const baseWindow)
                         id
                         (applyHistoryPage replacementPage baseWindow)
+                _ ->
+                    appendHistoryTurn remappedTurn baseWindow
         ui = truncateUiBlocks start state.appUi
     in state
         { appUi = ui
@@ -1553,12 +1605,20 @@ wrapNativePreviewVty runtime vty
                         if visible
                             then readIORef runtime.runtimeImagePreviews
                             else pure []
-                    let placements =
-                            nativePreviewPlacements
-                                runtime.runtimeImagePreviewIdBase
-                                terminalColumns
-                                terminalRows
-                                previews
+                    submitted <-
+                        if visible
+                            then
+                                readIORef
+                                    runtime.runtimeSubmittedImagePlacements
+                            else pure []
+                    let placements
+                            | null previews = submitted
+                            | otherwise =
+                                nativePreviewPlacements
+                                    runtime.runtimeImagePreviewIdBase
+                                    terminalColumns
+                                    terminalRows
+                                    previews
                         oldImageIds = case previous of
                             Just (_, _, imageIds) -> imageIds
                             Nothing -> []
@@ -2137,6 +2197,9 @@ copyCodeBlock target blockId codeIndex = do
                         <|> selectedBlock state.appUi blockId
                 AgentChild _ ->
                     conversationUiForTarget target state
+                        >>= \ui -> selectedBlock ui blockId
+                AgentNative _ ->
+                    conversationUiForTarget target state
                         >>= \ui -> selectedBlock ui blockId)
                 >>= fencedCodeBlock codeIndex . (.blockBody)
     case code of
@@ -2350,6 +2413,8 @@ handleUiEvents uiEvents = do
                 (initial, Nothing, False, False)
                 uiEvents
     put final
+    when (any (== UiConversationCleared) uiEvents) $
+        clearSubmittedImagePlacements final.appRuntime
     case nativeProgress of
         Nothing -> pure ()
         Just active ->
@@ -2558,23 +2623,48 @@ advanceAppClockNow = do
 noteTerminalFocusLost :: EventM Name AppState ()
 noteTerminalFocusLost = do
     now <- liftIO getMonotonicTimeNSec
+    state <- get
+    liftIO $
+        atomicModifyIORef'
+            state.appRuntime.runtimeSyntaxHighlighter
+            \syntaxState ->
+                ( SyntaxHighlighterInactive
+                    (syntaxHighlighterGeneration syntaxState + 1)
+                , ()
+                )
+    liftIO $ atomically $ void $ flushTQueue
+        state.appRuntime.runtimeSyntaxRequests
     modify' \state ->
         state
             { appTerminalFocus = TerminalUnfocused
             , appFocusLostAt = Just now
             , appAutoRecapShownThisAway = False
             , appLastAutoRecapAttemptAt = Nothing
+            , appSyntaxHighlighter = Nothing
+            , appSyntaxRequested = Set.empty
             }
+    invalidateCache
 
 noteTerminalFocusGained :: EventM Name AppState ()
 noteTerminalFocusGained = do
     maybeRequestAutoRecap
+    state <- get
+    liftIO $
+        atomicModifyIORef'
+            state.appRuntime.runtimeSyntaxHighlighter
+            \case
+                SyntaxHighlighterInactive generation ->
+                    (SyntaxHighlighterUnloaded generation, ())
+                active ->
+                    (active, ())
     modify' \state ->
         state
             { appTerminalFocus = TerminalFocused
             , appFocusLostAt = Nothing
             , appMotionScheduleReset = True
+            , appSyntaxRequested = Set.empty
             }
+    requestVisibleSyntaxLanguages
     invalidateCache
     getVtyHandle >>= liftIO . V.refresh
 
@@ -2679,10 +2769,11 @@ eventMayExposeSyntax = \case
         uiEventMayExposeSyntax uiEvent
     AppEvent (AppUiBatch uiEvents) ->
         any uiEventMayExposeSyntax uiEvents
-    AppEvent (AppSyntaxHighlighterLoaded _) -> True
+    AppEvent AppSyntaxHighlighterChanged -> True
     AppEvent (AppHistoryReset _) -> True
     AppEvent (AppHistoryLoaded _ _) -> True
     AppEvent (AppHistoryCommitted _ _ _) -> True
+    AppEvent AppHistoryLiveStarted -> True
     AppEvent (AppAgentSnapshot _ _) -> True
     _ -> False
 
@@ -2721,7 +2812,10 @@ requestVisibleSyntaxLanguages = do
             syntaxLanguagesForBlocks (visibleConversationBlocks state)
         missing =
             Set.difference languages state.appSyntaxRequested
-    unless (Set.null missing) do
+    when
+        ( state.appTerminalFocus /= TerminalUnfocused
+            && not (Set.null missing)
+        ) do
         liftIO $
             atomically $
                 mapM_
@@ -2878,6 +2972,7 @@ handleEventInner event = case event of
                 { appImagePreviews = []
                 , appSubmittedImagePreviews = submitted
                 }
+        queueConversationReflow
     AppEvent (AppDictationPartial text) -> do
         state <- get
         when (isJust state.appDictation) $
@@ -2915,13 +3010,21 @@ handleEventInner event = case event of
         vty <- getVtyHandle
         liftIO (writeOutputWindowTitle (V.outputIface vty) title)
         modify' \current -> current { appWindowTitle = Just title }
-    AppEvent (AppSyntaxHighlighterLoaded highlighter) ->
-        case highlighter of
-            Nothing -> pure ()
-            Just loaded -> do
-                modify' \current ->
-                    current { appSyntaxHighlighter = Just loaded }
-                invalidateCache
+    AppEvent AppSyntaxHighlighterChanged -> do
+        state <- get
+        when (state.appTerminalFocus /= TerminalUnfocused) do
+            highlighter <-
+                liftIO $
+                    readIORef state.appRuntime.runtimeSyntaxHighlighter
+            modify' \current ->
+                current
+                    { appSyntaxHighlighter =
+                        case highlighter of
+                            SyntaxHighlighterActive _ loaded -> loaded
+                            SyntaxHighlighterUnloaded _ -> Nothing
+                            SyntaxHighlighterInactive _ -> Nothing
+                    }
+            invalidateCache
     AppEvent (AppHistoryReset page) -> do
         modify' (resetHistoryPage page)
         invalidateCache
@@ -2954,6 +3057,15 @@ handleEventInner event = case event of
                         makeVisible
                             (ConversationBlock AgentRoot blockId)
                 queueConversationReflow
+    AppEvent AppHistoryLiveStarted ->
+        modify' \state ->
+            state
+                { appHistoryLiveStart =
+                    case state.appHistoryLiveStart of
+                        Just start -> Just start
+                        Nothing ->
+                            Just (Seq.length state.appUi.uiBlocks)
+                }
     AppEvent (AppHistoryCommitted generation turn commit) -> do
         state <- get
         let currentGeneration =
@@ -3034,6 +3146,13 @@ handleEventInner event = case event of
         modify' \state ->
             state { appConversationReflowQueued = False }
         reflowConversation
+        state <- get
+        liftIO $
+            enqueueAppEvent
+                state.appRuntime
+                AppSyncSubmittedImagePlacements
+    AppEvent AppSyncSubmittedImagePlacements ->
+        syncSubmittedImagePlacements
     AppEvent (AppAskPermission summary reply) -> do
         state <- get
         liftIO (state.appRuntime.runtimeNativeProgress False)
@@ -3652,6 +3771,8 @@ applyActiveConversationUiEvent uiEvent = do
             applyLocalUiEvent uiEvent
         target@(AgentChild _) ->
             modify' (applyChildConversationUiEvent target uiEvent)
+        target@(AgentNative _) ->
+            modify' (applyChildConversationUiEvent target uiEvent)
 
 scrollConversationPage :: Direction -> EventM Name AppState ()
 scrollConversationPage direction = do
@@ -3689,7 +3810,12 @@ scrollConversationBy amount = do
                 pure (Just (top, height, contentHeight))
             Nothing ->
                 pure Nothing
-    case Scroll.conversationScrollGesture amount viewportBounds of
+    case
+        Scroll.conversationScrollGesture
+            (state.appAgentSelected == AgentRoot
+                && historyWindowOlderAvailable state.appHistoryWindow)
+            amount
+            viewportBounds of
         Scroll.IgnoreConversationScroll ->
             pure ()
         Scroll.PauseAndScrollConversation -> do
@@ -3795,6 +3921,107 @@ reflowConversation = do
                             vScrollToEnd
                                 (viewportScroll ConversationViewport)
 
+syncSubmittedImagePlacements :: EventM Name AppState ()
+syncSubmittedImagePlacements = do
+    state <- get
+    when state.appRuntime.runtimeNativeImagePreviews do
+        let submitted =
+                [ (blockId, index, preview)
+                | (blockId, previews) <-
+                    Map.toAscList state.appSubmittedImagePreviews
+                , (index, preview) <- zip [0 ..] previews
+                ]
+        viewportExtent <- lookupExtent ConversationViewportExtent
+        placements <-
+            case viewportExtent of
+                Nothing -> pure []
+                Just viewportBounds ->
+                    fmap concat $
+                        sequence
+                            [ placementFor
+                                state
+                                viewportBounds
+                                ordinal
+                                blockId
+                                index
+                                preview
+                            | (ordinal, (blockId, index, preview)) <-
+                                zip [0 ..] submitted
+                            ]
+        previous <-
+            liftIO $
+                readIORef
+                    state.appRuntime.runtimeSubmittedImagePlacements
+        when (not (sameNativePreviewLayout previous placements)) $
+            liftIO do
+                writeIORef
+                    state.appRuntime.runtimeSubmittedImagePlacements
+                    placements
+                modifyIORef'
+                    state.appRuntime.runtimeImagePreviewRevision
+                    (+ 1)
+
+placementFor
+    :: AppState
+    -> Extent Name
+    -> Int
+    -> BlockId
+    -> Int
+    -> TuiImagePreview
+    -> EventM Name AppState [NativePreviewPlacement]
+placementFor state viewportBounds ordinal blockId index preview =
+    lookupExtent (ConversationImage blockId index) >>= \case
+        Just imageBounds
+            | extentInside viewportBounds imageBounds ->
+                let Location (column, row) = imageBounds.extentUpperLeft
+                    (columns, rows) = imageBounds.extentSize
+                    imageId =
+                        submittedImageId
+                            state.appRuntime.runtimeImagePreviewIdBase
+                            ordinal
+                in pure
+                    [ NativePreviewPlacement
+                        { nativePreviewImageId = imageId
+                        , nativePreviewRow = row
+                        , nativePreviewColumn = column
+                        , nativePreviewColumns = columns
+                        , nativePreviewRows = rows
+                        , nativePreviewAttachment =
+                            preview.previewKittyAttachment
+                        }
+                    ]
+        _ -> pure []
+
+extentInside :: Extent Name -> Extent Name -> Bool
+extentInside outer inner =
+    innerColumn >= outerColumn
+        && innerRow >= outerRow
+        && innerColumn + innerWidth <= outerColumn + outerWidth
+        && innerRow + innerHeight <= outerRow + outerHeight
+        && innerWidth > 0
+        && innerHeight > 0
+  where
+    Location (outerColumn, outerRow) = outer.extentUpperLeft
+    (outerWidth, outerHeight) = outer.extentSize
+    Location (innerColumn, innerRow) = inner.extentUpperLeft
+    (innerWidth, innerHeight) = inner.extentSize
+
+submittedImageId :: Int -> Int -> Int
+submittedImageId imageIdBase ordinal =
+    fromInteger $
+        ((toInteger imageIdBase + 2 + toInteger ordinal)
+            `mod` 4_294_967_295)
+            + 1
+
+clearSubmittedImagePlacements :: FullscreenRuntime -> EventM Name AppState ()
+clearSubmittedImagePlacements runtime = do
+    previous <-
+        liftIO $ readIORef runtime.runtimeSubmittedImagePlacements
+    when (not (null previous)) $
+        liftIO do
+            writeIORef runtime.runtimeSubmittedImagePlacements []
+            modifyIORef' runtime.runtimeImagePreviewRevision (+ 1)
+
 conversationRenderedReserveRows :: EventM Name AppState Int
 conversationRenderedReserveRows =
     lookupExtent ConversationReserve >>= \case
@@ -3820,6 +4047,9 @@ conversationBlocks target state =
         AgentChild _ ->
             maybe [] (toList . (.uiBlocks))
                 (conversationUiForTarget target state)
+        AgentNative _ ->
+            maybe [] (toList . (.uiBlocks))
+                (conversationUiForTarget target state)
 
 historyBlock :: HistoryWindow -> BlockId -> Maybe UiBlock
 historyBlock window ident =
@@ -3837,6 +4067,9 @@ selectedConversationBlockId target state =
         AgentChild _ ->
             conversationUiForTarget target state
                 >>= (.uiSelectedBlock)
+        AgentNative _ ->
+            conversationUiForTarget target state
+                >>= (.uiSelectedBlock)
 
 selectedConversationBlock
     :: AgentTarget
@@ -3849,6 +4082,8 @@ selectedConversationBlock target state =
                 historyBlock state.appHistoryWindow ident
                     <|> lookupBlock ident state.appUi
             AgentChild _ ->
+                conversationUiForTarget target state >>= lookupBlock ident
+            AgentNative _ ->
                 conversationUiForTarget target state >>= lookupBlock ident
 
 selectConversationBlock
@@ -3880,6 +4115,18 @@ selectConversationBlock target ident = do
                         (applyUiEvent
                             (UiFocusChanged FocusScrollback))
         AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiSelectBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+        AgentNative _ -> do
             modify' \current ->
                 (applyChildConversationUiEvent
                     target
@@ -3923,6 +4170,18 @@ activateConversationBlock target ident = do
                         (applyUiEvent
                             (UiFocusChanged FocusScrollback))
         AgentChild _ -> do
+            modify' \current ->
+                (applyChildConversationUiEvent
+                    target
+                    (UiActivateBlock ident)
+                    current)
+                    { appHistorySelectedBlock = Nothing
+                    , appUi =
+                        reduceUi
+                            (UiFocusChanged FocusScrollback)
+                            current.appUi
+                    }
+        AgentNative _ -> do
             modify' \current ->
                 (applyChildConversationUiEvent
                     target

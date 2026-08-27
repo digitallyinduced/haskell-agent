@@ -46,6 +46,11 @@ import Agent.CLI.Options
 import Agent.CLI.Command.Types
 import Agent.CLI.Style (roleMuted, rolePrompt)
 import Agent.Dialect (DialectId(..))
+import Agent.ReasoningEffort
+    ( ReasoningEffort(..)
+    , parseReasoningEffort
+    , reasoningEffortText
+    )
 import Agent.Responses.Types
 
 import qualified Data.Aeson as Aeson
@@ -169,7 +174,8 @@ commandForDialect dialect command
                 "/effort ["
                     <> Text.intercalate
                         "|"
-                        (reasoningEffortsForDialect dialect)
+                        (map reasoningEffortText
+                            (reasoningEffortsForDialect dialect))
                     <> "]"
             }
     | otherwise = command
@@ -677,7 +683,10 @@ parseModelCommand = \case
     _ -> ReplCommandError "usage: /model [NAME]"
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
-setReasoningEffort :: Text -> ResponseCreateParams -> ResponseCreateParams
+setReasoningEffort
+    :: ReasoningEffort
+    -> ResponseCreateParams
+    -> ResponseCreateParams
 setReasoningEffort level ResponseCreateParams{..} =
     ResponseCreateParams
         { reasoning = Just updated
@@ -685,19 +694,23 @@ setReasoningEffort level ResponseCreateParams{..} =
         }
   where
     updated = case reasoning of
-        Just ReasoningConfig{..} -> ReasoningConfig { effort = Just level, .. }
+        Just ReasoningConfig{..} ->
+            ReasoningConfig { effort = Just (reasoningEffortText level), .. }
         Nothing -> ReasoningConfig
             { context = Nothing
-            , effort = Just level
+            , effort = Just (reasoningEffortText level)
             , generateSummary = Nothing
             , reasoningMode = Nothing
             , summary = Nothing
             , extraFields = KeyMap.empty
             }
 
-currentEffort :: ResponseCreateParams -> Text
+currentEffort :: ResponseCreateParams -> ReasoningEffort
 currentEffort params =
-    fromMaybe "low" (params.reasoning >>= (.effort))
+    fromMaybe EffortLow $
+        params.reasoning
+            >>= (.effort)
+            >>= either (const Nothing) Just . parseReasoningEffort
 
 -- | Rebuild from the constructor: 'input' is also a field on 'CustomToolCall'.
 setModel :: Text -> ResponseCreateParams -> ResponseCreateParams
@@ -852,7 +865,9 @@ completeSlashArgs catalog cmd word =
 argCompletions :: SlashCatalog -> SlashCommand -> [Text]
 argCompletions catalog spec = case spec.slashName of
     "agents" -> ["limit"]
-    "effort" -> reasoningEffortsForDialect catalog.slashCatalogDialect
+    "effort" ->
+        map reasoningEffortText
+            (reasoningEffortsForDialect catalog.slashCatalogDialect)
     "model" -> catalog.slashCatalogModelIds
     "shell" -> ["ghci", "bash", "both", "none"]
     "help" ->

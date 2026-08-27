@@ -117,6 +117,48 @@ spec = do
             (.agentStatus) <$> selectedAgentEntry refreshed
                 `shouldBe` Just "done"
 
+        it "selects provider-native agents without changing host child identity" do
+            let native =
+                    AgentEntry
+                        { agentTarget = AgentNative "toolu-native"
+                        , agentPath = "/native/explore"
+                        , agentStatus = "running"
+                        , agentModel = Just "claude-sonnet"
+                        , agentSteps = []
+                        , agentTranscript = ["assistant: inspecting"]
+                        , agentConversation = initialUiState
+                        }
+                mixed = entries <> [native]
+                selected =
+                    selectAgentTarget (AgentNative "toolu-native")
+                        (initialAgentViewportState AgentRoot mixed)
+            (.agentTarget) <$> selectedAgentEntry selected
+                `shouldBe` Just (AgentNative "toolu-native")
+            lookupAgentEntry
+                (AgentChild (SubagentId "alpha"))
+                mixed
+                `shouldSatisfy` maybe False ((== "/root/alpha") . (.agentPath))
+
+        it "renders provider-native agents in the shared hierarchy" do
+            let native =
+                    AgentEntry
+                        { agentTarget = AgentNative "toolu-native"
+                        , agentPath = "/native/explore"
+                        , agentStatus = "cancelled"
+                        , agentModel = Just "claude-sonnet"
+                        , agentSteps = []
+                        , agentTranscript = ["assistant: partial result"]
+                        , agentConversation = initialUiState
+                        }
+                rendered =
+                    renderAgentTree
+                        False
+                        (AgentNative "toolu-native")
+                        (entries <> [native])
+            rendered `shouldSatisfy` Text.isInfixOf "explore  ■ cancelled"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "viewing /native/explore"
+
         it "renders hierarchy and transcript panes" do
             let frame = renderAgentViewportFrameFor False 10 70 state
             frame `shouldSatisfy` Text.isInfixOf "hierarchy"
