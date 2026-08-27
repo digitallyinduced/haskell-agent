@@ -28,7 +28,6 @@ import Agent.Responses.Types.Tools (ResponseTool, responseToolDecoder)
 import Control.Applicative ((<|>))
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Hermes as Hermes
 import Data.Scientific (Scientific)
 import Data.Text (Text)

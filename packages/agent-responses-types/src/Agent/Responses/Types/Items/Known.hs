@@ -10,7 +10,6 @@ module Agent.Responses.Types.Items.Known
 
 import Agent.Responses.Types.Common
 import Data.Aeson hiding (TaggedObject)
-import qualified Data.Aeson as Aeson
 import qualified Data.Hermes as Hermes
 import Data.Text (Text)
 

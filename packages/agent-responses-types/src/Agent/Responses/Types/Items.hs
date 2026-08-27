@@ -89,7 +89,6 @@ instance ToJSON FunctionCall where
                 , Just (field "name" name)
                 , optionalField "namespace" namespace
                 , optionalField "provider" provider
-                , optionalField "provider" provider
                 , Just (field "arguments" arguments)
                 , optionalField "encrypted_function_args" encryptedFunctionArgs
                 , optionalField "status" status
@@ -116,6 +115,7 @@ instance ToJSON FunctionCallOutput where
                 , Just (field "call_id" callId)
                 , optionalField "name" name
                 , optionalField "namespace" namespace
+                , optionalField "provider" provider
                 , Just (field "output" output)
                 , optionalField "status" status
                 ]
