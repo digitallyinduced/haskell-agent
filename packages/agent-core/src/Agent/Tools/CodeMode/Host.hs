@@ -33,7 +33,22 @@ import Agent.Tools.CodeMode.Protocol
     , encodeToolFailure
     , encodeToolSuccess
     )
-import Paths_agent_core (getDataFileName)
+import Agent.Tools.CodeMode.Host.Types
+    ( Cell(..)
+    , CellObservation(..)
+    , CellOutcome(..)
+    , CodeModeConfig(..)
+    , CodeModeError(..)
+    , CodeModeHost(..)
+    , CodeModeResult(..)
+    , CodeModeToolHandler
+    , ImageDetailVisibility(..)
+    , defaultCodeModeConfig
+    )
+import Agent.Tools.CodeMode.Host.Worker
+    ( bundledCodeModeWorkerPath
+    , codeModeWorkerPath
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
@@ -118,179 +133,8 @@ import System.Process
     , terminateProcess
     , waitForProcess
     )
-import Data.Bits (xor)
-import Data.Word (Word64)
-import qualified Language.Haskell.TH.Syntax as TH
-import Language.Haskell.TH.Syntax
-    ( makeRelativeToProject
-    , qAddDependentFile
-    , runIO
-    )
-import System.Posix.Process (getProcessID)
 import Text.Read (readMaybe)
 
-type CodeModeToolHandler =
-    Text -> Value -> IO (Either Text Value)
-
-data ImageDetailVisibility
-    = ImageDetailVisible
-    | ImageDetailHidden
-    deriving (Eq, Show)
-
-data CodeModeConfig = CodeModeConfig
-    { nodeExecutable :: !FilePath
-    , workerScript :: !FilePath
-    , startupTimeoutMs :: !Int
-    , maxActiveCells :: !Int
-    , maxSourceBytes :: !Int
-    , maxOldSpaceMb :: !Int
-    , toolHandler :: !CodeModeToolHandler
-    , notifyHandler :: !(Text -> IO ())
-    , imageDetailVisibility :: !ImageDetailVisibility
-    }
-
-defaultCodeModeConfig :: FilePath -> CodeModeToolHandler -> CodeModeConfig
-defaultCodeModeConfig script handler = CodeModeConfig
-    { nodeExecutable = "node"
-    , workerScript = script
-    , startupTimeoutMs = 3000
-    , maxActiveCells = 64
-    , maxSourceBytes = 1024 * 1024
-    , maxOldSpaceMb = 128
-    , toolHandler = handler
-    , notifyHandler = \_ -> pure ()
-    , imageDetailVisibility = ImageDetailVisible
-    }
-
--- | Resolve the worker through Cabal's data-file lookup, so installed
--- executables do not depend on the source tree. When the data file is not
--- present — interpreted development sessions, fresh worktrees, or a stale
--- data-directory override — the compile-time embedded worker source is
--- materialized into a content-addressed temporary file for Node.
-bundledCodeModeWorkerPath :: IO FilePath
-bundledCodeModeWorkerPath = do
-    installedPath <- getDataFileName workerRelativePath
-    installedExists <- doesFileExist installedPath
-    if installedExists
-        then pure installedPath
-        else materializeEmbeddedWorker
-  where
-    workerRelativePath = "data/code-mode/worker.mjs"
-
--- | Preferred public name for the bundled worker lookup.
---
--- 'bundledCodeModeWorkerPath' is retained as a compatibility alias.
-codeModeWorkerPath :: IO FilePath
-codeModeWorkerPath = bundledCodeModeWorkerPath
-
--- | The worker source embedded at compile time.
-embeddedCodeModeWorkerSource :: Text
-embeddedCodeModeWorkerSource =
-    Text.pack
-        $(do
-            path <- makeRelativeToProject "data/code-mode/worker.mjs"
-            qAddDependentFile path
-            contents <- runIO (readFile path)
-            TH.lift contents
-         )
-
--- | Write the embedded worker into the temporary directory under a
--- content-hashed name. Concurrent materialization is safe: each writer
--- creates a private file and renames it into place.
-materializeEmbeddedWorker :: IO FilePath
-materializeEmbeddedWorker = do
-    -- Node's permission model implicitly allows reading the entry script by
-    -- its real path. Canonicalize the target directory so a symlinked
-    -- temporary directory (such as macOS @/tmp@) cannot defeat that grant.
-    tmpDir <- getTemporaryDirectory >>= canonicalizePath
-    let bytes = Text.encodeUtf8 embeddedCodeModeWorkerSource
-        target =
-            tmpDir
-                </> ("haskell-agent-code-mode-worker-"
-                    <> embeddedWorkerFingerprint bytes
-                    <> ".mjs")
-    exists <- doesFileExist target
-    if exists
-        then pure target
-        else do
-            processId <- getProcessID
-            let staging = target <> "." <> show processId <> ".tmp"
-            BS.writeFile staging bytes
-            renameFile staging target
-            pure target
-
-embeddedWorkerFingerprint :: BS.ByteString -> String
-embeddedWorkerFingerprint bytes =
-    show (BS.length bytes) <> "-" <> show (BS.foldl' step seed bytes)
-  where
-    -- FNV-1a, enough to key a cache file on content identity.
-    seed = 14695981039346656037 :: Word64
-    step acc byte =
-        (acc `xor` fromIntegral byte) * 1099511628211
-
-data CodeModeError
-    = CodeModeStartupError !Text
-    | CodeModeProtocolError !Text
-    | CodeModeExecutionError !Text
-    | CodeModeResourceError !Text
-    | CodeModeUnknownCell !Text
-    | CodeModeBusyObserver !Text
-    | CodeModeAlreadyTerminating !Text
-    | CodeModeClosedCell !Text
-    deriving (Eq, Show)
-
-data CodeModeResult
-    = CodeModeFinished
-        { cellId :: !Text
-        , cellValue :: !Value
-        }
-    | CodeModeFailed
-        { cellId :: !Text
-        , cellValue :: !Value
-        , cellError :: !Text
-        }
-    | CodeModeRunning
-        { cellId :: !Text
-        , cellOutput :: !Value
-        }
-    | CodeModeTerminated
-        { cellId :: !Text
-        , cellValue :: !Value
-        }
-    deriving (Eq, Show)
-
-data CellOutcome
-    = CellSucceeded !Value
-    | CellFailed !Value !Text
-
-data CellObservation
-    = CellIdle
-    | CellObserved
-    | CellTerminating
-    | CellClosed
-
-data Cell = Cell
-    { cellIdentifier :: !Text
-    , cellInput :: !Handle
-    , cellOutput :: !Handle
-    , cellErrorOutput :: !Handle
-    , cellProcess :: !ProcessHandle
-    , cellWriterLock :: !(MVar ())
-    , cellResult :: !(TMVar (Either CodeModeError CellOutcome))
-    , cellYields :: !(TQueue Value)
-    , cellContent :: !(TQueue Value)
-    , cellMonitor :: !(Async ())
-    , cellStderr :: !(Async Text)
-    , cellCallbacks :: !(MVar [Async ()])
-    , cellObservation :: !(MVar CellObservation)
-    }
-
-data CodeModeHost = CodeModeHost
-    { hostConfig :: !CodeModeConfig
-    , hostCells :: !(MVar (Map Text Cell))
-    , hostNextId :: !(IORef Int)
-    , hostStoredValues :: !(MVar (Map Text Value))
-    }
 
 newCodeModeHost :: CodeModeConfig -> IO CodeModeHost
 newCodeModeHost config =

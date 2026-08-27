@@ -92,6 +92,8 @@ library
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
     other-modules:    Agent.Loop.Internal
+                    , Agent.Tools.CodeMode.Host.Types
+                    , Agent.Tools.CodeMode.Host.Worker
                     , Paths_agent_core
     autogen-modules:  Paths_agent_core
     hs-source-dirs:   src

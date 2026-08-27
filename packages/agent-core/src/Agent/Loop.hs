@@ -35,3 +35,25 @@ module Agent.Loop
     ) where
 
 import Agent.Loop.Internal
+import Agent.ToolDispatch (ToolDispatchConfig(..))
+import Control.Exception.Safe (SomeException)
+import qualified Data.Text as Text
+
+defaultLoopMaxTurns :: Int
+defaultLoopMaxTurns = 2000
+
+defaultLoopMaxEmptyContinuations :: Int
+defaultLoopMaxEmptyContinuations = 2
+
+defaultLoopDispatch :: ToolDispatchConfig
+defaultLoopDispatch = ToolDispatchConfig
+    { toolDispatchUnknownTool = \name -> "Unknown tool: " <> name
+    , toolDispatchFormatResult = \case
+        Left err -> "Error: " <> err
+        Right output -> output
+    , toolDispatchFormatException = \name exception ->
+        "Tool " <> name <> " crashed: " <> Text.pack (show exception)
+    , toolDispatchOnException = \_name (_ :: SomeException) -> pure ()
+    , toolDispatchOnOutput = \_call _output -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
+    }

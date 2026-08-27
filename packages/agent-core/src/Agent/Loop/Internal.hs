@@ -73,6 +73,9 @@ import qualified Data.IntSet as IntSet
 import Data.Text (Text)
 import qualified Data.Text as Text
 
+maxEmptyContinuations :: Int
+maxEmptyContinuations = 2
+
 -- | Image bytes attached to a user turn (PNG/JPEG/…).
 data ImageAttachment = ImageAttachment
     { imageMime :: !Text
@@ -518,7 +521,7 @@ runLoopInputsUnsafe config0 initialState previousResponseId firstInputs = do
                                                             , tokenUsage = usageAcc'
                                                             }
                                                     else if emptyContinuations
-                                                            >= defaultLoopMaxEmptyContinuations
+                                                            >= maxEmptyContinuations
                                                         then do
                                                             config.loopOnEvent
                                                                 (WarningRaised
