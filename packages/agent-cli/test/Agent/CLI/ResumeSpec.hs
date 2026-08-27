@@ -246,6 +246,9 @@ spec = do
                     ]
 
     describe "groupResumeEntries" do
+        it "returns no groups for empty input" do
+            groupResumeEntries [] `shouldBe` []
+
         it "groups matching cwd basenames while preserving first-seen order" do
             let other =
                     (sampleMeta "two" "second")
@@ -265,6 +268,60 @@ spec = do
             map fst groups `shouldBe` ["tmp-repo", "tmp-other"]
             map (map (.resumeId) . snd) groups
                 `shouldBe` [["one", "three"], ["two"]]
+
+        it "preserves per-project order for alternating projects" do
+            let entries =
+                    resumeEntriesFrom
+                        [ (sampleMeta "one" "one", [])
+                        , ((sampleMeta "two" "two")
+                            { metaCwd = fromFilePath "/tmp/other" }, [])
+                        , ((sampleMeta "three" "three")
+                            { metaCwd = fromFilePath "/tmp/repo" }, [])
+                        , ((sampleMeta "four" "four")
+                            { metaCwd = fromFilePath "/tmp/other" }, [])
+                        ]
+                groups = groupResumeEntries entries
+            map fst groups `shouldBe` ["tmp-repo", "tmp-other"]
+            map (map (.resumeId) . snd) groups
+                `shouldBe` [["one", "three"], ["two", "four"]]
+
+        it "keeps each unique project in first-seen order" do
+            let entries =
+                    resumeEntriesFrom
+                        [ ((sampleMeta "one" "one")
+                            { metaCwd = fromFilePath "/tmp/one" }, [])
+                        , ((sampleMeta "two" "two")
+                            { metaCwd = fromFilePath "/tmp/two" }, [])
+                        , ((sampleMeta "three" "three")
+                            { metaCwd = fromFilePath "/tmp/three" }, [])
+                        ]
+            map fst (groupResumeEntries entries)
+                `shouldBe` ["tmp-one", "tmp-two", "tmp-three"]
+
+        it "keeps all entries in one project in input order" do
+            let entries =
+                    resumeEntriesFrom
+                        [ (sampleMeta "one" "one", [])
+                        , (sampleMeta "two" "two", [])
+                        , (sampleMeta "three" "three", [])
+                        ]
+            map (map (.resumeId) . snd) (groupResumeEntries entries)
+                `shouldBe` [["one", "two", "three"]]
+
+        it "groups by project even when cwd values differ" do
+            let source =
+                    resumeEntriesFrom
+                        [ (sampleMeta "one" "one", [])
+                        , (sampleMeta "two" "two", [])
+                        ]
+                first = source !! 0
+                second = source !! 1
+                entries =
+                    [ first { resumeProject = "same", resumeCwd = "one-cwd" }
+                    , second { resumeProject = "same", resumeCwd = "two-cwd" }
+                    ]
+            map (map (.resumeId) . snd) (groupResumeEntries entries)
+                `shouldBe` [["one", "two"]]
 
     describe "resumeRelativeAge" do
         it "formats recent session ages" do

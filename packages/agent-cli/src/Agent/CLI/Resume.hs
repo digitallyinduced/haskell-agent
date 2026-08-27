@@ -474,15 +474,21 @@ resumeSourceLabel = \case
     ResumeProvider provider -> provider
 
 groupResumeEntries :: [ResumeEntry] -> [(Text, [ResumeEntry])]
-groupResumeEntries =
-    foldl' addGroup []
+groupResumeEntries entries =
+    [ (project, reverse groupedEntries)
+    | project <- reverse projectOrder
+    , let groupedEntries = Map.findWithDefault [] project groups
+    ]
   where
-    addGroup groups entry =
-        case break ((== entry.resumeProject) . fst) groups of
-            (_, []) ->
-                groups <> [(entry.resumeProject, [entry])]
-            (before, (project, entries) : after) ->
-                before <> ((project, entries <> [entry]) : after)
+    (groups, projectOrder) = foldl' addEntry (Map.empty, []) entries
+
+    addEntry (groups, projectOrder) entry =
+        let project = entry.resumeProject
+        in case Map.lookup project groups of
+            Nothing ->
+                (Map.insert project [entry] groups, project : projectOrder)
+            Just previous ->
+                (Map.insert project (entry : previous) groups, projectOrder)
 
 resumeRelativeAge :: UTCTime -> UTCTime -> Text
 resumeRelativeAge now updated =
