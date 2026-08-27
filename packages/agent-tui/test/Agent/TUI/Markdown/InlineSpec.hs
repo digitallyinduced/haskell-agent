@@ -1,6 +1,7 @@
 module Agent.TUI.Markdown.InlineSpec (spec) where
 
 import Agent.TUI.Markdown.Inline
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -116,3 +117,19 @@ spec = describe "shared inline Markdown parsing" do
     it "coalesces long plain input" do
         parseInline "plain text"
             `shouldBe` [InlineText "plain text"]
+
+    it "preserves escaped delimiters in long link labels and destinations" do
+        parseInline "[a\\]b](https://example.com/a\\(b\\))"
+            `shouldBe`
+                [ InlineLink
+                    "https://example.com/a(b)"
+                    [InlineText "a]b"]
+                ]
+
+    it "keeps unmatched multi-backtick spans literal" do
+        parseInline "``unfinished"
+            `shouldBe` [InlineText "``unfinished"]
+
+    it "does not flatten prior text while scanning repeated unmatched markers" do
+        let source = Text.replicate 200 "* "
+        parseInline source `shouldBe` [InlineText source]
