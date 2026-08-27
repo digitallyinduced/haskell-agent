@@ -245,14 +245,14 @@ main = hspec do
         it "tracks known field presence and retains explicit null" do
             decoded <- expectRight $
                 Decoder.decode plannedDecoder
-                    "{\"name\":\"Ada\",\"active\":null}"
+                    "{\"name\":\"Ada\",\"enabled\":null}"
             extensionFieldWasPresent
-                "active"
+                "enabled"
                 decoded.plannedExtensions
                 `shouldBe` True
             rawJsonBytes
                 <$> lookupExtension
-                    "active"
+                    "enabled"
                     decoded.plannedExtensions
                 `shouldBe` Just "null"
 
