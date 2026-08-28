@@ -100,7 +100,7 @@ import Agent.CLI.TUI.Types
       Name(ChoiceRow, ConversationViewport, ConversationViewportExtent,
            ConversationImage, AgentRow, AgentPane,
            AgentPopover, ConversationChunkCache, ConversationReserve,
-           QuickStartWorktree, QuickStartResume, QuickStartCommands,
+           ComposerImageRemove, QuickStartWorktree, QuickStartResume, QuickStartCommands,
            QuickStartModel, CodeBlockCache, ConversationBlock,
            ConversationBlockCache, ConversationBodyCache, CodeCopy, PermissionRow, ResumeViewport,
            ResumeSearchCursor, ResumeRow, OverlayViewport, MarkdownLink,
@@ -438,14 +438,14 @@ padImageBottom attr width amount image
 
 imagePreviewLayers :: Bool -> [TuiImagePreview] -> [Widget Name]
 imagePreviewLayers native previews =
-    case takeLast 3 previews of
+    case takeLast 3 (zip [0 ..] previews) of
         [] -> []
         shown -> [centerLayer (drawImagePreviews native shown)]
   where
     takeLast count values =
         drop (max 0 (length values - count)) values
 
-drawImagePreviews :: Bool -> [TuiImagePreview] -> Widget Name
+drawImagePreviews :: Bool -> [(Int, TuiImagePreview)] -> Widget Name
 drawImagePreviews native previews =
     Widget Fixed Fixed do
         context <- getContext
@@ -472,17 +472,18 @@ drawImagePreviews native previews =
   where
     previewGap = 2
 
-    drawPreview maxWidth maxHeight preview =
+    drawPreview maxWidth maxHeight (index, preview) =
         hLimit maxWidth $
             vBox
                 [ hCenter $
                     if native
                         then nativeImagePlaceholder maxWidth maxHeight preview
                         else renderTuiImagePreview maxWidth maxHeight preview
-                , hCenter $
-                    withAttr Theme.mutedAttr $
-                        terminalTxt $
-                            "[image] "
+                , clickable (ComposerImageRemove index) $
+                    hCenter $
+                        withAttr Theme.mutedAttr $
+                            terminalTxt $
+                                "[image] "
                                 <> preview.previewMime
                                 <> " · "
                                 <> Text.pack (show preview.previewSourceWidth)
@@ -490,6 +491,7 @@ drawImagePreviews native previews =
                                 <> Text.pack (show preview.previewSourceHeight)
                                 <> " · "
                                 <> formatImageSize preview.previewBytes
+                                <> "  [× remove]"
                 ]
 
     nativeImagePlaceholder maxWidth maxHeight preview =

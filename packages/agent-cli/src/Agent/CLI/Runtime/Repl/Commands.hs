@@ -21,6 +21,7 @@ import Agent.CLI.Command
       ReplAction(ReplCommandError, ReplQuit, ReplReload, ReplPrompt,
                  ReplExpandedPrompt, ReplInvokeSkill, ReplSkills, ReplShowShell,
                  ReplSetShell, ReplPaste, ReplShowAttachments, ReplClearAttachments,
+                 ReplRemoveAttachment,
                  ReplShowAgentLimit, ReplSetAgentLimit, ReplAgents, ReplMcp,
                  ReplGoalStatus, ReplGoalPause, ReplGoalResume, ReplGoalClear,
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
@@ -48,7 +49,8 @@ import Agent.CLI.Input
       submissionPromptText,
       ReplLine(ReplText, ReplEof, ReplQuitInterrupt, ReplCycleMode,
                ReplClipboardPaste, ReplClipboardPasteOrText, ReplChooseModel,
-               ReplChooseEffort, ReplChooseAccount, ReplPasted) )
+               ReplChooseEffort, ReplChooseAccount, ReplRemovePendingImage,
+               ReplPasted) )
 import Agent.CLI.Interrupt ()
 import Agent.CLI.LearnedSkills ()
 import Agent.CLI.LearnedSkills.Store ()
@@ -316,6 +318,12 @@ handleReplLine
         handleSelectionInput env (continueWith keptDraft) action
     action@(ReplChooseAccount keptDraft) ->
         handleSelectionInput env (continueWith keptDraft) action
+    ReplRemovePendingImage keptDraft index ->
+        handleAttachmentAction
+            env
+            finishTurn
+            (continueWith keptDraft)
+            (ReplRemoveAttachment index)
     ReplPasted pasted ->
         submitLine slashCatalog skillInvocations
             continue stdoutColor True pasted
@@ -451,6 +459,7 @@ handleReplLine
                     action@ReplPaste{} -> handleAttachmentAction env finishTurn continue action
                     action@ReplShowAttachments -> handleAttachmentAction env finishTurn continue action
                     action@ReplClearAttachments -> handleAttachmentAction env finishTurn continue action
+                    action@ReplRemoveAttachment{} -> handleAttachmentAction env finishTurn continue action
                     ReplShowAgentLimit -> do
                         limit <- env.sessionConcurrentLimit
                         let message =

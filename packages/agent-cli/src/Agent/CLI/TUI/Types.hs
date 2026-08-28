@@ -92,6 +92,7 @@ data Name
     | ComposerEffort
     | ComposerMode
     | ComposerAccount
+    | ComposerImageRemove !Int
     | QuickStartWorktree
     | QuickStartResume
     | QuickStartCommands
