@@ -91,14 +91,14 @@ currentSlashMenu state
 data ComposerEscapeAction
     = EscapeCancelTurn
     | EscapeDismissSlashMenu
-    | EscapeClearDraft
+    | EscapePreserveDraft
     deriving (Eq, Show)
 
 composerEscapeAction :: Bool -> Bool -> ComposerEscapeAction
 composerEscapeAction awaitingInput hasSlashMenu
     | not awaitingInput = EscapeCancelTurn
     | hasSlashMenu = EscapeDismissSlashMenu
-    | otherwise = EscapeClearDraft
+    | otherwise = EscapePreserveDraft
 
 selectedSlashSuggestion :: AppState -> SlashMenu -> Maybe SlashSuggestion
 selectedSlashSuggestion state menu =

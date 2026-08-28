@@ -71,11 +71,11 @@ spec = describe "fullscreen composer" do
             (ReplText "ordinary follow-up")
             `shouldBe` Nothing
 
-    it "dismisses slash completion or clears the draft while idle" do
+    it "dismisses slash completion or preserves the draft while idle" do
         composerEscapeAction True True
             `shouldBe` EscapeDismissSlashMenu
         composerEscapeAction True False
-            `shouldBe` EscapeClearDraft
+            `shouldBe` EscapePreserveDraft
 
     it "tracks the multiline cursor location" do
         draftCursorLocation "one\ntwo" 6 `shouldBe` (1, 2)
