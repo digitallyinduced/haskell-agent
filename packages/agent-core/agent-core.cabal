@@ -96,6 +96,7 @@ library
                     , Agent.MCP.Fleet
                     , Agent.MCP.Supervisor
                     , Agent.MCP.Types
+                    , Agent.MCP.OAuth
                     , Agent.Subagents.Registry.Internal.Core
                     , Agent.Subagents.Registry.Internal.Operations
                     , Agent.Subagents.Registry.Internal.Types
@@ -117,6 +118,8 @@ library
                     , crypton-connection
                     , directory
                     , filepath
+                    , http-client
+                    , http-types
                     , process
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet
