@@ -56,3 +56,25 @@ protected-resource discovery, authorization-server discovery, dynamic client
 registration, and refresh-token exchange are available in the MCP OAuth layer.
 Until the interactive PKCE login UI is wired in, an access token can be supplied
 as the redacted `MCP_ACCESS_TOKEN` environment entry.
+
+### OAuth token refresh
+
+Remote servers can point `env.MCP_OAUTH_TOKEN_FILE` at a private JSON token
+record:
+
+```json
+{
+  "client_id": "registered-public-client-id",
+  "token_endpoint": "https://example.com/oauth/token",
+  "access_token": "...",
+  "refresh_token": "...",
+  "expires_at": null
+}
+```
+
+The access token is loaded for each request. If the server returns `401`, the
+client takes an in-process and cross-process exclusive refresh lock, re-reads
+the record, exchanges its refresh token, atomically persists the new access
+and rotated refresh tokens with mode `0600`, and retries the MCP request once.
+A failed refresh returns an actionable error instead of repeatedly attempting
+the authorization flow.

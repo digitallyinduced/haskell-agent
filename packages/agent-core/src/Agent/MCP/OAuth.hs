@@ -11,7 +11,9 @@ import Agent.FileRetry (writeLazyFileAtomically)
 import System.OsPath (unsafeEncodeUtf)
 import Data.Bits ((.|.))
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
-import Control.Exception.Safe (tryAny)
+import Control.Exception.Safe (bracket, tryAny)
+import qualified System.FileLock as FileLock
+import System.Posix.IO (OpenFileFlags(..), OpenMode(ReadWrite), closeFd, defaultFileFlags, openFd)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import System.Posix.Files (ownerReadMode, ownerWriteMode)
@@ -62,7 +64,8 @@ loadOAuthTokenFile path = do
         Right bytes -> either (Left . Text.pack) Right (Aeson.eitherDecode bytes)
 
 refreshOAuthTokenFile :: Manager -> FilePath -> IO (Either Text OAuthTokenFile)
-refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ -> do
+refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ ->
+    withOAuthFileLock path $ do
     loadOAuthTokenFile path >>= \file -> case file of
         Left err -> pure (Left err)
         Right current -> refreshAccessToken manager current.tokenEndpoint current.tokenClientId current.tokenRefreshToken >>= \case
@@ -74,6 +77,14 @@ refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ -> do
                         }
                 writeLazyFileAtomically (unsafeEncodeUtf path) (ownerReadMode .|. ownerWriteMode) (Aeson.encode updated)
                 pure (Right updated)
+
+withOAuthFileLock :: FilePath -> IO a -> IO a
+withOAuthFileLock tokenPath action = do
+    let lockPath = tokenPath <> ".refresh.lock"
+    bracket
+        (openFd lockPath ReadWrite defaultFileFlags { creat = Just 0o600, cloexec = True })
+        closeFd
+        (const (FileLock.withFileLock lockPath FileLock.Exclusive (const action)))
 
 oauthRefreshLock :: MVar ()
 oauthRefreshLock = unsafePerformIO (newMVar ())
