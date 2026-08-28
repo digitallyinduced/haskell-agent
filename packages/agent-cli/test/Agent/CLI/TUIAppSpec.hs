@@ -17,6 +17,7 @@ import Agent.CLI.TUI.App
     , agentPaneVisible
     , backgroundActivityText
     , completionFlashTransitions
+    , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
     , choiceClosesOnUiTransition
@@ -896,6 +897,33 @@ spec = do
             turnCompletionRequiresRedraw running finished `shouldBe` True
             turnCompletionRequiresRedraw running continuing `shouldBe` False
             turnCompletionRequiresRedraw finished finished `shouldBe` False
+
+        it "requests an unfocused redraw when any child agent finishes" do
+            let runningChild = childEntry 1
+                sibling = childEntry 2
+                finishedChild =
+                    runningChild { agentStatus = "completed" }
+                stillStreaming =
+                    runningChild
+                        { agentTranscript = ["assistant: still working"] }
+            completionRequiresRedraw
+                initialUiState
+                [rootEntry, runningChild, sibling]
+                initialUiState
+                [rootEntry, finishedChild, sibling]
+                `shouldBe` True
+            completionRequiresRedraw
+                initialUiState
+                [rootEntry, runningChild, sibling]
+                initialUiState
+                [rootEntry, stillStreaming, sibling]
+                `shouldBe` False
+            completionRequiresRedraw
+                initialUiState
+                [rootEntry, runningChild, sibling]
+                initialUiState
+                [rootEntry, sibling]
+                `shouldBe` True
 
         it "retains sub-millisecond time across clock samples" do
             elapsedMillisSince 1000000 1499999

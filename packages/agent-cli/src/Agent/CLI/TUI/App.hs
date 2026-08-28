@@ -12,6 +12,7 @@ module Agent.CLI.TUI.App
     , agentPaneVisible
     , backgroundActivityText
     , completionFlashTransitions
+    , completionRequiresRedraw
     , conversationScrollbarRenderer
     , choiceRowColumns
     , choiceClosesOnUiTransition

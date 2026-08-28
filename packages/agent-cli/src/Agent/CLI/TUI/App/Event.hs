@@ -93,7 +93,7 @@ import Agent.CLI.TUI.History ( HistoryCursor(..)
     , setHistoryWindowTurns
     )
 import Agent.CLI.TUI.LambdaArt ( lambdaArtWidget )
-import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , turnCompletionRequiresRedraw , uiEventRestartsMotionSchedule , userActionPending )
+import Agent.CLI.TUI.Motion ( advanceCompletionFlashes , appMotionTiming , completionFlashTransitions , completionRequiresRedraw , elapsedMillisSince , hasBackgroundActivity , isBackgroundAgentActive , motionDemandFor , motionDemandForTerminalFocus , motionModeForTerminalFocus , nativeProgressKeepaliveDue , nextMotionSchedule , uiEventRestartsMotionSchedule , userActionPending )
 import Agent.CLI.TUI.Render ( agentEntryWindow , agentPaneEntryLimit , agentPaneVisible , applyChildConversationUiEvent , choiceRowColumns , conversationUiForTarget , conversationScrollbarRenderer , drawApp , fullscreenBounds , fullscreenSurface , onboardingVisibleRowIndices , normalizeTextOverlayInsertion , maskedSecretText , quickStartRows , quickStartVisible , repositoryHeaderText , resumeSearchCursorColumn , selectedAgentConversation , textOverlayDisplayText )
 import Agent.CLI.TUI.ImagePreview ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
@@ -219,9 +219,11 @@ handleEvent event = do
     when
         ( stateAfterMotionSync.appTerminalFocus == TerminalUnfocused
             && not
-                (turnCompletionRequiresRedraw
+                (completionRequiresRedraw
                     stateBeforeEvent.appUi
-                    stateAfterMotionSync.appUi)
+                    stateBeforeEvent.appAgentEntries
+                    stateAfterMotionSync.appUi
+                    stateAfterMotionSync.appAgentEntries)
         ) $
         continueWithoutRedraw
   where
