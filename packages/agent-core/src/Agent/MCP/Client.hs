@@ -18,7 +18,6 @@ import Agent.Tools.Types
     )
 import Agent.ToolDispatch (typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
-import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -170,16 +169,16 @@ startMcpClient config = case config.mcpServerUrl of
                 let client = McpClient
                         { clientConfig = config
                         , clientHttpSession = session
-                        , clientInput = input
-                        , clientProcess = processHandle
+                        , clientInput = Just input
+                        , clientProcess = Just processHandle
                         , clientGroupId = groupId
                         , clientNextId = nextId
                         , clientPending = pending
                         , clientFailure = failure
                         , clientWriteLock = writeLock
                         , clientStderr = stderrRef
-                        , clientReader = reader
-                        , clientStderrReader = stderrReader
+                        , clientReader = Just reader
+                        , clientStderrReader = Just stderrReader
                         , clientClosed = closed
                         , clientLifecycle = lifecycle
                         }
@@ -196,34 +195,25 @@ mcpHttpManager = unsafePerformIO newTlsManager
 {-# NOINLINE mcpHttpManager #-}
 
 startMcpHttpClient :: McpServerConfig -> Text -> IO McpClient
-startMcpHttpClient config url = mask $ \_ -> do
-    -- Keep the existing client record/lifecycle while using synchronous HTTP.
-    -- An exited helper process supplies the legacy handles needed by shutdown.
-    created <- createProcess ((proc "true" [])
-        { std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe })
-    case created of
-        (Just input, Just output, Just errOutput, processHandle) -> do
-            nextId <- newIORef 1
-            pending <- newTVarIO IntMap.empty
-            failure <- newTVarIO Nothing
-            writeLock <- newMVar ()
-            stderrRef <- newIORef emptyCapturedStderr
-            closed <- newMVar False
-            lifecycle <- newTVarIO ClientPending
-            session <- newIORef Nothing
-            reader <- asyncWithUnmask $ \unmask -> unmask (threadDelay maxBound)
-            stderrReader <- asyncWithUnmask $ \unmask -> unmask (threadDelay maxBound)
-            pure McpClient
-                { clientConfig = config, clientHttpSession = session
-                , clientInput = input, clientProcess = processHandle
-                , clientGroupId = Nothing, clientNextId = nextId
-                , clientPending = pending, clientFailure = failure
-                , clientWriteLock = writeLock, clientStderr = stderrRef
-                , clientReader = reader, clientStderrReader = stderrReader
-                , clientClosed = closed, clientLifecycle = lifecycle }
-        _ -> ioError (userError "MCP HTTP client setup failed")
-  where
-    _ = url
+startMcpHttpClient config _url = mask $ \_ -> do
+    nextId <- newIORef 1
+    pending <- newTVarIO IntMap.empty
+    failure <- newTVarIO Nothing
+    writeLock <- newMVar ()
+    stderrRef <- newIORef emptyCapturedStderr
+    closed <- newMVar False
+    lifecycle <- newTVarIO ClientPending
+    session <- newIORef Nothing
+    -- HTTP has no subprocess or background reader.  Its lifecycle is driven
+    -- by requestMcp and closeMcpClient below.
+    pure McpClient
+        { clientConfig = config, clientHttpSession = session
+        , clientInput = Nothing, clientProcess = Nothing
+        , clientGroupId = Nothing, clientNextId = nextId
+        , clientPending = pending, clientFailure = failure
+        , clientWriteLock = writeLock, clientStderr = stderrRef
+        , clientReader = Nothing, clientStderrReader = Nothing
+        , clientClosed = closed, clientLifecycle = lifecycle }
 
 data InitializeRole
     = InitializeLeader
@@ -552,6 +542,17 @@ requestMcp client timeoutMicros method parameters = do
 httpRequestMcp :: McpClient -> Int -> Text -> Text -> Aeson.Encoding -> IO (Either Text RawJson)
 httpRequestMcp client timeoutMicros url method parameters = do
     requestId <- atomicModifyIORef' client.clientNextId (\current -> (current + 1, current))
+    httpRequestMcpWithId client timeoutMicros url method parameters (Just requestId)
+
+httpNotificationMcp :: McpClient -> Int -> Text -> Text -> Aeson.Encoding -> IO (Either Text ())
+httpNotificationMcp client timeoutMicros url method parameters =
+    fmap (fmap (const ())) $
+        httpRequestMcpWithId client timeoutMicros url method parameters Nothing
+
+httpRequestMcpWithId
+    :: McpClient -> Int -> Text -> Text -> Aeson.Encoding -> Maybe Int
+    -> IO (Either Text RawJson)
+httpRequestMcpWithId client timeoutMicros url method parameters requestId = do
     request <- parseRequest (Text.unpack url)
     session <- readIORef client.clientHttpSession
     fileResult <- case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
@@ -568,8 +569,11 @@ httpRequestMcp client timeoutMicros url method parameters = do
     let configuredToken = case fileResult of
             Right (Just token) -> Just token
             _ -> fmap Text.pack (lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv)
-        body = AesonEncodingInternal.encodingToLazyByteString $ Aeson.pairs
-            ("jsonrpc" .= ("2.0" :: Text) <> "id" .= requestId <> "method" .= method <> AesonEncoding.pair "params" parameters)
+        body = AesonEncodingInternal.encodingToLazyByteString $ Aeson.pairs $
+            "jsonrpc" .= ("2.0" :: Text)
+                <> maybe mempty ("id" .=) requestId
+                <> "method" .= method
+                <> AesonEncoding.pair "params" parameters
         perform token = do
             let headers = [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream")]
                     <> maybe [] (\value -> [("Authorization", "Bearer " <> TextEncoding.encodeUtf8 value)]) token
@@ -582,7 +586,8 @@ httpRequestMcp client timeoutMicros url method parameters = do
             | otherwise = do
                 forM_ (lookup "Mcp-Session-Id" (responseHeaders response)) (writeIORef client.clientHttpSession . Just . TextEncoding.decodeUtf8)
                 let bytes = LBS.toStrict (responseBody response)
-                if BS.null bytes then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
+                if BS.null bytes
+                    then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
                 else case Json.decodeEither rawJsonDecoder bytes of
                     Right value -> pure (Right value)
                     Left jsonError -> case find (BS8.isPrefixOf "data: ") (BS8.lines bytes) of
@@ -609,8 +614,7 @@ sendNotification
     -> IO (Either Text ())
 sendNotification client method parameters =
     case client.clientConfig.mcpServerUrl of
-        Just url -> fmap (fmap (const ())) $
-            httpRequestMcp client
+        Just url -> httpNotificationMcp client
                 (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
                 url method parameters
         Nothing -> sendMessage client . Aeson.pairs $
@@ -621,10 +625,12 @@ sendNotification client method parameters =
 sendMessage :: McpClient -> Aeson.Encoding -> IO (Either Text ())
 sendMessage client message =
     tryAny
-        (withMVar client.clientWriteLock \_ -> do
-            LBS.hPutStr client.clientInput
-                (AesonEncodingInternal.encodingToLazyByteString message <> "\n")
-            hFlush client.clientInput)
+        (case client.clientInput of
+            Nothing -> ioError (userError "MCP client has no stdio transport")
+            Just input -> withMVar client.clientWriteLock \_ -> do
+                LBS.hPutStr input
+                    (AesonEncodingInternal.encodingToLazyByteString message <> "\n")
+                hFlush input)
         >>= \case
             Left exception -> do
                 let err = "MCP write failed: " <> exceptionSummary exception
@@ -759,13 +765,46 @@ closeMcpClient client =
                                     (Left "MCP server closed")
                         _ ->
                             writeTVar client.clientLifecycle ClientClosed
-                void $ tryAny (hClose client.clientInput)
-                terminateProcessGroup client.clientGroupId client.clientProcess
-                stopWorker client.clientReader
-                stopWorker client.clientStderrReader
+                forM_ client.clientInput \input ->
+                    void $ tryAny (hClose input)
+                forM_ client.clientProcess $ \processHandle ->
+                    terminateProcessGroup client.clientGroupId processHandle
+                when (isJust client.clientConfig.mcpServerUrl) $
+                    closeHttpSession client
+                forM_ client.clientReader stopWorker
+                forM_ client.clientStderrReader stopWorker
                 failClient client.clientPending client.clientFailure
                     "MCP server closed"
                 pure True
+
+-- Streamable HTTP sessions are explicitly terminated with DELETE when the
+-- server assigned a session id.  Failure is intentionally ignored during
+-- shutdown: the local client is already being closed and the server may have
+-- expired the session independently.
+closeHttpSession :: McpClient -> IO ()
+closeHttpSession client = do
+    session <- readIORef client.clientHttpSession
+    case (client.clientConfig.mcpServerUrl, session) of
+        (Just url, Just sessionId) -> void $ tryAny do
+            request <- parseRequest (Text.unpack url)
+            bearer <- case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
+                Just path -> either (const Nothing)
+                    (\(OAuth.OAuthTokenFile _ _ token _ _) -> Just token)
+                    <$> OAuth.loadOAuthTokenFile path
+                Nothing -> pure $ fmap Text.pack
+                    (lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv)
+            let request' = request
+                    { HC.method = "DELETE"
+                    , HC.requestHeaders =
+                        [ ("Mcp-Session-Id", TextEncoding.encodeUtf8 sessionId)
+                        ]
+                        <> maybe [] (\token ->
+                            [ ("Authorization", "Bearer " <> TextEncoding.encodeUtf8 token) ])
+                            bearer
+                    }
+            void $ timeout (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
+                (httpLbs request' mcpHttpManager)
+        _ -> pure ()
 
 stopWorker :: Async () -> IO ()
 stopWorker worker = do

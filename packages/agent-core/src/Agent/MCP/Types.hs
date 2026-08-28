@@ -224,16 +224,18 @@ data McpFleetLease = McpFleetLease
 data McpClient = McpClient
     { clientConfig :: !McpServerConfig
     , clientHttpSession :: !(IORef (Maybe Text))
-    , clientInput :: !Handle
-    , clientProcess :: !ProcessHandle
+    -- Stdio transports own a process and input pipe; remote HTTP transports
+    -- leave these fields empty and perform requests synchronously.
+    , clientInput :: !(Maybe Handle)
+    , clientProcess :: !(Maybe ProcessHandle)
     , clientGroupId :: !(Maybe ProcessGroupID)
     , clientNextId :: !(IORef Int)
     , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text RawJson))))
     , clientFailure :: !(TVar (Maybe Text))
     , clientWriteLock :: !(MVar ())
     , clientStderr :: !(IORef CapturedStderr)
-    , clientReader :: !(Async ())
-    , clientStderrReader :: !(Async ())
+    , clientReader :: !(Maybe (Async ()))
+    , clientStderrReader :: !(Maybe (Async ()))
     , clientClosed :: !(MVar Bool)
     , clientLifecycle :: !(TVar McpClientLifecycle)
     }
