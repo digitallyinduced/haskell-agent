@@ -6,6 +6,8 @@ module Agent.GrokBuild.Dialect.Todo
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (ToolCall, typedTool)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
+import Agent.GrokBuild.Dialect.Json (optionalBool, optionalTextValue)
+import qualified Agent.Json.Decode as Json
 import Agent.GrokBuild.Dialect.Shell (GrokSession(..))
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
@@ -18,14 +20,6 @@ import Agent.Tools.Types
     , withToolResourceClaims
     )
 import Control.Monad (foldM)
-import Data.Aeson
-    ( FromJSON(..)
-    , (.:)
-    , (.:?)
-    , (.!=)
-    , withObject
-    , withText
-    )
 import Data.IORef (atomicModifyIORef')
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -40,8 +34,8 @@ data TodoStatus
     | TodoCancelled
     deriving (Eq, Show)
 
-instance FromJSON TodoStatus where
-    parseJSON = withText "todo status" \case
+todoStatusDecoder :: Json.Decoder TodoStatus
+todoStatusDecoder = Json.withText \case
         "pending" -> pure TodoPending
         "in_progress" -> pure TodoInProgress
         "completed" -> pure TodoCompleted
@@ -58,21 +52,23 @@ data TodoUpdate = TodoUpdate
     , todoStatus :: !(Maybe TodoStatus)
     }
 
-instance FromJSON TodoUpdate where
-    parseJSON = withObject "todo update" \object -> TodoUpdate
-        <$> object .: "id"
-        <*> object .:? "content"
-        <*> object .:? "status"
+todoUpdateDecoder :: Json.Decoder TodoUpdate
+todoUpdateDecoder = Json.object $
+    TodoUpdate
+        <$> Json.atKey "id" Json.text
+        <*> optionalTextValue "content"
+        <*> Json.optionalKey "status" todoStatusDecoder
 
 data TodoWriteArgs = TodoWriteArgs
     { merge :: !Bool
     , todos :: ![TodoUpdate]
     }
 
-instance FromJSON TodoWriteArgs where
-    parseJSON = withObject "todo_write" \object -> TodoWriteArgs
-        <$> object .:? "merge" .!= True
-        <*> object .: "todos"
+todoWriteArgsDecoder :: Json.Decoder TodoWriteArgs
+todoWriteArgsDecoder = Json.object $
+    TodoWriteArgs
+        <$> (fromMaybe True <$> optionalBool "merge")
+        <*> Json.atKey "todos" (Json.list todoUpdateDecoder)
 
 todoWriteTool :: GrokSession -> AppTool
 todoWriteTool session =
@@ -85,7 +81,7 @@ todoWriteTool session =
     ]
     True
     TurnSequential
-    (typedTool "todo_write" (runTodoWrite session))
+    (typedTool "todo_write" todoWriteArgsDecoder (runTodoWrite session))
   where
     todoUpdateSchema :: PropertyType
     todoUpdateSchema = PropertyObject

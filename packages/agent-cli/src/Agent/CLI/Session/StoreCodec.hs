@@ -8,10 +8,13 @@ module Agent.CLI.Session.StoreCodec
     , toStoredResponseItem
     ) where
 
+import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Base64 as Base64
 import qualified Data.ByteString.Lazy as LazyByteString
+import Agent.Json.Decode qualified as Hermes
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -34,6 +37,9 @@ import Agent.Responses.Types
     , TaggedObject(..)
     , parseResponseItemType
     )
+import Agent.Responses.Types.Items (responseItemDecoder)
+import Agent.Responses.Types.Items.Known (internalChatMetadataDecoder)
+import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
 import Agent.Store.SessionItem
 
 toStoredResponseItem :: ResponseItem -> StoredResponseItem
@@ -46,11 +52,8 @@ toStoredResponseItem = \case
             , storedMessageStatus = itemStatusText <$> message.status
             , storedMessagePhase = message.phase
             , storedMessageExtraFields =
-                encodeObject
-                    (insertOptionalJson
-                        "internal_chat_message_metadata_passthrough"
-                        message.passthrough
-                        message.extraFields)
+                encodeKnownFields
+                    [("internal_chat_message_metadata_passthrough", Aeson.toJSON <$> message.passthrough)]
             }
     FunctionCallItem call ->
         StoredFunctionCallItem StoredFunctionCall
@@ -60,12 +63,11 @@ toStoredResponseItem = \case
             , storedFunctionCallArguments = call.arguments
             , storedFunctionCallStatus = itemStatusText <$> call.status
             , storedFunctionCallExtraFields =
-                encodeObject
-                    (insertOptionalJson "namespace" call.namespace $
-                        insertOptionalJson
-                            "encrypted_function_args"
-                            call.encryptedFunctionArgs
-                            call.extraFields)
+                encodeKnownFields
+                    [ ("namespace", Aeson.toJSON <$> call.namespace)
+                    , ("provider", Aeson.toJSON <$> call.provider)
+                    , ("encrypted_function_args", Aeson.toJSON <$> call.encryptedFunctionArgs)
+                    ]
             }
     FunctionCallOutputItem output ->
         StoredFunctionCallOutputItem StoredFunctionCallOutput
@@ -76,12 +78,11 @@ toStoredResponseItem = \case
             , storedFunctionCallOutputStatus =
                 itemStatusText <$> output.status
             , storedFunctionCallOutputExtraFields =
-                encodeObject
-                    (insertOptionalJson "name" output.name $
-                        insertOptionalJson
-                            "namespace"
-                            output.namespace
-                            output.extraFields)
+                encodeKnownFields
+                    [ ("name", Aeson.toJSON <$> output.name)
+                    , ("namespace", Aeson.toJSON <$> output.namespace)
+                    , ("provider", Aeson.toJSON <$> output.provider)
+                    ]
             }
     CustomToolCallItem call ->
         StoredCustomToolCallItem StoredCustomToolCall
@@ -91,11 +92,8 @@ toStoredResponseItem = \case
             , storedCustomToolCallInput = call.input
             , storedCustomToolCallStatus = itemStatusText <$> call.status
             , storedCustomToolCallExtraFields =
-                encodeObject
-                    (insertOptionalJson
-                        "namespace"
-                        call.namespace
-                        call.extraFields)
+                encodeKnownFields
+                    [("namespace", Aeson.toJSON <$> call.namespace)]
             }
     CustomToolCallOutputItem output ->
         StoredCustomToolCallOutputItem StoredCustomToolCallOutput
@@ -107,7 +105,7 @@ toStoredResponseItem = \case
             , storedCustomToolCallOutputStatus =
                 itemStatusText <$> output.status
             , storedCustomToolCallOutputExtraFields =
-                encodeObject output.extraFields
+                emptyOpaqueObject
             }
     ReasoningItemValue reasoning ->
         StoredReasoningItem StoredReasoning
@@ -120,13 +118,13 @@ toStoredResponseItem = \case
                 reasoning.encryptedContent
             , storedReasoningStatus = itemStatusText <$> reasoning.status
             , storedReasoningExtraFields =
-                encodeObject reasoning.extraFields
+                emptyOpaqueObject
             }
     ItemReferenceValue reference ->
         StoredItemReferenceItem StoredItemReference
             { storedItemReferenceProviderItemId = reference.itemId
             , storedItemReferenceExtraFields =
-                encodeObject reference.extraFields
+                emptyOpaqueObject
             }
     AgentMessageItem message ->
         storedTypedKnownItem "agent_message" message
@@ -152,13 +150,13 @@ toStoredResponseItem = \case
         StoredTaggedResponseItem StoredTaggedItem
             { storedTaggedItemRepresentation = StoredKnownRepresentation
             , storedTaggedItemWireTag = tagged.tag
-            , storedTaggedItemFields = encodeObject tagged.fields
+            , storedTaggedItemFields = emptyOpaqueObject
             }
     UnknownResponseItem tagged ->
         StoredTaggedResponseItem StoredTaggedItem
             { storedTaggedItemRepresentation = StoredUnknownRepresentation
             , storedTaggedItemWireTag = tagged.tag
-            , storedTaggedItemFields = encodeObject tagged.fields
+            , storedTaggedItemFields = emptyOpaqueObject
             }
 
 fromStoredResponseItem :: StoredResponseItem -> Either Text ResponseItem
@@ -167,12 +165,11 @@ fromStoredResponseItem = \case
         content <- fromStoredMessageContent message.storedMessageContent
         role <- responseRoleFromText message.storedMessageRole
         status <- traverse itemStatusFromText message.storedMessageStatus
-        extraFields0 <- decodeObject
+        passthrough <- decodeOptionalField
             "stored message extra fields"
+            "internal_chat_message_metadata_passthrough"
+            internalChatMetadataDecoder
             message.storedMessageExtraFields
-        let (passthrough, extraFields) =
-                takeOptionalJson extraFields0
-                    "internal_chat_message_metadata_passthrough"
         Right $ MessageItem ResponseMessage
             { messageId = message.storedMessageProviderItemId
             , content
@@ -180,26 +177,27 @@ fromStoredResponseItem = \case
             , status
             , phase = message.storedMessagePhase
             , passthrough
-            , extraFields
             }
     StoredFunctionCallItem call -> do
         status <- traverse itemStatusFromText call.storedFunctionCallStatus
-        extraFields0 <- decodeObject
+        namespace <- decodeOptionalField "stored function-call extra fields"
+            "namespace" Hermes.text call.storedFunctionCallExtraFields
+        encryptedFunctionArgs <- decodeOptionalField
             "stored function-call extra fields"
+            "encrypted_function_args"
+            (Hermes.list Hermes.text)
             call.storedFunctionCallExtraFields
-        let (namespace, extraFields1) =
-                takeOptionalJson extraFields0 "namespace"
-            (encryptedFunctionArgs, extraFields) =
-                takeOptionalJson extraFields1 "encrypted_function_args"
+        provider <- decodeOptionalField "stored function-call extra fields"
+            "provider" Hermes.text call.storedFunctionCallExtraFields
         Right $ FunctionCallItem FunctionCall
             { itemId = call.storedFunctionCallProviderItemId
             , callId = call.storedFunctionCallCallId
             , name = call.storedFunctionCallName
             , namespace
+            , provider
             , arguments = call.storedFunctionCallArguments
             , encryptedFunctionArgs
             , status
-            , extraFields
             }
     StoredFunctionCallOutputItem output -> do
         value <- fromStoredToolOutput
@@ -208,29 +206,25 @@ fromStoredResponseItem = \case
         status <- traverse
             itemStatusFromText
             output.storedFunctionCallOutputStatus
-        extraFields0 <- decodeObject
-            "stored function-call-output extra fields"
-            output.storedFunctionCallOutputExtraFields
-        let (name, extraFields1) =
-                takeOptionalJson extraFields0 "name"
-            (namespace, extraFields) =
-                takeOptionalJson extraFields1 "namespace"
+        name <- decodeOptionalField "stored function-call-output extra fields"
+            "name" Hermes.text output.storedFunctionCallOutputExtraFields
+        namespace <- decodeOptionalField "stored function-call-output extra fields"
+            "namespace" Hermes.text output.storedFunctionCallOutputExtraFields
+        provider <- decodeOptionalField "stored function-call-output extra fields"
+            "provider" Hermes.text output.storedFunctionCallOutputExtraFields
         Right $ FunctionCallOutputItem FunctionCallOutput
             { itemId = output.storedFunctionCallOutputProviderItemId
             , callId = output.storedFunctionCallOutputCallId
             , name
             , namespace
+            , provider
             , output = value
             , status
-            , extraFields
             }
     StoredCustomToolCallItem call -> do
         status <- traverse itemStatusFromText call.storedCustomToolCallStatus
-        extraFields0 <- decodeObject
-            "stored custom-tool-call extra fields"
-            call.storedCustomToolCallExtraFields
-        let (namespace, extraFields) =
-                takeOptionalJson extraFields0 "namespace"
+        namespace <- decodeOptionalField "stored custom-tool-call extra fields"
+            "namespace" Hermes.text call.storedCustomToolCallExtraFields
         Right $ CustomToolCallItem CustomToolCall
             { itemId = call.storedCustomToolCallProviderItemId
             , callId = call.storedCustomToolCallCallId
@@ -238,7 +232,6 @@ fromStoredResponseItem = \case
             , namespace
             , input = call.storedCustomToolCallInput
             , status
-            , extraFields
             }
     StoredCustomToolCallOutputItem output -> do
         value <- fromStoredToolOutput
@@ -247,16 +240,12 @@ fromStoredResponseItem = \case
         status <- traverse
             itemStatusFromText
             output.storedCustomToolCallOutputStatus
-        extraFields <- decodeObject
-            "stored custom-tool-call-output extra fields"
-            output.storedCustomToolCallOutputExtraFields
         Right $ CustomToolCallOutputItem CustomToolCallOutput
             { itemId = output.storedCustomToolCallOutputProviderItemId
             , callId = output.storedCustomToolCallOutputCallId
             , name = output.storedCustomToolCallOutputName
             , output = value
             , status
-            , extraFields
             }
     StoredReasoningItem reasoning -> do
         summary <- traverse
@@ -266,36 +255,22 @@ fromStoredResponseItem = \case
             (traverse fromStoredContentPart)
             reasoning.storedReasoningContent
         status <- traverse itemStatusFromText reasoning.storedReasoningStatus
-        extraFields <- decodeObject
-            "stored reasoning extra fields"
-            reasoning.storedReasoningExtraFields
         Right $ ReasoningItemValue ReasoningItem
             { itemId = reasoning.storedReasoningProviderItemId
             , summary
             , content
             , encryptedContent = reasoning.storedReasoningEncryptedContent
             , status
-            , extraFields
             }
     StoredItemReferenceItem reference -> do
-        extraFields <- decodeObject
-            "stored item-reference extra fields"
-            reference.storedItemReferenceExtraFields
         Right $ ItemReferenceValue ItemReference
             { itemId = reference.storedItemReferenceProviderItemId
-            , extraFields
             }
     StoredTaggedResponseItem tagged -> do
-        fields <- decodeObject
-            "stored tagged response-item fields"
-            tagged.storedTaggedItemFields
-        let value = TaggedObject
-                { tag = tagged.storedTaggedItemWireTag
-                , fields
-                }
+        let value = TaggedObject { tag = tagged.storedTaggedItemWireTag }
         case tagged.storedTaggedItemRepresentation of
             StoredKnownRepresentation ->
-                decodeKnownTaggedItem value
+                decodeKnownTaggedItem tagged
             StoredUnknownRepresentation ->
                 Right (UnknownResponseItem value)
             StoredCoreRepresentation ->
@@ -321,183 +296,171 @@ toStoredSummaryPart
 toStoredSummaryPart part = StoredReasoningSummaryPart
     { storedReasoningSummaryPartType = part.partType
     , storedReasoningSummaryPartText = part.text
-    , storedReasoningSummaryPartExtraFields =
-        encodeObject part.extraFields
+    , storedReasoningSummaryPartExtraFields = emptyOpaqueObject
     }
 
 fromStoredSummaryPart
     :: StoredReasoningSummaryPart
     -> Either Text ReasoningSummaryPart
-fromStoredSummaryPart part = do
-    extraFields <- decodeObject
-        "stored reasoning-summary extra fields"
-        part.storedReasoningSummaryPartExtraFields
+fromStoredSummaryPart part =
     Right ReasoningSummaryPart
         { partType = part.storedReasoningSummaryPartType
         , text = part.storedReasoningSummaryPartText
-        , extraFields
         }
 
 toStoredContentPart :: ResponseContentPart -> StoredContentPart
 toStoredContentPart = \case
-    InputTextPart{text, promptCacheBreakpoint, extraFields} ->
-        (emptyStoredContentPart "input_text" extraFields)
+    InputTextPart{text, promptCacheBreakpoint} ->
+        (emptyStoredContentPart "input_text")
             { storedContentPartText = Just text
             , storedContentPartPromptCacheBreakpoint =
-                encodeValue <$> promptCacheBreakpoint
+                encodeRawValue <$> promptCacheBreakpoint
             }
     InputImagePart
-        { detail, fileId, imageUrl, promptCacheBreakpoint, extraFields } ->
-            (emptyStoredContentPart "input_image" extraFields)
+        { detail, fileId, imageUrl, promptCacheBreakpoint } ->
+            let (storedImageUrl, storedImageBinary) =
+                    separateInlineBinary imageUrl
+            in (emptyStoredContentPart "input_image")
                 { storedContentPartDetail = detail
                 , storedContentPartFileId = fileId
-                , storedContentPartImageUrl = imageUrl
+                , storedContentPartImageUrl = storedImageUrl
+                , storedContentPartImageBinary = storedImageBinary
                 , storedContentPartPromptCacheBreakpoint =
-                    encodeValue <$> promptCacheBreakpoint
+                    encodeRawValue <$> promptCacheBreakpoint
                 }
     InputFilePart
         { detail, fileData, fileId, fileUrl, filename
-        , promptCacheBreakpoint, extraFields
+        , promptCacheBreakpoint
         } ->
-            (emptyStoredContentPart "input_file" extraFields)
+            let (storedFileData, storedFileBinary) =
+                    separateInlineBinary fileData
+            in (emptyStoredContentPart "input_file")
                 { storedContentPartDetail = detail
-                , storedContentPartFileData = fileData
+                , storedContentPartFileData = storedFileData
+                , storedContentPartFileBinary = storedFileBinary
                 , storedContentPartFileId = fileId
                 , storedContentPartFileUrl = fileUrl
                 , storedContentPartFilename = filename
                 , storedContentPartPromptCacheBreakpoint =
-                    encodeValue <$> promptCacheBreakpoint
+                    encodeRawValue <$> promptCacheBreakpoint
                 }
-    InputAudioPart{inputAudio, extraFields} ->
-        (emptyStoredContentPart "input_audio" extraFields)
-            { storedContentPartInputAudio = Just (encodeValue inputAudio)
+    InputAudioPart{inputAudio} ->
+        (emptyStoredContentPart "input_audio")
+            { storedContentPartInputAudio = Just (encodeRawValue inputAudio)
             }
-    OutputTextPart{text, annotations, logprobs, extraFields} ->
-        (emptyStoredContentPart "output_text" extraFields)
+    OutputTextPart{text, annotations, logprobs} ->
+        (emptyStoredContentPart "output_text")
             { storedContentPartText = Just text
             , storedContentPartAnnotations =
-                encodeValue . Aeson.toJSON <$> annotations
+                encodeRawValues <$> annotations
             , storedContentPartLogprobs =
-                encodeValue . Aeson.toJSON <$> logprobs
+                encodeRawValues <$> logprobs
             }
-    RefusalPart{refusal, extraFields} ->
-        (emptyStoredContentPart "refusal" extraFields)
+    RefusalPart{refusal} ->
+        (emptyStoredContentPart "refusal")
             { storedContentPartRefusal = Just refusal
             }
-    ReasoningTextPart{text, extraFields} ->
-        (emptyStoredContentPart "reasoning_text" extraFields)
+    ReasoningTextPart{text} ->
+        (emptyStoredContentPart "reasoning_text")
             { storedContentPartText = Just text
             }
-    SummaryTextPart{text, extraFields} ->
-        (emptyStoredContentPart "summary_text" extraFields)
+    SummaryTextPart{text} ->
+        (emptyStoredContentPart "summary_text")
             { storedContentPartText = Just text
             }
-    EncryptedContentPart{encryptedContent, extraFields} ->
-        (emptyStoredContentPart "encrypted_content" extraFields)
+    EncryptedContentPart{encryptedContent} ->
+        (emptyStoredContentPart "encrypted_content")
             { storedContentPartText = Just encryptedContent
             }
-    PlainTextPart{text, extraFields} ->
-        (emptyStoredContentPart "text" extraFields)
+    PlainTextPart{text} ->
+        (emptyStoredContentPart "text")
             { storedContentPartText = Just text
             }
     UnknownContentPart tagged ->
-        emptyStoredContentPart tagged.tag tagged.fields
+        emptyStoredContentPart tagged.tag
 
 fromStoredContentPart
     :: StoredContentPart
     -> Either Text ResponseContentPart
-fromStoredContentPart part = do
-    extraFields <- decodeObject
-        ("stored " <> part.storedContentPartType <> " extra fields")
-        part.storedContentPartExtraFields
+fromStoredContentPart part =
     case part.storedContentPartType of
         "input_text" ->
             InputTextPart
                 <$> required "stored input_text text" part.storedContentPartText
                 <*> traverse
-                    (decodeValue "stored prompt_cache_breakpoint")
+                    (decodeRawValue "stored prompt_cache_breakpoint")
                     part.storedContentPartPromptCacheBreakpoint
-                <*> pure extraFields
         "input_image" ->
             InputImagePart
                 part.storedContentPartDetail
                 part.storedContentPartFileId
-                part.storedContentPartImageUrl
+                ( (renderInlineBinary
+                        <$> part.storedContentPartImageBinary)
+                    <|> part.storedContentPartImageUrl
+                )
                 <$> traverse
-                    (decodeValue "stored prompt_cache_breakpoint")
+                    (decodeRawValue "stored prompt_cache_breakpoint")
                     part.storedContentPartPromptCacheBreakpoint
-                <*> pure extraFields
         "input_file" ->
             InputFilePart
                 part.storedContentPartDetail
-                part.storedContentPartFileData
+                ( (renderInlineBinary
+                        <$> part.storedContentPartFileBinary)
+                    <|> part.storedContentPartFileData
+                )
                 part.storedContentPartFileId
                 part.storedContentPartFileUrl
                 part.storedContentPartFilename
                 <$> traverse
-                    (decodeValue "stored prompt_cache_breakpoint")
+                    (decodeRawValue "stored prompt_cache_breakpoint")
                     part.storedContentPartPromptCacheBreakpoint
-                <*> pure extraFields
         "input_audio" ->
             InputAudioPart
                 <$> (required
                         "stored input_audio value"
                         part.storedContentPartInputAudio
-                        >>= decodeValue "stored input_audio value")
-                <*> pure extraFields
+                        >>= decodeRawValue "stored input_audio value")
         "output_text" ->
             OutputTextPart
                 <$> required
                     "stored output_text text"
                     part.storedContentPartText
                 <*> traverse
-                    (decodeValues "stored output_text annotations")
+                    (decodeRawValues "stored output_text annotations")
                     part.storedContentPartAnnotations
                 <*> traverse
-                    (decodeValues "stored output_text logprobs")
+                    (decodeRawValues "stored output_text logprobs")
                     part.storedContentPartLogprobs
-                <*> pure extraFields
         "refusal" ->
             RefusalPart
                 <$> required
                     "stored refusal text"
                     part.storedContentPartRefusal
-                <*> pure extraFields
         "reasoning_text" ->
             ReasoningTextPart
                 <$> required
                     "stored reasoning_text text"
                     part.storedContentPartText
-                <*> pure extraFields
         "summary_text" ->
             SummaryTextPart
                 <$> required
                     "stored summary_text text"
                     part.storedContentPartText
-                <*> pure extraFields
         "encrypted_content" ->
             EncryptedContentPart
                 <$> required
                     "stored encrypted_content text"
                     part.storedContentPartText
-                <*> pure extraFields
         "text" ->
             PlainTextPart
                 <$> required
                     "stored text part"
                     part.storedContentPartText
-                <*> pure extraFields
         tag ->
-            Right $ UnknownContentPart TaggedObject
-                { tag
-                , fields = extraFields
-                }
+            Right $ UnknownContentPart TaggedObject { tag }
 
-emptyStoredContentPart
-    :: Text
-    -> Aeson.Object
-    -> StoredContentPart
-emptyStoredContentPart partType extraFields = StoredContentPart
+emptyStoredContentPart :: Text -> StoredContentPart
+emptyStoredContentPart partType = StoredContentPart
     { storedContentPartType = partType
     , storedContentPartText = Nothing
     , storedContentPartRefusal = Nothing
@@ -507,34 +470,67 @@ emptyStoredContentPart partType extraFields = StoredContentPart
     , storedContentPartFileUrl = Nothing
     , storedContentPartFilename = Nothing
     , storedContentPartImageUrl = Nothing
+    , storedContentPartFileBinary = Nothing
+    , storedContentPartImageBinary = Nothing
     , storedContentPartInputAudio = Nothing
     , storedContentPartPromptCacheBreakpoint = Nothing
     , storedContentPartAnnotations = Nothing
     , storedContentPartLogprobs = Nothing
-    , storedContentPartExtraFields = encodeObject extraFields
+    , storedContentPartExtraFields = emptyOpaqueObject
     }
 
-toStoredToolOutput :: Aeson.Value -> StoredToolOutput
-toStoredToolOutput = \case
-    Aeson.String value -> StoredToolOutput
-        { storedToolOutputKind = StoredToolOutputText
-        , storedToolOutputText = value
-        }
-    value -> StoredToolOutput
-        { storedToolOutputKind = StoredToolOutputEncoded
-        , storedToolOutputText = encodeAeson value
-        }
+separateInlineBinary
+    :: Maybe Text
+    -> (Maybe Text, Maybe StoredBinaryData)
+separateInlineBinary value =
+    case value >>= parseInlineBinary of
+        Just binary -> (Nothing, Just binary)
+        Nothing -> (value, Nothing)
+
+parseInlineBinary :: Text -> Maybe StoredBinaryData
+parseInlineBinary value = do
+    body <- Text.stripPrefix "data:" value
+    let (metadata, payloadWithComma) = Text.breakOn "," body
+        base64Marker = ";base64"
+    payload <- Text.stripPrefix "," payloadWithComma
+    if Text.takeEnd (Text.length base64Marker) metadata /= base64Marker
+        then Nothing
+        else do
+            let mimeType =
+                    Text.dropEnd (Text.length base64Marker) metadata
+            if Text.null mimeType
+                then Nothing
+                else case Base64.decode (TextEncoding.encodeUtf8 payload) of
+                    Left _ -> Nothing
+                    Right bytes -> Just StoredBinaryData
+                        { storedBinaryDataMimeType = mimeType
+                        , storedBinaryDataBytes = bytes
+                        }
+
+renderInlineBinary :: StoredBinaryData -> Text
+renderInlineBinary binary =
+    "data:"
+        <> binary.storedBinaryDataMimeType
+        <> ";base64,"
+        <> TextEncoding.decodeUtf8
+            (Base64.encode binary.storedBinaryDataBytes)
+
+toStoredToolOutput :: RawJson -> StoredToolOutput
+toStoredToolOutput value = StoredToolOutput
+    { storedToolOutputKind = StoredToolOutputEncoded
+    , storedToolOutputText = TextEncoding.decodeUtf8 (rawJsonBytes value)
+    }
 
 fromStoredToolOutput
     :: Text
     -> StoredToolOutput
-    -> Either Text Aeson.Value
+    -> Either Text RawJson
 fromStoredToolOutput label output =
     case output.storedToolOutputKind of
         StoredToolOutputText ->
-            Right (Aeson.String output.storedToolOutputText)
+            decodeRawJson label (encodeAeson (Aeson.String output.storedToolOutputText))
         StoredToolOutputEncoded ->
-            decodeAeson label output.storedToolOutputText
+            decodeRawJson label output.storedToolOutputText
 
 storedTypedKnownItem :: Aeson.ToJSON a => Text -> a -> StoredResponseItem
 storedTypedKnownItem tag value =
@@ -545,15 +541,31 @@ storedTypedKnownItem tag value =
             encodeObject (objectWithoutType (Aeson.toJSON value))
         }
 
-decodeKnownTaggedItem :: TaggedObject -> Either Text ResponseItem
+decodeKnownTaggedItem :: StoredTaggedItem -> Either Text ResponseItem
 decodeKnownTaggedItem tagged =
-    case parseResponseItemType tagged.tag of
+    case parseResponseItemType tagged.storedTaggedItemWireTag of
         itemType | isPromotedKnownItem itemType ->
-            case Aeson.fromJSON (Aeson.toJSON tagged) of
-                Aeson.Success item -> Right item
-                Aeson.Error err ->
-                    Left ("stored " <> tagged.tag <> ": " <> Text.pack err)
-        itemType -> Right (KnownResponseItem itemType tagged)
+            decodeRawJsonWith
+                ("stored " <> tagged.storedTaggedItemWireTag)
+                responseItemDecoder
+                (taggedItemJson tagged)
+        itemType ->
+            Right
+                (KnownResponseItem itemType
+                    (TaggedObject tagged.storedTaggedItemWireTag))
+
+taggedItemJson :: StoredTaggedItem -> Text
+taggedItemJson tagged =
+    let typeObject = encodeAeson (Aeson.object
+            ["type" Aeson..= tagged.storedTaggedItemWireTag])
+        fields = Text.strip tagged.storedTaggedItemFields.storedOpaqueObjectText
+        innerFields
+            | Text.length fields >= 2 =
+                Text.dropEnd 1 (Text.drop 1 fields)
+            | otherwise = ""
+    in if Text.null (Text.strip innerFields)
+        then typeObject
+        else Text.dropEnd 1 typeObject <> "," <> innerFields <> "}"
 
 isPromotedKnownItem :: ResponseItemType -> Bool
 isPromotedKnownItem = \case
@@ -569,30 +581,6 @@ isPromotedKnownItem = \case
     ItemContextCompaction -> True
     _ -> False
 
-insertOptionalJson
-    :: Aeson.ToJSON a
-    => Text
-    -> Maybe a
-    -> Aeson.Object
-    -> Aeson.Object
-insertOptionalJson name = \case
-    Nothing -> id
-    Just value ->
-        KeyMap.insert (Key.fromText name) (Aeson.toJSON value)
-
-takeOptionalJson
-    :: Aeson.FromJSON a
-    => Aeson.Object
-    -> Text
-    -> (Maybe a, Aeson.Object)
-takeOptionalJson object name =
-    let key = Key.fromText name
-    in case KeyMap.lookup key object of
-        Just value
-            | Aeson.Success parsed <- Aeson.fromJSON value ->
-                (Just parsed, KeyMap.delete key object)
-        _ -> (Nothing, object)
-
 objectWithoutType :: Aeson.Value -> Aeson.Object
 objectWithoutType = \case
     Aeson.Object object -> KeyMap.delete "type" object
@@ -602,46 +590,62 @@ encodeObject :: Aeson.Object -> StoredOpaqueObject
 encodeObject =
     StoredOpaqueObject . encodeAeson . Aeson.Object
 
-decodeObject
-    :: Text
-    -> StoredOpaqueObject
-    -> Either Text Aeson.Object
-decodeObject label value =
-    decodeAeson label value.storedOpaqueObjectText >>= \case
-        Aeson.Object object -> Right object
-        _ -> Left (label <> ": expected an object")
+encodeRawValue :: RawJson -> StoredOpaqueValue
+encodeRawValue = StoredOpaqueValue . TextEncoding.decodeUtf8 . rawJsonBytes
 
-encodeValue :: Aeson.Value -> StoredOpaqueValue
-encodeValue = StoredOpaqueValue . encodeAeson
+encodeRawValues :: [RawJson] -> StoredOpaqueValue
+encodeRawValues =
+    StoredOpaqueValue . encodeAeson
 
-decodeValue
-    :: Text
-    -> StoredOpaqueValue
-    -> Either Text Aeson.Value
-decodeValue label value =
-    decodeAeson label value.storedOpaqueValueText
+decodeRawValue :: Text -> StoredOpaqueValue -> Either Text RawJson
+decodeRawValue label value =
+    decodeRawJson label value.storedOpaqueValueText
 
-decodeValues
-    :: Text
-    -> StoredOpaqueValue
-    -> Either Text [Aeson.Value]
-decodeValues label value = do
-    decoded <- decodeValue label value
-    case Aeson.fromJSON decoded of
-        Aeson.Error err -> Left (label <> ": " <> Text.pack err)
-        Aeson.Success values -> Right values
+decodeRawValues :: Text -> StoredOpaqueValue -> Either Text [RawJson]
+decodeRawValues label value =
+    decodeRawJsonWith
+        label
+        (Hermes.list rawJsonDecoder)
+        value.storedOpaqueValueText
 
-encodeAeson :: Aeson.Value -> Text
+encodeAeson :: Aeson.ToJSON a => a -> Text
 encodeAeson =
     TextEncoding.decodeUtf8
         . LazyByteString.toStrict
         . Aeson.encode
 
-decodeAeson :: Text -> Text -> Either Text Aeson.Value
-decodeAeson label value =
-    case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 value) of
-        Left err -> Left (label <> ": " <> Text.pack err)
+decodeRawJson :: Text -> Text -> Either Text RawJson
+decodeRawJson label = decodeRawJsonWith label rawJsonDecoder
+
+decodeRawJsonWith
+    :: Text
+    -> Hermes.Decoder a
+    -> Text
+    -> Either Text a
+decodeRawJsonWith label decoder value =
+    case Hermes.decodeEither decoder (TextEncoding.encodeUtf8 value) of
+        Left err -> Left (label <> ": " <> Hermes.jsonErrorMessage err)
         Right decoded -> Right decoded
+
+decodeOptionalField
+    :: Text
+    -> Text
+    -> Hermes.Decoder a
+    -> StoredOpaqueObject
+    -> Either Text (Maybe a)
+decodeOptionalField label key decoder value =
+    decodeRawJsonWith label (Hermes.object (Hermes.atKeyOptional key decoder))
+        value.storedOpaqueObjectText
+
+encodeKnownFields :: [(Text, Maybe Aeson.Value)] -> StoredOpaqueObject
+encodeKnownFields fields =
+    StoredOpaqueObject . encodeAeson . Aeson.object $
+        [ Key.fromText key Aeson..= value
+        | (key, Just value) <- fields
+        ]
+
+emptyOpaqueObject :: StoredOpaqueObject
+emptyOpaqueObject = StoredOpaqueObject "{}"
 
 required :: Text -> Maybe a -> Either Text a
 required label = maybe (Left (label <> " is missing")) Right

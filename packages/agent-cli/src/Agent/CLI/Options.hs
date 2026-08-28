@@ -23,6 +23,11 @@ import System.OsPath (OsPath, unsafeEncodeUtf)
 import Agent.Dialect (DialectId(..))
 import Agent.Loop (defaultLoopMaxTurns)
 import Agent.Provider (Provider(..), parseProvider)
+import Agent.ReasoningEffort
+    ( ReasoningEffort(..)
+    , parseReasoningEffort
+    )
+import qualified Agent.ReasoningEffort as ReasoningEffort
 import Agent.TUI.Motion (MotionMode(..))
 import Data.Foldable (asum)
 import qualified Data.List as List
@@ -101,8 +106,7 @@ data CliOptions = CliOptions
       -- 'defaultMaxConcurrent'.
     , optCompactThreshold :: !(Maybe Int)
       -- ^ OpenAI automatic-compaction threshold in estimated context tokens.
-      -- ^ Prefetch predicted OpenAI WebSocket read_file calls before completion.
-    , optEffort :: !(Maybe Text)
+    , optEffort :: !(Maybe ReasoningEffort)
       -- ^ 'Nothing' means use 'defaultEffortFor' once the provider is known.
     , optShowRawReasoning :: !Bool
       -- ^ Show raw OpenAI reasoning text instead of summaries only.
@@ -151,12 +155,12 @@ defaultCliOptions = CliOptions
     }
 
 -- | Provider default when @--effort@ is omitted. Grok runs at high effort.
-defaultEffortFor :: Provider -> Text
+defaultEffortFor :: Provider -> ReasoningEffort
 defaultEffortFor = \case
-    XAIProvider -> "high"
-    OpenAIProvider -> "medium"
-    OpenRouterProvider -> "medium"
-    ClaudeCodeProvider -> "xhigh"
+    XAIProvider -> EffortHigh
+    OpenAIProvider -> EffortMedium
+    OpenRouterProvider -> EffortMedium
+    ClaudeCodeProvider -> EffortXHigh
 
 isOneShot :: CliOptions -> Bool
 isOneShot options =
@@ -424,7 +428,7 @@ positiveIntReader :: String -> Options.ReadM Int
 positiveIntReader flag =
     Options.eitherReader (parseInt flag)
 
-effortReader :: Options.ReadM Text
+effortReader :: Options.ReadM ReasoningEffort
 effortReader =
     Options.eitherReader (parseEffort . Text.pack)
 
@@ -466,35 +470,30 @@ parseMotionMode raw = case Text.toLower (Text.pack raw) of
     "off" -> Right MotionOff
     _ -> Left ("--motion expects full, reduced, or off (got " <> raw <> ")")
 
-reasoningEfforts :: [Text]
-reasoningEfforts = ["none", "low", "medium", "high", "xhigh", "max"]
+reasoningEfforts :: [ReasoningEffort]
+reasoningEfforts = ReasoningEffort.reasoningEfforts
 
 -- | Efforts exposed by the active model-facing protocol. Grok accepts
 -- @xhigh@ but rejects the OpenAI-only @max@ value.
-reasoningEffortsForDialect :: DialectId -> [Text]
+reasoningEffortsForDialect :: DialectId -> [ReasoningEffort]
 reasoningEffortsForDialect = \case
-    GrokBuildDialect -> filter (/= "max") reasoningEfforts
+    GrokBuildDialect -> filter (/= EffortMax) reasoningEfforts
     _ -> reasoningEfforts
 
 -- | Replace an effort unsupported by the active model-facing protocol with
 -- its closest supported value. This also cleans up resumed sessions and
 -- provider switches that inherited an effort from another dialect.
-normalizeReasoningEffortForDialect :: DialectId -> Text -> Text
+normalizeReasoningEffortForDialect
+    :: DialectId
+    -> ReasoningEffort
+    -> ReasoningEffort
 normalizeReasoningEffortForDialect dialect effort
     | effort `elem` reasoningEffortsForDialect dialect = effort
-    | dialect == GrokBuildDialect = "high"
+    | dialect == GrokBuildDialect = EffortHigh
     | otherwise = effort
 
-parseEffort :: Text -> Either String Text
-parseEffort raw =
-    let effort = Text.toLower (Text.strip raw)
-    in if effort `elem` reasoningEfforts
-        then Right effort
-        else Left
-            ( "effort must be none, low, medium, high, xhigh, or max (got "
-                <> Text.unpack effort
-                <> ")"
-            )
+parseEffort :: Text -> Either String ReasoningEffort
+parseEffort = either (Left . Text.unpack) Right . parseReasoningEffort
 
 usage :: String
 usage = unlines
@@ -534,8 +533,6 @@ usage = unlines
     , "      --compact-threshold N"
     , "                          OpenAI auto-compaction threshold in tokens"
     , "                          (default: model-specific, currently 244800)"
-    , "      --speculative-read-file"
-    , "                          Prefetch predicted OpenAI WebSocket read_file calls"
     , "      --effort LEVEL      Reasoning effort: none, low, medium, high, xhigh, max"
     , "                          (default: xhigh for Claude Code, high for xai/grok,"
     , "                          medium otherwise)"

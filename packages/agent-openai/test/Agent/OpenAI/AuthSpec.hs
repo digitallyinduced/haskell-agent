@@ -8,6 +8,7 @@ import Agent.Error
     , credentialsExhausted
     )
 import Control.Concurrent.Async (wait, withAsync)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
     ( newEmptyMVar
     , putMVar
@@ -349,6 +350,9 @@ spec = do
             withAsync (discoverAccounts pool) \firstDiscovery -> do
                 takeMVar discoveryStarted
                 withAsync (discoverAccounts pool) \secondDiscovery -> do
+                    -- Give the second worker a chance to observe the in-flight
+                    -- discovery before releasing its owner.
+                    threadDelay 10_000
                     inspected <- timeout concurrencyProbeMicros
                         (allAccountIds pool)
                     inspected `shouldBe` Just ["initial-account"]

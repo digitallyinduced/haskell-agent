@@ -9,8 +9,10 @@ import qualified Agent.OpenAI.ErrorSpec as ErrorSpec
 import qualified Agent.OpenAI.FunctionalSpec as FunctionalSpec
 import qualified Agent.OpenAI.LoginSpec as LoginSpec
 import qualified Agent.OpenAI.LoopBackendSpec as LoopBackendSpec
+import qualified Agent.OpenAI.ModelsClientSpec as ModelsClientSpec
+import qualified Agent.OpenAI.ModelsManagerSpec as ModelsManagerSpec
+import qualified Agent.OpenAI.ModelsTypesSpec as ModelsTypesSpec
 import qualified Agent.OpenAI.CompactionSpec as CompactionSpec
-import qualified Agent.OpenAI.ResponsesSpec as ResponsesSpec
 import qualified Agent.OpenAI.ToolDSLSpec as ToolDSLSpec
 import qualified Agent.OpenAI.UsageSpec as UsageSpec
 import qualified Agent.OpenAI.WebSocketClientSpec as WebSocketClientSpec
@@ -24,8 +26,10 @@ main = hspec do
     FunctionalSpec.spec
     LoginSpec.spec
     LoopBackendSpec.spec
+    ModelsClientSpec.spec
+    ModelsManagerSpec.spec
+    ModelsTypesSpec.spec
     CompactionSpec.spec
-    ResponsesSpec.spec
     ToolDSLSpec.spec
     UsageSpec.spec
     WebSocketClientSpec.spec

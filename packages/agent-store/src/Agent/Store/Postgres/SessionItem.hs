@@ -9,11 +9,15 @@ module Agent.Store.Postgres.SessionItem
     ( sessionItemSchemaStatements
     , insertResponseItems
     , loadResponseItems
+    , loadResponseItemsPerItem
     ) where
 
 import qualified Data.ByteString as ByteString
 
-import Agent.Store.Postgres.SessionItem.Read (loadResponseItems)
+import Agent.Store.Postgres.SessionItem.Read
+    ( loadResponseItems
+    , loadResponseItemsPerItem
+    )
 import Agent.Store.Postgres.SessionItem.Write (insertResponseItems)
 
 sessionItemSchemaStatements :: [ByteString.ByteString]
@@ -145,6 +149,10 @@ sessionItemSchemaStatements =
       \ file_url text,\
       \ filename text,\
       \ image_url text,\
+      \ file_data_mime_type text,\
+      \ file_data_bytes bytea,\
+      \ image_mime_type text,\
+      \ image_bytes bytea,\
       \ input_audio_text text,\
       \ prompt_cache_breakpoint_text text,\
       \ annotations_text text,\

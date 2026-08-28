@@ -2,6 +2,7 @@
 module Agent.CLI.Models
     ( ModelTarget(..)
     , ModelOption(..)
+    , modelsCacheFilePath
     , PickerState(..)
     , PickerEvent(..)
     , modelOptionFromCatalog
@@ -363,3 +364,8 @@ isCurrent connectionId current dialect option =
     option.modelTarget.targetConnectionId == connectionId
         && option.modelTarget.targetModelId == current
         && option.modelTarget.targetDialect == dialect
+
+-- | Disk cache location for the fetched OpenAI model catalog, kept beside the
+-- other harness state under the state directory.
+modelsCacheFilePath :: FilePath -> FilePath
+modelsCacheFilePath stateDir = stateDir <> "/models-cache.json"

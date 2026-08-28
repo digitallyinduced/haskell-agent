@@ -10,6 +10,7 @@ module Agent.CLI.Command.Types
     ) where
 
 import Agent.Dialect (DialectId)
+import Agent.ReasoningEffort (ReasoningEffort)
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -21,7 +22,7 @@ data ReplAction
     | ReplExpandedPrompt !Text !Text
       -- ^ Original user-visible text and the model-visible expansion.
     | ReplShowEffort
-    | ReplSetEffort Text
+    | ReplSetEffort ReasoningEffort
     | ReplShowModel
     | ReplSetModel Text
     | ReplToggleAlwaysApprove

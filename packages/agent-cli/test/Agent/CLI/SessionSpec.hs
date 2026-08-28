@@ -7,9 +7,12 @@ import Agent.CLI.Session.StoreCodec
     )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect (DialectId(..))
+import Agent.Json (RawJson, rawJsonFromEncoding)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Loop (TokenUsage(..))
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.Store.SessionItem
 import Agent.Store.Postgres
     ( Store
     , closeStore
@@ -110,7 +113,6 @@ storedContentPartRoundTrip (StoredRoundTripContentPart part) =
         , status = Just ItemCompleted
         , phase = Just "final"
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
 
 genResponseItem :: Gen ResponseItem
@@ -142,10 +144,6 @@ genResponseMessage =
         <*> genMaybe genItemStatus
         <*> genMaybe genText
         <*> pure Nothing
-        <*> fmap
-            (withoutReservedKeys
-                ["internal_chat_message_metadata_passthrough"])
-            genJsonObject
 
 genResponseAgentMessage :: Gen ResponseAgentMessage
 genResponseAgentMessage =
@@ -158,25 +156,9 @@ genResponseAgentMessage =
             <*> genMaybe genText
             <*> genSmallList genContentPart
             <*> pure Nothing
-            <*> fmap
-                (withoutReservedKeys
-                    [ "type", "id", "author", "recipient", "content"
-                    , "internal_chat_message_metadata_passthrough"
-                    ])
-                genJsonObject
 
-jsonRoundTrip :: (Aeson.ToJSON a, Aeson.FromJSON a) => a -> Maybe a
-jsonRoundTrip value =
-    case Aeson.fromJSON (Aeson.toJSON value) of
-        Aeson.Success decoded -> Just decoded
-        Aeson.Error _ -> Nothing
-
-withoutReservedKeys :: [Text.Text] -> Aeson.Object -> Aeson.Object
-withoutReservedKeys names object =
-    foldl
-        (flip (KeyMap.delete . Key.fromText))
-        object
-        names
+jsonRoundTrip :: a -> Maybe a
+jsonRoundTrip = Just
 
 genAdditionalToolsItem :: Gen AdditionalToolsItem
 genAdditionalToolsItem =
@@ -186,18 +168,11 @@ genAdditionalToolsItem =
         AdditionalToolsItem
             <$> genMaybe genText
             <*> genText
-            <*> genSmallList genJsonValue
-            <*> fmap
-                (withoutReservedKeys ["type", "id", "role", "tools"])
-                genJsonObject
+            <*> genSmallList genRawJson
 
 genCompactionTriggerItem :: Gen CompactionTriggerItem
 genCompactionTriggerItem =
-    suchThatMap generate jsonRoundTrip
-  where
-    generate =
-        CompactionTriggerItem
-            <$> fmap (withoutReservedKeys ["type"]) genJsonObject
+    pure CompactionTriggerItem
 
 genCompactionItem :: Gen CompactionItem
 genCompactionItem =
@@ -207,9 +182,6 @@ genCompactionItem =
         CompactionItem
             <$> genMaybe genText
             <*> genMaybe genText
-            <*> fmap
-                (withoutReservedKeys ["type", "id", "encrypted_content"])
-                genJsonObject
 
 genMessageContent :: Gen MessageContent
 genMessageContent =
@@ -225,12 +197,10 @@ genFunctionCall =
         <*> genText
         <*> genText
         <*> genMaybe genText
+        <*> genMaybe genText
         <*> genText
         <*> genMaybe (genSmallList genText)
         <*> genMaybe genItemStatus
-        <*> fmap
-            (withoutReservedKeys ["namespace", "encrypted_function_args"])
-            genJsonObject
 
 genFunctionCallOutput :: Gen FunctionCallOutput
 genFunctionCallOutput =
@@ -239,11 +209,9 @@ genFunctionCallOutput =
         <*> genText
         <*> genMaybe genText
         <*> genMaybe genText
-        <*> genJsonValue
+        <*> genMaybe genText
+        <*> genRawJson
         <*> genMaybe genItemStatus
-        <*> fmap
-            (withoutReservedKeys ["name", "namespace"])
-            genJsonObject
 
 genCustomToolCall :: Gen CustomToolCall
 genCustomToolCall =
@@ -254,7 +222,6 @@ genCustomToolCall =
         <*> genMaybe genText
         <*> genText
         <*> genMaybe genItemStatus
-        <*> fmap (withoutReservedKeys ["namespace"]) genJsonObject
 
 genCustomToolCallOutput :: Gen CustomToolCallOutput
 genCustomToolCallOutput =
@@ -262,9 +229,8 @@ genCustomToolCallOutput =
         <$> genMaybe genText
         <*> genText
         <*> genMaybe genText
-        <*> genJsonValue
+        <*> genRawJson
         <*> genMaybe genItemStatus
-        <*> genJsonObject
 
 genReasoningItem :: Gen ReasoningItem
 genReasoningItem =
@@ -274,65 +240,52 @@ genReasoningItem =
         <*> genMaybe (genSmallList genContentPart)
         <*> genMaybe genText
         <*> genMaybe genItemStatus
-        <*> genJsonObject
 
 genReasoningSummaryPart :: Gen ReasoningSummaryPart
 genReasoningSummaryPart =
     ReasoningSummaryPart
         <$> genText
         <*> genMaybe genText
-        <*> genJsonObject
 
 genItemReference :: Gen ItemReference
 genItemReference =
     ItemReference
         <$> genText
-        <*> genJsonObject
 
 genContentPart :: Gen ResponseContentPart
 genContentPart =
     oneof
         [ InputTextPart
             <$> genText
-            <*> genMaybe genJsonValue
-            <*> genJsonObject
+            <*> genMaybe genNonNullRawJson
         , InputImagePart
             <$> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
-            <*> genMaybe genJsonValue
-            <*> genJsonObject
+            <*> genMaybe genNonNullRawJson
         , InputFilePart
             <$> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
             <*> genMaybe genText
-            <*> genMaybe genJsonValue
-            <*> genJsonObject
+            <*> genMaybe genNonNullRawJson
         , InputAudioPart
-            <$> genJsonValue
-            <*> genJsonObject
+            <$> genRawJson
         , OutputTextPart
             <$> genText
-            <*> genMaybe (genSmallList genJsonValue)
-            <*> genMaybe (genSmallList genJsonValue)
-            <*> genJsonObject
+            <*> genMaybe (genSmallList genRawJson)
+            <*> genMaybe (genSmallList genRawJson)
         , RefusalPart
             <$> genText
-            <*> genJsonObject
         , ReasoningTextPart
             <$> genText
-            <*> genJsonObject
         , SummaryTextPart
             <$> genText
-            <*> genJsonObject
         , EncryptedContentPart
             <$> genText
-            <*> genJsonObject
         , PlainTextPart
             <$> genText
-            <*> genJsonObject
         , UnknownContentPart <$> genTaggedObject "unknown-content-"
         ]
 
@@ -363,10 +316,6 @@ genTaggedObject :: Text.Text -> Gen TaggedObject
 genTaggedObject prefix =
     TaggedObject
         <$> ((prefix <>) <$> genText)
-        <*> genJsonObject
-
-genJsonObject :: Gen Aeson.Object
-genJsonObject = sized genJsonObjectAt
 
 genJsonObjectAt :: Int -> Gen Aeson.Object
 genJsonObjectAt size = do
@@ -403,6 +352,18 @@ genJsonValue = sized go
             , Aeson.Number . fromIntegral
                 <$> chooseInt (-100000, 100000)
             ]
+
+genRawJson :: Gen RawJson
+genRawJson = rawJsonValue <$> genJsonValue
+
+genNonNullRawJson :: Gen RawJson
+genNonNullRawJson =
+    suchThatMap genJsonValue \case
+        Aeson.Null -> Nothing
+        value -> Just (rawJsonValue value)
+
+rawJsonValue :: Aeson.ToJSON value => value -> RawJson
+rawJsonValue = rawJsonFromEncoding . Aeson.toEncoding
 
 genText :: Gen Text.Text
 genText = do
@@ -487,6 +448,80 @@ contentPartKind = \case
 spec :: Spec
 spec = describe "Agent.CLI.Session" do
     describe "pure compatibility helpers" do
+        it "stores inline image and file payloads as binary data" do
+            let imageUrl = "data:image/png;base64,cG5nLWJ5dGVz"
+                fileData = "data:text/plain;base64,ZmlsZS1ieXRlcw=="
+                item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputImagePart
+                            Nothing
+                            Nothing
+                            (Just imageUrl)
+                            Nothing
+                        , InputFilePart
+                            Nothing
+                            (Just fileData)
+                            Nothing
+                            Nothing
+                            (Just "notes.txt")
+                            Nothing
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+            case toStoredResponseItem item of
+                StoredMessageItem StoredMessage
+                    { storedMessageContent =
+                        StoredMessageParts [imagePart, filePart]
+                    } -> do
+                        imagePart.storedContentPartImageUrl
+                            `shouldBe` Nothing
+                        imagePart.storedContentPartImageBinary
+                            `shouldBe` Just StoredBinaryData
+                                { storedBinaryDataMimeType = "image/png"
+                                , storedBinaryDataBytes = "png-bytes"
+                                }
+                        filePart.storedContentPartFileData
+                            `shouldBe` Nothing
+                        filePart.storedContentPartFileBinary
+                            `shouldBe` Just StoredBinaryData
+                                { storedBinaryDataMimeType = "text/plain"
+                                , storedBinaryDataBytes = "file-bytes"
+                                }
+                stored ->
+                    expectationFailure
+                        ("unexpected stored item: " <> show stored)
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
+        it "keeps hosted and malformed attachment URLs as text" do
+            let item = MessageItem ResponseMessage
+                    { messageId = Nothing
+                    , content = MessageContentParts
+                        [ InputImagePart
+                            Nothing
+                            Nothing
+                            (Just "https://example.com/image.png")
+                            Nothing
+                        , InputFilePart
+                            Nothing
+                            (Just "data:text/plain;base64,not base64")
+                            Nothing
+                            Nothing
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleUser
+                    , status = Nothing
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+            fromStoredResponseItem (toStoredResponseItem item)
+                `shouldBe` Right item
+
         it "keeps the legacy artifact root and safe ids" do
             sessionsRoot (fromFilePath "/home/marc")
                 `shouldBe` fromFilePath "/home/marc/.haskell-agent/sessions"
@@ -514,10 +549,6 @@ spec = describe "Agent.CLI.Session" do
                         , status = Just ItemCompleted
                         , phase = Nothing
                         , passthrough = Nothing
-                        , extraFields =
-                            KeyMap.singleton
-                                "provider_extension"
-                                (Aeson.Bool True)
                         }
                     , MessageItem ResponseMessage
                         { messageId = Just "message-2"
@@ -525,59 +556,48 @@ spec = describe "Agent.CLI.Session" do
                             [ InputTextPart
                                 { text = "input"
                                 , promptCacheBreakpoint =
-                                    Just
-                                        (Aeson.object
-                                            ["scope" Aeson..= ("turn" :: Text.Text)])
-                                , extraFields = KeyMap.empty
+                                    Just (rawJsonValue (Aeson.object
+                                        ["scope" Aeson..= ("turn" :: Text.Text)]))
                                 }
                             , OutputTextPart
                                 { text = "output"
                                 , annotations =
                                     Just
-                                        [ Aeson.object
-                                            ["type" Aeson..= ("citation" :: Text.Text)]
+                                        [ rawJsonValue (Aeson.object
+                                            ["type" Aeson..= ("citation" :: Text.Text)])
                                         ]
                                 , logprobs =
                                     Just
-                                        [ Aeson.object
-                                            ["token" Aeson..= ("output" :: Text.Text)]
+                                        [ rawJsonValue (Aeson.object
+                                            ["token" Aeson..= ("output" :: Text.Text)])
                                         ]
-                                , extraFields = KeyMap.empty
                                 }
-                            , UnknownContentPart TaggedObject
-                                { tag = "provider_content"
-                                , fields =
-                                    KeyMap.singleton
-                                        "opaque"
-                                        (Aeson.Bool True)
-                                }
+                            , UnknownContentPart (TaggedObject "provider_content")
                             ]
                         , role = RoleDeveloper
                         , status = Just ItemInProgress
                         , phase = Just "commentary"
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
                         }
                     , FunctionCallItem FunctionCall
                         { itemId = Just "call-item"
                         , callId = "call-1"
                         , name = "shell"
                         , namespace = Nothing
+                        , provider = Nothing
                         , arguments = "{\"command\":\"pwd\"}"
                         , encryptedFunctionArgs = Nothing
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
                         }
                     , FunctionCallOutputItem FunctionCallOutput
                         { itemId = Just "output-item"
                         , callId = "call-1"
                         , name = Nothing
                         , namespace = Nothing
-                        , output =
-                            Aeson.object
-                                ["stdout" Aeson..= ("/tmp/project" :: Text.Text)]
+                        , provider = Nothing
+                        , output = rawJsonValue (Aeson.object
+                            ["stdout" Aeson..= ("/tmp/project" :: Text.Text)])
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
                         }
                     , CustomToolCallItem CustomToolCall
                         { itemId = Nothing
@@ -586,15 +606,13 @@ spec = describe "Agent.CLI.Session" do
                         , namespace = Nothing
                         , input = "*** Begin Patch"
                         , status = Nothing
-                        , extraFields = KeyMap.empty
                         }
                     , CustomToolCallOutputItem CustomToolCallOutput
                         { itemId = Nothing
                         , callId = "custom-1"
                         , name = Just "apply_patch"
-                        , output = Aeson.String "Done"
+                        , output = rawJsonValue ("Done" :: Text.Text)
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
                         }
                     , ReasoningItemValue ReasoningItem
                         { itemId = Just "reasoning-1"
@@ -602,23 +620,19 @@ spec = describe "Agent.CLI.Session" do
                             [ ReasoningSummaryPart
                                 { partType = "summary_text"
                                 , text = Just "Checked the schema"
-                                , extraFields = KeyMap.empty
                                 }
                             ]
                         , content =
                             Just
                                 [ ReasoningTextPart
                                     { text = "private placeholder"
-                                    , extraFields = KeyMap.empty
                                     }
                                 ]
                         , encryptedContent = Just "encrypted"
                         , status = Just ItemCompleted
-                        , extraFields = KeyMap.empty
                         }
                     , ItemReferenceValue ItemReference
                         { itemId = "call-item"
-                        , extraFields = KeyMap.empty
                         }
                     , AgentMessageItem ResponseAgentMessage
                         { messageId = Nothing
@@ -628,24 +642,15 @@ spec = describe "Agent.CLI.Session" do
                             [ InputTextPart
                                 { text = "Found it."
                                 , promptCacheBreakpoint = Nothing
-                                , extraFields = KeyMap.empty
                                 }
                             , EncryptedContentPart
                                 { encryptedContent = "opaque-provider-payload"
-                                , extraFields = KeyMap.empty
                                 }
                             ]
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
                         }
                     , CompactionTriggerItemValue CompactionTriggerItem
-                        { extraFields = KeyMap.empty
-                        }
-                    , UnknownResponseItem TaggedObject
-                        { tag = "provider_item"
-                        , fields =
-                            KeyMap.singleton "payload" (Aeson.String "opaque")
-                        }
+                    , UnknownResponseItem (TaggedObject "provider_item")
                     ]
             traverse fromStoredResponseItem (map toStoredResponseItem items)
                 `shouldBe` Right items
@@ -711,12 +716,11 @@ spec = describe "Agent.CLI.Session" do
                 let item = MessageItem ResponseMessage
                         { messageId = Nothing
                         , content = MessageContentParts
-                            [InputTextPart "hi" Nothing KeyMap.empty]
+                            [InputTextPart "hi" Nothing]
                         , role = RoleUser
                         , status = Nothing
                         , phase = Nothing
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
                         }
                     normalTurn = SessionTurn
                         { turnAt = fixedTime
@@ -862,7 +866,9 @@ spec = describe "Agent.CLI.Session" do
                     , turnUsage = Nothing
                     , turnEffect = TranscriptAppend
                     }
-            Aeson.eitherDecode (Aeson.encode turn) `shouldBe` Right turn
+            Hermes.decodeEither sessionTurnDecoder
+                (LBS.toStrict (Aeson.encode turn))
+                `shouldBe` Right turn
 
         it "round-trips recap metadata" do
             let meta =
@@ -871,7 +877,9 @@ spec = describe "Agent.CLI.Session" do
                         , metaLastTurnSummary = Just "Auth retries wired"
                         , metaLastRecapMainTurns = 3
                         }
-            Aeson.eitherDecode (Aeson.encode meta) `shouldBe` Right meta
+            Hermes.decodeEither sessionMetaDecoder
+                (LBS.toStrict (Aeson.encode meta))
+                `shouldBe` Right meta
 
         it "infers transcript effects when importing legacy JSON turns" do
             let legacy = Aeson.object
@@ -883,9 +891,8 @@ spec = describe "Agent.CLI.Session" do
                     , "items" Aeson..= ([] :: [ResponseItem])
                     , "usage" Aeson..= (Nothing :: Maybe TokenUsage)
                     ]
-                decoded =
-                    Aeson.eitherDecode (Aeson.encode legacy)
-                        :: Either String SessionTurn
+                decoded = Hermes.decodeEither sessionTurnDecoder
+                    (LBS.toStrict (Aeson.encode legacy))
             fmap (\turn -> turn.turnEffect) decoded
                 `shouldBe` Right TranscriptReplace
 

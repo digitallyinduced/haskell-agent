@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Surface dropped Codex WebSocket frames as loop warnings, including the
+  decode error and a truncated payload, instead of swallowing them.
 - Remove the deprecated `Agent.OpenAI.Responses.Types`,
   `Agent.OpenAI.Responses.Codec`, and `Agent.OpenAI.ResponseMerge`
   compatibility modules. Import their `Agent.Responses.*` counterparts

@@ -77,6 +77,7 @@ nativeProgressSignal :: Bool -> UiEvent -> UiState -> Maybe Bool
 nativeProgressSignal blocked event state
     | blocked = Nothing
     | otherwise = case event of
+        UiLoop (ToolArgumentEvent _) -> Nothing
         UiLoop TurnStarted -> Just True
         UiLoop (TurnFinished _) -> Just state.uiRunning
         UiTurnEnded _ -> Just False

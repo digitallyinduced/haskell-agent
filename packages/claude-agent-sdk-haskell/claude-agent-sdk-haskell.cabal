@@ -43,12 +43,14 @@ library
                     , Claude.Agent.SDK.Query
                     , Claude.Agent.SDK.Transport
                     , Claude.Agent.SDK.Types
-    other-modules:    Claude.Agent.SDK.Internal.MessageParser
+    other-modules:    Claude.Agent.SDK.Internal.Client.Usage
+                    , Claude.Agent.SDK.Internal.MessageParser
                     , Claude.Agent.SDK.Internal.Process
                     , Claude.Agent.SDK.Internal.Query
                     , Claude.Agent.SDK.Internal.Transport.SubprocessCLI
     build-depends:    base                  >= 4.17 && < 5
                     , agent-process        >= 0.1 && < 0.2
+                    , agent-json           >= 0.1 && < 0.2
                     , aeson                 >= 2.0
                     , async
                     , base64-bytestring
@@ -56,9 +58,9 @@ library
                     , containers
                     , directory
                     , entropy
+                    , hermes-json
                     , process               >= 1.6.26
                     , safe-exceptions
-                    , scientific
                     , text
                     , unix
                     , uuid-types
@@ -74,13 +76,12 @@ test-suite claude-agent-sdk-haskell-test
     ghc-options:      -threaded
     build-depends:    base >= 4.17 && < 5
                     , claude-agent-sdk-haskell
-                    , aeson
+                    , agent-json
                     , bytestring
                     , containers
                     , directory
                     , filepath
                     , hspec
                     , safe-exceptions
-                    , scientific
                     , text
                     , unix

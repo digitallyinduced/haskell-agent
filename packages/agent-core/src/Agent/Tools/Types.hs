@@ -15,6 +15,7 @@ module Agent.Tools.Types
     , rawJsonAppToolWithExecution
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
+    , freeformGrammarAppToolWithExecution
     , withToolResourceClaims
     , withTypedResourceClaims
     , withToolArgumentInterpreter
@@ -55,7 +56,8 @@ import Agent.Tools.Scheduling
     )
 import Control.Exception.Safe (tryAny)
 import Control.Monad (foldM)
-import Data.Aeson (FromJSON, Value)
+import Agent.Json.Decode (Decoder)
+import Data.Aeson (Value)
 import Data.IORef (IORef, newIORef, writeIORef)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -68,6 +70,10 @@ data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
     | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
+    -- | Freeform custom tool with an explicit provider grammar
+    -- (@format.type = "grammar"@). The fields are the grammar syntax
+    -- (for example @"lark"@) and its definition text.
+    | FreeformGrammarSchema !Text !Text
     deriving (Eq, Show)
 
 -- | Whether a call may run without generic user approval.
@@ -118,6 +124,9 @@ data ToolEnv = ToolEnv
       -- Kept separate so catalog refreshes can replace them without
       -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
+    , toolOutputInlineCap :: !Int
+    , toolOutputPreviewCap :: !Int
+    , toolOutputArtifactCap :: !Int
     , toolStdoutCap :: !Int
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
@@ -134,7 +143,10 @@ defaultToolEnv cwd = do
         , toolAllowedRoots = allowedRoots
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
-        , toolStdoutCap = 100000
+        , toolOutputInlineCap = 50 * 1024
+        , toolOutputPreviewCap = 8 * 1024
+        , toolOutputArtifactCap = 64 * 1024 * 1024
+        , toolStdoutCap = 16 * 1024
         , toolCancel = cancel
         }
 
@@ -238,18 +250,13 @@ withToolResourceClaims resolver tool =
 -- | Resource claims that consume already-shaped arguments. The wrapper
 -- decodes JSON once; claim functions must not re-parse 'ToolCall' text.
 withTypedResourceClaims
-    :: FromJSON args
-    => (args -> IO (Either Text [ToolResourceClaim]))
+    :: Decoder args
+    -> (args -> IO (Either Text [ToolResourceClaim]))
     -> AppTool
     -> AppTool
-withTypedResourceClaims resolve =
+withTypedResourceClaims decoder resolve =
     withToolResourceClaims \call ->
-        case
-            decodeToolArguments
-                (canonicalToolArguments
-                    call.name
-                    (toolArgumentsValue call.arguments))
-        of
+        case decodeToolArguments decoder call.arguments of
             Left err -> pure (Left err)
             Right args -> resolve args
 
@@ -297,6 +304,28 @@ freeformApplyPatchAppToolWithExecution
     { appToolName = name
     , appToolDescription = description
     , appToolSchema = FreeformApplyPatchSchema
+    , appToolHandler = handler
+    , appToolApproval = approval
+    , appToolExecution = execution
+    , appToolResourceClaims = Nothing
+    , appToolArgumentInterpreter = Just (streamedToolFactoryForHandler handler)
+    }
+
+-- | Construct a freeform tool that advertises an explicit grammar.
+freeformGrammarAppToolWithExecution
+    :: Text
+    -> Text
+    -> Text
+    -> Text
+    -> ApprovalRule
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+freeformGrammarAppToolWithExecution
+        name description syntax definition approval execution handler = AppTool
+    { appToolName = name
+    , appToolDescription = description
+    , appToolSchema = FreeformGrammarSchema syntax definition
     , appToolHandler = handler
     , appToolApproval = approval
     , appToolExecution = execution
@@ -377,6 +406,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> Just parameters
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
+    FreeformGrammarSchema _ _ -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

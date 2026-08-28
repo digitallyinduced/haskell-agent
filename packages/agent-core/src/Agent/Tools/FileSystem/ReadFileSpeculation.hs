@@ -17,9 +17,11 @@ import Agent.ToolDispatch
     , ToolResult
     )
 import Agent.Tools.FileSystem (resolveForRead)
+import qualified Agent.Json.Decode as Json
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( FileWindow(..)
     , ReadFileArgs(..)
+    , readFileArgsDecoder
     , fileWindowCoversArgs
     , formatReadFileContent
     , readFileWindowForArgs
@@ -638,8 +640,10 @@ targetFileProgress arguments =
         findTopLevelStringField "target_file" input
 
 decodeReadFileArgs :: Text -> Maybe ReadFileArgs
-decodeReadFileArgs =
-    Aeson.decodeStrict' . Text.encodeUtf8
+decodeReadFileArgs text =
+    case Json.decodeText readFileArgsDecoder text of
+        Right args -> Just args
+        Left _ -> Nothing
 
 defaultReadFileArgs :: Text -> ReadFileArgs
 defaultReadFileArgs targetFile =

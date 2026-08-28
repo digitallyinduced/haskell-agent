@@ -43,11 +43,11 @@ import Agent.CLI.Session
     , SessionTurn(..)
     , SessionTurnPage(..)
     , SessionResumeStats(..)
-    , TranscriptEffect(..)
     , loadRecentSessionTurns
     , loadSessionMeta
     , loadSessionResumeStats
     )
+import Agent.CLI.Session.Types (TranscriptEffect(..))
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.OpenAI.Compaction
     ( hasCompactionCheckpoint

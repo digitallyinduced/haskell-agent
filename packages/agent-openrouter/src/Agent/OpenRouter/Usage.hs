@@ -7,8 +7,7 @@ module Agent.OpenRouter.Usage
     ) where
 
 import Control.Exception.Safe (tryAny)
-import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.:?))
+import qualified Agent.Json.Decode as Json
 import qualified Data.ByteString.Lazy as LBS
 import Data.Scientific (Scientific)
 import Data.Text (Text)
@@ -36,39 +35,33 @@ data KeyInfo = KeyInfo
     , freeTier :: !(Maybe Bool)
     }
 
-instance Aeson.FromJSON KeyInfo where
-    parseJSON = Aeson.withObject "OpenRouter key response" \outer -> do
-        value <- outer .: "data"
-        Aeson.withObject "OpenRouter key data" parseData value
-      where
-        parseData object =
+keyInfoDecoder :: Json.Decoder KeyInfo
+keyInfoDecoder = Json.object $
+    Json.atKey "data" $ Json.object $
             KeyInfo
-                <$> object .:? "label"
-                <*> object .:? "usage"
-                <*> object .:? "limit"
-                <*> object .:? "limit_remaining"
-                <*> object .:? "is_free_tier"
+                <$> Json.optionalKey "label" Json.text
+                <*> Json.optionalKey "usage" Json.scientific
+                <*> Json.optionalKey "limit" Json.scientific
+                <*> Json.optionalKey "limit_remaining" Json.scientific
+                <*> Json.optionalKey "is_free_tier" Json.bool
 
 data Credits = Credits
     { credits :: !(Maybe Scientific)
     , used :: !(Maybe Scientific)
     }
 
-instance Aeson.FromJSON Credits where
-    parseJSON = Aeson.withObject "OpenRouter credits response" \outer -> do
-        value <- outer .: "data"
-        Aeson.withObject "OpenRouter credits data" parseData value
-      where
-        parseData object =
+creditsDecoder :: Json.Decoder Credits
+creditsDecoder = Json.object $
+    Json.atKey "data" $ Json.object $
             Credits
-                <$> object .:? "total_credits"
-                <*> object .:? "total_usage"
+                <$> Json.optionalKey "total_credits" Json.scientific
+                <*> Json.optionalKey "total_usage" Json.scientific
 
 decodeKeyInfo
     :: LBS.ByteString
     -> Either Text
         (Maybe Text, Maybe Scientific, Maybe Scientific, Maybe Scientific, Maybe Bool)
-decodeKeyInfo body = case Aeson.eitherDecode body of
+decodeKeyInfo body = case Json.decodeEither keyInfoDecoder (LBS.toStrict body) of
     Left _ ->
         Left "OpenRouter returned an unreadable key-usage response."
     Right KeyInfo{label, usage, limit, limitRemaining, freeTier} ->
@@ -77,7 +70,7 @@ decodeKeyInfo body = case Aeson.eitherDecode body of
 decodeCredits
     :: LBS.ByteString
     -> Either Text (Maybe Scientific, Maybe Scientific)
-decodeCredits body = case Aeson.eitherDecode body of
+decodeCredits body = case Json.decodeEither creditsDecoder (LBS.toStrict body) of
     Left _ ->
         Left "OpenRouter returned an unreadable credits response."
     Right Credits{credits, used} -> Right (credits, used)

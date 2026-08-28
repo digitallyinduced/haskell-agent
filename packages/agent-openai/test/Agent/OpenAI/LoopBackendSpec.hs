@@ -1,10 +1,12 @@
 module Agent.OpenAI.LoopBackendSpec (spec) where
 
+import Agent.Cancel (newCancelFlag)
 import Agent.Error
     ( ApiError(..)
     , ErrorType(..)
     , isInlineRetryableProviderError
     )
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.InterAgentMessage
 import Agent.Loop
 import Agent.OpenAI.LoopBackend
@@ -13,7 +15,10 @@ import Agent.OpenAI.WebSocketClient
     , readCodexTurnState
     , recordCodexTurnState
     )
-import Agent.Responses.LoopBackend (streamOutputObserved)
+import Agent.Responses.LoopBackend
+    ( responseNeedsLoopContinuation
+    , streamOutputObserved
+    )
 import Agent.Responses.Types
 import Agent.ToolDispatch
 import Agent.Tools.FileSystem.ReadFile (readFileToolWithSpeculation)
@@ -30,12 +35,13 @@ import Agent.Tools.Speculation
     , takeToolSpeculation
     , waitForToolSpeculation
     )
-import Agent.Tools.Types (defaultToolEnv)
+import Agent.Tools.Types (ToolRegistry, defaultToolEnv, mkToolRegistry)
 import Control.Exception (bracket)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -52,12 +58,11 @@ spec = do
             let legacySummary = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [InputTextPart "Compacted conversation summary:\nold" Nothing KeyMap.empty]
+                        [InputTextPart "Compacted conversation summary:\nold" Nothing]
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 request = withRequestInput baseParams [legacySummary]
             inputItems request `shouldBe`
@@ -68,12 +73,11 @@ spec = do
                             "Compacted conversation summary:\nold"
                             Nothing
                             Nothing
-                            KeyMap.empty]
+                            ]
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 ]
 
@@ -83,7 +87,7 @@ spec = do
                 [MessageItem message] -> do
                     message.role `shouldBe` RoleUser
                     message.content `shouldBe`
-                        MessageContentParts [InputTextPart "hello" Nothing KeyMap.empty]
+                        MessageContentParts [InputTextPart "hello" Nothing]
                 other -> expectationFailure ("expected one user message, got " <> show other)
 
         it "preserves encrypted collaboration payloads as agent_message content" do
@@ -104,11 +108,8 @@ spec = do
                             \Sender: /root\n\
                             \Payload:\n"
                             Nothing
-                            KeyMap.empty
-                        , EncryptedContentPart "gAAAAA-ciphertext" KeyMap.empty
+                        , EncryptedContentPart "gAAAAA-ciphertext"
                         ]
-                    Aeson.fromJSON (Aeson.toJSON item)
-                        `shouldBe` Aeson.Success item
                     Aeson.toJSON item `shouldBe` Aeson.object
                         [ "type" Aeson..= ("agent_message" :: Text)
                         , "author" Aeson..= ("/root" :: Text)
@@ -140,7 +141,7 @@ spec = do
                     message.role `shouldBe` RoleUser
                     case message.content of
                         MessageContentParts
-                            [ InputTextPart text Nothing _
+                            [ InputTextPart text Nothing
                             , InputImagePart
                                 { detail
                                 , fileId
@@ -181,7 +182,7 @@ spec = do
             case items of
                 [FunctionCallOutputItem output] -> do
                     output.callId `shouldBe` "c1"
-                    output.output `shouldBe` Aeson.String "echoed"
+                    Aeson.toJSON output.output `shouldBe` Aeson.String "echoed"
                     itemType output `shouldBe` "function_call_output"
                 other -> expectationFailure ("expected function output, got " <> show other)
 
@@ -191,7 +192,7 @@ spec = do
             case items of
                 [CustomToolCallOutputItem output] -> do
                     output.callId `shouldBe` "c2"
-                    output.output `shouldBe` Aeson.String "patched"
+                    Aeson.toJSON output.output `shouldBe` Aeson.String "patched"
                     itemType output `shouldBe` "custom_tool_call_output"
                 other -> expectationFailure ("expected custom output, got " <> show other)
 
@@ -269,7 +270,6 @@ spec = do
                         { status = ResponseIncomplete
                         , incompleteDetails = Just IncompleteDetails
                             { reason = "max_output_tokens"
-                            , extraFields = KeyMap.empty
                             }
                         }
                 turn = responseToTurnOutput response
@@ -278,6 +278,50 @@ spec = do
                 , incompleteReasoningTokens = Just 32000
                 }
             turn.tokenUsage.outputTokens `shouldBe` 32768
+
+        it "continues reasoning-only max-output stops on the response chain" do
+            let turn = responseToTurnOutput reasoningIncompleteResponse
+            turn.completion `shouldBe` TurnCompleted
+            turn.toolCalls `shouldBe` []
+            turn.assistantText `shouldBe` Nothing
+            turn.tokenUsage.outputTokens `shouldBe` 128000
+
+        it "continues only successful empty response steps" do
+            let cancelled = testResponse "resp-cancelled" []
+            responseNeedsLoopContinuation reasoningIncompleteResponse
+                `shouldBe` True
+            responseNeedsLoopContinuation (testResponse "resp-empty" [])
+                `shouldBe` True
+            responseNeedsLoopContinuation
+                (cancelled
+                    { status = ResponseCancelled
+                    , incompleteDetails = Nothing
+                    })
+                `shouldBe` False
+
+        it "keeps filtered or partially actionable incomplete output terminal" do
+            let incomplete reason output =
+                    (testResponse "resp-incomplete" output)
+                        { status = ResponseIncomplete
+                        , incompleteDetails = Just IncompleteDetails
+                            { reason
+                            }
+                        }
+                filtered = responseToTurnOutput
+                    (incomplete "content_filter" [reasoningItem "rs-filtered"])
+                partialCall = responseToTurnOutput
+                    (incomplete "max_output_tokens"
+                        [ reasoningItem "rs-partial"
+                        , functionCallItem "call-partial" "echo" "{}"
+                        ])
+            filtered.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "content_filter"
+                , incompleteReasoningTokens = Nothing
+                }
+            partialCall.completion `shouldBe` TurnIncomplete
+                { incompleteReason = "max_output_tokens"
+                , incompleteReasoningTokens = Nothing
+                }
 
     describe "streamEventToLoopEvent" do
         it "maps output and summary deltas but hides raw reasoning" do
@@ -294,12 +338,50 @@ spec = do
                     { otherEventType =
                         StreamEventUnknown "response.future.done"
                     , sequenceNumber = Just 42
-                    , eventExtraFields = KeyMap.empty
+                    , eventDelta = Nothing
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe`
                     Just
                         (ActivityUpdated
                             "Warning: unsupported provider event response.future.done")
+            streamEventToLoopEvent
+                (OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown "response.future.done"
+                    , sequenceNumber = Just 42
+                    , eventDelta = Just "partial"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
+                    })
+                `shouldBe`
+                    Just
+                        (ActivityUpdated
+                            "Warning: unsupported provider event response.future.done")
+
+        it "surfaces unparsed websocket frames as warnings without marking output" do
+            let event = OtherResponseStreamEvent
+                    { otherEventType =
+                        StreamEventUnknown unparsedStreamEventTypeText
+                    , sequenceNumber = Nothing
+                    , eventDelta =
+                        Just "key \"call_id\" not found: {\"type\":\"response.output_item.added\"}"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
+                    }
+            streamEventToLoopEvent event
+                `shouldBe`
+                    Just (ActivityUpdated
+                        ("Warning: unsupported provider event "
+                            <> unparsedStreamEventTypeText))
+            streamOutputObserved event `shouldBe` False
 
         it "surfaces low Codex usage as a persistent warning" do
             streamEventToLoopEvent
@@ -343,8 +425,11 @@ spec = do
                 (OtherResponseStreamEvent
                     { otherEventType = EventCodexRateLimits
                     , sequenceNumber = Nothing
-                    , eventExtraFields =
-                        KeyMap.singleton "rate_limits" (Aeson.String "invalid")
+                    , eventDelta = Nothing
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe` Nothing
 
@@ -357,45 +442,44 @@ spec = do
                 (OtherResponseStreamEvent
                     { otherEventType = EventCodexResponseMetadata
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.singleton
-                        "metadata"
-                        (Aeson.object ["request_id" Aeson..= ("req-1" :: Text)])
+                    , eventDelta = Nothing
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     })
                 `shouldBe` Nothing
             streamEventToLoopEvent (ResponseOutputItemDoneEvent
                 { item = assistantItem "x"
                 , outputIndex = Just 0
                 , sequenceNumber = Nothing
-                , eventExtraFields = KeyMap.empty
                 }) `shouldBe` Nothing
 
     describe "streamOutputObserved" do
         it "treats terminal lifecycle events as replay-unsafe" do
             streamOutputObserved
-                (ResponseCompletedEvent (Aeson.object []) Nothing KeyMap.empty)
+                (ResponseCompletedEvent (testResponse "completed" []) Nothing)
                 `shouldBe` True
             streamOutputObserved
-                (ResponseDoneEvent (Aeson.object []) Nothing KeyMap.empty)
+                (ResponseDoneEvent (testResponse "done" []) Nothing)
                 `shouldBe` True
             streamOutputObserved
-                (ResponseIncompleteEvent (Aeson.object []) Nothing KeyMap.empty)
+                (ResponseIncompleteEvent (testResponse "incomplete" []) Nothing)
                 `shouldBe` False
             streamOutputObserved
                 (ResponseIncompleteEvent
-                    (Aeson.object ["output" Aeson..= [Aeson.object []]])
-                    Nothing
-                    KeyMap.empty)
+                    (testResponse "incomplete-output" [assistantItem "x"])
+                    Nothing)
                 `shouldBe` True
 
         it "treats failed lifecycle events as output only when output is present" do
             streamOutputObserved
                 (ResponseFailedEvent
-                    (Aeson.object ["output" Aeson..= [Aeson.object []]])
-                    Nothing
-                    KeyMap.empty)
+                    (testResponse "failed-output" [assistantItem "x"])
+                    Nothing)
                 `shouldBe` True
             streamOutputObserved
-                (ResponseFailedEvent (Aeson.object []) Nothing KeyMap.empty)
+                (ResponseFailedEvent (testResponse "failed" []) Nothing)
                 `shouldBe` False
 
         it "treats function-call argument events as replay-unsafe" do
@@ -405,7 +489,6 @@ spec = do
                     , streamItemId = Just "fc_1"
                     , streamOutputIndex = Just 0
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 `shouldBe` True
             streamOutputObserved
@@ -415,7 +498,6 @@ spec = do
                     , streamItemId = Just "fc_1"
                     , streamOutputIndex = Just 0
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 `shouldBe` True
 
@@ -511,6 +593,36 @@ spec = do
                 ]
 
     describe "openAiBackendWith" do
+        it "continues a reasoning-only incomplete response by response id" do
+            seenPrevious <- newIORef []
+            remaining <- newIORef
+                [ reasoningIncompleteResponse
+                , testResponse "resp-final" [assistantItem "done"]
+                ]
+            let send _request previous _onEvent = do
+                    modifyIORef' seenPrevious (<> [previous])
+                    atomicModifyIORef' remaining \case
+                        response : rest -> (rest, Right response)
+                        [] -> error "unexpected extra response submission"
+                backend = openAiBackendWith send (pure baseParams)
+            config <- loopConfig backend
+
+            result <- runLoop config Nothing "investigate"
+
+            result `shouldBe` Right LoopResult
+                { finalResponseId = "resp-final"
+                , finalText = Just "done"
+                , turnsUsed = 2
+                , tokenUsage = TokenUsage
+                    { inputTokens = 64000
+                    , outputTokens = 128000
+                    , cachedTokens = 0
+                    }
+                }
+            readIORef seenPrevious `shouldReturn`
+                [Nothing, Just "resp-reasoning-incomplete"]
+            readIORef remaining `shouldReturn` []
+
         it "shows raw reasoning only when explicitly enabled" do
             let send _request _previous onEvent = do
                     onEvent (deltaEvent EventReasoningTextDelta "raw")
@@ -556,7 +668,7 @@ spec = do
                                     , arguments = ""
                                     , encryptedFunctionArgs = Nothing
                                     , status = Nothing
-                                    , extraFields = KeyMap.empty
+                                    , provider = Nothing
                                     }
                             finalCall =
                                 functionCallItem
@@ -568,14 +680,12 @@ spec = do
                                     { item = addedCall
                                     , outputIndex = Just 0
                                     , sequenceNumber = Nothing
-                                    , eventExtraFields = KeyMap.empty
                                     }
                                 onEvent ResponseFunctionCallArgumentsDeltaEvent
                                     { delta = Just arguments
                                     , streamItemId = Nothing
                                     , streamOutputIndex = Just 0
                                     , sequenceNumber = Nothing
-                                    , eventExtraFields = KeyMap.empty
                                     }
                                 waitForToolSpeculation runtime
                                 waitForReadFileSpeculation cache
@@ -635,7 +745,7 @@ spec = do
                                     , arguments
                                     , encryptedFunctionArgs = Nothing
                                     , status = Just ItemCompleted
-                                    , extraFields = KeyMap.empty
+                                    , provider = Nothing
                                     }
                             send _request _previous onEvent = do
                                 onEvent ResponseFunctionCallArgumentsDoneEvent
@@ -644,7 +754,6 @@ spec = do
                                     , streamItemId = Just itemId
                                     , streamOutputIndex = Nothing
                                     , sequenceNumber = Nothing
-                                    , eventExtraFields = KeyMap.empty
                                     }
                                 waitForToolSpeculation runtime
                                 waitForReadFileSpeculation cache
@@ -935,7 +1044,6 @@ spec = do
                     { item = assistantItem "partial"
                     , outputIndex = Just 0
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 sendCurrent _request _previous onEvent = do
                     onEvent outputEvent
@@ -959,10 +1067,9 @@ spec = do
             healthy <- newIORef True
             let connectionFailure = ConnectionError "decode failed"
                 completedEvent = ResponseCompletedEvent
-                    { responseValue = Aeson.toJSON
-                        (testResponse "resp-completed" [assistantItem "done"])
+                    { responseValue =
+                        testResponse "resp-completed" [assistantItem "done"]
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 sendCurrent _request _previous onEvent = do
                     onEvent completedEvent
@@ -986,10 +1093,9 @@ spec = do
             healthy <- newIORef True
             let connectionFailure = ConnectionError "failed response"
                 failedEvent = ResponseFailedEvent
-                    { responseValue = Aeson.toJSON
-                        (testResponse "resp-failed" [assistantItem "partial"])
+                    { responseValue =
+                        testResponse "resp-failed" [assistantItem "partial"]
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 sendCurrent _request _previous onEvent = do
                     onEvent failedEvent
@@ -1017,7 +1123,6 @@ spec = do
                     { item = assistantItem "partial"
                     , outputIndex = Just 0
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 sendCurrent _request _previous _onEvent = do
                     modifyIORef' currentCalls (+ 1)
@@ -1046,7 +1151,6 @@ spec = do
                     { item = assistantItem "partial"
                     , outputIndex = Just 0
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 sendCurrent _request _previous _onEvent =
                     pure (Left currentFailure)
@@ -1330,7 +1434,6 @@ spec = do
                     { item = assistantItem "partial"
                     , outputIndex = Just 0
                     , sequenceNumber = Nothing
-                    , eventExtraFields = KeyMap.empty
                     }
                 sendPrimary _request _previous onEvent = do
                     modifyIORef' primaryCalls (+ 1)
@@ -1468,6 +1571,30 @@ submitWithState stateRef backend previous inputs onEvent = do
             writeIORef stateRef backendState
             pure (Right backendOutput)
 
+loopConfig :: Backend -> IO LoopConfig
+loopConfig backend = do
+    state <- newIORef []
+    cancel <- newCancelFlag
+    pure LoopConfig
+        { loopBackend = backend
+        , loopBackendState = BackendStateStore
+            { readBackendState = readIORef state
+            , commitBackendState = writeIORef state
+            }
+        , loopTools = emptyRegistry
+        , loopDispatch = defaultLoopDispatch
+        , loopMaxTurns = defaultLoopMaxTurns
+        , loopOnEvent = const (pure ())
+        , loopApprove = const (pure (Right True))
+        , loopReadSteering = pure []
+        , loopCommitSteering = const (pure ())
+        , loopCancel = cancel
+        }
+
+emptyRegistry :: ToolRegistry
+emptyRegistry =
+    either (error . Text.unpack) id (mkToolRegistry [])
+
 baseParams :: ResponseCreateParams
 baseParams = withModel (Just "gpt-5.6-luna") defaultResponseCreateParams
 
@@ -1490,7 +1617,6 @@ withEffort effort ResponseCreateParams { reasoning = _, .. } =
             , generateSummary = Nothing
             , reasoningMode = Nothing
             , summary = Nothing
-            , extraFields = KeyMap.empty
             }
         , ..
         }
@@ -1550,16 +1676,23 @@ functionCallItemWithExtras
     -> Text
     -> Aeson.Object
     -> ResponseItem
-functionCallItemWithExtras callId name arguments extraFields =
+functionCallItemWithExtras callId name arguments metadataFields =
     FunctionCallItem FunctionCall
     { itemId = Nothing
     , callId
     , name
-    , namespace = Nothing
+    , namespace = case KeyMap.lookup "namespace" metadataFields of
+        Just (Aeson.String value) -> Just value
+        _ -> Nothing
+    , provider = case KeyMap.lookup "provider" metadataFields of
+        Just (Aeson.String value) -> Just value
+        _ -> Nothing
     , arguments
-    , encryptedFunctionArgs = Nothing
+    , encryptedFunctionArgs =
+        case KeyMap.lookup "encrypted_function_args" metadataFields of
+            Just (Aeson.Array _) -> Just []
+            _ -> Nothing
     , status = Just ItemCompleted
-    , extraFields
     }
 
 customCallItem :: Text -> Text -> Text -> ResponseItem
@@ -1570,55 +1703,103 @@ customCallItem callId name input = CustomToolCallItem CustomToolCall
     , namespace = Nothing
     , input
     , status = Just ItemCompleted
-    , extraFields = KeyMap.empty
     }
 
 assistantItem :: Text -> ResponseItem
 assistantItem text = MessageItem ResponseMessage
     { messageId = Nothing
-    , content = MessageContentParts [OutputTextPart text Nothing Nothing KeyMap.empty]
+    , content = MessageContentParts [OutputTextPart text Nothing Nothing]
     , role = RoleAssistant
     , status = Just ItemCompleted
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }
+
+reasoningItem :: Text -> ResponseItem
+reasoningItem itemId = ReasoningItemValue ReasoningItem
+    { itemId = Just itemId
+    , summary = []
+    , content = Nothing
+    , encryptedContent = Just "opaque"
+    , status = Just ItemCompleted
+    }
+
+reasoningIncompleteResponse :: Response
+reasoningIncompleteResponse =
+    (testResponseWithUsage
+        "resp-reasoning-incomplete"
+        [reasoningItem "rs-1"]
+        (Aeson.object
+            [ "input_tokens" Aeson..= (64000 :: Int)
+            , "output_tokens" Aeson..= (128000 :: Int)
+            , "total_tokens" Aeson..= (192000 :: Int)
+            , "output_tokens_details" Aeson..= Aeson.object
+                [ "reasoning_tokens" Aeson..= (53 :: Int)
+                ]
+            ]))
+        { status = ResponseIncomplete
+        , incompleteDetails = Just IncompleteDetails
+            { reason = "max_output_tokens"
+            }
+        }
 
 compactionItem :: Text -> ResponseItem
 compactionItem _ = CompactionItemValue CompactionItem
     { itemId = Nothing
     , encryptedContent = Nothing
-    , extraFields = KeyMap.empty
     }
 
 deltaEvent :: StreamEventType -> Text -> ResponseStreamEvent
 deltaEvent otherEventType delta = OtherResponseStreamEvent
     { otherEventType
     , sequenceNumber = Nothing
-    , eventExtraFields = KeyMap.fromList [(Key.fromText "delta", Aeson.String delta)]
+    , eventDelta = Just delta
+    , streamItemId = Nothing
+    , streamOutputIndex = Nothing
+    , summaryIndex = Nothing
+    , turnState = Nothing
     }
 
 codexRateLimitsEvent :: Aeson.Value -> ResponseStreamEvent
-codexRateLimitsEvent rateLimits = OtherResponseStreamEvent
-    { otherEventType = EventCodexRateLimits
+codexRateLimitsEvent rateLimits = ResponseCodexRateLimitsEvent
+    { rateLimits = CodexRateLimits
+        { allowed = boolField "allowed" rateLimits
+        , limitReached = boolField "limit_reached" rateLimits
+        , primaryUsedPercent = percentField "primary" rateLimits
+        , secondaryUsedPercent = percentField "secondary" rateLimits
+        }
     , sequenceNumber = Nothing
-    , eventExtraFields = KeyMap.singleton "rate_limits" rateLimits
     }
+  where
+    boolField name (Aeson.Object object) =
+        case KeyMap.lookup name object of
+            Just (Aeson.Bool value) -> Just value
+            _ -> Nothing
+    boolField _ _ = Nothing
+    percentField name (Aeson.Object object) =
+        case KeyMap.lookup name object of
+            Just (Aeson.Object window) ->
+                case KeyMap.lookup "used_percent" window of
+                    Just (Aeson.Number value) -> Just (realToFrac value)
+                    _ -> Nothing
+            _ -> Nothing
+    percentField _ _ = Nothing
 
 testResponse :: Text -> [ResponseItem] -> Response
 testResponse responseId output = testResponseWithUsage responseId output Aeson.Null
 
 testResponseWithUsage :: Text -> [ResponseItem] -> Aeson.Value -> Response
-testResponseWithUsage responseId output usage = case Aeson.fromJSON $ Aeson.object $
+testResponseWithUsage responseId output usage =
+    case ResponsesCodec.decodeResponse
+        (LBS.toStrict (Aeson.encode (Aeson.object $
     [ "id" Aeson..= responseId
     , "created_at" Aeson..= (0 :: Int)
     , "model" Aeson..= ("test-model" :: Text)
     , "status" Aeson..= ("completed" :: Text)
     , "output" Aeson..= output
-    ] <> usageField
-  of
-    Aeson.Success response -> response
-    Aeson.Error err -> error err
+    ] <> usageField))) of
+        Right response -> response
+        Left err -> error err
   where
     usageField = case usage of
         Aeson.Null -> []
@@ -1677,7 +1858,6 @@ shouldMarkPostOutputAuxiliaryFailure failure = do
             { item = assistantItem "partial"
             , outputIndex = Just 0
             , sequenceNumber = Nothing
-            , eventExtraFields = KeyMap.empty
             }
         sendCurrent _request _previous onEvent = do
             modifyIORef' currentCalls (+ 1)

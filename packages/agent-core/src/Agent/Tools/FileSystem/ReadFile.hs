@@ -13,6 +13,7 @@ import Agent.ToolDispatch
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
     , formatReadFileContent
+    , readFileArgsDecoder
     , runReadFile
     )
 import Agent.Tools.FileSystem.ReadFileSpeculation
@@ -57,7 +58,7 @@ readFileToolWithSpeculation env speculation =
 
 baseReadFileTool :: ToolEnv -> AppTool
 baseReadFileTool env =
-    withTypedResourceClaims (readFileClaims env) $
+    withTypedResourceClaims readFileArgsDecoder (readFileClaims env) $
     jsonTool "read_file" readFileDescription
     [ PropertySchema "target_file" PropertyString True $ Just
         "The path of the file to read. Relative paths use the workspace; absolute paths may resolve within the workspace or session temp directory."
@@ -68,7 +69,7 @@ baseReadFileTool env =
     ]
     True
     ParallelSafe
-    (typedTool "read_file" (runReadFile env))
+    (typedTool "read_file" readFileArgsDecoder (runReadFile env))
 
 readFileClaims
     :: ToolEnv
@@ -91,3 +92,4 @@ readFileDescription =
 
 formatReadFile :: Text -> ReadFileArgs -> Either Text Text
 formatReadFile = formatReadFileContent
+

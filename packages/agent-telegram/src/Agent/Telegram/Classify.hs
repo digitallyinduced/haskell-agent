@@ -13,18 +13,29 @@ module Agent.Telegram.Classify
     , isAmbientGroupPrompt
     , reactionMessageText
     , telegramCommand
+    , telegramCommandArguments
     , telegramReactionEmoji
     , telegramReplyText
+    , telegramUserLabel
+    , telegramReplyUserIdFromPrompt
+    , recordSeenTelegramUsers
+    , resolveTelegramUser
+    , grantableTelegramUser
+    , TelegramUserResolution(..)
     ) where
 
 import Agent.Telegram.Types
+import Agent.Telegram.Classify.Media
+import Agent.Telegram.Classify.User
 import Control.Applicative ((<|>))
+import Data.Char (isDigit)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe, isJust, maybeToList)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Text.Read (readMaybe)
 
 data TelegramUpdateAction
     = IgnoreUpdate
@@ -156,21 +167,37 @@ mergePendingActions previous incoming =
         (incomingText, incomingMedia, incomingUser, incomingMessageId,
             incomingEdited, incomingGroup) =
                 pendingActionParts incoming
-    in RunPendingMediaTurn TelegramPendingMediaTurn
-        { pendingMediaUpdateId = pendingActionUpdateIdLocal incoming
-        , pendingMediaMessageId = incomingMessageId
-        , pendingMediaChat = pendingActionChatLocal incoming
-        , pendingMediaUserId =
-            if incomingUser == 0 then previousUser else incomingUser
-        , pendingMediaText =
+        mergedText =
             Text.intercalate
                 pendingTurnSeparator
                 (filter (not . Text.null)
                     [Text.strip previousText, Text.strip incomingText])
-        , pendingMediaAttachments = previousMedia <> incomingMedia
-        , pendingMediaEdited = incomingEdited
-        , pendingMediaGroupId = incomingGroup <|> previousGroup
-        }
+        mergedAttachments = previousMedia <> incomingMedia
+        mergedUser =
+            if incomingUser == 0 then previousUser else incomingUser
+        mergedGroup = incomingGroup <|> previousGroup
+        chat = pendingActionChatLocal incoming
+        updateId = pendingActionUpdateIdLocal incoming
+    in if null mergedAttachments && not incomingEdited
+        then RunPendingTurn
+            TelegramPendingTurn
+                { pendingTurnUpdateId = updateId
+                , pendingTurnMessageId = incomingMessageId
+                , pendingTurnChat = chat
+                , pendingTurnText = mergedText
+                , pendingTurnVoice = Nothing
+                }
+        else RunPendingMediaTurn
+            TelegramPendingMediaTurn
+                { pendingMediaUpdateId = updateId
+                , pendingMediaMessageId = incomingMessageId
+                , pendingMediaChat = chat
+                , pendingMediaUserId = mergedUser
+                , pendingMediaText = mergedText
+                , pendingMediaAttachments = mergedAttachments
+                , pendingMediaEdited = incomingEdited
+                , pendingMediaGroupId = mergedGroup
+                }
 
 pendingActionParts
     :: PendingChatAction
@@ -530,7 +557,7 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
                 , pendingMediaChat = key
                 , pendingMediaUserId = sender.userId
                 , pendingMediaText =
-                    messageContextPrefix message <> promptText
+                    messageContextPrefix bot message <> promptText
                 , pendingMediaAttachments = messageMediaAttachments message
                 , pendingMediaEdited = edited
                 , pendingMediaGroupId = message.messageMediaGroupId
@@ -541,6 +568,11 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
         , Just target <- explicitCommandTarget (Text.strip rawText)
         , not (botUsernameMatches bot target) =
             IgnoreUpdate
+        | Just rawText <- messageContentText message
+        , telegramCommand rawText /= Nothing =
+            if hasTelegramMedia message
+                then queueMedia (attributeGroupText sender (Text.strip rawText))
+                else queueText (attributeGroupText sender (Text.strip rawText))
         | messageRepliesToBot bot message =
             queueGroupReply
         | Just rawText <- messageContentText message
@@ -556,7 +588,8 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
         case message.messageVoice of
             Just voice ->
                 QueueTurn message.messageId key
-                    (attributeGroupMessage sender "[Voice message]")
+                    (messageContextPrefix bot message
+                        <> attributeGroupMessage sender "[Voice message]")
                     (Just voice)
             Nothing
                 | hasTelegramMedia message ->
@@ -628,195 +661,15 @@ classifyMessageLike edited bot sender respondToAllGroupMessages message =
         | otherwise =
             QueueTurn message.messageId key clean Nothing
       where
+        rewritten = rewriteGrantCommand message rawText
         clean
-            | telegramCommand rawText /= Nothing = Text.strip rawText
+            | telegramCommand rewritten /= Nothing = Text.strip rewritten
             | otherwise =
-                Text.strip (messageContextPrefix message <> rawText)
+                Text.strip (messageContextPrefix bot message <> rewritten)
 
-hasTelegramMedia :: TelegramMessage -> Bool
-hasTelegramMedia = not . null . messageMediaAttachments
-
-messageMediaAttachments :: TelegramMessage -> [TelegramMedia]
-messageMediaAttachments message =
-    concat
-        [ maybeToList photoAttachment
-        , maybeToList documentAttachment
-        , maybeToList audioAttachment
-        , maybeToList videoAttachment
-        , maybeToList videoNoteAttachment
-        , maybeToList animationAttachment
-        , maybeToList stickerAttachment
-        ]
-  where
-    photoAttachment =
-        case reverse message.messagePhoto of
-            photo : _ ->
-                Just TelegramMedia
-                    { telegramMediaKind = TelegramMediaPhoto
-                    , telegramMediaFile =
-                        Just TelegramFileMedia
-                            { fileMediaFileId = photo.photoFileId
-                            , fileMediaName = Nothing
-                            , fileMediaMimeType = Just "image/jpeg"
-                            , fileMediaFileSize = photo.photoFileSize
-                            , fileMediaDuration = Nothing
-                            }
-                    , telegramMediaDescription = "[Photo]"
-                    }
-            [] -> Nothing
-
-    documentAttachment =
-        fmap
-            (\document -> TelegramMedia
-                { telegramMediaKind = TelegramMediaDocument
-                , telegramMediaFile =
-                    Just TelegramFileMedia
-                        { fileMediaFileId = document.documentFileId
-                        , fileMediaName = document.documentFileName
-                        , fileMediaMimeType = document.documentMimeType
-                        , fileMediaFileSize = document.documentFileSize
-                        , fileMediaDuration = Nothing
-                        }
-                , telegramMediaDescription =
-                    "[Document: "
-                        <> fromMaybe document.documentFileId document.documentFileName
-                        <> "]"
-                })
-            message.messageDocument
-
-    audioAttachment =
-        fmap
-            (\audio -> TelegramMedia
-                { telegramMediaKind = TelegramMediaAudio
-                , telegramMediaFile =
-                    Just TelegramFileMedia
-                        { fileMediaFileId = audio.audioFileId
-                        , fileMediaName = audio.audioFileName
-                        , fileMediaMimeType = audio.audioMimeType
-                        , fileMediaFileSize = audio.audioFileSize
-                        , fileMediaDuration = Just audio.audioDuration
-                        }
-                , telegramMediaDescription =
-                    "[Audio file: "
-                        <> fromMaybe "audio" audio.audioFileName
-                        <> "]"
-                })
-            message.messageAudio
-
-    videoAttachment =
-        fmap
-            (\video -> TelegramMedia
-                { telegramMediaKind = TelegramMediaVideo
-                , telegramMediaFile =
-                    Just TelegramFileMedia
-                        { fileMediaFileId = video.videoFileId
-                        , fileMediaName = video.videoFileName
-                        , fileMediaMimeType = video.videoMimeType
-                        , fileMediaFileSize = video.videoFileSize
-                        , fileMediaDuration = Just video.videoDuration
-                        }
-                , telegramMediaDescription =
-                    "[Video file: "
-                        <> fromMaybe "video" video.videoFileName
-                        <> "]"
-                })
-            message.messageVideo
-
-    videoNoteAttachment =
-        fmap
-            (\note -> TelegramMedia
-                { telegramMediaKind = TelegramMediaVideoNote
-                , telegramMediaFile =
-                    Just TelegramFileMedia
-                        { fileMediaFileId = note.videoNoteFileId
-                        , fileMediaName = Nothing
-                        , fileMediaMimeType = Just "video/mp4"
-                        , fileMediaFileSize = note.videoNoteFileSize
-                        , fileMediaDuration = Just note.videoNoteDuration
-                        }
-                , telegramMediaDescription = "[Video note]"
-                })
-            message.messageVideoNote
-
-    animationAttachment =
-        fmap
-            (\animation -> TelegramMedia
-                { telegramMediaKind = TelegramMediaAnimation
-                , telegramMediaFile =
-                    Just TelegramFileMedia
-                        { fileMediaFileId = animation.animationFileId
-                        , fileMediaName = animation.animationFileName
-                        , fileMediaMimeType = animation.animationMimeType
-                        , fileMediaFileSize = animation.animationFileSize
-                        , fileMediaDuration = Nothing
-                        }
-                , telegramMediaDescription = "[Animation]"
-                })
-            message.messageAnimation
-
-    stickerAttachment =
-        fmap
-            (\sticker -> TelegramMedia
-                { telegramMediaKind = TelegramMediaSticker
-                , telegramMediaFile =
-                    Just TelegramFileMedia
-                        { fileMediaFileId = sticker.stickerFileId
-                        , fileMediaName = Nothing
-                        , fileMediaMimeType = Just "application/octet-stream"
-                        , fileMediaFileSize = sticker.stickerFileSize
-                        , fileMediaDuration = Nothing
-                        }
-                , telegramMediaDescription =
-                    "[Sticker"
-                        <> maybe "" (\emoji -> " " <> emoji) sticker.stickerEmoji
-                        <> "]"
-                })
-            message.messageSticker
-
-messageContentText :: TelegramMessage -> Maybe Text
-messageContentText message =
-    case message.messageText <|> message.messageCaption of
-        Just text -> Just text
-        Nothing
-            | Just _ <- message.messageVoice ->
-                Just "[Voice message]"
-            | Just audio <- message.messageAudio ->
-                Just ("[Audio file: " <> fromMaybe "audio" audio.audioFileName <> "]")
-            | Just document <- message.messageDocument ->
-                Just ("[Document: " <> fromMaybe document.documentFileId document.documentFileName <> "]")
-            | not (null message.messagePhoto) ->
-                Just "[Photo]"
-            | Just video <- message.messageVideo ->
-                Just ("[Video file: " <> fromMaybe "video" video.videoFileName <> "]")
-            | Just _ <- message.messageVideoNote ->
-                Just "[Video note]"
-            | Just _ <- message.messageAnimation ->
-                Just "[Animation]"
-            | Just sticker <- message.messageSticker ->
-                Just
-                    ("[Sticker"
-                        <> maybe "" (\emoji -> " " <> emoji) sticker.stickerEmoji
-                        <> "]")
-            | Just location <- message.messageLocation ->
-                Just
-                    ("[Location: "
-                        <> Text.pack (show location.locationLatitude)
-                        <> ", "
-                        <> Text.pack (show location.locationLongitude)
-                        <> "]")
-            | Just contact <- message.messageContact ->
-                Just ("[Contact: " <> contact.contactFirstName <> "]")
-            | Just venue <- message.messageVenue ->
-                Just ("[Venue: " <> venue.venueTitle <> "]")
-            | Just poll <- message.messagePoll ->
-                Just ("[Poll: " <> poll.pollQuestion <> "]")
-            | Just dice <- message.messageDice ->
-                Just ("[Dice: " <> dice.diceEmoji <> " " <> Text.pack (show dice.diceValue) <> "]")
-            | otherwise -> Nothing
-
-messageContextPrefix :: TelegramMessage -> Text
-messageContextPrefix message =
-    forwarded <> replied
+messageContextPrefix :: TelegramUser -> TelegramMessage -> Text
+messageContextPrefix bot message =
+    forwarded <> replied <> mentioned
   where
     forwarded =
         case message.messageForwardOrigin of
@@ -824,14 +677,29 @@ messageContextPrefix message =
             Just _ -> "[Forwarded Telegram message]\n"
     replied =
         case message.messageReplyTo of
-            Just replyMessage
-                | Just content <- messageContentText replyMessage ->
-                    "[Replying to Telegram message "
+            Just replyMessage ->
+                "[Replying to Telegram message "
                     <> Text.pack (show replyMessage.messageId)
-                    <> ": "
-                    <> Text.take 1000 (Text.replace "\n" " " content)
+                    <> maybe
+                        ""
+                        (\user -> " from " <> telegramUserLabel user)
+                        replyMessage.messageFrom
+                    <> maybe
+                        ""
+                        (\content ->
+                            ": "
+                                <> Text.take 1000
+                                    (Text.replace "\n" " " content))
+                        (messageContentText replyMessage)
                     <> "]\n"
-            _ -> ""
+            Nothing -> ""
+    mentioned =
+        case mentionLabels bot message of
+            [] -> ""
+            labels ->
+                "[Telegram mentions: "
+                    <> Text.intercalate "; " labels
+                    <> "]\n"
 
 messageRepliesToBot :: TelegramUser -> TelegramMessage -> Bool
 messageRepliesToBot bot message =
@@ -953,11 +821,7 @@ pendingTurnSeparator = "\n\n---\n\n"
 
 telegramUserLabel :: TelegramUser -> Text
 telegramUserLabel user =
-    let name = Text.unwords
-            [ value
-            | Just value <- [user.userFirstName, user.userLastName]
-            , not (Text.null (Text.strip value))
-            ]
+    let name = telegramUserDisplayName user
         username = ("@" <>) <$> user.userUsername
         identityParts =
             filter (not . Text.null)
@@ -966,6 +830,58 @@ telegramUserLabel user =
                 , "user " <> Text.pack (show user.userId)
                 ]
     in Text.intercalate ", " identityParts
+
+telegramUserDisplayName :: TelegramUser -> Text
+telegramUserDisplayName user =
+    Text.unwords
+        [ value
+        | Just value <- [user.userFirstName, user.userLastName]
+        , not (Text.null (Text.strip value))
+        ]
+
+rewriteGrantCommand :: TelegramMessage -> Text -> Text
+rewriteGrantCommand message raw =
+    case telegramCommand raw of
+        Just command
+            | command == "allow" || command == "deny"
+            , Text.null (telegramCommandArguments raw) ->
+                case grantTargetUser message of
+                    Just user -> "/" <> command <> " " <> Text.pack (show user.userId)
+                    Nothing -> raw
+        _ -> raw
+
+grantTargetUser :: TelegramMessage -> Maybe TelegramUser
+grantTargetUser message =
+    case message.messageReplyTo >>= (.messageFrom) of
+        Just user | grantableTelegramUser user -> Just user
+        _ ->
+            case filter grantableTelegramUser (mentionedTelegramUsers message) of
+                [user] -> Just user
+                _ -> Nothing
+
+mentionLabels :: TelegramUser -> TelegramMessage -> [Text]
+mentionLabels bot message =
+    filter (not . Text.null)
+        [ label
+        | label <- mapMaybe (mentionLabel bot) (messageMentionEntities message)
+        ]
+
+mentionLabel :: TelegramUser -> (Text, Maybe TelegramUser) -> Maybe Text
+mentionLabel bot (snippet, mentionedUser)
+    | Just user <- mentionedUser
+    , user.userId == bot.userId =
+        Nothing
+    | Just user <- mentionedUser =
+        Just (telegramUserLabel user)
+    | botUsernameMatches bot mentionName =
+        Nothing
+    | Text.null mentionName =
+        Nothing
+    | otherwise =
+        Just (Text.strip snippet)
+  where
+    mentionName =
+        Text.strip (Text.dropWhile (== '@') (Text.strip snippet))
 
 reactionMessageText :: TelegramMessageReaction -> Text
 reactionMessageText reaction
@@ -999,6 +915,26 @@ telegramCommand text = do
         value : _ -> Just value
     withoutSlash <- Text.stripPrefix "/" firstWord
     pure (Text.toLower (Text.takeWhile (/= '@') withoutSlash))
+
+telegramCommandArguments :: Text -> Text
+telegramCommandArguments text =
+    case Text.words (Text.strip text) of
+        _command : rest -> Text.unwords rest
+        [] -> ""
+
+telegramReplyUserIdFromPrompt :: Text -> Maybe Integer
+telegramReplyUserIdFromPrompt prompt = do
+    rest <- Text.stripPrefix
+        "[Replying to Telegram message "
+        (Text.takeWhile (/= '\n') (Text.stripStart prompt))
+    let afterUser = snd (Text.breakOn ", user " rest)
+    digits <- Text.stripPrefix ", user " afterUser
+    parsePositiveUserId (Text.takeWhile isDigit digits)
+
+parsePositiveUserId :: Text -> Maybe Integer
+parsePositiveUserId text = do
+    userId <- readMaybe (Text.unpack text)
+    if userId > 0 then Just userId else Nothing
 
 checkpointPendingVoiceTranscript
     :: Integer
@@ -1044,4 +980,3 @@ supportedTelegramReactions = Set.fromList
     , "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷"
     , "😡"
     ]
-

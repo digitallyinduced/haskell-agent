@@ -13,6 +13,7 @@ copyright:          (c) 2026 digitally induced GmbH
 category:           Development
 build-type:         Simple
 extra-source-files: README.md
+data-files:         data/code-mode/worker.mjs
 
 common common-opts
     default-language: Haskell2010
@@ -46,6 +47,7 @@ library
                     , Agent.InterAgentMessage
                     , Agent.Provider
                     , Agent.Provider.Options
+                    , Agent.ReasoningEffort
                     , Agent.Loop
                     , Agent.MCP
                     , Agent.JsonText
@@ -65,6 +67,11 @@ library
                     , Agent.ToolArgs
                     , Agent.ToolDSL
                     , Agent.ToolDispatch
+                    , Agent.Tools.CodeMode
+                    , Agent.Tools.CodeMode.Client
+                    , Agent.Tools.CodeMode.Host
+                    , Agent.Tools.CodeMode.Protocol
+                    , Agent.Tools.CodeMode.Tool
                     , Agent.Tools.Dangerous
                     , Agent.Tools.FileSystem
                     , Agent.Tools.FileSystem.GitIgnore
@@ -79,6 +86,7 @@ library
                     , Agent.Tools.Ghci.Tool
                     , Agent.Tools.IO
                     , Agent.Tools.MultiAgents
+                    , Agent.Tools.OutputArtifact
                     , Agent.Tools.PlanMode
                     , Agent.Tools.Secret
                     , Agent.Tools.Scheduling
@@ -86,10 +94,24 @@ library
                     , Agent.Tools.Speculation
                     , Agent.Tools.Types
                     , Agent.Transport.WebSocket
-    other-modules:    Agent.Tools.FileSystem.PathPrefix
+    other-modules:    Agent.Loop.Internal
+                    , Agent.MCP.Client
+                    , Agent.MCP.Fleet
+                    , Agent.MCP.Supervisor
+                    , Agent.MCP.Types
+                    , Agent.Subagents.Registry.Internal.Core
+                    , Agent.Subagents.Registry.Internal.Operations
+                    , Agent.Subagents.Registry.Internal.Types
+                    , Agent.Tools.CodeMode.Host.Types
+                    , Agent.Tools.CodeMode.Host.Availability
+                    , Agent.Tools.CodeMode.Host.Worker
+                    , Agent.Tools.FileSystem.PathPrefix
                     , Agent.Tools.FileSystem.ReadFile.Internal
+                    , Paths_agent_core
+    autogen-modules:  Paths_agent_core
     hs-source-dirs:   src
     build-depends:    base >= 4.14 && < 5
+                    , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , aeson >= 2.0
@@ -106,6 +128,7 @@ library
                     , safe-exceptions
                     , scientific
                     , stm
+                    , template-haskell
                     , text
                     , time
                     , tls
@@ -158,6 +181,7 @@ benchmark loop-events-bench
     main-is:          LoopEvents.hs
     ghc-options:      -O2 -rtsopts
     build-depends:    agent-core
+                    , agent-json
                     , aeson
                     , base >= 4.14 && < 5
                     , text
@@ -189,6 +213,18 @@ benchmark speculative-read-file-bench
                     , text
                     , unix
 
+benchmark code-mode-pool-bench
+    import:           common-opts
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   benchmark
+    main-is:          CodeModePool.hs
+    ghc-options:      -O2
+    build-depends:    agent-core
+                    , base >= 4.14 && < 5
+                    , safe-exceptions
+                    , text
+                    , time
+
 test-suite agent-core-test
     import:           common-opts
     type:             exitcode-stdio-1.0
@@ -196,6 +232,8 @@ test-suite agent-core-test
     main-is:          Spec.hs
     other-modules:    Agent.Auth.JWTSpec
                     , Agent.CancelSpec
+                    , Agent.Tools.CodeMode.HostSpec
+                    , Agent.Tools.CodeMode.ProtocolSpec
                     , Agent.ConcurrentSpec
                     , Agent.DialectSpec
                     , Agent.ErrorSpec
@@ -224,6 +262,7 @@ test-suite agent-core-test
                     , Agent.Tools.InterpreterSpec
                     , Agent.Tools.IOSpec
                     , Agent.Tools.MultiAgentsSpec
+                    , Agent.Tools.OutputArtifactSpec
                     , Agent.Tools.PlanModeSpec
                     , Agent.Tools.SecretSpec
                     , Agent.Tools.SpeculationSpec
@@ -231,6 +270,7 @@ test-suite agent-core-test
                     , Agent.Transport.WebSocketSpec
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json
                     , agent-responses-types
                     , aeson
                     , async

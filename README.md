@@ -1,19 +1,21 @@
 # haskell-agent
 
+An independent agent harness, written in Haskell.
+
 <img width="1426" height="871" alt="Screenshot 2026-08-23 at 10 43 49 PM" src="https://github.com/user-attachments/assets/9da99007-484a-4c8a-9bb1-ca35abf8ae05" />
-
-**An independent agent harness, written in Haskell.**
-
-`haskell-agent` is a coding agent built in Haskell. Use OpenAI, xAI,
-OpenRouter, and Claude Code models with first-class GHCi integration and a
-runtime designed around types, pure functions, explicit effects, and
-composable concurrency.
 
 ## Try it out
 
-```console
-nix run github:digitallyinduced/haskell-agent
+```bash
+nix run "github:digitallyinduced/haskell-agent"
 ```
+
+## Supported LLM Providers
+
+- OpenAI (Subscription)
+- xAI (Subscription)
+- Claude (Subscription)
+- OpenRouter (API billing)
 
 ## What is distinctive
 
@@ -146,8 +148,7 @@ is selected explicitly rather than by auto-detection.
 
 ### Telegram
 
-Create a bot with BotFather, find your numeric Telegram user ID, and run the
-interactive setup command:
+Create a bot with BotFather, then run:
 
 ```console
 agent-telegram setup --provider openai --cwd /path/to/project \
@@ -156,143 +157,26 @@ agent-telegram start
 agent-telegram status
 ```
 
-Setup reads the BotFather token without terminal echo, validates it against
-Telegram, and stores it separately from the non-secret gateway configuration.
-Never paste the bot token into an agent conversation.
-
-Only messages from allowlisted Telegram users are handled. Repeat
-`--allowed-user` during setup, or manage the local allowlist later with
-`agent-telegram users list|add ID|remove ID`; running gateways must be restarted
-after an allowlist change. Private chats work directly. In groups and
-supergroups, mention the bot, use a command addressed to its username (for
-example `/new@your_bot`), or reply to one of its messages. Ambient group traffic
-and messages from non-allowlisted members are ignored by default. Pass
-`--all-group-messages` during setup to let the agent consider every group
-message from an allowlisted user. It replies only when it judges that doing so
-would be useful; otherwise it stays silent. Telegram must also deliver ambient
-messages to the bot: use BotFather's `/setprivacy` command to disable privacy
-mode for that bot, then remove and re-add the bot to existing groups if needed.
-
-The bot only stays in a group or channel if an allowlisted user who is also a
-Telegram administrator of that chat added it. Anyone else adding it causes the
-bot to leave immediately. Anonymous-admin adds are accepted only when an
-allowlisted user is already an administrator of that chat. Existing groups that
-already have a saved session are kept after upgrading; to authorize another
-group, add the bot as an allowed admin or mention it there.
-
-Each private chat, group, and forum topic is mapped to its own persisted agent
-session under `~/.haskell-agent`; `/new` starts a fresh session, `/session`
-shows the current session ID, `/status` reports queued/retrying/failed work,
-and `/retry` requeues the latest failed turn. Group replies include the
-sender's identity in the agent prompt and are posted as replies to the
-triggering Telegram message.
-
-The default approval mode asks through Telegram inline buttons when a mutating
-tool is requested. `--deny-mutations` disables those tools and `--yolo`
-auto-approves them. Approval and choice callbacks are scoped to the originating
-conversation and allowlisted user.
-
-Incoming updates and pending replies are persisted before they are processed.
-Polling continues while agent turns run, conversations are processed in order,
-and separate chats can run concurrently through a bounded worker pool. Pending
-work, callback bindings, retry schedules, delivery checkpoints, and dead
-letters resume when the gateway is restarted. Telegram 429/5xx responses and
-transient turn failures use bounded backoff; agent turns have a 20-minute
-deadline.
-
-The gateway accepts edited messages, reactions, photos, documents, audio,
-video, video notes, animations, stickers, locations, contacts, venues, polls,
-and dice. Images are sent to multimodal providers natively; other downloaded
-files are attached through Responses `input_file` content or a private local
-path fallback. The agent can send documents, photos, and voice files, react to
-messages, and ask generic inline-button questions through gateway-scoped tools.
-Bot credentials remain in the parent gateway process and are never inherited
-by the agent child.
-
-The built-in `telegram-agent` skill lets the normal agent guide this setup.
-Ask it to “set up a Telegram agent”; it will explain the BotFather steps,
-direct secret entry to the interactive setup command, and start the configured
-gateway after setup is complete.
-
-On NixOS, use the flake's reusable multi-instance service module instead of
-maintaining the systemd and PostgreSQL runtime configuration by hand. See
-[`docs/nixos.md`](docs/nixos.md).
+The gateway supports durable per-conversation sessions, allowlists,
+multimodal messages, approvals, and concurrent chats. See the
+[Telegram guide](docs/telegram.md) for setup, groups, commands, and NixOS
+deployment. You can also ask the agent to “set up a Telegram agent”.
 
 ### Model catalog and local models
 
-The model picker is driven by a versioned catalog. The application ships its
-default OpenAI, xAI, and OpenRouter entries, then merges an optional user file:
+Add local, hosted, or custom models through:
 
 ```text
 ~/.haskell-agent/models.json
 ```
 
-User entries with the same `id` replace shipped entries; new entries are
-appended. The `id` is the stable name accepted by `/model` and `--model`.
-Secrets are not stored in this file: custom connections name an environment
-variable containing their API key.
+The built-in `add-model` skill can configure it for you. See the
+[model catalog guide](docs/models.md) for the schema, local-server example,
+dialects, authentication, and compaction metadata.
 
-For example, an unauthenticated local server exposing the streaming OpenAI
-Responses API at `POST /v1/responses` can be configured as:
-
-```json
-{
-  "version": 1,
-  "connections": {
-    "ollama": {
-      "api": "responses",
-      "base_url": "http://localhost:11434/v1",
-      "api_key_optional": true,
-      "request_timeout_seconds": 600
-    }
-  },
-  "models": [
-    {
-      "id": "qwen-local",
-      "connection": "ollama",
-      "model": "qwen2.5-coder:32b",
-      "dialect": "generic-responses",
-      "context_window": 32768,
-      "label": "local"
-    }
-  ]
-}
-```
-
-Select it with `agent-cli --model qwen-local` or from `/model`. For an
-authenticated endpoint, set `"api_key_env": "MY_MODEL_API_KEY"` and export
-that variable. Omit `"api_key_optional": true` when the key is required.
-Set `context_window` to the model endpoint's documented token limit so
-`/compact` can bound both its summary request and the installed snapshot.
-Inference still works when this metadata is absent, but `/compact` refuses to
-guess a portable model's limit.
-
-Supported dialects are:
-
-- `codex` for Codex-style prompts and tools
-- `grok-build` for the Grok Build protocol
-- `generic-responses` for portable Responses-compatible models
-
-Custom connections are selected manually and are not considered for automatic
-billing fallback. Built-in connection names (`openai`, `xai`, and
-`openrouter`) are reserved. A malformed catalog is reported at startup with
-the file and invalid field instead of being silently ignored.
-
-The built-in `add-model` skill handles requests such as “use the model running
-at this URL”, “add this OpenRouter model”, or “OpenAI released a new model”.
-Invoke it explicitly with `/add-model`, `$add-model`, or describe the request
-naturally and let the agent activate it.
-
-The built-in `learn-about-user` skill can inspect a user-confirmed public
-GitHub profile, infer technical defaults from a representative repository
-sample, show the proposed profile for correction, and save the approved result
-as an always-loaded user-scoped learned skill. Invoke it with
-`/learn-about-user`, `$learn-about-user`, or ask the agent to learn about your
-technical preferences. It does not inspect private repositories unless the
-user separately and explicitly requests that. On first-use credential
-onboarding, users can opt into this workflow or skip it and run the skill
-later. Once approved, the profile is injected into every new session through
-the existing always-loaded learned-skill startup context.
+The built-in `learn-about-user` skill can derive consent-reviewed technical
+defaults from a confirmed public GitHub profile. Invoke it with
+`/learn-about-user`, `$learn-about-user`, or a natural-language request.
 
 ### Authentication
 
@@ -302,13 +186,9 @@ Works with your Codex, Grok, and Claude subscriptions, plus provider API keys.
 
 Press `Ctrl+R` in the prompt composer, speak, and press `Enter` to stop
 (or `Esc` to cancel). Recording stays in the TUI; it does not suspend or close
-the session. On macOS, the agent records audio with `ffmpeg`, streams 16 kHz mono PCM
-directly to `wss://api.x.ai/v1/stt`, and inserts the final transcript at the current cursor.
-Audio is sent while you speak, and xAI's partial transcript is displayed live in the
-status notice.
-Dictation uses the same configured Grok OAuth subscription or managed xAI
-API-key credential as the xAI provider; it does not run an external app server. Set
-`XAI_STT_LANGUAGE` to a supported language code to override the default `en`.
+the session. On macOS, audio is streamed to xAI and the live transcript is
+inserted at the cursor. Dictation uses the configured xAI credentials; set
+`XAI_STT_LANGUAGE` to override the default `en`.
 
 ### Claude Code subscription
 
@@ -320,25 +200,11 @@ claude auth login
 agent-cli --provider claude-code --model sonnet
 ```
 
-The reusable
+The integration keeps a `claude -p` process alive through the reusable
 [`claude-agent-sdk-haskell`](packages/claude-agent-sdk-haskell/README.md)
-package keeps one `claude -p` process alive and exchanges structured messages
-through Claude Code's bidirectional `stream-json` protocol. The thin
-`agent-claude` adapter enforces subscription authentication and translates SDK
-messages into provider-neutral harness events. Claude Code owns tool execution
-and context compaction; the harness renders its assistant and tool events and
-persists its session UUID. Clipboard and file image attachments are forwarded
-as structured multimodal content.
-
-The default permission mode is Claude Code's non-blocking `dontAsk` mode. Pass
-`--yolo` to bypass Claude Code's permission checks. Permission mode is fixed
-when the child process starts, and the harness's dynamic auto-approve,
-plan-mode, and `/compact` controls are unavailable for this provider.
-
-The integration disables Claude-specific project and user customizations and
-MCP servers so it cannot block on hidden prompts. It also rejects API-key and
-third-party cloud authentication, keeping this path restricted to first-party
-subscription sessions.
+package. Claude Code owns tool execution and compaction while the harness
+renders events and persists its session. Pass `--yolo` to bypass Claude Code's
+permission checks.
 
 Anthropic's [June 15, 2026 subscription-policy
 update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
@@ -348,161 +214,26 @@ draw from Claude subscription usage limits. Anthropic's current
 also says third-party developers need prior approval to offer Claude.ai login
 or subscription rate limits in their products. Technical availability does
 not replace that approval requirement; consult the linked documents for
-current terms. See
-[`packages/agent-claude/README.md`](packages/agent-claude/README.md)
-for implementation and embedding details.
+current terms. See [`packages/agent-claude/README.md`](packages/agent-claude/README.md)
+for details.
 
 ### Local MCP servers
 
-Configure local stdio MCP servers in `~/.haskell-agent/config.json`:
-
-```json
-{
-  "version": 1,
-  "mcpInitStrategy": "auto",
-  "mcpServers": {
-    "seo-mcp": {
-      "command": "nix",
-      "args": ["run", "/absolute/path/to/seo-mcp"],
-      "env": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "/absolute/path/to/credentials.json"
-      },
-      "startupTimeoutSeconds": 120,
-      "requestTimeoutSeconds": 60
-    }
-  }
-}
-```
-
-In an interactive session, `/mcp` opens a local-server manager. Use the arrow
-keys or `j`/`k` to navigate, Enter to inspect discovered tools, `a` to add a
-server, Space to enable or disable it, `x` to remove it, and `r` to restart the
-MCP runtime. Saved changes restart the runtime while resuming the same session.
-Environment variable values are never displayed.
-
-`mcpInitStrategy` accepts `auto`, `progressive`, or `blocking`. `auto`
-starts MCP servers progressively for interactive sessions so the prompt is
-available immediately, while one-shot commands wait for MCP initialization.
-
-The harness starts enabled servers once per root session and shares their tools
-with subagents. Blocking startup exposes read-only tools as
-`server__tool`. Progressive startup exposes stable `mcp_search` and `mcp_call`
-tools immediately, then publishes each server's read-only catalog as it
-becomes ready. Only tools explicitly annotated `readOnlyHint: true` are
-available. Live MCP fleets are reused across provider/session rebuilds when
-their configuration is unchanged. Progressive `mcp_call` invocations also
-restart a failed stdio transport once and retry the read-only call.
+Use `/mcp` to manage local stdio MCP servers, or configure them in
+`~/.haskell-agent/config.json`. See the [MCP guide](docs/mcp.md) for the
+configuration schema, startup strategies, and tool exposure rules.
 
 ### Secret entry
 
-Interactive root agents can request API keys and tokens with the built-in
-`ask_secret` tool. The harness reads the value through a masked terminal
-prompt, writes it to a private temporary file, and returns only the file path
-to the model. This keeps the secret out of chat history, tool arguments,
-transcripts, and command text.
+The built-in `ask_secret` tool reads secrets through a masked prompt and gives
+the model only a private temporary-file path, keeping values out of chat and
+tool arguments. Files are removed when the tool runtime closes.
 
-Secret files are created below the session scratch directory with owner-only
-permissions and removed when the agent's tool runtime closes. Commands should
-delete them sooner after consumption when possible. This protects against
-accidental persistence; it is not an isolation boundary against commands
-running unsandboxed as the same operating-system user.
+## Ideas and direction
 
-## Vision
-
-### The agent harness is the interface
-
-We believe the agent harness will become the primary interface through which
-people use computers.
-
-Instead of learning which application, menu, command, or workflow to use,
-people will describe the outcome they want. Their harness will assemble
-context, choose models, invoke tools, coordinate agents, manage permissions,
-and carry work across devices and sessions.
-
-A model can reason, but the harness turns that reasoning into useful work. The
-harness is the layer that owns:
-
-- identity, preferences, instructions, and long-term context
-- access to files, processes, applications, services, and devices
-- permissions and boundaries for consequential actions
-- model selection, routing, retries, and billing policy
-- concurrent agents that can divide work and communicate
-- sessions that persist, resume, move between clients, and produce artifacts
-
-Models will change. Providers will change. User interfaces will change. The
-harness should remain the stable layer that the user controls.
-
-### Code is the universal control surface
-
-It is a coding harness because code is the universal control surface of the
-computer. Through files, processes, protocols, APIs, compilers, and operating
-system interfaces, an agent that can write and execute programs can use the
-hardware and perform general digital work.
-
-Coding is not one temporary vertical on the way to a broader agent. It is the
-substrate that makes a general computer agent possible.
-
-That is also why this project does not depend on one vendor CLI or bind its
-core runtime to one model family. The goal is an independent system that can
-use the best available model while preserving one coherent tool, session,
-permission, and agent environment.
-
-### Why Haskell
-
-An agent harness is a concurrent, stateful program that manages untrusted
-inputs and long-lived effects:
-
-- streamed protocol events arrive incrementally
-- tools read, write, and execute concurrently
-- users interrupt work at arbitrary points
-- credentials fail and accounts enter cooldown
-- subagents start, communicate, persist, and terminate
-- sessions must recover without mixing old and new state
-
-These problems map naturally to Haskell:
-
-- algebraic data types make protocol states and valid transitions explicit
-- pure functions keep decoding, policy, state reduction, and assembly
-  understandable
-- effectful provider, tool, process, and filesystem operations stay at narrow
-  boundaries
-- STM makes mailboxes, cancellation, capacity, and shared state composable
-- managed resource lifetimes give connections, subprocesses, and agents clear
-  owners and shutdown paths
-
-The point is not Haskell for its own sake. The point is a harness whose
-behavior can be reasoned about when many agents, tools, streams, and failures
-are active at once.
-
-### LLMs, types, effects, and verification
-
-We believe there is a large unexplored design space at the intersection of
-LLMs and programming languages:
-
-- **ADTs can define the agent's action language.** Instead of interpreting
-  arbitrary text, the harness can ask a model to construct values from a
-  closed set of valid operations and states.
-- **Type checking can become part of the reasoning loop.** A model can propose
-  a program, query its type, receive structured compiler feedback, and refine
-  the proposal before any effect is executed.
-- **Plans can become typed programs.** Dependencies, resources, permissions,
-  concurrency, and expected outputs can be represented explicitly rather than
-  hidden in prose.
-- **Effect systems can make consequences explicit.** A model should describe
-  not only what a program computes, but which files, processes, networks,
-  credentials, and external services it may affect.
-- **Verification can guard the effect boundary.** Preconditions, invariants,
-  capability constraints, and postconditions can be checked before the
-  harness commits an action to the outside world.
-- **Compiler feedback is high-quality supervision.** Type errors, failed
-  proofs, and violated properties give models precise signals before mistakes
-  reach execution.
-
-Today, this begins with typed protocol states, strict tool decoding, explicit
-approval and concurrency policies, pure reducers, and GHCi-based type
-exploration. The direction is deeper: agents that synthesize typed programs,
-use type checkers, effect systems, and proof systems as collaborators, and
-execute only after the runtime has established the required guarantees.
+Why an independent harness matters, why code and Haskell are useful
+foundations, and how types, effects, and verification could make agents safer
+are discussed in [`IDEAS.md`](IDEAS.md).
 
 ## Architecture
 

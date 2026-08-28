@@ -10,6 +10,7 @@ module Agent.Store.Postgres.SessionItem.Write
     ) where
 
 import Control.Monad (forM_)
+import Data.ByteString (ByteString)
 import Data.Functor.Contravariant ((>$<))
 import Data.Int (Int32)
 import Data.Text (Text)
@@ -122,6 +123,10 @@ data ContentPartParams = ContentPartParams
     , contentPartFileUrl :: !(Maybe Text)
     , contentPartFilename :: !(Maybe Text)
     , contentPartImageUrl :: !(Maybe Text)
+    , contentPartFileDataMimeType :: !(Maybe Text)
+    , contentPartFileDataBytes :: !(Maybe ByteString)
+    , contentPartImageMimeType :: !(Maybe Text)
+    , contentPartImageBytes :: !(Maybe ByteString)
     , contentPartInputAudio :: !(Maybe Text)
     , contentPartPromptCacheBreakpoint :: !(Maybe Text)
     , contentPartAnnotations :: !(Maybe Text)
@@ -313,6 +318,18 @@ insertContentParts itemId parts =
                 , contentPartFileUrl = part.storedContentPartFileUrl
                 , contentPartFilename = part.storedContentPartFilename
                 , contentPartImageUrl = part.storedContentPartImageUrl
+                , contentPartFileDataMimeType =
+                    (.storedBinaryDataMimeType)
+                        <$> part.storedContentPartFileBinary
+                , contentPartFileDataBytes =
+                    (.storedBinaryDataBytes)
+                        <$> part.storedContentPartFileBinary
+                , contentPartImageMimeType =
+                    (.storedBinaryDataMimeType)
+                        <$> part.storedContentPartImageBinary
+                , contentPartImageBytes =
+                    (.storedBinaryDataBytes)
+                        <$> part.storedContentPartImageBinary
                 , contentPartInputAudio =
                     opaqueValueText <$> part.storedContentPartInputAudio
                 , contentPartPromptCacheBreakpoint =
@@ -517,10 +534,11 @@ insertContentPartStatement = mkStatement
     "INSERT INTO harness.session_response_content_parts\
     \ (response_item_id, part_index, part_type, text_value, refusal_text,\
     \ detail, file_data, file_id, file_url, filename, image_url,\
+    \ file_data_mime_type, file_data_bytes, image_mime_type, image_bytes,\
     \ input_audio_text, prompt_cache_breakpoint_text, annotations_text,\
     \ logprobs_text, extra_fields_text)\
     \ VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,\
-    \ $12, $13, $14, $15, $16)"
+    \ $12, $13, $14, $15, $16, $17, $18, $19, $20)"
     ( fieldParam (.contentPartResponseItemId) (Encoders.param (Encoders.nonNullable Encoders.text))
         <> fieldParam (.contentPartIndex) (Encoders.param (Encoders.nonNullable Encoders.int4))
         <> fieldParam (.contentPartType) (Encoders.param (Encoders.nonNullable Encoders.text))
@@ -532,6 +550,10 @@ insertContentPartStatement = mkStatement
         <> fieldParam (.contentPartFileUrl) (Encoders.param (Encoders.nullable Encoders.text))
         <> fieldParam (.contentPartFilename) (Encoders.param (Encoders.nullable Encoders.text))
         <> fieldParam (.contentPartImageUrl) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartFileDataMimeType) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartFileDataBytes) (Encoders.param (Encoders.nullable Encoders.bytea))
+        <> fieldParam (.contentPartImageMimeType) (Encoders.param (Encoders.nullable Encoders.text))
+        <> fieldParam (.contentPartImageBytes) (Encoders.param (Encoders.nullable Encoders.bytea))
         <> fieldParam (.contentPartInputAudio) (Encoders.param (Encoders.nullable Encoders.text))
         <> fieldParam (.contentPartPromptCacheBreakpoint) (Encoders.param (Encoders.nullable Encoders.text))
         <> fieldParam (.contentPartAnnotations) (Encoders.param (Encoders.nullable Encoders.text))

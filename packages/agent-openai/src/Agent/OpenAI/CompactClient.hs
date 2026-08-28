@@ -3,13 +3,16 @@ module Agent.OpenAI.CompactClient
     ( CompactRequest(..)
     , compactConversation
     , compactConversationAt
+    , decodeCompactBodyBytes
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Client (defaultCodexBaseUrl)
 import Agent.OpenAI.Error (classifyHttpFailure)
 import Agent.OpenAI.Http (postCodexJson)
 import Agent.Responses.Types hiding (Response)
+import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Provider
     ( Credential(..)
     , Provider(..)
@@ -19,7 +22,6 @@ import Agent.Provider
 import Control.Exception.Safe (tryAny)
 import Data.Aeson ((.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
@@ -99,23 +101,23 @@ compactResponseHandler
 compactResponseHandler response stream = do
     let status = getStatusCode response
     bytes <- Streams.fold mappend mempty stream
-    let bodyText = Text.decodeUtf8With Text.lenientDecode bytes
     if status >= 200 && status < 300
-        then pure (decodeCompactBody bodyText)
-        else pure $ Left (classifyHttpFailure status bodyText)
+        then pure (decodeCompactBodyBytes bytes)
+        else pure $ Left (classifyHttpFailure status (bodyText bytes))
 
-decodeCompactBody :: Text -> Either ApiError [ResponseItem]
-decodeCompactBody bodyText =
-    case Aeson.eitherDecodeStrict (Text.encodeUtf8 bodyText) of
-        Left err -> Left (JsonDecodeError (Text.pack err) bodyText)
-        Right (Aeson.Object object) ->
-            case KeyMap.lookup "output" object of
-                Just value ->
-                    case Aeson.fromJSON value of
-                        Aeson.Success items -> Right items
-                        Aeson.Error err ->
-                            Left (JsonDecodeError (Text.pack err) bodyText)
-                Nothing ->
-                    Left (JsonDecodeError "compact response missing output" bodyText)
-        Right _ ->
-            Left (JsonDecodeError "compact response was not an object" bodyText)
+decodeCompactBodyBytes :: BS.ByteString -> Either ApiError [ResponseItem]
+decodeCompactBodyBytes bytes =
+    case Json.decodeEither compactOutputDecoder bytes of
+        Left err -> Left
+            (JsonDecodeError
+                (Json.jsonErrorMessage err)
+                (bodyText bytes))
+        Right output -> Right output
+
+compactOutputDecoder :: Json.Decoder [ResponseItem]
+compactOutputDecoder =
+    Json.object $
+        Json.atKey "output" (Json.list responseItemDecoder)
+
+bodyText :: BS.ByteString -> Text
+bodyText = Text.decodeUtf8With Text.lenientDecode

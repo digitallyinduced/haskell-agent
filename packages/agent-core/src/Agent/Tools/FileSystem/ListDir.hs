@@ -13,6 +13,8 @@ module Agent.Tools.FileSystem.ListDir
     , renderTree
     ) where
 
+import Agent.Json.Decode (Decoder)
+import qualified Agent.Json.Decode as Json
 import Agent.OsPath (fromText, toText)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -36,7 +38,11 @@ import Agent.Tools.FileSystem.PathPrefix
     , uniqueWorkspaceCandidate
     , workspaceDirectoryIndex
     )
-import Agent.Tools.IO (listDirectoryEntries, resolveForRead)
+import Agent.Tools.IO
+    ( displayPathInWorkspace
+    , listDirectoryEntries
+    , resolveForRead
+    )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -66,22 +72,19 @@ import Control.Exception (evaluate)
 import Control.Exception.Safe (mask)
 import Control.Monad (forM_, void)
 import Data.Acquire (mkAcquire)
-import Data.Aeson (FromJSON(..))
-import qualified Data.Aeson as Aeson
 import Data.List (sortOn)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 import System.Directory.OsPath (doesDirectoryExist, pathIsSymbolicLink)
 import System.OsPath (OsPath, equalFilePath, takeExtension, (</>))
 
 newtype ListDirArgs = ListDirArgs { targetDirectory :: Text }
 
-instance FromJSON ListDirArgs where
-    parseJSON = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
+listDirArgsDecoder :: Decoder ListDirArgs
+listDirArgsDecoder = objectArgs \object -> ListDirArgs <$> reqText object "target_directory"
 
 listDirTool :: ToolEnv -> AppTool
 listDirTool env =
@@ -97,14 +100,14 @@ listDirToolWithSpeculation env speculation =
             (listDirArgumentInterpreter env)
             listDirArgumentInterpreterWithCache
             speculation) $
-    withTypedResourceClaims (listDirClaims env) $
+    withTypedResourceClaims listDirArgsDecoder (listDirClaims env) $
     jsonTool "list_dir" listDirDescription
     [ PropertySchema "target_directory" PropertyString True $ Just
         "Path to a directory within an allowed filesystem root. Relative paths use the workspace root; absolute paths may resolve within the workspace or session temp directory."
     ]
     True
     ParallelSafe
-    (typedTool "list_dir" (runListDir env))
+    (typedTool "list_dir" listDirArgsDecoder (runListDir env))
 
 listDirClaims
     :: ToolEnv
@@ -130,10 +133,11 @@ maxListItems :: Int
 maxListItems = 200
 
 runListDir :: ToolEnv -> ListDirArgs -> IO (Either Text Text)
-runListDir env args =
-    resolveForRead env (fromText args.targetDirectory) >>= \case
-        Left err -> pure (Left err)
-        Right path -> listDirResolved env path args.targetDirectory
+runListDir env args = resolveForRead env (fromText args.targetDirectory) >>= \case
+    Left err -> pure (Left err)
+    Right path -> do
+        display <- displayPathInWorkspace env path
+        listDirResolved env path display
 
 listDirResolved :: ToolEnv -> OsPath -> Text -> IO (Either Text Text)
 listDirResolved env path displayName = doesDirectoryExist path >>= \case
@@ -594,5 +598,7 @@ consumeListDir speculation args partial =
         runListDir speculation.listEnv args
 
 decodeListDirArgs :: Text -> Maybe ListDirArgs
-decodeListDirArgs =
-    Aeson.decodeStrict' . TextEncoding.encodeUtf8
+decodeListDirArgs text =
+    case Json.decodeText listDirArgsDecoder text of
+        Right args -> Just args
+        Left _ -> Nothing

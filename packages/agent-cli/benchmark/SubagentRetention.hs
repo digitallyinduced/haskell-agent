@@ -8,7 +8,6 @@ import Agent.Responses.Types
 import Control.Concurrent.MVar (modifyMVar_, newMVar)
 import Control.Exception (evaluate)
 import Control.Monad (forM, forM_)
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.List (sort)
 import Data.Map.Strict (Map)
@@ -213,7 +212,6 @@ messageItem text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }
 
 itemText :: Int -> Int -> Int -> Int -> Text

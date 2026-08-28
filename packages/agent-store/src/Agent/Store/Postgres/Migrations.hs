@@ -158,6 +158,24 @@ coreMigrations =
         , migrationName = "trigram indexes for conversation search"
         , migrationStatements = sessionSearchIndexStatements
         }
+    , Migration
+        { migrationVersion = 10
+        , migrationName = "binary session attachments"
+        , migrationStatements =
+            [ "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS file_data_mime_type text"
+            , "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS file_data_bytes bytea"
+            , "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS image_mime_type text"
+            , "ALTER TABLE IF EXISTS\
+              \ harness.session_response_content_parts\
+              \ ADD COLUMN IF NOT EXISTS image_bytes bytea"
+            ]
+        }
     ]
 
 -- Version 1 shipped only on the in-development PostgreSQL branch. Empty

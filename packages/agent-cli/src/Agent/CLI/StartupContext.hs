@@ -1,6 +1,7 @@
--- | Discover repository instructions for a fresh session.
+-- | Discover repository instructions for fresh or regenerated context.
 module Agent.CLI.StartupContext
-    ( loadAgentsContext
+    ( AgentsContextNotice(..)
+    , loadAgentsContext
     ) where
 
 import Agent.CLI.Dialects
@@ -42,23 +43,36 @@ import qualified Data.Text as Text
 import System.IO (Handle)
 import System.OsPath (OsPath)
 
--- | Discover AGENTS.md once for a fresh session. Resumed transcripts keep
--- whatever instructions were already in history; callers pass an empty
--- history after a persisted transcript-replacement boundary.
+data AgentsContextNotice
+    = ReportAgentsContextLoaded
+    | SuppressAgentsContextLoaded
+    deriving (Eq, Show)
+
+-- | Discover AGENTS.md when generated context is needed. Resumed transcripts
+-- keep whatever instructions were already in history; callers pass an empty
+-- history after a persisted transcript-replacement boundary. Regeneration can
+-- suppress the successful-load notice while still reporting read warnings.
+--
+-- @extraContext@ carries additional generated context blocks — such as the
+-- @<environment_context>@ fragment for catalog models — appended after the
+-- AGENTS.md wrapper (or sent alone when no AGENTS.md applies).
 loadAgentsContext
     :: Handle
     -> Maybe FullscreenRuntime
+    -> AgentsContextNotice
     -> CliOptions
     -> Dialect
     -> OsPath
     -> OsPath
     -> [ResponseItem]
     -> Maybe Text
+    -> Maybe Text
     -> IO (IORef (Maybe Text))
 loadAgentsContext
-        stderrHandle fullscreen options dialect home cwd initialItems initialPrevious
-    | not options.optAgentsMd = newIORef Nothing
+        stderrHandle fullscreen notice options dialect home cwd
+        initialItems initialPrevious extraContext
     | not (null initialItems) || isJust initialPrevious = newIORef Nothing
+    | not options.optAgentsMd = newIORef extraContext
     | otherwise = do
         let discoverOptions = DiscoverOptions
                 { discoverMaxBytes = defaultDiscoverOptions.discoverMaxBytes
@@ -70,20 +84,24 @@ loadAgentsContext
             (loadedInstructionWarnings loaded)
         let files = loadedInstructionFiles loaded
         case formatAgentsMdForDialect dialect cwd loaded of
-            Nothing -> newIORef Nothing
+            Nothing -> newIORef extraContext
             Just text -> do
-                let message =
-                        "agents.md: loaded "
-                            <> Text.pack (show (length files))
-                            <> if length files == 1 then " file" else " files"
-                case fullscreen of
-                    Nothing -> do
-                        color <- resolveColor stderrHandle
-                        putTextLn stderrHandle
-                            (roleMuted color (glyphSession <> message))
-                    Just runtime ->
-                        emitUiEvent runtime (UiSystemMessage message)
-                newIORef (Just text)
+                case notice of
+                    SuppressAgentsContextLoaded -> pure ()
+                    ReportAgentsContextLoaded -> do
+                        let message =
+                                "agents.md: loaded "
+                                    <> Text.pack (show (length files))
+                                    <> if length files == 1 then " file" else " files"
+                        case fullscreen of
+                            Nothing -> do
+                                color <- resolveColor stderrHandle
+                                putTextLn stderrHandle
+                                    (roleMuted color (glyphSession <> message))
+                            Just runtime ->
+                                emitUiEvent runtime (UiSystemMessage message)
+                newIORef
+                    (Just (text <> maybe "" ("\n\n" <>) extraContext))
 
 reportInstructionWarning
     :: Handle

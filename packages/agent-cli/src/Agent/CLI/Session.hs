@@ -2,13 +2,17 @@
 module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
+    , sessionMetaDecoder
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
+    , sessionTurnDecoder
     , SessionTurnPage(..)
     , SessionResumeStats(..)
     , SessionActivity(..)
+    , sessionActivityDecoder
     , SessionTransfer(..)
+    , sessionTransferDecoder
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -68,31 +72,40 @@ import Agent.CLI.SessionLock
     ( acquireSessionLock
     , releaseSessionLock
     )
-import Agent.CLI.Session.StoreCodec
-    ( fromStoredResponseItem
-    , toStoredResponseItem
+import Agent.CLI.Json (decodeLazy)
+import Agent.CLI.Session.Types
+    ( SessionHandle(..)
+    , SessionMeta(..)
+    , sessionMetaDecoder
+    , LegacySubagentTarget(..)
+    , TranscriptEffect(..)
+    , SessionTurn(..)
+    , sessionTurnDecoder
+    , SessionTurnPage(..)
+    , SessionResumeStats(..)
+    , SessionActivity(..)
+    , sessionActivityDecoder
+    , SessionTransfer(..)
+    , sessionTransferDecoder
+    , SessionCreate(..)
+    , Persistence(..)
+    , PersistenceState(..)
+    )
+import Agent.CLI.Session.Codec
+    ( contentFingerprint
+    , decodeStoredSession
+    , fromStoredMetadata
+    , fromStoredTurn
+    , importLegacySession
+    , toStoredMetadata
+    , toStoredTurn
+    , validateSessionMeta
     )
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Loop (TokenUsage(..))
-import Agent.Dialect
-    ( DialectId
-    , dialectSlug
-    , legacyDialectIdForProvider
-    , parseDialect
-    , providerSupportsDialect
-    )
 import Agent.OsPath (toText, unsafeToFilePath)
-import Agent.Responses.Types (ResponseItem)
-import Agent.OpenAI.Compaction
-    ( hasCompactionCheckpoint
-    , isClearSessionTurn
-    , isCompactSessionTurn
-    , isNewSessionTurn
-    )
-import Agent.Provider (Provider(..), parseProvider, providerSlug)
 import Agent.Store.Postgres (normalizePostgresTimestamp)
 import Agent.Store.Postgres.Connection (StorePool)
-import Agent.Store.Postgres.Session (TranscriptEffect(..))
 import qualified Agent.Store.Postgres.Session as Store
 import Agent.Store.Types (StoreError, renderStoreError)
 import Control.Applicative ((<|>))
@@ -105,7 +118,6 @@ import Control.Monad.Trans.Except
     , runExceptT
     , throwE
     )
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:), (.:?), (.!=), (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits (xor)
@@ -148,311 +160,6 @@ sessionTempsRoot root =
     takeDirectory root
         </> unsafeEncodeUtf "tmp"
         </> unsafeEncodeUtf "sessions"
-
-data SessionMeta = SessionMeta
-    { metaVersion :: !Int
-    , metaId :: !Text
-    , metaCreatedAt :: !UTCTime
-    , metaUpdatedAt :: !UTCTime
-    , metaProvider :: !Provider
-    , metaConnection :: !Text
-    , metaModel :: !Text
-    , metaTransportModel :: !(Maybe Text)
-    , metaDialect :: !DialectId
-    , metaLegacySubagentTarget :: !(Maybe LegacySubagentTarget)
-    , metaCwd :: !OsPath
-    , metaEffort :: !Text
-    , metaTitle :: !Text
-    , metaTitleIsManual :: !Bool
-    , metaTitleRefreshIndex :: !Int
-    , metaTitleUserTurns :: !Int
-    , metaLastResponseId :: !(Maybe Text)
-    , metaInputTokens :: !Int
-    , metaOutputTokens :: !Int
-    , metaCachedTokens :: !Int
-    , metaLastRecap :: !(Maybe Text)
-    , metaLastTurnSummary :: !(Maybe Text)
-    , metaLastRecapMainTurns :: !Int
-    } deriving (Eq, Show)
-
-data SessionTransfer = SessionTransfer
-    { transferMeta :: !SessionMeta
-    , transferTurns :: ![SessionTurn]
-    } deriving (Eq, Show)
-
-instance ToJSON SessionTransfer where
-    toJSON transfer = object
-        [ "meta" .= transfer.transferMeta
-        , "turns" .= transfer.transferTurns
-        ]
-
-instance FromJSON SessionTransfer where
-    parseJSON = withObject "SessionTransfer" \o ->
-        SessionTransfer <$> o .: "meta" <*> o .: "turns"
-
--- | Durable provenance for subagent transcripts written before child target
--- metadata was persisted. Keeping this target separate from the mutable root
--- target prevents a later reopen from treating stale legacy children as
--- compatible merely because the root metadata has already been retargeted.
-data LegacySubagentTarget = LegacySubagentTarget
-    { legacyTargetProvider :: !Provider
-    , legacyTargetConnection :: !Text
-    , legacyTargetEffectiveModel :: !Text
-    , legacyTargetDialect :: !DialectId
-    } deriving (Eq, Show)
-
-instance ToJSON LegacySubagentTarget where
-    toJSON target = object
-        [ "provider" .= providerSlug target.legacyTargetProvider
-        , "connection" .= target.legacyTargetConnection
-        , "effectiveModel" .= target.legacyTargetEffectiveModel
-        , "dialect" .= dialectSlug target.legacyTargetDialect
-        ]
-
-instance FromJSON LegacySubagentTarget where
-    parseJSON = withObject "LegacySubagentTarget" \o -> do
-        providerText <- o .: "provider"
-        provider <- case parseProvider providerText of
-            Just parsed -> pure parsed
-            Nothing ->
-                fail
-                    ("unknown legacy subagent provider: "
-                        <> Text.unpack providerText)
-        dialectText <- o .: "dialect"
-        dialect <- case parseDialect dialectText of
-            Just parsed -> pure parsed
-            Nothing ->
-                fail
-                    ("unknown legacy subagent dialect: "
-                        <> Text.unpack dialectText)
-        unless (providerSupportsDialect provider dialect) $
-            fail
-                ( "legacy subagent dialect "
-                    <> Text.unpack (dialectSlug dialect)
-                    <> " is incompatible with provider "
-                    <> Text.unpack (providerSlug provider)
-                )
-        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
-        when (Text.null (Text.strip connection)) $
-            fail "legacy subagent connection must not be empty"
-        LegacySubagentTarget provider connection
-            <$> o .: "effectiveModel"
-            <*> pure dialect
-
-instance ToJSON SessionMeta where
-    toJSON meta = object
-        [ "version" .= meta.metaVersion
-        , "id" .= meta.metaId
-        , "createdAt" .= meta.metaCreatedAt
-        , "updatedAt" .= meta.metaUpdatedAt
-        , "provider" .= providerSlug meta.metaProvider
-        , "connection" .= meta.metaConnection
-        , "model" .= meta.metaModel
-        , "transportModel" .= meta.metaTransportModel
-        , "dialect" .= dialectSlug meta.metaDialect
-        , "legacySubagentTarget" .= meta.metaLegacySubagentTarget
-        , "cwd" .= unsafeToFilePath meta.metaCwd
-        , "effort" .= meta.metaEffort
-        , "title" .= meta.metaTitle
-        , "titleIsManual" .= meta.metaTitleIsManual
-        , "titleRefreshIndex" .= meta.metaTitleRefreshIndex
-        , "titleUserTurns" .= meta.metaTitleUserTurns
-        , "lastResponseId" .= meta.metaLastResponseId
-        , "inputTokens" .= meta.metaInputTokens
-        , "outputTokens" .= meta.metaOutputTokens
-        , "cachedTokens" .= meta.metaCachedTokens
-        , "lastRecap" .= meta.metaLastRecap
-        , "lastTurnSummary" .= meta.metaLastTurnSummary
-        , "lastRecapMainTurns" .= meta.metaLastRecapMainTurns
-        ]
-
-instance FromJSON SessionMeta where
-    parseJSON = withObject "SessionMeta" \o -> do
-        version <- o .: "version"
-        providerText <- o .: "provider"
-        provider <- case parseProvider providerText of
-            Just p -> pure p
-            Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
-        model <- o .: "model"
-        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
-        when (Text.null (Text.strip connection)) $
-            fail "session connection must not be empty"
-        dialectText <- o .:? "dialect"
-        dialect <- case dialectText of
-            Nothing -> pure (legacyDialectIdForProvider provider)
-            Just text -> case parseDialect text of
-                Just parsed -> pure parsed
-                Nothing -> fail ("unknown dialect: " <> Text.unpack text)
-        unless (providerSupportsDialect provider dialect) $
-            fail
-                ( "dialect "
-                    <> Text.unpack (dialectSlug dialect)
-                    <> " is incompatible with provider "
-                    <> Text.unpack (providerSlug provider)
-                )
-        SessionMeta version
-            <$> o .: "id"
-            <*> o .: "createdAt"
-            <*> o .: "updatedAt"
-            <*> pure provider
-            <*> pure connection
-            <*> pure model
-            <*> o .:? "transportModel"
-            <*> pure dialect
-            <*> o .:? "legacySubagentTarget"
-            <*> (unsafeEncodeUtf <$> o .: "cwd")
-            <*> o .: "effort"
-            <*> o .: "title"
-            <*> (o .:? "titleIsManual" .!= False)
-            <*> (o .:? "titleRefreshIndex" .!= 2)
-            <*> (o .:? "titleUserTurns" .!= 6)
-            <*> o .:? "lastResponseId"
-            <*> (o .:? "inputTokens" .!= 0)
-            <*> (o .:? "outputTokens" .!= 0)
-            <*> (o .:? "cachedTokens" .!= 0)
-            <*> o .:? "lastRecap"
-            <*> o .:? "lastTurnSummary"
-            <*> (o .:? "lastRecapMainTurns" .!= 0)
-
-data SessionTurn = SessionTurn
-    { turnAt :: !UTCTime
-    , turnUserText :: !Text
-    , turnAssistantText :: !(Maybe Text)
-    , turnError :: !(Maybe Text)
-    , turnResponseId :: !(Maybe Text)
-    , turnEffect :: !TranscriptEffect
-    , turnItems :: ![ResponseItem]
-    , turnUsage :: !(Maybe TokenUsage)
-    } deriving (Eq, Show)
-
-data SessionTurnPage = SessionTurnPage
-    { pageTurns :: ![(Int64, SessionTurn)]
-    , pageGenerationStart :: !Int64
-    , pageTotalTurns :: !Int64
-    , pageHasOlder :: !Bool
-    , pageHasNewer :: !Bool
-    } deriving (Eq, Show)
-
-data SessionResumeStats = SessionResumeStats
-    { resumeStatsTurnCount :: !Int
-    , resumeStatsMessageCount :: !Int
-    , resumeStatsToolCount :: !Int
-    , resumeStatsFirstPrompt :: !(Maybe Text)
-    } deriving (Eq, Show)
-
-instance ToJSON SessionTurn where
-    toJSON turn = object
-        [ "at" .= turn.turnAt
-        , "userText" .= turn.turnUserText
-        , "assistantText" .= turn.turnAssistantText
-        , "error" .= turn.turnError
-        , "responseId" .= turn.turnResponseId
-        , "effect" .= transcriptEffectText turn.turnEffect
-        , "items" .= turn.turnItems
-        , "usage" .= turn.turnUsage
-        ]
-
-instance FromJSON SessionTurn where
-    parseJSON = withObject "SessionTurn" \o -> do
-        at <- o .: "at"
-        userText <- o .: "userText"
-        assistantText <- o .:? "assistantText"
-        turnErrorValue <- o .:? "error"
-        responseId <- o .:? "responseId"
-        items <- o .: "items"
-        usage <- o .:? "usage"
-        effect <- o .:? "effect" >>= \case
-            Nothing -> pure (inferTranscriptEffect userText items)
-            Just value ->
-                either (fail . Text.unpack) pure
-                    (parseTranscriptEffect value)
-        pure SessionTurn
-            { turnAt = at
-            , turnUserText = userText
-            , turnAssistantText = assistantText
-            , turnError = turnErrorValue
-            , turnResponseId = responseId
-            , turnEffect = effect
-            , turnItems = items
-            , turnUsage = usage
-            }
-
-transcriptEffectText :: TranscriptEffect -> Text
-transcriptEffectText = \case
-    TranscriptAppend -> "append"
-    TranscriptReplace -> "replace"
-    TranscriptReset -> "reset"
-
-parseTranscriptEffect :: Text -> Either Text TranscriptEffect
-parseTranscriptEffect = \case
-    "append" -> Right TranscriptAppend
-    "replace" -> Right TranscriptReplace
-    "reset" -> Right TranscriptReset
-    value -> Left ("unknown transcript effect: " <> value)
-
-inferTranscriptEffect :: Text -> [ResponseItem] -> TranscriptEffect
-inferTranscriptEffect userText items
-    | isClearSessionTurn userText || isNewSessionTurn userText =
-        TranscriptReset
-    | isCompactSessionTurn userText || hasCompactionCheckpoint items =
-        TranscriptReplace
-    | otherwise = TranscriptAppend
-
--- | Ephemeral progress for a running persisted session. This lives in the
--- session temp directory rather than the transcript so polling clients can
--- explain long waits without adding synthetic conversation turns.
-data SessionActivity = SessionActivity
-    { activityKind :: !Text
-    , activityMessage :: !Text
-    , activityRetryAt :: !(Maybe UTCTime)
-    , activityUpdatedAt :: !UTCTime
-    } deriving (Eq, Show)
-
-instance ToJSON SessionActivity where
-    toJSON activity = object
-        [ "kind" .= activity.activityKind
-        , "message" .= activity.activityMessage
-        , "retry_at" .= activity.activityRetryAt
-        , "updated_at" .= activity.activityUpdatedAt
-        ]
-
-instance FromJSON SessionActivity where
-    parseJSON = withObject "SessionActivity" \o ->
-        SessionActivity
-            <$> o .: "kind"
-            <*> o .: "message"
-            <*> o .:? "retry_at"
-            <*> o .: "updated_at"
-
-data SessionHandle = SessionHandle
-    { sessionPool :: !StorePool
-    , sessionDir :: !OsPath
-    , sessionTempDir :: !OsPath
-    , sessionMetaPath :: !OsPath
-    , sessionTranscriptPath :: !OsPath
-    , sessionMeta :: !SessionMeta
-    }
-
--- | Parameters for creating a session on the first persisted turn.
-data SessionCreate = SessionCreate
-    { createPool :: !StorePool
-    , createRoot :: !OsPath
-    , createTarget :: !ModelTarget
-    , createCwd :: !OsPath
-    , createEffort :: !Text
-    , createTitleHint :: !(Maybe Text)
-    , createTitleIsManual :: !Bool
-    }
-
--- | Whether conversation state is persisted.
-data Persistence
-    = PersistenceDisabled
-    | PersistenceEnabled (IORef PersistenceState)
-
--- | An enabled persistence slot, before or after its first use.
-data PersistenceState
-    = PersistencePending SessionCreate Text OsPath
-    | PersistenceActive SessionHandle
 
 newPendingPersistence :: SessionCreate -> IO Persistence
 newPendingPersistence spec = do
@@ -539,7 +246,7 @@ loadSessionActivity root sessionId =
                             Left _ -> Nothing
                             Right bytes ->
                                 either (const Nothing) Just
-                                    (Aeson.eitherDecode bytes)
+                                    (decodeLazy sessionActivityDecoder bytes)
 
 sessionActivityPath :: OsPath -> OsPath
 sessionActivityPath tempDir =
@@ -814,7 +521,7 @@ loadSession
 loadSession pool root sessionId = runExceptT do
     _ <- except (sessionDirForId root sessionId)
     stored <- loadWithLegacyImport root pool sessionId Store.loadSession
-    decodeStoredSession sessionId stored
+    decodeStoredSession sessionSchemaVersion isValidSessionId sessionId stored
 
 loadActiveSession
     :: StorePool
@@ -824,7 +531,7 @@ loadActiveSession
 loadActiveSession pool root sessionId = runExceptT do
     _ <- except (sessionDirForId root sessionId)
     stored <- loadWithLegacyImport root pool sessionId Store.loadActiveSession
-    decodeStoredSession sessionId stored
+    decodeStoredSession sessionSchemaVersion isValidSessionId sessionId stored
 
 loadSessionMeta
     :: StorePool
@@ -835,7 +542,7 @@ loadSessionMeta pool root sessionId = runExceptT do
     _ <- except (sessionDirForId root sessionId)
     stored <- loadWithLegacyImport root pool sessionId Store.loadSessionMetadata
     meta <- except (fromStoredMetadata stored)
-    validateSessionMeta sessionId meta
+    validateSessionMeta sessionSchemaVersion isValidSessionId sessionId meta
     pure meta
 
 loadRecentSessionTurns
@@ -921,7 +628,12 @@ loadWithLegacyImport root pool sessionId loader = do
     stored' <- case stored of
         Just value -> pure (Just value)
         Nothing -> do
-            _ <- importLegacySession root pool sessionId
+            _ <- importLegacySession
+                sessionSchemaVersion
+                isValidSessionId
+                (sessionDirForId root)
+                pool
+                sessionId
             -- Another process may win the import race and return False from
             -- its idempotent insert. Always reload the canonical row.
             lift (loader pool sessionId)
@@ -953,7 +665,12 @@ loadSessions pool root sessionIds = do
             Left err -> pure (Left (renderStoreError err))
             Right Nothing -> loadSession pool root sessionId
             Right (Just value) ->
-                runExceptT (decodeStoredSession sessionId value)
+                runExceptT
+                    (decodeStoredSession
+                        sessionSchemaVersion
+                        isValidSessionId
+                        sessionId
+                        value)
         (loaded :) <$> restoreResults rest results
     restoreResults _ _ =
         pure [Left "batched session load returned an unexpected result count"]
@@ -1274,264 +991,3 @@ ensurePrivateDir path = do
     createDirectoryIfMissing True path
     _ <- tryIO (setFileMode (unsafeToFilePath path) 0o700)
     pure ()
-
-loadTranscript :: OsPath -> ExceptT Text IO [SessionTurn]
-loadTranscript path = do
-    exists <- lift (doesFileExist path)
-    if not exists
-        then pure []
-        else do
-            raw <- lift (retryOnFileBusy (Text.readFile (unsafeToFilePath path)))
-            let linesOf = filter (not . Text.null) (Text.lines raw)
-            except (mapM decodeTurnLine linesOf)
-
-decodeTurnLine :: Text -> Either Text SessionTurn
-decodeTurnLine line =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 line) of
-        Left err -> Left ("invalid transcript line: " <> Text.pack err)
-        Right turn -> Right turn
-
-decodeFileEither :: FromJSON a => OsPath -> ExceptT Text IO a
-decodeFileEither path = do
-    exists <- lift (doesFileExist path)
-    unless exists $
-        throwE ("missing file: " <> toText path)
-    bytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
-    case Aeson.eitherDecode' bytes of
-        Left err -> throwE (toText path <> ": " <> Text.pack err)
-        Right value -> pure value
-
-decodeStoredSession
-    :: Text
-    -> Store.StoredSession
-    -> ExceptT Text IO (SessionMeta, [SessionTurn])
-decodeStoredSession sessionId stored = do
-    meta <- except (fromStoredMetadata stored.storedMetadata)
-    validateSessionMeta sessionId meta
-    turns <- except $
-        traverse
-            (fromStoredTurn . (.storedTurn))
-            (Vector.toList stored.storedTurns)
-    pure (meta, turns)
-
-toStoredMetadata :: SessionMeta -> Store.SessionMetadata
-toStoredMetadata meta = Store.SessionMetadata
-    { sessionMetadataKey = meta.metaId
-    , sessionMetadataVersion = fromIntegral meta.metaVersion
-    , sessionMetadataCreatedAt = meta.metaCreatedAt
-    , sessionMetadataUpdatedAt = meta.metaUpdatedAt
-    , sessionMetadataProvider = providerSlug meta.metaProvider
-    , sessionMetadataConnection = meta.metaConnection
-    , sessionMetadataModel = meta.metaModel
-    , sessionMetadataTransportModel = meta.metaTransportModel
-    , sessionMetadataDialect = dialectSlug meta.metaDialect
-    , sessionMetadataLegacyTarget =
-        toStoredLegacyTarget <$> meta.metaLegacySubagentTarget
-    , sessionMetadataCwd = Text.pack (unsafeToFilePath meta.metaCwd)
-    , sessionMetadataEffort = meta.metaEffort
-    , sessionMetadataTitle = meta.metaTitle
-    , sessionMetadataTitleIsManual = meta.metaTitleIsManual
-    , sessionMetadataTitleRefreshIndex =
-        fromIntegral meta.metaTitleRefreshIndex
-    , sessionMetadataTitleUserTurns =
-        fromIntegral meta.metaTitleUserTurns
-    , sessionMetadataLastResponseId = meta.metaLastResponseId
-    , sessionMetadataInputTokens = fromIntegral meta.metaInputTokens
-    , sessionMetadataOutputTokens = fromIntegral meta.metaOutputTokens
-    , sessionMetadataCachedTokens = fromIntegral meta.metaCachedTokens
-    , sessionMetadataLastRecap = meta.metaLastRecap
-    , sessionMetadataLastTurnSummary = meta.metaLastTurnSummary
-    , sessionMetadataLastRecapMainTurns =
-        fromIntegral meta.metaLastRecapMainTurns
-    }
-
-fromStoredMetadata :: Store.SessionMetadata -> Either Text SessionMeta
-fromStoredMetadata stored = do
-    when (Text.null (Text.strip stored.sessionMetadataConnection)) $
-        Left "stored session connection must not be empty"
-    provider <- maybe
-        (Left ("unknown stored provider: " <> stored.sessionMetadataProvider))
-        Right
-        (parseProvider stored.sessionMetadataProvider)
-    dialect <- maybe
-        (Left ("unknown stored dialect: " <> stored.sessionMetadataDialect))
-        Right
-        (parseDialect stored.sessionMetadataDialect)
-    unless (providerSupportsDialect provider dialect) $
-        Left
-            ( "stored dialect "
-                <> stored.sessionMetadataDialect
-                <> " is incompatible with provider "
-                <> stored.sessionMetadataProvider
-            )
-    legacyTarget <-
-        traverse fromStoredLegacyTarget stored.sessionMetadataLegacyTarget
-    pure SessionMeta
-        { metaVersion = fromIntegral stored.sessionMetadataVersion
-        , metaId = stored.sessionMetadataKey
-        , metaCreatedAt = stored.sessionMetadataCreatedAt
-        , metaUpdatedAt = stored.sessionMetadataUpdatedAt
-        , metaProvider = provider
-        , metaConnection = stored.sessionMetadataConnection
-        , metaModel = stored.sessionMetadataModel
-        , metaTransportModel = stored.sessionMetadataTransportModel
-        , metaDialect = dialect
-        , metaLegacySubagentTarget = legacyTarget
-        , metaCwd =
-            unsafeEncodeUtf (Text.unpack stored.sessionMetadataCwd)
-        , metaEffort = stored.sessionMetadataEffort
-        , metaTitle = stored.sessionMetadataTitle
-        , metaTitleIsManual = stored.sessionMetadataTitleIsManual
-        , metaTitleRefreshIndex =
-            fromIntegral stored.sessionMetadataTitleRefreshIndex
-        , metaTitleUserTurns =
-            fromIntegral stored.sessionMetadataTitleUserTurns
-        , metaLastResponseId = stored.sessionMetadataLastResponseId
-        , metaInputTokens = fromIntegral stored.sessionMetadataInputTokens
-        , metaOutputTokens = fromIntegral stored.sessionMetadataOutputTokens
-        , metaCachedTokens = fromIntegral stored.sessionMetadataCachedTokens
-        , metaLastRecap = stored.sessionMetadataLastRecap
-        , metaLastTurnSummary = stored.sessionMetadataLastTurnSummary
-        , metaLastRecapMainTurns =
-            fromIntegral stored.sessionMetadataLastRecapMainTurns
-        }
-
-toStoredLegacyTarget
-    :: LegacySubagentTarget
-    -> Store.SessionLegacyTarget
-toStoredLegacyTarget target = Store.SessionLegacyTarget
-    { sessionLegacyProvider = providerSlug target.legacyTargetProvider
-    , sessionLegacyConnection = target.legacyTargetConnection
-    , sessionLegacyEffectiveModel = target.legacyTargetEffectiveModel
-    , sessionLegacyDialect = dialectSlug target.legacyTargetDialect
-    }
-
-fromStoredLegacyTarget
-    :: Store.SessionLegacyTarget
-    -> Either Text LegacySubagentTarget
-fromStoredLegacyTarget stored = do
-    when (Text.null (Text.strip stored.sessionLegacyConnection)) $
-        Left "stored legacy session connection must not be empty"
-    when (Text.null (Text.strip stored.sessionLegacyEffectiveModel)) $
-        Left "stored legacy session effective model must not be empty"
-    provider <- maybe
-        (Left ("unknown stored legacy provider: " <> stored.sessionLegacyProvider))
-        Right
-        (parseProvider stored.sessionLegacyProvider)
-    dialect <- maybe
-        (Left ("unknown stored legacy dialect: " <> stored.sessionLegacyDialect))
-        Right
-        (parseDialect stored.sessionLegacyDialect)
-    unless (providerSupportsDialect provider dialect) $
-        Left
-            ( "stored legacy dialect "
-                <> stored.sessionLegacyDialect
-                <> " is incompatible with provider "
-                <> stored.sessionLegacyProvider
-            )
-    pure LegacySubagentTarget
-        { legacyTargetProvider = provider
-        , legacyTargetConnection = stored.sessionLegacyConnection
-        , legacyTargetEffectiveModel = stored.sessionLegacyEffectiveModel
-        , legacyTargetDialect = dialect
-        }
-
-toStoredTurn :: SessionTurn -> Store.SessionTurn
-toStoredTurn turn = Store.SessionTurn
-    { sessionTurnOccurredAt = turn.turnAt
-    , sessionTurnUserText = turn.turnUserText
-    , sessionTurnAssistantText = turn.turnAssistantText
-    , sessionTurnError = turn.turnError
-    , sessionTurnResponseId = turn.turnResponseId
-    , sessionTurnEffect = turn.turnEffect
-    , sessionTurnItems = map toStoredResponseItem turn.turnItems
-    , sessionTurnUsage = toStoredUsage <$> turn.turnUsage
-    }
-
-fromStoredTurn :: Store.SessionTurn -> Either Text SessionTurn
-fromStoredTurn stored = do
-    items <- traverse fromStoredResponseItem stored.sessionTurnItems
-    pure SessionTurn
-        { turnAt = stored.sessionTurnOccurredAt
-        , turnUserText = stored.sessionTurnUserText
-        , turnAssistantText = stored.sessionTurnAssistantText
-        , turnError = stored.sessionTurnError
-        , turnResponseId = stored.sessionTurnResponseId
-        , turnEffect = stored.sessionTurnEffect
-        , turnItems = items
-        , turnUsage = fromStoredUsage <$> stored.sessionTurnUsage
-        }
-
-toStoredUsage :: TokenUsage -> Store.SessionUsage
-toStoredUsage usage = Store.SessionUsage
-    { sessionUsageInputTokens = fromIntegral usage.inputTokens
-    , sessionUsageOutputTokens = fromIntegral usage.outputTokens
-    , sessionUsageCachedTokens = fromIntegral usage.cachedTokens
-    }
-
-fromStoredUsage :: Store.SessionUsage -> TokenUsage
-fromStoredUsage usage = TokenUsage
-    { inputTokens = fromIntegral usage.sessionUsageInputTokens
-    , outputTokens = fromIntegral usage.sessionUsageOutputTokens
-    , cachedTokens = fromIntegral usage.sessionUsageCachedTokens
-    }
-
-validateSessionMeta :: Text -> SessionMeta -> ExceptT Text IO ()
-validateSessionMeta sessionId meta = do
-    unless (isValidSessionId meta.metaId) $
-        throwE "invalid session id in metadata"
-    unless (meta.metaId == sessionId) $
-        throwE "session id does not match requested session"
-    unless (meta.metaVersion == sessionSchemaVersion) $
-        throwE $
-            "unsupported session schema version "
-                <> Text.pack (show meta.metaVersion)
-                <> " (expected "
-                <> Text.pack (show sessionSchemaVersion)
-                <> ")"
-
--- | Import the old @meta.json@ + @transcript.jsonl@ representation on first
--- access.  PostgreSQL remains canonical after a successful import; the files
--- are retained as rollback/export artifacts and are never dual-written.
-importLegacySession :: OsPath -> StorePool -> Text -> ExceptT Text IO Bool
-importLegacySession root pool sessionId = do
-    dir <- except (sessionDirForId root sessionId)
-    let
-        metaPath = dir </> unsafeEncodeUtf "meta.json"
-        transcriptPath = dir </> unsafeEncodeUtf "transcript.jsonl"
-    exists <- lift (doesDirectoryExist dir)
-    if not exists
-        then pure False
-        else do
-            meta <- decodeFileEither metaPath
-            validateSessionMeta sessionId meta
-            turns <- loadTranscript transcriptPath
-            metaBytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath metaPath)))
-            transcriptExists <- lift (doesFileExist transcriptPath)
-            transcriptBytes <- if transcriptExists
-                then lift (retryOnFileBusy
-                    (LBS.readFile (unsafeToFilePath transcriptPath)))
-                else pure mempty
-            let legacy = Store.LegacySession
-                    { legacySourcePath = toText dir
-                    , legacyContentHash =
-                        contentFingerprint (metaBytes <> transcriptBytes)
-                    , legacyMetadata = toStoredMetadata meta
-                    , legacyTurns = map toStoredTurn turns
-                    }
-            lift (Store.importLegacySession pool legacy) >>= \case
-                Left err -> throwE (renderStoreError err)
-                Right imported -> pure imported
-
--- A deterministic import key without another crypto dependency.  It is used
--- only for idempotency, not authentication or corruption detection.
-contentFingerprint :: LBS.ByteString -> Text
-contentFingerprint =
-    Text.pack . pad16 . (`showHex` "") . LBS.foldl' step fnvOffset
-  where
-    fnvOffset :: Word64
-    fnvOffset = 14695981039346656037
-    fnvPrime :: Word64
-    fnvPrime = 1099511628211
-    step hash byte = (hash `xor` fromIntegral byte) * fnvPrime
-    pad16 text = replicate (16 - length text) '0' <> text

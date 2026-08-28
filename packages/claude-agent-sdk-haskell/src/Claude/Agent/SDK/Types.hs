@@ -14,6 +14,9 @@ module Claude.Agent.SDK.Types
     , MessageOrigin(..)
     , UserContentBlock(..)
     , ContentBlock(..)
+    , ToolResultContent(..)
+    , StreamToolUse(..)
+    , OpaqueMessage(..)
     , UserMessage(..)
     , AssistantMessage(..)
     , SystemMessage(..)
@@ -21,20 +24,21 @@ module Claude.Agent.SDK.Types
     , StreamEvent(..)
     , ConversationResetMessage(..)
     , Message(..)
+    , QueryMessageScope(..)
+    , QueryProgress(..)
     , messageUuid
+    , messageSessionId
     , messageParentToolUseId
     , messageHasParentToolUseId
     ) where
 
-import Data.Aeson (Object, Value)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.Json (RawJson)
+import Data.Aeson (Value)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
-import qualified Data.Text as Text
 
 data PermissionMode
     = PermissionDefault
@@ -162,7 +166,6 @@ data ModelUsage = ModelUsage
     , cacheReadInputTokens :: !Int
     , cacheCreationInputTokens :: !Int
     , costUSD :: !(Maybe Double)
-    , raw :: !Object
     } deriving (Eq, Show)
 
 modelUsageToUsage :: ModelUsage -> Usage
@@ -176,12 +179,9 @@ modelUsageToUsage modelUsage =
         , cachedTokens = modelUsage.cacheReadInputTokens
         }
 
--- | Provenance attached to user messages and terminal results. Only @kind@
--- has a stable meaning; the raw object is retained for forward-compatible
--- origin-specific metadata.
+-- | Provenance attached to user messages and terminal results.
 data MessageOrigin = MessageOrigin
     { kind :: !Text
-    , raw :: !Object
     } deriving (Eq, Show)
 
 -- | Content accepted in one streaming-input user message.
@@ -215,39 +215,65 @@ data ContentBlock
     | ToolUseBlock
         { toolUseId :: !Text
         , name :: !Text
-        , input :: !Value
+        , input :: !RawJson
         }
     | ToolResultBlock
         { toolUseId :: !Text
-        , content :: !(Maybe Value)
+        , content :: !(Maybe ToolResultContent)
         , isError :: !(Maybe Bool)
         }
     | ServerToolUseBlock
         { toolUseId :: !Text
         , name :: !Text
-        , input :: !Value
+        , input :: !RawJson
         }
     | ServerToolResultBlock
         { toolUseId :: !Text
-        , content :: !(Maybe Value)
+        , content :: !(Maybe ToolResultContent)
         }
     | UnknownContentBlock
-        { raw :: !Value
+        { contentType :: !(Maybe Text)
+        , raw :: !RawJson
         }
     deriving (Eq, Show)
+
+-- | Opaque tool-result JSON plus the protocol-specific text projection used
+-- for loop events and persisted tool output.
+data ToolResultContent = ToolResultContent
+    { raw :: !RawJson
+    , renderedText :: !Text
+    } deriving (Eq, Show)
+
+data StreamToolUse = StreamToolUse
+    { toolUseId :: !Text
+    , name :: !Text
+    , input :: !RawJson
+    } deriving (Eq, Show)
+
+-- | Envelope metadata retained for message kinds whose payload is otherwise
+-- deliberately opaque.
+data OpaqueMessage = OpaqueMessage
+    { uuid :: !(Maybe Text)
+    , sessionId :: !(Maybe Text)
+    , parentToolUseId :: !(Maybe Text)
+    , hasParentToolUseId :: !Bool
+    , raw :: !RawJson
+    } deriving (Eq, Show)
 
 data UserMessage = UserMessage
     { content :: ![ContentBlock]
     , uuid :: !(Maybe Text)
     , parentToolUseId :: !(Maybe Text)
+    , hasParentToolUseId :: !Bool
+    , sessionId :: !(Maybe Text)
     , origin :: !(Maybe MessageOrigin)
-    , raw :: !Object
     } deriving (Eq, Show)
 
 data AssistantMessage = AssistantMessage
     { content :: ![ContentBlock]
     , model :: !(Maybe Text)
     , parentToolUseId :: !(Maybe Text)
+    , hasParentToolUseId :: !Bool
     , error :: !(Maybe Text)
     , usage :: !(Maybe Usage)
     , messageId :: !(Maybe Text)
@@ -255,7 +281,6 @@ data AssistantMessage = AssistantMessage
     , sessionId :: !(Maybe Text)
     , uuid :: !(Maybe Text)
     , supersedes :: ![Text]
-    , raw :: !Object
     } deriving (Eq, Show)
 
 data SystemMessage = SystemMessage
@@ -263,8 +288,9 @@ data SystemMessage = SystemMessage
     , sessionId :: !(Maybe Text)
     , uuid :: !(Maybe Text)
     , apiKeySource :: !(Maybe Text)
+    , parentToolUseId :: !(Maybe Text)
+    , hasParentToolUseId :: !Bool
     , retractedMessageUuids :: ![Text]
-    , raw :: !Object
     } deriving (Eq, Show)
 
 data ResultMessage = ResultMessage
@@ -278,28 +304,31 @@ data ResultMessage = ResultMessage
     , totalCostUsd :: !(Maybe Double)
     , usage :: !Usage
     , result :: !(Maybe Text)
-    , structuredOutput :: !(Maybe Value)
+    , structuredOutput :: !(Maybe RawJson)
     , modelUsage :: !(Map Text ModelUsage)
     , errors :: ![Text]
     , apiErrorStatus :: !(Maybe Int)
     , origin :: !(Maybe MessageOrigin)
     , uuid :: !(Maybe Text)
-    , raw :: !Object
+    , parentToolUseId :: !(Maybe Text)
+    , hasParentToolUseId :: !Bool
     } deriving (Eq, Show)
 
 data StreamEvent = StreamEvent
     { uuid :: !(Maybe Text)
     , sessionId :: !(Maybe Text)
-    , event :: !Value
+    , event :: !RawJson
+    , streamToolUse :: !(Maybe StreamToolUse)
     , parentToolUseId :: !(Maybe Text)
-    , raw :: !Object
+    , hasParentToolUseId :: !Bool
     } deriving (Eq, Show)
 
 data ConversationResetMessage = ConversationResetMessage
     { newConversationId :: !(Maybe Text)
     , uuid :: !(Maybe Text)
     , sessionId :: !(Maybe Text)
-    , raw :: !Object
+    , parentToolUseId :: !(Maybe Text)
+    , hasParentToolUseId :: !Bool
     } deriving (Eq, Show)
 
 data Message
@@ -309,8 +338,18 @@ data Message
     | MessageResult !ResultMessage
     | MessageStreamEvent !StreamEvent
     | MessageConversationReset !ConversationResetMessage
-    | MessageControlRequest !Object
-    | MessageUnknown !Value
+    | MessageControlRequest !OpaqueMessage
+    | MessageUnknown !OpaqueMessage
+    deriving (Eq, Show)
+
+data QueryMessageScope
+    = QueryTopLevel
+    | QueryNested !(Maybe Text)
+    deriving (Eq, Ord, Show)
+
+data QueryProgress
+    = QueryMessageObserved !QueryMessageScope !Message
+    | QueryMessagesRetracted !(Maybe QueryMessageScope) ![Text]
     deriving (Eq, Show)
 
 messageUuid :: Message -> Maybe Text
@@ -321,48 +360,41 @@ messageUuid = \case
     MessageResult message -> message.uuid
     MessageStreamEvent message -> message.uuid
     MessageConversationReset message -> message.uuid
-    MessageControlRequest _ -> Nothing
-    MessageUnknown (Aeson.Object object) ->
-        nonEmptyRawText "uuid" object
-    MessageUnknown _ -> Nothing
+    MessageControlRequest message -> message.uuid
+    MessageUnknown message -> message.uuid
+
+messageSessionId :: Message -> Maybe Text
+messageSessionId = \case
+    MessageUser message -> message.sessionId
+    MessageAssistant message -> message.sessionId
+    MessageSystem message -> message.sessionId
+    MessageResult message -> Just message.sessionId
+    MessageStreamEvent message -> message.sessionId
+    MessageConversationReset message -> message.sessionId
+    MessageControlRequest message -> message.sessionId
+    MessageUnknown message -> message.sessionId
 
 messageParentToolUseId :: Message -> Maybe Text
 messageParentToolUseId = \case
     MessageUser message -> message.parentToolUseId
     MessageAssistant message -> message.parentToolUseId
+    MessageSystem message -> message.parentToolUseId
+    MessageResult message -> message.parentToolUseId
     MessageStreamEvent message -> message.parentToolUseId
-    MessageUnknown (Aeson.Object object) ->
-        nonEmptyRawText "parent_tool_use_id" object
-    _ -> Nothing
+    MessageConversationReset message -> message.parentToolUseId
+    MessageControlRequest message -> message.parentToolUseId
+    MessageUnknown message -> message.parentToolUseId
 
 -- | Whether the wire record had a non-null @parent_tool_use_id@. This remains
 -- true for malformed or empty values so nested records can never be mistaken
 -- for top-level assistant output.
 messageHasParentToolUseId :: Message -> Bool
 messageHasParentToolUseId = \case
-    MessageUser message -> rawHasParent message.raw
-    MessageAssistant message -> rawHasParent message.raw
-    MessageSystem message -> rawHasParent message.raw
-    MessageResult message -> rawHasParent message.raw
-    MessageStreamEvent message -> rawHasParent message.raw
-    MessageConversationReset message -> rawHasParent message.raw
-    MessageControlRequest object -> rawHasParent object
-    MessageUnknown (Aeson.Object object) -> rawHasParent object
-    MessageUnknown _ -> False
-  where
-    rawHasParent object =
-        case KeyMap.lookup "parent_tool_use_id" object of
-            Nothing -> False
-            Just Aeson.Null -> False
-            Just _ -> True
-
-nonEmptyRawText :: Aeson.Key -> Object -> Maybe Text
-nonEmptyRawText key object =
-    case KeyMap.lookup key object of
-        Just (Aeson.String rawText) ->
-            let stripped = Text.strip rawText
-            in if Text.null stripped
-                then Nothing
-                else Just stripped
-        _ ->
-            Nothing
+    MessageUser message -> message.hasParentToolUseId
+    MessageAssistant message -> message.hasParentToolUseId
+    MessageSystem message -> message.hasParentToolUseId
+    MessageResult message -> message.hasParentToolUseId
+    MessageStreamEvent message -> message.hasParentToolUseId
+    MessageConversationReset message -> message.hasParentToolUseId
+    MessageControlRequest message -> message.hasParentToolUseId
+    MessageUnknown message -> message.hasParentToolUseId

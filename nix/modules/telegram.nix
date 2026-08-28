@@ -433,18 +433,24 @@ in
 
           harness_config=${lib.escapeShellArg "${instance.homeDirectory}/.haskell-agent/config.json"}
           managed_config="$(mktemp "$harness_config.XXXXXX")"
-          if [ -f "$harness_config" ]; then
+          # jq applies the filter to each input value. `jq ... /dev/null` and
+          # `jq ... empty-file` both succeed with no output, which previously
+          # replaced ~/.haskell-agent/config.json with a 0-byte file and made
+          # every managed turn exit 1. Whitespace-only files are also blank:
+          # `-s` is true for them, but the merge filter then writes nothing.
+          if [ -s "$harness_config" ] && grep -q '[^[:space:]]' "$harness_config"; then
             jq --slurpfile managed ${lib.escapeShellArg generatedMcpConfig} \
               '.mcpInitStrategy = $managed[0].mcpInitStrategy
                | .mcpServers = $managed[0].mcpServers' \
               "$harness_config" > "$managed_config"
           else
-            jq --slurpfile managed ${lib.escapeShellArg generatedMcpConfig} \
+            jq -n --slurpfile managed ${lib.escapeShellArg generatedMcpConfig} \
               '{ version: 1,
                  mcpInitStrategy: $managed[0].mcpInitStrategy,
                  mcpServers: $managed[0].mcpServers }' \
-              /dev/null > "$managed_config"
+              > "$managed_config"
           fi
+          jq -e . "$managed_config" >/dev/null
           chmod 0600 "$managed_config"
           mv -f "$managed_config" "$harness_config"
         '';

@@ -24,6 +24,10 @@ import Agent.Tools.IO
     , writeShellCommandInput
     , writeTextFile
     )
+import Agent.Tools.OutputArtifact
+    ( OutputArtifact(..)
+    , readOutputArtifact
+    )
 import Agent.Tools.Types (ToolEnv(..), defaultToolEnv, setToolSessionTmp)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Concurrent.MVar (readMVar)
@@ -63,6 +67,8 @@ spec = describe "Agent.Tools.IO" do
                     { commandExitCode = Just 3
                     , commandStdout = "out"
                     , commandStderr = "err"
+                    , commandStdoutArtifact = Nothing
+                    , commandStderrArtifact = Nothing
                     , commandTimedOut = False
                     , commandCancelled = False
                     }
@@ -87,6 +93,8 @@ spec = describe "Agent.Tools.IO" do
                 { commandExitCode = Nothing
                 , commandStdout = ""
                 , commandStderr = ""
+                , commandStdoutArtifact = Nothing
+                , commandStderrArtifact = Nothing
                 , commandTimedOut = False
                 , commandCancelled = False
                 }
@@ -301,6 +309,9 @@ spec = describe "Agent.Tools.IO" do
     it "caps foreground output" do
         withTempDir checkForegroundOutputCap
 
+    it "preserves oversized foreground output in an artifact" do
+        withTempDir checkForegroundOutputArtifact
+
     it "collects both output streams from a background shell command" do
         withTempDir checkBackgroundOutput
 
@@ -325,6 +336,9 @@ spec = describe "Agent.Tools.IO" do
 
     it "caps live and final background output" do
         withTempDir checkBackgroundOutputCap
+
+    it "preserves oversized completed background output in an artifact" do
+        withTempDir checkBackgroundOutputArtifact
 
 waitForSnapshot :: IORef [Text.Text] -> (Text.Text -> Bool) -> Int -> IO Bool
 waitForSnapshot _ _ 0 = pure False
@@ -360,6 +374,38 @@ checkForegroundOutputCap dir = do
     result <- runShellCommand env osDir "yes x | head -c 262144" 5000
     Text.length result.commandStdout `shouldSatisfy` (< 128)
     result.commandStdout `shouldSatisfy` Text.isInfixOf "[truncated"
+
+checkBackgroundOutputArtifact dir = do
+    let osDir = fromFilePath dir
+    base <- defaultToolEnv osDir
+    setToolSessionTmp base (Just osDir)
+    let env = base { toolStdoutCap = 64 }
+    Right running <-
+        startShellCommand env osDir "yes z | head -c 131072"
+    result <- readMVar running.runningResult
+    case result.commandStdoutArtifact of
+        Nothing -> expectationFailure "expected stdout artifact"
+        Just artifact -> do
+            artifact.artifactObservedBytes `shouldBe` 131072
+            readOutputArtifact env artifact.artifactHandle >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right output -> Text.length output `shouldBe` 131072
+
+checkForegroundOutputArtifact dir = do
+    let osDir = fromFilePath dir
+    base <- defaultToolEnv osDir
+    setToolSessionTmp base (Just osDir)
+    let env = base { toolStdoutCap = 64 }
+    result <- runShellCommand env osDir "yes x | head -c 262144" 5000
+    result.commandStdoutArtifact `shouldSatisfy` maybe False (const True)
+    case result.commandStdoutArtifact of
+        Nothing -> expectationFailure "expected stdout artifact"
+        Just artifact -> do
+            artifact.artifactObservedBytes `shouldBe` 262144
+            artifact.artifactTruncated `shouldBe` False
+            readOutputArtifact env artifact.artifactHandle >>= \case
+                Left err -> expectationFailure (Text.unpack err)
+                Right output -> Text.length output `shouldBe` 262144
 
 checkBackgroundOutput dir = do
     let osDir = fromFilePath dir

@@ -24,13 +24,20 @@ module Agent.CLI.AgentViewport
     , responseItemLines
     , responseItemPreviewLines
     , responseItemStepPreviews
+    , responseItemStepPreviewsRelative
     , responseItemsToUiState
+    , responseItemsToUiStateRelative
+    , agentStepsForStatusRelative
     , lookupAgentEntry
     , selectAgentTarget
     , selectedAgentEntry
     ) where
 
-import Agent.CLI.Render (summarizeToolCall)
+import Agent.CLI.Render (summarizeToolCallRelative)
+import Agent.CLI.AgentViewport.Status
+    ( agentStatusGlyph
+    , formatAgentStatus
+    )
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -39,6 +46,8 @@ import Agent.CLI.TextLayout
     , renderSplitPaneFrame
     )
 import Agent.Loop (LoopEvent(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -59,8 +68,6 @@ import Agent.TUI.Model
     , visibleTodoList
     )
 import Agent.TUI.Presentation (liveTodoPanelLines)
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef)
 import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
@@ -77,6 +84,7 @@ import System.IO (hFlush, hIsTerminalDevice, stderr, stdin)
 data AgentTarget
     = AgentRoot
     | AgentChild !SubagentId
+    | AgentNative !Text
     deriving (Eq, Ord, Show)
 
 data AgentStepState
@@ -110,29 +118,6 @@ data AgentEntry = AgentEntry
     , agentConversation :: !UiState
     }
     deriving (Eq, Show)
-
-formatAgentStatus :: SubagentStatus -> Text
-formatAgentStatus status = case status of
-    Pending -> "pending"
-    Running -> "running"
-    Completed _ -> "done"
-    Errored _ -> "error"
-    Interrupted -> "interrupted"
-    Closed -> "closed"
-    NotFound -> "missing"
-
-agentStatusGlyph :: Text -> Text
-agentStatusGlyph status = case Text.toLower status of
-    "active" -> "●"
-    "running" -> "●"
-    "ready" -> "○"
-    "pending" -> "○"
-    "done" -> "✓"
-    "error" -> "✕"
-    "interrupted" -> "■"
-    "closed" -> "×"
-    "missing" -> "?"
-    _ -> "·"
 
 data AgentViewportEnv = AgentViewportEnv
     { viewportSelected :: !(IORef AgentTarget)
@@ -351,8 +336,13 @@ responseItemLines = concatMap responseItemLineList
 -- and tool blocks without maintaining a second presentation model.
 responseItemsToUiState :: Bool -> [ResponseItem] -> UiState
 responseItemsToUiState showRawReasoning =
+    responseItemsToUiStateRelative showRawReasoning ""
+
+responseItemsToUiStateRelative :: Bool -> Text -> [ResponseItem] -> UiState
+responseItemsToUiStateRelative showRawReasoning workspace =
     normalizeTranscriptUi
-        . foldl' (appendResponseItem showRawReasoning) initialUiState
+        . foldl' (appendResponseItem showRawReasoning)
+            initialUiState { uiWorkspaceRoot = workspace }
 
 -- | Keep a compact agent preview: the first line for picker context plus
 -- only the most recent logical lines for the live pane. Earlier response
@@ -383,7 +373,10 @@ responseItemPreviewLines count items
 -- folded into their originating calls so the preview shows one semantic step
 -- instead of adjacent @tool: name@ / @tool: completed@ rows.
 responseItemStepPreviews :: Int -> [ResponseItem] -> [AgentStep]
-responseItemStepPreviews count items
+responseItemStepPreviews = responseItemStepPreviewsRelative ""
+
+responseItemStepPreviewsRelative :: Text -> Int -> [ResponseItem] -> [AgentStep]
+responseItemStepPreviewsRelative workspace count items
     | count <= 0 = []
     | otherwise = go count Map.empty (reverse items)
   where
@@ -413,7 +406,8 @@ responseItemStepPreviews count items
                         AgentStep
                             { agentStepState = state
                             , agentStepTitle =
-                                summarizeToolCall
+                                summarizeToolCallRelative
+                                    workspace
                                     (functionToolCall
                                         call.callId
                                         call.name
@@ -434,7 +428,8 @@ responseItemStepPreviews count items
                         AgentStep
                             { agentStepState = state
                             , agentStepTitle =
-                                summarizeToolCall
+                                summarizeToolCallRelative
+                                    workspace
                                     (customToolCall
                                         call.callId
                                         call.name
@@ -498,7 +493,15 @@ agentStepsForStatus
     -> SubagentStatus
     -> [ResponseItem]
     -> [AgentStep]
-agentStepsForStatus count status items
+agentStepsForStatus = agentStepsForStatusRelative ""
+
+agentStepsForStatusRelative
+    :: Text
+    -> Int
+    -> SubagentStatus
+    -> [ResponseItem]
+    -> [AgentStep]
+agentStepsForStatusRelative workspace count status items
     | count <= 0 = []
     | otherwise = take count $ case status of
         Pending ->
@@ -533,7 +536,7 @@ agentStepsForStatus count status items
         NotFound ->
             AgentStep AgentStepFailed "Agent unavailable" Nothing : settled
   where
-    recent = responseItemStepPreviews count items
+    recent = responseItemStepPreviewsRelative workspace count items
     settled = map settleStep recent
 
     settleStep step
@@ -789,13 +792,14 @@ agentMessagePlainText message =
             _ -> []
         ]
 
-renderToolOutputValue :: Aeson.Value -> Text
-renderToolOutputValue = \case
-    Aeson.String text -> text
-    Aeson.Null -> ""
-    value ->
-        TextEncoding.decodeUtf8 $
-            LBS.toStrict (Aeson.encode value)
+renderToolOutputValue :: RawJson -> Text
+renderToolOutputValue value =
+    case Hermes.decodeEither
+            (Hermes.nullable Hermes.text)
+            (rawJsonBytes value) of
+        Right (Just text) -> text
+        Right Nothing -> ""
+        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)
 
 normalizeTranscriptUi :: UiState -> UiState
 normalizeTranscriptUi state =

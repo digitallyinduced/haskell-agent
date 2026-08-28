@@ -4,12 +4,19 @@
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
 
+-- These database statements are dominated by decoding and IO; optimizing the
+-- generated expression trees adds substantially more build cost than value.
+{-# OPTIONS_GHC -O0 #-}
+
 -- | PostgreSQL session read operations.
 module Agent.Store.Postgres.Session.Read
-    ( loadSession
+    ( SessionReadImplementation(..)
+    , loadSession
+    , loadSessionWithImplementation
     , loadSessions
     , loadSessionMetadata
     , loadActiveSession
+    , loadActiveSessionWithImplementation
     , loadRecentSessionTurns
     , loadSessionTurnsBefore
     , loadSessionTurnsAfter
@@ -38,15 +45,33 @@ import Agent.Store.Postgres.Connection
     )
 import Agent.Store.Postgres.Hasql (mkStatement)
 import Agent.Store.Postgres.Session.Types
-import Agent.Store.Postgres.SessionItem (loadResponseItems)
+import Agent.Store.Postgres.SessionItem
+    ( loadResponseItems
+    , loadResponseItemsPerItem
+    )
 import Agent.Store.Types (StoreError(..))
+
+-- | Select the response-item read implementation. Normal callers should use
+-- 'AdaptiveSessionRead'; 'PerItemSessionRead' remains available so allocation
+-- benchmarks can execute the implementation being replaced.
+data SessionReadImplementation
+    = AdaptiveSessionRead
+    | PerItemSessionRead
+    deriving (Eq, Show)
 
 loadSession
     :: StorePool
     -> Text
     -> IO (Either StoreError (Maybe StoredSession))
-loadSession pool sessionKey =
-    loadSessions pool [sessionKey] >>= \case
+loadSession = loadSessionWithImplementation AdaptiveSessionRead
+
+loadSessionWithImplementation
+    :: SessionReadImplementation
+    -> StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe StoredSession))
+loadSessionWithImplementation implementation pool sessionKey =
+    loadSessionsWithImplementation implementation pool [sessionKey] >>= \case
         [result] -> pure result
         _ -> pure (Left (StoreDataError "batched session load returned no result"))
 
@@ -59,8 +84,15 @@ loadSessions
     :: StorePool
     -> [Text]
     -> IO [Either StoreError (Maybe StoredSession)]
-loadSessions _ [] = pure []
-loadSessions pool sessionKeys =
+loadSessions = loadSessionsWithImplementation AdaptiveSessionRead
+
+loadSessionsWithImplementation
+    :: SessionReadImplementation
+    -> StorePool
+    -> [Text]
+    -> IO [Either StoreError (Maybe StoredSession)]
+loadSessionsWithImplementation _ _ [] = pure []
+loadSessionsWithImplementation implementation pool sessionKeys =
     withSession pool
         (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
             metadata <- Transaction.statement
@@ -69,7 +101,8 @@ loadSessions pool sessionKeys =
             rows <- Transaction.statement sessionKeys loadTurnsManyStatement
             turns <- Vector.mapM
                 (\(sessionKey, row) ->
-                    fmap ((,) sessionKey) (loadStoredTurn row))
+                    fmap ((,) sessionKey)
+                        (loadStoredTurnWith implementation row))
                 rows
             pure (assembleSessions sessionKeys metadata turns))
         >>= \case
@@ -125,7 +158,15 @@ loadActiveSession
     :: StorePool
     -> Text
     -> IO (Either StoreError (Maybe StoredSession))
-loadActiveSession pool sessionKey =
+loadActiveSession =
+    loadActiveSessionWithImplementation AdaptiveSessionRead
+
+loadActiveSessionWithImplementation
+    :: SessionReadImplementation
+    -> StorePool
+    -> Text
+    -> IO (Either StoreError (Maybe StoredSession))
+loadActiveSessionWithImplementation implementation pool sessionKey =
     withSession pool
         (Transactions.transaction Transactions.RepeatableRead Transactions.Read do
             metadata <- Transaction.statement sessionKey loadMetadataStatement
@@ -133,7 +174,9 @@ loadActiveSession pool sessionKey =
                 Nothing -> pure (Right Nothing)
                 Just value -> do
                     rows <- Transaction.statement sessionKey loadActiveTurnsStatement
-                    turns <- Vector.mapM loadStoredTurn rows
+                    turns <- Vector.mapM
+                        (loadStoredTurnWith implementation)
+                        rows
                     pure do
                         decodedTurns <- sequence turns
                         pure $ Just StoredSession
@@ -194,6 +237,8 @@ loadSessionResumeStats pool sessionKey =
 data PageMode = PageRecent | PageBefore | PageAfter
     deriving (Eq, Show)
 
+-- | Load a visual history page. Compaction replacements stay in the
+-- scrollback; only an explicit reset starts a new display generation.
 loadTurnPage
     :: StorePool
     -> Text
@@ -210,7 +255,7 @@ loadTurnPage pool sessionKey loadRows limit mode =
                 Just _ -> do
                     rows0 <- loadRows
                     (generationStart, total) <-
-                        Transaction.statement sessionKey currentGenerationStatement
+                        Transaction.statement sessionKey displayHistoryBoundsStatement
                     let visibleRows = case mode of
                             PageRecent -> Vector.reverse (Vector.take limit rows0)
                             PageBefore -> Vector.reverse (Vector.take limit rows0)
@@ -287,8 +332,16 @@ data TurnRow = TurnRow
     }
 
 loadStoredTurn :: TurnRow -> Transaction.Transaction (Either Text StoredTurn)
-loadStoredTurn row = do
-    items <- loadResponseItems row.turnRowId
+loadStoredTurn = loadStoredTurnWith AdaptiveSessionRead
+
+loadStoredTurnWith
+    :: SessionReadImplementation
+    -> TurnRow
+    -> Transaction.Transaction (Either Text StoredTurn)
+loadStoredTurnWith implementation row = do
+    items <- case implementation of
+        AdaptiveSessionRead -> loadResponseItems row.turnRowId
+        PerItemSessionRead -> loadResponseItemsPerItem row.turnRowId
     pure do
         decodedItems <- items
         effect <- decodeTranscriptEffect row.turnRowEffect
@@ -420,14 +473,9 @@ loadRecentTurnsStatement
 loadRecentTurnsStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
-           \ AND t.turn_index >= COALESCE((\
-           \   SELECT checkpoint.turn_index\
-           \   FROM harness.session_turns checkpoint\
-           \   WHERE checkpoint.session_id = s.session_id\
-           \     AND checkpoint.transcript_effect <> 'append'\
-           \   ORDER BY checkpoint.turn_index DESC\
-           \   LIMIT 1\
-           \ ), 0)\
+           \ AND t.turn_index >= "
+        <> displayHistoryStartSql
+        <> "\
            \ ORDER BY t.turn_index DESC\
            \ LIMIT $2")
     ( (fst >$< Encoders.param (Encoders.nonNullable Encoders.text))
@@ -442,14 +490,9 @@ loadTurnsBeforeStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
            \ AND t.turn_index < $2\
-           \ AND t.turn_index >= COALESCE((\
-           \   SELECT checkpoint.turn_index\
-           \   FROM harness.session_turns checkpoint\
-           \   WHERE checkpoint.session_id = s.session_id\
-           \     AND checkpoint.transcript_effect <> 'append'\
-           \   ORDER BY checkpoint.turn_index DESC\
-           \   LIMIT 1\
-           \ ), 0)\
+           \ AND t.turn_index >= "
+        <> displayHistoryStartSql
+        <> "\
            \ ORDER BY t.turn_index DESC\
            \ LIMIT $3")
     ( ((\(value, _, _) -> value)
@@ -468,14 +511,9 @@ loadTurnsAfterStatement = mkStatement
     (turnSelectSql
         <> " WHERE s.session_key = $1\
            \ AND t.turn_index > $2\
-           \ AND t.turn_index >= COALESCE((\
-           \   SELECT checkpoint.turn_index\
-           \   FROM harness.session_turns checkpoint\
-           \   WHERE checkpoint.session_id = s.session_id\
-           \     AND checkpoint.transcript_effect <> 'append'\
-           \   ORDER BY checkpoint.turn_index DESC\
-           \   LIMIT 1\
-           \ ), 0)\
+           \ AND t.turn_index >= "
+        <> displayHistoryStartSql
+        <> "\
            \ ORDER BY t.turn_index ASC\
            \ LIMIT $3")
     ( ((\(value, _, _) -> value)
@@ -488,8 +526,23 @@ loadTurnsAfterStatement = mkStatement
     (Decoders.rowVector turnRowDecoder)
     True
 
-currentGenerationStatement :: Statement Text (Int64, Int64)
-currentGenerationStatement = mkStatement
+-- | Visual history continues across compaction replacements. Only an explicit
+-- reset (@/clear@, @/new@) hides earlier turns from scrollback. Model resume
+-- context still clips at the latest replace-or-reset via
+-- 'loadActiveTurnsStatement'.
+displayHistoryStartSql :: Text
+displayHistoryStartSql =
+    "COALESCE((\
+    \   SELECT checkpoint.turn_index\
+    \   FROM harness.session_turns checkpoint\
+    \   WHERE checkpoint.session_id = s.session_id\
+    \     AND checkpoint.transcript_effect = 'reset'\
+    \   ORDER BY checkpoint.turn_index DESC\
+    \   LIMIT 1\
+    \ ), 0)"
+
+displayHistoryBoundsStatement :: Statement Text (Int64, Int64)
+displayHistoryBoundsStatement = mkStatement
     "WITH target AS (\
     \ SELECT session_id\
     \ FROM harness.sessions\
@@ -499,7 +552,7 @@ currentGenerationStatement = mkStatement
     \   SELECT t.turn_index\
     \   FROM harness.session_turns t\
     \   JOIN target ON target.session_id = t.session_id\
-    \   WHERE t.transcript_effect <> 'append'\
+    \   WHERE t.transcript_effect = 'reset'\
     \   ORDER BY t.turn_index DESC\
     \   LIMIT 1\
     \ ), 0) AS start_index\

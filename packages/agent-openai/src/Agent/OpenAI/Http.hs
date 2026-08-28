@@ -2,12 +2,16 @@ module Agent.OpenAI.Http
     ( postCodexJson
     , decodeCodexHttpBody
     , decodeCodexHttpBodyWithModel
+    , decodeCodexHttpBodyBytes
+    , decodeCodexHttpBodyBytesWithModel
     , rejectFailedCodexResponse
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Error (mkOpenAIError)
-import Agent.Responses.SSE (parseSseEvents)
+import Agent.Responses.Codec (decodeResponse)
+import Agent.Responses.SSE (parseSseEventsBytes)
 import Agent.Responses.LoopBackend (hasRecoverableIncompleteOutput)
 import Agent.Responses.StreamAssembly
     ( ResponseFailure(..)
@@ -19,8 +23,8 @@ import Agent.Responses.StreamAssembly
 import qualified Agent.Responses.Types as OpenAI
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BS8
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -106,31 +110,44 @@ decodeCodexHttpBodyWithModel
     :: Maybe Text
     -> Text
     -> Either ApiError OpenAI.Response
-decodeCodexHttpBodyWithModel modelHint bodyText
-    | looksLikeSse bodyText = do
-        events <- parseSseEvents bodyText
+decodeCodexHttpBodyWithModel modelHint =
+    decodeCodexHttpBodyBytesWithModel modelHint . Text.encodeUtf8
+
+-- | Decode a complete buffered Codex response from its original wire bytes.
+decodeCodexHttpBodyBytes :: BS.ByteString -> Either ApiError OpenAI.Response
+decodeCodexHttpBodyBytes = decodeCodexHttpBodyBytesWithModel Nothing
+
+-- | Decode a complete buffered Codex response from its original wire bytes
+-- while retaining the request model for incomplete response fragments.
+decodeCodexHttpBodyBytesWithModel
+    :: Maybe Text
+    -> BS.ByteString
+    -> Either ApiError OpenAI.Response
+decodeCodexHttpBodyBytesWithModel modelHint bodyBytes
+    | looksLikeSseBytes bodyBytes = do
+        events <- parseSseEventsBytes bodyBytes
         response <- buildStreamResponseWithModel streamConfig modelHint events
         rejectFailedCodexResponse response
     | otherwise =
-        case decodeJsonResponseBody bodyText of
-            Just jsonValue -> decodeResponseValue jsonValue bodyText
-            Nothing -> Left (JsonDecodeError
-                "Invalid Codex Responses body"
-                (Text.take 2000 bodyText))
+        decodeJsonResponseBodyBytes bodyBytes
 
-decodeJsonResponseBody :: Text -> Maybe Aeson.Value
-decodeJsonResponseBody bodyText =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 (Text.strip bodyText)) of
-        Right (Aeson.Object object)
-            | Just inner <- KeyMap.lookup "response" object -> Just inner
-            | otherwise -> Just (Aeson.Object object)
-        _ -> Nothing
+decodeJsonResponseBodyBytes
+    :: BS.ByteString
+    -> Either ApiError OpenAI.Response
+decodeJsonResponseBodyBytes bodyBytes =
+    case decodeResponse bodyBytes of
+        Right response -> rejectFailedCodexResponse response
+        Left directError ->
+            case Json.decodeEither wrappedResponseDecoder bodyBytes of
+                Right response -> rejectFailedCodexResponse response
+                Left _ -> Left
+                    (JsonDecodeError
+                        (Text.pack directError)
+                        (bodyPreview bodyBytes))
 
-decodeResponseValue :: Aeson.Value -> Text -> Either ApiError OpenAI.Response
-decodeResponseValue jsonValue bodyText =
-    case Aeson.fromJSON jsonValue of
-        Aeson.Success response -> rejectFailedCodexResponse response
-        Aeson.Error err -> Left (JsonDecodeError (Text.pack err) (Text.take 2000 bodyText))
+wrappedResponseDecoder :: Json.Decoder OpenAI.Response
+wrappedResponseDecoder =
+    Json.object (Json.atKey "response" OpenAI.responseDecoder)
 
 -- | The Responses endpoint can return HTTP 200 with a terminal
 -- @status: "failed"@ payload. Normalize that wire shape into the same typed
@@ -191,10 +208,14 @@ terminalResponseError response =
                 (failedResponseMessage response)
                 Nothing
 
-looksLikeSse :: Text -> Bool
-looksLikeSse bodyText =
+looksLikeSseBytes :: BS.ByteString -> Bool
+looksLikeSseBytes bodyBytes =
     any
         (\line ->
-            Text.isPrefixOf "event:" line
-                || Text.isPrefixOf "data:" line)
-        (Text.lines bodyText)
+            "event:" `BS.isPrefixOf` line
+                || "data:" `BS.isPrefixOf` line)
+        (BS8.lines bodyBytes)
+
+bodyPreview :: BS.ByteString -> Text
+bodyPreview =
+    Text.take 2000 . Text.decodeUtf8Lenient

@@ -11,14 +11,7 @@ module Agent.Codex.Dialect.Tools
     ) where
 
 import Agent.OsPath (fromText)
-import Agent.ToolArgs
-    ( extractMaybeText
-    , objectArgs
-    , optIntOrString
-    , optText
-    , reqInt
-    , reqText
-    )
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -27,8 +20,10 @@ import Agent.ToolDispatch
     ( StreamedTool(..)
     , StreamedToolFactory
     , ToolCall(..)
+    , ToolCallKind(..)
     , ToolInput(..)
-    , toolArgumentsValue
+    , decodeToolArguments
+    , textTool
     , typedStreamingTool
     , typedTool
     )
@@ -62,6 +57,7 @@ import Agent.Tools.FileSystem.ListDir (listDirTool)
 import Agent.Tools.FileSystem.ReadFile (readFileTool)
 import Agent.Tools.IO
     ( CommandResult(..)
+    , commandResultArtifacts
     , resolveUnderCwd
     , runShellCommandStreaming
     )
@@ -88,17 +84,14 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     , jsonTool
     , withToolArgumentInterpreter
-    , withTypedResourceClaims
+    , withToolResourceClaims
     )
-import Control.Applicative ((<|>))
 import Data.Acquire (mkAcquire)
-import Data.Aeson (FromJSON(..), Value(..), withObject)
-import qualified Data.Map.Strict as Map
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (parseFail)
 import Data.Maybe (fromMaybe)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Read as Text
 import System.OsPath (unsafeEncodeUtf)
 
 codexTools
@@ -135,16 +128,17 @@ data ShellCommandArgs = ShellCommandArgs
     , yieldTimeMs :: Maybe Int
     }
 
-instance FromJSON ShellCommandArgs where
-    parseJSON = objectArgs \object -> ShellCommandArgs
-        <$> reqText object "command"
-        <*> optText object "workdir"
-        <*> optIntOrString object "timeout_ms"
-        <*> optIntOrString object "yield_time_ms"
+shellCommandArgsDecoder :: Json.Decoder ShellCommandArgs
+shellCommandArgsDecoder = Json.object $
+    ShellCommandArgs
+        <$> Json.atKey "command" Json.text
+        <*> optionalText "workdir"
+        <*> optionalIntOrString "timeout_ms"
+        <*> optionalIntOrString "yield_time_ms"
 
 shellCommandTool :: ToolEnv -> CodexShellSession -> AppTool
 shellCommandTool env session =
-    withTypedResourceClaims (shellCommandResourceClaims env) $
+    withToolResourceClaims (shellCommandResourceClaims env) $
     jsonTool "shell_command" shellDescription
     [ PropertySchema "command" PropertyString True $ Just
         "Shell script to run in the user's default shell."
@@ -157,26 +151,29 @@ shellCommandTool env session =
     ]
     False
     TurnSequential
-    (typedStreamingTool "shell_command" (runShell env session))
+    (typedStreamingTool "shell_command" shellCommandArgsDecoder (runShell env session))
 
 shellCommandResourceClaims
     :: ToolEnv
-    -> ShellCommandArgs
+    -> ToolCall
     -> IO (Either Text [ToolResourceClaim])
-shellCommandResourceClaims env args
-    | args.yieldTimeMs /= Nothing =
-        pure (Left "yielding shell commands remain exclusive")
-    | not (shellCommandIsReadOnly args.command) =
-        pure (Left "shell command is not in the read-only allowlist")
-    | otherwise = do
-        let requested = maybe env.toolCwd fromText args.workdir
-        resolveUnderCwd env requested
-            >>= pure . fmap
-                (\_ ->
-                    [ ToolResourceClaim
-                        ToolRead
-                        ToolAllPaths
-                    ])
+shellCommandResourceClaims env call =
+    case decodeToolArguments shellCommandArgsDecoder call.arguments of
+        Left err -> pure (Left err)
+        Right args
+            | args.yieldTimeMs /= Nothing ->
+                pure (Left "yielding shell commands remain exclusive")
+            | not (shellCommandIsReadOnly args.command) ->
+                pure (Left "shell command is not in the read-only allowlist")
+            | otherwise -> do
+                let requested = maybe env.toolCwd fromText args.workdir
+                resolveUnderCwd env requested
+                    >>= pure . fmap
+                        (\_ ->
+                            [ ToolResourceClaim
+                                ToolRead
+                                ToolAllPaths
+                            ])
 
 shellDescription :: Text
 shellDescription =
@@ -232,15 +229,16 @@ data WriteStdinArgs = WriteStdinArgs
     , yieldTimeMs :: Maybe Int
     }
 
-instance FromJSON WriteStdinArgs where
-    parseJSON = objectArgs \object -> WriteStdinArgs
-        <$> reqInt object "session_id"
-        <*> optText object "chars"
-        <*> optIntOrString object "yield_time_ms"
+writeStdinArgsDecoder :: Json.Decoder WriteStdinArgs
+writeStdinArgsDecoder = Json.object $
+    WriteStdinArgs
+        <$> Json.atKey "session_id" Json.int
+        <*> optionalText "chars"
+        <*> optionalIntOrString "yield_time_ms"
 
 writeStdinTool :: CodexShellSession -> AppTool
 writeStdinTool session =
-    withTypedResourceClaims writeStdinResourceClaims $
+    withToolResourceClaims writeStdinResourceClaims $
     jsonAppToolWithExecution "write_stdin" writeStdinDescription
         [ PropertySchema "session_id" PropertyInteger True $ Just
             "Identifier returned by shell_command for a running command."
@@ -251,17 +249,19 @@ writeStdinTool session =
         ]
         (ClassifyReadOnly writeStdinIsReadOnly)
         TurnSequential
-        (typedTool "write_stdin" (runWriteStdin session))
+        (typedTool "write_stdin" writeStdinArgsDecoder (runWriteStdin session))
 
 writeStdinResourceClaims
-    :: WriteStdinArgs
+    :: ToolCall
     -> IO (Either Text [ToolResourceClaim])
-writeStdinResourceClaims args =
-    pure $ Right
-        [ ToolResourceClaim ToolWrite $
-            ToolNamedResource
-                ("shell-session:" <> Text.pack (show args.sessionId))
-        ]
+writeStdinResourceClaims call =
+    pure $ do
+        args <- decodeToolArguments writeStdinArgsDecoder call.arguments
+        Right
+            [ ToolResourceClaim ToolWrite $
+                ToolNamedResource
+                    ("shell-session:" <> Text.pack (show args.sessionId))
+            ]
 
 writeStdinDescription :: Text
 writeStdinDescription =
@@ -269,8 +269,9 @@ writeStdinDescription =
 
 writeStdinIsReadOnly :: ToolCall -> IO Bool
 writeStdinIsReadOnly call =
-    pure $ maybe True Text.null $
-        extractMaybeText (toolArgumentsValue call.arguments) "chars"
+    pure $ case decodeToolArguments writeStdinArgsDecoder call.arguments of
+        Right args -> maybe True Text.null args.chars
+        Left _ -> True
 
 runWriteStdin
     :: CodexShellSession
@@ -297,7 +298,12 @@ renderShellResult = \case
 
 renderFinished :: CommandResult -> Text
 renderFinished result =
-    let body = commandBody result.commandStdout result.commandStderr
+    let output = commandBody result.commandStdout result.commandStderr
+        artifacts = commandResultArtifacts result
+        body
+            | Text.null output = artifacts
+            | Text.null artifacts = output
+            | otherwise = output <> "\n" <> artifacts
     in if result.commandCancelled
         then "Error: Command cancelled\n" <> body
         else if result.commandTimedOut
@@ -317,32 +323,81 @@ commandBody out err
 -- apply_patch
 --------------------------------------------------------------------------------
 
-newtype ApplyPatchArgs = ApplyPatchArgs { patch :: Text }
-
-instance FromJSON ApplyPatchArgs where
-    parseJSON (String text) = pure (ApplyPatchArgs text)
-    parseJSON (Object object) =
-        ApplyPatchArgs <$> (reqText object "input" <|> reqText object "patch" <|> reqText object "command")
-    parseJSON _ = parseFail "apply_patch expects freeform patch text"
+applyPatchArgsDecoder :: Json.Decoder Text
+applyPatchArgsDecoder = Json.withType \case
+    Json.VString -> Json.text
+    Json.VObject -> Json.object $
+        firstPresentText ["input", "patch", "command"]
+    _ -> fail "apply_patch expects freeform patch text"
 
 applyPatchTool :: ToolEnv -> AppTool
 applyPatchTool env =
     withToolArgumentInterpreter (applyPatchInterpreter env) $
-    withTypedResourceClaims (applyPatchResourceClaims env) $
+    withToolResourceClaims (applyPatchResourceClaims env) $
     freeformApplyPatchAppToolWithExecution
         "apply_patch" applyPatchDescription AlwaysPrompt TurnSequential
-        (typedTool "apply_patch" (runApplyPatch env))
+        (textTool "apply_patch" (applyPatchWithContents env Map.empty))
+
+applyPatchInterpreter :: ToolEnv -> StreamedToolFactory
+applyPatchInterpreter env =
+    streamedApplyPatch env
+        <$> mkAcquire (newFilePrefetch env) closeFilePrefetch
+
+streamedApplyPatch :: ToolEnv -> FilePrefetch -> StreamedTool
+streamedApplyPatch env prefetch =
+    StreamedTool
+        { streamedStart = pure emptyFileCallState
+        , streamedInterpret = interpretApplyPatch prefetch
+        , streamedConsume = \_call _emit patch state ->
+            consumeApplyPatch env prefetch patch state
+        , streamedClose = closeFileCall prefetch
+        }
+
+interpretApplyPatch
+    :: FilePrefetch
+    -> FileCallState
+    -> ToolInput
+    -> IO (Either (Text, FileCallState) FileCallState)
+interpretApplyPatch prefetch state = \case
+    ToolPrefix text ->
+        Right <$> refreshFileCall prefetch state text (streamingPatchReadTarget text)
+    ToolDone text -> do
+        next <- refreshFileCall prefetch state text (streamingPatchReadTarget text)
+        pure (Left (text, next))
+
+consumeApplyPatch
+    :: ToolEnv
+    -> FilePrefetch
+    -> Text
+    -> FileCallState
+    -> IO (Either Text Text)
+consumeApplyPatch env prefetch patch state = do
+    overlay <-
+        case streamingPatchReadTarget patch of
+            Just (PathComplete target) ->
+                consumePrefetchedFile prefetch target state >>= \case
+                    Just (path, contents) ->
+                        pure (Map.singleton path contents)
+                    Nothing ->
+                        pure Map.empty
+            _ -> do
+                closeFileCall prefetch state
+                pure Map.empty
+    applyPatchWithContents env overlay patch
 
 applyPatchResourceClaims
     :: ToolEnv
-    -> ApplyPatchArgs
+    -> ToolCall
     -> IO (Either Text [ToolResourceClaim])
-applyPatchResourceClaims env args =
-    case parsePatch args.patch of
+applyPatchResourceClaims env call =
+    case decodeApplyPatchArguments call of
         Left err -> pure (Left err)
-        Right hunks -> do
-            claims <- traverse (claimsForHunk env) hunks
-            pure (concat <$> sequence claims)
+        Right patch ->
+            case parsePatch patch of
+                Left err -> pure (Left err)
+                Right hunks -> do
+                    claims <- traverse (claimsForHunk env) hunks
+                    pure (concat <$> sequence claims)
 
 claimsForHunk
     :: ToolEnv
@@ -380,56 +435,10 @@ applyPatchDescription =
     \*** Delete File: path\n\
     \*** End Patch"
 
-runApplyPatch :: ToolEnv -> ApplyPatchArgs -> IO (Either Text Text)
-runApplyPatch env args = applyPatchWithContents env Map.empty args.patch
-
-applyPatchInterpreter :: ToolEnv -> StreamedToolFactory
-applyPatchInterpreter env =
-    streamedApplyPatch env
-        <$> mkAcquire (newFilePrefetch env) closeFilePrefetch
-
-streamedApplyPatch :: ToolEnv -> FilePrefetch -> StreamedTool
-streamedApplyPatch env prefetch =
-    StreamedTool
-        { streamedStart = pure emptyFileCallState
-        , streamedInterpret = interpretApplyPatch prefetch
-        , streamedConsume = \_call _emit args state ->
-            consumeApplyPatch env prefetch args state
-        , streamedClose = closeFileCall prefetch
-        }
-
-interpretApplyPatch
-    :: FilePrefetch
-    -> FileCallState
-    -> ToolInput
-    -> IO (Either (ApplyPatchArgs, FileCallState) FileCallState)
-interpretApplyPatch prefetch state = \case
-    ToolPrefix text ->
-        Right <$> refreshFileCall prefetch state text (streamingPatchReadTarget text)
-    ToolDone text -> do
-        next <-
-            refreshFileCall prefetch state text (streamingPatchReadTarget text)
-        pure (Left (ApplyPatchArgs text, next))
-
-consumeApplyPatch
-    :: ToolEnv
-    -> FilePrefetch
-    -> ApplyPatchArgs
-    -> FileCallState
-    -> IO (Either Text Text)
-consumeApplyPatch env prefetch args state = do
-    overlay <-
-        case streamingPatchReadTarget args.patch of
-            Just (PathComplete target) ->
-                consumePrefetchedFile prefetch target state >>= \case
-                    Just (path, contents) ->
-                        pure (Map.singleton path contents)
-                    Nothing ->
-                        pure Map.empty
-            _ -> do
-                closeFileCall prefetch state
-                pure Map.empty
-    applyPatchWithContents env overlay args.patch
+decodeApplyPatchArguments :: ToolCall -> Either Text Text
+decodeApplyPatchArguments call = case call.callKind of
+    CustomCallKind -> Right call.arguments
+    FunctionCallKind -> decodeToolArguments applyPatchArgsDecoder call.arguments
 
 --------------------------------------------------------------------------------
 -- update_plan
@@ -440,23 +449,22 @@ data PlanItem = PlanItem
     , status :: Text
     } deriving (Eq, Show)
 
-instance FromJSON PlanItem where
-    parseJSON = withObject "plan item" \object -> PlanItem
-        <$> reqText object "step"
-        <*> reqText object "status"
+planItemDecoder :: Json.Decoder PlanItem
+planItemDecoder = Json.object $
+    PlanItem
+        <$> Json.atKey "step" Json.text
+        <*> Json.atKey "status" Json.text
 
 data UpdatePlanArgs = UpdatePlanArgs
     { explanation :: Maybe Text
     , plan :: [PlanItem]
     }
 
-instance FromJSON UpdatePlanArgs where
-    parseJSON = withObject "update_plan" \object -> do
-        explanation <- optText object "explanation"
-        plan <- case KeyMap.lookup "plan" object of
-            Nothing -> parseFail "Missing parameter: plan"
-            Just value -> parseJSON value
-        pure UpdatePlanArgs { explanation, plan }
+updatePlanArgsDecoder :: Json.Decoder UpdatePlanArgs
+updatePlanArgsDecoder = Json.object $
+    UpdatePlanArgs
+        <$> optionalText "explanation"
+        <*> Json.atKey "plan" (Json.list planItemDecoder)
 
 updatePlanTool :: PlanModeEnv -> AppTool
 updatePlanTool planMode = jsonTool "update_plan" updatePlanDescription
@@ -470,7 +478,7 @@ updatePlanTool planMode = jsonTool "update_plan" updatePlanDescription
     ]
     True
     TurnSequential
-    (typedTool "update_plan" (runUpdatePlan planMode))
+    (typedTool "update_plan" updatePlanArgsDecoder (runUpdatePlan planMode))
 
 updatePlanDescription :: Text
 updatePlanDescription =
@@ -503,3 +511,33 @@ runUpdatePlanBody args
   where
     renderItem :: PlanItem -> Text
     renderItem item = "- [" <> item.status <> "] " <> item.step
+
+optionalText :: Text -> Json.FieldsDecoder (Maybe Text)
+optionalText key =
+    fmap (>>= nonEmpty) $
+        Json.optionalKey key Json.text
+  where
+    nonEmpty value
+        | Text.null value = Nothing
+        | otherwise = Just value
+
+optionalIntOrString :: Text -> Json.FieldsDecoder (Maybe Int)
+optionalIntOrString key =
+    Json.optionalKey key intOrString
+
+intOrString :: Json.Decoder Int
+intOrString = Json.withType \case
+    Json.VNumber -> Json.int
+    Json.VString -> Json.withText \value ->
+        case Text.signed Text.decimal (Text.strip value) of
+            Right (number, rest)
+                | Text.null rest -> pure number
+            _ -> fail "expected integer"
+    _ -> fail "expected integer"
+
+firstPresentText :: [Text] -> Json.FieldsDecoder Text
+firstPresentText keys = do
+    values <- traverse (`Json.atKeyOptional` Json.text) keys
+    case [value | Just value <- values] of
+        value : _ -> pure value
+        [] -> fail "missing patch text"

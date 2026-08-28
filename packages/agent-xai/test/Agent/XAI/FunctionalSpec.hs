@@ -17,14 +17,13 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import Agent.Json (rawJsonFromEncoding)
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Environment (lookupEnv)
 import Test.Hspec
 
@@ -109,9 +108,10 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing
-            , output = Aeson.object ["echoed" Aeson..= ("grok functional tool ok" :: Text)]
+            , provider = Nothing
+            , output = rawJsonFromEncoding $ Aeson.toEncoding $
+                Aeson.String "grok functional tool ok"
             , status = Nothing
-            , extraFields = mempty
             }
         , userMessage "The tool ran. Reply with exactly: done"
         ]))
@@ -124,30 +124,28 @@ echoTool :: ResponseTool
 echoTool = FunctionToolValue FunctionTool
     { name = "echo_text"
     , description = Just "Echo the given text back to the caller."
-    , parameters = Just (Aeson.object
+    , parameters = Just $ rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
         [ "type" Aeson..= ("object" :: Text)
         , "properties" Aeson..= Aeson.object
             [ "text" Aeson..= Aeson.object [ "type" Aeson..= ("string" :: Text) ] ]
         , "required" Aeson..= [ "text" :: Text ]
         , "additionalProperties" Aeson..= False
-        ])
+        ]
     , strict = Just True
-    , extraFields = mempty
     }
 
 userMessage :: Text -> ResponseItem
 userMessage text = MessageItem ResponseMessage
     { messageId = Nothing
     , role = RoleUser
-    , content = MessageContentParts [InputTextPart text Nothing mempty]
+    , content = MessageContentParts [InputTextPart text Nothing]
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = mempty
     }
 
 lowReasoning :: ReasoningConfig
-lowReasoning = ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing mempty
+lowReasoning = ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing
 
 assistantText :: Response -> Maybe Text
 assistantText response = case
@@ -162,11 +160,10 @@ assistantText response = case
         values -> Just (Text.intercalate "\n" values)
 
 functionCallArgumentText :: Text -> Text -> Text
-functionCallArgumentText key arguments = case Aeson.decodeStrict' (Text.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
+functionCallArgumentText key arguments =
+    case Json.decodeText (Json.object (Json.atKey key Json.text)) arguments of
+        Right value -> value
+        Left _ -> ""
 
 --------------------------------------------------------------------------------
 -- Credential loading
@@ -194,23 +191,30 @@ loadGrokCredential = do
 
 -- | Accepts the auth.json map, one entry of it, or @{"access_token": ...}@.
 accessTokenFromAuthJson :: Text -> Maybe Text
-accessTokenFromAuthJson raw = do
-    value <- Aeson.decodeStrict (Text.encodeUtf8 raw)
-    entryToken value `orElse` firstNestedToken value
+accessTokenFromAuthJson raw =
+    either (const Nothing) id (Json.decodeText authObjectTokenDecoder raw)
   where
-    orElse (Just a) _ = Just a
-    orElse Nothing b = b
+    authObjectTokenDecoder =
+        chooseToken <$> Json.objectFold (Nothing, Nothing) decodeField
 
-    entryToken (Aeson.Object object) =
-        textField "key" object `orElse` textField "access_token" object
-    entryToken _ = Nothing
+    decodeField name (direct, nested)
+        | name == "key" || name == "access_token" = do
+            value <- maybeTextValue
+            pure (direct `orElse` nonEmpty value, nested)
+        | otherwise = do
+            value <- nestedTokenValue
+            pure (direct, nested `orElse` value)
 
-    firstNestedToken (Aeson.Object object) =
-        case [token | nested <- KeyMap.elems object, Just token <- [entryToken nested]] of
-            (token : _) -> Just token
-            [] -> Nothing
-    firstNestedToken _ = Nothing
+    maybeTextValue = Json.withType \case
+        Json.VString -> Just <$> Json.text
+        _ -> Json.withRawJsonByteString (const (pure Nothing))
 
-    textField name object = case KeyMap.lookup name object of
-        Just (Aeson.String value) | not (Text.null value) -> Just value
-        _ -> Nothing
+    nestedTokenValue = Json.withType \case
+        Json.VObject -> authObjectTokenDecoder
+        _ -> Json.withRawJsonByteString (const (pure Nothing))
+
+    chooseToken (direct, nested) = direct `orElse` nested
+    nonEmpty (Just value) | not (Text.null value) = Just value
+    nonEmpty _ = Nothing
+    Just value `orElse` _ = Just value
+    Nothing `orElse` fallback = fallback

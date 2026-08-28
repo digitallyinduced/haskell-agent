@@ -6,6 +6,7 @@ module Agent.CLI.TUI.Scroll
     , ConversationScrollGesture(..)
     , conversationScrollGesture
     , conversationAnchorSticky
+    , conversationFollowScroll
     , followConversationTail
     , reconcileConversationFollow
     , reflowConversationAnchor
@@ -44,19 +45,27 @@ data ConversationScrollGesture
 -- | Decide whether a requested scroll can move the conversation viewport.
 --
 -- Empty sessions intentionally render without a viewport, and a viewport at
--- its top cannot move farther up. Neither case should pause live following.
+-- its top cannot move farther up unless older persisted turns can still be
+-- loaded. The latter must pause live following so a just-requested page is
+-- not immediately scrolled back to the tail.
 conversationScrollGesture
-    :: Int
+    :: Bool
+    -- ^ Whether older persisted turns can still be loaded.
+    -> Int
     -- ^ Signed scroll amount.
     -> Maybe (Int, Int, Int)
     -- ^ Viewport top, viewport height, and content height.
     -> ConversationScrollGesture
-conversationScrollGesture amount viewport
+conversationScrollGesture olderAvailable amount viewport
     | amount == 0 = IgnoreConversationScroll
     | otherwise =
         case viewport of
             Nothing -> IgnoreConversationScroll
             Just (top, height, contentHeight)
+                | amount < 0
+                , top <= 0
+                , olderAvailable ->
+                    PauseAndScrollConversation
                 | amount < 0
                 , top <= 0 ->
                     IgnoreConversationScroll
@@ -80,6 +89,16 @@ reconcileConversationFollow storedFollow = \case
     Just (top, height, contentHeight) ->
         storedFollow
             || top + max 0 height >= max 0 contentHeight
+
+-- | Resolve the viewport after its content geometry may have changed. Live
+-- blocks can be replaced by a much shorter durable projection, and hidden-tab
+-- redraw suppression can defer that transition until focus returns. A
+-- following viewport must resolve the current tail; paused scrollback stays
+-- fixed.
+conversationFollowScroll :: Bool -> ConversationScroll
+conversationFollowScroll following
+    | following = ScrollConversationToEnd
+    | otherwise = KeepConversationPosition
 
 startConversationAnchor :: BlockId -> Text -> Int -> ConversationAnchor
 startConversationAnchor blockId text top = ConversationAnchor

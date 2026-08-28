@@ -1,15 +1,18 @@
 module Agent.GrokBuild.Dialect.Terminal (runTerminalCmdTool) where
 
-import Agent.ToolArgs (objectArgs, optBool, reqText)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
     , decodeToolArguments
-    , toolArgumentsValue
     , typedStreamingTool
     )
 import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
-import Agent.GrokBuild.Dialect.Common (jsonTool, optionalTimeout, stripAnsi)
+import Agent.GrokBuild.Dialect.Common (jsonTool, stripAnsi)
+import Agent.GrokBuild.Dialect.Json
+    ( optionalBool
+    , optionalIntOrString
+    )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -31,7 +34,6 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , withToolResourceClaims
     )
-import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -43,12 +45,13 @@ data TerminalArgs = TerminalArgs
     , background :: Bool
     }
 
-instance FromJSON TerminalArgs where
-    parseJSON = objectArgs \object -> TerminalArgs
-        <$> reqText object "command"
-        <*> optionalTimeout object
-        <*> reqText object "description"
-        <*> (fromMaybe False <$> optBool object "background")
+terminalArgsDecoder :: Json.Decoder TerminalArgs
+terminalArgsDecoder = Json.object $
+    TerminalArgs
+        <$> Json.atKey "command" Json.text
+        <*> optionalIntOrString "timeout"
+        <*> Json.atKey "description" Json.text
+        <*> (fromMaybe False <$> optionalBool "background")
 
 runTerminalCmdTool :: GrokSession -> AppTool
 runTerminalCmdTool session =
@@ -65,16 +68,14 @@ runTerminalCmdTool session =
     ]
     False
     TurnSequential
-    (typedStreamingTool "run_terminal_cmd" (runTerminal session))
+    (typedStreamingTool "run_terminal_cmd" terminalArgsDecoder (runTerminal session))
 
 terminalResourceClaims
     :: ToolCall
     -> IO (Either Text [ToolResourceClaim])
 terminalResourceClaims call =
     pure $ do
-        args <-
-            decodeToolArguments (toolArgumentsValue call.arguments)
-                :: Either Text TerminalArgs
+        args <- decodeToolArguments terminalArgsDecoder call.arguments
         if args.background
             then Left "background terminal commands remain exclusive"
             else if not (shellCommandIsReadOnly args.command)

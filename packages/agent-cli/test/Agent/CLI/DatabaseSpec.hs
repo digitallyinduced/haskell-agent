@@ -13,6 +13,7 @@ import Agent.Tools.Types
     ( appToolHandlers
     )
 import Agent.ToolDispatch (dispatchToolCall)
+import Agent.Json (rawJsonFromEncoding)
 import Control.Exception.Safe (displayException)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
@@ -29,7 +30,8 @@ spec = do
             let env = testEnv
                     { databaseRunQuery = \scope sql -> do
                         writeIORef seen (Just (scope, sql))
-                        pure (Right (object ["rows" .= [object ["title" .= ("test" :: Text)]]]))
+                        pure (Right (rawJsonFromEncoding (Aeson.toEncoding
+                            (object ["rows" .= [object ["title" .= ("test" :: Text)]]]))))
                     }
             result <- dispatchToolCall dispatchConfig
                 (appToolHandlers (databaseTools env))
@@ -65,17 +67,12 @@ spec = do
             let env = testEnv
                     { databaseSearchConversations = \query limit -> do
                         writeIORef seen (Just (query, limit))
-                        pure (Right (Aeson.toJSON
-                            [ object
-                                [ "session_id" .= ("session-1" :: Text)
-                                , "turn_index" .= (4 :: Int)
-                                , "occurred_at" .= ("2026-08-24T09:30:00Z" :: Text)
-                                , "user_text" .= ("How should we store this?" :: Text)
-                                , "assistant_text" .=
-                                    Just ("Use PostgreSQL.\nKeep scopes explicit." :: Text)
-                                , "rank" .= (0.8 :: Double)
-                                ]
-                            ]))
+                        pure (Right
+                            [ ConversationSearchMatch "session-1" 4
+                                (Just "2026-08-24T09:30:00Z")
+                                "How should we store this?"
+                                (Just "Use PostgreSQL.\nKeep scopes explicit.")
+                            ])
                     }
             result <- dispatchToolCall dispatchConfig
                 (appToolHandlers (databaseTools env))
@@ -96,7 +93,7 @@ spec = do
         it "renders an empty conversation search result as text" do
             let env = testEnv
                     { databaseSearchConversations = \_ _ ->
-                        pure (Right (Aeson.toJSON ([] :: [Aeson.Value])))
+                        pure (Right [])
                     }
             result <- dispatchToolCall dispatchConfig
                 (appToolHandlers (databaseTools env))
@@ -141,10 +138,11 @@ spec = do
 testEnv :: DatabaseToolsEnv
 testEnv = DatabaseToolsEnv
     { databaseDescribeScope = \_ -> pure (Right (object []))
-    , databaseRunQuery = \_ _ -> pure (Right (object []))
+    , databaseRunQuery = \_ _ ->
+        pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
     , databaseRunExecute = \_ _ _ -> pure (Right (object []))
     , databaseSearchConversations = \_ _ ->
-        pure (Right (Aeson.toJSON ([] :: [Aeson.Value])))
+        pure (Right [])
     }
 
 dispatchConfig :: ToolDispatchConfig
@@ -155,6 +153,7 @@ dispatchConfig = ToolDispatchConfig
         name <> ": " <> Text.pack (displayException exception)
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
     }
 
 shouldContainText :: Text -> Text -> Expectation

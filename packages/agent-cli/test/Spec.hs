@@ -14,6 +14,7 @@ import qualified Agent.CLI.ClipboardSpec as ClipboardSpec
 import qualified Agent.CLI.CommandSpec as CommandSpec
 import qualified Agent.CLI.ConfigSpec as ConfigSpec
 import qualified Agent.CLI.CompactionSpec as CompactionSpec
+import qualified Agent.CLI.ConversationStoreSpec as ConversationStoreSpec
 import qualified Agent.CLI.ConnectivitySpec as ConnectivitySpec
 import qualified Agent.CLI.CredentialStoreSpec as CredentialStoreSpec
 import qualified Agent.CLI.DialectsSpec as DialectsSpec
@@ -31,6 +32,7 @@ import qualified Agent.CLI.MarkdownSpec as MarkdownSpec
 import qualified Agent.CLI.McpManagerSpec as McpManagerSpec
 import qualified Agent.CLI.ModelConfigSpec as ModelConfigSpec
 import qualified Agent.CLI.ModelPickerSpec as ModelPickerSpec
+import qualified Agent.CLI.NativeAgentsSpec as NativeAgentsSpec
 import qualified Agent.CLI.ModelsSpec as ModelsSpec
 import qualified Agent.CLI.NotificationSpec as NotificationSpec
 import qualified Agent.CLI.OptionsSpec as OptionsSpec
@@ -88,6 +90,7 @@ main = hspec do
     CommandSpec.spec
     ConfigSpec.spec
     CompactionSpec.spec
+    ConversationStoreSpec.spec
     ConnectivitySpec.spec
     CredentialStoreSpec.spec
     DialectsSpec.spec
@@ -105,6 +108,7 @@ main = hspec do
     McpManagerSpec.spec
     ModelConfigSpec.spec
     ModelPickerSpec.spec
+    NativeAgentsSpec.spec
     ModelsSpec.spec
     NotificationSpec.spec
     OptionsSpec.spec

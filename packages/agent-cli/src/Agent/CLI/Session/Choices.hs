@@ -17,6 +17,10 @@ import Agent.CLI.Models
     , initialPickerStateResolved
     )
 import Agent.Concurrent (mapConcurrentlyBounded)
+import Agent.ReasoningEffort
+    ( ReasoningEffort
+    , reasoningEffortText
+    )
 import Agent.CLI.Style
     ( roleError
     , roleMuted
@@ -97,9 +101,9 @@ modelChoice
 
 effortChoice
     :: Maybe FullscreenRuntime
-    -> [Text]
-    -> Text
-    -> IO (Maybe Text)
+    -> [ReasoningEffort]
+    -> ReasoningEffort
+    -> IO (Maybe ReasoningEffort)
 effortChoice fullscreen efforts current = case fullscreen of
     Nothing -> pure Nothing
     Just runtime -> do
@@ -108,7 +112,7 @@ effortChoice fullscreen efforts current = case fullscreen of
             runtime
             "Reasoning effort"
             initial
-            [(effort, "") | effort <- efforts]
+            [(reasoningEffortText effort, "") | effort <- efforts]
             >>= \case
                 Just index
                     | index >= 0

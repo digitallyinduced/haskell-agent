@@ -11,8 +11,9 @@ module Agent.OpenAI.Usage
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import qualified Agent.Json.Decode as Json
 import Control.Exception.Safe (tryAny)
-import qualified Data.Aeson as Aeson
+import Control.Monad (join)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -45,31 +46,45 @@ data AdditionalUsageLimit = AdditionalUsageLimit
     , rateLimit :: !(Maybe UsageLimit)
     } deriving (Eq, Show)
 
-instance Aeson.FromJSON UsageSnapshot where
-    parseJSON = Aeson.withObject "Codex usage" \object -> UsageSnapshot
-        <$> object Aeson..: "plan_type"
-        <*> object Aeson..:? "rate_limit"
-        <*> object Aeson..:? "additional_rate_limits" Aeson..!= []
+usageSnapshotDecoder :: Json.Decoder UsageSnapshot
+usageSnapshotDecoder = Json.object do
+    planType <- Json.atKey "plan_type" Json.text
+    rateLimit <- optionalNullable "rate_limit" usageLimitDecoder
+    additionalRateLimits <-
+        maybe [] id <$> Json.atKeyOptional
+            "additional_rate_limits"
+            (Json.list additionalUsageLimitDecoder)
+    pure UsageSnapshot{..}
 
-instance Aeson.FromJSON UsageLimit where
-    parseJSON = Aeson.withObject "Codex usage limit" \object -> UsageLimit
-        <$> object Aeson..: "allowed"
-        <*> object Aeson..: "limit_reached"
-        <*> object Aeson..:? "primary_window"
-        <*> object Aeson..:? "secondary_window"
+usageLimitDecoder :: Json.Decoder UsageLimit
+usageLimitDecoder = Json.object do
+    allowed <- Json.atKey "allowed" Json.bool
+    limitReached <- Json.atKey "limit_reached" Json.bool
+    primaryWindow <- optionalNullable "primary_window" usageWindowDecoder
+    secondaryWindow <- optionalNullable "secondary_window" usageWindowDecoder
+    pure UsageLimit{..}
 
-instance Aeson.FromJSON UsageWindow where
-    parseJSON = Aeson.withObject "Codex usage window" \object -> UsageWindow
-        <$> object Aeson..: "used_percent"
-        <*> object Aeson..: "limit_window_seconds"
-        <*> object Aeson..: "reset_after_seconds"
-        <*> object Aeson..: "reset_at"
+usageWindowDecoder :: Json.Decoder UsageWindow
+usageWindowDecoder = Json.object $
+    UsageWindow
+        <$> Json.atKey "used_percent" Json.int
+        <*> Json.atKey "limit_window_seconds" Json.int
+        <*> Json.atKey "reset_after_seconds" Json.int
+        <*> Json.atKey "reset_at" Json.int
 
-instance Aeson.FromJSON AdditionalUsageLimit where
-    parseJSON = Aeson.withObject "additional Codex usage limit" \object -> AdditionalUsageLimit
-        <$> object Aeson..: "limit_name"
-        <*> object Aeson..: "metered_feature"
-        <*> object Aeson..:? "rate_limit"
+additionalUsageLimitDecoder :: Json.Decoder AdditionalUsageLimit
+additionalUsageLimitDecoder = Json.object do
+    limitName <- Json.atKey "limit_name" Json.text
+    meteredFeature <- Json.atKey "metered_feature" Json.text
+    rateLimit <- optionalNullable "rate_limit" usageLimitDecoder
+    pure AdditionalUsageLimit{..}
+
+optionalNullable
+    :: Text
+    -> Json.Decoder value
+    -> Json.FieldsDecoder (Maybe value)
+optionalNullable key decoder =
+    join <$> Json.atKeyOptional key (Json.nullable decoder)
 
 -- | Read current rate-limit usage for one ChatGPT account.
 --
@@ -97,7 +112,7 @@ fetchUsage accessToken accountId = tryAny requestUsage >>= \case
             $ setRequestHeader "Accept" ["application/json"] request
 
 decodeUsageResponse :: LBS.ByteString -> Either ApiError UsageSnapshot
-decodeUsageResponse body = case Aeson.eitherDecode body of
+decodeUsageResponse body = case Json.decodeEither usageSnapshotDecoder (LBS.toStrict body) of
     Left err -> Left $ ConnectionError
-        ("Invalid Codex usage response: " <> Text.pack err)
+        ("Invalid Codex usage response: " <> Json.jsonErrorMessage err)
     Right snapshot -> Right snapshot

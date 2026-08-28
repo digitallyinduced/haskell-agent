@@ -91,6 +91,22 @@ spec = do
             renderLoginFrame False (initialLoginState [openai])
                 `shouldSatisfy` Text.isInfixOf "checking usage"
 
+        it "rounds OpenRouter credit amounts to cents" do
+            formatCurrencyAmount 5.317721499 `shouldBe` "$5.32"
+            formatCurrencyAmount 3369.682278501 `shouldBe` "$3369.68"
+            let account = openRouter
+                    { loginUsage =
+                        UsageAvailable AccountUsage
+                            { usagePlan = Nothing
+                            , usageWindows = []
+                            , creditsRemaining = Just "$5.32"
+                            , creditsUsed = Just "$3369.68"
+                            }
+                    }
+                body = renderLoginFrame False (initialLoginState [account])
+            body `shouldSatisfy` Text.isInfixOf "credits remaining $5.32"
+            body `shouldSatisfy` Text.isInfixOf "used $3369.68"
+
 openai :: LoginAccount
 openai = LoginAccount
     { loginManagedId = Nothing

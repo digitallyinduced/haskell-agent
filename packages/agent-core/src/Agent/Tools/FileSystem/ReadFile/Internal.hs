@@ -1,6 +1,7 @@
 module Agent.Tools.FileSystem.ReadFile.Internal
     ( ReadFileArgs(..)
     , FileWindow(..)
+    , readFileArgsDecoder
     , runReadFile
     , runReadFileResolved
     , readFileResolvedContent
@@ -9,12 +10,12 @@ module Agent.Tools.FileSystem.ReadFile.Internal
     , formatReadFileContent
     ) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.Tools.IO (readTextFile, resolveForRead)
 import Agent.Tools.Types (ToolEnv)
 import Control.Exception.Safe (SomeException, try)
-import Data.Aeson (FromJSON(..))
 import qualified Data.ByteString as BS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -40,13 +41,13 @@ data ReadFileArgs = ReadFileArgs
     , format :: Maybe Text
     } deriving (Eq, Show)
 
-instance FromJSON ReadFileArgs where
-    parseJSON = objectArgs \object -> ReadFileArgs
-        <$> reqText object "target_file"
-        <*> optInt object "offset"
-        <*> optInt object "limit"
-        <*> optText object "pages"
-        <*> optText object "format"
+readFileArgsDecoder :: Decoder ReadFileArgs
+readFileArgsDecoder = objectArgs \object -> ReadFileArgs
+    <$> reqText object "target_file"
+    <*> optInt object "offset"
+    <*> optInt object "limit"
+    <*> optText object "pages"
+    <*> optText object "format"
 
 maxReadLines :: Int
 maxReadLines = 1000

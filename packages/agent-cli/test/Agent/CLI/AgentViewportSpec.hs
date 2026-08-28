@@ -1,6 +1,7 @@
 module Agent.CLI.AgentViewportSpec (spec) where
 
 import Agent.CLI.AgentViewport
+import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.Picker (PickerKey(..))
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -20,7 +21,6 @@ import Agent.ToolDispatch
     , functionToolCall
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -116,6 +116,48 @@ spec = do
                 `shouldBe` Just (AgentChild (SubagentId "alpha"))
             (.agentStatus) <$> selectedAgentEntry refreshed
                 `shouldBe` Just "done"
+
+        it "selects provider-native agents without changing host child identity" do
+            let native =
+                    AgentEntry
+                        { agentTarget = AgentNative "toolu-native"
+                        , agentPath = "/native/explore"
+                        , agentStatus = "running"
+                        , agentModel = Just "claude-sonnet"
+                        , agentSteps = []
+                        , agentTranscript = ["assistant: inspecting"]
+                        , agentConversation = initialUiState
+                        }
+                mixed = entries <> [native]
+                selected =
+                    selectAgentTarget (AgentNative "toolu-native")
+                        (initialAgentViewportState AgentRoot mixed)
+            (.agentTarget) <$> selectedAgentEntry selected
+                `shouldBe` Just (AgentNative "toolu-native")
+            lookupAgentEntry
+                (AgentChild (SubagentId "alpha"))
+                mixed
+                `shouldSatisfy` maybe False ((== "/root/alpha") . (.agentPath))
+
+        it "renders provider-native agents in the shared hierarchy" do
+            let native =
+                    AgentEntry
+                        { agentTarget = AgentNative "toolu-native"
+                        , agentPath = "/native/explore"
+                        , agentStatus = "cancelled"
+                        , agentModel = Just "claude-sonnet"
+                        , agentSteps = []
+                        , agentTranscript = ["assistant: partial result"]
+                        , agentConversation = initialUiState
+                        }
+                rendered =
+                    renderAgentTree
+                        False
+                        (AgentNative "toolu-native")
+                        (entries <> [native])
+            rendered `shouldSatisfy` Text.isInfixOf "explore  ■ cancelled"
+            rendered `shouldSatisfy`
+                Text.isInfixOf "viewing /native/explore"
 
         it "renders hierarchy and transcript panes" do
             let frame = renderAgentViewportFrameFor False 10 70 state
@@ -251,6 +293,32 @@ spec = do
             body False `shouldBe` Just "Visible summary"
             body True
                 `shouldBe` Just "Visible summary\nprivate detail"
+
+        it "shows workspace-relative tool titles when hydrating a child transcript" do
+            let workspace = "/Users/marc/.haskell-agent/worktrees/haskell-agent/wt"
+                ui =
+                    responseItemsToUiStateRelative False workspace
+                        [ functionCallItem
+                            "call-1"
+                            "read_file"
+                            ("{\"target_file\":\""
+                                <> workspace
+                                <> "/nix/modules/telegram.nix\"}")
+                            (Just ItemCompleted)
+                        ]
+            map (.blockTitle) (toList ui.uiBlocks)
+                `shouldBe` ["Read nix/modules/telegram.nix"]
+            map (.agentStepTitle)
+                (responseItemStepPreviewsRelative workspace 1
+                    [ functionCallItem
+                        "call-1"
+                        "search_replace"
+                        ("{\"file_path\":\""
+                            <> workspace
+                            <> "/nix/modules/telegram.nix\"}")
+                        (Just ItemCompleted)
+                    ])
+                `shouldBe` ["Edited nix/modules/telegram.nix"]
 
     describe "responseItemStepPreviews" do
         it "coalesces tool calls with their outputs and returns newest first" do
@@ -393,7 +461,6 @@ messageItem role text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }
 
 functionCallItem
@@ -408,10 +475,10 @@ functionCallItem callId name arguments status =
         , callId
         , name
         , namespace = Nothing
+        , provider = Nothing
         , arguments
         , encryptedFunctionArgs = Nothing
         , status
-        , extraFields = KeyMap.empty
         }
 
 functionOutputItem :: Text -> Maybe ItemStatus -> ResponseItem
@@ -421,9 +488,9 @@ functionOutputItem callId status =
         , callId
         , name = Nothing
         , namespace = Nothing
-        , output = Aeson.String "ok"
+        , provider = Nothing
+        , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text))
         , status
-        , extraFields = KeyMap.empty
         }
 
 agentMessageItem :: Text -> ResponseItem
@@ -432,9 +499,8 @@ agentMessageItem text =
         { messageId = Nothing
         , author = Nothing
         , recipient = Nothing
-        , content = [InputTextPart text Nothing KeyMap.empty]
+        , content = [InputTextPart text Nothing]
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
 
 reasoningItem :: Text -> Text -> ResponseItem
@@ -445,19 +511,16 @@ reasoningItem summary raw =
             [ ReasoningSummaryPart
                 { partType = "summary_text"
                 , text = Just summary
-                , extraFields = KeyMap.empty
                 }
             ]
         , content =
             Just
                 [ ReasoningTextPart
                     { text = raw
-                    , extraFields = KeyMap.empty
                     }
                 ]
         , encryptedContent = Nothing
         , status = Just ItemCompleted
-        , extraFields = KeyMap.empty
         }
 
 atMay :: [a] -> Int -> Maybe a

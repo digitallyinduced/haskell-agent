@@ -137,6 +137,28 @@ spec = do
                         , "- flake.lock"
                         ]
 
+        it "echoes workspace-relative paths when the model used an absolute directory" do
+            withTempDir \dir -> do
+                let workspace = dir </> "workspace"
+                    docs = workspace </> "docs"
+                createDirectory workspace
+                createDirectory docs
+                writeFile (docs </> "readme.md") "ok\n"
+                env <- defaultToolEnv (unsafeEncodeUtf workspace)
+                result <-
+                    dispatchToolCall testConfig
+                        [(listDirTool env).appToolHandler]
+                        (functionToolCall "list-abs" "list_dir"
+                            ("{\"target_directory\":\""
+                                <> Text.pack workspace
+                                <> "\"}"))
+                result.output
+                    `shouldBe` Text.unlines
+                        [ "Directory listing for .:"
+                        , "- docs/"
+                        , "  - readme.md"
+                        ]
+
         it "fails when the target directory cannot be listed" do
             withTempDir \dir -> do
                 let workspace = dir </> "workspace"
@@ -192,6 +214,7 @@ testConfig = ToolDispatchConfig
     , toolDispatchFormatException = \name _ -> "EX " <> name
     , toolDispatchOnException = \_ _ -> pure ()
     , toolDispatchOnOutput = \_ _ -> pure ()
+    , toolDispatchFinalizeOutput = \_call output -> pure output
     }
 
 withUnreadableDirectory :: FilePath -> IO a -> IO a

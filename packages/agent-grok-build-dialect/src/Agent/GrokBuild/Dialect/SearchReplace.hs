@@ -10,7 +10,7 @@ import System.OsPath
     , takeDirectory
     , takeFileName
     )
-import Agent.ToolArgs (objectArgs, optBool, reqText)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( StreamedTool(..)
@@ -18,13 +18,11 @@ import Agent.ToolDispatch
     , ToolCall(..)
     , ToolInput(..)
     , decodeToolArguments
-    , toolArgumentsValue
     , typedTool
     )
 import Agent.Tools.FileSystem.FilePrefetch
     ( FileCallState
     , FilePrefetch
-    , PathProgress
     , closeFileCall
     , closeFilePrefetch
     , consumePrefetchedFile
@@ -35,7 +33,13 @@ import Agent.Tools.FileSystem.FilePrefetch
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
-import Agent.Tools.IO (readTextFile, resolveUnderCwd, writeTextFile)
+import Agent.GrokBuild.Dialect.Json (optionalBool)
+import Agent.Tools.IO
+    ( displayPathInWorkspace
+    , readTextFile
+    , resolveUnderCwd
+    , writeTextFile
+    )
 import Agent.Tools.Scheduling
     ( ToolAccess(..)
     , ToolResource(..)
@@ -64,9 +68,6 @@ import Control.Monad.Trans.Except
     , throwE
     )
 import Data.Acquire (mkAcquire)
-import Data.Aeson (FromJSON(..))
-import qualified Data.Aeson as Aeson
-import qualified Data.Text.Encoding as TextEncoding
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
@@ -80,12 +81,13 @@ data SearchReplaceArgs = SearchReplaceArgs
     , replaceAll :: Bool
     }
 
-instance FromJSON SearchReplaceArgs where
-    parseJSON = objectArgs \object -> SearchReplaceArgs
-        <$> reqText object "file_path"
-        <*> reqText object "old_string"
-        <*> reqText object "new_string"
-        <*> (fromMaybe False <$> optBool object "replace_all")
+searchReplaceArgsDecoder :: Json.Decoder SearchReplaceArgs
+searchReplaceArgsDecoder = Json.object $
+    SearchReplaceArgs
+        <$> Json.atKey "file_path" Json.text
+        <*> Json.atKey "old_string" Json.text
+        <*> Json.atKey "new_string" Json.text
+        <*> (fromMaybe False <$> optionalBool "replace_all")
 
 searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
 searchReplaceTool env planMode =
@@ -115,17 +117,14 @@ searchReplaceToolWithPrefetch env planMode prefetch =
     ]
     False
     TurnSequential
-    (typedTool "search_replace" (runSearchReplace env planMode))
+    (typedTool "search_replace" searchReplaceArgsDecoder (runSearchReplace env planMode))
 
 searchReplaceResourceClaims
     :: ToolEnv
     -> ToolCall
     -> IO (Either Text [ToolResourceClaim])
 searchReplaceResourceClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text SearchReplaceArgs
-    of
+    case decodeToolArguments searchReplaceArgsDecoder call.arguments of
         Left err -> pure (Left err)
         Right args ->
             resolveUnderCwd env (fromText args.filePath)
@@ -185,18 +184,15 @@ runSearchReplaceBody env args
 
 createNewFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 createNewFile env args = do
-    path <- resolvePath env args.filePath
-    gitignoreGuard env path args.filePath
+    (path, display) <- resolveDisplayPath env args.filePath
+    gitignoreGuard env path display
     exists <- lift (doesFileExist path)
     when exists do
         existing <- ExceptT (readTextFile path)
         unless (Text.null existing) $
             throwE "An empty old_string cannot overwrite an existing non-empty file."
-    writeCreated path
-  where
-    writeCreated path = do
-        ExceptT (writeTextFile path args.newString)
-        pure ("The file " <> args.filePath <> " has been created successfully.")
+    ExceptT (writeTextFile path args.newString)
+    pure ("The file " <> display <> " has been created successfully.")
 
 replaceInFile :: ToolEnv -> SearchReplaceArgs -> ExceptT Text IO Text
 replaceInFile env args = replaceInFileWithContent env args Nothing
@@ -207,11 +203,11 @@ replaceInFileWithContent
     -> Maybe Text
     -> ExceptT Text IO Text
 replaceInFileWithContent env args cachedContent = do
-    path <- resolvePath env args.filePath
-    gitignoreGuard env path args.filePath
+    (path, display) <- resolveDisplayPath env args.filePath
+    gitignoreGuard env path display
     exists <- lift (doesFileExist path)
     unless exists $
-        throwE ("File not found: " <> args.filePath)
+        throwE ("File not found: " <> display)
     content <- case cachedContent of
         Just text -> pure text
         Nothing -> ExceptT (readTextFile path)
@@ -227,14 +223,20 @@ replaceInFileWithContent env args cachedContent = do
     ExceptT (writeTextFile path updated)
     pure $
         if args.replaceAll && count > 1
-            then "The file " <> args.filePath
+            then "The file " <> display
                 <> " has been updated. All occurrences were successfully replaced."
-            else "The file " <> args.filePath
+            else "The file " <> display
                 <> " has been updated successfully."
 
 resolvePath :: ToolEnv -> Text -> ExceptT Text IO OsPath
 resolvePath env path =
     ExceptT (resolveUnderCwd env (fromText path))
+
+resolveDisplayPath :: ToolEnv -> Text -> ExceptT Text IO (OsPath, Text)
+resolveDisplayPath env requested = do
+    path <- resolvePath env requested
+    display <- lift (displayPathInWorkspace env path)
+    pure (path, display)
 
 gitignoreGuard :: ToolEnv -> OsPath -> Text -> ExceptT Text IO ()
 gitignoreGuard env path display = do
@@ -313,19 +315,18 @@ interpretSearchReplace
     -> IO (Either (SearchReplaceArgs, FileCallState) FileCallState)
 interpretSearchReplace prefetch state = \case
     ToolPrefix text ->
-        Right <$> refreshFileCall prefetch state text (pathProgress text)
+        Right <$> refreshFileCall prefetch state text (jsonStringFieldProgress "file_path" text)
     ToolDone text -> do
-        next <- refreshFileCall prefetch state text (pathProgress text)
+        next <- refreshFileCall prefetch state text (jsonStringFieldProgress "file_path" text)
         case decodeSearchReplaceArgs text of
             Nothing -> pure (Right next)
             Just args -> pure (Left (args, next))
 
-pathProgress :: Text -> Maybe PathProgress
-pathProgress = jsonStringFieldProgress "file_path"
-
 decodeSearchReplaceArgs :: Text -> Maybe SearchReplaceArgs
-decodeSearchReplaceArgs =
-    Aeson.decodeStrict' . TextEncoding.encodeUtf8
+decodeSearchReplaceArgs text =
+    case decodeToolArguments searchReplaceArgsDecoder text of
+        Right args -> Just args
+        Left _ -> Nothing
 
 consumeSearchReplace
     :: ToolEnv

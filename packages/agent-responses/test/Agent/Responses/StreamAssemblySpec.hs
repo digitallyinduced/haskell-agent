@@ -2,12 +2,14 @@ module Agent.Responses.StreamAssemblySpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Responses.SSE (parseSseEvents)
+import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.StreamAssembly
 import Agent.Responses.Types
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -57,6 +59,17 @@ spec = describe "buildStreamResponse" do
         [name | FunctionCallItem FunctionCall { name } <- response.output]
             `shouldBe` ["shell_command"]
 
+    it "preserves a cancelled status carried by response.done" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.created"
+                "{\"type\":\"response.created\",\"response\":{\"id\":\"resp-cancelled\"}}"
+            , sseBlock "response.done"
+                "{\"type\":\"response.done\",\"response\":{\"status\":\"cancelled\"}}"
+            ]
+        response <- expectRight
+            (buildStreamResponseWithModel config (Just "request-model") events)
+        response.status `shouldBe` ResponseCancelled
+
     it "assembles minimal created and completed lifecycle fragments" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.created"
@@ -85,6 +98,24 @@ spec = describe "buildStreamResponse" do
             `shouldBe`
                 Left (ConnectionError
                     "failed: response.incomplete: max_output_tokens")
+
+    it "recovers a dropped stream after response.created as incomplete" do
+        -- A real response.created frame carries status "in_progress". When the
+        -- socket dies mid-stream the recovery path must force an "incomplete"
+        -- status rather than leaking the stale "in_progress" through, which
+        -- would otherwise be classified as a completed turn.
+        let created = ResponseCreatedEvent
+                (decodeResponseValue (Aeson.object
+                    [ "id" Aeson..= ("resp-dropped" :: Text)
+                    , "created_at" Aeson..= (0 :: Int)
+                    , "model" Aeson..= ("test" :: Text)
+                    , "status" Aeson..= ("in_progress" :: Text)
+                    ]))
+                Nothing
+            state = applyStreamEvent emptyStreamAssemblyState created
+        response <- expectRight (finishAssembledIncomplete (Just "test") state)
+        response.status `shouldBe` ResponseIncomplete
+        response.responseId `shouldBe` "resp-dropped"
 
     it "replaces indexed added items with done items without duplicates" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
@@ -287,13 +318,11 @@ spec = describe "buildStreamResponse" do
                         [ ResponseCreatedEvent
                             (responseFragment "adversarial")
                             Nothing
-                            mempty
                         ]
                         <> map operationEvent operations
                         <> [ ResponseCompletedEvent
                                 (responseFragment "adversarial")
                                 Nothing
-                                mempty
                            ]
                     expectedModel =
                         foldl applyExpected Map.empty operations
@@ -334,7 +363,6 @@ spec = describe "buildStreamResponse" do
                         [ ResponseCreatedEvent
                             (responseFragment "sticky-done")
                             Nothing
-                            mempty
                         , operationEvent doneOperation
                         , operationEvent lateOperation
                         , ResponseCompletedEvent
@@ -342,7 +370,6 @@ spec = describe "buildStreamResponse" do
                                 "sticky-done"
                                 [toResponseItem terminalFragment])
                             Nothing
-                            mempty
                         ]
                 in case buildStreamResponse config events of
                     Left err ->
@@ -384,9 +411,9 @@ spec = describe "buildStreamResponse" do
         , incompleteAsFailure = True
         }
 
-responseFragment :: Text -> Aeson.Value
+responseFragment :: Text -> Response
 responseFragment responseId =
-    Aeson.object
+    decodeResponseValue $ Aeson.object
         [ "id" Aeson..= responseId
         , "created_at" Aeson..= (0 :: Int)
         , "model" Aeson..= ("generated-model" :: Text)
@@ -394,15 +421,20 @@ responseFragment responseId =
         , "output" Aeson..= ([] :: [Aeson.Value])
         ]
 
-responseFragmentWithOutput :: Text -> [ResponseItem] -> Aeson.Value
+responseFragmentWithOutput :: Text -> [ResponseItem] -> Response
 responseFragmentWithOutput responseId output =
-    Aeson.object
+    decodeResponseValue $ Aeson.object
         [ "id" Aeson..= responseId
         , "created_at" Aeson..= (0 :: Int)
         , "model" Aeson..= ("generated-model" :: Text)
         , "status" Aeson..= ("completed" :: Text)
         , "output" Aeson..= output
         ]
+
+decodeResponseValue :: Aeson.Value -> Response
+decodeResponseValue value =
+    either error id
+        (Codec.decodeResponse (LBS.toStrict (Aeson.encode value)))
 
 -- This model deliberately stores raw item values rather than reusing the
 -- implementation's progress type. An explicit output index identifies one
@@ -464,12 +496,10 @@ lifecycleEvent step
         ResponseCompletedEvent
             (responseFragment step.lifecycleId)
             Nothing
-            mempty
     | otherwise =
         ResponseCreatedEvent
             (responseFragment step.lifecycleId)
             Nothing
-            mempty
 
 instance Arbitrary CallFragment where
     arbitrary = CallFragment
@@ -571,13 +601,11 @@ operationEvent operation
             (toResponseItem operation.operationCall)
             operation.operationIndex
             Nothing
-            mempty
     | otherwise =
         ResponseOutputItemAddedEvent
             (toResponseItem operation.operationCall)
             operation.operationIndex
             Nothing
-            mempty
 
 toResponseItem :: CallFragment -> ResponseItem
 toResponseItem fragment =
@@ -586,13 +614,11 @@ toResponseItem fragment =
         , callId = fragment.fragmentCallId
         , name = fragment.fragmentName
         , namespace = fragment.fragmentNamespace
+        , provider = Nothing
         , arguments = fragment.fragmentArguments
         , encryptedFunctionArgs = Nothing
         , status = fragment.fragmentStatus
-        , extraFields =
-            KeyMap.singleton
-                "model_test_marker"
-                (Aeson.String fragment.fragmentMarker)
+
         }
 
 applyExpected :: StreamModel -> IndexedOperation -> StreamModel

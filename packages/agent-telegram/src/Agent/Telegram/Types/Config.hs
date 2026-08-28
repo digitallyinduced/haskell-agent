@@ -6,22 +6,19 @@ module Agent.Telegram.Types.Config
     , defaultTelegramSetupOptions
     , defaultTelegramWorkerCount
     , maximumTelegramWorkerCount
+    , telegramConfigDecoder
     , TelegramCommand(..)
     , TelegramUsersCommand(..)
     ) where
 
 import Agent.Provider (Provider, parseProvider, providerSlug)
+import qualified Agent.Json.Decode as Hermes
 import Data.Aeson
-    ( FromJSON(..)
-    , ToJSON(..)
+    ( ToJSON(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
-import qualified Data.Aeson as Aeson
+import Data.Maybe (fromMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -39,8 +36,8 @@ instance ToJSON TelegramApprovalMode where
         TelegramApprovalDeny -> "deny"
         TelegramApprovalYolo -> "yolo"
 
-instance FromJSON TelegramApprovalMode where
-    parseJSON = Aeson.withText "TelegramApprovalMode" \case
+telegramApprovalModeDecoder :: Hermes.Decoder TelegramApprovalMode
+telegramApprovalModeDecoder = Hermes.withText \case
         "prompt" -> pure TelegramApprovalPrompt
         "deny" -> pure TelegramApprovalDeny
         "yolo" -> pure TelegramApprovalYolo
@@ -76,19 +73,22 @@ instance ToJSON TelegramConfig where
         , "workers" .= config.telegramWorkerCount
         ]
 
-instance FromJSON TelegramConfig where
-    parseJSON = withObject "TelegramConfig" \o -> do
-        providerText <- o .: "provider"
+telegramConfigDecoder :: Hermes.Decoder TelegramConfig
+telegramConfigDecoder = Hermes.object do
+        providerText <- Hermes.atKey "provider" Hermes.text
         telegramProvider <- maybe
             (fail ("unknown provider: " <> Text.unpack providerText))
             pure
             (parseProvider providerText)
-        legacyYolo <- o .:? "yolo" .!= False
-        approvalMode <- o .:? "approvalMode" .!=
+        legacyYolo <- fromMaybe False
+            <$> Hermes.optionalKey "yolo" Hermes.bool
+        approvalMode <- fromMaybe
             (if legacyYolo
                 then TelegramApprovalYolo
                 else TelegramApprovalPrompt)
-        workerCount <- o .:? "workers" .!= defaultTelegramWorkerCount
+            <$> Hermes.optionalKey "approvalMode" telegramApprovalModeDecoder
+        workerCount <- fromMaybe defaultTelegramWorkerCount
+            <$> Hermes.optionalKey "workers" Hermes.int
         if workerCount < 1 || workerCount > maximumTelegramWorkerCount
             then fail
                 ("workers must be between 1 and "
@@ -96,13 +96,19 @@ instance FromJSON TelegramConfig where
             else pure ()
         TelegramConfig
             <$> pure telegramProvider
-            <*> o .:? "model"
-            <*> o .: "cwd"
-            <*> o .:? "effort"
+            <*> Hermes.optionalKey "model" Hermes.text
+            <*> (Text.unpack <$> Hermes.atKey "cwd" Hermes.text)
+            <*> Hermes.optionalKey "effort" Hermes.text
             <*> pure approvalMode
-            <*> (Set.fromList <$> o .: "allowedUsers")
-            <*> (o .:? "respondToAllGroupMessages" .!= False)
+            <*> (Set.fromList <$> Hermes.atKey "allowedUsers"
+                (Hermes.list integerDecoder))
+            <*> (fromMaybe False
+                <$> Hermes.optionalKey "respondToAllGroupMessages" Hermes.bool)
             <*> pure workerCount
+
+
+integerDecoder :: Hermes.Decoder Integer
+integerDecoder = fromIntegral <$> Hermes.int
 
 data TelegramSetupOptions = TelegramSetupOptions
     { setupProvider :: !(Maybe Provider)

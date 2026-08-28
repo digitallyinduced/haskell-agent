@@ -1,5 +1,6 @@
 module Agent.Tools.InterpreterSpec (spec) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.ToolArgs (objectArgs, reqText)
 import Agent.ToolDispatch
     ( ToolArgumentStreamEvent(..)
@@ -54,8 +55,8 @@ import Test.QuickCheck
 newtype EchoArgs = EchoArgs { message :: Text }
     deriving (Eq, Show)
 
-instance FromJSON EchoArgs where
-    parseJSON = objectArgs $ \object ->
+echoArgsDecoder :: Decoder EchoArgs
+echoArgsDecoder = objectArgs $ \object ->
         EchoArgs <$> reqText object "message"
 
 instance ToJSON EchoArgs where
@@ -244,21 +245,21 @@ itemRef = ToolCallStreamItem "item-1"
 typedEcho :: IORef Int -> AppTool
 typedEcho runs =
     jsonTool "echo" "echo" [] True ParallelSafe $
-        typedTool "echo" $ \EchoArgs{message} -> do
+        typedTool "echo" echoArgsDecoder $ \EchoArgs{message} -> do
             modifyIORef' runs (+ 1)
             pure (Right ("echo:" <> message))
 
 callAwareEcho :: IORef Int -> AppTool
 callAwareEcho runs =
     jsonTool "echo" "echo" [] True ParallelSafe $
-        typedToolWithCall "echo" $ \call (EchoArgs message) -> do
+        typedToolWithCall "echo" echoArgsDecoder $ \call (EchoArgs message) -> do
             modifyIORef' runs (+ 1)
             pure (Right (call.callId <> ":" <> message))
 
 streamingEcho :: IORef Int -> AppTool
 streamingEcho runs =
     jsonTool "echo" "echo" [] True ParallelSafe $
-        typedStreamingTool "echo" $ \emit EchoArgs{message} -> do
+        typedStreamingTool "echo" echoArgsDecoder $ \emit EchoArgs{message} -> do
             modifyIORef' runs (+ 1)
             emit ("part:" <> message)
             pure (Right ("full:" <> message))

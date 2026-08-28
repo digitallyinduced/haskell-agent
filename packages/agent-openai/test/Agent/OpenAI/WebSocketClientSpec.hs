@@ -4,6 +4,7 @@ import Test.Hspec
 import Agent.Error
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.WebSocketClient
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
@@ -17,7 +18,7 @@ import Data.Text (Text)
 spec :: Spec
 spec = do
   describe "CodexTurnState" do
-    it "keeps the first token through tool calls and clears it at turn end" do
+    it "keeps the first token through continuations and clears it at turn end" do
         turnState <- newCodexTurnState
         recordCodexTurnState turnState " "
         recordCodexTurnState turnState "ts-first"
@@ -31,16 +32,51 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 ])
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
 
         finishCodexTurnStateResponse turnState
+            ((responseWithOutput
+                [ ReasoningItemValue ReasoningItem
+                    { itemId = Just "rs-1"
+                    , summary = []
+                    , content = Nothing
+                    , encryptedContent = Nothing
+                    , status = Just ItemCompleted
+                    }
+                ])
+                { status = ResponseIncomplete
+                , incompleteDetails = Just IncompleteDetails
+                    { reason = "max_output_tokens"
+                    }
+                })
+        readCodexTurnState turnState `shouldReturn` Just "ts-first"
+
+        finishCodexTurnStateResponse turnState
             (responseWithOutput [])
+        readCodexTurnState turnState `shouldReturn` Just "ts-first"
+
+        finishCodexTurnStateResponse turnState
+            (responseWithOutput
+                [ MessageItem ResponseMessage
+                    { messageId = Just "msg-1"
+                    , content = MessageContentParts
+                        [ OutputTextPart
+                            "done"
+                            Nothing
+                            Nothing
+                        ]
+                    , role = RoleAssistant
+                    , status = Just ItemCompleted
+                    , phase = Nothing
+                    , passthrough = Nothing
+                    }
+                ])
         readCodexTurnState turnState `shouldReturn` Nothing
 
   describe "buildCodexWsHeaders" do
@@ -223,7 +259,31 @@ spec = do
                 (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
             , lifecycleFrame "response.completed" (Aeson.object [])
             ]
-            [EventResponseCreated, EventResponseCompleted]
+            [ StreamEventUnknown unparsedStreamEventTypeText
+            , EventResponseCreated
+            , EventResponseCompleted
+            ]
+            \response -> response.output `shouldBe` []
+
+    it "surfaces unparsed function_call items and still completes the turn" do
+        testPartialTerminalResponse
+            [ lifecycleFrame "response.created"
+                (Aeson.object ["id" Aeson..= ("resp-test" :: Text)])
+            , Aeson.encode $ Aeson.object
+                [ "type" Aeson..= ("response.output_item.added" :: Text)
+                , "output_index" Aeson..= (0 :: Int)
+                , "item" Aeson..= Aeson.object
+                    [ "type" Aeson..= ("function_call" :: Text)
+                    , "id" Aeson..= ("fc-1" :: Text)
+                    , "status" Aeson..= ("in_progress" :: Text)
+                    ]
+                ]
+            , lifecycleFrame "response.completed" (Aeson.object [])
+            ]
+            [ EventResponseCreated
+            , StreamEventUnknown unparsedStreamEventTypeText
+            , EventResponseCompleted
+            ]
             \response -> response.output `shouldBe` []
 
     it "returns response.incomplete with the server reason" do
@@ -531,7 +591,7 @@ sampleLitePrefixRequest = sampleRequest
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , content = MessageContentParts
-                [InputTextPart "base instructions" Nothing KeyMap.empty]
+                [InputTextPart "base instructions" Nothing]
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
@@ -540,9 +600,7 @@ sampleLitePrefixRequest = sampleRequest
                 , createTime = Nothing
                 , contentItemKinds = Just ["model.base_instructions"]
                 , executedToolCalls = Nothing
-                , extraFields = KeyMap.empty
                 }
-            , extraFields = KeyMap.empty
             }
         ])
     }
@@ -559,7 +617,6 @@ sampleRequest = defaultResponseCreateParams
         , generateSummary = Nothing
         , reasoningMode = Nothing
         , summary = Nothing
-        , extraFields = mempty
         }
     , include = Just []
     , promptCacheKey = Just "cache-key"
@@ -582,12 +639,12 @@ withModel nextModel ResponseCreateParams { model = _, .. } =
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =
-    case Aeson.fromJSON $ Aeson.object
+    case ResponsesCodec.decodeResponse . LBS.toStrict . Aeson.encode $ Aeson.object
             [ "id" Aeson..= ("resp-test" :: Text)
             , "created_at" Aeson..= (0 :: Int)
             , "model" Aeson..= ("gpt-test" :: Text)
             , "status" Aeson..= ("completed" :: Text)
             , "output" Aeson..= output
             ] of
-        Aeson.Success response -> response
-        Aeson.Error err -> error err
+        Right response -> response
+        Left err -> error err

@@ -4,17 +4,18 @@ import Agent.CLI.GatewayBridge
 import Agent.CLI.ManagedTurn
 import Agent.CLI.Permission (PermissionChoice(..))
 import Agent.Loop (LoopEvent(..), defaultLoopDispatch)
+import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , dispatchToolCall
     , functionToolCall
     )
-import Agent.Tools.Types (appToolHandlers)
+import Agent.Tools.Types (AppTool(..), appToolHandlers)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait)
 import Control.Exception.Safe (bracket)
-import Data.Aeson (Value(..), eitherDecode)
+import Data.Aeson (Value(..))
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (listToMaybe)
 import System.Directory
@@ -53,6 +54,13 @@ spec = describe "Agent.CLI.GatewayBridge" do
                     result <- wait running
                     result.output `shouldBe` "sent"
 
+    it "advertises Telegram allowlist tools on the managed gateway bridge" $
+        withBridgeRequest \request -> do
+            let names = map (.appToolName) (managedGatewayTools request)
+            names `shouldContain` ["allow_telegram_user"]
+            names `shouldContain` ["deny_telegram_user"]
+            names `shouldContain` ["list_telegram_users"]
+
     it "uses the bridge for mutating-tool approval choices" $
         withBridgeRequest \request -> do
             let call = functionToolCall
@@ -80,11 +88,10 @@ spec = describe "Agent.CLI.GatewayBridge" do
             publish (TextDelta "the issue.")
             bytes <- LBS.readFile
                 (unsafeToFilePath (managedBridgeActivityPath request))
-            activity <- case
-                    eitherDecode bytes
-                        :: Either String ManagedActivity
+            activity <- case Hermes.decodeEither managedActivityDecoder
+                    (LBS.toStrict bytes)
                 of
-                Left err -> expectationFailure err >> fail err
+                Left err -> expectationFailure (show err) >> fail (show err)
                 Right value -> pure value
             activity.managedActivityKind `shouldBe` "writing"
             activity.managedActivityMessage `shouldBe` "Writing reply…"
@@ -123,7 +130,8 @@ waitForBridgeRequest request = go (100 :: Int)
             Nothing -> threadDelay 20_000 >> go (attempts - 1)
             Just name -> do
                 bytes <- LBS.readFile (directory </> name)
-                case eitherDecode bytes of
+                case Hermes.decodeEither managedBridgeRequestDecoder
+                        (LBS.toStrict bytes) of
                     Left _ -> threadDelay 20_000 >> go (attempts - 1)
                     Right value -> pure value
 

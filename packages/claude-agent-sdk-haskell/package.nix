@@ -1,6 +1,6 @@
-{ mkDerivation, aeson, agent-process, async, base
+{ mkDerivation, aeson, agent-json, agent-process, async, base
 , base64-bytestring, bytestring, containers, directory, entropy
-, filepath, hspec, lib, process, safe-exceptions, scientific, text
+, filepath, hermes-json, hspec, lib, process, safe-exceptions, text
 , unix, uuid-types
 }:
 mkDerivation {
@@ -8,13 +8,13 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson agent-process async base base64-bytestring bytestring
-    containers directory entropy process safe-exceptions scientific
-    text unix uuid-types
+    aeson agent-json agent-process async base base64-bytestring
+    bytestring containers directory entropy hermes-json process
+    safe-exceptions text unix uuid-types
   ];
   testHaskellDepends = [
-    aeson base bytestring containers directory filepath hspec
-    safe-exceptions scientific text unix
+    agent-json base bytestring containers directory filepath hspec
+    safe-exceptions text unix
   ];
   description = "Haskell SDK for the Claude Agent SDK stream protocol";
   license = lib.meta.getLicenseFromSpdxId "MIT";

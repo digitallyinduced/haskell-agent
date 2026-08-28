@@ -17,6 +17,7 @@ import Agent.CLI.Render ( putTextLn )
 import Agent.CLI.Session.Runtime.Types ( StartupRuntime(..) )
 import Agent.Tools.Types ( AppTool(..) )
 import Agent.ToolDispatch ( canonicalToolName )
+import Agent.OsPath ( toText )
 import Agent.TUI.Model ( UiEvent(..) )
 import Control.Monad ( when )
 import Data.IORef ( readIORef, writeIORef )
@@ -102,6 +103,7 @@ setStartupRepository fullscreen home branch cwd =
                 UiSetRepository
                     branch
                     (formatRepositoryPath home cwd)
+                    (toText cwd)
 
 -- | Drop Ghostty / Windows Terminal native progress (OSC 9;4) on stderr.
 -- Safe when the bar was never shown; unknown terminals ignore the sequence.

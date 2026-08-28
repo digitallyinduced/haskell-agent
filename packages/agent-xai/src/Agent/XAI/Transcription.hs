@@ -7,6 +7,7 @@ module Agent.XAI.Transcription
     ) where
 
 import Agent.Error (ApiError(..))
+import qualified Agent.Json.Decode as Json
 import Agent.XAI.Options
     ( defaultGrokClientVersion
     , grokClientIdentifier
@@ -40,8 +41,6 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (unless, void)
-import Data.Aeson (FromJSON(..), eitherDecode, withObject, (.:), (.:?))
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -78,25 +77,29 @@ data TranscriptEvent
     | TranscriptUnknown
     deriving (Eq, Show)
 
-instance FromJSON TranscriptEvent where
-    parseJSON = withObject "xAI STT event" \values ->
-        values .: "type" >>= \case
-            ("transcript.created" :: Text) ->
-                pure TranscriptCreated
-            "transcript.partial" ->
-                TranscriptPartial
-                    <$> values .:? "text" Aeson..!= ""
-                    <*> values .:? "is_final" Aeson..!= False
-                    <*> values .:? "speech_final" Aeson..!= False
-            "transcript.done" ->
-                TranscriptDone <$> values .:? "text" Aeson..!= ""
-            "error" ->
-                TranscriptError <$> values .:? "message" Aeson..!= "xAI STT error"
-            _ ->
-                pure TranscriptUnknown
+transcriptEventDecoder :: Json.Decoder TranscriptEvent
+transcriptEventDecoder = Json.discriminatedObject "type" \case
+    "transcript.created" ->
+        pure TranscriptCreated
+    "transcript.partial" ->
+        Json.object $ TranscriptPartial
+            <$> Json.defaultKey "" "text" Json.text
+            <*> Json.defaultKey False "is_final" Json.bool
+            <*> Json.defaultKey False "speech_final" Json.bool
+    "transcript.done" ->
+        Json.object $ TranscriptDone
+            <$> Json.defaultKey "" "text" Json.text
+    "error" ->
+        Json.object $ TranscriptError
+            <$> Json.defaultKey "xAI STT error" "message" Json.text
+    _ ->
+        pure TranscriptUnknown
 
 decodeTranscriptEvent :: LBS.ByteString -> Either String TranscriptEvent
-decodeTranscriptEvent = eitherDecode
+decodeTranscriptEvent body =
+    case Json.decodeEither transcriptEventDecoder (LBS.toStrict body) of
+        Left err -> Left (Text.unpack err.jsonErrorMessage)
+        Right event -> Right event
 
 data TranscriptState = TranscriptState
     { completed :: ![Text]
@@ -187,12 +190,17 @@ transcribe credential produceAudio onTranscript = do
         , ("User-Agent"
           , Text.encodeUtf8 (grokUserAgent defaultGrokClientVersion))
         ]
-        \connection -> do
-            awaitCreated connection
+        \connection -> Json.withDecoderSession \decoderSession -> do
+            awaitCreated decoderSession connection
             state <- newMVar emptyTranscriptState
             finished <- newEmptyMVar
             withAsync
-                (receiveTranscripts connection state finished onTranscript)
+                (receiveTranscripts
+                    decoderSession
+                    connection
+                    state
+                    finished
+                    onTranscript)
                 \receiver -> do
                 (do
                     produceAudio (WS.sendBinaryData connection)
@@ -221,8 +229,8 @@ sttLanguage = do
             || char == '-'
             || char == '_'
 
-awaitCreated :: WS.Connection -> IO ()
-awaitCreated connection = do
+awaitCreated :: Json.DecoderSession -> WS.Connection -> IO ()
+awaitCreated decoderSession connection = do
     next <- Timeout.timeout (10 * 1_000_000) loop
     case next of
         Nothing ->
@@ -232,24 +240,31 @@ awaitCreated connection = do
   where
     loop = do
         bytes <- WS.receiveData connection
-        case decodeTranscriptEvent bytes of
+        Json.decodeIO
+            decoderSession
+            transcriptEventDecoder
+            (LBS.toStrict bytes) >>= \case
             Right TranscriptCreated -> pure ()
             Right TranscriptError{transcriptMessage} ->
                 fail (Text.unpack transcriptMessage)
             _ -> loop
 
 receiveTranscripts
-    :: WS.Connection
+    :: Json.DecoderSession
+    -> WS.Connection
     -> MVar TranscriptState
     -> MVar (Either SomeException ())
     -> (Text -> IO ())
     -> IO ()
-receiveTranscripts connection state finished onTranscript =
+receiveTranscripts decoderSession connection state finished onTranscript =
     tryAny loop >>= void . tryPutMVar finished
   where
     loop = do
         bytes <- WS.receiveData connection
-        case decodeTranscriptEvent bytes of
+        Json.decodeIO
+            decoderSession
+            transcriptEventDecoder
+            (LBS.toStrict bytes) >>= \case
             Left _ -> loop
             Right event -> do
                 current <- modifyMVar state \previous ->

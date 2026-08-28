@@ -39,7 +39,6 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM_, replicateM_)
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -252,7 +251,6 @@ spec = describe "Agent.CLI.SubagentStore" do
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
             Right taskPath <- pure (parseTaskPath "/root/research/worker")
             let identity = SubagentIdentity (Just parentId) 2 taskPath
@@ -783,7 +781,6 @@ messageItem role text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }
 
 withTempDir :: (OsPath -> IO a) -> IO a

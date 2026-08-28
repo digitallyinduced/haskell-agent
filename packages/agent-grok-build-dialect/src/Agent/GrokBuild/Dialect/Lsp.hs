@@ -7,16 +7,11 @@ module Agent.GrokBuild.Dialect.Lsp
     ) where
 
 import Agent.GrokBuild.Dialect.Common (jsonTool)
+import Agent.GrokBuild.Dialect.Json (optionalInt, optionalTextValue)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
-import Data.Aeson
-    ( FromJSON(..)
-    , (.:)
-    , (.:?)
-    , withObject
-    , withText
-    )
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -38,8 +33,8 @@ lspOperationName = \case
     DocumentSymbol -> "documentSymbol"
     WorkspaceSymbol -> "workspaceSymbol"
 
-instance FromJSON LspOperation where
-    parseJSON = withText "LSP operation" \value ->
+lspOperationDecoder :: Json.Decoder LspOperation
+lspOperationDecoder = Json.withText \value ->
         case value of
             "goToDefinition" -> pure GoToDefinition
             "findReferences" -> pure FindReferences
@@ -62,14 +57,14 @@ data LspRequest = LspRequest
     }
     deriving (Eq, Show)
 
-instance FromJSON LspRequest where
-    parseJSON = withObject "lsp" \object ->
+lspRequestDecoder :: Json.Decoder LspRequest
+lspRequestDecoder = Json.object $
         LspRequest
-            <$> object .: "operation"
-            <*> object .:? "file_path"
-            <*> object .:? "line"
-            <*> object .:? "character"
-            <*> object .:? "query"
+            <$> Json.atKey "operation" lspOperationDecoder
+            <*> optionalTextValue "file_path"
+            <*> optionalInt "line"
+            <*> optionalInt "character"
+            <*> optionalTextValue "query"
 
 lspTool
     :: (LspRequest -> IO (Either Text Text))
@@ -101,7 +96,7 @@ lspTool run =
         ]
         True
         TurnSequential
-        (typedTool "lsp" run)
+        (typedTool "lsp" lspRequestDecoder run)
 
 lspDescription :: Text
 lspDescription =

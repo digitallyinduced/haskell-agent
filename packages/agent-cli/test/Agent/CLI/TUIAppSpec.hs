@@ -1,6 +1,11 @@
 module Agent.CLI.TUIAppSpec (spec) where
 
-import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
+import Agent.CLI.AgentViewport
+    ( AgentEntry(..)
+    , AgentStep(..)
+    , AgentStepState(..)
+    , AgentTarget(..)
+    )
 import Agent.CLI.Input (terminalTextWidth)
 import Agent.CLI.Interrupt (CtrlCDecision(..))
 import Agent.CLI.TUI.App
@@ -10,6 +15,7 @@ import Agent.CLI.TUI.App
     , agentEntryWindow
     , agentPaneEntryLimit
     , agentPaneVisible
+    , backgroundActivityText
     , completionFlashTransitions
     , conversationScrollbarRenderer
     , choiceRowColumns
@@ -19,6 +25,8 @@ import Agent.CLI.TUI.App
     , fullscreenBounds
     , fullscreenVtyConfig
     , fullscreenSurface
+    , fullscreenApp
+    , initialFullscreenAppState
     , mergeConversationView
     , newFullscreenInputBuffer
     , newFullscreenRuntime
@@ -46,13 +54,20 @@ import Agent.CLI.TUI.App
     )
 import Agent.CLI.WindowTitle (oscWindowTitleBytes)
 import Agent.CLI.TUI.Types
-    ( ChoiceOverlay(..)
+    ( AppEvent(..)
+    , ChoiceOverlay(..)
     , ChoicePresentation(..)
     , FullscreenRuntime(..)
+    , HistoryCommit(..)
     , Name(..)
     , TerminalFocus(..)
     , TextInputMode(..)
     , TextOverlay(..)
+    )
+import Agent.CLI.TUI.History
+    ( HistoryCursor(..)
+    , HistoryGeneration(..)
+    , HistoryTurn(..)
     )
 import Agent.CLI.Terminal
     ( kittyKeyboardDisambiguatePush
@@ -60,18 +75,23 @@ import Agent.CLI.Terminal
     )
 import Agent.Loop (LoopEvent(..), emptyTurnOutput)
 import Brick
-    ( VScrollbarRenderer(..)
+    ( App(..)
+    , BrickEvent(..)
+    , VScrollbarRenderer(..)
     , Widget
+    , customMain
     , hLimit
     , renderWidget
     , txt
     , vLimit
     )
+import Brick.BChan (newBChan, writeBChan)
 import qualified Brick.Types as B
 import Agent.Subagents (SubagentId(..))
 import Agent.ToolDispatch
     ( ToolCallKind(..)
     , ToolCallResult(..)
+    , customToolCall
     , functionToolCall
     )
 import Agent.TUI.Model
@@ -80,21 +100,53 @@ import Agent.TUI.Presentation
     , TodoDisplayStatus(..)
     )
 import Agent.TUI.Motion
-import Control.Concurrent.STM (newTChanIO)
+import Control.Concurrent.STM (atomically, newTChanIO, retry)
 import qualified Data.ByteString as ByteString
 import Data.Foldable (find, toList)
 import Data.IORef (modifyIORef', newIORef, readIORef, writeIORef)
 import qualified Data.Map.Strict as Map
+import qualified Data.Sequence as Seq
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Output.Mock as VMock
+import System.Timeout (timeout)
 import Test.Hspec
 
 spec :: Spec
 spec = do
+    describe "background activity status" do
+        it "names a running agent and its current step" do
+            backgroundActivityText
+                [ rootEntry
+                , (childEntry 1)
+                    { agentSteps =
+                        [ AgentStep AgentStepCompleted "Read files" Nothing
+                        , AgentStep AgentStepRunning "Running focused tests" Nothing
+                        ]
+                    }
+                ]
+                `shouldBe` "Background · agent-1 — Running focused tests"
+
+        it "summarizes multiple active agents and ignores finished agents" do
+            backgroundActivityText
+                [ rootEntry
+                , (childEntry 1)
+                    { agentSteps = [AgentStep AgentStepRunning "Reading logs" Nothing] }
+                , (childEntry 2)
+                    { agentSteps = [AgentStep AgentStepRunning "Reproducing bug" Nothing] }
+                , (childEntry 3)
+                    { agentSteps = [AgentStep AgentStepRunning "Waiting" Nothing] }
+                , (childEntry 4) { agentStatus = "done" }
+                ]
+                `shouldBe` "3 agents · agent-1 — Reading logs; agent-2 — Reproducing bug …"
+
+        it "falls back to the agent name before its first step arrives" do
+            backgroundActivityText [rootEntry, childEntry 1]
+                `shouldBe` "Background · agent-1"
+
     describe "on-demand syntax loading" do
         it "requests grammars used by fenced file paths" do
             let conversation =
@@ -105,6 +157,19 @@ spec = do
                         initialUiState
             syntaxLanguagesForBlocks (toList conversation.uiBlocks)
                 `shouldBe` Set.fromList ["haskell", "python"]
+
+        it "requests the JavaScript grammar for exec source" do
+            let conversation =
+                    reduceUi
+                        (UiLoop
+                            (ToolStarted
+                                (customToolCall
+                                    "exec-1"
+                                    "exec"
+                                    "const answer = 42;")))
+                        initialUiState
+            syntaxLanguagesForBlocks (toList conversation.uiBlocks)
+                `shouldBe` Set.singleton "javascript"
 
     describe "externalUrlCommand" do
         it "opens HTTP(S) URLs without passing through a shell" do
@@ -286,6 +351,20 @@ spec = do
             after.uiPrompt.promptModel `shouldBe` "gpt-5.6-sol"
 
     describe "fullscreenVtyConfig" do
+        it "maps the Kitty-encoded Esc key so its payload cannot leak" do
+            let mappings = V.configInputMap fullscreenVtyConfig
+            mapM_
+                (\body -> mappings `shouldContain`
+                    [(Nothing, "\ESC[" <> body, V.EvKey V.KEsc [])])
+                [ "27u"
+                , "27;1u"
+                , "27;1:1u"
+                , "27;2u"
+                , "27;5:1u"
+                , "27;65u"
+                , "27;256:1u"
+                ]
+
         it "maps enhanced-keyboard sequences before Vty decodes them" do
             let mappings = V.configInputMap fullscreenVtyConfig
             mappings `shouldContain`
@@ -682,6 +761,17 @@ spec = do
                 (conversationScrollbarRenderer @()).renderVScrollbar
                 `shouldBe` V.char V.defAttr '┃'
 
+    describe "history replacement viewport" do
+        it "shows the new durable tail immediately while focused" do
+            timeout 2_000_000
+                (replacementLeavesDurableTailVisible ReplaceWhileFocused)
+                `shouldReturn` Just True
+
+        it "shows the new durable tail immediately when focus returns" do
+            timeout 2_000_000
+                (replacementLeavesDurableTailVisible ReplaceWhileHidden)
+                `shouldReturn` Just True
+
     describe "motion demand" do
         it "distinguishes foreground, waiting, background, and static modes" do
             let idle =
@@ -978,6 +1068,133 @@ spec = do
                 `shouldBe` Map.singleton (BlockId 7) 1
             advanceCompletionFlashes 400 active
                 `shouldBe` Map.empty
+
+data FullscreenScriptEvent
+    = FullscreenScriptApp !AppEvent
+    | FullscreenScriptVty !V.Event
+
+data ReplacementScenario
+    = ReplaceWhileFocused
+    | ReplaceWhileHidden
+
+replacementLeavesDurableTailVisible :: ReplacementScenario -> IO Bool
+replacementLeavesDurableTailVisible scenario = do
+    input <- newFullscreenInputBuffer
+    let liveTranscript =
+            Text.unlines (replicate 200 "live transcript line")
+    runtime <- newFullscreenRuntime
+        input
+        (pure ())
+        (const (pure ()))
+        (pure WarnExit)
+        (const (pure True))
+        (const (pure ()))
+        (const (pure ()))
+        (pure (AgentRoot, []))
+        (const (pure ()))
+        (pure ())
+        (const (pure ()))
+        MotionFull
+        False
+        (initialUiState { uiFollow = True })
+    let
+        durableTail = "FINAL DURABLE ANSWER"
+        durableBlock = UiBlock
+            { blockId = BlockId 1000
+            , blockKind = BlockAssistant
+            , blockTitle = "Assistant"
+            , blockBody =
+                Text.unlines
+                    (replicate 35 "durable transcript line"
+                        <> [durableTail])
+            , blockTimestamp = ""
+            , blockDetail = ""
+            , blockState = BlockComplete
+            , blockExpanded = False
+            , blockCallId = Nothing
+            }
+        durableTurn = HistoryTurn
+            { historyTurnCursor = HistoryCursor 0
+            , historyTurnBlocks = Seq.singleton durableBlock
+            }
+        initialState =
+            initialFullscreenAppState runtime [] AgentRoot [] 0
+        scriptedApp = App
+            { appDraw = fullscreenApp.appDraw
+            , appChooseCursor = fullscreenApp.appChooseCursor
+            , appHandleEvent = \case
+                AppEvent (FullscreenScriptApp event) ->
+                    fullscreenApp.appHandleEvent (AppEvent event)
+                AppEvent (FullscreenScriptVty event) ->
+                    fullscreenApp.appHandleEvent (VtyEvent event)
+                VtyEvent event ->
+                    fullscreenApp.appHandleEvent (VtyEvent event)
+                MouseDown name button modifiers location ->
+                    fullscreenApp.appHandleEvent
+                        (MouseDown name button modifiers location)
+                MouseUp name button location ->
+                    fullscreenApp.appHandleEvent
+                        (MouseUp name button location)
+            , appStartEvent = fullscreenApp.appStartEvent
+            , appAttrMap = fullscreenApp.appAttrMap
+            }
+
+    -- A single custom-event channel makes each focus/history sequence
+    -- deterministic while still running the real Brick event handler.
+    events <- newBChan 8
+    let commit = FullscreenScriptApp
+            (AppHistoryCommitted
+                (HistoryGeneration 0)
+                durableTurn
+                HistoryCommitAppend)
+        beginLive =
+            [ FullscreenScriptApp AppHistoryLiveStarted
+            , FullscreenScriptApp
+                (AppUi (UiAssistantHistory liveTranscript))
+            ]
+        script = beginLive <> case scenario of
+            ReplaceWhileFocused ->
+                [ commit
+                , FullscreenScriptApp AppStop
+                ]
+            ReplaceWhileHidden ->
+                [ FullscreenScriptVty V.EvLostFocus
+                , commit
+                -- This later hidden event discards the commit's pending
+                -- scroll request, so focus gain must reassert it.
+                , FullscreenScriptApp AppConversationReflow
+                , FullscreenScriptVty V.EvGainedFocus
+                , FullscreenScriptApp AppStop
+                ]
+    mapM_ (writeBChan events) script
+
+    let bounds = (80, 24)
+    (_, mockOutput) <- VMock.mockTerminal bounds
+    outputBytes <- newIORef ByteString.empty
+    let output = mockOutput
+            { V.outputByteBuffer = \bytes ->
+                modifyIORef' outputBytes (<> bytes)
+            }
+    context <- V.mkDisplayContext output output bounds
+    internalEvents <- newTChanIO
+    let vty = V.Vty
+            { V.update = V.outputPicture context
+            , V.nextEvent = atomically retry
+            , V.nextEventNonblocking = pure Nothing
+            , V.inputIface = V.Input
+                { V.eventChannel = internalEvents
+                , V.shutdownInput = pure ()
+                , V.restoreInputState = pure ()
+                , V.inputLogMsg = const (pure ())
+                }
+            , V.outputIface = output
+            , V.refresh = pure ()
+            , V.shutdown = pure ()
+            , V.isShutdown = pure False
+            }
+    _ <- customMain vty (pure vty) (Just events) scriptedApp initialState
+    rendered <- readIORef outputBytes
+    pure $ TextEncoding.encodeUtf8 durableTail `ByteString.isInfixOf` rendered
 
 mockVty :: V.Output -> IO () -> IO Bool -> IO V.Vty
 mockVty output shutdownAction isShutdownAction = do

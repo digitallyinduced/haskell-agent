@@ -5,6 +5,7 @@ module Agent.CLI.TUI.ImagePreview
     ( NativePreviewPlacement(..)
     , TuiImagePreview(..)
     , nativePreviewPlacements
+    , sameNativePreviewLayout
     , imageDimensions
     , prepareTuiImagePreview
     , previewCountForWidth
@@ -43,6 +44,23 @@ data PreviewCell = PreviewCell
     , cellBottom :: !PixelRGB8
     }
     deriving (Eq, Show)
+
+-- | Compare only the layout that changes while scrolling. Attachments can be
+-- large, so synchronization must not traverse their bytes on every reflow.
+sameNativePreviewLayout
+    :: [NativePreviewPlacement]
+    -> [NativePreviewPlacement]
+    -> Bool
+sameNativePreviewLayout left right =
+    length left == length right
+        && and (zipWith samePlacement left right)
+  where
+    samePlacement a b =
+        a.nativePreviewImageId == b.nativePreviewImageId
+            && a.nativePreviewRow == b.nativePreviewRow
+            && a.nativePreviewColumn == b.nativePreviewColumn
+            && a.nativePreviewColumns == b.nativePreviewColumns
+            && a.nativePreviewRows == b.nativePreviewRows
 
 data NativePreviewPlacement = NativePreviewPlacement
     { nativePreviewImageId :: !Int

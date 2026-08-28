@@ -1,0 +1,37 @@
+module Agent.Store.Postgres.SessionItem.Mapping.Statements.CustomCall
+    ( CustomCallRow (..)
+    , loadCustomCallStatement
+    ) where
+
+import Data.Text (Text)
+import qualified Hasql.Decoders as Decoders
+import qualified Hasql.Encoders as Encoders
+import Hasql.Statement (Statement)
+
+import Agent.Store.Postgres.Hasql (mkStatement)
+
+data CustomCallRow = CustomCallRow
+    { customCallRowProviderItemId :: !(Maybe Text)
+    , customCallRowCallId :: !Text
+    , customCallRowName :: !Text
+    , customCallRowInput :: !Text
+    , customCallRowStatus :: !(Maybe Text)
+    , customCallRowExtraFields :: !Text
+    }
+
+loadCustomCallStatement :: Statement Text (Maybe CustomCallRow)
+loadCustomCallStatement = mkStatement
+    "SELECT provider_item_id, call_id, tool_name, input_text, status_name,\
+    \ extra_fields_text\
+    \ FROM harness.session_custom_tool_calls\
+    \ WHERE response_item_id = $1::uuid"
+    (Encoders.param (Encoders.nonNullable Encoders.text))
+    (Decoders.rowMaybe $
+        CustomCallRow
+            <$> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text)
+            <*> Decoders.column (Decoders.nullable Decoders.text)
+            <*> Decoders.column (Decoders.nonNullable Decoders.text))
+    True

@@ -19,6 +19,7 @@ import Agent.CLI.Compaction
     )
 import Agent.CLI.Connectivity (withConnectionRecoveryUsing)
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json.Decode qualified as Hermes
 import Agent.Loop
 import Agent.OpenAI.Compaction
     ( assistantSummaryItem
@@ -53,8 +54,11 @@ import Control.Exception
     )
 import Data.IORef
 import Control.Monad.Trans.Except (runExceptT)
+import qualified Data.ByteString as ByteString
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as TextEncoding
 import Test.Hspec
 
 spec :: Spec
@@ -174,7 +178,6 @@ spec = do
                                     , description = Nothing
                                     , parameters = Nothing
                                     , strict = Just True
-                                    , extraFields = mempty
                                     }
                                 ]
                         , toolChoice =
@@ -217,15 +220,9 @@ spec = do
 
         it "does not replay OpenAI checkpoints to portable summarizers" do
             let remoteCheckpoint =
-                    KnownResponseItem ItemCompaction TaggedObject
-                        { tag = "compaction"
-                        , fields = mempty
-                        }
+                    KnownResponseItem ItemCompaction (TaggedObject "compaction")
                 remoteTrigger =
-                    UnknownResponseItem TaggedObject
-                        { tag = "COMPACTION_TRIGGER"
-                        , fields = mempty
-                        }
+                    UnknownResponseItem (TaggedObject "COMPACTION_TRIGGER")
                 paramsValue = defaultResponseCreateParams
                 history =
                     [ userTextItem "old context"
@@ -267,10 +264,7 @@ spec = do
 
         it "preserves OpenAI checkpoints for focused OpenAI summaries" do
             let remoteCheckpoint =
-                    KnownResponseItem ItemCompaction TaggedObject
-                        { tag = "compaction"
-                        , fields = mempty
-                        }
+                    KnownResponseItem ItemCompaction (TaggedObject "compaction")
                 history = [userTextItem "old context", remoteCheckpoint]
             params <- newIORef defaultResponseCreateParams
             transcript <- newIORef history
@@ -295,10 +289,7 @@ spec = do
 
         it "rejects portable summaries with only opaque checkpoints" do
             let remoteCheckpoint =
-                    KnownResponseItem ItemCompaction TaggedObject
-                        { tag = "compaction"
-                        , fields = mempty
-                        }
+                    KnownResponseItem ItemCompaction (TaggedObject "compaction")
             params <- newIORef defaultResponseCreateParams
             transcript <- newIORef [remoteCheckpoint]
             requests <- newIORef (0 :: Int)
@@ -628,7 +619,6 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
-                            , extraFields = mempty
                             }
                         ]
                     }
@@ -685,7 +675,6 @@ spec = do
                                 Just (Text.replicate 4_000 "schema")
                             , parameters = Nothing
                             , strict = Just True
-                            , extraFields = mempty
                             }
                         ]
                     }
@@ -1186,6 +1175,60 @@ spec = do
             readIORef compactCalls `shouldReturn` 0
             readIORef submitCalls `shouldReturn` 0
 
+        it "does not reject a first turn whose size is dominated by an image" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { model = Just "gpt-5.6-sol" }
+                contextWindow =
+                    codexEffectiveContextWindowFor params.model
+                image =
+                    ImageAttachment
+                        { imageMime = "image/png"
+                        , imageBytes = ByteString.replicate (1024 * 1024) 1
+                        }
+                inputs =
+                    [ UserMultimodal
+                        { userText = "what does this screenshot show?"
+                        , userImages = [image]
+                        }
+                    ]
+                items = turnInputsToItems inputs
+                naiveTokens =
+                    Text.length
+                        (TextEncoding.decodeUtf8
+                            (LBS.toStrict (Aeson.encode items)))
+                        `div` 4
+                estimated =
+                    estimateRequestTokensWithItems params items
+            naiveTokens `shouldSatisfy` (> contextWindow)
+            estimated `shouldSatisfy` (< contextWindow)
+            contextState <- newIORef Nothing
+            compactCalls <- newIORef (0 :: Int)
+            submitCalls <- newIORef (0 :: Int)
+            let sender _request = do
+                    modifyIORef' compactCalls (+ 1)
+                    pure (Right remoteCompactionResponse)
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' submitCalls (+ 1)
+                    pure $ successful state TurnOutput
+                        { responseId = "resp-new"
+                        , toolCalls = []
+                        , assistantText = Just "ok"
+                        , tokenUsage = TokenUsage 20 5 0
+                        , completion = TurnCompleted
+                        }
+                backend =
+                    autoCompactOpenAiBackendWithSender
+                        Nothing
+                        sender
+                        (const (pure ()))
+                        (pure params)
+                        contextState
+                        base
+            result <- backend.submitTurn [] Nothing inputs (const (pure ()))
+            result `shouldSatisfy` either (const False) (const True)
+            readIORef compactCalls `shouldReturn` 0
+            readIORef submitCalls `shouldReturn` 1
+
         it "compacts before the next request at the Codex token limit" do
             let oldHistory = [userTextItem "old"]
                 compactedHistory = [userTextItem "compacted"]
@@ -1346,10 +1389,10 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = mempty
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 toolOutputText = Text.replicate 400 "x"
@@ -1407,10 +1450,10 @@ spec = do
                     , callId = "call-oversized"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = mempty
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput =
@@ -1554,10 +1597,10 @@ spec = do
                     , callId = "call-keep"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = mempty
                     }
                 oldHistory =
                     [ userTextItem
@@ -1609,10 +1652,10 @@ spec = do
                     , callId = "call-occupancy"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = mempty
                     }
                 oldHistory = [userTextItem "run it", danglingCall]
                 originalOutput = Text.replicate 80_000 "x"
@@ -1699,10 +1742,10 @@ spec = do
                     , callId = "call-live"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = mempty
                     }
                 oldHistory =
                     [ userTextItem
@@ -1760,10 +1803,10 @@ spec = do
                     , callId = "call-replay"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = mempty
                     }
                 oldHistory =
                     [ userTextItem
@@ -1944,7 +1987,7 @@ responseWithoutCompaction =
 
 responseWithOutput :: [Aeson.Value] -> Response
 responseWithOutput output =
-    case Aeson.fromJSON $ Aeson.object
+    decodeResponseFixture $ Aeson.object
         [ "id" .= ("resp-compact" :: Text)
         , "created_at" .= (0 :: Int)
         , "status" .= ("completed" :: Text)
@@ -1959,9 +2002,14 @@ responseWithOutput output =
                 [ "cached_tokens" .= compactionUsage.cachedTokens
                 ]
             ]
-        ] of
-        Aeson.Success response -> response
-        Aeson.Error err -> error err
+        ]
+
+decodeResponseFixture :: Aeson.Value -> Response
+decodeResponseFixture fixture =
+    case Hermes.decodeEither responseDecoder
+            (LBS.toStrict (Aeson.encode fixture)) of
+        Right response -> response
+        Left err -> error (Text.unpack (Hermes.jsonErrorMessage err))
 
 compactionUsage :: TokenUsage
 compactionUsage = TokenUsage
@@ -1980,7 +2028,7 @@ summaryResponse summary =
 
 summaryResponseWithStatus :: Text -> Text -> Response
 summaryResponseWithStatus responseStatus summary =
-    case Aeson.fromJSON $ Aeson.object
+    decodeResponseFixture $ Aeson.object
         [ "id" .= ("resp-summary" :: Text)
         , "created_at" .= (0 :: Int)
         , "status" .= responseStatus
@@ -1997,6 +2045,4 @@ summaryResponseWithStatus responseStatus summary =
                     ]
                 ]
             ]
-        ] of
-        Aeson.Success response -> response
-        Aeson.Error err -> error err
+        ]

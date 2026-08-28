@@ -274,6 +274,11 @@ spec = describe "fullscreen Markdown rendering" do
         prose `shouldSatisfy` not . Text.any isControl
         code `shouldSatisfy` not . Text.any isControl
 
+    it "hides fenced code language labels" do
+        let rendered = Text.concat (renderRows 40 "```haskell\nmain = pure ()\n```")
+        rendered `shouldSatisfy` Text.isInfixOf "main = pure ()"
+        rendered `shouldSatisfy` (not . Text.isInfixOf "haskell")
+
     it "renders numbered controls for fenced code block headers" do
         let widget :: Widget ()
             widget =

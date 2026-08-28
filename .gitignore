@@ -9,3 +9,6 @@
 /.ghc.environment.*
 *.hi
 *.o
+# Fetched from openai/codex by nix (see flake.nix codexModelsJson); not vendored.
+packages/agent-openai/data/models.json
+packages/agent-openai/data/prompt.md

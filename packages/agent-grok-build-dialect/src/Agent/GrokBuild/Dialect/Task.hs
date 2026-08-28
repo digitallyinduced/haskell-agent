@@ -40,12 +40,8 @@ import Agent.Subagents
     , subagentLease
     , waitSubagents
     )
-import Agent.ToolArgs
-    ( objectArgs
-    , optBool
-    , optText
-    , reqText
-    )
+import qualified Agent.Json.Decode as Json
+import Agent.GrokBuild.Dialect.Json (optionalBool, optionalText)
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -61,7 +57,6 @@ import Agent.Tools.Types
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
-import Data.Aeson (FromJSON(..))
 import Data.IORef
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -190,16 +185,21 @@ data TaskArgs = TaskArgs
     , isolation :: Maybe Text
     }
 
-instance FromJSON TaskArgs where
-    parseJSON = objectArgs \object -> do
-        prompt <- reqText object "prompt"
-        description <- reqText object "description"
-        subagentType <- fromMaybe defaultSubagentType <$> optText object "subagent_type"
-        runInBackground <- fromMaybe True <$> optBool object "run_in_background"
-        resumeFrom <- sanitizeOptional <$> optText object "resume_from"
-        cwd <- sanitizeOptional <$> optText object "cwd"
-        model <- sanitizeOptional <$> optText object "model"
-        isolation <- sanitizeOptional <$> optText object "isolation"
+taskArgsDecoder :: Json.Decoder TaskArgs
+taskArgsDecoder = Json.object do
+        prompt <- Json.atKey "prompt" Json.text
+        description <- Json.atKey "description" Json.text
+        subagentType <- fromMaybe defaultSubagentType <$> optionalText "subagent_type"
+        canonicalBackground <- optionalBool "run_in_background"
+        legacyBackground <- optionalBool "background"
+        let runInBackground =
+                fromMaybe True $ case canonicalBackground of
+                    Just value -> Just value
+                    Nothing -> legacyBackground
+        resumeFrom <- sanitizeOptional <$> optionalText "resume_from"
+        cwd <- sanitizeOptional <$> optionalText "cwd"
+        model <- sanitizeOptional <$> optionalText "model"
+        isolation <- sanitizeOptional <$> optionalText "isolation"
         pure TaskArgs
             { prompt
             , description
@@ -241,7 +241,7 @@ taskTool baseCwd ctx specsRef =
         ]
         (taskApproval ctx)
         TurnSequential
-        (typedTool "task" (runTask baseCwd ctx specsRef))
+        (typedTool "task" taskArgsDecoder (runTask baseCwd ctx specsRef))
 
 taskApproval :: MultiAgentContext -> ApprovalRule
 taskApproval ctx = case ctx.multiSelfId of

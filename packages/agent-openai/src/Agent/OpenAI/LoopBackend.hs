@@ -42,6 +42,11 @@ import Agent.Loop
     , LoopEvent(..)
     , TurnInput(..)
     )
+import Agent.ToolDispatch
+    ( ToolArgumentStreamEvent(..)
+    , ToolCall
+    , functionToolCall
+    )
 import Agent.OpenAI.Error (isResponseChainCompatibilityError)
 import Agent.OpenAI.Request (sanitizeCodexRequest)
 import Agent.OpenAI.WebSocketClient
@@ -648,20 +653,21 @@ openAiBackendWithRetryPolicyAndFeatures
         go emittedRawOutput emittedVisibleOutput defaultRetryStatus
       where
         go emittedRawOutput emittedVisibleOutput retryStatus = do
+            -- One projector per attempt: argument-progress counters must
+            -- describe a single provider sample, not the whole retry chain.
+            projectEvent <-
+                Responses.newStreamEventToLoopEvents showRawReasoning
             result <- send request previousResponseId \event -> do
                 if streamOutputObserved event
                     then writeIORef emittedRawOutput True
                     else pure ()
                 forM_ (responseEventToToolArgumentEvent event) $
                     onLoopEvent . ToolArgumentEvent
-                mapM_
-                    (\loopEvent -> do
+                projectEvent event
+                    >>= mapM_ \loopEvent -> do
                         when (isVisibleModelOutput loopEvent) $
                             writeIORef emittedVisibleOutput True
-                        onLoopEvent loopEvent)
-                    (Responses.streamEventToLoopEventWithRawReasoning
-                        showRawReasoning
-                        event)
+                        onLoopEvent loopEvent
             emitted <- readIORef emittedRawOutput
             case result of
                 Left apiError

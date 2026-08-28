@@ -4,7 +4,8 @@ module Agent.CLI.SessionState
     , newSessionState
     ) where
 
-import Agent.CLI.Session.History (LiveConversation(..))
+import Agent.CLI.Session.ConversationStore (newConversationStore)
+import Agent.CLI.Session.History (LiveConversation)
 import Data.IORef (IORef, newIORef)
 import Data.Text (Text)
 
@@ -21,11 +22,7 @@ data SessionState = SessionState
 newSessionState :: IO SessionState
 newSessionState = do
     draft <- newIORef ""
-    conversation <- newIORef LiveConversation
-        { livePreviousResponseId = Nothing
-        , liveTranscript = []
-        , liveAttachments = []
-        }
+    conversation <- newIORef =<< newConversationStore Nothing [] []
     previewId <- newIORef 1
     pure SessionState
         { sessionDraft = draft
