@@ -57,5 +57,6 @@ library
                     , agent-json >= 0.1 && < 0.2
                     , aeson      >= 2.0
                     , hermes-json
+                    , containers
                     , scientific
                     , text

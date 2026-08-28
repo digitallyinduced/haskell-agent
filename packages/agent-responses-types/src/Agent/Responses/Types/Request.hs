@@ -217,7 +217,7 @@ data ResponseCreateParams = ResponseCreateParams
     , instructions         :: !(Maybe Text)
     , maxOutputTokens      :: !(Maybe Int)
     , maxToolCalls         :: !(Maybe Int)
-    , metadata             :: !(Maybe RawJson)
+    , metadata             :: !(Maybe ResponseMetadata)
     , model                :: !(Maybe Text)
     , moderation           :: !(Maybe RawJson)
     , parallelToolCalls    :: !(Maybe Bool)
@@ -416,7 +416,7 @@ responseCreateParamsDecoder = Hermes.object $
         <*> optionalAtKey "instructions" Hermes.text
         <*> optionalAtKey "max_output_tokens" Hermes.int
         <*> optionalAtKey "max_tool_calls" Hermes.int
-        <*> optionalAtKey "metadata" rawJsonDecoder
+        <*> optionalAtKey "metadata" responseMetadataDecoder
         <*> optionalAtKey "model" Hermes.text
         <*> optionalAtKey "moderation" rawJsonDecoder
         <*> optionalAtKey "parallel_tool_calls" Hermes.bool

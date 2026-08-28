@@ -8,11 +8,15 @@ import Agent.CLI.Request
 import Agent.CLI.Tools (webSearchTool)
 import Agent.Provider (Provider(..))
 import Agent.Responses.Types
+import Agent.Responses.Types.Items (responseItemDecoder)
+import Agent.Json.Decode qualified as Hermes
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
+import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
 spec :: Spec
@@ -42,6 +46,26 @@ spec = describe "requestParams" do
                 reasoning.generateSummary `shouldBe` Nothing
                 reasoning.reasoningMode `shouldBe` Nothing
                 reasoning.summary `shouldBe` Just "auto"
+
+    it "decodes Responses metadata as a string map" do
+        let decoded = Hermes.decodeEither responseCreateParamsDecoder $
+                Text.encodeUtf8
+                    "{\"metadata\":{\"team\":\"agent\"}}"
+        fmap (.metadata) decoded `shouldBe`
+            Right (Just (ResponseMetadata (Map.fromList [("team", "agent")])))
+
+    it "decodes local-shell environment variables as a string map" do
+        let decoded = Hermes.decodeEither responseItemDecoder $ Text.encodeUtf8
+                "{\"type\":\"local_shell_call\",\"action\":{\"type\":\"exec\",\"command\":[\"env\"],\"env\":{\"LANG\":\"C\"}}}"
+        case decoded of
+            Right (LocalShellCallItem LocalShellCall
+                { action = Just LocalShellExec{env} }) ->
+                    env `shouldBe` Just
+                        (EnvironmentVariables (Map.fromList [("LANG", "C")]))
+            Right item -> expectationFailure
+                ("unexpected decoded item: " <> show item)
+            Left err -> expectationFailure
+                ("could not decode local shell item: " <> show err)
 
     it "leaves reasoning summaries provider-controlled outside OpenAI" do
         let params =
