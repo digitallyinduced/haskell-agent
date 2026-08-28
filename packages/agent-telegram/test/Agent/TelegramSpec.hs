@@ -1063,24 +1063,27 @@ spec = describe "Agent.Telegram" do
             reordered.nextUpdateId `shouldBe` Just 102
 
     describe "durable queue state" do
-        it "only visibly replies when a newer inbound message is queued" do
-            let key = TelegramChatKey 123 Nothing
+        it "tracks ignored messages when choosing visible reply targets" do
+            update <- (decodeWith telegramUpdateDecoder
+                (LBS.pack "{\"update_id\":12,\"message\":{\"message_id\":78,\"from\":{\"id\":789},\"chat\":{\"id\":-1001,\"type\":\"group\"},\"text\":\"ambient message\"}}")
+                :: Either String TelegramUpdate)
+                `shouldReturnRight` "Telegram update should decode"
+            let key = TelegramChatKey (-1001) Nothing
                 reply = TelegramPendingReply 11 key (Just 77) Nothing "reply"
-                newerTurn = TelegramPendingTurn 12 78 key "next" Nothing
-                latestState = emptyTelegramState
-                    { pendingQueues =
-                        Map.singleton key
-                            (Map.singleton 11 (DeliverReply reply))
-                    }
-                overtakenState = latestState
-                    { pendingQueues =
-                        Map.singleton key $ Map.fromList
-                            [ (11, DeliverReply reply)
-                            , (12, RunPendingTurn newerTurn)
-                            ]
-                    }
+                unknownState = emptyTelegramState
+                latestState = unknownState
+                    { latestInboundMessageIds = Map.singleton key 77 }
+                ignoredNewerState =
+                    storeUpdateAction update.updateId IgnoreUpdate
+                        (recordLatestInboundMessage update latestState)
+            pendingReplyTarget reply unknownState `shouldBe` Just 77
             pendingReplyTarget reply latestState `shouldBe` Nothing
-            pendingReplyTarget reply overtakenState `shouldBe` Just 77
+            pendingReplyTarget reply ignoredNewerState `shouldBe` Just 77
+            restored <- (decodeWith telegramStateDecoder (encode ignoredNewerState)
+                :: Either String TelegramState)
+                `shouldReturnRight` "Telegram state should decode"
+            Map.lookup key restored.latestInboundMessageIds `shouldBe` Just 78
+            pendingReplyTarget reply restored `shouldBe` Just 77
 
         it "loads state written before pending turns were introduced" do
             let decoded = decodeWith telegramStateDecoder
@@ -1223,6 +1226,7 @@ spec = describe "Agent.Telegram" do
                     , "allowedUserIds" .= ([] :: [Integer])
                     , "seenTelegramUsers" .= ([] :: [TelegramUser])
                     , "seenUsersByChat" .= ([] :: [Value])
+                    , "latestInboundMessages" .= ([] :: [Value])
                     ]
             encode state `shouldBe` encode expected
 

@@ -19,6 +19,7 @@ module Agent.Telegram.Classify
     , telegramUserLabel
     , telegramReplyUserIdFromPrompt
     , recordSeenTelegramUsers
+    , recordLatestInboundMessage
     , resolveTelegramUser
     , grantableTelegramUser
     , TelegramUserResolution(..)

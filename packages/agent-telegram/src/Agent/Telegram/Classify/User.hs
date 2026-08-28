@@ -4,6 +4,7 @@ module Agent.Telegram.Classify.User
     , resolveTelegramUser
     , grantableTelegramUser
     , recordSeenTelegramUsers
+    , recordLatestInboundMessage
     , messageMentionEntities
     , mentionedTelegramUsers
     ) where
@@ -132,6 +133,22 @@ stubTelegramUser userId =
         , userLastName = Nothing
         , userUsername = Nothing
         }
+
+recordLatestInboundMessage :: TelegramUpdate -> TelegramState -> TelegramState
+recordLatestInboundMessage update state =
+    case update.updateMessage of
+        Nothing -> state
+        Just message -> state
+            { latestInboundMessageIds =
+                Map.insertWith
+                    max
+                    TelegramChatKey
+                        { chatId = message.messageChat.telegramChatId
+                        , messageThreadId = message.messageThread
+                        }
+                    message.messageId
+                    state.latestInboundMessageIds
+            }
 
 recordSeenTelegramUsers :: TelegramUpdate -> TelegramState -> TelegramState
 recordSeenTelegramUsers update state =

@@ -38,6 +38,7 @@ module Agent.Telegram
     , telegramReplyUserIdFromPrompt
     , telegramUserLabel
     , recordSeenTelegramUsers
+    , recordLatestInboundMessage
     , resolveTelegramUser
     , TelegramUserResolution(..)
     , transcribeWithXAI
