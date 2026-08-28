@@ -897,7 +897,7 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
         let shouldCompact =
                 not (null history)
                     && projectedTokens >= tokenLimit
-        if shouldCompact && not (any isCompletedTool inputs)
+        if shouldCompact
             then compactThenSubmit
                 tokenLimit
                 contextState history inputs onEvent
@@ -914,7 +914,15 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
 
     compactThenSubmit tokenLimit oldTokens oldHistory inputs onEvent = do
         onEvent (ActivityUpdated "Compacting context…")
-        runCompaction oldHistory inputs >>= \case
+        -- Tool results complete protocol units that are already represented by
+        -- calls in oldHistory. Put those results behind their calls before
+        -- requesting the checkpoint; replaying them after the checkpoint
+        -- would create orphaned or duplicated tool output.
+        let (completedTools, continuationInputs) =
+                partitionCompletedTools inputs
+            compactionHistory =
+                oldHistory <> turnInputsToItems completedTools
+        runCompaction compactionHistory continuationInputs >>= \case
                 Left err ->
                     pure (Left (automaticCompactionError err))
                 Right outcome
@@ -932,8 +940,16 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                             restore
                             rollback
                             outcome
-                            inputs
+                            continuationInputs
                             onEvent
+
+    partitionCompletedTools =
+        foldr
+            (\input (completed, pending) ->
+                if isCompletedTool input
+                    then (input : completed, pending)
+                    else (completed, input : pending))
+            ([], [])
 
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
