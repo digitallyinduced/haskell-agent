@@ -11,7 +11,9 @@ import Agent.ToolDispatch
 import Agent.Tools.Types
     ( AppTool(..)
     , ApprovalRule(..)
+    , ToolExecutionPolicy(..)
     , appToolHandlers
+    , toolAllowsWithoutPrompt
     )
 import Control.Exception.Safe (bracket)
 import Control.Concurrent (threadDelay)
@@ -83,7 +85,7 @@ spec = describe "Agent.MCP" do
                     ])
                 `shouldBe` Left "denied"
 
-    it "initializes a stdio server, exposes only read-only tools, and calls one" $
+    it "exposes MCP mutations behind approval while reads stay unprompted" $
         withFakeServer \script -> do
             started <- newIORef []
             fleet <- startMcpFleetWithProgress
@@ -102,16 +104,23 @@ spec = describe "Agent.MCP" do
             bracket (pure fleet) closeMcpFleet \_ -> do
                 readIORef started `shouldReturn` [["fake"], []]
                 let tools = mcpFleetTools fleet
-                map (.appToolName) tools `shouldBe` ["fake__echo_read"]
-                fleet.mcpFleetWarnings `shouldBe`
-                    ["MCP server fake skipped non-read-only tool mutate"]
+                map (.appToolName) tools `shouldBe`
+                    ["fake__echo_read", "fake__mutate"]
+                fleet.mcpFleetWarnings `shouldBe` []
                 mcpFleetStatuses fleet `shouldReturn`
-                    [McpServerStatus "fake" McpReady 1]
-                Just tool <-
+                    [McpServerStatus "fake" McpReady 2]
+                Just readTool <-
                     pure (find ((== "fake__echo_read") . (.appToolName)) tools)
-                case tool.appToolApproval of
+                Just mutateTool <-
+                    pure (find ((== "fake__mutate") . (.appToolName)) tools)
+                case readTool.appToolApproval of
                     AlwaysReadOnly -> pure ()
                     _ -> expectationFailure "expected read-only approval"
+                readTool.appToolExecution `shouldBe` ParallelSafe
+                case mutateTool.appToolApproval of
+                    AlwaysPrompt -> pure ()
+                    _ -> expectationFailure "expected mutation approval"
+                mutateTool.appToolExecution `shouldBe` TurnSequential
                 let dispatch ident message = dispatchToolCall
                         defaultLoopDispatch
                         (appToolHandlers tools)
@@ -184,7 +193,7 @@ spec = describe "Agent.MCP" do
                     `shouldBe` ["missing", "healthy"]
                 case statuses of
                     [ McpServerStatus "missing" (McpFailed _) 0
-                        , McpServerStatus "healthy" McpReady 1
+                        , McpServerStatus "healthy" McpReady 2
                         ] -> pure ()
                     _ -> expectationFailure ("unexpected statuses: " <> show statuses)
 
@@ -238,6 +247,25 @@ spec = describe "Agent.MCP" do
                 called.output `shouldBe` "delayed response"
                 updates <- readIORef progress
                 updates `shouldSatisfy` (not . null)
+
+    it "classifies progressive MCP calls using the selected tool annotation" $
+        withFakeServer \script -> do
+            fleet <- startMcpFleetProgressive
+                (const (pure ()))
+                [baseConfig "fake" script]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                waitForServerReady fleet "fake"
+                let tools = mcpFleetMetaTools fleet
+                Just callTool <-
+                    pure (find ((== "mcp_call") . (.appToolName)) tools)
+                toolAllowsWithoutPrompt callTool
+                    (functionToolCall "read" "mcp_call"
+                        "{\"name\":\"fake__echo_read\",\"arguments\":{}}")
+                    `shouldReturn` True
+                toolAllowsWithoutPrompt callTool
+                    (functionToolCall "write" "mcp_call"
+                        "{\"name\":\"fake__mutate\",\"arguments\":{}}")
+                    `shouldReturn` False
 
     it "projects progressive MCP discovery through Grok search_tool and use_tool" $
         withDelayedFakeServer \script -> do
@@ -427,6 +455,24 @@ spec = describe "Agent.MCP" do
                     called.output `shouldBe` "reconnected response"
                     countStarts counter `shouldReturn` 2
 
+        it "does not reconnect and retry a mutation after transport loss" $
+            withCountingMutationServer \script counter -> do
+                fleet <- startMcpFleetProgressive
+                    (const (pure ()))
+                    [ (baseConfig "mutation" script)
+                        { mcpServerArgs = [counter]
+                        }
+                    ]
+                bracket (pure fleet) closeMcpFleet \_ -> do
+                    waitForServerReady fleet "mutation"
+                    let tools = mcpFleetMetaTools fleet
+                    _ <- dispatchToolCall
+                        defaultLoopDispatch
+                        (appToolHandlers tools)
+                        (functionToolCall "mutation-call" "mcp_call"
+                            "{\"name\":\"mutation__write\",\"arguments\":{}}")
+                    countStarts counter `shouldReturn` 1
+
         it "rebuilds an idle fleet whose transport failed" $
             withCountingFailingServer \script counter -> do
                 supervisor <- newMcpSupervisor
@@ -476,6 +522,9 @@ withCountingFailingServer = withCountingServer countingFailingServer
 
 withCountingReconnectServer :: (FilePath -> FilePath -> IO a) -> IO a
 withCountingReconnectServer = withCountingServer countingReconnectServer
+
+withCountingMutationServer :: (FilePath -> FilePath -> IO a) -> IO a
+withCountingMutationServer = withCountingServer countingMutationServer
 
 withCountingServer
     :: LBS.ByteString
@@ -630,7 +679,7 @@ fakeServer =
     \      ;;\n\
     \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
     \    *'\"method\":\"tools/list\"'*)\n\
-    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo_read\",\"description\":\"Echo.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true}},{\"name\":\"mutate\",\"description\":\"Write.\",\"inputSchema\":{\"type\":\"object\"},\"annotations\":{\"readOnlyHint\":false}}]}}'\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"echo_read\",\"description\":\"Echo.\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\"}},\"required\":[\"message\"],\"additionalProperties\":false},\"annotations\":{\"readOnlyHint\":true}},{\"name\":\"mutate\",\"description\":\"Write.\",\"inputSchema\":{\"type\":\"object\"}}]}}'\n\
     \      ;;\n\
     \    *'\"method\":\"tools/call\"'*)\n\
     \      if [ -z \"$first_call_seen\" ]; then\n\
@@ -688,6 +737,26 @@ countingReconnectServer =
     \      else\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"reconnected response\"}]}}'\n\
     \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+countingMutationServer :: LBS.ByteString
+countingMutationServer =
+    "#!/bin/sh\n\
+    \counter=\"$1\"\n\
+    \printf 'started\\n' >> \"$counter\"\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"serverInfo\":{\"name\":\"mutation\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"write\",\"description\":\"Write.\",\"inputSchema\":{\"type\":\"object\"}}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"tools/call\"'*)\n\
+    \      exit 0\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

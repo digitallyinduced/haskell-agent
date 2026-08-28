@@ -30,11 +30,14 @@ Environment variable values are never displayed.
 servers progressively for interactive sessions so the prompt is immediately
 available, while one-shot commands wait for MCP initialization.
 
-Enabled servers are shared with subagents. Only tools explicitly annotated
-`readOnlyHint: true` are exposed. Blocking startup publishes them as
-`server__tool`. Progressive startup exposes `mcp_search` and `mcp_call` while
-servers connect, then publishes each server's read-only catalog. Failed stdio
-transports are restarted once before a progressive call is retried.
+Enabled servers are shared with subagents. Tools explicitly annotated
+`readOnlyHint: true` run without generic mutation approval. All other tools are
+exposed as mutations and follow the session's normal approval policy; Telegram
+uses its scoped inline approval buttons, while `--deny-mutations` blocks them.
+Blocking startup publishes tools as `server__tool`. Progressive startup exposes
+`mcp_search` and `mcp_call` while servers connect, then publishes each server's
+catalog. Failed stdio transports are restarted and retried only for read-only
+calls, because retrying a mutation could duplicate its side effect.
 
 ## Remote Streamable HTTP servers
 
