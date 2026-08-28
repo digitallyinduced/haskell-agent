@@ -1,6 +1,7 @@
 module Agent.OpenAI.CompactionSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Control.Exception (evaluate)
 import Agent.Json (RawJson, rawJsonDecoder, rawJsonFromEncoding)
 import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.CompactClient
@@ -18,6 +19,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Vector as Vector
 import Test.Hspec
+import System.Timeout (timeout)
 
 raw :: Aeson.Value -> RawJson
 raw = rawJsonFromEncoding . Aeson.toEncoding
@@ -108,6 +110,24 @@ spec = do
                     [MessageItem message] ->
                         Text.length (userOnly message) < 4_000
                     _ -> True
+
+        it "handles a 2050-item compaction history in bounded time" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { tools = Just [] }
+                largeOutput = toolOutput
+                    (raw (Aeson.String (Text.replicate 8_000 "x")))
+                history = replicate 2_050 largeOutput
+                trimmed = trimRemoteCompactionRequestToFit
+                    200_000 params history
+            completed <- timeout 5_000_000 (evaluate $! length trimmed)
+            completed `shouldNotBe` Nothing
+
+        it "recognizes typed context compaction checkpoints" do
+            let checkpoint = ContextCompactionItemValue ContextCompactionItem
+                    { itemId = Just "ctx-compact-1"
+                    , encryptedContent = Just "opaque"
+                    }
+            hasCompactionCheckpoint [checkpoint] `shouldBe` True
 
         it "accounts for large tool schemas when trimming remote requests" do
             let schemaText = Text.replicate 20_000 "s"
@@ -1067,9 +1087,25 @@ spec = do
             compactTranscriptAtLastCheckpoint history
                 `shouldBe` [latest, user "recent"]
 
+        it "clips at a typed context compaction checkpoint" do
+            let contextCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "ctx-compact"
+                        , encryptedContent = Just "opaque"
+                        }
+            compactTranscriptAtLastCheckpoint
+                [user "old", contextCheckpoint, user "recent"]
+                `shouldBe` [contextCheckpoint, user "recent"]
+
     describe "hasCompactionCheckpoint" do
         it "recognizes typed and locally generated compaction checkpoints" do
             hasCompactionCheckpoint [checkpoint "remote"] `shouldBe` True
+            hasCompactionCheckpoint
+                [ContextCompactionItemValue ContextCompactionItem
+                    { itemId = Just "ctx-compact"
+                    , encryptedContent = Just "opaque"
+                    }]
+                `shouldBe` True
             hasCompactionCheckpoint
                 (buildLocalCompactedHistory 1 [user "old"] "local summary")
                 `shouldBe` True

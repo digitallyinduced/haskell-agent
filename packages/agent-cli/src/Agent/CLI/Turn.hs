@@ -139,7 +139,7 @@ import Agent.Tools.PlanMode
     )
 import Agent.OsPath (toText, unsafeToFilePath)
 import Control.Monad (forM_, when)
-import Control.Exception.Safe (bracket_, onException, tryAny)
+import Control.Exception.Safe (bracket_, finally, onException, tryAny)
 import Data.IORef
     ( atomicModifyIORef'
     , readIORef
@@ -194,6 +194,7 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
         (withLiveTranscript env.sessionConversation \beforeItems ->
             runOneTurnBusy
                 includeTurnContext env beforeItems promptText inputs)
+        `finally` writeIORef env.sessionAutomaticCompaction Nothing
 
 runOneTurnBusy
     :: Bool

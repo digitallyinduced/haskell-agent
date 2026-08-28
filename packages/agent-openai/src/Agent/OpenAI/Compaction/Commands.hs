@@ -9,7 +9,7 @@ module Agent.OpenAI.Compaction.Commands
     , isTranscriptResetTurn
     ) where
 
-import Agent.Responses.Types (ResponseItem(..))
+import Agent.Responses.Types (ResponseItem(..), ResponseItemType(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -20,6 +20,9 @@ compactTranscriptAtLastCheckpoint items = go [] (reverse items)
     go after (item : before) =
         case item of
             CompactionItemValue{} -> item : after
+            ContextCompactionItemValue{} -> item : after
+            KnownResponseItem ItemCompaction _ -> item : after
+            KnownResponseItem ItemContextCompaction _ -> item : after
             _ -> go (item : after) before
 
 isCompactSessionTurn :: Text -> Bool

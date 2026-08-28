@@ -95,6 +95,7 @@ trimRemoteCompactionHistoryToFit
 trimRemoteCompactionHistoryToFit contextWindow instructionText history =
     trimCompactionHistoryToFitWith
         sanitizeRemoteCompactionHistory
+        False
         contextWindow
         requestTokens
         history
@@ -115,6 +116,7 @@ trimRemoteCompactionRequestToFit
 trimRemoteCompactionRequestToFit contextWindow params =
     trimCompactionHistoryToFitWith
         sanitizeRemoteCompactionHistory
+        False
         contextWindow
         requestTokens
   where
@@ -133,6 +135,7 @@ trimResponseHistoryToFit
 trimResponseHistoryToFit contextWindow params trailing =
     trimCompactionHistoryToFitWith
         sanitizeCompactionHistory
+        True
         contextWindow
         requestTokens
   where
@@ -141,36 +144,53 @@ trimResponseHistoryToFit contextWindow params trailing =
 
 trimCompactionHistoryToFitWith
     :: ([ResponseItem] -> [ResponseItem])
+    -> Bool
     -> Int
     -> ([ResponseItem] -> Int)
     -> [ResponseItem]
     -> [ResponseItem]
-trimCompactionHistoryToFitWith sanitize contextWindow requestTokens history =
-    let sanitized = sanitize history
-        rewritten = rewriteUntilFit sanitized
-    in dropOldestUntilFit rewritten
+trimCompactionHistoryToFitWith sanitize dropIrreducible contextWindow
+        requestTokens history =
+    let rewritten =
+            rewriteNewest initialCost [] (reverse (zip sanitized itemCosts))
+    in if dropIrreducible
+        then dropOldestUntilFit rewritten
+        else rewritten
   where
-    rewriteUntilFit items
-        | requestTokens items <= contextWindow = items
+    sanitized = sanitize history
+    itemCosts = map itemTokenCount sanitized
+    itemsCost = sum itemCosts
+    requestCost = requestTokens sanitized
+    -- Request-level instructions, tools, and the envelope stay fixed while an
+    -- item is rewritten. Measure them once; independently rounded item costs
+    -- make the running estimate conservative.
+    fixedCost = max 0 (requestCost - itemsCost)
+    initialCost = max requestCost (fixedCost + itemsCost)
+
+    -- Codex considers each item once and updates a running total. Processing
+    -- newest-to-oldest matches its tool-output preflight and avoids quadratic
+    -- prefix appends and complete-request serialization.
+    rewriteNewest _ suffix [] = suffix
+    rewriteNewest totalCost suffix remaining@((item, cost) : older)
+        | totalCost <= contextWindow =
+            map fst (reverse remaining) <> suffix
         | otherwise =
-            case rewriteFirstReducible [] items of
-                Just smaller -> rewriteUntilFit smaller
-                Nothing -> items
+            let availableTokens =
+                    max 0 (contextWindow - (totalCost - cost))
+            in case rewriteItemForBudget availableTokens item of
+                Just compacted
+                    | let compactedCost = itemTokenCount compacted
+                    , compactedCost < cost ->
+                        rewriteNewest
+                            (totalCost - cost + compactedCost)
+                            (compacted : suffix)
+                            older
+                _ -> rewriteNewest totalCost (item : suffix) older
 
-    rewriteFirstReducible _ [] = Nothing
-    rewriteFirstReducible prefix (item : remaining) =
-        let withoutItem = prefix <> remaining
-            availableTokens =
-                max 0 (contextWindow - requestTokens withoutItem)
-            original = prefix <> (item : remaining)
-        in case rewriteItemForBudget availableTokens item of
-            Just compacted
-                | let candidate = prefix <> (compacted : remaining)
-                , requestTokens candidate < requestTokens original ->
-                    Just candidate
-            _ ->
-                rewriteFirstReducible (prefix <> [item]) remaining
+    itemTokenCount item = estimateItemsTokens [item]
 
+    -- Local summarization follows Codex's context-error fallback and may drop
+    -- old protocol units. Remote V2 never enters this loop.
     dropOldestUntilFit items
         | requestTokens items <= contextWindow = items
         | otherwise =
@@ -183,6 +203,12 @@ dropOldestProtocolUnit = go []
   where
     go _ [] = Nothing
     go prefix (item@(KnownResponseItem ItemCompaction _) : rest) =
+        go (prefix <> [item]) rest
+    go prefix (item@(KnownResponseItem ItemContextCompaction _) : rest) =
+        go (prefix <> [item]) rest
+    go prefix (item@CompactionItemValue{} : rest) =
+        go (prefix <> [item]) rest
+    go prefix (item@ContextCompactionItemValue{} : rest) =
         go (prefix <> [item]) rest
     go prefix (FunctionCallItem call : rest) =
         Just (prefix <> dropMatchingFunctionOutput call.callId rest)
@@ -245,12 +271,6 @@ pairedOutputType = \case
     ItemProgram -> Just ItemProgramOutput
     _ -> Nothing
 
-compactedScreenshotDataUrl :: Text
-compactedScreenshotDataUrl =
-    "data:image/png;base64,"
-        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
-        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
-
 pairedUnknownOutputTag :: Text -> Maybe Text
 pairedUnknownOutputTag itemType
     | "_call" `Text.isSuffixOf` normalized =
@@ -292,6 +312,12 @@ identifiersMatch expected actual =
 nonEmptyIdentifiers :: [Text] -> [Text]
 nonEmptyIdentifiers =
     filter (not . Text.null) . map Text.strip
+
+compactedScreenshotDataUrl :: Text
+compactedScreenshotDataUrl =
+    "data:image/png;base64,"
+        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
+        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
 
 sanitizeRemoteCompactionHistory :: [ResponseItem] -> [ResponseItem]
 sanitizeRemoteCompactionHistory =
@@ -888,6 +914,9 @@ fitLocalSummaryItem targetWindow params summary
 hasCompactionCheckpoint :: [ResponseItem] -> Bool
 hasCompactionCheckpoint = any \case
     CompactionItemValue{} -> True
+    ContextCompactionItemValue{} -> True
+    KnownResponseItem ItemCompaction _ -> True
+    KnownResponseItem ItemContextCompaction _ -> True
     MessageItem message
         | message.role == RoleAssistant ->
             maybe False

@@ -1309,11 +1309,11 @@ spec = do
             map requestItems <$> readIORef requests
                 `shouldReturn` [history <> [compactionTriggerItem]]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
-            readIORef contextState `shouldSatisfy`
-                (/= oldContextState)
+            readIORef contextState >>= (`shouldSatisfy`
+                (/= oldContextState))
             readIORef hookCalls `shouldReturn` 1
 
-        it "keeps compacted state when the continuation is cancelled" do
+        it "rolls back deferred compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
                 threshold = 20
                 oldContextState =
@@ -1343,8 +1343,7 @@ spec = do
                         (Either ApiError BackendResult))
             result `shouldBe` Left UserInterrupt
             readIORef continuationMasking `shouldReturn` Unmasked
-            readIORef contextState `shouldSatisfy`
-                (/= oldContextState)
+            readIORef contextState `shouldReturn` oldContextState
 
         it "does not rerun compaction while its continuation reconnects" do
             let history = [userTextItem "old"]
