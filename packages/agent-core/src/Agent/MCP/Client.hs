@@ -125,6 +125,7 @@ import System.Process
 import System.Timeout (timeout)
 import System.IO.Unsafe (unsafePerformIO)
 import Agent.MCP.Types
+import qualified Agent.MCP.OAuth as OAuth
 import Network.HTTP.Client (Manager, RequestBody(..), httpLbs, parseRequest, responseBody, responseHeaders, responseStatus)
 import qualified Network.HTTP.Client as HC
 import Network.HTTP.Client.TLS (newTlsManager)
@@ -552,36 +553,47 @@ httpRequestMcp client timeoutMicros url method parameters = do
     requestId <- atomicModifyIORef' client.clientNextId (\current -> (current + 1, current))
     request <- parseRequest (Text.unpack url)
     session <- readIORef client.clientHttpSession
-    let body = AesonEncodingInternal.encodingToLazyByteString $ Aeson.pairs
+    file <- case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
+        Nothing -> pure Nothing
+        Just path -> OAuth.loadOAuthTokenFile path >>= \case
+            Right (OAuth.OAuthTokenFile _ _ token _ _) -> pure (Just token)
+            Left _ -> pure Nothing
+    let configuredToken = case file of
+            Just token -> Just token
+            Nothing -> fmap Text.pack (lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv)
+        body = AesonEncodingInternal.encodingToLazyByteString $ Aeson.pairs
             ("jsonrpc" .= ("2.0" :: Text) <> "id" .= requestId <> "method" .= method <> AesonEncoding.pair "params" parameters)
-        configuredToken = lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv
-        headers = [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream")]
-            <> maybe [] (\token -> [("Authorization", "Bearer " <> BS8.pack token)]) configuredToken
-            <> maybe [] (\value -> [("Mcp-Session-Id", TextEncoding.encodeUtf8 value)]) session
-        request' = request { HC.method = "POST", HC.requestBody = RequestBodyLBS body, HC.requestHeaders = headers }
-    result <- tryAny (timeout (max 1 timeoutMicros) (httpLbs request' mcpHttpManager))
-    case result of
+        perform token = do
+            let headers = [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream")]
+                    <> maybe [] (\value -> [("Authorization", "Bearer " <> TextEncoding.encodeUtf8 value)]) token
+                    <> maybe [] (\value -> [("Mcp-Session-Id", TextEncoding.encodeUtf8 value)]) session
+                request' = request { HC.method = "POST", HC.requestBody = RequestBodyLBS body, HC.requestHeaders = headers }
+            tryAny (timeout (max 1 timeoutMicros) (httpLbs request' mcpHttpManager))
+        decodeResponse response
+            | statusCode (responseStatus response) < 200 || statusCode (responseStatus response) >= 300 =
+                pure (Left ("MCP HTTP request failed with status " <> Text.pack (show (statusCode (responseStatus response)))))
+            | otherwise = do
+                forM_ (lookup "Mcp-Session-Id" (responseHeaders response)) (writeIORef client.clientHttpSession . Just . TextEncoding.decodeUtf8)
+                let bytes = LBS.toStrict (responseBody response)
+                if BS.null bytes then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
+                else case Json.decodeEither rawJsonDecoder bytes of
+                    Right value -> pure (Right value)
+                    Left jsonError -> case find (BS8.isPrefixOf "data: ") (BS8.lines bytes) of
+                        Just eventData -> pure (either (Left . ("Invalid MCP SSE response: " <>) . Text.pack . show) Right (Json.decodeEither rawJsonDecoder (BS8.drop 6 eventData)))
+                        Nothing -> pure (Left ("Invalid MCP HTTP response: " <> Text.pack (show jsonError)))
+    perform configuredToken >>= \case
         Left exception -> pure (Left ("MCP HTTP request failed: " <> exceptionSummary exception))
         Right Nothing -> pure (Left ("MCP request " <> method <> " timed out"))
         Right (Just response)
-            | statusCode (responseStatus response) == 401 ->
-                pure (Left "MCP server requires OAuth authorization; configure MCP OAuth credentials")
-            | statusCode (responseStatus response) < 200 || statusCode (responseStatus response) >= 300 ->
-                pure (Left ("MCP HTTP request failed with status " <> Text.pack (show (statusCode (responseStatus response)))))
-            | otherwise -> do
-                forM_ (lookup "Mcp-Session-Id" (responseHeaders response)) $ \value ->
-                    writeIORef client.clientHttpSession (Just (TextEncoding.decodeUtf8 value))
-                let bytes = LBS.toStrict (responseBody response)
-                if BS.null bytes
-                    then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
-                    else case Json.decodeEither rawJsonDecoder bytes of
-                        Right value -> pure (Right value)
-                        Left jsonError ->
-                            case find (BS8.isPrefixOf "data: ") (BS8.lines bytes) of
-                                Just eventData ->
-                                    pure (either (Left . ("Invalid MCP SSE response: " <>) . Text.pack . show) Right
-                                        (Json.decodeEither rawJsonDecoder (BS8.drop 6 eventData)))
-                                Nothing -> pure (Left ("Invalid MCP HTTP response: " <> Text.pack (show jsonError)))
+            | statusCode (responseStatus response) == 401 -> case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
+                Nothing -> pure (Left "MCP server requires OAuth authorization; configure MCP OAuth credentials")
+                Just path -> OAuth.refreshOAuthTokenFile mcpHttpManager path >>= \case
+                    Left err -> pure (Left ("MCP OAuth refresh failed: " <> err))
+                    Right (OAuth.OAuthTokenFile _ _ token _ _) -> perform (Just token) >>= \case
+                        Right (Just retryResponse) -> decodeResponse retryResponse
+                        Right Nothing -> pure (Left ("MCP request " <> method <> " timed out"))
+                        Left retryException -> pure (Left ("MCP HTTP request failed: " <> exceptionSummary retryException))
+            | otherwise -> decodeResponse response
 
 sendNotification
     :: McpClient

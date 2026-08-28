@@ -4,11 +4,18 @@ module Agent.MCP.OAuth
     , AuthorizationServerMetadata(..), ClientRegistration(..)
     , discoverProtectedResource, discoverAuthorizationServer, registerClient
     , refreshAccessToken, oauthCallbackSuccessPage
+    , OAuthTokenFile(..), loadOAuthTokenFile, refreshOAuthTokenFile
     ) where
 
+import Agent.FileRetry (writeLazyFileAtomically)
+import System.OsPath (unsafeEncodeUtf)
+import Data.Bits ((.|.))
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (tryAny)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
+import System.Posix.Files (ownerReadMode, ownerWriteMode)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
@@ -20,6 +27,57 @@ data OAuthTokens = OAuthTokens { accessToken :: !Text, refreshToken :: !(Maybe T
 instance Show OAuthTokens where
     show tokens = "OAuthTokens { accessToken = <redacted>, refreshToken = " <> show (maybe False (const True) tokens.refreshToken) <> " }"
 data OAuthTokenResponse = OAuthTokenSuccess !OAuthTokens | OAuthTokenFailure !Text deriving (Eq, Show)
+
+data OAuthTokenFile = OAuthTokenFile
+    { tokenClientId :: !Text
+    , tokenEndpoint :: !Text
+    , tokenAccessToken :: !Text
+    , tokenRefreshToken :: !Text
+    , tokenExpiresAt :: !(Maybe Int)
+    } deriving (Eq)
+
+instance Show OAuthTokenFile where
+    show _ = "OAuthTokenFile { tokens = <redacted> }"
+
+instance Aeson.FromJSON OAuthTokenFile where
+    parseJSON = Aeson.withObject "OAuthTokenFile" $ \o -> OAuthTokenFile
+        <$> o Aeson..: "client_id" <*> o Aeson..: "token_endpoint"
+        <*> o Aeson..: "access_token" <*> o Aeson..: "refresh_token"
+        <*> o Aeson..:? "expires_at"
+
+instance Aeson.ToJSON OAuthTokenFile where
+    toJSON t = Aeson.object
+        [ "client_id" Aeson..= t.tokenClientId
+        , "token_endpoint" Aeson..= t.tokenEndpoint
+        , "access_token" Aeson..= t.tokenAccessToken
+        , "refresh_token" Aeson..= t.tokenRefreshToken
+        , "expires_at" Aeson..= t.tokenExpiresAt
+        ]
+
+loadOAuthTokenFile :: FilePath -> IO (Either Text OAuthTokenFile)
+loadOAuthTokenFile path = do
+    result <- tryAny (LBS.readFile path)
+    pure $ case result of
+        Left exception -> Left ("MCP OAuth token file unavailable: " <> Text.pack (show exception))
+        Right bytes -> either (Left . Text.pack) Right (Aeson.eitherDecode bytes)
+
+refreshOAuthTokenFile :: Manager -> FilePath -> IO (Either Text OAuthTokenFile)
+refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ -> do
+    loadOAuthTokenFile path >>= \file -> case file of
+        Left err -> pure (Left err)
+        Right current -> refreshAccessToken manager current.tokenEndpoint current.tokenClientId current.tokenRefreshToken >>= \case
+            OAuthTokenFailure err -> pure (Left err)
+            OAuthTokenSuccess tokens -> do
+                let updated = current
+                        { tokenAccessToken = tokens.accessToken
+                        , tokenRefreshToken = maybe current.tokenRefreshToken id tokens.refreshToken
+                        }
+                writeLazyFileAtomically (unsafeEncodeUtf path) (ownerReadMode .|. ownerWriteMode) (Aeson.encode updated)
+                pure (Right updated)
+
+oauthRefreshLock :: MVar ()
+oauthRefreshLock = unsafePerformIO (newMVar ())
+{-# NOINLINE oauthRefreshLock #-}
 
 data ProtectedResourceMetadata = ProtectedResourceMetadata { resource :: !(Maybe Text), authorizationServers :: ![Text], scopesSupported :: ![Text] } deriving (Eq, Show)
 instance Aeson.FromJSON ProtectedResourceMetadata where
