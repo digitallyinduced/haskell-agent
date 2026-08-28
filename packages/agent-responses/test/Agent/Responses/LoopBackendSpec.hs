@@ -375,16 +375,73 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
             request = withRequestInput defaultResponseCreateParams items
         request.input `shouldBe` Just (ResponseInputItems items)
 
--- | Streamed tool-call arguments map to no visible loop delta of their own.
--- Without the projected activity below, a model writing a large call — or
--- degenerating into a repetition loop inside one — looks like endless silent
--- reasoning until the provider's output-token cap fails the turn.
+-- | Streamed tool calls are announced immediately, while argument deltas map
+-- to activity updates at coarse boundaries. Without the projected activity
+-- below, a model writing a large call — or degenerating into a repetition
+-- loop inside one — looks like endless silent reasoning until the provider's
+-- output-token cap fails the turn.
 streamProjectionSpec :: Spec
 streamProjectionSpec = describe "newStreamEventToLoopEvents" do
-    it "announces a streamed function call by name" do
+    it "publishes a streamed function call immediately" do
         projectEvent <- newStreamEventToLoopEvents False
         events <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
-        events `shouldBe` [ActivityUpdated "Writing shell_command call…"]
+        events `shouldBe`
+            [ ToolStarted
+                (functionToolCall "call-1" "shell_command" "")
+            , ActivityUpdated "Writing shell_command call…"
+            ]
+
+    it "replaces streamed tool metadata with the canonical done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent (functionCallAdded "fc-1" "call-1" "shell_command")
+        events <- projectEvent
+            (functionCallDone
+                "fc-1"
+                "call-1"
+                "shell_command"
+                "{\"command\":\"git status\"}")
+        events `shouldBe`
+            [ ToolUpdated
+                (functionToolCall
+                    "call-1"
+                    "shell_command"
+                    "{\"command\":\"git status\"}")
+            ]
+
+    it "publishes a streamed custom tool call immediately" do
+        projectEvent <- newStreamEventToLoopEvents False
+        events <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        events `shouldBe`
+            [ ToolStarted ToolCall
+                { callId = "call-9"
+                , name = "apply_patch"
+                , arguments = ""
+                , callKind = CustomCallKind
+                , argumentsEncrypted = False
+                }
+            , ActivityUpdated "Writing apply_patch call…"
+            ]
+
+    it "updates a streamed custom tool from its done item" do
+        projectEvent <- newStreamEventToLoopEvents False
+        _ <- projectEvent
+            (customToolCallAdded "ct-1" "call-9" "apply_patch")
+        events <- projectEvent
+            (customToolCallDone
+                "ct-1"
+                "call-9"
+                "apply_patch"
+                "*** Begin Patch")
+        events `shouldBe`
+            [ ToolUpdated ToolCall
+                { callId = "call-9"
+                , name = "apply_patch"
+                , arguments = "*** Begin Patch"
+                , callKind = CustomCallKind
+                , argumentsEncrypted = False
+                }
+            ]
 
     it "reports argument progress at chunk boundaries" do
         projectEvent <- newStreamEventToLoopEvents False
@@ -437,6 +494,15 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
             }
         events `shouldBe` [TextDelta "hi"]
 
+functionToolCall :: Text.Text -> Text.Text -> Text.Text -> ToolCall
+functionToolCall functionCallId functionName functionArguments = ToolCall
+    { callId = functionCallId
+    , name = functionName
+    , arguments = functionArguments
+    , callKind = FunctionCallKind
+    , argumentsEncrypted = False
+    }
+
 functionCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 functionCallAdded functionItemId functionCallId functionName =
     ResponseOutputItemAddedEvent
@@ -456,6 +522,30 @@ functionCallAdded functionItemId functionCallId functionName =
 
         }
 
+functionCallDone
+    :: Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> ResponseStreamEvent
+functionCallDone functionItemId functionCallId functionName functionArguments =
+    ResponseOutputItemDoneEvent
+        { item = FunctionCallItem FunctionCall
+            { itemId = Just functionItemId
+            , callId = functionCallId
+            , name = functionName
+            , namespace = Nothing
+            , provider = Nothing
+            , arguments = functionArguments
+            , encryptedFunctionArgs = Nothing
+            , status = Nothing
+
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 2
+
+        }
+
 customToolCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
 customToolCallAdded customItemId customCallId customName =
     ResponseOutputItemAddedEvent
@@ -470,6 +560,28 @@ customToolCallAdded customItemId customCallId customName =
             }
         , outputIndex = Just 0
         , sequenceNumber = Just 1
+
+        }
+
+customToolCallDone
+    :: Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> Text.Text
+    -> ResponseStreamEvent
+customToolCallDone customItemId customCallId customName customInput =
+    ResponseOutputItemDoneEvent
+        { item = CustomToolCallItem CustomToolCall
+            { itemId = Just customItemId
+            , callId = customCallId
+            , name = customName
+            , namespace = Nothing
+            , input = customInput
+            , status = Nothing
+
+            }
+        , outputIndex = Just 0
+        , sequenceNumber = Just 2
 
         }
 

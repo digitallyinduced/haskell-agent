@@ -415,15 +415,15 @@ renderEventUnlocked config = \case
                 putTextLn config.renderStdout ""
     ToolStarted call -> do
         commitThinkingUnlocked config
-        modifyRenderState config \state ->
+        alreadyVisible <- modifyRenderState config \state ->
             ( state
                 { stateToolCalls = Map.insert call.callId call state.stateToolCalls
                 , stateActivity =
                     summarizeToolCallRelative config.renderWorkspace call
                 }
-            , ()
+            , Map.member call.callId state.stateToolCalls
             )
-        unless (isTodoTool call.name) do
+        unless (alreadyVisible || isTodoTool call.name) do
             putTextLn config.renderStderr
                 (formatToolStartedRelative
                     config.renderColor
@@ -470,8 +470,38 @@ renderEventUnlocked config = \case
         case painted of
             Nothing -> pure ()
             Just line -> putTextLn config.renderStderr line
-    ToolUpdated _ ->
-        pure ()
+    ToolUpdated call -> do
+        previous <- modifyRenderState config \state ->
+            ( state
+                { stateToolCalls =
+                    Map.insert call.callId call state.stateToolCalls
+                , stateActivity =
+                    summarizeToolCallRelative config.renderWorkspace call
+                }
+            , Map.lookup call.callId state.stateToolCalls
+            )
+        -- An early streamed start may only show a placeholder. Append the
+        -- canonical rendering once when the done item supplies arguments;
+        -- the later execution-time ToolStarted is deduplicated by call id.
+        when
+            ( maybe False
+                (Text.null . Text.strip . (.arguments))
+                previous
+                && not (Text.null (Text.strip call.arguments))
+                && not (isTodoTool call.name)
+            ) do
+                putTextLn config.renderStderr
+                    (formatToolStartedRelative
+                        config.renderColor
+                        config.renderWorkspace
+                        call)
+                let extra =
+                        formatToolBodyRelative
+                            config.renderColor
+                            config.renderWorkspace
+                            call
+                unless (Text.null extra) do
+                    putTextLn config.renderStderr extra
     ToolRetracted _ ->
         pure ()
     ResponseAttemptDiscarded ->

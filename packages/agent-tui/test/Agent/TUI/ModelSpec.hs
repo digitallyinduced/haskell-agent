@@ -332,6 +332,27 @@ spec = describe "fullscreen UI reducer" do
         Foldable.toList state.uiToolCalls
             `shouldBe` [(0, canonical)]
 
+    it "makes repeated tool starts idempotent by call id" do
+        let early = functionToolCall "c1" "Task" "{}"
+            canonical =
+                functionToolCall
+                    "c1"
+                    "Agent"
+                    "{\"description\":\"review the patch\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolStarted canonical)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "Agent"
+                block.blockState `shouldBe` BlockRunning
+            _ -> expectationFailure "expected one updated tool block"
+        Foldable.toList state.uiToolCalls
+            `shouldBe` [(0, canonical)]
+
     it "retracts a tool and repairs later tool positions" do
         let first = functionToolCall "c1" "Task" "{}"
             second = functionToolCall "c2" "Read" "{\"file_path\":\"README.md\"}"

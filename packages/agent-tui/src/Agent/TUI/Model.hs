@@ -381,6 +381,16 @@ reduceLoop event state = case event of
                 , uiToolCalls = Map.empty
                 }
     ToolStarted call
+        | Map.member call.callId state.uiToolCalls ->
+            -- A streaming backend may announce the call before execution;
+            -- the core loop announces it again once the response is complete.
+            -- Refresh the canonical metadata without adding another block.
+            updateToolCall call
+                state
+                    { uiRunning = True
+                    , uiGenerating = False
+                    , uiAwaitingInput = False
+                    }
         | isTodoTool call.name ->
             state
                 { uiRunning = True

@@ -568,6 +568,18 @@ streamEventToLoopEventWithRawReasoning
     -> ResponseStreamEvent
     -> Maybe LoopEvent
 streamEventToLoopEventWithRawReasoning showRawReasoning = \case
+    -- Publish a tool block as soon as the provider announces the output item.
+    -- The loop will still execute the call only after the complete response
+    -- has been assembled; this event is purely a live UI projection.
+    ResponseOutputItemAddedEvent { item }
+        | Just call <- responseItemToToolCall item ->
+            Just (ToolStarted call)
+    -- Providers commonly send the call arguments in deltas and include the
+    -- complete call in the corresponding done event. Replace the placeholder
+    -- block's metadata/body before the core loop starts executing it.
+    ResponseOutputItemDoneEvent { item }
+        | Just call <- responseItemToToolCall item ->
+            Just (ToolUpdated call)
     ResponseReasoningSummaryPartAddedEvent
         { summaryIndex = Just index }
         | index > 0 ->
@@ -688,11 +700,11 @@ toolArgumentStreamStep
     -> (ToolArgumentStreamState, [LoopEvent])
 toolArgumentStreamStep event state = case event of
     ResponseOutputItemAddedEvent { item = FunctionCallItem call } ->
-        announceToolCall call.name
+        announceToolCall (namespacedToolName call.namespace call.name)
             (maybeToList call.itemId <> [call.callId])
             state
     ResponseOutputItemAddedEvent { item = CustomToolCallItem call } ->
-        announceToolCall call.name
+        announceToolCall (namespacedToolName call.namespace call.name)
             (maybeToList call.itemId <> [call.callId])
             state
     ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText, streamItemId } ->
