@@ -15,7 +15,7 @@ import Agent.Tools.Types
     , ToolExecutionPolicy(..)
     , ToolSchema(..)
     )
-import Agent.ToolDispatch (typedTool)
+import Agent.ToolDispatch (ToolCall(..), typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
 import Control.Concurrent.Async
     ( Async
@@ -677,17 +677,21 @@ callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
     callDiscoveredTool entry.catalogClient entry.catalogTool arguments
         >>= \case
             Right result -> pure (Right result)
-            Left originalError -> do
-                failed <- readTVarIO entry.catalogClient.clientFailure
-                case failed of
-                    Nothing -> pure (Left originalError)
-                    Just _ ->
-                        -- Stable meta-tool handlers can transparently replace
-                        -- a failed stdio transport and retry the read-only
-                        -- call once. The per-server lock makes this
-                        -- single-flight across concurrent calls.
-                        reconnectCatalogEntry fleet qualifiedName entry
-                            >>= \case
+            Left originalError
+                | not entry.catalogTool.discoveredReadOnly ->
+                    -- A failed mutation may have reached the server. Retrying
+                    -- it after reconnect could duplicate the side effect.
+                    pure (Left originalError)
+                | otherwise -> do
+                    failed <- readTVarIO entry.catalogClient.clientFailure
+                    case failed of
+                        Nothing -> pure (Left originalError)
+                        Just _ ->
+                            -- Read-only calls are safe to retry once after a
+                            -- transport failure. The per-server lock makes
+                            -- this single-flight across concurrent calls.
+                            reconnectCatalogEntry fleet qualifiedName entry
+                                >>= \case
                                 Left reconnectError ->
                                     pure . Left $
                                         originalError
@@ -770,7 +774,7 @@ mcpCallTool :: McpFleet -> AppTool
 mcpCallTool fleet = AppTool
     { appToolName = "mcp_call"
     , appToolDescription =
-        "Call a currently available read-only MCP tool by its qualified server__tool name."
+        "Call a currently available MCP tool by its qualified server__tool name. Mutating tools require user approval."
     , appToolSchema = RawJsonFunctionSchema $ object
         [ "type" .= ("object" :: Text)
         , "properties" .= object
@@ -794,8 +798,9 @@ mcpCallTool fleet = AppTool
                                 then
                                     "MCP tool is not available yet; one or more servers are still connecting"
                                 else "Unknown MCP tool: " <> name
-    , appToolApproval = AlwaysReadOnly
-    , appToolExecution = ParallelSafe
+    , appToolApproval =
+        ClassifyReadOnly (catalogCallIsReadOnly fleet callArgumentsDecoder)
+    , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     }
 
@@ -833,10 +838,25 @@ grokUseTool fleet = AppTool
                                 then
                                     "MCP tool is not available yet; one or more servers are still connecting"
                                 else "Unknown MCP tool: " <> name
-    , appToolApproval = AlwaysReadOnly
-    , appToolExecution = ParallelSafe
+    , appToolApproval =
+        ClassifyReadOnly (catalogCallIsReadOnly fleet grokCallArgumentsDecoder)
+    , appToolExecution = TurnSequential
     , appToolResourceClaims = Nothing
     }
+
+catalogCallIsReadOnly
+    :: McpFleet
+    -> Json.Decoder (Text, RawJson)
+    -> ToolCall
+    -> IO Bool
+catalogCallIsReadOnly fleet decoder call =
+    case Json.decodeEither decoder (TextEncoding.encodeUtf8 call.arguments) of
+        Left _ -> pure False
+        Right (name, _) -> do
+            entries <- readTVarIO fleet.mcpFleetCatalog
+            pure $ maybe False
+                (.catalogTool.discoveredReadOnly)
+                (Map.lookup name entries)
 
 searchArgumentsDecoder :: Json.Decoder (Maybe Text, Maybe Text, Int)
 searchArgumentsDecoder = Json.object do

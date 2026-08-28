@@ -417,29 +417,9 @@ discoverMcpTools client = go Nothing [] []
                 case parsePage result of
                     Left err -> ioError (userError ("invalid tools/list response: " <> Text.unpack err))
                     Right (pageTools, nextCursor) -> do
-                        let (readOnlyTools, skipped) =
-                                foldr classify ([], []) pageTools
-                            skippedWarnings =
-                                [ "MCP server "
-                                    <> client.clientConfig.mcpServerName
-                                    <> " skipped non-read-only tool "
-                                    <> tool.discoveredName
-                                | tool <- skipped
-                                ]
                         if isJust nextCursor
-                            then go nextCursor
-                                (tools <> readOnlyTools)
-                                (warnings <> skippedWarnings)
-                            else pure
-                                (tools <> readOnlyTools, warnings <> skippedWarnings)
-
-    classify
-        :: McpTool
-        -> ([McpTool], [McpTool])
-        -> ([McpTool], [McpTool])
-    classify tool (allowed, skipped)
-        | tool.discoveredReadOnly = (tool : allowed, skipped)
-        | otherwise = (allowed, tool : skipped)
+                            then go nextCursor (tools <> pageTools) warnings
+                            else pure (tools <> pageTools, warnings)
 
     parsePage :: RawJson -> Either Text ([McpTool], Maybe RawJson)
     parsePage raw =
@@ -558,8 +538,10 @@ appToolFor client tool = AppTool
     , appToolHandler =
         typedTool qualifiedName rawObjectDecoder \arguments -> do
             callDiscoveredTool client tool arguments
-    , appToolApproval = AlwaysReadOnly
-    , appToolExecution = ParallelSafe
+    , appToolApproval =
+        if tool.discoveredReadOnly then AlwaysReadOnly else AlwaysPrompt
+    , appToolExecution =
+        if tool.discoveredReadOnly then ParallelSafe else TurnSequential
     , appToolResourceClaims = Nothing
     }
   where
