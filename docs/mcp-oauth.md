@@ -11,8 +11,14 @@ of the authorization response.
 
 ```
 agent-cli mcp login https://example.com/mcp
+agent-cli mcp login https://example.com/mcp --scope files:write
 agent-cli mcp logout https://example.com/mcp
 ```
+
+`--scope` (repeatable) requests additional scopes for step-up authorization;
+they are unioned with the scopes already granted for the same issuer. A `403`
+with `insufficient_scope` during a session names the missing scope in its
+error message.
 
 `mcp login` runs the interactive browser flow:
 
@@ -122,5 +128,3 @@ tests share one implementation: `parseWwwAuthenticate` / `challengeScopes`,
 `selectClientRegistration`, `selectScopes` / `planScopes`, and
 `validateAuthorizationResponseIssuer`, plus the IO discovery and token
 endpoint helpers built on them.
-
-TODO: link this page from docs/mcp.md once the wire client rewrite lands.
