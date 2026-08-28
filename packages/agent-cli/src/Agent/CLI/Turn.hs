@@ -392,7 +392,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                 Nothing -> pure ()
             pure $ TurnRestartRequested level PendingTurn
                 { pendingPromptText = promptText
-                , pendingInputs = inputs
+                , pendingInputs = committedPrepared.preparedTurnInputs
                 , pendingExitAfter = False
                 , pendingPlanState = planState
                 }
@@ -446,7 +446,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         planState <- readIORef planMode.planStateRef
                         pure $ TurnProviderUnavailable apiError PendingTurn
                             { pendingPromptText = promptText
-                            , pendingInputs = inputs
+                            , pendingInputs = committedPrepared.preparedTurnInputs
                             , pendingExitAfter = False
                             , pendingPlanState = planState
                             }
