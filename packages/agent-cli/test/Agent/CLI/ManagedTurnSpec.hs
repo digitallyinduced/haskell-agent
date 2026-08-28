@@ -5,6 +5,7 @@ import Agent.CLI.ManagedTurn
     , ManagedTurnRequest(..)
     , managedTurnInputs
     , managedTurnRequestFromText
+    , loadTextPrompt
     , loadManagedTurnRequest
     , renderManagedTurnPrompt
     )
@@ -29,6 +30,14 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "Agent.CLI.ManagedTurn" do
+    it "loads --prompt-file as plain text" $
+        withManagedTempDir \dir -> do
+            let pathFile = dir </> "prompt.txt"
+                path = fromText (Text.pack pathFile)
+            Text.writeFile pathFile "  inspect this project\ncarefully  \n"
+            loadTextPrompt path `shouldReturn`
+                managedTurnRequestFromText "inspect this project\ncarefully"
+
     it "round-trips a prompt-file request through JSON" $
         withManagedTempDir \dir -> do
             let request = managedTurnRequestFromText "hello"
