@@ -6,6 +6,7 @@ module Agent.CLI.Config
     , LspConfig(..)
     , LspServerConfig(..)
     , McpInitStrategy(..)
+    , McpOAuthConfig(..)
     , McpServerConfig(..)
     , defaultHarnessConfig
     , harnessConfigPath
@@ -16,16 +17,18 @@ module Agent.CLI.Config
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Json (decodeLazy)
+import Agent.MCP.OAuth (validateClientIdMetadataUrl)
 import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Control.Exception.Safe (displayException, tryIO)
-import Control.Monad (unless, when)
+import Control.Monad (forM_, unless, when)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Directory.OsPath (createDirectoryIfMissing, doesFileExist)
@@ -67,8 +70,41 @@ data McpServerConfig = McpServerConfig
     , mcpEnv :: !(Map Text Text)
     , mcpStartupTimeoutSeconds :: !Int
     , mcpRequestTimeoutSeconds :: !Int
+    , mcpOAuth :: !(Maybe McpOAuthConfig)
     }
     deriving (Eq)
+
+-- | Optional OAuth client settings for a remote MCP server: pre-registered
+-- credentials, a Client ID Metadata Document URL, and default scopes. The
+-- client secret is redacted from 'Show' and must never be printed.
+data McpOAuthConfig = McpOAuthConfig
+    { mcpOAuthClientId :: !(Maybe Text)
+    , mcpOAuthClientSecret :: !(Maybe Text)
+    , mcpOAuthClientIdMetadataUrl :: !(Maybe Text)
+    , mcpOAuthScopes :: ![Text]
+    }
+    deriving (Eq)
+
+instance Show McpOAuthConfig where
+    show oauth =
+        "McpOAuthConfig { mcpOAuthClientId = "
+            <> show oauth.mcpOAuthClientId
+            <> ", mcpOAuthClientSecret = "
+            <> (if isJust oauth.mcpOAuthClientSecret then "<redacted>" else "Nothing")
+            <> ", mcpOAuthClientIdMetadataUrl = "
+            <> show oauth.mcpOAuthClientIdMetadataUrl
+            <> ", mcpOAuthScopes = "
+            <> show oauth.mcpOAuthScopes
+            <> " }"
+
+instance Aeson.ToJSON McpOAuthConfig where
+    toJSON oauth =
+        Aeson.object
+            [ "clientId" Aeson..= oauth.mcpOAuthClientId
+            , "clientSecret" Aeson..= oauth.mcpOAuthClientSecret
+            , "clientIdMetadataUrl" Aeson..= oauth.mcpOAuthClientIdMetadataUrl
+            , "scopes" Aeson..= oauth.mcpOAuthScopes
+            ]
 
 data McpInitStrategy
     = McpInitAuto
@@ -174,6 +210,8 @@ instance Show McpServerConfig where
             <> show server.mcpStartupTimeoutSeconds
             <> ", mcpRequestTimeoutSeconds = "
             <> show server.mcpRequestTimeoutSeconds
+            <> ", mcpOAuth = "
+            <> show server.mcpOAuth
             <> " }"
 
 instance Aeson.ToJSON McpServerConfig where
@@ -189,6 +227,7 @@ instance Aeson.ToJSON McpServerConfig where
                 Aeson..= server.mcpStartupTimeoutSeconds
             , "requestTimeoutSeconds"
                 Aeson..= server.mcpRequestTimeoutSeconds
+            , "oauth" Aeson..= server.mcpOAuth
             ]
 
 instance Aeson.ToJSON WebFetchConfig where
@@ -280,6 +319,16 @@ mcpServerConfigDecoder =
                 "startupTimeoutSeconds" Hermes.int
             <*> defaultKey defaultMcpRequestTimeoutSeconds
                 "requestTimeoutSeconds" Hermes.int
+            <*> optionalKey "oauth" mcpOAuthConfigDecoder
+
+mcpOAuthConfigDecoder :: Hermes.Decoder McpOAuthConfig
+mcpOAuthConfigDecoder =
+    Hermes.object $
+        McpOAuthConfig
+            <$> optionalKey "clientId" Hermes.text
+            <*> optionalKey "clientSecret" Hermes.text
+            <*> optionalKey "clientIdMetadataUrl" Hermes.text
+            <*> defaultKey [] "scopes" (Hermes.list Hermes.text)
 
 webFetchConfigDecoder :: Hermes.Decoder WebFetchConfig
 webFetchConfigDecoder =
@@ -460,7 +509,35 @@ validateHarnessConfig config = do
                     <> quote label
                     <> " requestTimeoutSeconds must be positive"
                 )
+        forM_ server.mcpOAuth (validateOAuth label hasUrl)
         pure server
+
+    validateOAuth label hasUrl oauth = do
+        unless hasUrl $
+            Left ("MCP server " <> quote label <> " oauth requires url")
+        when (maybe False (Text.null . Text.strip) oauth.mcpOAuthClientId) $
+            Left ("MCP server " <> quote label <> " oauth.clientId must not be empty")
+        when (isJust oauth.mcpOAuthClientSecret && isNothing oauth.mcpOAuthClientId) $
+            Left
+                ( "MCP server "
+                    <> quote label
+                    <> " oauth.clientSecret requires oauth.clientId"
+                )
+        forM_ oauth.mcpOAuthClientIdMetadataUrl \url ->
+            case validateClientIdMetadataUrl url of
+                Left _ ->
+                    Left
+                        ( "MCP server "
+                            <> quote label
+                            <> " oauth.clientIdMetadataUrl must be an https URL with a path"
+                        )
+                Right () -> Right ()
+        when (any (Text.null . Text.strip) oauth.mcpOAuthScopes) $
+            Left
+                ( "MCP server "
+                    <> quote label
+                    <> " oauth.scopes must not contain empty entries"
+                )
 
     validateMaxConcurrentAgents = \case
         Nothing -> pure ()

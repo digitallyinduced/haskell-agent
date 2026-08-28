@@ -114,4 +114,5 @@ server enabled command = McpServerConfig
     , mcpEnv = Map.empty
     , mcpStartupTimeoutSeconds = 30
     , mcpRequestTimeoutSeconds = 60
+    , mcpOAuth = Nothing
     }
