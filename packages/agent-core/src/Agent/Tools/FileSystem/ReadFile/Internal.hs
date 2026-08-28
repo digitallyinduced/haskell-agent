@@ -115,7 +115,7 @@ boundedLineCount args =
         Just n | n <= 0 -> Nothing
         Just n | n > 1 -> Nothing
         _ ->
-            Just (min maxReadLines (fromMaybe maxReadLines args.limit))
+            Just (fromMaybe maxReadLines args.limit)
 
 fileWindowCoversArgs :: FileWindow -> ReadFileArgs -> Bool
 fileWindowCoversArgs window args
@@ -126,7 +126,7 @@ fileWindowCoversArgs window args
             Just n | n > 1 -> False
             _ ->
                 let have = length (readFileLines window.fileWindowText)
-                    need = min maxReadLines (fromMaybe maxReadLines args.limit)
+                    need = fromMaybe maxReadLines args.limit
                 in have >= need
 
 readFirstLines :: OsPath -> Int -> IO (Either Text FileWindow)
@@ -205,7 +205,7 @@ formatReadFileContent content args =
                 total = length allLines
                 start = resolveReadStartLine total args.offset
                 window = drop (start - 1) allLines
-                takeCount = min maxReadLines (fromMaybe maxReadLines args.limit)
+                takeCount = fromMaybe maxReadLines args.limit
                 taken = take takeCount window
                 numbered = formatNumbered start taken
                 tokens = estimateTokens numbered

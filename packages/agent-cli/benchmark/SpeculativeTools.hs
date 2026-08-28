@@ -100,6 +100,7 @@ data Fixture = Fixture
     , patchPath :: !FilePath
     , replaceBody :: !Text
     , patchBody :: !Text
+    , readLineCount :: !Int
     }
 
 data ToolCaches = ToolCaches
@@ -185,6 +186,7 @@ main = do
                                     runTurn
                                         Speculative
                                         tailMillis
+                                        fixture
                                         env
                                         registry
                                         (Just (caches, runtime))
@@ -199,8 +201,13 @@ main = do
                 "usage: speculative-tools-bench "
                     <> "MODE FILE_KIB TAIL_MS SAMPLES\n"
                     <> "modes: baseline, speculative\n"
-                    <> "Replays list_dir + 4 read_file + search_replace + "
-                    <> "apply_patch with a streamed unique-path tail."
+                    <> "Replays list_dir + 4 full-file read_file + "
+                    <> "search_replace + apply_patch. FILE_KIB sizes the "
+                    <> "edit payloads; reads are capped at 64 KiB so they "
+                    <> "stay under read_file token limits.\n"
+                    <> "columns: mode,file_kib,tail_ms,samples,"
+                    <> "wall_p50,wall_p95,io_p50,io_p95,cpu_p50,alloc,checksum\n"
+                    <> "io_* is wall minus the injected tail."
 
 parseMode :: String -> IO Mode
 parseMode = \case
@@ -272,6 +279,7 @@ runBenchmark modeArg mode fileKiB tailMillis sampleCount fixture env registry
             runTurn
                 mode
                 tailMillis
+                fixture
                 env
                 registry
                 speculation
@@ -285,14 +293,19 @@ runBenchmark modeArg mode fileKiB tailMillis sampleCount fixture env registry
         first = case samples of
             sample : _ -> sample
             [] -> error "median requires at least one sample"
+    let tailMs = fromIntegral tailMillis
+        ioOf wall = max 0 (wall - tailMs)
+        ios = sort (map (ioOf . (.wallMillis)) samples)
     printf
-        "%s,%d,%d,%d,%.3f,%.3f,%.3f,%d,%d\n"
+        "%s,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n"
         modeArg
         fileKiB
         tailMillis
         sampleCount
         (percentile 0.50 walls)
         (percentile 0.95 walls)
+        (percentile 0.50 ios)
+        (percentile 0.95 ios)
         (percentile 0.50 cpus)
         (percentileInt 0.50 allocs)
         first.checksum
@@ -300,27 +313,29 @@ runBenchmark modeArg mode fileKiB tailMillis sampleCount fixture env registry
 runTurn
     :: Mode
     -> Int
+    -> Fixture
     -> ToolEnv
     -> ToolRegistry
     -> Maybe (ToolCaches, ToolSpeculationRuntime)
     -> Int
     -> IO Int
-runTurn mode tailMillis _env registry speculation sampleIndex = do
+runTurn mode tailMillis fixture _env registry speculation sampleIndex = do
     let delay = when (tailMillis > 0) (threadDelay (tailMillis * 1000))
         suffix = Text.pack (show sampleIndex)
+        calls = allCalls fixture.readLineCount suffix
     outputs <- case mode of
         Baseline -> do
             delay
-            traverse (dispatchNormally registry) (allCalls suffix)
+            traverse (dispatchNormally registry) calls
         Speculative ->
             withRuntime speculation \runtime -> do
                 streamListDir runtime suffix
-                streamReads runtime suffix
+                streamReads fixture.readLineCount runtime suffix
                 streamReplace runtime suffix
                 streamPatch runtime suffix
                 delay
-                finishAll runtime suffix
-                traverse (takeOrDispatch registry runtime) (allCalls suffix)
+                finishAll fixture.readLineCount runtime suffix
+                traverse (takeOrDispatch registry runtime) calls
     let combined = Text.intercalate "\n---\n" outputs
     case outputs of
         listOut : read1 : _read2 : _read3 : _read4 : replaceOut : patchOut : _ -> do
@@ -338,22 +353,22 @@ runTurn mode tailMillis _env registry speculation sampleIndex = do
     withRuntime Nothing _ = die "speculative mode requires a runtime"
     withRuntime (Just (_, runtime)) action = action runtime
 
-allCalls :: Text -> [ToolCall]
-allCalls suffix =
+allCalls :: Int -> Text -> [ToolCall]
+allCalls readLimit suffix =
     listCall suffix
-        : map (readCall suffix) readTargets
+        : map (readCall readLimit suffix) readTargets
         <> [replaceCall suffix, patchCall suffix]
 
 listCall :: Text -> ToolCall
 listCall suffix =
     functionToolCall ("list-" <> suffix) "list_dir" (listArguments listTarget)
 
-readCall :: Text -> Text -> ToolCall
-readCall suffix target =
+readCall :: Int -> Text -> Text -> ToolCall
+readCall readLimit suffix target =
     functionToolCall
         ("read-" <> suffix <> "-" <> target)
         "read_file"
-        (readArguments target)
+        (readArguments target readLimit)
 
 replaceCall :: Text -> ToolCall
 replaceCall suffix =
@@ -371,15 +386,15 @@ streamListDir runtime suffix =
     observePrefix runtime ("list-" <> suffix) "list_dir"
         "{\"target_directory\":\"src/unique-li"
 
-streamReads :: ToolSpeculationRuntime -> Text -> IO ()
-streamReads runtime suffix =
+streamReads :: Int -> ToolSpeculationRuntime -> Text -> IO ()
+streamReads readLimit runtime suffix =
     mapM_
         (\target ->
             observePrefix
                 runtime
                 ("read-" <> suffix <> "-" <> target)
                 "read_file"
-                ("{\"target_file\":\"" <> Text.take 12 target))
+                (readArguments target readLimit))
         readTargets
 
 streamReplace :: ToolSpeculationRuntime -> Text -> IO ()
@@ -392,10 +407,10 @@ streamPatch runtime suffix =
     observePrefix runtime ("patch-" <> suffix) "apply_patch"
         ("*** Begin Patch\n*** Update File: " <> patchRel <> "\n")
 
-finishAll :: ToolSpeculationRuntime -> Text -> IO ()
-finishAll runtime suffix = do
-    mapM_ (finishOne runtime) (allCalls suffix)
-    retainToolSpeculation runtime (allCalls suffix)
+finishAll :: Int -> ToolSpeculationRuntime -> Text -> IO ()
+finishAll readLimit runtime suffix = do
+    mapM_ (finishOne runtime) (allCalls readLimit suffix)
+    retainToolSpeculation runtime (allCalls readLimit suffix)
 
 finishOne :: ToolSpeculationRuntime -> ToolCall -> IO ()
 finishOne runtime call@ToolCall{callId, name, arguments} = do
@@ -451,9 +466,13 @@ listArguments :: Text -> Text
 listArguments target =
     "{\"target_directory\":\"" <> target <> "\"}"
 
-readArguments :: Text -> Text
-readArguments target =
-    "{\"target_file\":\"" <> target <> "\"}"
+readArguments :: Text -> Int -> Text
+readArguments target readLimit =
+    "{\"target_file\":\""
+        <> target
+        <> "\",\"limit\":"
+        <> Text.pack (show readLimit)
+        <> "}"
 
 replaceArguments :: Text -> Text
 replaceArguments target =
@@ -482,14 +501,19 @@ setupFixture dir fileKiB = do
     Text.writeFile (dir </> "src" </> "unique-listing-a" </> "keep.txt") "keep"
     Text.writeFile (dir </> "src" </> "other-listing-b" </> "skip.txt") "skip"
     let payloadBytes = fileKiB * 1024
+        readBytes = min payloadBytes (64 * 1024)
         replaceFile = dir </> Text.unpack replaceRel
         patchFile = dir </> Text.unpack patchRel
     replaceBody <- writePayload replaceFile replaceOld payloadBytes
     patchBody <- writePayload patchFile patchOld payloadBytes
-    mapM_
-        (\target ->
-            writePayload (dir </> Text.unpack target) "module Main where" payloadBytes)
-        readTargets
+    readBodies <-
+        mapM
+            (\target ->
+                writePayload
+                    (dir </> Text.unpack target)
+                    "module Main where"
+                    readBytes)
+            readTargets
     initializeGitRepository dir
     pure Fixture
         { fixtureDir = dir
@@ -497,12 +521,22 @@ setupFixture dir fileKiB = do
         , patchPath = patchFile
         , replaceBody
         , patchBody
+        , readLineCount = case readBodies of
+            body : _ -> payloadLineCount body
+            [] -> 0
         }
 
 restoreFixture :: Fixture -> IO ()
 restoreFixture fixture = do
     Text.writeFile fixture.replacePath fixture.replaceBody
     Text.writeFile fixture.patchPath fixture.patchBody
+
+payloadLineCount :: Text -> Int
+payloadLineCount body =
+    let fields = Text.splitOn "\n" body
+    in if Text.isSuffixOf "\n" body
+        then max 0 (length fields - 1)
+        else length fields
 
 writePayload :: FilePath -> Text -> Int -> IO Text
 writePayload path header byteCount = do
