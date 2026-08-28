@@ -55,6 +55,8 @@ module Agent.Responses.Types
     , ReasoningSummaryPart(..)
     , ItemReference(..)
     , TaggedObject(..)
+    , ResponseMetadata(..)
+    , EnvironmentVariables(..)
 
       -- * Tools
     , ResponseTool(..)

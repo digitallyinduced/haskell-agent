@@ -13,10 +13,7 @@ import Agent.Tools.Types
     ( appToolHandlers
     )
 import Agent.ToolDispatch (dispatchToolCall)
-import Agent.Json (rawJsonFromEncoding)
 import Control.Exception.Safe (displayException)
-import Data.Aeson (object, (.=))
-import qualified Data.Aeson as Aeson
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -30,8 +27,7 @@ spec = do
             let env = testEnv
                     { databaseRunQuery = \scope sql -> do
                         writeIORef seen (Just (scope, sql))
-                        pure (Right (rawJsonFromEncoding (Aeson.toEncoding
-                            (object ["rows" .= [object ["title" .= ("test" :: Text)]]]))))
+                        pure (Right "row 1:\n  title: test\n\ntruncated: no")
                     }
             result <- dispatchToolCall dispatchConfig
                 (appToolHandlers (databaseTools env))
@@ -39,14 +35,14 @@ spec = do
                     "{\"scope\":\"user\",\"sql\":\"select * from todos\"}")
             readIORef seen `shouldReturn`
                 Just (DatabaseUserScope, "select * from todos")
-            result.output `shouldContainText` "\"rows\""
+            result.output `shouldContainText` "title: test"
 
         it "rejects empty mutating SQL before calling storage" do
             called <- newIORef False
             let env = testEnv
                     { databaseRunExecute = \_ _ _ -> do
                         writeIORef called True
-                        pure (Right (object []))
+                        pure (Right "ok")
                     }
             result <- dispatchToolCall dispatchConfig
                 (appToolHandlers (databaseTools env))
@@ -137,10 +133,9 @@ spec = do
 
 testEnv :: DatabaseToolsEnv
 testEnv = DatabaseToolsEnv
-    { databaseDescribeScope = \_ -> pure (Right (object []))
-    , databaseRunQuery = \_ _ ->
-        pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
-    , databaseRunExecute = \_ _ _ -> pure (Right (object []))
+    { databaseDescribeScope = \_ -> pure (Right "ok")
+    , databaseRunQuery = \_ _ -> pure (Right "(no rows)")
+    , databaseRunExecute = \_ _ _ -> pure (Right "ok")
     , databaseSearchConversations = \_ _ ->
         pure (Right [])
     }

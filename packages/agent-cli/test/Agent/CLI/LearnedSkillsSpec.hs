@@ -33,7 +33,6 @@ import Agent.Tools.Types
     , appToolHandlers
     )
 import Control.Exception.Safe (displayException)
-import Data.Aeson (object, (.=))
 import Data.IORef (newIORef, readIORef, writeIORef)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -79,10 +78,10 @@ spec = do
             let env = testEnv
                     { learnedSkillSearch = \query limit -> do
                         writeIORef searchSeen (Just (query, limit))
-                        pure (Right (object ["matches" .= ([] :: [Text])]))
+                        pure (Right testSearchResponse)
                     , learnedSkillCreate = \request -> do
                         writeIORef createSeen (Just request)
-                        pure (Right (object ["status" .= ("applied" :: Text)]))
+                        pure (Right testMutationResponse)
                     }
             searchResult <- dispatchToolCall dispatchConfig
                 (appToolHandlers (learnedSkillTools invocationsRef env))
@@ -103,8 +102,8 @@ spec = do
                 Just ("postgres session", 4)
             fmap (.createRequestSlug) <$> readIORef createSeen
                 `shouldReturn` Just "postgres-session"
-            searchResult.output `shouldContainText` "\"matches\""
-            createResult.output `shouldContainText` "\"applied\""
+            searchResult.output `shouldContainText` "no matching learned skills"
+            createResult.output `shouldContainText` "status: applied"
 
         it "views filesystem and learned skills through one lazy-loading tool" do
             learnedSeen <- newIORef Nothing
@@ -113,9 +112,7 @@ spec = do
             let env = testEnv
                     { learnedSkillRead = \scope slug revision -> do
                         writeIORef learnedSeen (Just (scope, slug, revision))
-                        pure (Right (object
-                            [ "instructions" .= ("Learned body" :: Text)
-                            ]))
+                        pure (Right testLearnedSkillView)
                     }
                 handlers =
                     appToolHandlers (learnedSkillTools invocationsRef env)
@@ -127,12 +124,12 @@ spec = do
                     "{\"name\":\"postgres-session\",\
                     \\"scope\":\"repository\",\
                     \\"revision\":2}")
-            filesystemResult.output `shouldContainText` "\"kind\":\"filesystem\""
+            filesystemResult.output `shouldContainText` "kind: filesystem"
             filesystemResult.output `shouldContainText`
-                "\"instructions\":\"Deploy carefully.\""
+                "instructions:\n  Deploy carefully."
             readIORef learnedSeen `shouldReturn`
                 Just (DatabaseRepositoryScope, "postgres-session", Just 2)
-            learnedResult.output `shouldContainText` "\"Learned body\""
+            learnedResult.output `shouldContainText` "Learned body"
 
         it "rejects invalid mutations before calling storage" do
             called <- newIORef False
@@ -140,10 +137,10 @@ spec = do
             let env = testEnv
                     { learnedSkillCreate = \_ -> do
                         writeIORef called True
-                        pure (Right (object []))
+                        pure (Right testMutationResponse)
                     , learnedSkillUpdate = \_ -> do
                         writeIORef called True
-                        pure (Right (object []))
+                        pure (Right testMutationResponse)
                     }
             badSlug <- dispatchToolCall dispatchConfig
                 (appToolHandlers (learnedSkillTools invocationsRef env))
@@ -271,13 +268,54 @@ spec = do
 
 testEnv :: LearnedSkillToolsEnv
 testEnv = LearnedSkillToolsEnv
-    { learnedSkillSearch = \_ _ -> pure (Right (object []))
-    , learnedSkillRead = \_ _ _ -> pure (Right (object []))
-    , learnedSkillCreate = \_ -> pure (Right (object []))
-    , learnedSkillUpdate = \_ -> pure (Right (object []))
-    , learnedSkillArchive = \_ -> pure (Right (object []))
-    , learnedSkillRollback = \_ -> pure (Right (object []))
+    { learnedSkillSearch = \_ _ -> pure (Right testSearchResponse)
+    , learnedSkillRead = \_ _ _ -> pure (Right testLearnedSkillView)
+    , learnedSkillCreate = \_ -> pure (Right testMutationResponse)
+    , learnedSkillUpdate = \_ -> pure (Right testMutationResponse)
+    , learnedSkillArchive = \_ -> pure (Right testMutationResponse)
+    , learnedSkillRollback = \_ -> pure (Right testMutationResponse)
     }
+
+testSearchResponse :: LearnedSkillSearchResponse
+testSearchResponse = LearnedSkillSearchResponse []
+
+testMutationResponse :: LearnedSkillMutationResponse
+testMutationResponse = LearnedSkillMutationResponse "applied" testSkillDetails
+
+testLearnedSkillView :: LearnedSkillView
+testLearnedSkillView = LearnedSkillView
+    testSkillDetails
+    testRevisionDetails
+    []
+    []
+
+testSkillDetails :: LearnedSkillDetails
+testSkillDetails = LearnedSkillDetails
+    "repository"
+    "postgres-session"
+    "Postgres sessions"
+    "Use typed durable tables"
+    "Changing session persistence"
+    "Learned body"
+    "relevant"
+    0
+    "active"
+    2
+    timestamp
+    timestamp
+
+testRevisionDetails :: LearnedSkillRevisionDetails
+testRevisionDetails = LearnedSkillRevisionDetails
+    2
+    "Postgres sessions"
+    "Use typed durable tables"
+    "Changing session persistence"
+    "Learned body"
+    "relevant"
+    0
+    "active"
+    "Updated lesson"
+    timestamp
 
 dispatchConfig :: ToolDispatchConfig
 dispatchConfig = ToolDispatchConfig

@@ -361,7 +361,7 @@ data LocalShellAction
         { command           :: ![Text]
         , timeoutMs         :: !(Maybe Integer)
         , workingDirectory  :: !(Maybe Text)
-        , env               :: !(Maybe RawJson)
+        , env               :: !(Maybe EnvironmentVariables)
         , user              :: !(Maybe Text)
 
         }
@@ -833,7 +833,7 @@ localShellActionDecoder =
                     (Hermes.list Hermes.text))
                 <*> optionalAtKey "timeout_ms" integerDecoder
                 <*> optionalAtKey "working_directory" Hermes.text
-                <*> optionalAtKey "env" rawJsonDecoder
+                <*> optionalAtKey "env" environmentVariablesDecoder
                 <*> optionalAtKey "user" Hermes.text
             _ -> pure $
                 LocalShellActionOther
