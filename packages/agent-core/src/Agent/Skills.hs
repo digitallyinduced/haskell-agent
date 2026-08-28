@@ -33,14 +33,12 @@ import Control.Exception.Safe (SomeException, displayException, tryAny)
 import Control.Monad (filterM)
 import Data.Aeson
     ( FromJSON(..)
-    , Object
     , Value(..)
     , withObject
     , (.:)
     , (.:?)
     , (.!=)
     )
-import Data.Aeson.Key (Key)
 import System.OsPath (OsPath, unsafeEncodeUtf)
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
@@ -156,7 +154,6 @@ data Frontmatter = Frontmatter
 
 instance FromJSON Frontmatter where
     parseJSON = withObject "Skill frontmatter" \o -> do
-        allowed <- o .:? "allowed-tools"
         metadata <- o .:? "metadata" .!= Map.empty
         Frontmatter
             <$> o .: "name"
@@ -166,7 +163,7 @@ instance FromJSON Frontmatter where
             <*> o .:? "argument-hint"
             <*> (o .:? "user-invocable" .!= True)
             <*> (o .:? "disable-model-invocation" .!= False)
-            <*> parseAllowedTools allowed
+            <*> ((.unAllowedTools) <$> (o .:? "allowed-tools" .!= AllowedTools []))
             <*> o .:? "model"
             <*> o .:? "effort"
             <*> o .:? "license"
@@ -183,18 +180,44 @@ instance FromJSON SkillContextMode where
                     <> Text.unpack value)
         _ -> fail "activation must be a string"
 
-parseAllowedTools :: Maybe Value -> Parser [Text]
-parseAllowedTools = \case
-    Nothing -> pure []
-    Just (String text) ->
-        pure (filter (not . Text.null) (Text.words (Text.replace "," " " text)))
-    Just (Array values) ->
-        traverse
-            (\case
-                String text -> pure text
-                _ -> fail "allowed-tools entries must be strings")
-            (foldr (:) [] values)
-    Just _ -> fail "allowed-tools must be a string or list of strings"
+newtype AllowedTools = AllowedTools { unAllowedTools :: [Text] }
+
+instance FromJSON AllowedTools where
+    parseJSON = \case
+        String text ->
+            pure $ AllowedTools $
+                filter (not . Text.null)
+                    (Text.words (Text.replace "," " " text))
+        Array values ->
+            AllowedTools <$> traverse
+                (\case
+                    String text -> pure text
+                    _ -> fail "allowed-tools entries must be strings")
+                (foldr (:) [] values)
+        _ -> fail "allowed-tools must be a string or list of strings"
+
+data OpenAiInterface = OpenAiInterface
+    { interfaceDisplayName :: !(Maybe Text)
+    , interfaceShortDescription :: !(Maybe Text)
+    , interfaceDefaultPrompt :: !(Maybe Text)
+    , interfaceArgumentHint :: !(Maybe Text)
+    }
+
+instance FromJSON OpenAiInterface where
+    parseJSON = withObject "agents/openai.yaml interface" \o ->
+        OpenAiInterface
+            <$> o .:? "display_name"
+            <*> o .:? "short_description"
+            <*> o .:? "default_prompt"
+            <*> o .:? "argument_hint"
+
+newtype OpenAiPolicy = OpenAiPolicy
+    { policyAllowImplicitInvocation :: Maybe Bool
+    }
+
+instance FromJSON OpenAiPolicy where
+    parseJSON = withObject "agents/openai.yaml policy" \o ->
+        OpenAiPolicy <$> o .:? "allow_implicit_invocation"
 
 data OpenAiMetadata = OpenAiMetadata
     { openAiDisplayName :: !(Maybe Text)
@@ -206,24 +229,17 @@ data OpenAiMetadata = OpenAiMetadata
 
 instance FromJSON OpenAiMetadata where
     parseJSON = withObject "agents/openai.yaml" \o -> do
-        interface <- o .:? "interface"
-        policy <- o .:? "policy"
-        let interfaceFields = interface >>= valueObject
-            policyFields = policy >>= valueObject
-        OpenAiMetadata
-            <$> optionalField interfaceFields "display_name"
-            <*> optionalField interfaceFields "short_description"
-            <*> optionalField interfaceFields "default_prompt"
-            <*> optionalField interfaceFields "argument_hint"
-            <*> optionalField policyFields "allow_implicit_invocation"
-
-valueObject :: Value -> Maybe Object
-valueObject (Object fields) = Just fields
-valueObject _ = Nothing
-
-optionalField :: FromJSON a => Maybe Object -> Key -> Parser (Maybe a)
-optionalField fields key =
-    maybe (pure Nothing) (\object -> object .:? key) fields
+        interface <- (o .:? "interface" :: Parser (Maybe OpenAiInterface))
+        policy <- (o .:? "policy" :: Parser (Maybe OpenAiPolicy))
+        pure OpenAiMetadata
+            { openAiDisplayName = interface >>= (.interfaceDisplayName)
+            , openAiShortDescription =
+                interface >>= (.interfaceShortDescription)
+            , openAiDefaultPrompt = interface >>= (.interfaceDefaultPrompt)
+            , openAiArgumentHint = interface >>= (.interfaceArgumentHint)
+            , openAiAllowImplicit =
+                policy >>= (.policyAllowImplicitInvocation)
+            }
 
 defaultSkillCatalogMaxChars :: Int
 defaultSkillCatalogMaxChars = 8000

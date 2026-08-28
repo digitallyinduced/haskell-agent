@@ -155,7 +155,7 @@ queryCustom scopePool database limits rawQuery =
                 Left err -> pure (Left err)
                 Right (Left err) -> pure (Left err)
                 Right (Right result)
-                    | encodedSize result.customQueryRows
+                    | encodedSize result.customQueryOutput
                         > limits.queryMaxOutputBytes ->
                         pure $ Left $
                             "database query result exceeds "

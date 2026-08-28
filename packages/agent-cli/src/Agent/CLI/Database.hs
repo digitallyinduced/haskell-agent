@@ -15,18 +15,13 @@ import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Json.Decode (defaultKey)
 import Agent.Json.Decode qualified as Hermes
-import Agent.Json (RawJson, rawJsonBytes)
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     , jsonTool
     )
-import Data.Aeson (Value)
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 
 data DatabaseScope
     = DatabaseUserScope
@@ -47,18 +42,17 @@ databaseScopeDecoder = Hermes.withText \case
 
 -- | Storage callbacks for the three model-facing database operations.
 --
--- Structured database values are encoded as JSON in the tool result. Conversation
--- search is rendered as labeled text because its results are primarily read by
--- the model and by humans rather than consumed as a machine-readable payload.
+-- Database and conversation-search results are rendered as labeled text because
+-- they are read by the model and humans rather than consumed as an API.
 -- Store errors are already sanitized 'Text' because database exception details
 -- can contain SQL values that should not be copied into the transcript.
 data DatabaseToolsEnv = DatabaseToolsEnv
     { databaseDescribeScope
-        :: !(DatabaseScope -> IO (Either Text Value))
+        :: !(DatabaseScope -> IO (Either Text Text))
     , databaseRunQuery
-        :: !(DatabaseScope -> Text -> IO (Either Text RawJson))
+        :: !(DatabaseScope -> Text -> IO (Either Text Text))
     , databaseRunExecute
-        :: !(DatabaseScope -> Text -> Text -> IO (Either Text Value))
+        :: !(DatabaseScope -> Text -> Text -> IO (Either Text Text))
     , databaseSearchConversations
         :: !(Text -> Int -> IO (Either Text [ConversationSearchMatch]))
     }
@@ -130,7 +124,7 @@ schemaTool env = jsonTool
     True
     ParallelSafe
     (typedTool "database_schema" schemaArgsDecoder \(SchemaArgs scope) ->
-        encodeResult <$> env.databaseDescribeScope scope)
+        env.databaseDescribeScope scope)
 
 queryTool :: DatabaseToolsEnv -> AppTool
 queryTool env = jsonTool
@@ -149,8 +143,7 @@ queryTool env = jsonTool
     (typedTool "database_query" queryArgsDecoder \(QueryArgs scope sql) ->
         if Text.null (Text.strip sql)
             then pure (Left "database query must not be empty")
-            else fmap (Text.decodeUtf8 . rawJsonBytes)
-                <$> env.databaseRunQuery scope sql)
+            else env.databaseRunQuery scope sql)
 
 executeTool :: DatabaseToolsEnv -> AppTool
 executeTool env = jsonTool
@@ -177,11 +170,7 @@ executeTool env = jsonTool
             then pure (Left "database SQL must not be empty")
             else if Text.null (Text.strip purpose)
                 then pure (Left "database change purpose must not be empty")
-                else encodeResult
-                    <$> env.databaseRunExecute
-                        scope
-                        purpose
-                        sql)
+                else env.databaseRunExecute scope purpose sql)
 
 conversationSearchTool :: DatabaseToolsEnv -> AppTool
 conversationSearchTool env = jsonTool
@@ -216,10 +205,6 @@ scopeProperty = PropertySchema
         ( "Durable data scope: user for cross-project personal data, repository "
             <> "for data shared by clones/worktrees, or checkout for this worktree."
         ))
-
-encodeResult :: Either Text Value -> Either Text Text
-encodeResult =
-    fmap (Text.decodeUtf8 . LBS.toStrict . Aeson.encode)
 
 renderConversationSearchResult :: [ConversationSearchMatch] -> Text
 renderConversationSearchResult matches =
