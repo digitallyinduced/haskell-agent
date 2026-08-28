@@ -22,16 +22,12 @@ import Control.Concurrent.Async (Async, cancel, waitCatch)
 import Control.Exception.Safe (tryAny)
 import Control.Applicative ((<|>))
 import Control.Monad (guard, void)
-import Data.Aeson (Value(..))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Agent.Json.Decode as Json
 import Data.Char (isSpace)
 import Data.List (inits)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Exit (ExitCode(..))
 import System.OsPath (OsPath, isAbsolute)
 import System.Posix.Files
@@ -65,10 +61,10 @@ jsonStringFieldProgress :: Text -> Text -> Maybe PathProgress
 jsonStringFieldProgress fieldName arguments =
     completeField arguments <|> partialField arguments
   where
-    completeField input = do
-        Object object <- Aeson.decodeStrict' (Text.encodeUtf8 input)
-        String target <- KeyMap.lookup (Key.fromText fieldName) object
-        pure (PathComplete target)
+    completeField input =
+        case Json.decodeText (Json.object (Json.atKey fieldName Json.text)) input of
+            Right target -> Just (PathComplete target)
+            Left _ -> Nothing
 
     partialField = findTopLevelStringField fieldName
 
@@ -223,6 +219,6 @@ scanJsonStringToken reversed = \case
 
 decodeJsonString :: String -> Maybe Text
 decodeJsonString raw =
-    Aeson.decodeStrict' $
-        Text.encodeUtf8 $
-            "\"" <> Text.pack raw <> "\""
+    case Json.decodeText Json.text ("\"" <> Text.pack raw <> "\"") of
+        Right value -> Just value
+        Left _ -> Nothing

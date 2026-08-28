@@ -28,7 +28,7 @@ import Agent.Tools.Types
     )
 import Control.Exception.Safe (bracket)
 import Control.Monad (forM_)
-import Data.Aeson (FromJSON(..), ToJSON, object, (.=))
+import Data.Aeson (ToJSON, object, (.=))
 import qualified Data.Aeson as Aeson
 import Data.ByteString.Lazy (toStrict)
 import Data.IORef

@@ -17,6 +17,10 @@ import Agent.ToolDispatch
     , ToolResult
     )
 import Agent.Tools.FileSystem (resolveForRead)
+import Agent.Tools.FileSystem.PathPrefix
+    ( PathProgress(..)
+    , jsonStringFieldProgress
+    )
 import qualified Agent.Json.Decode as Json
 import Agent.Tools.FileSystem.ReadFile.Internal
     ( FileWindow(..)
@@ -48,9 +52,6 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forM_, guard, void, when)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Acquire (mkAcquire)
 import Data.Char (isSpace)
 import Data.IORef
@@ -123,11 +124,6 @@ data FileFingerprint = FileFingerprint
     , fingerprintModified :: !Rational
     , fingerprintChanged :: !Rational
     }
-    deriving (Eq, Show)
-
-data TargetFileProgress
-    = TargetFilePrefix !Text
-    | TargetFileComplete !Text
     deriving (Eq, Show)
 
 data PredictionKind
@@ -260,7 +256,7 @@ refreshCallCandidate
     -> IO PartialReadCall
 refreshCallCandidate speculation partial = mask \_ -> do
     current <- readMVar speculation.state
-    let progress = targetFileProgress partial.partialArguments
+    let progress = jsonStringFieldProgress "target_file" partial.partialArguments
         desired =
             desiredCandidate
                 current.workspacePaths
@@ -297,8 +293,8 @@ pendingWorkspaceIndex
 pendingWorkspaceIndex speculation partial
     | not (isNothing partial.partialCandidate) = pure Nothing
     | otherwise =
-        case targetFileProgress partial.partialArguments of
-            Just (TargetFilePrefix prefix)
+        case jsonStringFieldProgress "target_file" partial.partialArguments of
+            Just (PathPrefix prefix)
                 | Text.length prefix >= minimumPredictionPrefix ->
                     (.workspaceIndexTask)
                         <$> readMVar speculation.state
@@ -406,10 +402,10 @@ recordMiss speculation =
 desiredCandidate
     :: Maybe (Set.Set Text)
     -> PartialReadCall
-    -> Maybe TargetFileProgress
+    -> Maybe PathProgress
     -> Maybe (ReadFileArgs, PredictionKind)
 desiredCandidate _ _ Nothing = Nothing
-desiredCandidate _ partial (Just (TargetFileComplete target))
+desiredCandidate _ partial (Just (PathComplete target))
     | Text.null target = Nothing
     | otherwise =
         Just
@@ -419,7 +415,7 @@ desiredCandidate _ partial (Just (TargetFileComplete target))
             , CompletePrediction
             )
 desiredCandidate workspacePaths partial
-        (Just progress@(TargetFilePrefix prefix))
+        (Just progress@(PathPrefix prefix))
     | Text.length prefix < minimumPredictionPrefix = Nothing
     | candidateStillMatches
         (Just progress)
@@ -437,13 +433,13 @@ desiredCandidate workspacePaths partial
                     (defaultReadFileArgs target, PrefixPrediction))
                 (uniqueWorkspaceCandidate prefix paths)
 
-candidateStillMatches :: Maybe TargetFileProgress -> Text -> Bool
+candidateStillMatches :: Maybe PathProgress -> Text -> Bool
 candidateStillMatches progress candidateTarget =
     case progress of
-        Just (TargetFilePrefix prefix) ->
+        Just (PathPrefix prefix) ->
             not (Text.null candidateTarget)
                 && prefix `Text.isPrefixOf` candidateTarget
-        Just (TargetFileComplete target) -> target == candidateTarget
+        Just (PathComplete target) -> target == candidateTarget
         Nothing -> False
 
 uniqueWorkspaceCandidate :: Text -> Set.Set Text -> Maybe Text
@@ -625,96 +621,6 @@ fileFingerprint path = do
                 }
         _ -> Nothing
 
-targetFileProgress :: Text -> Maybe TargetFileProgress
-targetFileProgress arguments =
-    completeTarget arguments <|> partialTarget arguments
-  where
-    completeTarget input = do
-        Aeson.Object object <-
-            Aeson.decodeStrict' (Text.encodeUtf8 input)
-        Aeson.String target <-
-            KeyMap.lookup (Key.fromText "target_file") object
-        pure (TargetFileComplete target)
-
-    partialTarget input =
-        findTopLevelStringField "target_file" input
-
-decodeReadFileArgs :: Text -> Maybe ReadFileArgs
-decodeReadFileArgs text =
-    case Json.decodeText readFileArgsDecoder text of
-        Right args -> Just args
-        Left _ -> Nothing
-
-defaultReadFileArgs :: Text -> ReadFileArgs
-defaultReadFileArgs targetFile =
-    ReadFileArgs
-        { targetFile
-        , offset = Nothing
-        , limit = Nothing
-        , pages = Nothing
-        , format = Nothing
-        }
-
-findTopLevelStringField :: Text -> Text -> Maybe TargetFileProgress
-findTopLevelStringField fieldName =
-    scan 0 . Text.unpack
-  where
-    scan :: Int -> String -> Maybe TargetFileProgress
-    scan _ [] = Nothing
-    scan depth ('{' : rest) = scan (depth + 1) rest
-    scan depth ('[' : rest) = scan (depth + 1) rest
-    scan depth ('}' : rest) = scan (max 0 (depth - 1)) rest
-    scan depth (']' : rest) = scan (max 0 (depth - 1)) rest
-    scan depth ('"' : rest) =
-        case scanJsonStringToken [] rest of
-            Nothing -> Nothing
-            Just (JsonStringIncomplete _) -> Nothing
-            Just (JsonStringComplete value afterString)
-                | depth == 1
-                , value == fieldName
-                , Just afterColon <- consumeColon afterString ->
-                    parseFieldValue afterColon
-                | otherwise ->
-                    scan depth afterString
-    scan depth (_ : rest) = scan depth rest
-
-    consumeColon input =
-        case dropWhile isSpace input of
-            ':' : rest -> Just (dropWhile isSpace rest)
-            _ -> Nothing
-
-    parseFieldValue = \case
-        '"' : rest ->
-            case scanJsonStringToken [] rest of
-                Just (JsonStringIncomplete value) ->
-                    Just (TargetFilePrefix value)
-                Just (JsonStringComplete value _) ->
-                    Just (TargetFileComplete value)
-                Nothing -> Nothing
-        _ -> Nothing
-
-data JsonStringToken
-    = JsonStringIncomplete !Text
-    | JsonStringComplete !Text ![Char]
-
-scanJsonStringToken :: [Char] -> [Char] -> Maybe JsonStringToken
-scanJsonStringToken reversed = \case
-    [] ->
-        JsonStringIncomplete <$> decodeJsonString (reverse reversed)
-    '"' : rest ->
-        (`JsonStringComplete` rest)
-            <$> decodeJsonString (reverse reversed)
-    '\\' : escaped : rest ->
-        scanJsonStringToken (escaped : '\\' : reversed) rest
-    ['\\'] -> Nothing
-    character : rest ->
-        scanJsonStringToken (character : reversed) rest
-
-decodeJsonString :: String -> Maybe Text
-decodeJsonString raw =
-    Aeson.decodeStrict' $
-        Text.encodeUtf8 $
-            "\"" <> Text.pack raw <> "\""
 
 recordStart
     :: PredictionKind
@@ -761,3 +667,19 @@ maximumConcurrentSpeculativeReads = 4
 
 maxSpeculativeReadBytes :: Integer
 maxSpeculativeReadBytes = 16 * 1024 * 1024
+
+decodeReadFileArgs :: Text -> Maybe ReadFileArgs
+decodeReadFileArgs text =
+    case Json.decodeText readFileArgsDecoder text of
+        Right args -> Just args
+        Left _ -> Nothing
+
+defaultReadFileArgs :: Text -> ReadFileArgs
+defaultReadFileArgs targetFile =
+    ReadFileArgs
+        { targetFile
+        , offset = Nothing
+        , limit = Nothing
+        , pages = Nothing
+        , format = Nothing
+        }
