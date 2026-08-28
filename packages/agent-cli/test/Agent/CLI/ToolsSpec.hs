@@ -1,6 +1,10 @@
 module Agent.CLI.ToolsSpec (spec) where
 
 import Agent.CLI.Tools
+import Agent.CLI.CodeModeRuntime
+    ( CodeModeToolProjection(..)
+    , projectCodeModeTools
+    )
 import Agent.Dialect
     ( claudeCodeDialect
     , codexDialect
@@ -20,8 +24,9 @@ import Agent.ToolDispatch (noArgsTool)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.Codex.Dialect.ApplyPatch (applyPatchGrammar)
 import Agent.Tools.MultiAgents (MultiAgentContext(..), multiAgentTools)
+import Agent.Tools.CodeMode.Tool (ToolMode(..))
 import Agent.Tools.Types
-    ( AppTool
+    ( AppTool(..)
     , ApprovalRule(..)
     , freeformApplyPatchAppTool
     , jsonAppTool
@@ -37,6 +42,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "keeps native shell tools both direct and nested for code-only models" do
+        let tools = map testTool
+                ["read_file", "shell_command", "write_stdin", "apply_patch"]
+            projection = projectCodeModeTools CodeOnlyToolMode tools
+        map (.appToolName) projection.directCodeModeTools
+            `shouldBe` ["shell_command", "write_stdin"]
+        map (.appToolName) projection.nestedCodeModeTools
+            `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
+
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()
