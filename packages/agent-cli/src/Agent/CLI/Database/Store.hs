@@ -46,13 +46,10 @@ import Agent.Store.Postgres.Scope
     , provisionScope
     )
 import Agent.Store.Types (renderStoreError)
-import Agent.Json (RawJson)
-import Agent.Json.Decode (JsonError(..), validateRawJson)
 import Control.Exception.Safe (SomeException, try)
-import Data.Aeson (Value, toJSON)
-import qualified Data.Aeson as Aeson
 import Data.Bits (xor)
 import qualified Data.ByteString as ByteString
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -105,17 +102,16 @@ databaseToolsEnvForStore
 databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
     { databaseDescribeScope = \selected ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
-            fmap (toJSON . map catalogObjectValue)
-                <$> inspectCustomSchema pool database
+            fmap formatCatalog <$> inspectCustomSchema pool database
     , databaseRunQuery = \selected sql ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool ->
             queryCustom pool database defaultQueryLimits sql >>= \case
                 Left err -> pure (Left err)
-                Right result -> pure (queryResultValue result)
+                Right result -> pure (Right (formatQueryResult result))
     , databaseRunExecute = \selected purpose sql ->
         withScopeDatabase store (scopeForDatabase scopes selected) \database pool -> do
             sessionId <- currentSessionId
-            fmap executionResultValue <$> executeCustom
+            fmap formatExecutionResult <$> executeCustom
                 (storePool (trustedPool store))
                 pool
                 database
@@ -132,75 +128,88 @@ databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
             Right results -> pure $ Right $ map searchResultValue results
     }
 
-queryResultValue :: CustomQueryResult -> Either Text RawJson
-queryResultValue result = do
-    _ <- decodeJsonText "custom query rows" result.customQueryRows
-    case validateRawJson $ Text.encodeUtf8 $
-            "{\"rows\":" <> result.customQueryRows
-                <> ",\"truncated\":"
-                <> (if result.customQueryTruncated then "true" else "false")
-                <> "}" of
-        Left err -> Left ("custom query result: " <> jsonErrorMessage err)
-        Right raw -> Right raw
+formatQueryResult :: CustomQueryResult -> Text
+formatQueryResult result =
+    result.customQueryOutput
+        <> "\n\ntruncated: " <> yesNo result.customQueryTruncated
 
-executionResultValue :: CustomExecutionResult -> Value
-executionResultValue result = Aeson.object
-    [ "audit_id" Aeson..= result.customExecutionAuditId
-    , "catalog_before" Aeson..=
-        map catalogObjectValue result.customExecutionCatalogBefore
-    , "catalog_after" Aeson..=
-        map catalogObjectValue result.customExecutionCatalogAfter
-    , "warning" Aeson..= result.customExecutionWarning
+formatExecutionResult :: CustomExecutionResult -> Text
+formatExecutionResult result = Text.intercalate "\n"
+    ( ["audit id: " <> result.customExecutionAuditId]
+        <> maybe [] (\warning -> ["warning: " <> warning])
+            result.customExecutionWarning
+        <> [ ""
+           , "catalog before:"
+           , indentBlock (formatCatalog result.customExecutionCatalogBefore)
+           , ""
+           , "catalog after:"
+           , indentBlock (formatCatalog result.customExecutionCatalogAfter)
+           ]
+    )
+
+formatCatalog :: [CatalogObject] -> Text
+formatCatalog [] = "(no user-defined objects)"
+formatCatalog objects =
+    Text.intercalate "\n\n" (map formatCatalogObject objects)
+
+formatCatalogObject :: CatalogObject -> Text
+formatCatalogObject object = Text.intercalate "\n" $
+    [object.catalogObjectKind <> " " <> object.catalogObjectName]
+        <> optionalCatalogFields definition
+        <> formatSection "columns"
+            (map formatColumn definition.definitionColumns)
+        <> formatSection "constraints"
+            (map formatConstraint definition.definitionConstraints)
+        <> formatSection "indexes"
+            (map formatIndex definition.definitionIndexes)
+  where
+    definition = object.catalogObjectDefinition
+
+optionalCatalogFields :: CatalogDefinition -> [Text]
+optionalCatalogFields definition = catMaybes
+    [ labeled "owner" definition.definitionOwner
+    , labeled "comment" definition.definitionComment
+    , labeled "view definition" definition.definitionView
     ]
+  where
+    labeled label = fmap (\value -> "  " <> label <> ": " <> value)
 
-catalogObjectValue :: CatalogObject -> Value
-catalogObjectValue object = Aeson.object
-    [ "kind" Aeson..= object.catalogObjectKind
-    , "name" Aeson..= object.catalogObjectName
-    , "definition" Aeson..= catalogDefinitionValue
-        object.catalogObjectDefinition
+formatSection :: Text -> [Text] -> [Text]
+formatSection _ [] = []
+formatSection label values =
+    ("  " <> label <> ":") : map ("    - " <>) values
+
+formatColumn :: CatalogColumn -> Text
+formatColumn column = Text.intercalate "; " $
+    [ column.columnName <> " " <> column.columnType
+    , if column.columnNullable then "nullable" else "not null"
     ]
+        <> catMaybes
+            [ fmap ("default " <>) column.columnDefault
+            , fmap ("identity " <>) column.columnIdentity
+            , fmap ("generated " <>) column.columnGenerated
+            , fmap ("comment " <>) column.columnComment
+            ]
 
-catalogDefinitionValue :: CatalogDefinition -> Value
-catalogDefinitionValue definition = Aeson.object
-    [ "owner" Aeson..= definition.definitionOwner
-    , "comment" Aeson..= definition.definitionComment
-    , "view_definition" Aeson..= definition.definitionView
-    , "columns" Aeson..= map catalogColumnValue definition.definitionColumns
-    , "constraints" Aeson..=
-        map catalogConstraintValue definition.definitionConstraints
-    , "indexes" Aeson..= map catalogIndexValue definition.definitionIndexes
-    ]
+formatConstraint :: CatalogConstraint -> Text
+formatConstraint constraint =
+    constraint.constraintName
+        <> " (" <> constraint.constraintType <> "): "
+        <> constraint.constraintDefinition
 
-catalogColumnValue :: CatalogColumn -> Value
-catalogColumnValue column = Aeson.object
-    [ "name" Aeson..= column.columnName
-    , "type" Aeson..= column.columnType
-    , "nullable" Aeson..= column.columnNullable
-    , "default" Aeson..= column.columnDefault
-    , "identity" Aeson..= column.columnIdentity
-    , "generated" Aeson..= column.columnGenerated
-    , "comment" Aeson..= column.columnComment
-    ]
+formatIndex :: CatalogIndex -> Text
+formatIndex index = index.indexName <> ": " <> index.indexDefinition
 
-catalogConstraintValue :: CatalogConstraint -> Value
-catalogConstraintValue constraint = Aeson.object
-    [ "name" Aeson..= constraint.constraintName
-    , "type" Aeson..= constraint.constraintType
-    , "definition" Aeson..= constraint.constraintDefinition
-    ]
+indentBlock :: Text -> Text
+indentBlock = Text.intercalate "\n" . map ("  " <>) . Text.lines
 
-catalogIndexValue :: CatalogIndex -> Value
-catalogIndexValue index = Aeson.object
-    [ "name" Aeson..= index.indexName
-    , "definition" Aeson..= index.indexDefinition
-    ]
+boolText :: Bool -> Text
+boolText True = "true"
+boolText False = "false"
 
-decodeJsonText :: Text -> Text -> Either Text RawJson
-decodeJsonText label value =
-    case validateRawJson (Text.encodeUtf8 value) of
-        Left err -> Left (label <> ": " <> jsonErrorMessage err)
-        Right decoded -> Right decoded
+yesNo :: Bool -> Text
+yesNo True = "yes"
+yesNo False = "no"
 
 searchResultValue :: ConversationSearchResult -> ConversationSearchMatch
 searchResultValue result = ConversationSearchMatch
