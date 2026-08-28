@@ -66,6 +66,25 @@ spec = do
             extractProposedPlan "no plan here" `shouldBe` Nothing
             extractProposedPlan "<proposed_plan>\nunclosed" `shouldBe` Nothing
 
+    describe "resumedPlanNeedsApproval" do
+        it "restores approval when the latest assistant turn is a proposal" do
+            resumedPlanNeedsApproval
+                [ Just "earlier"
+                , Just "<proposed_plan>\n# Plan\n</proposed_plan>"
+                ]
+                `shouldBe` True
+
+        it "does not restore approval after implementation continues" do
+            resumedPlanNeedsApproval
+                [ Just "<proposed_plan>\n# Plan\n</proposed_plan>"
+                , Just "Implementation complete."
+                ]
+                `shouldBe` False
+
+        it "ignores turns without assistant text" do
+            resumedPlanNeedsApproval [Nothing, Just "ordinary answer"]
+                `shouldBe` False
+
     describe "stripProposedPlan" do
         it "removes the tagged block and keeps surrounding text" do
             stripProposedPlan
