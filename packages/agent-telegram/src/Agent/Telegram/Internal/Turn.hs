@@ -589,7 +589,12 @@ telegramAgentPrompt prompt =
     prompt
         <> "\n\n[Telegram delivery context: You are conversing in Telegram. \
         \Keep messages concise and conversational; avoid terminal-style \
-        \verbosity unless the user asks for detail. Your answer and available \
+        \verbosity unless the user asks for detail. If you need to use tools \
+        \or do substantial work before you can answer, first emit one short \
+        \commentary progress sentence before the first tool call. For \
+        \example: Ich schaue mir das kurz an. Do not wait for findings \
+        \before this initial update. Skip it when you can answer immediately \
+        \or when no reply should be sent. Your answer and available \
         \reasoning summaries are shown to the user as a live Telegram draft \
         \while you work, followed by your normal final response. If the best \
         \complete response \

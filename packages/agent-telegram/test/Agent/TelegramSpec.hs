@@ -66,6 +66,10 @@ spec = describe "Agent.Telegram" do
             prompt `shouldSatisfy`
                 Text.isInfixOf "Keep messages concise and conversational"
             prompt `shouldSatisfy`
+                Text.isInfixOf "before the first tool call"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Do not wait for findings"
+            prompt `shouldSatisfy`
                 Text.isPrefixOf "Inspect the failing tests"
 
     describe "telegramActivityDraftHtml" do
