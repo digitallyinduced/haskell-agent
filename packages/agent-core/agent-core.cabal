@@ -222,6 +222,7 @@ test-suite agent-core-test
                     , Agent.Http.HeaderSpec
                     , Agent.LoopSpec
                     , Agent.MCPSpec
+                    , Agent.MCP.OAuthSpec
                     , Agent.OsPathSpec
                     , Agent.JsonTextSpec
                     , Agent.ProjectInstructionsSpec

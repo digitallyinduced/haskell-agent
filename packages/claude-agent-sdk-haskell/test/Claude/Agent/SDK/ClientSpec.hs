@@ -181,6 +181,35 @@ spec = describe "ClaudeSDKClient subprocess transport" do
                             `Text.isInfixOf` message
                     _ -> False
 
+    it "accepts multi-megabyte structured output records by default" do
+        -- Claude Code executes its own tools and echoes each tool result as
+        -- one NDJSON record. Reading a 600 KB PNG produced a 1.2 MB record
+        -- in production, which the previous 1 MiB default rejected.
+        let recordTextDoublings = 21
+            recordTextBytes = 2 ^ recordTextDoublings
+        withFakeClaude
+            (largeRecordScript recordTextDoublings)
+            \directory executable -> do
+                callbackMessages <- newIORef []
+                result <-
+                    query
+                        (testOptions executable directory)
+                        "large record"
+                        (\message ->
+                            modifyIORef' callbackMessages (message :))
+                _ <- expectRight result
+                messages <- readIORef callbackMessages
+                let assistantTexts =
+                        [ text
+                        | MessageAssistant AssistantMessage{content} <-
+                            messages
+                        , TextBlock{text} <- content
+                        ]
+                map Text.length assistantTexts
+                    `shouldBe` [recordTextBytes]
+                assistantTexts
+                    `shouldSatisfy` all (Text.all (== 'x'))
+
     it "aborts a blocked subprocess output read promptly" do
         withFakeClaude blockedOutputScript \directory executable -> do
             turnFinished <- newEmptyMVar
@@ -1355,6 +1384,38 @@ successResult result =
         <> "\",\"uuid\":\"result\",\"result\":\""
         <> result
         <> "\"}"
+
+-- | A fake Claude Code that streams one assistant record whose text block is
+-- @2 ^ doublings@ characters long, followed by a success result. The payload
+-- is built by repeatedly doubling a shell variable rather than embedded in
+-- the script, so the record arrives across many pipe reads like a real
+-- oversized tool result. Only shell builtins are used: the tests run the
+-- fake with an empty environment, so external commands such as @head@ or
+-- @tr@ are not on @PATH@ inside the Nix build sandbox.
+largeRecordScript :: Int -> String
+largeRecordScript doublings =
+    Text.unpack $
+        Text.unlines
+            [ "#!/bin/sh"
+            , "IFS= read -r _query"
+            , "payload=x"
+            , "i=0"
+            , "while [ \"$i\" -lt "
+                <> Text.pack (show doublings)
+                <> " ]; do payload=\"$payload$payload\"; i=$((i + 1)); done"
+            , "printf '%s' " <> shellQuote assistantPrefix
+            , "printf '%s' \"$payload\""
+            , "printf '%s\\n' " <> shellQuote assistantSuffix
+            , "printf '%s\\n' " <> shellQuote (successResult "done")
+            ]
+  where
+    assistantPrefix =
+        "{\"type\":\"assistant\",\"uuid\":\"large-assistant\",\
+        \\"session_id\":\""
+            <> testSessionId
+            <> "\",\"message\":{\"content\":[{\"type\":\"text\",\
+               \\"text\":\""
+    assistantSuffix = "\"}]}}"
 
 assistantLine :: Text -> Text -> Text
 assistantLine sessionId text =

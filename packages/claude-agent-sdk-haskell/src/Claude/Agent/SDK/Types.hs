@@ -105,6 +105,12 @@ data ClaudeAgentOptions = ClaudeAgentOptions
     , streamInactivityTimeoutMicros :: !Int
     , turnTimeoutMicros :: !Int
     -- | Maximum size of one newline-delimited structured-output record.
+    --
+    -- Claude Code runs its own tools and echoes every tool result on stdout
+    -- as a single NDJSON record. Reading an image or PDF therefore produces
+    -- a record that embeds the whole file as base64, and multi-megabyte
+    -- records are routine. The limit only guards against a runaway process,
+    -- so it should stay far above any legitimate record.
     , maxBufferSizeBytes :: !Int
     } deriving (Eq, Show)
 
@@ -137,7 +143,7 @@ defaultClaudeAgentOptions executable cwd = ClaudeAgentOptions
     , streamStartupTimeoutMicros = 60 * 1_000_000
     , streamInactivityTimeoutMicros = 15 * 60 * 1_000_000
     , turnTimeoutMicros = 2 * 60 * 60 * 1_000_000
-    , maxBufferSizeBytes = 1_048_576
+    , maxBufferSizeBytes = 1_073_741_824
     }
 
 data Usage = Usage
