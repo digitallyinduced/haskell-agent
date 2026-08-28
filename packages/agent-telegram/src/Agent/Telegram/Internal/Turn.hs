@@ -122,6 +122,7 @@ import Data.Aeson
     )
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.IORef (newIORef, readIORef)
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Map.Strict as Map
 import Data.List (sortOn)
@@ -177,8 +178,17 @@ import Text.Read (readMaybe)
 import Agent.Telegram.Internal.Runtime.Types
 import Agent.Telegram.Internal.Allowlist
 import Agent.Telegram.Internal.Support
-runQueuedMediaTurn :: TelegramRuntime -> TelegramPendingMediaTurn -> IO Text
+data TelegramTurnResponse = TelegramTurnResponse
+    { telegramTurnText :: !Text
+    , telegramTurnProgressMessageId :: !(Maybe Integer)
+    }
+
+runQueuedMediaTurn
+    :: TelegramRuntime
+    -> TelegramPendingMediaTurn
+    -> IO TelegramTurnResponse
 runQueuedMediaTurn runtime pending = do
+    progressMessageId <- newIORef Nothing
     handle <- sessionForPrompt runtime pending.pendingMediaChat pending.pendingMediaText
     let agentPrompt = telegramAgentPrompt pending.pendingMediaText
     attachments <- downloadTelegramMediaAttachments runtime handle pending
@@ -225,6 +235,8 @@ runQueuedMediaTurn runtime pending = do
                 pending.pendingMediaChat
                 pending.pendingMediaUserId
                 (Just pending.pendingMediaMessageId)
+                progressMessageId
+                (not (isAmbientGroupPrompt pending.pendingMediaText))
                 (unsafeToFilePath handle.sessionTempDir)
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
@@ -242,7 +254,7 @@ runQueuedMediaTurn runtime pending = do
                 handle
                 gatewayRequest)
             `finally` cleanupTelegramBridge runtime bridgePath bridgeDir
-    (case result of
+    response <- (case result of
         Left err -> fail (Text.unpack err)
         Right _ ->
             loadSessionHandle
@@ -265,6 +277,7 @@ runQueuedMediaTurn runtime pending = do
                                         "agent completed without recording \
                                         \the Telegram turn")
         `finally` cleanupManagedTurnMedia request
+    TelegramTurnResponse response <$> readIORef progressMessageId
 
 checkpointVoiceTranscript
     :: TelegramRuntime
@@ -518,6 +531,7 @@ failureReply = \case
             { pendingUpdateId = pending.pendingTurnUpdateId
             , pendingChat = pending.pendingTurnChat
             , pendingReplyToMessageId = Just pending.pendingTurnMessageId
+            , pendingEditMessageId = Nothing
             , pendingText =
                 "This turn failed after 5 attempts. Send /retry to try it again."
             }
@@ -526,6 +540,7 @@ failureReply = \case
             { pendingUpdateId = pending.pendingMediaUpdateId
             , pendingChat = pending.pendingMediaChat
             , pendingReplyToMessageId = Just pending.pendingMediaMessageId
+            , pendingEditMessageId = Nothing
             , pendingText =
                 "This media turn failed after 5 attempts. Send /retry to try it again."
             }
@@ -571,7 +586,7 @@ runAgentTurn
     -> Integer
     -> Maybe Integer
     -> Text
-    -> IO Text
+    -> IO TelegramTurnResponse
 runAgentTurn runtime key userId replyToMessageId prompt = do
     handle <- sessionForPrompt runtime key prompt
     let agentPrompt = telegramAgentPrompt prompt
@@ -581,6 +596,7 @@ runAgentTurn runtime key userId replyToMessageId prompt = do
         key
         userId
         replyToMessageId
+        (not (isAmbientGroupPrompt prompt))
         (managedTurnRequestFromText agentPrompt)
         agentPrompt
 
@@ -589,11 +605,12 @@ telegramAgentPrompt prompt =
     prompt
         <> "\n\n[Telegram delivery context: You are conversing in Telegram. \
         \Keep messages concise and conversational; avoid terminal-style \
-        \verbosity unless the user asks for detail. If you need to use tools \
-        \or do substantial work before you can answer, first emit one short \
-        \commentary progress sentence before the first tool call. For \
-        \example: Ich schaue mir das kurz an. Do not wait for findings \
-        \before this initial update. Skip it when you can answer immediately \
+        \verbosity unless the user asks for detail. Follow the language and \
+        \style of the conversation. If you need to use tools or do substantial \
+        \work before you can answer, first emit one short commentary progress \
+        \sentence before the first tool call, in that same language and style. \
+        \For example: I'll take a quick look. Do not wait for findings before \
+        \this initial update. Skip it when you can answer immediately \
         \or when no reply should be sent. Your answer and available \
         \reasoning summaries are shown to the user as a live Telegram draft \
         \while you work, followed by your normal final response. If the best \
@@ -608,11 +625,13 @@ runManagedAgentTurn
     -> TelegramChatKey
     -> Integer
     -> Maybe Integer
+    -> Bool
     -> ManagedTurnRequest
     -> Text
-    -> IO Text
+    -> IO TelegramTurnResponse
 runManagedAgentTurn
-        runtime handle key userId replyToMessageId baseRequest expectedPrompt = do
+        runtime handle key userId replyToMessageId groupActivityEnabled baseRequest expectedPrompt = do
+    progressMessageId <- newIORef Nothing
     let bridgeDir =
             handle.sessionTempDir
                 </> unsafeEncodeUtf
@@ -637,12 +656,14 @@ runManagedAgentTurn
                 key
                 userId
                 replyToMessageId
+                progressMessageId
+                groupActivityEnabled
                 (unsafeToFilePath handle.sessionTempDir)
     createDirectoryIfMissing True bridgeDir
     setFileMode bridgePath 0o700
     priorTurnIndex <-
         latestPersistedTurnIndex runtime handle.sessionMeta.metaId
-    (withTelegramBridge bridgeEnv $
+    response <- (withTelegramBridge bridgeEnv $
         launchManagedTurnBounded
             runtime.runtimeProcessManager
             False
@@ -673,6 +694,7 @@ runManagedAgentTurn
                                         fail
                                             "agent completed without recording \
                                             \the Telegram turn"
+    TelegramTurnResponse response <$> readIORef progressMessageId
 
 telegramTurnUserId :: TelegramRuntime -> TelegramChatKey -> IO Integer
 telegramTurnUserId runtime key

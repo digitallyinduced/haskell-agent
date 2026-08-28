@@ -288,7 +288,8 @@ modifyState runtime update =
 
 reply :: TelegramRuntime -> TelegramPendingReply -> IO ()
 reply runtime pending
-    | Just emoji <- telegramReactionEmoji pending.pendingText
+    | Nothing <- pending.pendingEditMessageId
+    , Just emoji <- telegramReactionEmoji pending.pendingText
     , Just messageId <- pending.pendingReplyToMessageId = do
         TelegramClient.setMessageReaction
             runtime.runtimeClient
@@ -305,48 +306,63 @@ reply runtime pending
         let chunks = case splitTelegramText 4096 pending.pendingText of
                 [] -> ["(empty response)"]
                 values -> values
-            checkpointKey =
-                Text.intercalate ":"
-                    [ Text.pack (show pending.pendingChat.chatId)
-                    , maybe
-                        "-"
-                        (Text.pack . show)
-                        pending.pendingChat.messageThreadId
-                    , Text.pack (show pending.pendingUpdateId)
-                    , "reply"
-                    ]
+            checkpointKey = replyCheckpointKey pending
         state <- readMVar runtime.runtimeStateVar
         let startIndex =
                 fromMaybe 0
                     (Map.lookup checkpointKey state.deliveryCheckpoints)
         forM_ (drop startIndex (zip [0 :: Int ..] chunks)) \(index, chunk) ->
-            TelegramClient.sendRichMessage
-                runtime.runtimeClient
-                pending.pendingChat
-                (if index == 0
-                    then pending.pendingReplyToMessageId
-                    else Nothing)
-                chunk >>= \case
-                    Left err -> fail (Text.unpack err)
-                    Right messageId ->
-                        modifyState runtime \current ->
-                            current
-                                { deliveryCheckpoints =
-                                    Map.insert
-                                        checkpointKey
-                                        (index + 1)
-                                        current.deliveryCheckpoints
-                                , outboundMessageIds =
-                                    maybe
-                                        current.outboundMessageIds
-                                        (\sentId ->
-                                            Map.insertWith
-                                                Set.union
-                                                pending.pendingChat
-                                                (Set.singleton sentId)
-                                                current.outboundMessageIds)
-                                        messageId
-                                }
+            case (index, pending.pendingEditMessageId) of
+                (0, Just messageId) ->
+                    TelegramClient.editRichMessageText
+                        runtime.runtimeClient
+                        pending.pendingChat
+                        messageId
+                        chunk >>= \case
+                            Left err -> fail (Text.unpack err)
+                            Right () -> checkpoint (index + 1) Nothing
+                _ ->
+                    TelegramClient.sendRichMessage
+                        runtime.runtimeClient
+                        pending.pendingChat
+                        (if index == 0
+                            then pending.pendingReplyToMessageId
+                            else Nothing)
+                        chunk >>= \case
+                            Left err -> fail (Text.unpack err)
+                            Right messageId -> checkpoint (index + 1) messageId
+      where
+        checkpoint nextIndex messageId =
+            modifyState runtime \current ->
+                current
+                    { deliveryCheckpoints =
+                        Map.insert
+                            (replyCheckpointKey pending)
+                            nextIndex
+                            current.deliveryCheckpoints
+                    , outboundMessageIds =
+                        maybe
+                            current.outboundMessageIds
+                            (\sentId ->
+                                Map.insertWith
+                                    Set.union
+                                    pending.pendingChat
+                                    (Set.singleton sentId)
+                                    current.outboundMessageIds)
+                            messageId
+                    }
+
+replyCheckpointKey :: TelegramPendingReply -> Text
+replyCheckpointKey pending =
+    Text.intercalate ":"
+        [ Text.pack (show pending.pendingChat.chatId)
+        , maybe
+            "-"
+            (Text.pack . show)
+            pending.pendingChat.messageThreadId
+        , Text.pack (show pending.pendingUpdateId)
+        , "reply"
+        ]
 
 withTelegramProgress
     :: TelegramClient

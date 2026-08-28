@@ -349,6 +349,7 @@ data TelegramPendingReply = TelegramPendingReply
     { pendingUpdateId :: !Integer
     , pendingChat :: !TelegramChatKey
     , pendingReplyToMessageId :: !(Maybe Integer)
+    , pendingEditMessageId :: !(Maybe Integer)
     , pendingText :: !Text
     } deriving (Eq, Show)
 
@@ -357,6 +358,7 @@ instance ToJSON TelegramPendingReply where
         [ "updateId" .= pending.pendingUpdateId
         , "chat" .= pending.pendingChat
         , "replyToMessageId" .= pending.pendingReplyToMessageId
+        , "editMessageId" .= pending.pendingEditMessageId
         , "text" .= pending.pendingText
         ]
 
@@ -366,6 +368,7 @@ telegramPendingReplyDecoder = Hermes.object $
             <$> Hermes.atKey "updateId" integerDecoder
             <*> Hermes.atKey "chat" telegramChatKeyDecoder
             <*> Hermes.optionalKey "replyToMessageId" integerDecoder
+            <*> Hermes.optionalKey "editMessageId" integerDecoder
             <*> Hermes.atKey "text" Hermes.text
 
 data TelegramPendingMediaTurn = TelegramPendingMediaTurn
