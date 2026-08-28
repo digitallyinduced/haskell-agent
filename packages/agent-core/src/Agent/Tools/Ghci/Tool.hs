@@ -3,8 +3,11 @@ module Agent.Tools.Ghci.Tool
     ( runGhciTool
     ) where
 
+import Agent.Json.Decode (Decoder, FieldsDecoder)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs
-    ( objectArgs
+    ( Object
+    , objectArgs
     , optIntOrString
     , reqText
     )
@@ -33,15 +36,9 @@ import Agent.Tools.Types
     , jsonAppToolWithExecution
     , withToolResourceClaims
     )
-import Data.Aeson (FromJSON(..), Object)
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (Parser)
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 
 data GhciArgs = GhciArgs
     { expression :: Text
@@ -49,13 +46,13 @@ data GhciArgs = GhciArgs
     , description :: Text
     }
 
-instance FromJSON GhciArgs where
-    parseJSON = objectArgs \object -> GhciArgs
+ghciArgsDecoder :: Decoder GhciArgs
+ghciArgsDecoder = objectArgs \object -> GhciArgs
         <$> reqText object "expression"
         <*> optionalTimeout object
         <*> reqText object "description"
 
-optionalTimeout :: Object -> Parser (Maybe Int)
+optionalTimeout :: Object -> FieldsDecoder (Maybe Int)
 optionalTimeout object =
     optIntOrString object "timeout"
 
@@ -72,7 +69,7 @@ runGhciTool session =
         ]
         (ClassifyReadOnly (isGhciReadOnlyCall session))
         TurnSequential
-        (typedTool "run_ghci" (runGhci session))
+        (typedTool "run_ghci" ghciArgsDecoder (runGhci session))
 
 ghciResourceClaims
     :: ToolCall
@@ -109,12 +106,8 @@ isGhciReadOnlyCall session call =
 
 decodeExpression :: Text -> Maybe Text
 decodeExpression arguments =
-    case Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments) of
-        Just (Aeson.Object object) ->
-            case KeyMap.lookup (Key.fromText "expression") object of
-                Just (Aeson.String value) -> Just value
-                _ -> Nothing
-        _ -> Nothing
+    either (const Nothing) Just $
+        Json.decodeText (Json.object (Json.atKey "expression" Json.text)) arguments
 
 runGhci :: GhciSession -> GhciArgs -> IO (Either Text Text)
 runGhci session args

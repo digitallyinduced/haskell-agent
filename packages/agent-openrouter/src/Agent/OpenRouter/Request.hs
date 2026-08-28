@@ -31,8 +31,7 @@ mapModel options model =
 -- OpenRouter is a drop-in Responses host except that it is stateless:
 -- @store@ must be false and @previous_response_id@ is rejected. ChatGPT-only
 -- computer-use tools are dropped; function tools and @web_search@ pass
--- through. Extra OpenRouter fields (provider routing, plugins) stay in
--- 'extraFields'.
+-- through.
 buildRequest :: ClientOptions -> ResponseCreateParams -> ResponseCreateParams
 buildRequest options request =
     mapResponseTools openRouterTool $
@@ -47,7 +46,7 @@ buildRequest options request =
 openRouterTool :: ResponseTool -> Maybe ResponseTool
 openRouterTool tool = case tool of
     FunctionToolValue {} -> Just tool
-    KnownResponseTool ToolWebSearch _ -> Just tool
-    KnownResponseTool ToolComputer _ -> Nothing
-    KnownResponseTool ToolComputerUsePreview _ -> Nothing
+    KnownResponseTool ToolWebSearch -> Just tool
+    KnownResponseTool ToolComputer -> Nothing
+    KnownResponseTool ToolComputerUsePreview -> Nothing
     _ -> Just tool

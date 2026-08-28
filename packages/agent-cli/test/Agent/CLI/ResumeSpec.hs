@@ -17,7 +17,6 @@ import Agent.Responses.Types
     , ResponseItem(..)
     )
 import Agent.Store.Postgres.Session (ConversationSearchResult(..))
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Time.Clock (addUTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import qualified Data.Text as Text
@@ -90,7 +89,6 @@ spec = do
                     CompactionItemValue CompactionItem
                         { itemId = Nothing
                         , encryptedContent = Nothing
-                        , extraFields = KeyMap.empty
                         }
             resumeNeedsGeneratedContext
                 [sampleTurn { turnItems = [checkpoint] }]

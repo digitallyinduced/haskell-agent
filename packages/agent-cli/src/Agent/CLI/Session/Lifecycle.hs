@@ -32,7 +32,7 @@ import Agent.CLI.Runtime.Types
     , StartupFailure(..)
     )
 import Agent.CLI.Session.Interaction
-    ( setSessionEffort
+    ( setSessionEffortText
     , syncFullscreenPrompt
     )
 import Agent.CLI.Session.Retry (waitAndRetryPendingTurn)
@@ -180,7 +180,7 @@ finishTurnWithCooldownRetry continuation allowCooldownRetry env exitAfter = \cas
                     Just _ -> pure ()
                 continueAfterTurn continuation env
     TurnRestartRequested level pending -> do
-        setSessionEffort env level
+        setSessionEffortText env level
         writeIORef env.sessionPlanMode.planStateRef pending.pendingPlanState
         case env.sessionFullscreen of
             Just runtime ->

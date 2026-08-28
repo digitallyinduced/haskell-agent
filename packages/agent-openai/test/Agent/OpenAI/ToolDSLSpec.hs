@@ -170,21 +170,31 @@ spec = do
 
 -- | Extract the parameters.properties.<name> schema from a built tool.
 propertyField :: Text -> ResponseTool -> Maybe Aeson.Value
-propertyField name (FunctionToolValue FunctionTool { parameters = Just (Aeson.Object params) }) =
-    case KeyMap.lookup "properties" params of
-        Just (Aeson.Object props) -> KeyMap.lookup (Key.fromText name) props
-        _                         -> Nothing
+propertyField name
+        (FunctionToolValue FunctionTool { parameters = Just parameters }) =
+    case Aeson.toJSON parameters of
+        Aeson.Object params ->
+            case KeyMap.lookup "properties" params of
+                Just (Aeson.Object props) ->
+                    KeyMap.lookup (Key.fromText name) props
+                _ -> Nothing
+        _ -> Nothing
 propertyField _ _ = Nothing
 
 -- | Extract the parameters.required array.
 required_ :: ResponseTool -> Maybe Aeson.Value
-required_ (FunctionToolValue FunctionTool { parameters = Just (Aeson.Object params) }) =
-    KeyMap.lookup "required" params
+required_ (FunctionToolValue FunctionTool { parameters = Just parameters }) =
+    case Aeson.toJSON parameters of
+        Aeson.Object params -> KeyMap.lookup "required" params
+        _ -> Nothing
 required_ _ = Nothing
 
 additionalProperties_ :: ResponseTool -> Maybe Aeson.Value
-additionalProperties_ (FunctionToolValue FunctionTool { parameters = Just (Aeson.Object params) }) =
-    KeyMap.lookup "additionalProperties" params
+additionalProperties_
+        (FunctionToolValue FunctionTool { parameters = Just parameters }) =
+    case Aeson.toJSON parameters of
+        Aeson.Object params -> KeyMap.lookup "additionalProperties" params
+        _ -> Nothing
 additionalProperties_ _ = Nothing
 
 propertyType :: Text -> ResponseTool -> Maybe Aeson.Value

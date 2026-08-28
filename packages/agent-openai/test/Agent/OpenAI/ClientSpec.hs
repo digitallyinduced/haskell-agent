@@ -1,6 +1,9 @@
 module Agent.OpenAI.ClientSpec (spec) where
 
 import Agent.OpenAI.Client
+import Agent.Json (rawJsonDecoder)
+import qualified Agent.Json.Decode as Json
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.Credential (staticBearerProvider)
 import Agent.Error
 import Agent.OpenAI.Http
@@ -569,8 +572,9 @@ withMockResponses recorded handler action =
                     | (name, value) <- Wai.requestHeaders waiRequest
                     ]
                 , body =
-                    case Aeson.eitherDecode requestBody of
-                        Right value -> value
+                    case Json.decodeEither rawJsonDecoder
+                            (LBS.toStrict requestBody) of
+                        Right value -> Aeson.toJSON value
                         Left _ -> Aeson.Null
                 }
         atomicModifyIORef' recorded \requests -> (requests <> [request], ())
@@ -711,9 +715,11 @@ withPromptCacheRetention nextRetention
     ResponseCreateParams { promptCacheRetention = nextRetention, .. }
 
 decodeResponse :: Aeson.Value -> Response
-decodeResponse value = case Aeson.fromJSON value of
-    Aeson.Success response -> response
-    Aeson.Error err -> error err
+decodeResponse value =
+    case ResponsesCodec.decodeResponse
+        (LBS.toStrict (Aeson.encode value)) of
+        Right response -> response
+        Left err -> error err
 
 extractAssistantText :: Response -> Maybe Text
 extractAssistantText response = case

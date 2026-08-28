@@ -21,6 +21,8 @@ import qualified Agent.TextBufferSpec as TextBufferSpec
 import qualified Agent.ToolArgsSpec as ToolArgsSpec
 import qualified Agent.ToolDispatchSpec as ToolDispatchSpec
 import qualified Agent.ToolDSLSpec as ToolDSLSpec
+import qualified Agent.Tools.CodeMode.HostSpec as CodeModeHostSpec
+import qualified Agent.Tools.CodeMode.ProtocolSpec as CodeModeProtocolSpec
 import qualified Agent.Tools.DangerousSpec as DangerousSpec
 import qualified Agent.Tools.FileSystem.GrepSpec as GrepSpec
 import qualified Agent.Tools.FileSystem.ListDirSpec as ListDirSpec
@@ -28,6 +30,7 @@ import qualified Agent.Tools.FileSystem.ReadFileSpec as ReadFileSpec
 import qualified Agent.Tools.GhciSpec as GhciSpec
 import qualified Agent.Tools.IOSpec as IOSpec
 import qualified Agent.Tools.MultiAgentsSpec as MultiAgentsSpec
+import qualified Agent.Tools.OutputArtifactSpec as OutputArtifactSpec
 import qualified Agent.Tools.PlanModeSpec as PlanModeSpec
 import qualified Agent.Tools.SecretSpec as SecretSpec
 import qualified Agent.Transport.WebSocketSpec as WebSocketSpec
@@ -62,7 +65,10 @@ main = hspec do
     GhciSpec.spec
     IOSpec.spec
     MultiAgentsSpec.spec
+    OutputArtifactSpec.spec
     PlanModeSpec.spec
     SecretSpec.spec
+    CodeModeHostSpec.spec
+    CodeModeProtocolSpec.spec
     DangerousSpec.spec
     WebSocketSpec.spec

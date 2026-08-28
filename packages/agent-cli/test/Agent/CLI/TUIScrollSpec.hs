@@ -46,6 +46,15 @@ spec = describe "fullscreen conversation scrolling" do
             reconcileConversationFollow True Nothing `shouldBe` True
             reconcileConversationFollow False Nothing `shouldBe` False
 
+    describe "conversationFollowScroll" do
+        it "resolves the new tail after durable history replaces live blocks" do
+            conversationFollowScroll True
+                `shouldBe` ScrollConversationToEnd
+
+        it "preserves explicitly paused scrollback across replacement or refocus" do
+            conversationFollowScroll False
+                `shouldBe` KeepConversationPosition
+
     it "reserves the rest of the viewport below a submitted prompt" do
         let anchor = startConversationAnchor (BlockId 7) "question" 40
             (next, action) =

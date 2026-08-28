@@ -16,19 +16,22 @@ module Agent.CLI.CredentialStore
     ) where
 
 import Agent.CLI.Error (formatException)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (defaultKey)
 import Agent.CLI.PrivateFileLock (withPrivateFileLock)
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider
-    ( BillingMode
+    ( BillingMode(..)
     , Provider(..)
     , parseProvider
     , providerSlug
     )
+import Agent.Json.Decode qualified as Hermes
 import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import qualified Data.Aeson as Aeson
-import Data.Aeson ((.:), (.:?), (.=))
+import Data.Aeson ((.=))
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (find)
 import Data.Text (Text)
@@ -88,8 +91,8 @@ instance Aeson.ToJSON ManagedAuthKind where
         ManagedOpenAIAuthJson -> "openai_oauth"
         ManagedGrokAuthJson -> "grok_oauth"
 
-instance Aeson.FromJSON ManagedAuthKind where
-    parseJSON = Aeson.withText "ManagedAuthKind" \case
+managedAuthKindDecoder :: Hermes.Decoder ManagedAuthKind
+managedAuthKindDecoder = Hermes.withText \case
         "bearer" -> pure ManagedBearerToken
         "openai_oauth" -> pure ManagedOpenAIAuthJson
         "grok_oauth" -> pure ManagedGrokAuthJson
@@ -106,21 +109,27 @@ instance Aeson.ToJSON ManagedCredential where
         , "enabled" .= credential.managedEnabled
         ]
 
-instance Aeson.FromJSON ManagedCredential where
-    parseJSON = Aeson.withObject "ManagedCredential" \object -> do
-        providerText <- object .: "provider"
+managedCredentialDecoder :: Hermes.Decoder ManagedCredential
+managedCredentialDecoder = Hermes.object do
+        providerText <- Hermes.atKey "provider" Hermes.text
         managedProvider <- maybe
             (fail ("unknown provider: " <> Text.unpack providerText))
             pure
             (parseProvider providerText)
         ManagedCredential
-            <$> object .: "id"
+            <$> Hermes.atKey "id" Hermes.text
             <*> pure managedProvider
-            <*> object .: "account_id"
-            <*> object .: "label"
-            <*> object .: "billing"
-            <*> object .: "auth_kind"
-            <*> object .:? "enabled" Aeson..!= True
+            <*> Hermes.atKey "account_id" Hermes.text
+            <*> Hermes.atKey "label" Hermes.text
+            <*> Hermes.atKey "billing" billingModeDecoder
+            <*> Hermes.atKey "auth_kind" managedAuthKindDecoder
+            <*> defaultKey True "enabled" Hermes.bool
+
+billingModeDecoder :: Hermes.Decoder BillingMode
+billingModeDecoder = Hermes.withText \case
+    "subscription" -> pure SubscriptionBilled
+    "api_credits" -> pure ApiBilled
+    other -> fail ("unknown billing mode: " <> Text.unpack other)
 
 instance Aeson.ToJSON ManagedSecret where
     toJSON secret = Aeson.object
@@ -128,11 +137,12 @@ instance Aeson.ToJSON ManagedSecret where
         , "payload" .= secret.secretPayload
         ]
 
-instance Aeson.FromJSON ManagedSecret where
-    parseJSON = Aeson.withObject "ManagedSecret" \object ->
+managedSecretDecoder :: Hermes.Decoder ManagedSecret
+managedSecretDecoder =
+    Hermes.object $
         ManagedSecret
-            <$> object .: "id"
-            <*> object .: "payload"
+            <$> Hermes.atKey "id" Hermes.text
+            <*> Hermes.atKey "payload" Hermes.text
 
 data MetadataFile = MetadataFile
     { metadataVersion :: !Int
@@ -145,11 +155,12 @@ instance Aeson.ToJSON MetadataFile where
         , "accounts" .= file.metadataAccounts
         ]
 
-instance Aeson.FromJSON MetadataFile where
-    parseJSON = Aeson.withObject "Credential metadata" \object ->
+metadataFileDecoder :: Hermes.Decoder MetadataFile
+metadataFileDecoder =
+    Hermes.object $
         MetadataFile
-            <$> object .:? "version" Aeson..!= 1
-            <*> object .:? "accounts" Aeson..!= []
+            <$> defaultKey 1 "version" Hermes.int
+            <*> defaultKey [] "accounts" (Hermes.list managedCredentialDecoder)
 
 data SecretsFile = SecretsFile
     { secretsVersion :: !Int
@@ -162,11 +173,12 @@ instance Aeson.ToJSON SecretsFile where
         , "secrets" .= file.storedSecrets
         ]
 
-instance Aeson.FromJSON SecretsFile where
-    parseJSON = Aeson.withObject "Credential secrets" \object ->
+secretsFileDecoder :: Hermes.Decoder SecretsFile
+secretsFileDecoder =
+    Hermes.object $
         SecretsFile
-            <$> object .:? "version" Aeson..!= 1
-            <*> object .:? "secrets" Aeson..!= []
+            <$> defaultKey 1 "version" Hermes.int
+            <*> defaultKey [] "secrets" (Hermes.list managedSecretDecoder)
 
 managedCredentialsPath :: OsPath -> OsPath
 managedCredentialsPath home =
@@ -225,9 +237,11 @@ loadManagedCredentialStoreUnlocked
     -> IO (Either Text ManagedCredentialStore)
 loadManagedCredentialStoreUnlocked home = do
     metadataResult <- decodeFileOrEmpty
+        metadataFileDecoder
         (managedCredentialsPath home)
         (MetadataFile 1 [])
     secretsResult <- decodeFileOrEmpty
+        secretsFileDecoder
         (managedSecretsPath home)
         (SecretsFile 1 [])
     pure do
@@ -373,8 +387,12 @@ credentialStoreProcessLock :: MVar ()
 credentialStoreProcessLock = unsafePerformIO (newMVar ())
 {-# NOINLINE credentialStoreProcessLock #-}
 
-decodeFileOrEmpty :: Aeson.FromJSON value => OsPath -> value -> IO (Either Text value)
-decodeFileOrEmpty path empty = do
+decodeFileOrEmpty
+    :: Hermes.Decoder value
+    -> OsPath
+    -> value
+    -> IO (Either Text value)
+decodeFileOrEmpty decoder path empty = do
     exists <- doesFileExist path
     if not exists
         then pure (Right empty)
@@ -383,11 +401,11 @@ decodeFileOrEmpty path empty = do
                 pure $ Left
                     ("could not read " <> toText path <> ": "
                         <> formatException exception)
-            Right bytes -> pure case Aeson.eitherDecode bytes of
+            Right bytes -> pure case decodeLazy decoder bytes of
                 Left err ->
                     Left
                         ("invalid credential store " <> toText path <> ": "
-                            <> Text.pack err)
+                            <> err)
                 Right value -> Right value
 
 writePrivateJson :: Aeson.ToJSON value => OsPath -> value -> IO (Either Text ())

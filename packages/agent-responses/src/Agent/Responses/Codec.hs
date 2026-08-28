@@ -5,44 +5,53 @@
 -- where the event discriminator arrives outside the JSON payload.
 module Agent.Responses.Codec
     ( encodeResponseCreateParams
-    , encodeResponseCreateParamsValue
     , decodeResponseCreateParams
     , decodeResponse
-    , decodeResponseValue
     , decodeResponseStreamEvent
-    , decodeResponseStreamEventValue
     , decodeResponseStreamEventWithType
+    , withResponseStreamEventDecoder
     ) where
 
-import Data.Aeson (Result, Value)
+import qualified Agent.Json.Decode as Json
+import qualified Data.ByteString as BS
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import qualified Data.Text as Text
 
 import Agent.Responses.Types
 
 encodeResponseCreateParams :: ResponseCreateParams -> LBS.ByteString
 encodeResponseCreateParams = Aeson.encode
 
-encodeResponseCreateParamsValue :: ResponseCreateParams -> Value
-encodeResponseCreateParamsValue = Aeson.toJSON
+decodeResponseCreateParams :: BS.ByteString -> Either String ResponseCreateParams
+decodeResponseCreateParams =
+    decodeDirect responseCreateParamsDecoder
 
-decodeResponseCreateParams :: LBS.ByteString -> Either String ResponseCreateParams
-decodeResponseCreateParams = Aeson.eitherDecode'
+decodeResponse :: BS.ByteString -> Either String Response
+decodeResponse = decodeDirect responseDecoder
 
-decodeResponse :: LBS.ByteString -> Either String Response
-decodeResponse = Aeson.eitherDecode'
+decodeResponseStreamEvent :: BS.ByteString -> Either String ResponseStreamEvent
+decodeResponseStreamEvent =
+    decodeDirect responseStreamEventDecoder
 
-decodeResponseValue :: Value -> Result Response
-decodeResponseValue = Aeson.fromJSON
-
-decodeResponseStreamEvent :: LBS.ByteString -> Either String ResponseStreamEvent
-decodeResponseStreamEvent = Aeson.eitherDecode'
-
-decodeResponseStreamEventValue :: Value -> Result ResponseStreamEvent
-decodeResponseStreamEventValue = Aeson.fromJSON
-
-decodeResponseStreamEventWithType :: Text -> Value -> Either String ResponseStreamEvent
+decodeResponseStreamEventWithType
+    :: Text
+    -> BS.ByteString
+    -> Either String ResponseStreamEvent
 decodeResponseStreamEventWithType eventType =
-    AesonTypes.parseEither (parseStreamEventWithType eventType)
+    decodeDirect (responseStreamEventDecoderWithType eventType)
+
+withResponseStreamEventDecoder
+    :: ((BS.ByteString -> IO (Either String ResponseStreamEvent)) -> IO value)
+    -> IO value
+withResponseStreamEventDecoder action =
+    Json.withDecoderSession \session ->
+        action \bytes -> do
+            result <- Json.decodeIO session responseStreamEventDecoder bytes
+            pure (either (Left . Text.unpack . (.jsonErrorMessage)) Right result)
+
+decodeDirect :: Json.Decoder value -> BS.ByteString -> Either String value
+decodeDirect decoder =
+    either (Left . Text.unpack . (.jsonErrorMessage)) Right
+        . Json.decodeEither decoder

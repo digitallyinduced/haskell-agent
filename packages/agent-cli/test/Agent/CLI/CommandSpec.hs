@@ -3,8 +3,8 @@ module Agent.CLI.CommandSpec (spec) where
 import Agent.CLI.Command
 import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
+import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.Responses.Types
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -53,11 +53,11 @@ spec = do
             parseReplLine "  /Effort  " `shouldBe` ReplShowEffort
 
         it "sets a valid effort level" do
-            parseReplLine "/effort none" `shouldBe` ReplSetEffort "none"
-            parseReplLine "/effort high" `shouldBe` ReplSetEffort "high"
-            parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort "xhigh"
-            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort "max"
-            parseReplLine "/effort medium" `shouldBe` ReplSetEffort "medium"
+            parseReplLine "/effort none" `shouldBe` ReplSetEffort EffortNone
+            parseReplLine "/effort high" `shouldBe` ReplSetEffort EffortHigh
+            parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort EffortXHigh
+            parseReplLine "/effort MAX" `shouldBe` ReplSetEffort EffortMax
+            parseReplLine "/effort medium" `shouldBe` ReplSetEffort EffortMedium
 
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
@@ -664,8 +664,9 @@ spec = do
 
     describe "setReasoningEffort" do
         it "writes effort onto an empty reasoning config" do
-            let updated = setReasoningEffort "high" defaultResponseCreateParams
-            currentEffort updated `shouldBe` "high"
+            let updated =
+                    setReasoningEffort EffortHigh defaultResponseCreateParams
+            currentEffort updated `shouldBe` EffortHigh
             fmap (.effort) updated.reasoning `shouldBe` Just (Just "high")
 
         it "preserves other reasoning fields" do
@@ -677,12 +678,11 @@ spec = do
                             , generateSummary = Just "auto"
                             , reasoningMode = Nothing
                             , summary = Just "concise"
-                            , extraFields = KeyMap.empty
                             }
                         , ..
                         }
-                updated = setReasoningEffort "xhigh" original
-            currentEffort updated `shouldBe` "xhigh"
+                updated = setReasoningEffort EffortXHigh original
+            currentEffort updated `shouldBe` EffortXHigh
             case updated.reasoning of
                 Just config -> do
                     config.context `shouldBe` Just "256k"
@@ -692,7 +692,7 @@ spec = do
 
     describe "currentEffort" do
         it "defaults to low when reasoning is missing" do
-            currentEffort defaultResponseCreateParams `shouldBe` "low"
+            currentEffort defaultResponseCreateParams `shouldBe` EffortLow
 
     describe "setModel" do
         it "writes the model onto request params" do

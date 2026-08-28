@@ -9,8 +9,10 @@ module Agent.Tools.MultiAgents
     , multiAgentTools
     , multiAgentNamespace
     , multiAgentToolNames
+    , spawnSharedSubagent
     ) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.Subagents
     ( SubagentId(..)
     , SubagentRegistry
@@ -48,9 +50,10 @@ import Agent.ToolArgs
     , objectArgsLenient
     , optInt
     , optText
+    , optTextList
     , readExactInt
+    , rejectField
     , reqText
-    , reqTextList
     )
 import Agent.ToolDSL
     ( PropertySchema(..)
@@ -65,7 +68,7 @@ import Agent.Tools.Types
 import Control.Concurrent.MVar (modifyMVar, newMVar)
 import Control.Exception.Safe (mask, onException)
 import Control.Monad (void)
-import Data.Aeson (FromJSON(..), Value(..), object, (.=))
+import Data.Aeson (Value(..), object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -149,24 +152,23 @@ data SpawnAgentArgs = SpawnAgentArgs
     , forkTurns :: Maybe Text
     }
 
-instance FromJSON SpawnAgentArgs where
-    parseJSON = objectArgs \object_ ->
-        if KeyMap.member (Key.fromText "isolation") object_
-            then fail
-                "isolation is no longer supported; use spawn_agent_in_worktree"
-            else SpawnAgentArgs
-                <$> reqText object_ "task_name"
-                <*> reqText object_ "message"
-                <*> optText object_ "model"
-                <*> optText object_ "reasoning_effort"
-                <*> optText object_ "fork_turns"
+spawnAgentArgsDecoder :: Decoder SpawnAgentArgs
+spawnAgentArgsDecoder = objectArgs \object_ -> do
+        rejectField object_ "isolation"
+            "isolation is no longer supported; use spawn_agent_in_worktree"
+        SpawnAgentArgs
+            <$> reqText object_ "task_name"
+            <*> reqText object_ "message"
+            <*> optText object_ "model"
+            <*> optText object_ "reasoning_effort"
+            <*> optText object_ "fork_turns"
 
 spawnAgentTool :: MultiAgentContext -> AppTool
 spawnAgentTool ctx = jsonTool "spawn_agent" spawnAgentDescription
     (spawnAgentParameters ctx True)
     True
     TurnSequential
-    (typedToolWithCall "spawn_agent" (runSpawn ctx SharedWorkspace))
+    (typedToolWithCall "spawn_agent" spawnAgentArgsDecoder (runSpawn ctx SharedWorkspace))
 
 spawnAgentInWorktreeTool :: MultiAgentContext -> AppTool
 spawnAgentInWorktreeTool ctx =
@@ -176,6 +178,7 @@ spawnAgentInWorktreeTool ctx =
         TurnSequential
         (typedToolWithCall
             "spawn_agent_in_worktree"
+            spawnAgentArgsDecoder
             (runSpawn ctx IsolatedWorktree))
 
 spawnAgentParameters :: MultiAgentContext -> Bool -> [PropertySchema]
@@ -233,6 +236,35 @@ runSpawn ctx workspace call args
             Left err -> pure (Left err)
             Right (childCwd, worktree) ->
                 restore (spawnInWorkspace ctx call args childCwd worktree)
+
+-- | Spawn a tracked child in the caller's shared workspace.
+--
+-- This is the programmatic counterpart of @spawn_agent@: hosts may use it
+-- from another built-in tool without round-tripping through the JSON tool
+-- dispatcher.  Validation, model sanitization, preparation hooks, task-path
+-- accounting, and lifecycle ownership remain exactly the same as for the
+-- public collaboration tool.
+spawnSharedSubagent
+    :: MultiAgentContext
+    -> ToolCall
+    -> Text
+    -> Text
+    -> Maybe Text
+    -> Maybe Text
+    -> Maybe Text
+    -> IO (Either Text Text)
+spawnSharedSubagent ctx call taskName message model reasoningEffort forkTurns =
+    runSpawn
+        ctx
+        SharedWorkspace
+        call
+        SpawnAgentArgs
+            { taskName
+            , message
+            , model
+            , reasoningEffort
+            , forkTurns
+            }
 
 spawnToolName :: SpawnWorkspace -> Text
 spawnToolName = \case
@@ -360,11 +392,9 @@ data WaitAgentArgs = WaitAgentArgs
     , timeoutMs :: Maybe Int
     }
 
-instance FromJSON WaitAgentArgs where
-    parseJSON = objectArgsLenient \object_ -> do
-        targets <- case KeyMap.lookup (Key.fromText "targets") object_ of
-            Nothing -> pure Nothing
-            Just _ -> Just <$> reqTextList object_ "targets"
+waitAgentArgsDecoder :: Decoder WaitAgentArgs
+waitAgentArgsDecoder = objectArgsLenient \object_ -> do
+        targets <- optTextList object_ "targets"
         timeoutMs <- optInt object_ "timeout_ms"
         pure WaitAgentArgs { targets, timeoutMs }
 
@@ -375,7 +405,7 @@ waitAgentTool ctx = jsonTool "wait_agent" waitAgentDescription
     ]
     True
     TurnSequential
-    (typedTool "wait_agent" (runWait ctx))
+    (typedTool "wait_agent" waitAgentArgsDecoder (runWait ctx))
 
 waitAgentDescription :: Text
 waitAgentDescription =
@@ -445,8 +475,8 @@ data MessageArgs = MessageArgs
     , message :: Text
     }
 
-instance FromJSON MessageArgs where
-    parseJSON = objectArgs \object_ -> MessageArgs
+messageArgsDecoder :: Decoder MessageArgs
+messageArgsDecoder = objectArgs \object_ -> MessageArgs
         <$> reqText object_ "target"
         <*> reqText object_ "message"
 
@@ -459,7 +489,7 @@ sendMessageTool ctx = jsonTool "send_message" sendMessageDescription
     ]
     True
     TurnSequential
-    (typedToolWithCall "send_message" (runSendMessage ctx))
+    (typedToolWithCall "send_message" messageArgsDecoder (runSendMessage ctx))
 
 sendMessageDescription :: Text
 sendMessageDescription =
@@ -490,7 +520,7 @@ followupTaskTool ctx = jsonTool "followup_task" followupDescription
     ]
     True
     TurnSequential
-    (typedToolWithCall "followup_task" (runFollowup ctx))
+    (typedToolWithCall "followup_task" messageArgsDecoder (runFollowup ctx))
 
 followupDescription :: Text
 followupDescription =
@@ -587,8 +617,8 @@ data ListAgentsArgs = ListAgentsArgs
     { pathPrefix :: Maybe Text
     }
 
-instance FromJSON ListAgentsArgs where
-    parseJSON = objectArgsLenient \object_ -> ListAgentsArgs
+listAgentsArgsDecoder :: Decoder ListAgentsArgs
+listAgentsArgsDecoder = objectArgsLenient \object_ -> ListAgentsArgs
         <$> optText object_ "path_prefix"
 
 listAgentsTool :: MultiAgentContext -> AppTool
@@ -598,7 +628,7 @@ listAgentsTool ctx = jsonTool "list_agents" listAgentsDescription
     ]
     True
     ParallelSafe
-    (typedTool "list_agents" (runListAgents ctx))
+    (typedTool "list_agents" listAgentsArgsDecoder (runListAgents ctx))
 
 listAgentsDescription :: Text
 listAgentsDescription =
@@ -624,8 +654,8 @@ runListAgents ctx args = do
 
 newtype InterruptAgentArgs = InterruptAgentArgs { target :: Text }
 
-instance FromJSON InterruptAgentArgs where
-    parseJSON = objectArgs \object_ -> InterruptAgentArgs <$> reqText object_ "target"
+interruptAgentArgsDecoder :: Decoder InterruptAgentArgs
+interruptAgentArgsDecoder = objectArgs \object_ -> InterruptAgentArgs <$> reqText object_ "target"
 
 interruptAgentTool :: MultiAgentContext -> AppTool
 interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
@@ -634,7 +664,7 @@ interruptAgentTool ctx = jsonTool "interrupt_agent" interruptDescription
     ]
     True
     TurnSequential
-    (typedTool "interrupt_agent" (runInterrupt ctx))
+    (typedTool "interrupt_agent" interruptAgentArgsDecoder (runInterrupt ctx))
 
 interruptDescription :: Text
 interruptDescription =

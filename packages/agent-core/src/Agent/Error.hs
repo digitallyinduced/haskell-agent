@@ -5,6 +5,7 @@ module Agent.Error
     , RetryDisposition(..)
     , errorTypeFromText
     , errorTypeText
+    , errorTypeDecoder
     , retryDisposition
     , isRetryable
     , isInlineRetryableProviderError
@@ -16,7 +17,8 @@ module Agent.Error
     , credentialsExhaustedRetryAt
     ) where
 
-import Data.Aeson (FromJSON(..), ToJSON(..), Value(String), withText)
+import qualified Agent.Json.Decode as Json
+import Data.Aeson (ToJSON(..), Value(String))
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 
@@ -73,8 +75,8 @@ data RetryDisposition
     | RetryAfterLimitReset
     deriving (Eq, Show)
 
-instance FromJSON ErrorType where
-    parseJSON = withText "ErrorType" (pure . errorTypeFromText)
+errorTypeDecoder :: Json.Decoder ErrorType
+errorTypeDecoder = errorTypeFromText <$> Json.text
 
 instance ToJSON ErrorType where
     toJSON = String . errorTypeText

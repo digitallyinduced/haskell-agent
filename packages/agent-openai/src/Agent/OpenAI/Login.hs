@@ -11,6 +11,7 @@ module Agent.OpenAI.Login
 
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Http.Url (trimTrailingSlash)
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Auth (deriveAccountId)
 import System.OsPath (OsPath)
 import Control.Concurrent (threadDelay)
@@ -18,8 +19,7 @@ import Control.Exception.Safe (tryAny)
 import Control.Monad (unless)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Key as Key
+import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
@@ -71,16 +71,10 @@ requestDeviceCode options = safely do
         $ setRequestHeader "Content-Type" ["application/json"]
         $ setRequestBodyJSON (Aeson.object ["client_id" .= options.clientId]) request
     requireSuccess "device code request" response
-    object <- decodeObject "device code response" response
-    code <- field "user_code" object
-    authId <- field "device_auth_id" object
-    interval <- intervalField object
-    pure DeviceCode
-        { verificationUrl = trimTrailingSlash options.issuer <> "/codex/device"
-        , userCode = code
-        , deviceAuthId = authId
-        , pollIntervalSeconds = max 1 interval
-        }
+    decodeResponse "device code response"
+        (deviceCodeDecoder
+            (trimTrailingSlash options.issuer <> "/codex/device"))
+        response
 
 completeDeviceCodeLogin :: LoginOptions -> DeviceCode -> IO (Either Text Aeson.Value)
 completeDeviceCodeLogin options deviceCode = safely do
@@ -131,9 +125,9 @@ pollOnce options deviceCode = do
             ]) request
     case getResponseStatusCode response of
         status | status >= 200 && status < 300 -> do
-            codeResponse <- decodeObject "device authorization response" response
-            authorizationCode <- field "authorization_code" codeResponse
-            codeVerifier <- field "code_verifier" codeResponse
+            (authorizationCode, codeVerifier) <-
+                decodeResponse "device authorization response"
+                    authorizationDecoder response
             Just <$> exchange authorizationCode codeVerifier
         403 -> pure Nothing
         404 -> pure Nothing
@@ -152,8 +146,7 @@ pollOnce options deviceCode = do
                 , ("code_verifier", encode codeVerifier)
                 ] request
         requireSuccess "OAuth token exchange" response
-        object <- decodeObject "OAuth token response" response
-        Tokens <$> field "id_token" object <*> field "access_token" object <*> field "refresh_token" object
+        decodeResponse "OAuth token response" tokensDecoder response
 
 writeAuthFile :: OsPath -> Aeson.Value -> IO ()
 writeAuthFile path value = do
@@ -170,23 +163,45 @@ requireSuccess label response = do
     unless (status >= 200 && status < 300) $ fail
         (Text.unpack label <> " failed with HTTP " <> show status)
 
-decodeObject label response = case Aeson.eitherDecode (getResponseBody response) of
-    Left err -> fail (Text.unpack label <> " is invalid JSON: " <> err)
-    Right (Aeson.Object object) -> pure object
-    Right _ -> fail (Text.unpack label <> " is not a JSON object")
+decodeResponse label decoder response =
+    case Json.decodeEither decoder
+            (LBS.toStrict (getResponseBody response)) of
+        Left err -> fail
+            (Text.unpack label <> " is invalid JSON: "
+                <> Text.unpack (Json.jsonErrorMessage err))
+        Right value -> pure value
 
-field name object = case KeyMap.lookup (Key.fromText name) object of
-    Just value -> case Aeson.fromJSON value of
-        Aeson.Success result -> pure result
-        Aeson.Error err -> fail (Text.unpack name <> " is invalid: " <> err)
-    Nothing -> fail (Text.unpack name <> " is missing")
+deviceCodeDecoder :: String -> Json.Decoder DeviceCode
+deviceCodeDecoder verificationUrl = Json.object do
+    userCode <- Json.atKey "user_code" Json.text
+    deviceAuthId <- Json.atKey "device_auth_id" Json.text
+    interval <- Json.atKey "interval" intervalDecoder
+    pure DeviceCode
+        { verificationUrl
+        , userCode
+        , deviceAuthId
+        , pollIntervalSeconds = max 1 interval
+        }
 
-intervalField object = case KeyMap.lookup "interval" object of
-    Just (Aeson.String value) -> maybe invalid pure (readMaybeInt value)
-    Just (Aeson.Number value) -> pure (round value)
-    _ -> invalid
-  where
-    invalid = fail "interval is missing or invalid"
+authorizationDecoder :: Json.Decoder (Text, Text)
+authorizationDecoder = Json.object $
+    (,)
+        <$> Json.atKey "authorization_code" Json.text
+        <*> Json.atKey "code_verifier" Json.text
+
+tokensDecoder :: Json.Decoder Tokens
+tokensDecoder = Json.object $
+    Tokens
+        <$> Json.atKey "id_token" Json.text
+        <*> Json.atKey "access_token" Json.text
+        <*> Json.atKey "refresh_token" Json.text
+
+intervalDecoder :: Json.Decoder Int
+intervalDecoder = Json.withType \case
+    Json.VString -> Json.withText \value ->
+        maybe (fail "interval is invalid") pure (readMaybeInt value)
+    Json.VNumber -> Json.int
+    _ -> fail "interval is invalid"
 
 encode = Text.encodeUtf8
 

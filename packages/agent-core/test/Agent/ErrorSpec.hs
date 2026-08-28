@@ -1,7 +1,7 @@
 module Agent.ErrorSpec (spec) where
 
 import Agent.Error
-import qualified Data.Aeson as Aeson
+import qualified Agent.Json.Decode as Json
 import Test.Hspec
 
 spec :: Spec
@@ -16,7 +16,8 @@ spec = do
     it "preserves unknown discriminators" do
         let unknown = UnknownErrorType "future_error"
         errorTypeFromText "future_error" `shouldBe` unknown
-        Aeson.fromJSON (Aeson.toJSON unknown) `shouldBe` Aeson.Success unknown
+        Json.decodeText errorTypeDecoder "\"future_error\""
+            `shouldBe` Right unknown
 
   describe "retryDisposition" do
     it "separates transient retries from usage-reset retries" do

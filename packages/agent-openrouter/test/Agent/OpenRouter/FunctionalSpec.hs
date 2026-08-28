@@ -12,14 +12,13 @@ import Agent.OpenRouter.Client
 import Agent.OpenRouter.Credential
 import Agent.OpenRouter.Options
 import Agent.Responses.Types
+import Agent.Json (rawJsonFromEncoding)
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 import System.Environment (lookupEnv)
 import Test.Hspec
 
@@ -97,9 +96,10 @@ toolOutputRequest model history call = defaultResponseCreateParams
             , callId = call.callId
             , name = Nothing
             , namespace = Nothing
-            , output = Aeson.object ["echoed" Aeson..= ("openrouter functional tool ok" :: Text)]
+            , provider = Nothing
+            , output = rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
+                ["echoed" Aeson..= ("openrouter functional tool ok" :: Text)]
             , status = Nothing
-            , extraFields = mempty
             }
         , userMessage "The tool ran. Reply with exactly: done"
         ]))
@@ -110,26 +110,24 @@ echoTool :: ResponseTool
 echoTool = FunctionToolValue FunctionTool
     { name = "echo_text"
     , description = Just "Echo the given text back to the caller."
-    , parameters = Just (Aeson.object
+    , parameters = Just $ rawJsonFromEncoding $ Aeson.toEncoding $ Aeson.object
         [ "type" Aeson..= ("object" :: Text)
         , "properties" Aeson..= Aeson.object
             [ "text" Aeson..= Aeson.object [ "type" Aeson..= ("string" :: Text) ] ]
         , "required" Aeson..= [ "text" :: Text ]
         , "additionalProperties" Aeson..= False
-        ])
+        ]
     , strict = Just True
-    , extraFields = mempty
     }
 
 userMessage :: Text -> ResponseItem
 userMessage text = MessageItem ResponseMessage
     { messageId = Nothing
     , role = RoleUser
-    , content = MessageContentParts [InputTextPart text Nothing mempty]
+    , content = MessageContentParts [InputTextPart text Nothing]
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = mempty
     }
 
 assistantText :: Response -> Maybe Text
@@ -145,8 +143,7 @@ assistantText response = case
         values -> Just (Text.intercalate "\n" values)
 
 functionCallArgumentText :: Text -> Text -> Text
-functionCallArgumentText key arguments = case Aeson.decodeStrict' (Text.encodeUtf8 arguments) of
-    Just (Aeson.Object object) -> case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value) -> value
-        _ -> ""
-    _ -> ""
+functionCallArgumentText key arguments =
+    case Json.decodeText (Json.object (Json.atKey key Json.text)) arguments of
+        Right value -> value
+        Left _ -> ""

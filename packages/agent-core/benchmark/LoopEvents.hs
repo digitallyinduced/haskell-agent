@@ -1,6 +1,7 @@
 module Main (main) where
 
 import Agent.Cancel (newCancelFlag)
+import qualified Agent.Json.Decode as Json
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -29,7 +30,6 @@ import Agent.Tools.Types
 import Control.Concurrent (threadDelay)
 import Control.Exception (evaluate)
 import Control.Monad (forM, replicateM_)
-import Data.Aeson (FromJSON(..), withObject, (.:))
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -61,9 +61,9 @@ data EventArgs = EventArgs
     { count :: !Int
     }
 
-instance FromJSON EventArgs where
-    parseJSON = withObject "EventArgs" \fields ->
-        EventArgs <$> fields .: "count"
+eventArgsDecoder :: Json.Decoder EventArgs
+eventArgsDecoder = Json.object $
+    EventArgs <$> Json.atKey "count" Json.int
 
 data WorkloadResult = WorkloadResult
     { resultChecksum :: !Int
@@ -292,7 +292,7 @@ streamingRegistry =
                 []
                 AlwaysReadOnly
                 ParallelSafe
-                (typedStreamingTool "stream-events" \emit EventArgs{count} -> do
+                (typedStreamingTool "stream-events" eventArgsDecoder \emit EventArgs{count} -> do
                     mapM_
                         (\size -> emit (Text.replicate size "x"))
                         [1 .. count]
@@ -318,6 +318,19 @@ eventWeight = \case
     TurnStarted -> 1
     TurnFinished _ -> 1
     ToolStarted call -> Text.length call.callId
+    ToolUpdated call -> Text.length call.callId
+    ToolRetracted callId -> Text.length callId
+    ResponseAttemptDiscarded -> 1
+    NativeAgentStarted identifier parent label model ->
+        sum
+            [ Text.length identifier
+            , maybe 0 Text.length parent
+            , Text.length label
+            , maybe 0 Text.length model
+            ]
+    NativeAgentOutput identifier output ->
+        Text.length identifier + Text.length output
+    NativeAgentFinished identifier _ -> Text.length identifier
     ToolOutputUpdated callId output ->
         Text.length callId + Text.length output
     ToolFinished result ->

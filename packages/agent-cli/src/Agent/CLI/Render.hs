@@ -52,15 +52,21 @@ module Agent.CLI.Render
     ) where
 
 import Agent.CLI.Markdown
-    ( MarkdownFragmentSplit(..)
-    , renderMarkdown
-    , renderMarkdownFragment
-    , splitMarkdownFragment
+    ( renderMarkdown
     )
-import Agent.TUI.FencedCode
-    ( FenceMarker
-    , fenceOpener
-    , isFenceCloser
+import Agent.CLI.Render.MarkdownStream
+    ( MarkdownStreamState
+    , emptyMarkdownStreamState
+    , feedMarkdownStream
+    , flushMarkdownStream
+    )
+import Agent.CLI.Render.Status
+    ( formatActivityLine
+    , formatElapsed
+    , formatThinkingBlock
+    , formatTurnStatus
+    , thinkingMaxWidth
+    , wrapThinkingLines
     )
 import Agent.CLI.Progress
     ( osc9ProgressIndeterminate
@@ -73,13 +79,10 @@ import Agent.CLI.Error
     , formatApiErrorAt
     , formatApiErrorPersistedAt
     )
-import Agent.CLI.Status (formatTokensPerSecond)
 import Agent.CLI.Style
     ( agentBackground
     , glyphCancel
     , glyphErr
-    , glyphOk
-    , glyphThink
     , glyphTool
     , glyphToolAccent
     , glyphToolOut
@@ -88,8 +91,6 @@ import Agent.CLI.Style
     , osc8Link
     , roleError
     , roleMuted
-    , roleSuccess
-    , roleThinking
     , roleToolArrow
     , roleToolCommand
     , roleToolDetail
@@ -139,7 +140,6 @@ import Control.Concurrent (ThreadId, forkIO, killThread, threadDelay)
 import Control.Concurrent.MVar (MVar, withMVar)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless, void, when)
-import Data.Char (isDigit, isSpace)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
@@ -156,7 +156,6 @@ import Agent.TUI.Motion
     , motionIntervalMicros
     , nativeProgressAnimationEnabled
     )
-import Agent.TUI.TextWidth (splitTerminalGraphemeSuffix)
 import System.Environment (lookupEnv)
 import System.IO (Handle, hFlush)
 
@@ -233,353 +232,6 @@ emptyRenderState =
         , stateGenerationStartedAt = Nothing
         , stateLastTokensPerSecond = Nothing
         }
-
-data MarkdownStreamState = MarkdownStreamState
-    { pending :: !Text
-    , context :: !(Maybe Char)
-    , streamMode :: !MarkdownStreamMode
-    , blockPending :: !Text
-    }
-
-data MarkdownStreamMode
-    = StreamLineStart
-    | StreamProse
-    | StreamFence !FenceMarker
-    | StreamTableCandidate
-    | StreamTable
-
-emptyMarkdownStreamState :: MarkdownStreamState
-emptyMarkdownStreamState =
-    MarkdownStreamState "" Nothing StreamLineStart ""
-
-feedMarkdownStream
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedMarkdownStream state input = case state.streamMode of
-    StreamLineStart -> feedLineStart state input
-    StreamProse -> feedProse state input
-    StreamFence marker -> feedFence marker state input
-    StreamTableCandidate -> feedTableCandidate state input
-    StreamTable -> feedTable state input
-
-feedLineStart
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedLineStart state input =
-    let buffered = state.blockPending <> input
-    in case takeCompleteLine buffered of
-        Just (line, rest) ->
-            classifyCompleteLine state{blockPending = ""} line rest
-        Nothing
-            | lineNeedsLookahead buffered ->
-                (state{blockPending = buffered}, "")
-            | otherwise ->
-                feedProse
-                    state
-                        { streamMode = StreamProse
-                        , blockPending = ""
-                        }
-                    buffered
-
-classifyCompleteLine
-    :: MarkdownStreamState
-    -> Text
-    -> Text
-    -> (MarkdownStreamState, Text)
-classifyCompleteLine state line rest
-    | Just (marker, _) <- fenceOpener (dropLineEnding line) =
-        feedMarkdownStream
-            state
-                { streamMode = StreamFence marker
-                , blockPending = line
-                }
-            rest
-    | isPossibleTableHeader line =
-        feedMarkdownStream
-            state
-                { streamMode = StreamTableCandidate
-                , blockPending = line
-                }
-            rest
-    | lineIsBlock line =
-        let (nextState, output) =
-                feedMarkdownStream
-                    state
-                        { streamMode = StreamLineStart
-                        , blockPending = ""
-                        }
-                    rest
-        in (nextState, renderMarkdown True line <> output)
-    | otherwise =
-        feedProse
-            state
-                { streamMode = StreamProse
-                , blockPending = ""
-                }
-            (line <> rest)
-
-feedProse
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedProse state input =
-    case Text.breakOn "\n" input of
-        (linePart, rest)
-            | Text.null rest ->
-                let source = state.pending <> linePart
-                    MarkdownFragmentSplit
-                        { markdownReady = parsedReady
-                        , markdownPending = parsedPending
-                        , markdownPrevChar = parsedContext
-                        } =
-                        splitMarkdownFragment state.context source
-                    (stablePrefix, graphemePending) =
-                        splitTerminalGraphemeSuffix parsedReady
-                    MarkdownFragmentSplit
-                        { markdownReady = ready
-                        , markdownPending = reparsedPending
-                        , markdownPrevChar = nextContext
-                        }
-                        | Text.null graphemePending =
-                            MarkdownFragmentSplit
-                                { markdownReady = parsedReady
-                                , markdownPending = ""
-                                , markdownPrevChar = parsedContext
-                                }
-                        | otherwise =
-                            splitMarkdownFragment
-                                state.context
-                                stablePrefix
-                    pending' =
-                        reparsedPending
-                            <> graphemePending
-                            <> parsedPending
-                in ( state
-                        { pending = pending'
-                        , context = nextContext
-                        , streamMode = StreamProse
-                        }
-                   , renderMarkdownFragment True state.context ready
-                   )
-            | otherwise ->
-                let source = state.pending <> linePart <> "\n"
-                    MarkdownFragmentSplit
-                        { markdownReady = ready
-                        , markdownPending = pending'
-                        } =
-                        splitMarkdownFragment state.context source
-                    rendered =
-                        renderMarkdownFragment True state.context
-                            (ready <> pending')
-                    reset =
-                        state
-                            { pending = ""
-                            , context = Nothing
-                            , streamMode = StreamLineStart
-                            , blockPending = ""
-                            }
-                    (nextState, following) =
-                        feedMarkdownStream reset (Text.drop 1 rest)
-                in (nextState, rendered <> following)
-
-feedFence
-    :: FenceMarker
-    -> MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedFence marker state input =
-    let buffered = state.blockPending <> input
-        (lines_, partial) = completeLines buffered
-        (beforeCloser, closingAndAfter) =
-            break (isFenceCloser marker . dropLineEnding) (drop 1 lines_)
-    in case closingAndAfter of
-        [] -> (state{blockPending = buffered}, "")
-        closing : after ->
-            let block = Text.concat (take 1 lines_ <> beforeCloser <> [closing])
-                rest = Text.concat after <> partial
-                reset =
-                    state
-                        { streamMode = StreamLineStart
-                        , blockPending = ""
-                        , pending = ""
-                        , context = Nothing
-                        }
-                (nextState, following) = feedMarkdownStream reset rest
-            in (nextState, renderMarkdown True block <> following)
-
-feedTableCandidate
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedTableCandidate state input =
-    let buffered = state.blockPending <> input
-        (lines_, partial) = completeLines buffered
-    in case lines_ of
-        header : separator : after
-            | isTableSeparator separator ->
-                feedMarkdownStream
-                    state
-                        { streamMode = StreamTable
-                        , blockPending = header <> separator
-                        }
-                    (Text.concat after <> partial)
-            | otherwise ->
-                let reset =
-                        state
-                            { streamMode = StreamLineStart
-                            , blockPending = ""
-                            }
-                    (nextState, following) =
-                        feedMarkdownStream reset
-                            (separator <> Text.concat after <> partial)
-                in (nextState, renderMarkdown True header <> following)
-        _ -> (state{blockPending = buffered}, "")
-
-feedTable
-    :: MarkdownStreamState
-    -> Text
-    -> (MarkdownStreamState, Text)
-feedTable state input =
-    let buffered = state.blockPending <> input
-        (lines_, partial) = completeLines buffered
-        (tableLines, after) =
-            case lines_ of
-                header : separator : rows ->
-                    let (body, following) =
-                            span isPossibleTableHeader rows
-                    in (header : separator : body, following)
-                _ -> (lines_, [])
-    in case after of
-        [] -> (state{blockPending = buffered}, "")
-        line : rest ->
-                let table = Text.concat tableLines
-                    reset =
-                        state
-                            { streamMode = StreamLineStart
-                            , blockPending = ""
-                            }
-                    (nextState, following) =
-                        feedMarkdownStream reset
-                            (line <> Text.concat rest <> partial)
-                in (nextState, renderMarkdown True table <> following)
-
-flushMarkdownStream :: MarkdownStreamState -> Text
-flushMarkdownStream state = case state.streamMode of
-    StreamProse ->
-        renderMarkdownFragment True state.context state.pending
-    StreamLineStart ->
-        renderMarkdown True state.blockPending
-    StreamFence _ ->
-        renderMarkdown True state.blockPending
-    StreamTableCandidate ->
-        renderMarkdown True state.blockPending
-    StreamTable ->
-        renderMarkdown True state.blockPending
-
-takeCompleteLine :: Text -> Maybe (Text, Text)
-takeCompleteLine text =
-    case Text.breakOn "\n" text of
-        (_, rest) | Text.null rest -> Nothing
-        (line, rest) -> Just (line <> "\n", Text.drop 1 rest)
-
-completeLines :: Text -> ([Text], Text)
-completeLines = go []
-  where
-    go reversed remaining =
-        case takeCompleteLine remaining of
-            Nothing -> (reverse reversed, remaining)
-            Just (line, rest) -> go (line : reversed) rest
-
-dropLineEnding :: Text -> Text
-dropLineEnding = Text.dropWhileEnd (== '\n')
-
-lineNeedsLookahead :: Text -> Bool
-lineNeedsLookahead line =
-    let stripped = Text.dropWhile isSpace line
-        markerRun marker = Text.span (== marker) stripped
-        allMarkerOrSpace marker =
-            Text.all (\character -> character == marker || isSpace character)
-                stripped
-    in case Text.uncons stripped of
-        Nothing -> True
-        Just ('#', _) ->
-            let (marks, after) = markerRun '#'
-            in Text.length marks <= 6
-                && (Text.null after || Text.isPrefixOf " " after)
-        Just ('>', _) -> True
-        Just ('|', _) -> True
-        Just ('`', _) ->
-            let (ticks, after) = markerRun '`'
-            in Text.null after || Text.length ticks >= 3
-        Just ('~', _) ->
-            let (tildes, after) = markerRun '~'
-            in Text.null after || Text.length tildes >= 3
-        Just ('+', after) -> Text.null after || Text.isPrefixOf " " after
-        Just ('*', after) ->
-            Text.null after
-                || Text.isPrefixOf " " after
-                || allMarkerOrSpace '*'
-        Just ('-', after) ->
-            Text.null after
-                || Text.isPrefixOf " " after
-                || allMarkerOrSpace '-'
-        Just ('_', _) -> allMarkerOrSpace '_'
-        Just (character, _)
-            | isDigit character ->
-                let (digits, after) = Text.span isDigit stripped
-                in not (Text.null digits)
-                    && ( Text.null after
-                        || after == "."
-                        || Text.isPrefixOf ". " after
-                       )
-        _ -> False
-
-lineIsBlock :: Text -> Bool
-lineIsBlock line =
-    let stripped = Text.dropWhile isSpace (dropLineEnding line)
-        (marks, afterHeading) = Text.span (== '#') stripped
-        heading =
-            not (Text.null marks)
-                && Text.length marks <= 6
-                && Text.isPrefixOf " " afterHeading
-        quote = Text.isPrefixOf ">" stripped
-        bullet = any (`Text.isPrefixOf` stripped) ["- ", "* ", "+ "]
-        (digits, orderedRest) = Text.span isDigit stripped
-        ordered =
-            not (Text.null digits) && Text.isPrefixOf ". " orderedRest
-        thematic marker =
-            let compact = Text.filter (not . isSpace) stripped
-            in Text.length compact >= 3 && Text.all (== marker) compact
-    in heading
-        || quote
-        || bullet
-        || ordered
-        || thematic '-'
-        || thematic '*'
-        || thematic '_'
-
-isPossibleTableHeader :: Text -> Bool
-isPossibleTableHeader =
-    Text.isPrefixOf "|" . Text.dropWhile isSpace . dropLineEnding
-
-isTableSeparator :: Text -> Bool
-isTableSeparator line =
-    let stripped =
-            Text.dropWhile (== '|')
-                (Text.dropWhileEnd (== '|')
-                    (Text.strip (dropLineEnding line)))
-        cells = map Text.strip (Text.splitOn "|" stripped)
-        valid cell =
-            Text.any (== '-') cell
-                && Text.null
-                    (Text.filter (`notElem` ['-', ':', ' ']) cell)
-    in length cells >= 1 && all valid cells
-
--- | Grok-build @max_thoughts_width@: wrap reasoning display at this column.
-thinkingMaxWidth :: Int
-thinkingMaxWidth = 120
 
 modifyRenderState
     :: RenderConfig
@@ -818,6 +470,18 @@ renderEventUnlocked config = \case
         case painted of
             Nothing -> pure ()
             Just line -> putTextLn config.renderStderr line
+    ToolUpdated _ ->
+        pure ()
+    ToolRetracted _ ->
+        pure ()
+    ResponseAttemptDiscarded ->
+        pure ()
+    NativeAgentStarted{} ->
+        pure ()
+    NativeAgentOutput{} ->
+        pure ()
+    NativeAgentFinished{} ->
+        pure ()
 
 -- | Style assistant markdown when color is enabled; otherwise return plain text.
 -- The terminal theme owns the default assistant background.
@@ -1044,103 +708,6 @@ commitThinkingUnlocked config = do
                 Text.hPutStr config.renderStderr "\n"
             hFlush config.renderStderr
 
--- | Thinking/reasoning block: accented header plus wrapped summary, matching
--- grok-build's collapsible thought chrome in a linear CLI.
---
--- Live (@streaming@) shows a truncated preview so the block cannot grow
--- without bound while tokens arrive; the committed form keeps the full text
--- wrapped at 'thinkingMaxWidth'.
-formatThinkingBlock :: Bool -> Bool -> Double -> Text -> Text
-formatThinkingBlock color streaming elapsed raw =
-    let header =
-            if streaming
-                then roleThinking color (glyphThink <> "Thinking…")
-                    <> roleMuted color ("  " <> formatElapsed elapsed)
-                else
-                    roleThinking color (glyphThink <> "Thought")
-                        <> roleMuted color (" for " <> formatElapsed elapsed)
-        wrapped = wrapThinkingLines thinkingMaxWidth (Text.strip raw)
-        preview
-            | streaming = take thinkingPreviewLines wrapped
-            | otherwise = wrapped
-        hidden = length wrapped - length preview
-        more
-            | streaming && hidden > 0 =
-                [roleMuted color ("  … " <> Text.pack (show hidden) <> " more")]
-            | otherwise = []
-        body =
-            map (\line -> roleMuted color (glyphToolAccent <> line)) preview
-                <> more
-    in Text.intercalate "\n" (header : body)
-
-thinkingPreviewLines :: Int
-thinkingPreviewLines = 3
-
--- | Wrap reasoning text at @width@, splitting on spaces when possible.
-wrapThinkingLines :: Int -> Text -> [Text]
-wrapThinkingLines width text
-    | Text.null text = []
-    | otherwise =
-        concatMap (wrapOne (max 1 width)) (Text.splitOn "\n" text)
-
-wrapOne :: Int -> Text -> [Text]
-wrapOne width line
-    | Text.null line = [""]
-    | Text.length line <= width = [line]
-    | otherwise = go (Text.words line) ""
-  where
-    go [] acc
-        | Text.null acc = []
-        | otherwise = [acc]
-    go (word : rest) acc
-        | Text.null acc && Text.length word > width =
-            let (chunk, leftover) = Text.splitAt width word
-            in chunk : go (leftover : rest) ""
-        | Text.null acc = go rest word
-        | Text.length acc + 1 + Text.length word <= width =
-            go rest (acc <> " " <> word)
-        | otherwise = acc : go (word : rest) ""
-
--- | One-line live status: spinner, current activity, elapsed time, tok/s.
-formatActivityLine :: Bool -> Text -> Text -> Double -> Maybe Double -> Text
-formatActivityLine color glyph activity seconds rate =
-    roleThinking color (glyph <> " " <> activity)
-        <> roleMuted color ("  " <> formatElapsed seconds <> rateSuffix)
-  where
-    rateSuffix = case rate of
-        Just value -> " · " <> formatTokensPerSecond value
-        Nothing -> ""
-
--- | Compact elapsed time: @0.4s@, @12.4s@, @1m20s@.
-formatElapsed :: Double -> Text
-formatElapsed seconds
-    | seconds < 0 = "0.0s"
-    | seconds < 60 =
-        let tenths = round (seconds * 10) :: Int
-            whole = tenths `div` 10
-            frac = tenths `mod` 10
-        in Text.pack (show whole <> "." <> show frac <> "s")
-    | otherwise =
-        let total = round seconds :: Int
-            m = total `div` 60
-            s = total `mod` 60
-        in Text.pack (show m <> "m" <> pad2 s <> "s")
-  where
-    pad2 n
-        | n < 10 = "0" <> show n
-        | otherwise = show n
-
-formatTurnStatus :: Bool -> Text -> Text -> Text
-formatTurnStatus color outcome detail =
-    let mark
-            | outcome == "ok" = roleSuccess color glyphOk
-            | outcome == "cancelled" = roleMuted color glyphCancel
-            | otherwise = roleError color glyphErr
-        body
-            | Text.null detail = outcome
-            | otherwise = outcome <> " · " <> detail
-    in mark <> roleMuted color body
-
 -- | Write @text@ plus a newline as one 'Text.hPutStr'. @hPutStrLn@ on a
 -- 'String' is @hPutStr@ then @hPutChar '\n'@ over a @[Char]@ spine, so
 -- concurrent tool threads can interleave characters on the TTY.
@@ -1209,6 +776,7 @@ toolChrome name = case canonicalToolName name of
     "shell_command" -> ToolChromeShell
     "write_stdin" -> ToolChrome "Continued" ToolDetailMuted
     "run_ghci" -> ToolChromeShell
+    "exec" -> ToolChrome "$ exec" ToolDetailNone
     "get_task_output" -> ToolChrome "Read" ToolDetailMuted
     "wait_tasks" -> ToolChrome "Waited" ToolDetailMuted
     "kill_task" -> ToolChrome "Killed" ToolDetailMuted
@@ -1243,6 +811,7 @@ formatToolBodyRelative :: Bool -> Text -> ToolCall -> Text
 formatToolBodyRelative color workspace call = case canonicalToolName call.name of
     "search_replace" ->
         formatSearchReplaceDiffRelative color workspace call.arguments
+    "exec" -> roleToolCommand color call.arguments
     _ -> ""
 
 -- | Compact unified-diff preview for @search_replace@ arguments.

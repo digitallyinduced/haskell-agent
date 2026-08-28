@@ -7,16 +7,16 @@ import System.OsPath
     , takeDirectory
     , takeFileName
     )
-import Agent.ToolArgs (objectArgs, optBool, reqText)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch
     ( ToolCall(..)
     , decodeToolArguments
-    , toolArgumentsValue
     , typedTool
     )
 import Agent.Tools.FileSystem.GitIgnore (isGitIgnored)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
+import Agent.GrokBuild.Dialect.Json (optionalBool)
 import Agent.Tools.IO
     ( displayPathInWorkspace
     , readTextFile
@@ -49,7 +49,6 @@ import Control.Monad.Trans.Except
     , runExceptT
     , throwE
     )
-import Data.Aeson (FromJSON(..))
 import Data.List (sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
@@ -63,12 +62,13 @@ data SearchReplaceArgs = SearchReplaceArgs
     , replaceAll :: Bool
     }
 
-instance FromJSON SearchReplaceArgs where
-    parseJSON = objectArgs \object -> SearchReplaceArgs
-        <$> reqText object "file_path"
-        <*> reqText object "old_string"
-        <*> reqText object "new_string"
-        <*> (fromMaybe False <$> optBool object "replace_all")
+searchReplaceArgsDecoder :: Json.Decoder SearchReplaceArgs
+searchReplaceArgsDecoder = Json.object $
+    SearchReplaceArgs
+        <$> Json.atKey "file_path" Json.text
+        <*> Json.atKey "old_string" Json.text
+        <*> Json.atKey "new_string" Json.text
+        <*> (fromMaybe False <$> optionalBool "replace_all")
 
 searchReplaceTool :: ToolEnv -> PlanModeEnv -> AppTool
 searchReplaceTool env planMode =
@@ -85,17 +85,14 @@ searchReplaceTool env planMode =
     ]
     False
     TurnSequential
-    (typedTool "search_replace" (runSearchReplace env planMode))
+    (typedTool "search_replace" searchReplaceArgsDecoder (runSearchReplace env planMode))
 
 searchReplaceResourceClaims
     :: ToolEnv
     -> ToolCall
     -> IO (Either Text [ToolResourceClaim])
 searchReplaceResourceClaims env call =
-    case
-        decodeToolArguments (toolArgumentsValue call.arguments)
-            :: Either Text SearchReplaceArgs
-    of
+    case decodeToolArguments searchReplaceArgsDecoder call.arguments of
         Left err -> pure (Left err)
         Right args ->
             resolveUnderCwd env (fromText args.filePath)

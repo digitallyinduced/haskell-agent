@@ -48,11 +48,7 @@ import qualified Graphics.Vty as V
 
 markdownWidget :: Ord n => Text -> Widget n
 markdownWidget =
-    markdownWidgetWithCodeControls \_ language ->
-        if Text.null language
-            then emptyWidget
-            else withAttr Theme.mutedAttr
-                (txt (displayTerminalText language))
+    markdownWidgetWithCodeControls \_ _ -> emptyWidget
 
 -- | Render Markdown with application-level click targets for links.
 markdownWidgetWithLinks
@@ -65,11 +61,7 @@ markdownWidgetWithLinks linkName =
         Nothing
         linkName
         (\_ widget -> widget)
-        (\_ language ->
-            if Text.null language
-                then emptyWidget
-                else withAttr Theme.mutedAttr
-                    (txt (displayTerminalText language)))
+        (\_ _ -> emptyWidget)
 
 -- | Render Markdown, allowing callers to add an interactive control to each
 -- fenced code block header. Code block indices are one-based.

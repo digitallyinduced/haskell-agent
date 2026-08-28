@@ -31,22 +31,18 @@ module Agent.TUI.Presentation
     ) where
 
 import Agent.JsonText (jsonTextField, jsonTextFieldDefault)
+import qualified Agent.Json.Decode as Hermes
 import Agent.OsPath (fromText, relativeDisplayPath)
 import Agent.TUI.TextWidth (displayTerminalText)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , canonicalToolName
     )
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Control.Applicative ((<|>))
 import Data.Char (isSpace)
-import Data.Foldable (toList)
 import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as TextEncoding
 
 summarizeToolCall :: ToolCall -> Text
 summarizeToolCall = summarizeToolCallRelative ""
@@ -105,12 +101,14 @@ toolCallTitle = toolCallTitleRelative ""
 toolCallTitleRelative :: Text -> ToolCall -> Text
 toolCallTitleRelative workspace call
     | canonicalToolName call.name == "run_ghci" = "$ ghci"
+    | canonicalToolName call.name == "exec" = "$ exec"
     | otherwise = summarizeToolCallRelative workspace call
 
 -- | Full invocation text that benefits from dedicated code rendering.
 toolCallInput :: ToolCall -> Text
 toolCallInput call = case canonicalToolName call.name of
     "run_ghci" -> jsonTextFieldDefault "expression" call.arguments
+    "exec" -> call.arguments
     _ -> ""
 
 data SearchReplaceAction
@@ -176,6 +174,7 @@ formatSearchReplaceDiffRelative workspace arguments =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
+    "exec" -> completedExecOutput output
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
     "wait_agent" ->
@@ -192,6 +191,18 @@ formatToolOutput call output = case canonicalToolName call.name of
     "todo_write" -> formatTodoList output
     "update_plan" -> formatTodoList output
     _ -> output
+
+-- The exec protocol keeps status and timing metadata for the model. In the
+-- transcript, the invocation itself already communicates successful
+-- completion, so retain only the script's meaningful output.
+completedExecOutput :: Text -> Text
+completedExecOutput output
+    | "Script completed\n" `Text.isPrefixOf` output =
+        case Text.breakOn "\nOutput:\n" output of
+            (_, rest)
+                | Text.null rest -> output
+                | otherwise -> Text.drop (Text.length "\nOutput:\n") rest
+    | otherwise = output
 
 -- | Rewrite workspace-absolute filesystem paths in tool chrome/output without
 -- touching file contents returned by @read_file@.
@@ -393,24 +404,38 @@ todoStatusGlyph = \case
     TodoDisplayCancelled -> "✗"
 
 firstTodoContentFromArguments :: Text -> Text
-firstTodoContentFromArguments arguments = fromMaybe "" do
-    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
-    Aeson.Array todos <- KeyMap.lookup "todos" object
-    Aeson.Object todo <- case toList todos of
-        first : _ -> Just first
-        [] -> Nothing
-    content <- jsonObjectText "content" todo
-    pure (firstLine content)
+firstTodoContentFromArguments arguments =
+    fromMaybe "" (decodeMaybe firstTodoContentDecoder arguments)
+  where
+    firstTodoContentDecoder =
+        Hermes.object do
+            todos <- Hermes.atKeyOptional "todos" $
+                Hermes.list todoDecoder
+            pure $ case todos >>= listToMaybe of
+                Just (Just content) -> firstLine content
+                _ -> ""
+    todoDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object (Hermes.atKeyOptional "content" Hermes.text)
+            _ -> pure Nothing
 
 firstPlanStepFromArguments :: Text -> Text
-firstPlanStepFromArguments arguments = fromMaybe "" do
-    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
-    Aeson.Array plan <- KeyMap.lookup "plan" object
-    Aeson.Object item <- case toList plan of
-        first : _ -> Just first
-        [] -> Nothing
-    step <- jsonObjectText "step" item
-    pure (firstLine step)
+firstPlanStepFromArguments arguments =
+    fromMaybe "" (decodeMaybe firstPlanStepDecoder arguments)
+  where
+    firstPlanStepDecoder =
+        Hermes.object do
+            plan <- Hermes.atKeyOptional "plan" $
+                Hermes.list planDecoder
+            pure $ case plan >>= listToMaybe of
+                Just (Just step) -> firstLine step
+                _ -> ""
+    planDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object (Hermes.atKeyOptional "step" Hermes.text)
+            _ -> pure Nothing
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
@@ -521,19 +546,23 @@ viewSkillIdentity arguments =
 
 formatSkillMutation :: Text -> Maybe Text
 formatSkillMutation output = do
-    Aeson.Object envelope <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
-    Aeson.Object skill <- KeyMap.lookup "skill" envelope
-    scope <- jsonObjectText "scope" skill
-    slug <- jsonObjectText "slug" skill
-    revision <- jsonObjectInteger "revision" skill
-    let activation = maybe "" (" · " <>) (jsonObjectText "activation" skill)
-    pure $
-        scope
-            <> "/"
-            <> slug
-            <> " · revision "
-            <> revision
-            <> activation
+    (scope, slug, revision, activation) <- decodeMaybe skillMutationDecoder output
+    pure $ scope <> "/" <> slug <> " · revision " <> Text.pack (show revision)
+        <> maybe "" (" · " <>) activation
+  where
+    skillMutationDecoder =
+        Hermes.object do
+            skill <- Hermes.atKeyOptional "skill" $
+                Hermes.object do
+                    scope <- Hermes.atKeyOptional "scope" Hermes.text
+                    slug <- Hermes.atKeyOptional "slug" Hermes.text
+                    revision <- Hermes.atKeyOptional "revision" Hermes.int
+                    activation <- Hermes.atKeyOptional "activation" Hermes.text
+                    pure (scope, slug, revision, activation)
+            case skill of
+                Just (Just scope, Just slug, Just revision, activation) ->
+                    pure (scope, slug, revision, activation)
+                _ -> fail "missing skill fields"
 
 nonEmptyJsonText :: Text -> Text -> Maybe Text
 nonEmptyJsonText key input = jsonTextField key input >>= \value ->
@@ -541,42 +570,37 @@ nonEmptyJsonText key input = jsonTextField key input >>= \value ->
     in if Text.null stripped then Nothing else Just stripped
 
 jsonIntField :: Text -> Text -> Maybe Text
-jsonIntField key input = do
-    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 input)
-    field <- KeyMap.lookup (Key.fromText key) object
-    case Aeson.fromJSON field :: Aeson.Result Int of
-        Aeson.Success value -> pure (Text.pack (show value))
-        Aeson.Error _ -> Nothing
+jsonIntField key input =
+    fmap (Text.pack . show) $
+        decodeMaybe (Hermes.object (Hermes.atKeyOptional key Hermes.int)) input
+            >>= id
 
 formatAgentList :: Text -> Maybe Text
 formatAgentList output = do
-    Aeson.Object object <- Aeson.decodeStrict (TextEncoding.encodeUtf8 output)
-    Aeson.Array agents <- KeyMap.lookup (Key.fromText "agents") object
-    let rows = mapMaybe formatAgentRow (toList agents)
+    agents <- decodeMaybe
+        (Hermes.object $ Hermes.atKeyOptional "agents" $
+            Hermes.list agentRowDecoder)
+        output
+    let rows = mapMaybe id (fromMaybe [] agents)
     pure $ case rows of
         [] -> "(no live agents)"
         _ -> Text.intercalate "\n" rows
 
-formatAgentRow :: Aeson.Value -> Maybe Text
-formatAgentRow (Aeson.Object agent) = do
-    name <- jsonObjectText "agent_name" agent
-    pure $ maybe name (\status -> name <> " · " <> status)
-        (jsonObjectText "agent_status" agent)
-formatAgentRow _ = Nothing
-
-jsonObjectText :: Text -> Aeson.Object -> Maybe Text
-jsonObjectText key object =
-    case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String value)
-            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
-        _ -> Nothing
-
-jsonObjectInteger :: Text -> Aeson.Object -> Maybe Text
-jsonObjectInteger key object = do
-    value <- KeyMap.lookup (Key.fromText key) object
-    case Aeson.fromJSON value :: Aeson.Result Integer of
-        Aeson.Success integer -> pure (Text.pack (show integer))
-        Aeson.Error _ -> Nothing
+  where
+    agentRowDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object do
+                    name <- Hermes.atKeyOptional "agent_name" Hermes.text
+                    status <- Hermes.atKeyOptional "agent_status" Hermes.text
+                    pure $ case name of
+                        Just value
+                            | not (Text.null (Text.strip value)) ->
+                                Just $ maybe (Text.strip value)
+                                    (\s -> Text.strip value <> " · " <> Text.strip s)
+                                    status
+                        _ -> Nothing
+            _ -> pure Nothing
 
 firstPatchPath :: Text -> Maybe Text
 firstPatchPath patch =
@@ -596,12 +620,25 @@ askUserQuestionDetail :: Text -> Text
 askUserQuestionDetail arguments =
     case firstLine (jsonTextFieldDefault "question" arguments) of
         legacy | not (Text.null legacy) -> legacy
-        _ -> fromMaybe "" do
-            Aeson.Object object <-
-                Aeson.decodeStrict (TextEncoding.encodeUtf8 arguments)
-            Aeson.Array questions <- KeyMap.lookup "questions" object
-            Aeson.Object questionObject <- case toList questions of
-                question : _ -> Just question
-                [] -> Nothing
-            Aeson.String question <- KeyMap.lookup "question" questionObject
-            pure (firstLine question)
+        _ -> fromMaybe "" (decodeMaybe questionDetailDecoder arguments)
+  where
+    questionDetailDecoder =
+        Hermes.object do
+            questions <- Hermes.atKeyOptional "questions" $
+                Hermes.list questionDecoder
+            pure $ case questions >>= listToMaybe of
+                Just (Just question) -> firstLine question
+                _ -> ""
+    questionDecoder =
+        Hermes.getType >>= \case
+            Hermes.VObject ->
+                Hermes.object (Hermes.atKeyOptional "question" Hermes.text)
+            _ -> pure Nothing
+
+decodeMaybe :: Hermes.Decoder a -> Text -> Maybe a
+decodeMaybe decoder input =
+    either (const Nothing) Just (Hermes.decodeText decoder input)
+
+listToMaybe :: [a] -> Maybe a
+listToMaybe [] = Nothing
+listToMaybe (x : _) = Just x

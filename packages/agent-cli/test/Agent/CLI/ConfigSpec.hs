@@ -4,6 +4,7 @@ import Agent.CLI.Config
 import Control.Exception.Safe (bracket)
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
+import Data.Maybe (isJust)
 import qualified Data.Text as Text
 import System.Directory.OsPath
     ( createDirectoryIfMissing
@@ -90,6 +91,42 @@ spec = describe "Agent.CLI.Config" do
             result <- loadHarnessConfig home
             fmap (.configMaxConcurrentAgents) result
                 `shouldBe` Right (Just 48)
+
+    it "decodes LSP maps and retains opaque JSON options" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"lsp\":{\"enabled\":true,\"servers\":{\"hls\":{\"command\":\"haskell-language-server-wrapper\",\"args\":[\"--lsp\"],\"env\":{\"HLS_LOG\":\"warn\"},\"extensionToLanguage\":{\".hs\":\"haskell\"},\"initializationOptions\":{\"haskell\":{\"formattingProvider\":\"fourmolu\"}},\"settings\":[true,3],\"workspaceFolder\":\"src\",\"startupTimeoutMilliseconds\":1234,\"shutdownTimeoutMilliseconds\":5678}}}}"
+            result <- loadHarnessConfig home
+            case result of
+                Left err -> expectationFailure (Text.unpack err)
+                Right config -> do
+                    case Map.lookup "hls" config.configLsp.lspServers of
+                        Nothing -> expectationFailure "missing HLS config"
+                        Just server -> do
+                            server.lspArgs `shouldBe` ["--lsp"]
+                            server.lspEnv
+                                `shouldBe` Map.singleton "HLS_LOG" "warn"
+                            server.lspExtensionToLanguage
+                                `shouldBe` Map.singleton ".hs" "haskell"
+                            server.lspInitializationOptions
+                                `shouldSatisfy` isJust
+                            server.lspSettings `shouldSatisfy` isJust
+                            server.lspWorkspaceFolder `shouldBe` Just "src"
+                            server.lspStartupTimeoutMilliseconds
+                                `shouldBe` 1234
+                            server.lspShutdownTimeoutMilliseconds
+                                `shouldBe` 5678
+                    saveHarnessConfig home config `shouldReturn` Right ()
+                    loadHarnessConfig home `shouldReturn` Right config
+
+    it "rejects non-text values in configured environment maps" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"broken\":{\"command\":\"ok\",\"env\":{\"TOKEN\":1}}}}"
+            result <- loadHarnessConfig home
+            result `shouldSatisfy` \case
+                Left err -> "Invalid " `Text.isPrefixOf` err
+                Right _ -> False
 
     it "rejects a non-positive concurrent agent limit" $
         withTempDir "agent-config-" \home -> do

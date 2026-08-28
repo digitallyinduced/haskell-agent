@@ -10,10 +10,10 @@ module Agent.CLI.Auth.Grok
 
 import Agent.CLI.Auth.Types
     ( GrokAuthState(..)
-    , applyGrokAuthTokens
     , externalAuthSelectionId
     , grokAuthStateFromJson
     , grokAuthStateToJson
+    , grokAuthStateToJsonWithKnownFields
     , grokOAuthOptionsFromAuthJson
     , xaiOAuthClientId
     )
@@ -43,7 +43,8 @@ import Agent.Provider
 import qualified Agent.XAI.Auth as XAIAuth
 import Control.Applicative ((<|>))
 import Control.Concurrent.MVar (newMVar, withMVar)
-import qualified Data.Aeson as Aeson
+import Data.Aeson (ToJSON)
+import qualified Data.Aeson.Text as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
     ( IORef
@@ -54,6 +55,7 @@ import Data.IORef
 import Data.Maybe (catMaybes, fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Text.Lazy as LazyText
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import System.Directory.OsPath (doesFileExist, getHomeDirectory)
 import System.OsPath (OsPath, unsafeEncodeUtf, (</>))
@@ -250,8 +252,7 @@ refreshExternalGrok source stateRef payloadRef refresh state =
                     GrokSourceFile path -> Just path
                     GrokSourceEnvironment -> Nothing)
                 (fromMaybe
-                    (TextEncoding.decodeUtf8
-                        (LBS.toStrict (Aeson.encode (grokAuthStateToJson state))))
+                    (encodeJsonText (grokAuthStateToJson state))
                     original)
                 newState
             case persistResult of
@@ -310,12 +311,10 @@ persistGrokPayload managedId filePath original newState = do
 
 encodeGrokPayload :: Text -> GrokAuthState -> Text
 encodeGrokPayload original state =
-    case Aeson.decodeStrict (TextEncoding.encodeUtf8 original) of
-        Just value | Just patched <- applyGrokAuthTokens state value ->
-            TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode patched))
-        _ ->
-            TextEncoding.decodeUtf8
-                (LBS.toStrict (Aeson.encode (grokAuthStateToJson state)))
+    encodeJsonText (grokAuthStateToJsonWithKnownFields original state)
+
+encodeJsonText :: ToJSON a => a -> Text
+encodeJsonText = LazyText.toStrict . Aeson.encodeToLazyText
 
 readGrokAuthFile :: OsPath -> IO (Maybe Text)
 readGrokAuthFile path = do
@@ -446,10 +445,7 @@ persistRefreshedGrok metadata secret stateRef state tokens = do
                 (XAIAuth.accountIdFromAccessToken tokens.accessToken)
         newMetadata = metadata { managedAccountId = newAccountId }
         newSecret = secret
-            { secretPayload =
-                TextEncoding.decodeUtf8
-                    (LBS.toStrict
-                        (Aeson.encode (grokAuthStateToJson newState)))
+            { secretPayload = encodeJsonText (grokAuthStateToJson newState)
             }
     upsertManagedCredentialAfterRefresh newMetadata newSecret >>= \case
         Left err -> pure (Left (ConnectionError err))

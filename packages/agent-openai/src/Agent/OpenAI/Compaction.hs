@@ -35,18 +35,30 @@ module Agent.OpenAI.Compaction
     , newSessionUserText
     ) where
 
-import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
-import Agent.Responses.LoopBackend (withRequestInput)
+import Agent.OpenAI.Compaction.Request
+    ( buildRemoteCompactionRequest
+    , estimateEncodedValue
+    , estimateRequestTokensWithItems
+    , estimateResponseCreateParamsTokens
+    , resizedImageBytesEstimate
+    )
+import Agent.OpenAI.Compaction.Commands
+    ( clearSessionUserText
+    , compactTranscriptAtLastCheckpoint
+    , isClearSessionTurn
+    , isCompactSessionTurn
+    , isNewSessionTurn
+    , isTranscriptResetTurn
+    , newSessionUserText
+    )
 import Agent.Responses.Types
+import Agent.Json (RawJson, rawJsonFromEncoding)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Maybe (listToMaybe, mapMaybe)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import qualified Data.Vector as Vector
 
 -- | Marker prefix for compacted summary messages.
 summaryPrefix :: Text
@@ -67,131 +79,6 @@ maxRetainedAgentMessageTokens = 10_000
 compactionTriggerItem :: ResponseItem
 compactionTriggerItem =
     CompactionTriggerItemValue CompactionTriggerItem
-        { extraFields = KeyMap.empty
-        }
-
--- | Build a normal streaming Responses request whose final input item asks the
--- model to emit an opaque compaction checkpoint.
---
--- Regular Codex compaction enables parallel tool calls. Responses Lite
--- rejects that value, so keep the flag false for sol/terra/luna.
-buildRemoteCompactionRequest
-    :: ResponseCreateParams
-    -> [ResponseItem]
-    -> ResponseCreateParams
-buildRemoteCompactionRequest params history =
-    case withRequestInput params (history <> [compactionTriggerItem]) of
-        ResponseCreateParams{..} ->
-            ResponseCreateParams
-                { parallelToolCalls =
-                    Just (not (maybe False isCodexResponsesLiteModel model))
-                , previousResponseId = Nothing
-                , store = Just False
-                , stream = Just True
-                , toolChoice = Just (ToolChoiceMode ToolChoiceAuto)
-                , ..
-                }
-
--- | Estimate the complete serialized request, including instructions, tools,
--- and all other request-level fields. @input_image.image_url@ data URLs are
--- counted as vision tokens rather than as base64 text; see
--- 'estimateEncodedValue'.
-estimateRequestTokensWithItems
-    :: ResponseCreateParams
-    -> [ResponseItem]
-    -> Int
-estimateRequestTokensWithItems params items =
-    estimateEncodedValue (withRequestInput params items)
-
-estimateResponseCreateParamsTokens :: ResponseCreateParams -> Int
-estimateResponseCreateParamsTokens = estimateEncodedValue
-
--- | Estimate serialized JSON at four characters per token, matching the rest
--- of compaction accounting. Base64 payloads on @input_image.image_url@ are
--- replaced with 'resizedImageBytesEstimate' because the model consumes those
--- images as vision tokens, not as the transport encoding. Ordinary strings
--- that happen to contain a data URL, including tool-output text, stay at raw
--- size.
-estimateEncodedValue :: Aeson.ToJSON value => value -> Int
-estimateEncodedValue value =
-    estimateAdjustedJsonTokens (Aeson.toJSON value)
-
-estimateAdjustedJsonTokens :: Aeson.Value -> Int
-estimateAdjustedJsonTokens json =
-    let encoded =
-            TextEncoding.decodeUtf8 (LBS.toStrict (Aeson.encode json))
-        (payloadBytes, replacementBytes) = mediaEstimateAdjustment json
-        adjusted =
-            max 0 (Text.length encoded - payloadBytes) + replacementBytes
-    in max 1 (adjusted `div` 4)
-
--- | Approximate model-visible byte cost for one inline image, matching Codex.
--- Four bytes per token maps this to about 1,843 tokens. Attachments from this
--- harness use @detail: "auto"@, so original-detail patch counting is unused.
-resizedImageBytesEstimate :: Int
-resizedImageBytesEstimate = 7_373
-
-mediaEstimateAdjustment :: Aeson.Value -> (Int, Int)
-mediaEstimateAdjustment = \case
-    Aeson.Array values ->
-        foldl'
-            (\acc value -> addPair acc (mediaEstimateAdjustment value))
-            (0, 0)
-            values
-    Aeson.Object fields ->
-        let isInputImage =
-                KeyMap.lookup "type" fields == Just (Aeson.String "input_image")
-        in foldl'
-            (\acc (key, value) ->
-                addPair acc (fieldAdjustment isInputImage key value))
-            (0, 0)
-            (KeyMap.toList fields)
-    _ ->
-        (0, 0)
-  where
-    addPair (payloadAcc, replacementAcc) (payload, replacement) =
-        (payloadAcc + payload, replacementAcc + replacement)
-
-    fieldAdjustment isInputImage key value
-        | isInputImage && key == "image_url" =
-            imageUrlAdjustment value
-        | otherwise =
-            mediaEstimateAdjustment value
-
-imageUrlAdjustment :: Aeson.Value -> (Int, Int)
-imageUrlAdjustment = \case
-    Aeson.String text ->
-        case parseBase64ImageDataUrl text of
-            Just payload ->
-                (Text.length payload, resizedImageBytesEstimate)
-            Nothing ->
-                (0, 0)
-    _ ->
-        (0, 0)
-
--- | Return the base64 payload of a @data:image/...;base64,...@ URL.
--- Hosted HTTP(S) image URLs and non-image data URLs stay at raw size.
-parseBase64ImageDataUrl :: Text -> Maybe Text
-parseBase64ImageDataUrl url
-    | not (hasInsensitivePrefix "data:" url) = Nothing
-    | otherwise =
-        case Text.break (== ',') (Text.drop 5 url) of
-            (_, payload)
-                | Text.null payload -> Nothing
-            (metadata, payload) ->
-                let parts = Text.splitOn ";" metadata
-                    mime = case parts of
-                        (value : _) -> value
-                        [] -> Text.empty
-                    hasBase64 =
-                        any (\part -> Text.toLower part == "base64") parts
-                in if hasBase64 && hasInsensitivePrefix "image/" mime
-                    then Just (Text.drop 1 payload)
-                    else Nothing
-
-hasInsensitivePrefix :: Text -> Text -> Bool
-hasInsensitivePrefix prefix text =
-    Text.toLower (Text.take (Text.length prefix) text) == Text.toLower prefix
 
 contextWindowTruncatedOutputMessage :: Text
 contextWindowTruncatedOutputMessage =
@@ -375,16 +262,7 @@ dropMatchingTaggedOutput isOutput callIds = go
     go (item : rest) = item : go rest
 
 taggedProtocolIds :: TaggedObject -> [Text]
-taggedProtocolIds tagged =
-    mapMaybe
-        (\name -> taggedTextField name tagged)
-        ["call_id", "approval_request_id", "id"]
-
-taggedTextField :: Text -> TaggedObject -> Maybe Text
-taggedTextField name tagged =
-    case KeyMap.lookup (Key.fromText name) tagged.fields of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
+taggedProtocolIds _ = []
 
 identifiersMatch :: [Text] -> [Text] -> Bool
 identifiersMatch expected actual =
@@ -412,10 +290,10 @@ sanitizeOversizedToolCall = \case
                 , callId = call.callId
                 , name = call.name
                 , namespace = call.namespace
+                , provider = call.provider
                 , arguments = oversizedFunctionArguments
                 , encryptedFunctionArgs = call.encryptedFunctionArgs
                 , status = call.status
-                , extraFields = call.extraFields
                 }
     CustomToolCallItem call
         | Text.length call.input > remoteCompactionMaxStringLength ->
@@ -426,7 +304,6 @@ sanitizeOversizedToolCall = \case
                 , namespace = call.namespace
                 , input = oversizedToolArgumentsMessage
                 , status = call.status
-                , extraFields = call.extraFields
                 }
     item -> item
 
@@ -448,18 +325,17 @@ rewriteOversizedToolOutput = \case
             , callId = output.callId
             , name = output.name
             , namespace = output.namespace
-            , output = Aeson.String contextWindowTruncatedOutputMessage
+            , provider = output.provider
+            , output = truncatedOutputJson
             , status = output.status
-            , extraFields = output.extraFields
             }
     CustomToolCallOutputItem output ->
         Just $ CustomToolCallOutputItem CustomToolCallOutput
             { itemId = output.itemId
             , callId = output.callId
             , name = output.name
-            , output = Aeson.String contextWindowTruncatedOutputMessage
+            , output = truncatedOutputJson
             , status = output.status
-            , extraFields = output.extraFields
             }
     ToolSearchOutputItem output ->
         Just $ ToolSearchOutputItem ToolSearchOutput
@@ -468,122 +344,12 @@ rewriteOversizedToolOutput = \case
             , status = output.status
             , execution = output.execution
             , tools = []
-            , extraFields = output.extraFields
             }
-    KnownResponseItem itemType tagged
-        | isTaggedOutputItem itemType ->
-            KnownResponseItem itemType
-                <$> rewriteTaggedOutput tagged
-        | isTaggedInlineResultItem itemType ->
-            KnownResponseItem itemType
-                <$> rewriteTaggedInlineResult tagged
-    -- Provider extensions are decoded as 'ItemUnknownType'. Preserve their
-    -- identity and required metadata, but only redact broad payload fields
-    -- when the wire type is explicitly output-like. Call-shaped extensions
-    -- may safely redact recognized result fields, never generic input fields
-    -- such as content, data, text, or payload.
-    KnownResponseItem (ItemUnknownType itemType) tagged
-        | isOutputLikeType itemType ->
-            KnownResponseItem (ItemUnknownType itemType)
-                <$> rewriteTaggedOutput tagged
-        | isCallLikeType itemType ->
-            KnownResponseItem (ItemUnknownType itemType)
-                <$> rewriteTaggedInlineResult tagged
-    UnknownResponseItem tagged
-        | isOutputLikeType tagged.tag ->
-            UnknownResponseItem <$> rewriteTaggedOutput tagged
-        | isCallLikeType tagged.tag ->
-            UnknownResponseItem <$> rewriteTaggedInlineResult tagged
     _ -> Nothing
 
-isTaggedOutputItem :: ResponseItemType -> Bool
-isTaggedOutputItem = \case
-    ItemComputerCallOutput -> True
-    ItemLocalShellCallOutput -> True
-    ItemShellCallOutput -> True
-    ItemApplyPatchCallOutput -> True
-    ItemMcpApprovalResponse -> True
-    ItemProgramOutput -> True
-    _ -> False
-
--- Some provider-managed call items carry completed results inline. Limit
--- rewriting on these shapes to unambiguously result-like fields.
-isTaggedInlineResultItem :: ResponseItemType -> Bool
-isTaggedInlineResultItem = \case
-    ItemFileSearchCall -> True
-    ItemWebSearchCall -> True
-    ItemImageGenerationCall -> True
-    ItemCodeInterpreterCall -> True
-    ItemMcpListTools -> True
-    ItemMcpCall -> True
-    _ -> False
-
-isOutputLikeType :: Text -> Bool
-isOutputLikeType itemType =
-    let normalized = Text.toLower (Text.strip itemType)
-    in Text.isSuffixOf "_output" normalized
-        || Text.isInfixOf "output" normalized
-
-isCallLikeType :: Text -> Bool
-isCallLikeType itemType =
-    Text.isSuffixOf "_call" (Text.toLower (Text.strip itemType))
-
-rewriteTaggedOutput :: TaggedObject -> Maybe TaggedObject
-rewriteTaggedOutput =
-    rewriteTaggedFields
-        [ "output"
-        , "outputs"
-        , "result"
-        , "results"
-        , "stdout"
-        , "stderr"
-        , "response"
-        , "data"
-        , "content"
-        , "text"
-        , "payload"
-        , "tools"
-        ]
-
-rewriteTaggedInlineResult :: TaggedObject -> Maybe TaggedObject
-rewriteTaggedInlineResult =
-    rewriteTaggedFields
-        [ "output"
-        , "outputs"
-        , "result"
-        , "results"
-        , "stdout"
-        , "stderr"
-        , "response"
-        , "tools"
-        ]
-
-rewriteTaggedFields :: [Text] -> TaggedObject -> Maybe TaggedObject
-rewriteTaggedFields payloadKeys tagged =
-    let
-        rewritten =
-            foldr
-                (\name fields ->
-                    let key = Key.fromText name
-                    in case KeyMap.lookup key fields of
-                        Just value ->
-                            KeyMap.insert key (truncatePayload value) fields
-                        Nothing -> fields)
-                tagged.fields
-                payloadKeys
-    in if rewritten == tagged.fields
-        then Nothing
-        else Just tagged { fields = rewritten }
-
-truncatePayload :: Aeson.Value -> Aeson.Value
-truncatePayload = \case
-    Aeson.String _ ->
-        Aeson.String contextWindowTruncatedOutputMessage
-    Aeson.Array _ ->
-        Aeson.Array Vector.empty
-    Aeson.Object _ ->
-        Aeson.Object KeyMap.empty
-    value -> value
+truncatedOutputJson :: RawJson
+truncatedOutputJson =
+    rawJsonFromEncoding (Aeson.toEncoding contextWindowTruncatedOutputMessage)
 
 rewriteItemForBudget :: Int -> ResponseItem -> Maybe ResponseItem
 rewriteItemForBudget budget item =
@@ -656,7 +422,6 @@ sanitizeMessage message =
         , status = message.status
         , phase = message.phase
         , passthrough = message.passthrough
-        , extraFields = message.extraFields
         }
 
 sanitizeContentPart
@@ -680,13 +445,11 @@ richContentNoticePart role notice =
                 { text = notice
                 , annotations = Nothing
                 , logprobs = Nothing
-                , extraFields = KeyMap.empty
                 }
         _ ->
             InputTextPart
                 { text = notice
                 , promptCacheBreakpoint = Nothing
-                , extraFields = KeyMap.empty
                 }
 
 richContentNotice :: ResponseContentPart -> Text
@@ -871,7 +634,6 @@ replaceMessageContent message nextContent =
         , status = message.status
         , phase = message.phase
         , passthrough = message.passthrough
-        , extraFields = message.extraFields
         }
 
 truncateContentParts :: Int -> [ResponseContentPart] -> [ResponseContentPart]
@@ -921,18 +683,18 @@ partTextValue = maybe "" id . partText
 
 replacePartText :: Text -> ResponseContentPart -> ResponseContentPart
 replacePartText value = \case
-    InputTextPart { promptCacheBreakpoint, extraFields } ->
-        InputTextPart value promptCacheBreakpoint extraFields
-    OutputTextPart { annotations, logprobs, extraFields } ->
-        OutputTextPart value annotations logprobs extraFields
-    RefusalPart { extraFields } ->
-        RefusalPart value extraFields
-    ReasoningTextPart { extraFields } ->
-        ReasoningTextPart value extraFields
-    SummaryTextPart { extraFields } ->
-        SummaryTextPart value extraFields
-    PlainTextPart { extraFields } ->
-        PlainTextPart value extraFields
+    InputTextPart { promptCacheBreakpoint } ->
+        InputTextPart value promptCacheBreakpoint
+    OutputTextPart { annotations, logprobs } ->
+        OutputTextPart value annotations logprobs
+    RefusalPart {} ->
+        RefusalPart value
+    ReasoningTextPart {} ->
+        ReasoningTextPart value
+    SummaryTextPart {} ->
+        SummaryTextPart value
+    PlainTextPart {} ->
+        PlainTextPart value
     part -> part
 
 takeTokenBudget :: Int -> Text -> Text
@@ -1010,12 +772,11 @@ messageText message = case message.content of
 userTextItem :: Text -> ResponseItem
 userTextItem text = MessageItem ResponseMessage
     { messageId = Nothing
-    , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , content = MessageContentParts [InputTextPart text Nothing]
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }
 
 assistantSummaryItem :: Text -> ResponseItem
@@ -1028,13 +789,11 @@ assistantSummaryItem summary =
                     (summaryPrefix <> "\n" <> Text.strip summary)
                     Nothing
                     Nothing
-                    KeyMap.empty
                 ]
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
 
 -- | Grok-style local rebuild: recent user texts + assistant summary.
@@ -1100,44 +859,6 @@ fitLocalSummaryItem targetWindow params summary
             in if requestTokens candidate <= targetWindow
                 then search (middle + 1) high (Just candidate)
                 else search low (middle - 1) best
-
--- | Legacy helper retained for API compatibility. Installed v2 snapshots must
--- be replayed in full because they intentionally place retained messages
--- before the checkpoint; new loop code therefore no longer calls this.
-compactTranscriptAtLastCheckpoint :: [ResponseItem] -> [ResponseItem]
-compactTranscriptAtLastCheckpoint items = go [] (reverse items)
-  where
-    go _ [] = items
-    go after (item : before) =
-        case item of
-            CompactionItemValue{} -> item : after
-            _ -> go (item : after) before
-
--- | Session turns that represent a compaction checkpoint.
-isCompactSessionTurn :: Text -> Bool
-isCompactSessionTurn text =
-    let stripped = Text.strip text
-    in stripped == "/compact" || Text.isPrefixOf "/compact " stripped
-
-clearSessionUserText :: Text
-clearSessionUserText = "/clear"
-
-newSessionUserText :: Text
-newSessionUserText = "/new"
-
-isClearSessionTurn :: Text -> Bool
-isClearSessionTurn text = Text.strip text == clearSessionUserText
-
-isNewSessionTurn :: Text -> Bool
-isNewSessionTurn text = Text.strip text == newSessionUserText
-
--- | Turns that replace the live transcript with their turnItems snapshot
--- (compact) or empty it (/clear, /new).
-isTranscriptResetTurn :: Text -> Bool
-isTranscriptResetTurn text =
-    isCompactSessionTurn text
-        || isClearSessionTurn text
-        || isNewSessionTurn text
 
 hasCompactionCheckpoint :: [ResponseItem] -> Bool
 hasCompactionCheckpoint = any \case

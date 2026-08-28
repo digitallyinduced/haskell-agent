@@ -1,5 +1,6 @@
 module Agent.OpenAI.LoginSpec (spec) where
 
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Login (DeviceCode(..), writeAuthFile)
 import System.OsPath (unsafeEncodeUtf)
 import qualified Data.Aeson as Aeson
@@ -33,7 +34,10 @@ spec = describe "Agent.OpenAI.Login" do
                 osPath = fromFilePath path
                 auth = Aeson.object ["auth_mode" Aeson..= ("chatgpt" :: String)]
             writeAuthFile osPath auth
-            decoded <- Aeson.decode <$> LBS.readFile path
-            decoded `shouldBe` Just auth
+            bytes <- LBS.toStrict <$> LBS.readFile path
+            Json.decodeEither
+                (Json.object (Json.atKey "auth_mode" Json.text))
+                bytes
+                `shouldBe` Right "chatgpt"
             status <- getFileStatus path
             fileMode status `shouldBe` 0o100600

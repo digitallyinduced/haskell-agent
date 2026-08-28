@@ -12,8 +12,9 @@ module Agent.Tools.Secret
     , askSecretTool
     ) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (unsafeToFilePath)
-import Agent.ToolArgs (optText, reqText)
+import Agent.ToolArgs (objectArgs, optText, reqText)
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -41,10 +42,8 @@ import Control.Exception.Safe
     )
 import Control.Monad (void)
 import Data.Aeson
-    ( FromJSON(..)
-    , Value
+    ( Value
     , object
-    , withObject
     , (.=)
     )
 import qualified Data.Aeson as Aeson
@@ -123,8 +122,8 @@ data AskSecretArgs = AskSecretArgs
     , purpose :: !(Maybe Text)
     }
 
-instance FromJSON AskSecretArgs where
-    parseJSON = withObject "ask_secret" \input -> AskSecretArgs
+askSecretArgsDecoder :: Decoder AskSecretArgs
+askSecretArgsDecoder = objectArgs \input -> AskSecretArgs
         <$> reqText input "prompt"
         <*> optText input "purpose"
 
@@ -139,7 +138,7 @@ askSecretTool store = jsonTool "ask_secret" askSecretDescription
     -- generic mutating-tool approval would be redundant.
     True
     TurnSequential
-    (typedTool "ask_secret" (runAskSecret store))
+    (typedTool "ask_secret" askSecretArgsDecoder (runAskSecret store))
 
 askSecretDescription :: Text
 askSecretDescription =

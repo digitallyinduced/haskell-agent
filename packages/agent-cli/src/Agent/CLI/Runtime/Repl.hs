@@ -20,6 +20,7 @@ import Agent.CLI.Auth ()
 import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort, currentModel, mkSlashCatalog )
+import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
 import Agent.CLI.Connectivity ()
@@ -324,7 +325,7 @@ replWithDraft env@SessionEnv
                         | otherwise = savedRate
                 Text.putStrLn $ formatReplStatusLine stdoutColor termCols
                     (currentModel params)
-                    (currentEffort params)
+                    (reasoningEffortText (currentEffort params))
                     idleMode
                     account
                     usage

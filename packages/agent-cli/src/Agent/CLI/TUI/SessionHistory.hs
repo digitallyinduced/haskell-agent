@@ -11,8 +11,10 @@ module Agent.CLI.TUI.SessionHistory
 import Agent.CLI.Session
     ( SessionTurn(..)
     , SessionTurnPage(..)
-    , TranscriptEffect(..)
     )
+import Agent.CLI.Session.Types (TranscriptEffect(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decode as Hermes
 import Agent.CLI.TUI.History
     ( HistoryCursor(..)
     , HistoryDirection
@@ -50,13 +52,10 @@ import Agent.TUI.Model
     , initialUiState
     , reduceUi
     )
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LazyByteString
 import Data.Foldable (toList)
 import qualified Data.Sequence as Seq
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
-import Data.Text.Encoding.Error (lenientDecode)
 
 sessionHistoryPage
     :: HistoryGeneration
@@ -250,9 +249,11 @@ responseContentText = \case
     RefusalPart{refusal} -> [refusal]
     _ -> []
 
-renderJsonValue :: Aeson.Value -> Text.Text
-renderJsonValue = \case
-    Aeson.String text -> text
-    value ->
-        TextEncoding.decodeUtf8With lenientDecode
-            (LazyByteString.toStrict (Aeson.encode value))
+renderJsonValue :: RawJson -> Text.Text
+renderJsonValue value =
+    case Hermes.decodeEither
+            (Hermes.nullable Hermes.text)
+            (rawJsonBytes value) of
+        Right (Just text) -> text
+        Right Nothing -> ""
+        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)

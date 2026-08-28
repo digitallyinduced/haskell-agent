@@ -235,6 +235,11 @@ spec = describe "web_fetch and LSP runtime support" do
                         , "shutdown"
                         , "exit"
                         ]
+                    requests `shouldSatisfy`
+                        Text.isInfixOf
+                            "\"id\":\"configuration-1\""
+                    requests `shouldSatisfy`
+                        Text.isInfixOf "\"result\":[null,null]"
 
     it "does not advertise lsp when every configured server fails" $
         withTempDir "agent-lsp-failed-" \directory -> do
@@ -317,6 +322,8 @@ mockLspScript =
         , "send_frame '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{}}}'"
         , "read_frame"
         , "read_frame"
+        , "read_frame"
+        , "send_frame '{\"jsonrpc\":\"2.0\",\"id\":\"configuration-1\",\"method\":\"workspace/configuration\",\"params\":{\"items\":[{},{}]}}'"
         , "read_frame"
         , "send_frame '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"uri\":\"file:///mock/Test.hs\",\"range\":{\"start\":{\"line\":0,\"character\":1}}}}'"
         , "read_frame"

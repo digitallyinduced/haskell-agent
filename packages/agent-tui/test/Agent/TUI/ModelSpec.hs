@@ -15,6 +15,7 @@ import Agent.Loop
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , ToolCallKind(..)
+    , customToolCall
     , functionToolCall
     )
 import qualified Data.Foldable as Foldable
@@ -309,6 +310,103 @@ spec = describe "fullscreen UI reducer" do
                 block.blockBody `shouldBe` "exit: 0\nclean"
             _ -> expectationFailure "expected one completed tool block"
 
+    it "updates an early tool start in place" do
+        let early = functionToolCall "c1" "Task" "{}"
+            canonical =
+                functionToolCall
+                    "c1"
+                    "Agent"
+                    "{\"description\":\"review the patch\"}"
+            state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted early)
+                    , UiLoop (ToolUpdated canonical)
+                    ]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockTitle `shouldBe` "Agent"
+                block.blockDetail `shouldBe` ""
+                block.blockState `shouldBe` BlockRunning
+            _ -> expectationFailure "expected one updated tool block"
+        Foldable.toList state.uiToolCalls
+            `shouldBe` [(0, canonical)]
+
+    it "retracts a tool and repairs later tool positions" do
+        let first = functionToolCall "c1" "Task" "{}"
+            second = functionToolCall "c2" "Read" "{\"file_path\":\"README.md\"}"
+            running =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted first)
+                    , UiSystemMessage "between"
+                    , UiLoop (ToolStarted second)
+                    ]
+            retracted =
+                reduceUi (UiLoop (ToolRetracted "c1")) running
+            finished =
+                reduceUi
+                    (UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "c2"
+                                , output = "contents"
+                                , callKind = FunctionCallKind
+                                }))
+                    retracted
+        map (.blockBody) (Foldable.toList finished.uiBlocks)
+            `shouldBe` ["between", "contents"]
+        map (.blockState) (Foldable.toList finished.uiBlocks)
+            `shouldBe` [BlockComplete, BlockComplete]
+        finished.uiToolCalls `shouldBe` mempty
+
+    it "removes a completed tool when its provider message is retracted" do
+        let call = functionToolCall "c1" "Task" "{}"
+            completed =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop (ToolStarted call)
+                    , UiLoop
+                        (ToolFinished
+                            ToolCallResult
+                                { callId = "c1"
+                                , output = "done"
+                                , callKind = FunctionCallKind
+                                })
+                    ]
+            retracted =
+                reduceUi (UiLoop (ToolRetracted "c1")) completed
+        retracted.uiBlocks `shouldBe` mempty
+        retracted.uiToolCalls `shouldBe` mempty
+
+    it "discards only blocks from the current response attempt" do
+        let state =
+                apply
+                    [ UiUserSubmitted "hello"
+                    , UiLoop TurnStarted
+                    , UiLoop (TextDelta "partial")
+                    , UiLoop
+                        (ToolStarted
+                            (functionToolCall "c1" "Task" "{}"))
+                    , UiLoop ResponseAttemptDiscarded
+                    ]
+        map (.blockBody) (Foldable.toList state.uiBlocks)
+            `shouldBe` ["hello"]
+        state.uiToolCalls `shouldBe` mempty
+
+    it "settles running tools when a response restarts" do
+        let state =
+                apply
+                    [ UiLoop TurnStarted
+                    , UiLoop
+                        (ToolStarted
+                            (functionToolCall "c1" "Task" "{}"))
+                    , UiLoop (ResponseRestarted "retrying")
+                    ]
+        map (.blockState) (Foldable.toList state.uiBlocks)
+            `shouldBe` [BlockFailed]
+        state.uiToolCalls `shouldBe` mempty
+
     it "renders write_stdin as a shell block" do
         let call = functionToolCall "c1" "write_stdin" "{\"session_id\":3}"
             state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
@@ -334,6 +432,18 @@ spec = describe "fullscreen UI reducer" do
                     `shouldBe` "do { putStrLn \"one\"; putStrLn \"two\" }"
                 state.uiActivity `shouldBe` "$ ghci"
             _ -> expectationFailure "expected one running GHCi block"
+
+    it "stores exec source as JavaScript code" do
+        let source = "const answer = await tools.read_file({target_file: \"A.hs\"});"
+            call = customToolCall "c1" "exec" source
+            state = apply [UiLoop TurnStarted, UiLoop (ToolStarted call)]
+        case Foldable.toList state.uiBlocks of
+            [block] -> do
+                block.blockKind `shouldBe` BlockShell
+                block.blockTitle `shouldBe` "$ exec"
+                block.blockDetail `shouldBe` source
+                blockCodeLanguage block `shouldBe` Just "javascript"
+            _ -> expectationFailure "expected one running exec block"
 
     it "renders the public Grok terminal alias as a shell block" do
         let call = functionToolCall

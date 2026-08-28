@@ -2,11 +2,11 @@ module Agent.Responses.SSESpec (spec) where
 
 import Agent.Error (ApiError(..))
 import Agent.Responses.SSE
+import qualified Agent.Responses.Codec as Codec
 import Agent.Responses.Types
 import Control.Monad (foldM)
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
@@ -61,6 +61,11 @@ spec = describe "Responses SSE decoder" do
                 <> "data: " <> completedJson <> "\n\n"
         eventTypes events `shouldBe` [EventResponseCompleted]
 
+    it "accepts Unicode whitespace around the done sentinel" do
+        events <- expectRight $ parseSseEvents $
+            "data: \x2003[DONE]\x2003\n\n" <> completedBlock
+        eventTypes events `shouldBe` [EventResponseCompleted]
+
     it "skips malformed event payloads while preserving unknown events" do
         events <- expectRight $ parseSseEvents $ Text.intercalate ""
             [ sseBlock "response.output_item.done"
@@ -72,6 +77,58 @@ spec = describe "Responses SSE decoder" do
             ]
         eventTypes events
             `shouldBe` [StreamEventUnknown "response.future_event", EventResponseCompleted]
+
+    it "preserves Codex turn state from direct aliases and nested headers" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.output_text.delta"
+                "{\"type\":\"response.output_text.delta\",\"x-codex-turn-state\":\"direct\"}"
+            , sseBlock "response.output_text.done"
+                "{\"type\":\"response.output_text.done\",\"turn_state\":\"alias\"}"
+            , sseBlock "response.reasoning_text.done"
+                "{\"type\":\"response.reasoning_text.done\",\"headers\":{\"x-codex-turn-state\":\"nested\"}}"
+            ]
+        let states =
+                [ turnState
+                | OtherResponseStreamEvent { turnState } <- events
+                ]
+        states `shouldBe` [Just "direct", Just "alias", Just "nested"]
+        case events of
+            first : _ ->
+                Text.decodeUtf8 (LBS.toStrict (Aeson.encode first))
+                    `shouldSatisfy`
+                        Text.isInfixOf "\"x-codex-turn-state\":\"direct\""
+            [] -> expectationFailure "expected turn-state events"
+
+    it "round-trips typed Codex rate limits through Aeson encoding" do
+        let payload =
+                "{\"type\":\"codex.rate_limits\",\"sequence_number\":7,"
+                <> "\"rate_limits\":{\"allowed\":true,\"limit_reached\":false,"
+                <> "\"primary\":{\"used_percent\":12.5},"
+                <> "\"secondary\":{\"used_percent\":3.0}}}"
+        event <- expectRight $
+            Codec.decodeResponseStreamEvent payload
+        Codec.decodeResponseStreamEvent
+            (LBS.toStrict (Aeson.encode event))
+            `shouldBe` Right event
+
+    it "decodes provider provenance on function calls and outputs" do
+        events <- expectRight $ parseSseEvents $ Text.intercalate ""
+            [ sseBlock "response.output_item.added"
+                "{\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"Task\",\"provider\":\"claude-code\",\"arguments\":\"{}\"}}"
+            , sseBlock "response.output_item.done"
+                "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"provider\":\"claude-code\",\"output\":\"ok\"}}"
+            ]
+        case events of
+            [ ResponseOutputItemAddedEvent
+                { item = FunctionCallItem FunctionCall { provider = callProvider } }
+              , ResponseOutputItemDoneEvent
+                { item = FunctionCallOutputItem
+                    FunctionCallOutput { provider = outputProvider } }
+              ] -> do
+                callProvider `shouldBe` Just "claude-code"
+                outputProvider `shouldBe` Just "claude-code"
+            other -> expectationFailure
+                ("unexpected provider-tagged events: " <> show other)
 
     it "rejects invalid UTF-8 only after a complete event block arrives" do
         (decoder, events) <- expectRight $
@@ -188,21 +245,24 @@ genLifecycleEvent index = do
     status <-
         elements ["completed", "incomplete", "failed"]
             :: Gen Text
-    let response =
+    let responseValue =
             Aeson.object
                 [ "id" .= ("resp-" <> Text.pack (show index))
                 , "created_at" .= index
                 , "model" .= model
                 , "status" .= status
                 ]
+        response = either error id
+            (Codec.decodeResponse
+                (LBS.toStrict (Aeson.encode responseValue)))
     elements
-        [ ResponseCreatedEvent response (Just index) KeyMap.empty
-        , ResponseInProgressEvent response (Just index) KeyMap.empty
-        , ResponseCompletedEvent response (Just index) KeyMap.empty
-        , ResponseDoneEvent response (Just index) KeyMap.empty
-        , ResponseFailedEvent response (Just index) KeyMap.empty
-        , ResponseIncompleteEvent response (Just index) KeyMap.empty
-        , ResponseQueuedEvent response (Just index) KeyMap.empty
+        [ ResponseCreatedEvent response (Just index)
+        , ResponseInProgressEvent response (Just index)
+        , ResponseCompletedEvent response (Just index)
+        , ResponseDoneEvent response (Just index)
+        , ResponseFailedEvent response (Just index)
+        , ResponseIncompleteEvent response (Just index)
+        , ResponseQueuedEvent response (Just index)
         ]
 
 genOutputItemEvent :: Int -> Gen ResponseStreamEvent
@@ -217,20 +277,20 @@ genOutputItemEvent index = do
                             { text = body
                             , annotations = Nothing
                             , logprobs = Nothing
-                            , extraFields = KeyMap.empty
+
                             }
                         ]
                 , role = RoleAssistant
                 , status = Just ItemCompleted
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
+
                 }
     elements
         [ ResponseOutputItemAddedEvent
-            item (Just index) (Just index) KeyMap.empty
+            item (Just index) (Just index)
         , ResponseOutputItemDoneEvent
-            item (Just index) (Just index) KeyMap.empty
+            item (Just index) (Just index)
         ]
 
 genCustomToolDelta :: Int -> Gen ResponseStreamEvent
@@ -240,9 +300,9 @@ genCustomToolDelta index = do
         callId = Just ("call-" <> Text.pack (show index))
     elements
         [ ResponseCustomToolInputDeltaEvent
-            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+            (Just delta) itemId callId (Just index) (Just index)
         , ResponseCustomToolInputDoneEvent
-            (Just delta) itemId callId (Just index) (Just index) KeyMap.empty
+            (Just delta) itemId callId (Just index) (Just index)
         ]
 
 genText :: Gen Text

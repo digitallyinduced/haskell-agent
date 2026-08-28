@@ -14,7 +14,6 @@ import Control.Concurrent
     , takeMVar
     , threadDelay
     )
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Text as Text
 import Test.Hspec
@@ -53,7 +52,6 @@ spec = describe "Agent.CLI.SessionTitle" do
                 , generateSummary = Nothing
                 , reasoningMode = Nothing
                 , summary = Nothing
-                , extraFields = KeyMap.empty
                 }
             baseParams =
                 case defaultResponseCreateParams :: ResponseCreateParams of
@@ -137,10 +135,40 @@ spec = describe "Agent.CLI.SessionTitle" do
                         }
                     ]
 
-    it "reports provider failures instead of silently dropping them" do
+    it "retries a failed title request once before reporting its outcome" do
+        attempts <- newIORef (0 :: Int)
         notified <- newEmptyMVar
         let backendFactory _ =
-                Backend \state _ _ _ ->
+                Backend \state _ _ _ -> do
+                    attempt <- atomicModifyIORef' attempts \count ->
+                        let next = count + 1
+                        in (next, next)
+                    pure $ Right BackendResult
+                        { backendOutput =
+                            emptyTurnOutput "title-response" []
+                                (if attempt == 1
+                                    then Nothing
+                                    else Just "Recovered title")
+                        , backendState = state
+                        }
+        withSessionTitleManager backendFactory (pure defaultResponseCreateParams) (putMVar notified) \manager -> do
+            requestSessionTitle manager "session-1" 3 "conversation"
+            takeMVar notified
+                `shouldReturn`
+                    SessionTitleGenerated SessionTitleResult
+                        { resultSessionId = "session-1"
+                        , resultMilestone = 3
+                        , resultTitle = "Recovered title"
+                        , resultGeneration = 0
+                        }
+        readIORef attempts `shouldReturn` 2
+
+    it "reports provider failures instead of silently dropping them" do
+        attempts <- newIORef (0 :: Int)
+        notified <- newEmptyMVar
+        let backendFactory _ =
+                Backend \state _ _ _ -> do
+                    modifyIORef' attempts (+ 1)
                     pure $ Right BackendResult
                         { backendOutput =
                             emptyTurnOutput "title-response" [] Nothing
@@ -156,6 +184,7 @@ spec = describe "Agent.CLI.SessionTitle" do
                         , failureMessage = "provider returned no title text"
                         , failureGeneration = 0
                         }
+        readIORef attempts `shouldReturn` 2
 
 waitForResults :: SessionTitleManager -> Int -> IO [SessionTitleResult]
 waitForResults manager attempts

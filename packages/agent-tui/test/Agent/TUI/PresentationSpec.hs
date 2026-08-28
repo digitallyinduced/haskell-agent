@@ -114,6 +114,22 @@ spec = describe "tool presentation" do
                 "Evaluate this Haskell code in GHCi?\n\n\
                 \do { putStrLn \"one\"; putStrLn \"two\" }"
 
+    it "renders exec source and hides successful protocol boilerplate" do
+        let source = "const result = await tools.grep({pattern: \"needle\"});\ntext(result);"
+            call = customToolCall "exec" "exec" source
+        toolCallTitle call `shouldBe` "$ exec"
+        toolCallInput call `shouldBe` source
+        formatToolOutput call
+            "Script completed\nWall time 0.1 seconds\nOutput:\nmatch"
+            `shouldBe` "match"
+        formatToolOutput call
+            "Script completed\nWall time 0.0 seconds\nOutput:\n"
+            `shouldBe` ""
+        formatToolOutput call
+            "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\nboom"
+            `shouldBe`
+                "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\nboom"
+
     it "shows complete multiline code and shell commands for permission" do
         permissionToolCallPrompt
             (functionToolCall

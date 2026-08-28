@@ -9,11 +9,11 @@ import Agent.CLI.Session
     , TranscriptEffect(..)
     )
 import Agent.CLI.TUI.History
+import Agent.Json (rawJsonFromEncoding)
 import Agent.CLI.TUI.Composer (composerScrollbackAvailable)
 import Agent.CLI.TUI.SessionHistory (sessionHistoryTurn)
 import Agent.Responses.Types
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Foldable (toList)
 import Agent.TUI.Model
     ( BlockId(..)
@@ -316,32 +316,31 @@ spec = describe "bounded fullscreen history window" do
                                     , text =
                                         Just
                                             "Don't mention skills. Brief summary for the user."
-                                    , extraFields = KeyMap.empty
                                     }
                                 ]
                             , content = Nothing
                             , encryptedContent = Nothing
                             , status = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         , FunctionCallItem FunctionCall
                             { itemId = Nothing
                             , callId = "call-1"
                             , name = "shell_command"
                             , namespace = Nothing
+                            , provider = Nothing
                             , arguments = "{\"command\":\"pwd\"}"
                             , encryptedFunctionArgs = Nothing
                             , status = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         , FunctionCallOutputItem FunctionCallOutput
                             { itemId = Nothing
                             , callId = "call-1"
                             , name = Nothing
                             , namespace = Nothing
-                            , output = Aeson.String "/tmp/project"
+                            , provider = Nothing
+                            , output = rawJsonFromEncoding
+                                (Aeson.toEncoding ("/tmp/project" :: Text.Text))
                             , status = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         , assistantMessage "Done"
                         ])
@@ -506,7 +505,6 @@ userMessage text =
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
 
 assistantMessage :: Text.Text -> ResponseItem
@@ -518,7 +516,6 @@ assistantMessage text =
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
 
 fixedTime :: UTCTime

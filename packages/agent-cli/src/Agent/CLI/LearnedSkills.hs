@@ -11,7 +11,7 @@ module Agent.CLI.LearnedSkills
     , queueLearnedSkillContextWithOmissions
     ) where
 
-import Agent.CLI.Database (DatabaseScope(..))
+import Agent.CLI.Database (DatabaseScope(..), databaseScopeDecoder)
 import Agent.OsPath (toText)
 import Agent.Skills
     ( Skill(..)
@@ -31,20 +31,16 @@ import Agent.Store.Postgres.Skill
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
+import Agent.CLI.Json (integer)
+import Agent.Json.Decode (defaultKey, optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     , jsonTool
     )
-import Data.Aeson
-    ( FromJSON(..)
-    , Value
-    , (.:)
-    , (.:?)
-    , withObject
-    )
+import Data.Aeson (Value)
 import qualified Data.Aeson as Aeson
-import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.IORef (IORef, modifyIORef', readIORef)
@@ -121,69 +117,69 @@ data LearnedSkillToolsEnv = LearnedSkillToolsEnv
 
 data SearchArgs = SearchArgs !Text !Int
 
-instance FromJSON SearchArgs where
-    parseJSON = withObject "SearchArgs" \object ->
+searchArgsDecoder :: Hermes.Decoder SearchArgs
+searchArgsDecoder = Hermes.object $
         SearchArgs
-            <$> object .: "query"
-            <*> (object .:? "limit" >>= pure . fromMaybe 10)
+            <$> Hermes.atKey "query" Hermes.text
+            <*> defaultKey 10 "limit" Hermes.int
 
 data ViewArgs = ViewArgs !Text !(Maybe DatabaseScope) !(Maybe Integer)
 
-instance FromJSON ViewArgs where
-    parseJSON = withObject "ViewArgs" \object ->
+viewArgsDecoder :: Hermes.Decoder ViewArgs
+viewArgsDecoder = Hermes.object $
         ViewArgs
-            <$> object .: "name"
-            <*> object .:? "scope"
-            <*> object .:? "revision"
+            <$> Hermes.atKey "name" Hermes.text
+            <*> optionalKey "scope" databaseScopeDecoder
+            <*> optionalKey "revision" integer
 
-instance FromJSON LearnedSkillCreateRequest where
-    parseJSON = withObject "LearnedSkillCreateRequest" \object -> do
-        activation <- parseOptionalActivation object
+learnedSkillCreateRequestDecoder :: Hermes.Decoder LearnedSkillCreateRequest
+learnedSkillCreateRequestDecoder = Hermes.object do
+        activation <- optionalKey "activation" learnedSkillActivationDecoder
         LearnedSkillCreateRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "title"
-            <*> object .: "description"
-            <*> object .: "applies_when"
-            <*> object .: "instructions"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "title" Hermes.text
+            <*> Hermes.atKey "description" Hermes.text
+            <*> Hermes.atKey "applies_when" Hermes.text
+            <*> Hermes.atKey "instructions" Hermes.text
             <*> pure (fromMaybe SkillRelevant activation)
-            <*> (object .:? "priority" >>= pure . fromMaybe 0)
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <*> defaultKey 0 "priority" Hermes.int
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
-instance FromJSON LearnedSkillUpdateRequest where
-    parseJSON = withObject "LearnedSkillUpdateRequest" \object ->
+learnedSkillUpdateRequestDecoder :: Hermes.Decoder LearnedSkillUpdateRequest
+learnedSkillUpdateRequestDecoder = Hermes.object $
         LearnedSkillUpdateRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "expected_revision"
-            <*> object .:? "title"
-            <*> object .:? "description"
-            <*> object .:? "applies_when"
-            <*> object .:? "instructions"
-            <*> parseOptionalActivation object
-            <*> object .:? "priority"
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "expected_revision" integer
+            <*> optionalKey "title" Hermes.text
+            <*> optionalKey "description" Hermes.text
+            <*> optionalKey "applies_when" Hermes.text
+            <*> optionalKey "instructions" Hermes.text
+            <*> optionalKey "activation" learnedSkillActivationDecoder
+            <*> optionalKey "priority" Hermes.int
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
-instance FromJSON LearnedSkillArchiveRequest where
-    parseJSON = withObject "LearnedSkillArchiveRequest" \object ->
+learnedSkillArchiveRequestDecoder :: Hermes.Decoder LearnedSkillArchiveRequest
+learnedSkillArchiveRequestDecoder = Hermes.object $
         LearnedSkillArchiveRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "expected_revision"
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "expected_revision" integer
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
-instance FromJSON LearnedSkillRollbackRequest where
-    parseJSON = withObject "LearnedSkillRollbackRequest" \object ->
+learnedSkillRollbackRequestDecoder :: Hermes.Decoder LearnedSkillRollbackRequest
+learnedSkillRollbackRequestDecoder = Hermes.object $
         LearnedSkillRollbackRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "expected_revision"
-            <*> object .: "target_revision"
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "expected_revision" integer
+            <*> Hermes.atKey "target_revision" integer
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
 learnedSkillTools :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> [AppTool]
 learnedSkillTools invocationsRef env =
@@ -211,7 +207,7 @@ searchTool env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "skill_search" \(SearchArgs query limit) ->
+    (typedTool "skill_search" searchArgsDecoder \(SearchArgs query limit) ->
         case validateSearch query limit of
             Left err -> pure (Left err)
             Right () -> encodeResult <$> env.learnedSkillSearch query limit)
@@ -236,7 +232,7 @@ viewTool invocationsRef env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "view_skill" \(ViewArgs name scope revision) ->
+    (typedTool "view_skill" viewArgsDecoder \(ViewArgs name scope revision) ->
         case scope of
             Nothing ->
                 case revision of
@@ -314,7 +310,7 @@ createTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_create" \request ->
+    (typedTool "skill_create" learnedSkillCreateRequestDecoder \request ->
         case validateCreate request of
             Left err -> pure (Left err)
             Right () -> encodeResult <$> env.learnedSkillCreate request)
@@ -346,7 +342,7 @@ updateTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_update" \request ->
+    (typedTool "skill_update" learnedSkillUpdateRequestDecoder \request ->
         case validateUpdate request of
             Left err -> pure (Left err)
             Right () -> encodeResult <$> env.learnedSkillUpdate request)
@@ -367,7 +363,7 @@ archiveTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_archive" \request ->
+    (typedTool "skill_archive" learnedSkillArchiveRequestDecoder \request ->
         case validateArchive request of
             Left err -> pure (Left err)
             Right () -> encodeResult <$> env.learnedSkillArchive request)
@@ -390,7 +386,7 @@ rollbackTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_rollback" \request ->
+    (typedTool "skill_rollback" learnedSkillRollbackRequestDecoder \request ->
         case validateRollback request of
             Left err -> pure (Left err)
             Right () -> encodeResult <$> env.learnedSkillRollback request)
@@ -455,15 +451,8 @@ evidenceProperty = PropertySchema
             <> "lesson, decision, preference, or procedure."
         ))
 
-parseOptionalActivation
-    :: Aeson.Object
-    -> Parser (Maybe LearnedSkillActivation)
-parseOptionalActivation object = do
-    value <- object .:? "activation" :: Parser (Maybe Text)
-    traverse parseActivation value
-  where
-    parseActivation :: Text -> Parser LearnedSkillActivation
-    parseActivation = \case
+learnedSkillActivationDecoder :: Hermes.Decoder LearnedSkillActivation
+learnedSkillActivationDecoder = Hermes.withText \case
         "always" -> pure SkillAlways
         "relevant" -> pure SkillRelevant
         "manual" -> pure SkillManual

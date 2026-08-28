@@ -15,6 +15,7 @@ module Agent.Tools.Types
     , rawJsonAppToolWithExecution
     , freeformApplyPatchAppTool
     , freeformApplyPatchAppToolWithExecution
+    , freeformGrammarAppToolWithExecution
     , withToolResourceClaims
     , mkToolRegistry
     , toolRegistryTools
@@ -59,6 +60,10 @@ data ToolSchema
     = JsonFunctionSchema ![PropertySchema]
     | RawJsonFunctionSchema !Value
     | FreeformApplyPatchSchema
+    -- | Freeform custom tool with an explicit provider grammar
+    -- (@format.type = "grammar"@). The fields are the grammar syntax
+    -- (for example @"lark"@) and its definition text.
+    | FreeformGrammarSchema !Text !Text
     deriving (Eq, Show)
 
 -- | Whether a call may run without generic user approval.
@@ -107,6 +112,9 @@ data ToolEnv = ToolEnv
       -- Kept separate so catalog refreshes can replace them without
       -- disturbing other explicitly allowed roots.
     , toolSessionTmp :: !(IORef (Maybe OsPath))
+    , toolOutputInlineCap :: !Int
+    , toolOutputPreviewCap :: !Int
+    , toolOutputArtifactCap :: !Int
     , toolStdoutCap :: !Int
       -- | Soft-cancel latch for the active turn. Shell tools race against it.
     , toolCancel :: !CancelFlag
@@ -123,7 +131,10 @@ defaultToolEnv cwd = do
         , toolAllowedRoots = allowedRoots
         , toolSkillRoots = skillRoots
         , toolSessionTmp = sessionTmp
-        , toolStdoutCap = 100000
+        , toolOutputInlineCap = 50 * 1024
+        , toolOutputPreviewCap = 8 * 1024
+        , toolOutputArtifactCap = 64 * 1024 * 1024
+        , toolStdoutCap = 16 * 1024
         , toolCancel = cancel
         }
 
@@ -251,6 +262,27 @@ freeformApplyPatchAppToolWithExecution
     , appToolResourceClaims = Nothing
     }
 
+-- | Construct a freeform tool that advertises an explicit grammar.
+freeformGrammarAppToolWithExecution
+    :: Text
+    -> Text
+    -> Text
+    -> Text
+    -> ApprovalRule
+    -> ToolExecutionPolicy
+    -> ToolHandler
+    -> AppTool
+freeformGrammarAppToolWithExecution
+        name description syntax definition approval execution handler = AppTool
+    { appToolName = name
+    , appToolDescription = description
+    , appToolSchema = FreeformGrammarSchema syntax definition
+    , appToolHandler = handler
+    , appToolApproval = approval
+    , appToolExecution = execution
+    , appToolResourceClaims = Nothing
+    }
+
 mkToolRegistry :: [AppTool] -> Either Text ToolRegistry
 mkToolRegistry tools = do
     byName <- foldM insertTool Map.empty tools
@@ -324,6 +356,7 @@ jsonToolParameters tool = case tool.appToolSchema of
     JsonFunctionSchema parameters -> Just parameters
     RawJsonFunctionSchema _ -> Nothing
     FreeformApplyPatchSchema -> Nothing
+    FreeformGrammarSchema _ _ -> Nothing
 
 -- | Compatibility helper for direct handler consumers. New dispatch paths
 -- should retain and use 'ToolRegistry' instead.

@@ -1,4 +1,4 @@
-{ mkDerivation, aeson, agent-core, agent-syntax, base, brick
+{ mkDerivation, agent-core, agent-json, agent-syntax, base, brick
 , containers, hspec, lib, QuickCheck, text, vty
 }:
 mkDerivation {
@@ -6,7 +6,7 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson agent-core agent-syntax base brick containers text vty
+    agent-core agent-json agent-syntax base brick containers text vty
   ];
   testHaskellDepends = [
     agent-core agent-syntax base brick containers hspec QuickCheck text

@@ -6,13 +6,13 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import qualified Agent.Json.Decode as Json
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
 import Control.Exception.Safe (finally)
 import Control.Monad (void, when)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
@@ -56,7 +56,7 @@ spec = do
                 `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
-            (inputRoles <$> requestBodyObject request) `shouldBe` Just ["system", "user"]
+            requestInputRoles request `shouldBe` Just ["system", "user"]
 
         it "streams callbacks before the response completes" do
             recorded <- newIORef []
@@ -91,6 +91,25 @@ spec = do
                             seen `shouldBe` Just ()
                             stopped <- timeout 2_000_000 (cancel worker)
                             stopped `shouldBe` Just ()
+
+        it "aborts a stalled streaming body instead of hanging forever" do
+            recorded <- newIORef []
+            serverRelease <- newEmptyMVar
+            let handler _ = pure (stalledStreamingResponse serverRelease)
+            (withMockGrokTimeout 1 recorded handler \options -> do
+                result <- timeout 5_000_000 $
+                    createResponseWith options
+                        (xaiCredential "token-a")
+                        (helloRequest "hi")
+                case result of
+                    Nothing ->
+                        expectationFailure
+                            "client hung on a stalled stream despite the timeout"
+                    Just (Left (ConnectionError _)) -> pure ()
+                    Just other ->
+                        expectationFailure
+                            ("expected a ConnectionError, got " <> show other))
+                `finally` putMVar serverRelease ()
 
     describe "retry boundaries" do
         it "reports a terminal stream failure after one request" do
@@ -273,11 +292,19 @@ withMockGrok
     -> (RecordedRequest -> IO Wai.Response)
     -> (ClientOptions -> IO a)
     -> IO a
-withMockGrok recorded handler action =
+withMockGrok = withMockGrokTimeout 10
+
+withMockGrokTimeout
+    :: Int
+    -> IORef [RecordedRequest]
+    -> (RecordedRequest -> IO Wai.Response)
+    -> (ClientOptions -> IO a)
+    -> IO a
+withMockGrokTimeout timeoutSecs recorded handler action =
     Warp.testWithApplication (pure app) \port ->
         action defaultClientOptions
             { baseUrl = "http://127.0.0.1:" <> show port <> "/v1"
-            , requestTimeoutSeconds = 10
+            , requestTimeoutSeconds = timeoutSecs
             }
   where
     app waiRequest respond = do
@@ -315,6 +342,19 @@ streamingResponse callbackSeen serverSawCallback =
             writeIORef serverSawCallback (maybe False (const True) seen)
             writeSse write (completedEvent "resp-stream" [])
             flush
+
+-- | Sends response headers and one SSE event, then stalls forever (until the
+-- test releases it). Models a connection that dies without FIN/RST mid-stream:
+-- headers arrive, so http-client's responseTimeout is satisfied, and only the
+-- body-read timeout can rescue the turn.
+stalledStreamingResponse :: MVar () -> Wai.Response
+stalledStreamingResponse release =
+    Wai.responseStream HTTP.status200
+        [("Content-Type", "text/event-stream")]
+        \write flush -> do
+            writeSse write (outputItemDone (assistantMessage "partial"))
+            flush
+            readMVar release
 
 cancellableStreamingResponse :: MVar () -> MVar () -> Wai.Response
 cancellableStreamingResponse callbackSeen serverRelease =
@@ -391,7 +431,7 @@ helloRequest prompt = defaultResponseCreateParams
     , instructions = Just "You are a test agent."
     , input = Just (ResponseInputText prompt)
     , tools = Just []
-    , reasoning = Just (ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing mempty)
+    , reasoning = Just (ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing)
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     }
 
@@ -407,26 +447,22 @@ extractAssistantText response = case
         [] -> Nothing
         values -> Just (Text.intercalate "\n" values)
 
-requestBodyObject :: RecordedRequest -> Maybe Aeson.Object
-requestBodyObject request = case Aeson.decode request.body of
-    Just (Aeson.Object object) -> Just object
-    _ -> Nothing
-
 requestModel :: RecordedRequest -> Maybe Text
-requestModel request = do
-    object <- requestBodyObject request
-    case KeyMap.lookup "model" object of
-        Just (Aeson.String model) -> Just model
-        _ -> Nothing
+requestModel request =
+    either (const Nothing) Just $
+        Json.decodeEither
+            (Json.object (Json.atKey "model" Json.text))
+            (LBS.toStrict request.body)
 
-inputRoles :: Aeson.Object -> [Text]
-inputRoles object = case KeyMap.lookup "input" object of
-    Just (Aeson.Array items) ->
-        [ role
-        | Aeson.Object item <- foldr (:) [] items
-        , Just (Aeson.String role) <- [KeyMap.lookup "role" item]
-        ]
-    _ -> []
+requestInputRoles :: RecordedRequest -> Maybe [Text]
+requestInputRoles request =
+    either (const Nothing) Just $
+        Json.decodeEither
+            (Json.object
+                (Json.atKey "input"
+                    (Json.list
+                        (Json.object (Json.atKey "role" Json.text)))))
+            (LBS.toStrict request.body)
 
 expectRight :: Show e => Either e a -> IO a
 expectRight = \case

@@ -92,6 +92,8 @@ jobs:
           find "$credential_home" -type d -exec chmod 755 {} +
           find "$credential_home" -type f -exec chmod 644 {} +
 
+          ./scripts/check-no-aeson-json-decode.sh
+
           "$nix_bin" flake check \
             --impure \
             --option sandbox relaxed \

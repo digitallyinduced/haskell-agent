@@ -9,8 +9,12 @@ module Agent.Responses.LoopBackend
     , responseTokenUsage
     , streamEventToLoopEvent
     , streamEventToLoopEventWithRawReasoning
+    , newStreamEventToLoopEvents
+    , toolArgumentActivityChunkChars
+    , runawayToolArgumentWarningChars
     , streamOutputObserved
     , hasRecoverableIncompleteOutput
+    , responseNeedsLoopContinuation
     , assistantTextFromResponse
     , toolResultToItem
     , withRequestInput
@@ -40,8 +44,8 @@ import Agent.Provider
     , TokenProvider
     , runWithTokenProvider
     )
-import Agent.Responses.StreamAssembly (responseFragmentHasOutput)
 import Agent.Responses.Types
+import Agent.Json (rawJsonFromEncoding)
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
@@ -49,16 +53,15 @@ import Agent.ToolDispatch
     )
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.ByteString (ByteString)
-import qualified Data.ByteString.Lazy as LBS
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
+import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, mapMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
-import Text.Printf (printf)
 
 -- | Adapt a stateless Responses transport to the provider-neutral loop.
 statelessResponsesBackend
@@ -82,12 +85,12 @@ statelessResponsesBackendWithRawReasoning
 statelessResponsesBackendWithRawReasoning showRawReasoning send getParams =
     Backend \history _previousResponseId inputs onEvent -> do
         baseParams <- getParams
+        projectEvent <- newStreamEventToLoopEvents showRawReasoning
         let newItems = turnInputsToItems inputs
             requestItems = history <> newItems
             request = withRequestInput baseParams requestItems
         result <- send request \event ->
-            mapM_ onEvent
-                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+            projectEvent event >>= mapM_ onEvent
         case result of
             Left err -> pure (Left err)
             Right response ->
@@ -175,7 +178,7 @@ stripResponsesLiteImageDetails = \case
             , status = message.status
             , phase = message.phase
             , passthrough = message.passthrough
-            , extraFields = message.extraFields
+
             }
     FunctionCallOutputItem callOutput ->
         FunctionCallOutputItem FunctionCallOutput
@@ -183,36 +186,25 @@ stripResponsesLiteImageDetails = \case
             , callId = callOutput.callId
             , name = callOutput.name
             , namespace = callOutput.namespace
-            , output = stripInputImageDetailValue callOutput.output
+            , provider = callOutput.provider
+            , output = callOutput.output
             , status = callOutput.status
-            , extraFields = callOutput.extraFields
+
             }
     CustomToolCallOutputItem callOutput ->
         CustomToolCallOutputItem CustomToolCallOutput
             { itemId = callOutput.itemId
             , callId = callOutput.callId
             , name = callOutput.name
-            , output = stripInputImageDetailValue callOutput.output
+            , output = callOutput.output
             , status = callOutput.status
-            , extraFields = callOutput.extraFields
+
             }
     item -> item
   where
     stripContentPart = \case
         InputImagePart{..} -> InputImagePart { detail = Nothing, .. }
         part -> part
-
-stripInputImageDetailValue :: Aeson.Value -> Aeson.Value
-stripInputImageDetailValue = \case
-    Aeson.Object object ->
-        let nested = KeyMap.map stripInputImageDetailValue object
-        in Aeson.Object $ case KeyMap.lookup (Key.fromText "type") nested of
-            Just (Aeson.String "input_image") ->
-                KeyMap.delete (Key.fromText "detail") nested
-            _ -> nested
-    Aeson.Array values ->
-        Aeson.Array (fmap stripInputImageDetailValue values)
-    value -> value
 
 -- Older local compaction snapshots accidentally persisted assistant summaries
 -- as input_text. Responses input accepts assistant history, but its content
@@ -227,25 +219,25 @@ normalizeRequestItem = \case
                 , content = case message.content of
                     MessageContentText text ->
                         MessageContentParts
-                            [OutputTextPart text Nothing Nothing KeyMap.empty]
+                            [OutputTextPart text Nothing Nothing]
                     MessageContentParts parts ->
                         MessageContentParts (map normalizeAssistantPart parts)
                 , role = message.role
                 , status = message.status
                 , phase = message.phase
                 , passthrough = message.passthrough
-                , extraFields = message.extraFields
+
                 }
     item -> item
 
 normalizeAssistantPart :: ResponseContentPart -> ResponseContentPart
 normalizeAssistantPart = \case
-    InputTextPart { text, extraFields } ->
+    InputTextPart { text } ->
         OutputTextPart
             { text
             , annotations = Nothing
             , logprobs = Nothing
-            , extraFields
+
             }
     part -> part
 
@@ -264,12 +256,12 @@ emptyAssistantFollowupItem :: ResponseItem
 emptyAssistantFollowupItem = MessageItem ResponseMessage
     { messageId = Nothing
     , content = MessageContentParts
-        [OutputTextPart "" Nothing Nothing KeyMap.empty]
+        [OutputTextPart "" Nothing Nothing]
     , role = RoleAssistant
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+
     }
 
 turnInputsToItems :: [TurnInput] -> [ResponseItem]
@@ -287,19 +279,19 @@ turnInputToItem = \case
 userMessageItem :: Text -> ResponseItem
 userMessageItem text = MessageItem ResponseMessage
     { messageId = Nothing
-    , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , content = MessageContentParts [InputTextPart text Nothing]
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+
     }
 
 multimodalFilesItem :: Text -> [ImageAttachment] -> [FileAttachment] -> ResponseItem
 multimodalFilesItem text images files = MessageItem ResponseMessage
     { messageId = Nothing
     , content = MessageContentParts
-        ( InputTextPart text Nothing KeyMap.empty
+        ( InputTextPart text Nothing
         : map imageAttachmentPart images
         <> map fileAttachmentPart files
         )
@@ -307,7 +299,7 @@ multimodalFilesItem text images files = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+
     }
 
 agentMessageItem :: InterAgentMessage -> ResponseItem
@@ -317,33 +309,32 @@ agentMessageItem message = AgentMessageItem ResponseAgentMessage
     , recipient = Just message.messageRecipient
     , content = agentMessageContent message
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+
     }
 
 agentMessageContent :: InterAgentMessage -> [ResponseContentPart]
 agentMessageContent message = case message.messageContent of
     PlainInterAgentContent _ ->
-        [InputTextPart (renderInterAgentMessage message) Nothing KeyMap.empty]
+        [InputTextPart (renderInterAgentMessage message) Nothing]
     EncryptedInterAgentContent encrypted ->
         [ InputTextPart
             (renderInterAgentMessageHeader message)
             Nothing
-            KeyMap.empty
-        , EncryptedContentPart encrypted KeyMap.empty
+        , EncryptedContentPart encrypted
         ]
 
 multimodalUserItem :: Text -> [ImageAttachment] -> ResponseItem
 multimodalUserItem text images = MessageItem ResponseMessage
     { messageId = Nothing
     , content = MessageContentParts
-        ( InputTextPart text Nothing KeyMap.empty
+        ( InputTextPart text Nothing
         : map imageAttachmentPart images
         )
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
+
     }
 
 imageAttachmentPart :: ImageAttachment -> ResponseContentPart
@@ -353,7 +344,7 @@ imageAttachmentPart ImageAttachment{imageMime, imageBytes} =
         , fileId = Nothing
         , imageUrl = Just (imageDataUrl imageMime imageBytes)
         , promptCacheBreakpoint = Nothing
-        , extraFields = KeyMap.empty
+
         }
 
 fileAttachmentPart :: FileAttachment -> ResponseContentPart
@@ -365,7 +356,7 @@ fileAttachmentPart FileAttachment{fileName, fileMime, fileBytes} =
         , fileUrl = Nothing
         , filename = fileName
         , promptCacheBreakpoint = Nothing
-        , extraFields = KeyMap.empty
+
         }
 
 imageDataUrl :: Text -> ByteString -> Text
@@ -379,17 +370,18 @@ toolResultToItem result = case result.callKind of
         , callId = result.callId
         , name = Nothing
         , namespace = Nothing
-        , output = Aeson.String result.output
+        , provider = Nothing
+        , output = rawJsonFromEncoding (Aeson.toEncoding result.output)
         , status = Nothing
-        , extraFields = KeyMap.empty
+
         }
     CustomCallKind -> CustomToolCallOutputItem CustomToolCallOutput
         { itemId = Nothing
         , callId = result.callId
         , name = Nothing
-        , output = Aeson.String result.output
+        , output = rawJsonFromEncoding (Aeson.toEncoding result.output)
         , status = Nothing
-        , extraFields = KeyMap.empty
+
         }
 
 responseToTurnOutput :: Response -> TurnOutput
@@ -399,30 +391,59 @@ responseToTurnOutput response = TurnOutput
     , assistantText = assistantTextFromResponse response
     , tokenUsage = responseTokenUsage response
     , completion = case response.status of
-        ResponseIncomplete -> TurnIncomplete
-            { incompleteReason =
-                maybe "unknown" (.reason) response.incompleteDetails
-            , incompleteReasoningTokens =
-                response.usage
-                    >>= (.outputTokensDetails)
-                    >>= (.reasoningTokens)
-            }
+        ResponseIncomplete
+            | hasContinuableReasoningOnlyOutput response -> TurnCompleted
+            | otherwise -> TurnIncomplete
+                { incompleteReason =
+                    maybe "unknown" (.reason) response.incompleteDetails
+                , incompleteReasoningTokens =
+                    response.usage
+                        >>= (.outputTokensDetails)
+                        >>= (.reasoningTokens)
+                }
         _ -> TurnCompleted
     }
 
--- | An incomplete response can still finish the turn when it already contains
--- executable tool calls or assistant text, or when it is a continuable
--- reasoning-only stop. @max_output_tokens@ during reasoning is handed to the
--- loop as an empty completion so it can continue the chain. Reasons such as
--- @content_filter@ stay transport failures, as do completely empty incomplete
--- responses, so a replay-safe fallback can still run.
+-- | Whether this successful response requires an empty continuation on its
+-- committed response chain.
+responseNeedsLoopContinuation :: Response -> Bool
+responseNeedsLoopContinuation response = case response.status of
+    ResponseCompleted ->
+        not (responseHasToolCalls response)
+            && not (responseHasVisibleAssistantText response)
+    ResponseIncomplete -> hasContinuableReasoningOnlyOutput response
+    _ -> False
+
+-- | Whether the transport should retain an incomplete response instead of
+-- converting it to an 'ApiError'. Partial tool/text output is retained so the
+-- committed response can be reported without replaying it, but remains
+-- 'TurnIncomplete'. A reasoning-only @max_output_tokens@ stop instead becomes
+-- an empty completion so the loop can continue the response chain. Reasons
+-- such as @content_filter@ stay transport failures, as do completely empty
+-- incomplete responses, so a replay-safe fallback can still run.
 hasRecoverableIncompleteOutput :: Response -> Bool
 hasRecoverableIncompleteOutput response =
-    not (null (mapMaybe responseItemToToolCall response.output))
-        || maybe False (not . Text.null . Text.strip)
-            (assistantTextFromResponse response)
-        || (any isReasoningOutput response.output
-            && isContinuableIncompleteReason response)
+    responseHasToolCalls response
+        || responseHasVisibleAssistantText response
+        || hasContinuableReasoningOnlyOutput response
+
+-- A reasoning-only max-output stop is an intermediate model sample. Mark it
+-- completed at the loop boundary so the core loop continues from its committed
+-- response id. Partial text or tool calls remain terminal incomplete output:
+-- executing either could act on a truncated response.
+hasContinuableReasoningOnlyOutput :: Response -> Bool
+hasContinuableReasoningOnlyOutput response =
+    not (null response.output)
+        && all isReasoningOutput response.output
+        && isContinuableIncompleteReason response
+
+responseHasToolCalls :: Response -> Bool
+responseHasToolCalls =
+    not . null . mapMaybe responseItemToToolCall . (.output)
+
+responseHasVisibleAssistantText :: Response -> Bool
+responseHasVisibleAssistantText =
+    maybe False (not . Text.null . Text.strip) . assistantTextFromResponse
 
 isReasoningOutput :: ResponseItem -> Bool
 isReasoningOutput = \case
@@ -475,92 +496,6 @@ responseItemToToolCall = \case
         }
     _ -> Nothing
 
-data CodexRateLimitsPayload = CodexRateLimitsPayload
-    { rateLimits :: !(Maybe CodexRateLimitDetails) }
-
-data CodexRateLimitDetails = CodexRateLimitDetails
-    { allowed :: !(Maybe Bool)
-    , limitReached :: !(Maybe Bool)
-    , primary :: !(Maybe CodexRateLimitWindow)
-    , secondary :: !(Maybe CodexRateLimitWindow)
-    }
-
-data CodexRateLimitWindow = CodexRateLimitWindow
-    { usedPercent :: !Double }
-
-instance Aeson.FromJSON CodexRateLimitsPayload where
-    parseJSON = Aeson.withObject "Codex rate limits payload" \object ->
-        CodexRateLimitsPayload
-            <$> object Aeson..:? "rate_limits"
-
-instance Aeson.FromJSON CodexRateLimitDetails where
-    parseJSON = Aeson.withObject "Codex rate limit details" \object ->
-        CodexRateLimitDetails
-            <$> object Aeson..:? "allowed"
-            <*> object Aeson..:? "limit_reached"
-            <*> object Aeson..:? "primary"
-            <*> object Aeson..:? "secondary"
-
-instance Aeson.FromJSON CodexRateLimitWindow where
-    parseJSON = Aeson.withObject "Codex rate limit window" \object ->
-        CodexRateLimitWindow
-            <$> object Aeson..: "used_percent"
-
-codexRateLimitsWarning :: Aeson.Object -> Maybe Text
-codexRateLimitsWarning fields =
-    case Aeson.fromJSON (Aeson.Object fields)
-        :: Aeson.Result CodexRateLimitsPayload of
-        Aeson.Error _ -> Nothing
-        Aeson.Success payload -> do
-            details <- payload.rateLimits
-            let reportedWindows =
-                    [ ("primary", window)
-                    | window <- maybeToList details.primary
-                    ]
-                    <> [ ("secondary", window)
-                       | window <- maybeToList details.secondary
-                       ]
-                lowWindows =
-                    [ (label, window)
-                    | (label, window) <- reportedWindows
-                    , window.usedPercent >= 90
-                    ]
-                reached =
-                    details.limitReached == Just True
-                        || details.allowed == Just False
-                        || any ((>= 100) . (.usedPercent) . snd) reportedWindows
-            if not reached && null lowWindows
-                then Nothing
-                else
-                    let headline
-                            | reached = "Codex usage limit reached"
-                            | otherwise = "Codex usage is low"
-                        windows =
-                            if null lowWindows && reached
-                                then reportedWindows
-                                else lowWindows
-                        detail = case windows of
-                            [] -> ""
-                            values ->
-                                ": "
-                                    <> Text.intercalate " · "
-                                        (map formatRateLimitWindow values)
-                    in Just
-                        (headline <> detail
-                            <> ". Check /usage for reset details.")
-
-formatRateLimitWindow :: (Text, CodexRateLimitWindow) -> Text
-formatRateLimitWindow (label, window) =
-    label <> " " <> formatPercent remaining <> "% left"
-  where
-    remaining = max 0 (min 100 (100 - window.usedPercent))
-
-formatPercent :: Double -> Text
-formatPercent value
-    | abs (value - fromIntegral (round value :: Int)) < 0.05 =
-        Text.pack (show (round value :: Int))
-    | otherwise = Text.pack (printf "%.1f" value)
-
 encryptedCollaborationArguments :: Text -> Maybe [Text] -> Bool
 encryptedCollaborationArguments toolName encryptedFunctionArgs =
     toolName `elem`
@@ -605,26 +540,15 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
         { summaryIndex = Just index }
         | index > 0 ->
             Just (ReasoningDelta "\n\n")
+    ResponseCodexRateLimitsEvent { rateLimits = limits } ->
+            codexRateLimitsWarning limits
     OtherResponseStreamEvent
-        { otherEventType
-        , eventExtraFields
-        }
-        | streamEventTypeText otherEventType == unparsedStreamEventTypeText ->
-            Just (WarningRaised (unparsedStreamFrameWarning eventExtraFields))
-    OtherResponseStreamEvent
-        { otherEventType = StreamEventUnknown eventType
-        , eventExtraFields
-        } ->
-            Just
-                (ActivityUpdated
-                    (unknownProviderEventWarning eventType eventExtraFields))
-    OtherResponseStreamEvent
-        { otherEventType = EventCodexRateLimits
-        , eventExtraFields
-        } ->
-            WarningRaised <$> codexRateLimitsWarning eventExtraFields
-    OtherResponseStreamEvent { otherEventType, eventExtraFields } ->
-        case extraDeltaText eventExtraFields of
+        { otherEventType = StreamEventUnknown eventType } ->
+            Just (ActivityUpdated
+                ("Warning: unsupported provider event " <> eventType))
+    OtherResponseStreamEvent { otherEventType, eventDelta } ->
+        case eventDelta of
+            Just text | Text.null text -> Nothing
             Just text -> case otherEventType of
                 EventOutputTextDelta -> Just (TextDelta text)
                 EventReasoningTextDelta
@@ -635,6 +559,199 @@ streamEventToLoopEventWithRawReasoning showRawReasoning = \case
             Nothing -> Nothing
     _ -> Nothing
 
+codexRateLimitsWarning :: CodexRateLimits -> Maybe LoopEvent
+codexRateLimitsWarning limits =
+    if reached || not (null lowWindows)
+        then Just (WarningRaised
+            (headline <> foldMap formatWindows (nonEmpty lowWindows)))
+        else Nothing
+  where
+    windows =
+        [ ("primary", used)
+        | used <- maybeToList limits.primaryUsedPercent
+        ]
+        <> [ ("secondary", used)
+           | used <- maybeToList limits.secondaryUsedPercent
+           ]
+    lowWindows = filter ((>= 90) . snd) windows
+    reached =
+        limits.limitReached == Just True
+            || limits.allowed == Just False
+            || any ((>= 100) . snd) windows
+    headline
+        | reached =
+            "Codex usage limit reached. Check /usage for reset details."
+        | otherwise = "Codex usage is low"
+    nonEmpty [] = Nothing
+    nonEmpty values = Just values
+    formatWindows values =
+        ": " <> Text.intercalate " · "
+            [ label <> " " <> formatRemaining (max 0 (100 - used))
+                <> "% left"
+            | (label, used) <- values
+            ]
+            <> ". Check /usage for reset details."
+    formatRemaining value
+        | value == fromIntegral (round value :: Int) =
+            Text.pack (show (round value :: Int))
+        | otherwise = Text.pack (show value)
+
+-- | Stateful projection of one streamed response attempt into loop events.
+--
+-- On top of 'streamEventToLoopEventWithRawReasoning' this surfaces streamed
+-- tool-call arguments as live activity. Argument deltas map to no visible
+-- loop event on their own, so a model writing a large tool call — or stuck in
+-- a degenerate repetition loop inside one (observed as multi-minute
+-- 128k-output-token samples whose arguments repeat @\\u0000@ or a hallucinated
+-- path segment) — previously looked like endless silent reasoning until the
+-- provider's output-token cap ended the turn.
+--
+-- Build one projector per response attempt so counters describe a single
+-- provider sample.
+newStreamEventToLoopEvents
+    :: Bool
+    -> IO (ResponseStreamEvent -> IO [LoopEvent])
+newStreamEventToLoopEvents showRawReasoning = do
+    stateRef <- newIORef emptyToolArgumentStreamState
+    pure \event -> do
+        argumentEvents <- atomicModifyIORef' stateRef \state ->
+            toolArgumentStreamStep event state
+        pure $
+            maybeToList
+                (streamEventToLoopEventWithRawReasoning showRawReasoning event)
+                <> argumentEvents
+
+-- | Emit an updated argument-streaming activity after this many additional
+-- streamed argument characters.
+toolArgumentActivityChunkChars :: Int
+toolArgumentActivityChunkChars = 8192
+
+-- | Warn after every additional this many streamed argument characters in a
+-- single response. The largest legitimate call observed in practice is well
+-- under half of this; degenerate repetition loops run to the provider's
+-- output-token cap (hundreds of thousands of characters).
+runawayToolArgumentWarningChars :: Int
+runawayToolArgumentWarningChars = 100000
+
+data ToolArgumentStreamState = ToolArgumentStreamState
+    { toolNamesById :: !(Map Text Text)
+    , currentToolName :: !(Maybe Text)
+    , streamedArgumentChars :: !Int
+    , announcedArgumentChars :: !Int
+    , warnedArgumentChars :: !Int
+    }
+
+emptyToolArgumentStreamState :: ToolArgumentStreamState
+emptyToolArgumentStreamState = ToolArgumentStreamState
+    { toolNamesById = Map.empty
+    , currentToolName = Nothing
+    , streamedArgumentChars = 0
+    , announcedArgumentChars = 0
+    , warnedArgumentChars = 0
+    }
+
+toolArgumentStreamStep
+    :: ResponseStreamEvent
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+toolArgumentStreamStep event state = case event of
+    ResponseOutputItemAddedEvent { item = FunctionCallItem call } ->
+        announceToolCall call.name
+            (maybeToList call.itemId <> [call.callId])
+            state
+    ResponseOutputItemAddedEvent { item = CustomToolCallItem call } ->
+        announceToolCall call.name
+            (maybeToList call.itemId <> [call.callId])
+            state
+    ResponseFunctionCallArgumentsDeltaEvent { delta = Just deltaText, streamItemId } ->
+        countToolArgumentChars
+            (resolveToolName [streamItemId] state)
+            (Text.length deltaText)
+            state
+    ResponseCustomToolInputDeltaEvent
+        { delta = Just deltaText, streamItemId, streamCallId } ->
+            countToolArgumentChars
+                (resolveToolName [streamItemId, streamCallId] state)
+                (Text.length deltaText)
+                state
+    _ -> (state, [])
+
+announceToolCall
+    :: Text
+    -> [Text]
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+announceToolCall name identities state =
+    ( state
+        { toolNamesById =
+            foldr (\identity -> Map.insert identity name)
+                state.toolNamesById
+                identities
+        , currentToolName = Just name
+        }
+    , [ActivityUpdated (writingToolCallActivity name Nothing)]
+    )
+
+resolveToolName :: [Maybe Text] -> ToolArgumentStreamState -> Text
+resolveToolName identities state =
+    fromMaybe (fromMaybe "tool" state.currentToolName) $
+        firstJust
+            [ Map.lookup identity state.toolNamesById
+            | Just identity <- identities
+            ]
+  where
+    firstJust = foldr (<|>) Nothing
+
+countToolArgumentChars
+    :: Text
+    -> Int
+    -> ToolArgumentStreamState
+    -> (ToolArgumentStreamState, [LoopEvent])
+countToolArgumentChars name deltaChars state =
+    let total = state.streamedArgumentChars + deltaChars
+        announce =
+            total - state.announcedArgumentChars
+                >= toolArgumentActivityChunkChars
+        warn =
+            total - state.warnedArgumentChars
+                >= runawayToolArgumentWarningChars
+    in
+    ( state
+        { streamedArgumentChars = total
+        , announcedArgumentChars =
+            if announce then total else state.announcedArgumentChars
+        , warnedArgumentChars =
+            if warn then total else state.warnedArgumentChars
+        }
+    , [ ActivityUpdated (writingToolCallActivity name (Just total))
+      | announce
+      ]
+        <> [ WarningRaised (runawayToolArgumentWarning name total)
+           | warn
+           ]
+    )
+
+writingToolCallActivity :: Text -> Maybe Int -> Text
+writingToolCallActivity name total =
+    "Writing " <> name <> " call…"
+        <> foldMap
+            (\chars -> " (" <> formatCharCount chars <> ")")
+            total
+
+runawayToolArgumentWarning :: Text -> Int -> Text
+runawayToolArgumentWarning name total =
+    "The model has streamed "
+        <> formatCharCount total
+        <> " of "
+        <> name
+        <> " arguments in one response; it may be stuck in a repetition loop."
+
+formatCharCount :: Int -> Text
+formatCharCount chars
+    | chars >= 10000 =
+        Text.pack (show (chars `div` 1000)) <> "k chars"
+    | otherwise = Text.pack (show chars) <> " chars"
+
 -- | Whether a stream event proves the provider has begun producing response
 -- output. These events make replay unsafe even when they do not map to a
 -- visible loop delta.
@@ -643,9 +760,9 @@ streamOutputObserved event = case event of
     ResponseCompletedEvent{} -> True
     ResponseDoneEvent{} -> True
     ResponseIncompleteEvent { responseValue } ->
-        responseFragmentHasOutput responseValue
+        not (null responseValue.output)
     ResponseFailedEvent { responseValue } ->
-        responseFragmentHasOutput responseValue
+        not (null responseValue.output)
     ResponseOutputItemAddedEvent{} -> True
     ResponseOutputItemDoneEvent{} -> True
     ResponseFunctionCallArgumentsDeltaEvent{} -> True
@@ -660,34 +777,3 @@ streamOutputObserved event = case event of
     _ ->
         responseStreamEventType event /= EventCodexRateLimits
             && isJust (streamEventToLoopEvent event)
-
-unknownProviderEventWarning :: Text -> Aeson.Object -> Text
-unknownProviderEventWarning eventType extras =
-    "Warning: unsupported provider event "
-        <> eventType
-        <> foldMap (": " <>) (objectPreview extras)
-
-unparsedStreamFrameWarning :: Aeson.Object -> Text
-unparsedStreamFrameWarning extras =
-    "Codex websocket dropped an unparsed frame"
-        <> foldMap (": " <>) (nonEmptyText extras "error")
-        <> foldMap (" payload=" <>) (nonEmptyText extras "payload")
-
-objectPreview :: Aeson.Object -> Maybe Text
-objectPreview extras
-    | KeyMap.null extras = Nothing
-    | otherwise =
-        Just
-            . Text.take 500
-            . Text.decodeUtf8Lenient
-            . LBS.toStrict
-            . Aeson.encode
-            $ Aeson.Object extras
-
-extraDeltaText :: Aeson.Object -> Maybe Text
-extraDeltaText extras = nonEmptyText extras "delta" <|> nonEmptyText extras "text"
-
-nonEmptyText :: Aeson.Object -> Text -> Maybe Text
-nonEmptyText extras key = case KeyMap.lookup (Key.fromText key) extras of
-    Just (Aeson.String text) | not (Text.null text) -> Just text
-    _ -> Nothing

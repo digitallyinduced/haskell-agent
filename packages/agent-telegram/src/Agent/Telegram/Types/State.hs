@@ -16,17 +16,22 @@ module Agent.Telegram.Types.State
     , insertPendingAction
     , enqueuePendingAction
     , deletePendingAction
+    , telegramStateDecoder
     ) where
 
-import Agent.Telegram.Types.Wire (TelegramMedia, TelegramUser(..), TelegramVoice)
+import Agent.Json (rawJsonBytes, rawJsonDecoder)
+import qualified Agent.Json.Decode as Hermes
+import Agent.Telegram.Types.Wire
+    ( TelegramMedia
+    , TelegramUser(..)
+    , TelegramVoice
+    , telegramMediaDecoder
+    , telegramUserDecoder
+    , telegramVoiceDecoder
+    )
 import Data.Aeson
-    ( FromJSON(..)
-    , ToJSON(..)
+    ( ToJSON(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
 import qualified Data.Map.Strict as Map
@@ -58,14 +63,18 @@ instance ToJSON PendingChatAction where
             , "leave" .= pending
             ]
 
-instance FromJSON PendingChatAction where
-    parseJSON = withObject "PendingChatAction" \o -> do
-        kind <- o .: "kind"
+pendingChatActionDecoder :: Hermes.Decoder PendingChatAction
+pendingChatActionDecoder = Hermes.object do
+        kind <- Hermes.atKey "kind" Hermes.text
         case (kind :: Text) of
-            "reply" -> DeliverReply <$> o .: "reply"
-            "turn" -> RunPendingTurn <$> o .: "turn"
-            "media_turn" -> RunPendingMediaTurn <$> o .: "mediaTurn"
-            "leave" -> LeaveUnauthorizedChat <$> o .: "leave"
+            "reply" -> DeliverReply
+                <$> Hermes.atKey "reply" telegramPendingReplyDecoder
+            "turn" -> RunPendingTurn
+                <$> Hermes.atKey "turn" telegramPendingTurnDecoder
+            "media_turn" -> RunPendingMediaTurn
+                <$> Hermes.atKey "mediaTurn" telegramPendingMediaTurnDecoder
+            "leave" -> LeaveUnauthorizedChat
+                <$> Hermes.atKey "leave" telegramPendingLeaveDecoder
             _ -> fail ("unknown pending Telegram action: " <> Text.unpack kind)
 
 data TelegramChatKey = TelegramChatKey
@@ -79,9 +88,11 @@ instance ToJSON TelegramChatKey where
         , "messageThreadId" .= key.messageThreadId
         ]
 
-instance FromJSON TelegramChatKey where
-    parseJSON = withObject "TelegramChatKey" \o ->
-        TelegramChatKey <$> o .: "chatId" <*> o .:? "messageThreadId"
+telegramChatKeyDecoder :: Hermes.Decoder TelegramChatKey
+telegramChatKeyDecoder = Hermes.object $
+    TelegramChatKey
+        <$> Hermes.atKey "chatId" integerDecoder
+        <*> Hermes.optionalKey "messageThreadId" integerDecoder
 
 data TelegramBinding = TelegramBinding
     { bindingChat :: !TelegramChatKey
@@ -94,9 +105,11 @@ instance ToJSON TelegramBinding where
         , "sessionId" .= binding.bindingSessionId
         ]
 
-instance FromJSON TelegramBinding where
-    parseJSON = withObject "TelegramBinding" \o ->
-        TelegramBinding <$> o .: "chat" <*> o .: "sessionId"
+telegramBindingDecoder :: Hermes.Decoder TelegramBinding
+telegramBindingDecoder = Hermes.object $
+    TelegramBinding
+        <$> Hermes.atKey "chat" telegramChatKeyDecoder
+        <*> Hermes.atKey "sessionId" Hermes.text
 
 data TelegramState = TelegramState
     { telegramStateVersion :: !Int
@@ -166,40 +179,54 @@ instance ToJSON TelegramState where
             ]
         ]
 
-instance FromJSON TelegramState where
-    parseJSON = withObject "TelegramState" \o -> do
-        storedVersion <- o .:? "version" .!= 1
+telegramStateDecoder :: Hermes.Decoder TelegramState
+telegramStateDecoder = Hermes.object do
+        storedVersion <- defaultField "version" 1 Hermes.int
         if storedVersion `elem` [1 :: Int, 2]
             then pure ()
             else fail
                 ("unsupported Telegram state version: "
                     <> show storedVersion)
-        nextUpdateId <- o .:? "nextUpdateId"
-        storedBindings <- o .:? "bindings" .!= ([] :: [TelegramBinding])
-        pendingTurns <- o .:? "pendingTurns" .!= ([] :: [TelegramPendingTurn])
-        pendingReplies <- o .:? "pendingReplies" .!= ([] :: [TelegramPendingReply])
+        nextUpdateId <- Hermes.optionalKey "nextUpdateId" integerDecoder
+        storedBindings <- defaultField "bindings" []
+            (Hermes.list telegramBindingDecoder)
+        pendingTurns <- defaultField "pendingTurns" []
+            (Hermes.list telegramPendingTurnDecoder)
+        pendingReplies <- defaultField "pendingReplies" []
+            (Hermes.list telegramPendingReplyDecoder)
         pendingMediaTurns <-
-            o .:? "pendingMediaTurns" .!= ([] :: [TelegramPendingMediaTurn])
+            defaultField "pendingMediaTurns" []
+                (Hermes.list telegramPendingMediaTurnDecoder)
         pendingLeaves <-
-            o .:? "pendingLeaves" .!= ([] :: [TelegramPendingLeave])
-        storedAuthorized <- o .:? "authorizedGroupChats"
+            defaultField "pendingLeaves" []
+                (Hermes.list telegramPendingLeaveDecoder)
+        storedAuthorized <- Hermes.optionalKey "authorizedGroupChats"
+            (Hermes.list integerDecoder)
         storedCallbacks <-
-            o .:? "pendingCallbacks" .!= ([] :: [TelegramPendingCallback])
+            defaultField "pendingCallbacks" []
+                (Hermes.list telegramPendingCallbackDecoder)
         storedCallbackBindings <-
-            o .:? "callbackBindings" .!= ([] :: [TelegramCallbackBinding])
+            defaultField "callbackBindings" []
+                (Hermes.list telegramCallbackBindingDecoder)
         storedRetries <-
-            o .:? "retryMetadata" .!= ([] :: [(Text, TelegramRetryMetadata)])
+            defaultField "retryMetadata" []
+                (Hermes.list (pairDecoder Hermes.text telegramRetryMetadataDecoder))
         storedDeliveryCheckpoints <-
-            o .:? "deliveryCheckpoints" .!= ([] :: [(Text, Int)])
-        deadLetters <- o .:? "deadLetters" .!= []
+            defaultField "deliveryCheckpoints" []
+                (Hermes.list (pairDecoder Hermes.text Hermes.int))
+        deadLetters <- defaultField "deadLetters" []
+            (Hermes.list telegramDeadLetterDecoder)
         outboundMessages <-
-            o .:? "outboundMessages" .!= ([] :: [TelegramOutboundMessages])
+            defaultField "outboundMessages" []
+                (Hermes.list telegramOutboundMessagesDecoder)
         storedAllowedUsers <-
-            o .:? "allowedUserIds" .!= ([] :: [Integer])
+            defaultField "allowedUserIds" [] (Hermes.list integerDecoder)
         storedSeenUsers <-
-            o .:? "seenTelegramUsers" .!= ([] :: [TelegramUser])
+            defaultField "seenTelegramUsers" []
+                (Hermes.list telegramUserDecoder)
         storedSeenByChat <-
-            o .:? "seenUsersByChat" .!= ([] :: [TelegramSeenChatUsers])
+            defaultField "seenUsersByChat" []
+                (Hermes.list telegramSeenChatUsersDecoder)
         let bindings =
                 foldr
                     (\binding ->
@@ -269,9 +296,11 @@ instance ToJSON TelegramSeenChatUsers where
         , "userIds" .= seen.seenChatUserIds
         ]
 
-instance FromJSON TelegramSeenChatUsers where
-    parseJSON = withObject "TelegramSeenChatUsers" \o ->
-        TelegramSeenChatUsers <$> o .: "chatId" <*> (o .:? "userIds" .!= [])
+telegramSeenChatUsersDecoder :: Hermes.Decoder TelegramSeenChatUsers
+telegramSeenChatUsersDecoder = Hermes.object $
+    TelegramSeenChatUsers
+        <$> Hermes.atKey "chatId" integerDecoder
+        <*> defaultField "userIds" [] (Hermes.list integerDecoder)
 
 data TelegramOutboundMessages = TelegramOutboundMessages
     { outboundChat :: !TelegramChatKey
@@ -284,9 +313,11 @@ instance ToJSON TelegramOutboundMessages where
         , "messageIds" .= messages.outboundIds
         ]
 
-instance FromJSON TelegramOutboundMessages where
-    parseJSON = withObject "TelegramOutboundMessages" \o ->
-        TelegramOutboundMessages <$> o .: "chat" <*> o .:? "messageIds" .!= []
+telegramOutboundMessagesDecoder :: Hermes.Decoder TelegramOutboundMessages
+telegramOutboundMessagesDecoder = Hermes.object $
+    TelegramOutboundMessages
+        <$> Hermes.atKey "chat" telegramChatKeyDecoder
+        <*> defaultField "messageIds" [] (Hermes.list integerDecoder)
 
 data TelegramPendingTurn = TelegramPendingTurn
     { pendingTurnUpdateId :: !Integer
@@ -305,14 +336,14 @@ instance ToJSON TelegramPendingTurn where
         , "voice" .= pending.pendingTurnVoice
         ]
 
-instance FromJSON TelegramPendingTurn where
-    parseJSON = withObject "TelegramPendingTurn" \o ->
+telegramPendingTurnDecoder :: Hermes.Decoder TelegramPendingTurn
+telegramPendingTurnDecoder = Hermes.object $
         TelegramPendingTurn
-            <$> o .: "updateId"
-            <*> o .:? "messageId" .!= 0
-            <*> o .: "chat"
-            <*> o .: "text"
-            <*> o .:? "voice"
+            <$> Hermes.atKey "updateId" integerDecoder
+            <*> defaultField "messageId" 0 integerDecoder
+            <*> Hermes.atKey "chat" telegramChatKeyDecoder
+            <*> Hermes.atKey "text" Hermes.text
+            <*> Hermes.optionalKey "voice" telegramVoiceDecoder
 
 data TelegramPendingReply = TelegramPendingReply
     { pendingUpdateId :: !Integer
@@ -329,13 +360,13 @@ instance ToJSON TelegramPendingReply where
         , "text" .= pending.pendingText
         ]
 
-instance FromJSON TelegramPendingReply where
-    parseJSON = withObject "TelegramPendingReply" \o ->
+telegramPendingReplyDecoder :: Hermes.Decoder TelegramPendingReply
+telegramPendingReplyDecoder = Hermes.object $
         TelegramPendingReply
-            <$> o .: "updateId"
-            <*> o .: "chat"
-            <*> o .:? "replyToMessageId"
-            <*> o .: "text"
+            <$> Hermes.atKey "updateId" integerDecoder
+            <*> Hermes.atKey "chat" telegramChatKeyDecoder
+            <*> Hermes.optionalKey "replyToMessageId" integerDecoder
+            <*> Hermes.atKey "text" Hermes.text
 
 data TelegramPendingMediaTurn = TelegramPendingMediaTurn
     { pendingMediaUpdateId :: !Integer
@@ -360,17 +391,17 @@ instance ToJSON TelegramPendingMediaTurn where
         , "mediaGroupId" .= pending.pendingMediaGroupId
         ]
 
-instance FromJSON TelegramPendingMediaTurn where
-    parseJSON = withObject "TelegramPendingMediaTurn" \o ->
+telegramPendingMediaTurnDecoder :: Hermes.Decoder TelegramPendingMediaTurn
+telegramPendingMediaTurnDecoder = Hermes.object $
         TelegramPendingMediaTurn
-            <$> o .: "updateId"
-            <*> o .:? "messageId" .!= 0
-            <*> o .: "chat"
-            <*> o .:? "userId" .!= 0
-            <*> o .:? "text" .!= ""
-            <*> o .:? "attachments" .!= []
-            <*> o .:? "edited" .!= False
-            <*> o .:? "mediaGroupId"
+            <$> Hermes.atKey "updateId" integerDecoder
+            <*> defaultField "messageId" 0 integerDecoder
+            <*> Hermes.atKey "chat" telegramChatKeyDecoder
+            <*> defaultField "userId" 0 integerDecoder
+            <*> defaultField "text" "" Hermes.text
+            <*> defaultField "attachments" [] (Hermes.list telegramMediaDecoder)
+            <*> defaultField "edited" False Hermes.bool
+            <*> Hermes.optionalKey "mediaGroupId" Hermes.text
 
 data TelegramPendingLeave = TelegramPendingLeave
     { pendingLeaveUpdateId :: !Integer
@@ -383,11 +414,11 @@ instance ToJSON TelegramPendingLeave where
         , "chat" .= pending.pendingLeaveChat
         ]
 
-instance FromJSON TelegramPendingLeave where
-    parseJSON = withObject "TelegramPendingLeave" \o ->
+telegramPendingLeaveDecoder :: Hermes.Decoder TelegramPendingLeave
+telegramPendingLeaveDecoder = Hermes.object $
         TelegramPendingLeave
-            <$> o .: "updateId"
-            <*> o .: "chat"
+            <$> Hermes.atKey "updateId" integerDecoder
+            <*> Hermes.atKey "chat" telegramChatKeyDecoder
 
 data TelegramPendingCallback = TelegramPendingCallback
     { pendingCallbackUpdateId :: !Integer
@@ -408,15 +439,15 @@ instance ToJSON TelegramPendingCallback where
         , "data" .= pending.pendingCallbackData
         ]
 
-instance FromJSON TelegramPendingCallback where
-    parseJSON = withObject "TelegramPendingCallback" \o ->
+telegramPendingCallbackDecoder :: Hermes.Decoder TelegramPendingCallback
+telegramPendingCallbackDecoder = Hermes.object $
         TelegramPendingCallback
-            <$> o .: "updateId"
-            <*> o .: "queryId"
-            <*> o .: "userId"
-            <*> o .:? "chat"
-            <*> o .:? "messageId"
-            <*> o .: "data"
+            <$> Hermes.atKey "updateId" integerDecoder
+            <*> Hermes.atKey "queryId" Hermes.text
+            <*> Hermes.atKey "userId" integerDecoder
+            <*> Hermes.optionalKey "chat" telegramChatKeyDecoder
+            <*> Hermes.optionalKey "messageId" integerDecoder
+            <*> Hermes.atKey "data" Hermes.text
 
 data TelegramRetryMetadata = TelegramRetryMetadata
     { retryAttempts :: !Int
@@ -431,12 +462,12 @@ instance ToJSON TelegramRetryMetadata where
         , "lastError" .= retry.retryLastError
         ]
 
-instance FromJSON TelegramRetryMetadata where
-    parseJSON = withObject "TelegramRetryMetadata" \o ->
+telegramRetryMetadataDecoder :: Hermes.Decoder TelegramRetryMetadata
+telegramRetryMetadataDecoder = Hermes.object $
         TelegramRetryMetadata
-            <$> o .:? "attempts" .!= 0
-            <*> o .:? "nextAt"
-            <*> o .:? "lastError"
+            <$> defaultField "attempts" 0 Hermes.int
+            <*> Hermes.optionalKey "nextAt" Hermes.utcTime
+            <*> Hermes.optionalKey "lastError" Hermes.text
 
 data TelegramDeadLetter = TelegramDeadLetter
     { deadLetterUpdateId :: !Integer
@@ -455,14 +486,14 @@ instance ToJSON TelegramDeadLetter where
         , "action" .= dead.deadLetterAction
         ]
 
-instance FromJSON TelegramDeadLetter where
-    parseJSON = withObject "TelegramDeadLetter" \o ->
+telegramDeadLetterDecoder :: Hermes.Decoder TelegramDeadLetter
+telegramDeadLetterDecoder = Hermes.object $
         TelegramDeadLetter
-            <$> o .: "updateId"
-            <*> o .:? "chat"
-            <*> o .: "error"
-            <*> o .: "failedAt"
-            <*> o .:? "action"
+            <$> Hermes.atKey "updateId" integerDecoder
+            <*> Hermes.optionalKey "chat" telegramChatKeyDecoder
+            <*> Hermes.atKey "error" Hermes.text
+            <*> Hermes.atKey "failedAt" Hermes.utcTime
+            <*> Hermes.optionalKey "action" pendingChatActionDecoder
 
 data TelegramCallbackBinding = TelegramCallbackBinding
     { callbackBindingData :: !Text
@@ -489,18 +520,18 @@ instance ToJSON TelegramCallbackBinding where
         , "consumed" .= binding.callbackBindingConsumed
         ]
 
-instance FromJSON TelegramCallbackBinding where
-    parseJSON = withObject "TelegramCallbackBinding" \o ->
+telegramCallbackBindingDecoder :: Hermes.Decoder TelegramCallbackBinding
+telegramCallbackBindingDecoder = Hermes.object $
         TelegramCallbackBinding
-            <$> o .: "data"
-            <*> o .: "requestId"
-            <*> o .: "chat"
-            <*> o .: "userId"
-            <*> o .:? "messageId"
-            <*> o .: "bridgeDirectory"
-            <*> o .: "value"
-            <*> o .: "expiresAt"
-            <*> o .:? "consumed" .!= False
+            <$> Hermes.atKey "data" Hermes.text
+            <*> Hermes.atKey "requestId" Hermes.text
+            <*> Hermes.atKey "chat" telegramChatKeyDecoder
+            <*> Hermes.atKey "userId" integerDecoder
+            <*> Hermes.optionalKey "messageId" integerDecoder
+            <*> (Text.unpack <$> Hermes.atKey "bridgeDirectory" Hermes.text)
+            <*> Hermes.atKey "value" Hermes.text
+            <*> Hermes.atKey "expiresAt" Hermes.utcTime
+            <*> defaultField "consumed" False Hermes.bool
 
 data PendingChatAction
     = DeliverReply !TelegramPendingReply
@@ -508,6 +539,33 @@ data PendingChatAction
     | RunPendingMediaTurn !TelegramPendingMediaTurn
     | LeaveUnauthorizedChat !TelegramPendingLeave
     deriving (Eq, Show)
+
+
+defaultField
+    :: Text
+    -> a
+    -> Hermes.Decoder a
+    -> Hermes.FieldsDecoder a
+defaultField key fallback decoder =
+    Hermes.defaultKey fallback key decoder
+
+integerDecoder :: Hermes.Decoder Integer
+integerDecoder = fromIntegral <$> Hermes.int
+
+pairDecoder
+    :: Hermes.Decoder a
+    -> Hermes.Decoder b
+    -> Hermes.Decoder (a, b)
+pairDecoder first second =
+    rawJsonDecoder >>= \raw ->
+        case Hermes.decodeEither
+                ((,)
+                    <$> Hermes.atPointer "/0" first
+                    <*> Hermes.atPointer "/1" second)
+                (rawJsonBytes raw) of
+            Left err -> fail
+                (Text.unpack (Hermes.jsonErrorMessage err))
+            Right pair -> pure pair
 
 pendingActionUpdateId :: PendingChatAction -> Integer
 pendingActionUpdateId = \case

@@ -6,12 +6,12 @@ import Agent.OpenRouter.Client
 import Agent.OpenRouter.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import qualified Agent.Json.Decode as Json
 import Control.Concurrent.MVar
 import Control.Monad (when)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Builder as Builder
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
 import Data.IORef
@@ -48,7 +48,7 @@ spec = do
             lookup "HTTP-Referer" request.headers `shouldBe` Just "https://example.com"
             lookup "X-Title" request.headers `shouldBe` Just "haskell-agent-test"
             requestModel request `shouldBe` Just "openai/gpt-5.1"
-            (instructionsOf <$> requestBodyObject request)
+            requestInstructions request
                 `shouldBe` Just (Just "You are a test agent.")
 
         it "streams callbacks before the response completes" do
@@ -300,22 +300,20 @@ extractAssistantText response = case
         [] -> Nothing
         values -> Just (Text.intercalate "\n" values)
 
-requestBodyObject :: RecordedRequest -> Maybe Aeson.Object
-requestBodyObject request = case Aeson.decode request.body of
-    Just (Aeson.Object object) -> Just object
-    _ -> Nothing
-
 requestModel :: RecordedRequest -> Maybe Text
-requestModel request = do
-    object <- requestBodyObject request
-    case KeyMap.lookup "model" object of
-        Just (Aeson.String model) -> Just model
-        _ -> Nothing
+requestModel request =
+    either (const Nothing) Just $
+        Json.decodeEither
+            (Json.object (Json.atKey "model" Json.text))
+            (LBS.toStrict request.body)
 
-instructionsOf :: Aeson.Object -> Maybe Text
-instructionsOf object = case KeyMap.lookup "instructions" object of
-    Just (Aeson.String text) -> Just text
-    _ -> Nothing
+requestInstructions :: RecordedRequest -> Maybe (Maybe Text)
+requestInstructions request =
+    either (const Nothing) Just $
+        Json.decodeEither
+            (Json.object
+                (Json.optionalKey "instructions" Json.text))
+            (LBS.toStrict request.body)
 
 expectRight :: Show e => Either e a -> IO a
 expectRight = \case

@@ -1,9 +1,11 @@
 -- | Dialect-specific system prompt closed over by the transport backend.
 module Agent.CLI.Prompt
-    ( secretInputGuidance
+    ( codexEnvironmentContext
+    , secretInputGuidance
     , subscriptionSubagentModelGuidance
     , sessionTempGuidance
     , systemPrompt
+    , systemPromptForCatalogModel
     , systemPromptForTools
     ) where
 
@@ -11,6 +13,11 @@ import Agent.CLI.Timestamp (timeContextGuidance)
 import Agent.Codex.Dialect.Prompt
     ( codexSystemPrompt
     , codexSystemPromptForTools
+    )
+import Agent.OpenAI.Models
+    ( ModelInfo
+    , ModelPersonality(..)
+    , renderModelInstructions
     )
 import Agent.Dialect
     ( Dialect
@@ -112,6 +119,63 @@ systemPromptForTools
                 isNonInteractive
         ClaudeCodePromptStyle ->
             claudeCodeSystemPrompt cwd today
+
+-- | Render instructions for an OpenAI model whose catalog entry carries an
+-- instructions template. The template is emitted verbatim (Codex sends it
+-- unmodified as the base-instructions developer item); harness-specific
+-- runtime guidance follows in the same developer text. Working directory and
+-- date deliberately stay out of the instructions — catalog models receive
+-- them through 'codexEnvironmentContext', matching upstream placement.
+systemPromptForCatalogModel
+    :: Dialect
+    -> ModelInfo
+    -> [Text]
+    -> Maybe OsPath
+    -> Text
+systemPromptForCatalogModel dialect info toolNames sessionTmp =
+    Text.intercalate "\n\n" $
+        filter (not . Text.null)
+            [ Text.strip
+                (renderModelInstructions ModelPersonalityDefault info)
+            , sessionTempGuidance sessionTmp
+            , secretInputGuidance available
+            , learnedSkillGuidance available
+            , ghciGuidanceForTools dialect available
+            , timeContextGuidance
+            ]
+  where
+    available =
+        Set.fromList (hostedSearchToolNames dialect ++ toolNames)
+
+-- | The upstream @<environment_context>@ user fragment: working directory,
+-- shell, date, and timezone. Sent as conversation context rather than inside
+-- the instructions, matching where Codex-trained models expect it.
+codexEnvironmentContext
+    :: OsPath
+    -> Day
+    -> Maybe Text
+    -> Maybe Text
+    -> Text
+codexEnvironmentContext cwd today shell timezone =
+    Text.intercalate "\n" $
+        [ "<environment_context>"
+        , "  <cwd>" <> escapeXml (toText cwd) <> "</cwd>"
+        ]
+            <> [ "  <shell>" <> escapeXml value <> "</shell>"
+               | Just value <- [shell]
+               ]
+            <> [ "  <current_date>" <> formattedToday <> "</current_date>" ]
+            <> [ "  <timezone>" <> escapeXml value <> "</timezone>"
+               | Just value <- [timezone]
+               ]
+            <> [ "</environment_context>" ]
+  where
+    formattedToday =
+        Text.pack (formatTime defaultTimeLocale "%Y-%m-%d" today)
+    escapeXml =
+        Text.replace ">" "&gt;"
+            . Text.replace "<" "&lt;"
+            . Text.replace "&" "&amp;"
 
 -- | Tell the model about its second filesystem sandbox root without changing
 -- the project/worktree used for relative paths.
