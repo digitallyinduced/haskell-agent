@@ -311,6 +311,7 @@ reply runtime pending
         let startIndex =
                 fromMaybe 0
                     (Map.lookup checkpointKey state.deliveryCheckpoints)
+            replyToMessageId = pendingReplyTarget pending state
         forM_ (drop startIndex (zip [0 :: Int ..] chunks)) \(index, chunk) ->
             case (index, pending.pendingEditMessageId) of
                 (0, Just messageId) ->
@@ -326,7 +327,7 @@ reply runtime pending
                         runtime.runtimeClient
                         pending.pendingChat
                         (if index == 0
-                            then pending.pendingReplyToMessageId
+                            then replyToMessageId
                             else Nothing)
                         chunk >>= \case
                             Left err -> fail (Text.unpack err)
