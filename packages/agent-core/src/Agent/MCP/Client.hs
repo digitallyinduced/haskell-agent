@@ -103,6 +103,7 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Vector as Vector
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Environment (getEnvironment)
 import System.Directory (getCurrentDirectory)
 import System.IO
@@ -574,6 +575,7 @@ httpRequestMcpWithId client timeoutMicros url method parameters requestId = do
                 <> maybe mempty ("id" .=) requestId
                 <> "method" .= method
                 <> AesonEncoding.pair "params" parameters
+
         perform token = do
             let headers = [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream")]
                     <> maybe [] (\value -> [("Authorization", "Bearer " <> TextEncoding.encodeUtf8 value)]) token

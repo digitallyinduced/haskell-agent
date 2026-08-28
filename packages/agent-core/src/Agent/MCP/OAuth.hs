@@ -3,7 +3,7 @@ module Agent.MCP.OAuth
     ( OAuthTokens(..), OAuthTokenResponse(..), ProtectedResourceMetadata(..)
     , AuthorizationServerMetadata(..), ClientRegistration(..)
     , discoverProtectedResource, discoverAuthorizationServer, registerClient
-    , refreshAccessToken, oauthCallbackSuccessPage
+    , refreshAccessToken, exchangeAuthorizationCode, oauthCallbackSuccessPage
     , OAuthTokenFile(..), loadOAuthTokenFile, refreshOAuthTokenFile
     ) where
 
@@ -18,6 +18,7 @@ import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import System.Posix.Files (ownerReadMode, ownerWriteMode)
 import System.IO.Unsafe (unsafePerformIO)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Text as Text
@@ -77,6 +78,7 @@ refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ ->
                         { tokenAccessToken = tokens.accessToken
                         , tokenRefreshToken = maybe current.tokenRefreshToken id tokens.refreshToken
                         , tokenExpiresAt = fmap (fromIntegral now +) tokens.expiresIn
+
                         }
                 writeLazyFileAtomically (unsafeEncodeUtf path) (ownerReadMode .|. ownerWriteMode) (Aeson.encode updated)
                 pure (Right updated)
@@ -135,6 +137,28 @@ refreshAccessToken manager endpoint clientId oldRefresh = do
         Left e -> pure (OAuthTokenFailure (Text.pack (show e)))
         Right response | statusCode (responseStatus response) < 200 || statusCode (responseStatus response) >= 300 -> pure (OAuthTokenFailure "OAuth token request failed")
                        | otherwise -> pure $ either (OAuthTokenFailure . Text.pack) OAuthTokenSuccess (Aeson.eitherDecode (responseBody response))
+
+exchangeAuthorizationCode :: Manager -> Text -> Text -> Text -> Text -> Text -> IO OAuthTokenResponse
+exchangeAuthorizationCode manager endpoint clientId code redirectUri verifier = do
+    result <- tryAny $ do
+        request <- parseRequest (Text.unpack endpoint)
+        let request' = urlEncodedBody
+                [ ("grant_type", "authorization_code")
+                , ("code", Encoding.encodeUtf8 code)
+                , ("redirect_uri", Encoding.encodeUtf8 redirectUri)
+                , ("client_id", Encoding.encodeUtf8 clientId)
+                , ("code_verifier", Encoding.encodeUtf8 verifier)
+                ] request { HC.method = "POST" }
+        httpLbs request' manager
+    case result of
+        Left e -> pure (OAuthTokenFailure (Text.pack (show e)))
+        Right response
+            | statusCode (responseStatus response) < 200
+                || statusCode (responseStatus response) >= 300 ->
+                pure (OAuthTokenFailure "OAuth authorization-code exchange failed")
+            | otherwise ->
+                pure $ either (OAuthTokenFailure . Text.pack) OAuthTokenSuccess
+                    (Aeson.eitherDecode (responseBody response))
 
 getJson :: Aeson.FromJSON value => Manager -> Text -> IO (Either Text value)
 getJson manager url = do

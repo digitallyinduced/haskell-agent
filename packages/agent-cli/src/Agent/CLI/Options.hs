@@ -4,6 +4,7 @@ module Agent.CLI.Options
     , ApprovalPolicy(..)
     , CliOptions(..)
     , Command(..)
+    , McpCommand(..)
     , ScreenMode(..)
     , StorageCommand(..)
     , defaultCliOptions
@@ -40,12 +41,18 @@ data Command
     = ShowHelp
     | ShowVersion
     | Login
+    | Mcp McpCommand
     | ListSessions
     | ShowSession Text
     | WaitSession Text
     | ImportSession (Maybe OsPath)
     | Storage StorageCommand
     | RunAgent CliOptions
+    deriving (Eq, Show)
+
+data McpCommand
+    = McpLogin Text
+    | McpLogout Text
     deriving (Eq, Show)
 
 -- | Administrative commands for the harness-managed PostgreSQL server.
@@ -224,6 +231,9 @@ commandParser =
             <> Options.command "sessions"
                 (Options.info sessionsParser
                     (Options.progDesc "Administer persisted sessions"))
+            <> Options.command "mcp"
+                (Options.info mcpParser
+                    (Options.progDesc "Authorize remote MCP servers"))
             <> Options.command "storage"
                 (Options.info storageParser
                     (Options.progDesc "Administer managed PostgreSQL storage"))
@@ -282,6 +292,18 @@ storageParser =
         Options.command name
             (Options.info (pure (Storage command))
                 (Options.progDesc description))
+
+mcpParser :: Options.Parser Command
+mcpParser = Mcp <$> Options.hsubparser
+    ( Options.command "login"
+        (Options.info
+            (McpLogin . Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+            (Options.progDesc "Authorize an MCP server with OAuth PKCE"))
+    <> Options.command "logout"
+        (Options.info
+            (McpLogout . Text.pack <$> Options.argument Options.str (Options.metavar "URL"))
+            (Options.progDesc "Remove saved MCP OAuth credentials"))
+    )
 
 type OptionUpdate = CliOptions -> CliOptions
 
@@ -501,6 +523,8 @@ usage = unlines
     , "       agent-cli login"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id>"
+    , "       agent-cli mcp login <url>"
+    , "       agent-cli mcp logout <url>"
     , "       agent-cli storage <status|start|stop|migrate|doctor>"
     , ""
     , "  -p, --prompt TEXT       Run one prompt and exit"
