@@ -1,6 +1,7 @@
 module Main (main) where
 
 import qualified Claude.Agent.SDK.ClientSpec as ClientSpec
+import qualified Claude.Agent.SDK.Internal.Transport.OutputBufferSpec as OutputBufferSpec
 import qualified Claude.Agent.SDK.MessageParserSpec as MessageParserSpec
 import qualified Claude.Agent.SDK.QuerySpec as QuerySpec
 import Control.Concurrent (threadDelay)
@@ -18,6 +19,7 @@ main =
         _ ->
             hspec do
                 ClientSpec.spec
+                OutputBufferSpec.spec
                 MessageParserSpec.spec
                 QuerySpec.spec
 
