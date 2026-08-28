@@ -72,11 +72,11 @@ refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ ->
         Right current -> refreshAccessToken manager current.tokenEndpoint current.tokenClientId current.tokenRefreshToken >>= \case
             OAuthTokenFailure err -> pure (Left err)
             OAuthTokenSuccess tokens -> do
-                now <- floor <$> getPOSIXTime
+                now <- round <$> getPOSIXTime
                 let updated = current
                         { tokenAccessToken = tokens.accessToken
                         , tokenRefreshToken = maybe current.tokenRefreshToken id tokens.refreshToken
-                        , tokenExpiresAt = fmap (now +) tokens.expiresIn
+                        , tokenExpiresAt = fmap (fromIntegral now +) tokens.expiresIn
                         }
                 writeLazyFileAtomically (unsafeEncodeUtf path) (ownerReadMode .|. ownerWriteMode) (Aeson.encode updated)
                 pure (Right updated)

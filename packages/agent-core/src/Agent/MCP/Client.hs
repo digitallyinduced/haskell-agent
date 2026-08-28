@@ -554,20 +554,20 @@ httpRequestMcp client timeoutMicros url method parameters = do
     requestId <- atomicModifyIORef' client.clientNextId (\current -> (current + 1, current))
     request <- parseRequest (Text.unpack url)
     session <- readIORef client.clientHttpSession
-    file <- case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
-        Nothing -> pure Nothing
+    fileResult <- case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
+        Nothing -> pure (Right Nothing)
         Just path -> OAuth.loadOAuthTokenFile path >>= \case
+            Left err -> pure (Left err)
             Right (OAuth.OAuthTokenFile _ _ token _ expiresAt) -> do
-                now <- floor <$> getPOSIXTime
+                now <- round <$> getPOSIXTime
                 if maybe False (<= now + 60) expiresAt
                     then OAuth.refreshOAuthTokenFile mcpHttpManager path >>= \case
-                        Right (OAuth.OAuthTokenFile _ _ refreshed _ _) -> pure (Just refreshed)
-                        Left _ -> pure (Just token)
-                    else pure (Just token)
-            Left _ -> pure Nothing
-    let configuredToken = case file of
-            Just token -> Just token
-            Nothing -> fmap Text.pack (lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv)
+                        Left err -> pure (Left err)
+                        Right (OAuth.OAuthTokenFile _ _ refreshed _ _) -> pure (Right (Just refreshed))
+                    else pure (Right (Just token))
+    let configuredToken = case fileResult of
+            Right (Just token) -> Just token
+            _ -> fmap Text.pack (lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv)
         body = AesonEncodingInternal.encodingToLazyByteString $ Aeson.pairs
             ("jsonrpc" .= ("2.0" :: Text) <> "id" .= requestId <> "method" .= method <> AesonEncoding.pair "params" parameters)
         perform token = do
