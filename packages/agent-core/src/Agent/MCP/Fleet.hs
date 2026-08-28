@@ -135,6 +135,27 @@ sameServerConfigs left right =
 mcpFleetTools :: McpFleet -> [AppTool]
 mcpFleetTools = map (.mcpRegistrationTool) . (.mcpFleetRegistrations)
 
+-- | Snapshot the metadata advertised by every Skills-over-MCP server.  The
+-- server name is deliberately retained alongside each URI: URIs are only
+-- unique within an MCP server.
+mcpFleetSkillRegistrations :: McpFleet -> IO [McpSkillRegistration]
+mcpFleetSkillRegistrations fleet = readTVarIO fleet.mcpFleetSkills
+
+mcpFleetGetSkill :: McpFleet -> Text -> Text -> IO (Either Text McpSkillEntry)
+mcpFleetGetSkill fleet server uri = do
+    clients <- readTVarIO fleet.mcpFleetClients
+    case Map.lookup server clients of
+        Nothing -> pure (Left ("unknown MCP server: " <> server))
+        Just client -> getMcpSkill client uri
+
+mcpFleetReadResource
+    :: McpFleet -> Text -> Text -> IO (Either Text [McpResourceContent])
+mcpFleetReadResource fleet server uri = do
+    clients <- readTVarIO fleet.mcpFleetClients
+    case Map.lookup server clients of
+        Nothing -> pure (Left ("unknown MCP server: " <> server))
+        Just client -> readMcpResource client uri
+
 -- | Snapshot server status without triggering initialization or other I/O.
 mcpFleetStatuses :: McpFleet -> IO [McpServerStatus]
 mcpFleetStatuses fleet = do
@@ -183,6 +204,13 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
             `onException` closeOwnedClients ownedClients
     let (clients, registrations, warnings, failures) =
             foldr collectServerResult ([], [], [], Map.empty) results
+    skills <- fmap concat $ forM clients \client -> do
+        entries <- readTVarIO client.clientDiscoveredSkills
+        pure
+            [ McpSkillRegistration client.clientConfig.mcpServerName entry
+            | entry <- entries
+            ]
+    skillsVar <- newTVarIO skills
     catalog <- newTVarIO $
         Map.fromList
             [ (registration.mcpRegistrationTool.appToolName, McpCatalogEntry client tool)
@@ -204,6 +232,7 @@ startMcpFleetWithProgress reportActive configs = mask \restore -> do
     let
         fleet = McpFleet
             { mcpFleetRegistrations = registrations
+            , mcpFleetSkills = skillsVar
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clientsVar
             , mcpFleetServerOrder = map (.mcpServerName) configs
@@ -322,6 +351,7 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
     catalog <- newTVarIO Map.empty
     ownedClients <- newIORef []
     clientsVar <- newTVarIO Map.empty
+    skillsVar <- newTVarIO []
     reconnects <- Map.fromList <$> mapM
         (\config -> do
             lock <- newMVar ()
@@ -356,6 +386,7 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
             ]
         fleet = McpFleet
             { mcpFleetRegistrations = []
+            , mcpFleetSkills = skillsVar
             , mcpFleetWarnings = warnings
             , mcpFleetClients = clientsVar
             , mcpFleetServerOrder = map (.mcpServerName) configs
@@ -371,7 +402,14 @@ startMcpFleetProgressive reportStatuses configs = mask \restore -> do
                 (publishCatalogEntries catalog client)
                 client >>= \case
                 Left _ -> pure ()
-                Right _ -> pure ()
+                Right _ -> do
+                    entries <- readTVarIO client.clientDiscoveredSkills
+                    atomically $ modifyTVar' skillsVar \current ->
+                        current
+                            <> [ McpSkillRegistration
+                                    client.clientConfig.mcpServerName entry
+                                | entry <- entries
+                                ]
             void (reportFleetStatuses reportStatuses fleet)
     atomically $
         writeTVar clientsVar $

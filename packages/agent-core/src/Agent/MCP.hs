@@ -1,14 +1,20 @@
 -- | Local Model Context Protocol clients over the stdio transport.
 --
 -- Each configured server is started once, initialized, and queried for its
--- read-only tools. The returned 'AppTool' handlers share the retained client;
--- 'closeMcpFleet' must run after all loops and subagents using those handlers
--- have stopped.
+-- read-only tools and (when negotiated) Skills-over-MCP metadata. The
+-- returned handlers share the retained client; 'closeMcpFleet' must run
+-- after all loops and subagents using those handlers have stopped.
 module Agent.MCP
     ( McpServerConfig(..)
     , McpInitState(..)
     , McpServerStatus(..)
     , McpToolRegistration(..)
+    , McpSkillsCapability(..)
+    , McpSkillRegistration(..)
+    , McpSkillEntry(..)
+    , McpSkillResources(..)
+    , McpSkillResource(..)
+    , McpResourceContent(..)
     , McpFleet(..)
     , McpSupervisor
     , McpFleetLease(..)
@@ -26,6 +32,9 @@ module Agent.MCP
     , mcpFleetMetaTools
     , mcpFleetGrokMetaTools
     , mcpFleetStatuses
+    , mcpFleetSkillRegistrations
+    , mcpFleetGetSkill
+    , mcpFleetReadResource
     , normalizeMcpToolResult
     ) where
 
@@ -35,6 +44,9 @@ import Agent.MCP.Fleet
     , mcpFleetGrokMetaTools
     , mcpFleetMetaTools
     , mcpFleetStatuses
+    , mcpFleetSkillRegistrations
+    , mcpFleetGetSkill
+    , mcpFleetReadResource
     , mcpFleetTools
     , startMcpFleet
     , startMcpFleetProgressive
@@ -56,4 +68,10 @@ import Agent.MCP.Types
     , McpServerStatus(..)
     , McpSupervisor
     , McpToolRegistration(..)
+    , McpSkillsCapability(..)
+    , McpSkillRegistration(..)
+    , McpSkillEntry(..)
+    , McpSkillResources(..)
+    , McpSkillResource(..)
+    , McpResourceContent(..)
     )
