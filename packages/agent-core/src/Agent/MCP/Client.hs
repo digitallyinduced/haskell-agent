@@ -574,7 +574,14 @@ httpRequestMcp client timeoutMicros url method parameters = do
                 let bytes = LBS.toStrict (responseBody response)
                 if BS.null bytes
                     then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
-                    else pure (either (Left . ("Invalid MCP HTTP response: " <>) . Text.pack . show) Right (Json.decodeEither rawJsonDecoder bytes))
+                    else case Json.decodeEither rawJsonDecoder bytes of
+                        Right value -> pure (Right value)
+                        Left jsonError ->
+                            case find (BS8.isPrefixOf "data: ") (BS8.lines bytes) of
+                                Just eventData ->
+                                    pure (either (Left . ("Invalid MCP SSE response: " <>) . Text.pack . show) Right
+                                        (Json.decodeEither rawJsonDecoder (BS8.drop 6 eventData)))
+                                Nothing -> pure (Left ("Invalid MCP HTTP response: " <> Text.pack (show jsonError)))
 
 sendNotification
     :: McpClient
