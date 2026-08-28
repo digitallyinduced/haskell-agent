@@ -4,6 +4,7 @@ module Agent.CLI.TUI.Motion
     , appMotionDemand
     , appMotionTiming
     , completionFlashTransitions
+    , completionRequiresRedraw
     , elapsedMillisSince
     , hasBackgroundActivity
     , isBackgroundAgentActive
@@ -47,6 +48,7 @@ import Agent.TUI.Motion
     )
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Maybe (isJust)
 import qualified Data.Text as Text
 import Data.Word (Word64)
@@ -274,3 +276,26 @@ nativeProgressKeepaliveDue blocked previousBucket ui =
 turnCompletionRequiresRedraw :: UiState -> UiState -> Bool
 turnCompletionRequiresRedraw previous next =
     previous.uiRunning && not next.uiRunning
+
+-- | A completed root turn or child agent gets one final frame while focus
+-- throttling suppresses ordinary snapshot redraws. Check each child rather
+-- than only aggregate background activity so one completion is visible even
+-- when sibling agents keep running.
+completionRequiresRedraw
+    :: UiState
+    -> [AgentEntry]
+    -> UiState
+    -> [AgentEntry]
+    -> Bool
+completionRequiresRedraw previousUi previousAgents nextUi nextAgents =
+    turnCompletionRequiresRedraw previousUi nextUi
+        || not (Set.null (previousActive `Set.difference` nextActive))
+  where
+    previousActive = activeTargets previousAgents
+    nextActive = activeTargets nextAgents
+    activeTargets entries =
+        Set.fromList
+            [ entry.agentTarget
+            | entry <- entries
+            , isBackgroundAgentActive entry
+            ]
