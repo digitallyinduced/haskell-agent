@@ -3,12 +3,12 @@
 , agent-openrouter, agent-process, agent-responses
 , agent-responses-types, agent-store, agent-syntax, agent-tui
 , agent-xai, ansi-terminal, async, base, base64-bytestring, brick
-, bytestring, colour, containers, deepseq, directory, filelock
-, filepath, haskeline, hasql-pool, hspec, http-client
-, http-client-tls, http-types, JuicyPixels, lib, mtl, network
-, network-uri, optparse-applicative, process, QuickCheck, retry
-, safe-exceptions, scientific, stm, tagsoup, text, time
-, transformers, unix, vector, vty, vty-crossplatform
+, bytestring, colour, containers, crypton, deepseq, directory
+, entropy, filelock, filepath, haskeline, hasql-pool, hspec
+, http-client, http-client-tls, http-types, JuicyPixels, lib
+, memory, mtl, network, network-uri, optparse-applicative, process
+, QuickCheck, retry, safe-exceptions, scientific, stm, tagsoup
+, text, time, transformers, unix, vector, vty, vty-crossplatform
 }:
 mkDerivation {
   pname = "agent-cli";
@@ -22,11 +22,12 @@ mkDerivation {
     agent-grok-build-dialect agent-json agent-openai agent-openrouter
     agent-process agent-responses agent-responses-types agent-store
     agent-syntax agent-tui agent-xai ansi-terminal async base
-    base64-bytestring brick bytestring colour containers directory
-    filelock filepath haskeline hasql-pool http-client http-client-tls
-    http-types JuicyPixels mtl network network-uri optparse-applicative
-    process retry safe-exceptions scientific stm tagsoup text time
-    transformers unix vector vty vty-crossplatform
+    base64-bytestring brick bytestring colour containers crypton
+    directory entropy filelock filepath haskeline hasql-pool
+    http-client http-client-tls http-types JuicyPixels memory mtl
+    network network-uri optparse-applicative process retry
+    safe-exceptions scientific stm tagsoup text time transformers unix
+    vector vty vty-crossplatform
   ];
   executableHaskellDepends = [
     aeson agent-responses agent-responses-types agent-store base

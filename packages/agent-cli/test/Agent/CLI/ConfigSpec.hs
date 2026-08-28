@@ -59,6 +59,7 @@ spec = describe "Agent.CLI.Config" do
                     Map.lookup "alpha" config.configMcpServers
                         `shouldBe` Just McpServerConfig
                             { mcpEnabled = False
+                            , mcpUrl = Nothing
                             , mcpCommand = "a"
                             , mcpArgs = ["one"]
                             , mcpCwd = Just "/tmp"
@@ -69,6 +70,7 @@ spec = describe "Agent.CLI.Config" do
                     Map.lookup "zeta" config.configMcpServers
                         `shouldBe` Just McpServerConfig
                             { mcpEnabled = True
+                            , mcpUrl = Nothing
                             , mcpCommand = "z"
                             , mcpArgs = []
                             , mcpCwd = Nothing
@@ -76,6 +78,16 @@ spec = describe "Agent.CLI.Config" do
                             , mcpStartupTimeoutSeconds = 30
                             , mcpRequestTimeoutSeconds = 60
                             }
+
+    it "loads remote MCP servers by URL" $
+        withTempDir "agent-config-" \home -> do
+            writeConfig home
+                "{\"mcpServers\":{\"remote\":{\"url\":\"https://example.test/mcp\"}}}"
+            result <- loadHarnessConfig home
+            fmap (Map.lookup "remote" . (.configMcpServers)) result
+                `shouldSatisfy` \case
+                    Right (Just server) -> server.mcpUrl == Just "https://example.test/mcp"
+                    _ -> False
 
     it "loads the MCP initialization strategy" $
         withTempDir "agent-config-" \home -> do
@@ -168,7 +180,7 @@ spec = describe "Agent.CLI.Config" do
             writeConfig home
                 "{\"mcpServers\":{\"broken\":{\"command\":\" \"}}}"
             loadHarnessConfig home
-                `shouldReturn` Left "MCP server 'broken' has an empty command"
+                `shouldReturn` Left "MCP server 'broken' must configure exactly one of url or command"
 
             writeConfig home
                 "{\"mcpServers\":{\"broken\":{\"command\":\"ok\",\"startupTimeoutSeconds\":0}}}"
@@ -190,6 +202,7 @@ spec = describe "Agent.CLI.Config" do
         withTempDir "agent-config-" \home -> do
             let server = McpServerConfig
                     { mcpEnabled = True
+                    , mcpUrl = Nothing
                     , mcpCommand = "nix"
                     , mcpArgs = ["run", "/tmp/seo-mcp"]
                     , mcpCwd = Just "/tmp"
@@ -212,6 +225,7 @@ spec = describe "Agent.CLI.Config" do
                     { configMcpServers =
                         Map.singleton "broken" McpServerConfig
                             { mcpEnabled = True
+                            , mcpUrl = Nothing
                             , mcpCommand = ""
                             , mcpArgs = []
                             , mcpCwd = Nothing
@@ -222,7 +236,7 @@ spec = describe "Agent.CLI.Config" do
                     }
             saveHarnessConfig home broken
                 `shouldReturn`
-                    Left "MCP server 'broken' has an empty command"
+                    Left "MCP server 'broken' must configure exactly one of url or command"
 
 writeConfig :: OsPath -> LBS.ByteString -> IO ()
 writeConfig home bytes = do

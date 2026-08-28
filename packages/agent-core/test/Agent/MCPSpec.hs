@@ -39,6 +39,7 @@ spec = describe "Agent.MCP" do
     it "redacts configured environment values from Show" do
         let rendered = show McpServerConfig
                 { mcpServerName = "private"
+                , mcpServerUrl = Nothing
                 , mcpServerCommand = "/bin/server"
                 , mcpServerArgs = []
                 , mcpServerCwd = Nothing
@@ -89,6 +90,7 @@ spec = describe "Agent.MCP" do
                 (\names -> modifyIORef' started (<> [names]))
                 [ McpServerConfig
                     { mcpServerName = "fake"
+                    , mcpServerUrl = Nothing
                     , mcpServerCommand = script
                     , mcpServerArgs = []
                     , mcpServerCwd = Nothing
@@ -524,6 +526,7 @@ countStarts path = length . lines <$> readFile path
 concurrentConfig :: FilePath -> FilePath -> Text.Text -> McpServerConfig
 concurrentConfig script barrier name = McpServerConfig
     { mcpServerName = name
+    , mcpServerUrl = Nothing
     , mcpServerCommand = script
     , mcpServerArgs = [barrier, Text.unpack name]
     , mcpServerCwd = Nothing
@@ -541,6 +544,7 @@ progressiveConfig script delay name =
 baseConfig :: Text.Text -> FilePath -> McpServerConfig
 baseConfig name command = McpServerConfig
     { mcpServerName = name
+    , mcpServerUrl = Nothing
     , mcpServerCommand = command
     , mcpServerArgs = []
     , mcpServerCwd = Nothing

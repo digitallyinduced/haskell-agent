@@ -50,6 +50,7 @@ library
                     , Agent.ReasoningEffort
                     , Agent.Loop
                     , Agent.MCP
+                    , Agent.MCP.OAuth
                     , Agent.JsonText
                     , Agent.OsPath
                     , Agent.Http.Header
@@ -117,6 +118,10 @@ library
                     , crypton-connection
                     , directory
                     , filepath
+                    , filelock
+                    , http-client
+                    , http-client-tls
+                    , http-types
                     , process
                     , retry >= 0.9.3.1 && < 0.10
                     , resourcet

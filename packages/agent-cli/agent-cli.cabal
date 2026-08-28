@@ -153,6 +153,8 @@ library
                     , Agent.CLI.Command
                     , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
+                    , Agent.CLI.McpOAuthStore
+                    , Agent.CLI.McpOAuth
                     , Agent.CLI.Database
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
@@ -256,7 +258,9 @@ library
                     , bytestring
                     , colour >= 2.3
                     , containers
+                    , crypton
                     , directory
+                    , entropy
                     , filelock
                     , filepath
                     , haskeline >= 0.8 && < 0.9
@@ -266,6 +270,7 @@ library
                     , hasql-pool >= 1.3 && < 2
                     , JuicyPixels
                     , mtl
+                    , memory
                     , network
                     , network-uri
                     , optparse-applicative >= 0.18 && < 0.19

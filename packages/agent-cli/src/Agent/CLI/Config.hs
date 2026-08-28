@@ -56,10 +56,11 @@ defaultLspStartupTimeoutMilliseconds = 15000
 defaultLspShutdownTimeoutMilliseconds :: Int
 defaultLspShutdownTimeoutMilliseconds = 5000
 
--- | One local stdio MCP server. Environment values are intentionally kept
+-- | One local stdio or remote HTTP MCP server. Environment values are intentionally kept
 -- opaque: callers must not include them in diagnostics.
 data McpServerConfig = McpServerConfig
     { mcpEnabled :: !Bool
+    , mcpUrl :: !(Maybe Text)
     , mcpCommand :: !Text
     , mcpArgs :: ![Text]
     , mcpCwd :: !(Maybe Text)
@@ -159,6 +160,8 @@ instance Show McpServerConfig where
     show server =
         "McpServerConfig { mcpEnabled = "
             <> show server.mcpEnabled
+            <> ", mcpUrl = "
+            <> show server.mcpUrl
             <> ", mcpCommand = "
             <> show server.mcpCommand
             <> ", mcpArgs = "
@@ -177,6 +180,7 @@ instance Aeson.ToJSON McpServerConfig where
     toJSON server =
         Aeson.object
             [ "enabled" Aeson..= server.mcpEnabled
+            , "url" Aeson..= server.mcpUrl
             , "command" Aeson..= server.mcpCommand
             , "args" Aeson..= server.mcpArgs
             , "cwd" Aeson..= server.mcpCwd
@@ -267,7 +271,8 @@ mcpServerConfigDecoder =
     Hermes.object $
         McpServerConfig
             <$> defaultKey True "enabled" Hermes.bool
-            <*> Hermes.atKey "command" Hermes.text
+            <*> optionalKey "url" Hermes.text
+            <*> defaultKey "" "command" Hermes.text
             <*> defaultKey [] "args" (Hermes.list Hermes.text)
             <*> optionalKey "cwd" Hermes.text
             <*> defaultKey Map.empty "env" textMapDecoder
@@ -439,8 +444,10 @@ validateHarnessConfig config = do
     validateServer label server = do
         when (Text.null (Text.strip label)) $
             Left "MCP server label must not be empty"
-        when (Text.null (Text.strip server.mcpCommand)) $
-            Left ("MCP server " <> quote label <> " has an empty command")
+        let hasUrl = maybe False (not . Text.null . Text.strip) server.mcpUrl
+            hasCommand = not (Text.null (Text.strip server.mcpCommand))
+        when (hasUrl == hasCommand) $
+            Left ("MCP server " <> quote label <> " must configure exactly one of url or command")
         when (server.mcpStartupTimeoutSeconds < 1) $
             Left
                 ( "MCP server "

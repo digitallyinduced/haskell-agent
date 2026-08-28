@@ -110,6 +110,7 @@ import System.Timeout (timeout)
 
 data McpServerConfig = McpServerConfig
     { mcpServerName :: !Text
+    , mcpServerUrl :: !(Maybe Text)
     , mcpServerCommand :: !FilePath
     , mcpServerArgs :: ![String]
     , mcpServerCwd :: !(Maybe FilePath)
@@ -122,6 +123,7 @@ instance Show McpServerConfig where
     show config =
         "McpServerConfig"
             <> " { mcpServerName = " <> show config.mcpServerName
+            <> ", mcpServerUrl = " <> show config.mcpServerUrl
             <> ", mcpServerCommand = " <> show config.mcpServerCommand
             <> ", mcpServerArgs = " <> show config.mcpServerArgs
             <> ", mcpServerCwd = " <> show config.mcpServerCwd
@@ -253,16 +255,19 @@ data McpFleetLease = McpFleetLease
 -- and 'closeMcpSupervisor' performs the final deterministic shutdown.
 data McpClient = McpClient
     { clientConfig :: !McpServerConfig
-    , clientInput :: !Handle
-    , clientProcess :: !ProcessHandle
+    , clientHttpSession :: !(IORef (Maybe Text))
+    -- Stdio transports own a process and input pipe; remote HTTP transports
+    -- leave these fields empty and perform requests synchronously.
+    , clientInput :: !(Maybe Handle)
+    , clientProcess :: !(Maybe ProcessHandle)
     , clientGroupId :: !(Maybe ProcessGroupID)
     , clientNextId :: !(IORef Int)
     , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text RawJson))))
     , clientFailure :: !(TVar (Maybe Text))
     , clientWriteLock :: !(MVar ())
     , clientStderr :: !(IORef CapturedStderr)
-    , clientReader :: !(Async ())
-    , clientStderrReader :: !(Async ())
+    , clientReader :: !(Maybe (Async ()))
+    , clientStderrReader :: !(Maybe (Async ()))
     , clientClosed :: !(MVar Bool)
     , clientLifecycle :: !(TVar McpClientLifecycle)
     -- Set after initialize.  A missing value means the server did not

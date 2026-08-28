@@ -27,6 +27,7 @@ import Agent.CLI.AgentSessions
     ( closeSessionThreadManager, newSessionThreadManager )
 import Agent.CLI.Interrupt ( catchUserInterrupt )
 import Agent.CLI.Login ( runLoginManager )
+import Agent.CLI.McpOAuth (loginMcp, logoutMcp)
 import Agent.CLI.McpStatus
     ( formatMcpModelNotice
     , formatMcpModelNoticeFor
@@ -35,6 +36,7 @@ import Agent.CLI.McpStatus
 import Agent.CLI.Options
     ( CliOptions
     , Command(..)
+    , McpCommand(..)
     , parseArgs
     , usage
     )
@@ -133,6 +135,8 @@ devMainResume resumeId = do
             color <- resolveColor stderr
             runLoginManager color
             pure DevQuit
+        Right (Mcp (McpLogin url)) -> loginMcp url >> pure DevQuit
+        Right (Mcp (McpLogout url)) -> logoutMcp url >> pure DevQuit
         Right ListSessions -> runListSessions >> pure DevQuit
         Right (ShowSession sessionId) -> runShowSession sessionId >> pure DevQuit
         Right (WaitSession sessionId) -> runWaitSession sessionId >> pure DevQuit
@@ -155,6 +159,8 @@ run = do
         Right Login -> do
             color <- resolveColor stderr
             runLoginManager color
+        Right (Mcp (McpLogin url)) -> loginMcp url
+        Right (Mcp (McpLogout url)) -> logoutMcp url
         Right ListSessions -> runListSessions
         Right (ShowSession sessionId) -> runShowSession sessionId
         Right (WaitSession sessionId) -> runWaitSession sessionId
