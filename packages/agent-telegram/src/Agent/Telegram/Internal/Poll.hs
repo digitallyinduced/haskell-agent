@@ -421,7 +421,7 @@ processChatQueue runtime key =
                         Just _ -> runQueuedTurn runtime pending
                     modifyState runtime \state ->
                         let completed = completePendingAction action state
-                        in case telegramReplyText pending.pendingTurnText response of
+                        in case telegramReplyText pending.pendingTurnText response.telegramTurnText of
                             Nothing -> completed
                             Just replyText ->
                                 enqueuePendingAction
@@ -430,6 +430,7 @@ processChatQueue runtime key =
                                             pending.pendingTurnUpdateId
                                             pending.pendingTurnChat
                                             (Just pending.pendingTurnMessageId)
+                                            response.telegramTurnProgressMessageId
                                             replyText))
                                     completed
                 RunPendingMediaTurn pending -> do
@@ -442,7 +443,7 @@ processChatQueue runtime key =
                         Just _ -> runQueuedMediaTurn runtime pending
                     modifyState runtime \state ->
                         let completed = completePendingAction action state
-                        in case telegramReplyText pending.pendingMediaText response of
+                        in case telegramReplyText pending.pendingMediaText response.telegramTurnText of
                             Nothing -> completed
                             Just replyText ->
                                 enqueuePendingAction
@@ -451,6 +452,7 @@ processChatQueue runtime key =
                                             pending.pendingMediaUpdateId
                                             pending.pendingMediaChat
                                             (Just pending.pendingMediaMessageId)
+                                            response.telegramTurnProgressMessageId
                                             replyText))
                                     completed
                 LeaveUnauthorizedChat pending -> do
@@ -477,14 +479,14 @@ processChatQueue runtime key =
                     processChatQueue runtime key
                 Right () -> processChatQueue runtime key
 
-runQueuedTurn :: TelegramRuntime -> TelegramPendingTurn -> IO Text
+runQueuedTurn :: TelegramRuntime -> TelegramPendingTurn -> IO TelegramTurnResponse
 runQueuedTurn runtime pending =
     case telegramCommand pending.pendingTurnText of
-        Just "start" -> pure
+        Just "start" -> withoutProgress $ pure
             "Send a message to start or continue an agent session. \
             \Use /new for a fresh session, /session for its ID, and /allow \
             \in a group to accept another member by name or by replying to them."
-        Just "new" -> do
+        Just "new" -> withoutProgress do
             modifyState runtime \state ->
                 state
                     { bindings = Map.delete
@@ -492,34 +494,36 @@ runQueuedTurn runtime pending =
                         state.bindings
                     }
             pure "Started a new conversation. Send your next prompt."
-        Just "session" -> do
+        Just "session" -> withoutProgress do
             state <- readMVar runtime.runtimeStateVar
             pure case lookupBinding pending.pendingTurnChat state of
                 Nothing -> "No session yet. Send a prompt to create one."
                 Just sessionId -> "Session: " <> sessionId
-        Just "status" -> telegramConversationStatus runtime pending.pendingTurnChat
-        Just "retry" ->
+        Just "status" -> withoutProgress $
+            telegramConversationStatus runtime pending.pendingTurnChat
+        Just "retry" -> withoutProgress $
             retryLastDeadLetter
                 runtime
                 pending.pendingTurnChat
                 (pending.pendingTurnUpdateId + 1)
-        Just "allow" ->
+        Just "allow" -> withoutProgress $
             applyAllowlistChange
                 runtime
                 pending.pendingTurnChat.chatId
                 AllowlistGrant
                 Nothing
                 (telegramCommandArguments pending.pendingTurnText)
-        Just "deny" ->
+        Just "deny" -> withoutProgress $
             applyAllowlistChange
                 runtime
                 pending.pendingTurnChat.chatId
                 AllowlistRevoke
                 Nothing
                 (telegramCommandArguments pending.pendingTurnText)
-        Just "users" ->
+        Just "users" -> withoutProgress $
             describeTelegramAllowlist runtime pending.pendingTurnChat.chatId
-        Just command -> pure ("Unknown command: /" <> command)
+        Just command -> withoutProgress $
+            pure ("Unknown command: /" <> command)
         Nothing -> do
             userId <- telegramTurnUserId runtime pending.pendingTurnChat
             case pending.pendingTurnVoice of
@@ -541,10 +545,11 @@ runQueuedTurn runtime pending =
                                         runtime.runtimeClient.clientToken
                                         (Text.pack (displayException err))
                                 ]
-                            pure
+                            pure $ TelegramTurnResponse
                                 "I could not transcribe that voice message. \
                                 \Check that Codex is installed and logged in, and \
                                 \that the subscription has usage available."
+                                Nothing
                         Right prompt -> do
                             let deliveredPrompt
                                     | isAmbientGroupPrompt pending.pendingTurnText =
@@ -557,6 +562,9 @@ runQueuedTurn runtime pending =
                                 userId
                                 (Just pending.pendingTurnMessageId)
                                 deliveredPrompt
+
+withoutProgress :: IO Text -> IO TelegramTurnResponse
+withoutProgress action = (`TelegramTurnResponse` Nothing) <$> action
 
 telegramConversationStatus :: TelegramRuntime -> TelegramChatKey -> IO Text
 telegramConversationStatus runtime key = do

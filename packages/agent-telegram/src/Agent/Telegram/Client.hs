@@ -15,6 +15,7 @@ module Agent.Telegram.Client
     , sendRichMessage
     , sendMessageWithKeyboard
     , editMessageText
+    , editRichMessageText
     , answerCallbackQuery
     , sendTelegramDocument
     , sendTelegramPhoto
@@ -461,6 +462,20 @@ editMessageText client key messageId text =
         , "reply_markup" .= object
             [ "inline_keyboard" .= ([] :: [[Value]])
             ]
+        ]
+
+editRichMessageText
+    :: TelegramClient
+    -> TelegramChatKey
+    -> Integer
+    -> Text
+    -> IO (Either Text ())
+editRichMessageText client key messageId text =
+    requestUnit client "editMessageText" $ object
+        [ "chat_id" .= key.chatId
+        , "message_id" .= messageId
+        , "text" .= markdownToTelegramHtml text
+        , "parse_mode" .= ("HTML" :: Text)
         ]
 
 answerCallbackQuery

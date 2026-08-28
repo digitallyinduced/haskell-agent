@@ -6,6 +6,7 @@ module Agent.Telegram.Bridge
     , processTelegramCallbacks
     , processBridgeRequestBatch
     , telegramActivityDraftHtml
+    , telegramActivityMessageText
     ) where
 
 import Agent.CLI.GatewayBridge
@@ -31,6 +32,7 @@ import Control.Exception.Safe (SomeException, displayException, try)
 import Control.Monad (forM_, void, when)
 import Data.Aeson (Value(..))
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (IORef, readIORef, writeIORef)
 import Data.List (isPrefixOf, sort)
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
@@ -58,6 +60,8 @@ data TelegramBridgeEnv = TelegramBridgeEnv
     , telegramBridgeChat :: !TelegramChatKey
     , telegramBridgeUserId :: !Integer
     , telegramBridgeReplyTo :: !(Maybe Integer)
+    , telegramBridgeProgressMessageId :: !(IORef (Maybe Integer))
+    , telegramBridgeGroupActivityEnabled :: !Bool
     , telegramBridgeAllowedRoot :: !FilePath
     , telegramBridgeModifyState ::
         !((TelegramState -> TelegramState) -> IO ())
@@ -563,18 +567,56 @@ publishActivity env previous forceRefresh = do
                                 Right value -> Just value
                                 Left _ -> Nothing
     let next = activity <&> \value ->
-            telegramActivityDraftHtml
-                value.managedActivityMessage
-                value.managedActivityReasoning
-                value.managedActivityResponse
-    forM_ next \html ->
-        when (forceRefresh || Just html /= previous) $
-            void $ try @_ @SomeException $
-                Client.sendStreamingDraft
-                    env.telegramBridgeClient
-                    env.telegramBridgeChat
-                    html
+            if env.telegramBridgeChat.chatId < 0
+                    && env.telegramBridgeGroupActivityEnabled
+                then telegramActivityMessageText
+                    value.managedActivityMessage
+                    value.managedActivityReasoning
+                    value.managedActivityResponse
+                else telegramActivityDraftHtml
+                    value.managedActivityMessage
+                    value.managedActivityReasoning
+                    value.managedActivityResponse
+    forM_ next \rendered ->
+        when (forceRefresh || Just rendered /= previous) $
+            if env.telegramBridgeChat.chatId < 0
+                then when env.telegramBridgeGroupActivityEnabled $
+                    publishGroupActivity env rendered
+                else void $ try @_ @SomeException $
+                    Client.sendStreamingDraft
+                        env.telegramBridgeClient
+                        env.telegramBridgeChat
+                        rendered
     pure (next <|> previous)
+
+publishGroupActivity :: TelegramBridgeEnv -> Text -> IO ()
+publishGroupActivity env message =
+    readIORef env.telegramBridgeProgressMessageId >>= \case
+        Just messageId ->
+            void $ Client.editRichMessageText
+                env.telegramBridgeClient
+                env.telegramBridgeChat
+                messageId
+                message
+        Nothing ->
+            Client.sendRichMessage
+                env.telegramBridgeClient
+                env.telegramBridgeChat
+                env.telegramBridgeReplyTo
+                message >>= \case
+                    Right (Just messageId) -> do
+                        writeIORef env.telegramBridgeProgressMessageId
+                            (Just messageId)
+                        env.telegramBridgeModifyState \state ->
+                            state
+                                { outboundMessageIds =
+                                    Map.insertWith
+                                        Set.union
+                                        env.telegramBridgeChat
+                                        (Set.singleton messageId)
+                                        state.outboundMessageIds
+                                }
+                    _ -> pure ()
 
 managedActivityDecoder :: Hermes.Decoder ManagedActivity
 managedActivityDecoder = Hermes.object $
@@ -598,6 +640,25 @@ telegramActivityDraftHtml status reasoningText responseText =
     reasoning = Text.strip reasoningText
     thinkingText =
         Text.takeEnd 1200 $
+            if Text.null reasoning
+                then status
+                else
+                    if status `elem`
+                        ["Thinking…", "Writing reply…", "Finishing…"]
+                        then reasoning
+                        else status <> "\n" <> reasoning
+    response = Text.takeEnd 2600 responseText
+
+
+telegramActivityMessageText :: Text -> Text -> Text -> Text
+telegramActivityMessageText status reasoningText responseText =
+    Text.takeEnd 4096 $
+        Text.intercalate "\n\n" $
+            filter (not . Text.null) [thinkingText, response]
+  where
+    reasoning = Text.strip reasoningText
+    thinkingText =
+        Text.takeEnd 1400 $
             if Text.null reasoning
                 then status
                 else

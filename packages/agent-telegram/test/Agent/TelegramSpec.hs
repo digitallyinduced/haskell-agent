@@ -66,6 +66,15 @@ spec = describe "Agent.Telegram" do
             prompt `shouldSatisfy`
                 Text.isInfixOf "Keep messages concise and conversational"
             prompt `shouldSatisfy`
+                Text.isInfixOf "before the first tool call"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Do not wait for findings"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "Follow the language and style"
+            prompt `shouldSatisfy`
+                Text.isInfixOf "For example: I'll take a quick look."
+            prompt `shouldNotSatisfy` Text.isInfixOf "Ich schaue"
+            prompt `shouldSatisfy`
                 Text.isPrefixOf "Inspect the failing tests"
 
     describe "telegramActivityDraftHtml" do
@@ -77,6 +86,14 @@ spec = describe "Agent.Telegram" do
                 `shouldBe`
                 "<tg-thinking>Checking &lt;files&gt;</tg-thinking>\
                 \<p>Found &amp; fixed<br>Done</p>"
+
+    describe "telegramActivityMessageText" do
+        it "renders group progress without private-chat draft markup" do
+            Bridge.telegramActivityMessageText
+                "Writing reply…"
+                "Prüfe die Dateien"
+                "Fast fertig"
+                `shouldBe` "Prüfe die Dateien\n\nFast fertig"
 
     describe "parseTelegramArgs" do
         it "runs the configured gateway by default" do
@@ -1066,9 +1083,9 @@ spec = describe "Agent.Telegram" do
                 secondTurn =
                     TelegramPendingTurn 9 76 secondKey "other" Nothing
                 firstReply =
-                    TelegramPendingReply 11 firstKey (Just 77) "reply"
+                    TelegramPendingReply 11 firstKey (Just 77) Nothing "reply"
                 secondReply =
-                    TelegramPendingReply 8 secondKey (Just 75) "other reply"
+                    TelegramPendingReply 8 secondKey (Just 75) Nothing "other reply"
                 decoded = decodeWith telegramStateDecoder
                     (LBS.pack
                         "{\"nextUpdateId\":12,\"bindings\":[{\
@@ -1151,7 +1168,7 @@ spec = describe "Agent.Telegram" do
         it "writes keyed state using the legacy JSON array fields" do
             let key = TelegramChatKey 123 Nothing
                 turn = TelegramPendingTurn 10 77 key "hello" Nothing
-                reply = TelegramPendingReply 11 key (Just 77) "reply"
+                reply = TelegramPendingReply 11 key (Just 77) Nothing "reply"
                 state = emptyTelegramState
                     { nextUpdateId = Just 12
                     , bindings = Map.singleton key "session-1"
@@ -1319,7 +1336,7 @@ spec = describe "Agent.Telegram" do
             let key = TelegramChatKey 123 Nothing
                 newerTurn = TelegramPendingTurn 12 79 key "later" Nothing
                 olderTurn = TelegramPendingTurn 10 77 key "first" Nothing
-                middleReply = TelegramPendingReply 11 key (Just 77) "reply"
+                middleReply = TelegramPendingReply 11 key (Just 77) Nothing "reply"
                 state = emptyTelegramState
                     { pendingQueues =
                         Map.singleton key $ Map.fromList
@@ -1334,7 +1351,7 @@ spec = describe "Agent.Telegram" do
         it "keeps delivery ahead of later inbound work" do
             let key = TelegramChatKey 123 Nothing
                 turn = TelegramPendingTurn 12 79 key "later" Nothing
-                reply = TelegramPendingReply 11 key (Just 77) "reply"
+                reply = TelegramPendingReply 11 key (Just 77) Nothing "reply"
                 state = emptyTelegramState
                     { pendingQueues =
                         Map.singleton key $ Map.fromList

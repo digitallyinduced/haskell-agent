@@ -826,7 +826,7 @@ runAgentTools
             case resumed of
                 Just (_, turns) ->
                     resumedPlanNeedsApproval
-                        (map turnAssistantText turns)
+                        (map (.turnAssistantText) turns)
                 Nothing -> False
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
