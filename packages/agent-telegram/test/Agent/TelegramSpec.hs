@@ -17,6 +17,7 @@ import Agent.Telegram.Types
     , TelegramPendingMediaTurn(..)
     , TelegramRetryMetadata(..)
     , telegramConfigDecoder
+    , pendingReplyTarget
     , telegramStateDecoder
     , telegramUpdateDecoder
     )
@@ -1062,6 +1063,25 @@ spec = describe "Agent.Telegram" do
             reordered.nextUpdateId `shouldBe` Just 102
 
     describe "durable queue state" do
+        it "only visibly replies when a newer inbound message is queued" do
+            let key = TelegramChatKey 123 Nothing
+                reply = TelegramPendingReply 11 key (Just 77) Nothing "reply"
+                newerTurn = TelegramPendingTurn 12 78 key "next" Nothing
+                latestState = emptyTelegramState
+                    { pendingQueues =
+                        Map.singleton key
+                            (Map.singleton 11 (DeliverReply reply))
+                    }
+                overtakenState = latestState
+                    { pendingQueues =
+                        Map.singleton key $ Map.fromList
+                            [ (11, DeliverReply reply)
+                            , (12, RunPendingTurn newerTurn)
+                            ]
+                    }
+            pendingReplyTarget reply latestState `shouldBe` Nothing
+            pendingReplyTarget reply overtakenState `shouldBe` Just 77
+
         it "loads state written before pending turns were introduced" do
             let decoded = decodeWith telegramStateDecoder
                     (LBS.pack
