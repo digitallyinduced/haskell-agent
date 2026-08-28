@@ -36,9 +36,10 @@ module Agent.MCP
     , mcpFleetGetSkill
     , mcpFleetReadResource
     , normalizeMcpToolResult
+    , decodeHttpMcpResponse
     ) where
 
-import Agent.MCP.Client (normalizeMcpToolResult)
+import Agent.MCP.Client (decodeHttpMcpResponse, normalizeMcpToolResult)
 import Agent.MCP.Fleet
     ( closeMcpFleet
     , mcpFleetGrokMetaTools
