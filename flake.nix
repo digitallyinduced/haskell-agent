@@ -24,6 +24,27 @@
             system:
             let
                 pkgs = import nixpkgs { inherit system; };
+                bun_1_4 = pkgs.bun.overrideAttrs (_old: {
+                    version = "1.4.0";
+                    src = pkgs.fetchurl {
+                        url = {
+                            aarch64-darwin = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-aarch64.zip";
+                            x86_64-darwin = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-darwin-x64.zip";
+                            aarch64-linux = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip";
+                            x86_64-linux = "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip";
+                        }.${system};
+                        hash = {
+                            aarch64-darwin = "sha256-xmnpf2Fk4cluBwF0jbmN+ndJKQjL2DlMdVcTSnNd44E=";
+                            x86_64-darwin = "sha256-HQIRuPHcmRGCNEaHrRXnLuhvFUhFpff6R3mUzTQd2bA=";
+                            aarch64-linux = "sha256-SxozLuhhmD65O8/m93D/+U4+MbLDiL2uo8jtNeWO7Q4=";
+                            x86_64-linux = "sha256-GE+0WV8NQBohfPfHjBvEMLqDMU2reouUgFurv3+nCX8=";
+                        }.${system};
+                    };
+                    sourceRoot = {
+                        aarch64-darwin = "bun-darwin-aarch64";
+                        x86_64-darwin = "bun-darwin-x64";
+                    }.${system} or null;
+                });
 
                 # Codex upstream model catalog and fallback instructions.
                 # Fetched at build time (pinned by content hash) instead of
@@ -60,6 +81,16 @@
                     include = [
                         "src"
                         "agent-process.cabal"
+                        "LICENSE"
+                    ];
+                };
+
+                agentJsonSource = nix-filter.lib {
+                    root = ./packages/agent-json;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-json.cabal"
                         "LICENSE"
                     ];
                 };
@@ -252,6 +283,16 @@
                                         (pkgs.haskell.lib.disableSharedLibraries
                                             (pkgs.haskell.lib.disableLibraryProfiling package)));
                     in {
+                        hermes-json =
+                            pkgs.haskell.lib.overrideSrc previous.hermes-json {
+                                src = pkgs.fetchFromGitHub {
+                                    owner = "velveteer";
+                                    repo = "hermes";
+                                    rev = "c04619a2b490fb49c67cacc0d2eb15368b78505f";
+                                    hash = "sha256-BZEIcQrQTYE7Vf3FVq1EOaeH/dLnFvU+INZZNNQSMcw=";
+                                    fetchSubmodules = true;
+                                };
+                            };
                         pqi = pkgs.haskell.lib.dontCheck
                             (final.callHackageDirect {
                                 pkg = "pqi";
@@ -328,13 +369,18 @@
                             })
                             [
                                 pkgs.git
-                                pkgs.nodejs_22
+                                bun_1_4
                                 pkgs.ripgrep
                             ]);
                         agent-process = localPackage (pkgs.haskell.lib.overrideSrc
                             (final.callPackage ./packages/agent-process/package.nix { })
                             {
                                 src = agentProcessSource;
+                            });
+                        agent-json = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-json/package.nix { })
+                            {
+                                src = agentJsonSource;
                             });
                         agent-responses-types = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
                             src = agentResponsesTypesSource;
@@ -402,7 +448,7 @@
                             })
                             [
                                 pkgs.git
-                                pkgs.nodejs_22
+                                bun_1_4
                                 pkgs.postgresql_18
                             ]);
                         agent-telegram = localPackage (pkgs.haskell.lib.addTestToolDepends
@@ -416,6 +462,7 @@
                 haskellPackages = mkHaskellPackages true;
                 productionHaskellPackages = mkHaskellPackages false;
                 agentCorePackage = productionHaskellPackages.agent-core;
+                agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = productionHaskellPackages.agent-grok-build-dialect;
@@ -449,7 +496,7 @@
                                         --prefix PATH : \
                                             "${pkgs.lib.makeBinPath [
                                                 pkgs.ffmpeg
-                                                pkgs.nodejs_22
+                                                bun_1_4
                                                 pkgs.postgresql_18
                                                 haskellPackages.ghc
                                             ]}"
@@ -597,6 +644,7 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
@@ -631,6 +679,7 @@
                         packages.agent-cli
                         packages.agent-telegram
                         packages.agent-core
+                        packages.agent-json
                         packages.agent-process
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
@@ -669,7 +718,7 @@
                         ++ (with pkgs; [
                             cabal2nix
                             ffmpeg
-                            nodejs_22
+                            bun_1_4
                             postgresql_18
                             ripgrep
                         ])
@@ -680,6 +729,7 @@
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
+                    agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
                     agent-grok-build-dialect = haskellPackages.agent-grok-build-dialect;

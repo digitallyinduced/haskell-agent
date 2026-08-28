@@ -2,6 +2,7 @@ module Agent.CLI.BtwSpec (spec) where
 
 import Agent.CLI.Btw
 import Agent.Error (ApiError(..))
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop
     ( Backend(..)
     , BackendResult(..)
@@ -12,7 +13,6 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
 import Agent.ToolDispatch (functionToolCall)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef
 import qualified Data.Text as Text
 import Test.Hspec
@@ -55,8 +55,7 @@ spec = do
     describe "runBtwWithCancel" do
         it "uses private state and preserves parent params including tools" do
             let originalItems = turnInputsToItems [UserMessage "earlier context"]
-                tool = KnownResponseTool ToolWebSearch
-                    (TaggedObject "web_search" KeyMap.empty)
+                tool = knownResponseTool ToolWebSearch
                 originalParams = case defaultResponseCreateParams of
                     ResponseCreateParams{..} -> ResponseCreateParams
                         { input = Just (ResponseInputText "stale input")
@@ -152,12 +151,11 @@ spec = do
 userItem :: Text.Text -> ResponseItem
 userItem text = MessageItem ResponseMessage
     { messageId = Nothing
-    , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+    , content = MessageContentParts [InputTextPart text Nothing]
     , role = RoleUser
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }
 
 functionCallItem :: Text.Text -> ResponseItem
@@ -166,10 +164,10 @@ functionCallItem callId = FunctionCallItem FunctionCall
     , callId
     , name = "shell_command"
     , namespace = Nothing
+    , provider = Nothing
     , arguments = "{}"
     , encryptedFunctionArgs = Nothing
     , status = Nothing
-    , extraFields = KeyMap.empty
     }
 
 functionOutputItem :: Text.Text -> ResponseItem
@@ -178,9 +176,9 @@ functionOutputItem callId = FunctionCallOutputItem FunctionCallOutput
     , callId
     , name = Nothing
     , namespace = Nothing
-    , output = Aeson.String "ok"
+    , provider = Nothing
+    , output = rawJsonFromEncoding (Aeson.toEncoding ("ok" :: Text.Text))
     , status = Nothing
-    , extraFields = KeyMap.empty
     }
 
 reasoningItem :: ResponseItem
@@ -190,5 +188,4 @@ reasoningItem = ReasoningItemValue ReasoningItem
     , content = Nothing
     , encryptedContent = Nothing
     , status = Nothing
-    , extraFields = KeyMap.empty
     }

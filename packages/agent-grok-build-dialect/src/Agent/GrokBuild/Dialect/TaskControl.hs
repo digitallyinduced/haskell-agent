@@ -13,10 +13,15 @@ import Agent.Subagents
     , waitSubagents
     )
 import Agent.Subagents.Format (isFinalStatus)
-import Agent.ToolArgs (objectArgs, optInt, reqText, reqTextList)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.GrokBuild.Dialect.Common (jsonTool, stripAnsi)
+import Agent.GrokBuild.Dialect.Json
+    ( optionalInt
+    , requiredTextList
+    , textList
+    )
 import Agent.GrokBuild.Dialect.Shell
     ( GrokSession
     , killTask
@@ -28,10 +33,8 @@ import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     )
-import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently)
-import Data.Aeson (FromJSON(..))
 import Data.Containers.ListUtils (nubOrd)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -44,16 +47,18 @@ data TaskOutputArgs = TaskOutputArgs
     , timeoutMs :: Maybe Int
     }
 
-instance FromJSON TaskOutputArgs where
-    parseJSON = objectArgs \object -> do
-        taskIds <-
-            reqTextList object "task_ids"
-                <|> reqTextList object "task_id"
-        canonicalTimeout <- optInt object "timeout_ms"
-        legacyTimeout <- optInt object "timeout"
+taskOutputArgsDecoder :: Json.Decoder TaskOutputArgs
+taskOutputArgsDecoder = Json.object do
+        canonicalIds <- Json.atKeyOptional "task_ids" textList
+        legacyIds <- Json.atKeyOptional "task_id" textList
+        taskIds <- maybe (maybe (fail "Missing parameter: task_ids") pure legacyIds) pure canonicalIds
+        canonicalTimeout <- optionalInt "timeout_ms"
+        legacyTimeout <- optionalInt "timeout"
         pure TaskOutputArgs
             { taskIds
-            , timeoutMs = canonicalTimeout <|> legacyTimeout
+            , timeoutMs = case canonicalTimeout of
+                Just timeout -> Just timeout
+                Nothing -> legacyTimeout
             }
 
 getTaskOutputTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
@@ -65,7 +70,7 @@ getTaskOutputTool session multi = jsonTool "get_task_output" getTaskOutputDescri
     ]
     True
     TurnSequential
-    (typedTool "get_task_output" (runGetTaskOutput session multi))
+    (typedTool "get_task_output" taskOutputArgsDecoder (runGetTaskOutput session multi))
 
 getTaskOutputDescription :: Text
 getTaskOutputDescription =
@@ -189,15 +194,15 @@ data WaitTasksArgs = WaitTasksArgs
     , waitTimeoutMs :: !(Maybe Int)
     }
 
-instance FromJSON WaitTasksArgs where
-    parseJSON = objectArgs \object -> do
-        waitTaskIds <- reqTextList object "task_ids"
-        mode <- reqText object "mode"
+waitTasksArgsDecoder :: Json.Decoder WaitTasksArgs
+waitTasksArgsDecoder = Json.object do
+        waitTaskIds <- requiredTextList "task_ids"
+        mode <- Json.atKey "mode" Json.text
         waitMode <- case Text.toLower (Text.strip mode) of
             "wait_any" -> pure WaitAny
             "wait_all" -> pure WaitAll
             _ -> fail "mode must be wait_any or wait_all"
-        waitTimeoutMs <- optInt object "timeout_ms"
+        waitTimeoutMs <- optionalInt "timeout_ms"
         pure WaitTasksArgs{..}
 
 waitTasksTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
@@ -214,7 +219,7 @@ waitTasksTool session multi =
         ]
         True
         TurnSequential
-        (typedTool "wait_tasks" (runWaitTasks session multi))
+        (typedTool "wait_tasks" waitTasksArgsDecoder (runWaitTasks session multi))
 
 waitTasksDescription :: Text
 waitTasksDescription =
@@ -287,8 +292,9 @@ formatWaitResult mode completed entries =
 
 newtype KillTaskArgs = KillTaskArgs { taskId :: Text }
 
-instance FromJSON KillTaskArgs where
-    parseJSON = objectArgs \object -> KillTaskArgs <$> reqText object "task_id"
+killTaskArgsDecoder :: Json.Decoder KillTaskArgs
+killTaskArgsDecoder = Json.object $
+    KillTaskArgs <$> Json.atKey "task_id" Json.text
 
 killTaskTool :: GrokSession -> Maybe MultiAgentContext -> AppTool
 killTaskTool session multi = jsonTool "kill_task" killTaskDescription
@@ -297,7 +303,7 @@ killTaskTool session multi = jsonTool "kill_task" killTaskDescription
     ]
     False
     TurnSequential
-    (typedTool "kill_task" (runKillTask session multi))
+    (typedTool "kill_task" killTaskArgsDecoder (runKillTask session multi))
 
 killTaskDescription :: Text
 killTaskDescription =

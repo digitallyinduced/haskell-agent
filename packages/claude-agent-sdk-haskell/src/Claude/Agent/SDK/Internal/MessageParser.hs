@@ -1,32 +1,21 @@
--- | Typed parser for Claude Code's stream-json records.
+-- | Native Hermes decoders for Claude Code's stream-json records.
 module Claude.Agent.SDK.Internal.MessageParser
     ( decodeMessageLine
-    , parseMessageValue
     ) where
 
+import Agent.Json
+    ( RawJson
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
+import qualified Agent.Json.Decode as Json
 import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Claude.Agent.SDK.Types
-    ( AssistantMessage(..)
-    , ContentBlock(..)
-    , ConversationResetMessage(..)
-    , Message(..)
-    , MessageOrigin(..)
-    , ModelUsage(..)
-    , ResultMessage(..)
-    , StreamEvent(..)
-    , SystemMessage(..)
-    , Usage(..)
-    , UserMessage(..)
-    , emptyUsage
-    )
-import qualified Data.Aeson as Aeson
-import Data.Aeson (Object, Value)
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Aeson.Encoding as Aeson
 import Data.ByteString (ByteString)
-import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -35,486 +24,482 @@ import qualified Data.UUID.Types as UUID
 
 decodeMessageLine :: ByteString -> Either ClaudeSDKError Message
 decodeMessageLine bytes =
-    case Aeson.eitherDecodeStrict' bytes of
-        Left message ->
-            Left CLIJSONDecodeError
-                { decodeError = Text.pack message
-                , rawBody =
-                    Text.take 2_000
-                        (TextEncoding.decodeUtf8With lenientDecode bytes)
-                }
-        Right value ->
-            parseMessageValue value
+    case Json.decodeEither messageDecoder bytes of
+        Right message -> Right message
+        Left typedError ->
+            case Json.decodeEither rawJsonDecoder bytes of
+                Left syntaxError ->
+                    Left CLIJSONDecodeError
+                        { decodeError = syntaxError.jsonErrorMessage
+                        , rawBody = displayBytes bytes
+                        }
+                Right raw ->
+                    Left MessageParseError
+                        { parseError =
+                            conciseDecodeError typedError.jsonErrorMessage
+                        , rawMessage = Just raw
+                        }
 
-parseMessageValue :: Value -> Either ClaudeSDKError Message
-parseMessageValue value =
-    case value of
-        Aeson.Object object ->
-            parseMessageObject object
-        _ ->
-            Left MessageParseError
-                { parseError = "expected a JSON object"
-                , rawMessage = Just value
-                }
+messageDecoder :: Json.Decoder Message
+messageDecoder = Json.withType \case
+    Json.VObject -> Json.object do
+        messageType <- requiredNonEmptyText
+            "type"
+            "message is missing a string `type` field"
+        Json.liftObjectDecoder case messageType of
+            "user" -> MessageUser <$> userMessageDecoder
+            "assistant" -> MessageAssistant <$> assistantMessageDecoder
+            "system" -> MessageSystem <$> systemMessageDecoder
+            "result" -> MessageResult <$> resultMessageDecoder
+            "stream_event" -> MessageStreamEvent <$> streamEventDecoder
+            "conversation_reset" ->
+                MessageConversationReset <$> conversationResetDecoder
+            "control_request" ->
+                MessageControlRequest <$> opaqueMessageDecoder
+            _ ->
+                MessageUnknown <$> opaqueMessageDecoder
+    _ -> fail "expected a JSON object"
 
-parseMessageObject :: Object -> Either ClaudeSDKError Message
-parseMessageObject object =
-    case textAt "type" object of
-        Nothing ->
-            Left MessageParseError
-                { parseError = "message is missing a string `type` field"
-                , rawMessage = Just (Aeson.Object object)
-                }
-        Just "user" ->
-            MessageUser <$> parseUserMessage object
-        Just "assistant" ->
-            MessageAssistant <$> parseAssistantMessage object
-        Just "system" ->
-            MessageSystem <$> parseSystemMessage object
-        Just "result" ->
-            MessageResult <$> parseResultMessage object
-        Just "stream_event" ->
-            MessageStreamEvent <$> parseStreamEvent object
-        Just "conversation_reset" ->
-            pure $
-                MessageConversationReset ConversationResetMessage
-                    { newConversationId =
-                        nonEmptyTextAt "new_conversation_id" object
-                    , uuid = nonEmptyTextAt "uuid" object
-                    , sessionId = nonEmptyTextAt "session_id" object
-                    , raw = object
-                    }
-        Just "control_request" ->
-            pure (MessageControlRequest object)
-        Just _ ->
-            pure (MessageUnknown (Aeson.Object object))
+userMessageDecoder :: Json.Decoder UserMessage
+userMessageDecoder = Json.object do
+    content <- Json.atKeyOptional "message" userContentEnvelopeDecoder
+        >>= maybe
+            (fail "user message is missing `message.content`")
+            pure
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    sessionId <- optionalNonEmptyText "session_id"
+    origin <- optionalOrigin "origin"
+    uuid <- optionalNonEmptyText "uuid"
+    pure UserMessage{..}
 
-parseUserMessage :: Object -> Either ClaudeSDKError UserMessage
-parseUserMessage object = do
-    message <- requireObjectAt "message" object
-    content <- case KeyMap.lookup "content" message of
-        Just (Aeson.String text) ->
-            pure [TextBlock text]
-        Just (Aeson.Array values) ->
-            traverse parseContentBlock (toList values)
-        Just value ->
-            Left $
-                messageParseError
-                    "user message content must be text or an array"
-                    value
-        Nothing ->
-            Left $
-                messageParseError
-                    "user message is missing `message.content`"
-                    (Aeson.Object object)
-    pure UserMessage
-        { content
-        , uuid = nonEmptyTextAt "uuid" object
-        , parentToolUseId =
-            nonEmptyTextAt "parent_tool_use_id" object
-        , origin = messageOriginAt "origin" object
-        , raw = object
-        }
+userContentEnvelopeDecoder :: Json.Decoder [ContentBlock]
+userContentEnvelopeDecoder = Json.object do
+    content <- Json.atKeyOptional "content" userContentDecoder
+    maybe (fail "user message is missing `message.content`") pure content
 
-parseAssistantMessage
-    :: Object
-    -> Either ClaudeSDKError AssistantMessage
-parseAssistantMessage object = do
-    message <- requireObjectAt "message" object
-    contentValue <-
-        maybe
-            (Left $
-                messageParseError
-                    "assistant message is missing `message.content`"
-                    (Aeson.Object object))
-            Right
-            (KeyMap.lookup "content" message)
-    content <- case contentValue of
-        Aeson.Array values ->
-            traverse parseContentBlock (toList values)
-        _ ->
-            Left $
-                messageParseError
-                    "assistant message content must be an array"
-                    contentValue
-    supersedes <-
-        strictOptionalStringArrayAt "supersedes" object
+userContentDecoder :: Json.Decoder [ContentBlock]
+userContentDecoder = Json.withType \case
+    Json.VString -> pure . (: []) . TextBlock =<< Json.text
+    Json.VArray -> Json.list contentBlockDecoder
+    _ -> fail "user message content must be text or an array"
+
+assistantMessageDecoder :: Json.Decoder AssistantMessage
+assistantMessageDecoder = Json.object do
+    details <- Json.atKeyOptional "message" assistantDetailsDecoder
+        >>= maybe
+            (fail "assistant message is missing `message.content`")
+            pure
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    error <- optionalNonEmptyText "error"
+    sessionId <- optionalNonEmptyText "session_id"
+    uuid <- optionalNonEmptyText "uuid"
+    supersedes <- strictOptionalNonEmptyTextList
+        "supersedes"
+        "`supersedes` must be an array of non-empty strings"
     pure AssistantMessage
-        { content
-        , model = nonEmptyTextAt "model" message
-        , parentToolUseId =
-            nonEmptyTextAt "parent_tool_use_id" object
-        , error = nonEmptyTextAt "error" object
-        , usage = usageFromObject <$> objectAt "usage" message
-        , messageId = nonEmptyTextAt "id" message
-        , stopReason = nonEmptyTextAt "stop_reason" message
-        , sessionId = nonEmptyTextAt "session_id" object
-        , uuid = nonEmptyTextAt "uuid" object
-        , supersedes
-        , raw = object
+        { content = details.assistantContent
+        , model = details.assistantModel
+        , usage = details.assistantUsage
+        , messageId = details.assistantMessageId
+        , stopReason = details.assistantStopReason
+        , ..
         }
 
-parseSystemMessage
-    :: Object
-    -> Either ClaudeSDKError SystemMessage
-parseSystemMessage object = do
-    subtype <-
-        requireTextAt "subtype" object
-            "system message is missing a string `subtype`"
-    retractedMessageUuids <-
-        strictOptionalStringArrayAt
-            "retracted_message_uuids"
-            object
-    pure SystemMessage
-        { subtype
-        , sessionId = nonEmptyTextAt "session_id" object
-        , uuid = nonEmptyTextAt "uuid" object
-        , apiKeySource = nonEmptyTextAt "apiKeySource" object
-        , retractedMessageUuids
-        , raw = object
-        }
+data AssistantDetails = AssistantDetails
+    { assistantContent :: ![ContentBlock]
+    , assistantModel :: !(Maybe Text)
+    , assistantUsage :: !(Maybe Usage)
+    , assistantMessageId :: !(Maybe Text)
+    , assistantStopReason :: !(Maybe Text)
+    }
 
-parseResultMessage
-    :: Object
-    -> Either ClaudeSDKError ResultMessage
-parseResultMessage object = do
-    subtype <-
-        requireTextAt "subtype" object
-            "result message is missing a string `subtype`"
-    isError <- case KeyMap.lookup "is_error" object of
-        Just (Aeson.Bool value) -> Right value
-        Just value ->
-            Left $
-                messageParseError
-                    "result `is_error` must be a boolean"
-                    value
-        Nothing ->
-            Left $
-                messageParseError
-                    "result message is missing `is_error`"
-                    (Aeson.Object object)
-    sessionId <-
-        requireSessionIdAt "session_id" object
-            "result message is missing a non-empty string `session_id`"
-    let modelUsage = modelUsageFromResult object
-    pure ResultMessage
-        { subtype
-        , durationMs = optionalIntAt "duration_ms" object
-        , durationApiMs = optionalIntAt "duration_api_ms" object
-        , isError
-        , numTurns = optionalIntAt "num_turns" object
-        , sessionId
-        , stopReason = nonEmptyTextAt "stop_reason" object
-        , totalCostUsd = optionalDoubleAt "total_cost_usd" object
-        , usage = maybe emptyUsage usageFromObject (objectAt "usage" object)
-        , result = textAt "result" object
-        , structuredOutput = KeyMap.lookup "structured_output" object
-        , modelUsage
-        , errors = stringArrayAt "errors" object
-        , apiErrorStatus = optionalIntAt "api_error_status" object
-        , origin = messageOriginAt "origin" object
-        , uuid = nonEmptyTextAt "uuid" object
-        , raw = object
-        }
+assistantDetailsDecoder :: Json.Decoder AssistantDetails
+assistantDetailsDecoder = Json.object do
+    assistantContent <- Json.atKeyOptional
+        "content"
+        (Json.withType \case
+            Json.VArray -> Json.list contentBlockDecoder
+            _ -> fail "assistant message content must be an array")
+        >>= maybe
+            (fail "assistant message is missing `message.content`")
+            pure
+    assistantModel <- optionalNonEmptyText "model"
+    assistantUsage <- optionalTyped "usage" usageDecoder
+    assistantMessageId <- optionalNonEmptyText "id"
+    assistantStopReason <- optionalNonEmptyText "stop_reason"
+    pure AssistantDetails{..}
 
-parseStreamEvent :: Object -> Either ClaudeSDKError StreamEvent
-parseStreamEvent object =
-    case KeyMap.lookup "event" object of
-        Nothing ->
-            Left $
-                messageParseError
-                    "stream event is missing `event`"
-                    (Aeson.Object object)
-        Just event ->
-            pure StreamEvent
-                { uuid = nonEmptyTextAt "uuid" object
-                , sessionId = nonEmptyTextAt "session_id" object
-                , event
-                , parentToolUseId =
-                    nonEmptyTextAt "parent_tool_use_id" object
-                , raw = object
-                }
+systemMessageDecoder :: Json.Decoder SystemMessage
+systemMessageDecoder = Json.object do
+    subtype <- requiredText
+        "subtype"
+        "system message is missing a string `subtype`"
+    sessionId <- optionalNonEmptyText "session_id"
+    uuid <- optionalNonEmptyText "uuid"
+    apiKeySource <- optionalNonEmptyText "apiKeySource"
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    retractedMessageUuids <- strictOptionalNonEmptyTextList
+        "retracted_message_uuids"
+        "`retracted_message_uuids` must be an array of non-empty strings"
+    pure SystemMessage{..}
 
-parseContentBlock :: Value -> Either ClaudeSDKError ContentBlock
-parseContentBlock value =
-    case value of
-        Aeson.Object object ->
-            case textAt "type" object of
-                Just "text" ->
-                    TextBlock
-                        <$> requireTextAt "text" object
-                            "text block is missing `text`"
-                Just "thinking" ->
-                    ThinkingBlock
-                        <$> requireTextAt "thinking" object
-                            "thinking block is missing `thinking`"
-                        <*> pure (nonEmptyTextAt "signature" object)
-                Just "tool_use" ->
-                    ToolUseBlock
-                        <$> requireNonEmptyTextAt "id" object
-                            "tool_use block is missing `id`"
-                        <*> requireNonEmptyTextAt "name" object
-                            "tool_use block is missing `name`"
-                        <*> pure
-                            ( maybe
-                                (Aeson.Object KeyMap.empty)
-                                id
-                                (KeyMap.lookup "input" object)
-                            )
-                Just "tool_result" ->
-                    ToolResultBlock
-                        <$> requireNonEmptyTextAt "tool_use_id" object
-                            "tool_result block is missing `tool_use_id`"
-                        <*> pure (KeyMap.lookup "content" object)
-                        <*> pure (boolAt "is_error" object)
-                Just "server_tool_use" ->
-                    ServerToolUseBlock
-                        <$> requireNonEmptyTextAt "id" object
-                            "server_tool_use block is missing `id`"
-                        <*> requireNonEmptyTextAt "name" object
-                            "server_tool_use block is missing `name`"
-                        <*> pure
-                            ( maybe
-                                (Aeson.Object KeyMap.empty)
-                                id
-                                (KeyMap.lookup "input" object)
-                            )
-                Just "advisor_tool_result" ->
-                    ServerToolResultBlock
-                        <$> requireNonEmptyTextAt "tool_use_id" object
-                            "server tool result is missing `tool_use_id`"
-                        <*> pure (KeyMap.lookup "content" object)
-                _ ->
-                    pure (UnknownContentBlock value)
-        _ ->
-            Left $
-                messageParseError
-                    "content block must be a JSON object"
-                    value
+resultMessageDecoder :: Json.Decoder ResultMessage
+resultMessageDecoder = Json.object do
+    subtype <- requiredText
+        "subtype"
+        "result message is missing a string `subtype`"
+    isError <- requiredBool
+        "is_error"
+        "result message is missing `is_error`"
+    sessionId <- normalizeSessionId <$> requiredNonEmptyText
+        "session_id"
+        "result message is missing a non-empty string `session_id`"
+    durationMs <- optionalNumber "duration_ms" Json.int
+    durationApiMs <- optionalNumber "duration_api_ms" Json.int
+    numTurns <- optionalNumber "num_turns" Json.int
+    stopReason <- optionalNonEmptyText "stop_reason"
+    totalCostUsd <- optionalNumber "total_cost_usd" Json.double
+    usage <- fromMaybe emptyUsage <$> optionalTyped "usage" usageDecoder
+    result <- optionalText "result"
+    structuredOutput <- optionalRaw "structured_output"
+    modelUsage <- fromMaybe Map.empty
+        <$> optionalTyped "modelUsage" modelUsageDecoder
+    errors <- catMaybes . fromMaybe [] <$> optionalTyped
+        "errors"
+        (Json.list tolerantOptionalText)
+    apiErrorStatus <- optionalNumber "api_error_status" Json.int
+    origin <- optionalOrigin "origin"
+    uuid <- optionalNonEmptyText "uuid"
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    pure ResultMessage{..}
 
-usageFromObject :: Object -> Usage
-usageFromObject object =
-    let directInput = intAt "input_tokens" object
-        cacheCreation = intAt "cache_creation_input_tokens" object
-        cacheRead = intAt "cache_read_input_tokens" object
-    in Usage
+streamEventDecoder :: Json.Decoder StreamEvent
+streamEventDecoder = Json.object do
+    uuid <- optionalNonEmptyText "uuid"
+    sessionId <- optionalNonEmptyText "session_id"
+    event <- Json.atKeyOptional "event" rawJsonDecoder
+        >>= maybe (fail "stream event is missing `event`") pure
+    streamToolUse <- Json.atKeyOptional "event" streamToolUseDecoder
+        >>= pure . (>>= id)
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    pure StreamEvent{..}
+
+streamToolUseDecoder :: Json.Decoder (Maybe StreamToolUse)
+streamToolUseDecoder = Json.withType \case
+    Json.VObject -> Json.object do
+        eventType <- optionalText "type"
+        case eventType of
+            Just "content_block_start" ->
+                Json.atKeyOptional "content_block" streamToolBlockDecoder
+                    >>= pure . (>>= id)
+            _ -> pure Nothing
+    _ -> pure Nothing
+
+streamToolBlockDecoder :: Json.Decoder (Maybe StreamToolUse)
+streamToolBlockDecoder = Json.withType \case
+    Json.VObject -> Json.object do
+        blockType <- optionalText "type"
+        case blockType of
+            Just kind | kind `elem` ["tool_use", "server_tool_use"] -> do
+                toolUseId <- requiredNonEmptyText
+                    "id"
+                    "stream tool block is missing `id`"
+                name <- requiredNonEmptyText
+                    "name"
+                    "stream tool block is missing `name`"
+                input <- fromMaybe emptyObjectJson <$> optionalRaw "input"
+                pure (Just StreamToolUse{..})
+            _ -> pure Nothing
+    _ -> pure Nothing
+
+conversationResetDecoder :: Json.Decoder ConversationResetMessage
+conversationResetDecoder = Json.object do
+    newConversationId <- optionalNonEmptyText "new_conversation_id"
+    uuid <- optionalNonEmptyText "uuid"
+    sessionId <- optionalNonEmptyText "session_id"
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    pure ConversationResetMessage{..}
+
+opaqueMessageDecoder :: Json.Decoder OpaqueMessage
+opaqueMessageDecoder = Json.object do
+    uuid <- optionalNonEmptyText "uuid"
+    sessionId <- optionalNonEmptyText "session_id"
+    parentToolUseId <- optionalNonEmptyText "parent_tool_use_id"
+    hasParentToolUseId <- parentFieldPresent
+    raw <- Json.liftObjectDecoder rawJsonDecoder
+    pure OpaqueMessage{..}
+
+contentBlockDecoder :: Json.Decoder ContentBlock
+contentBlockDecoder = Json.withType \case
+    Json.VObject -> Json.object do
+        contentType <- optionalText "type"
+        Json.liftObjectDecoder $ Json.object $ case contentType of
+            Just "text" ->
+                TextBlock <$> requiredText
+                    "text"
+                    "text block is missing `text`"
+            Just "thinking" ->
+                ThinkingBlock
+                    <$> requiredText
+                        "thinking"
+                        "thinking block is missing `thinking`"
+                    <*> optionalNonEmptyText "signature"
+            Just "tool_use" ->
+                ToolUseBlock
+                    <$> requiredNonEmptyText
+                        "id"
+                        "tool_use block is missing `id`"
+                    <*> requiredNonEmptyText
+                        "name"
+                        "tool_use block is missing `name`"
+                    <*> (fromMaybe emptyObjectJson <$> optionalRaw "input")
+            Just "tool_result" ->
+                ToolResultBlock
+                    <$> requiredNonEmptyText
+                        "tool_use_id"
+                        "tool_result block is missing `tool_use_id`"
+                    <*> optionalTyped "content" toolResultContentDecoder
+                    <*> optionalBool "is_error"
+            Just "server_tool_use" ->
+                ServerToolUseBlock
+                    <$> requiredNonEmptyText
+                        "id"
+                        "server_tool_use block is missing `id`"
+                    <*> requiredNonEmptyText
+                        "name"
+                        "server_tool_use block is missing `name`"
+                    <*> (fromMaybe emptyObjectJson <$> optionalRaw "input")
+            Just "advisor_tool_result" ->
+                ServerToolResultBlock
+                    <$> requiredNonEmptyText
+                        "tool_use_id"
+                        "server tool result is missing `tool_use_id`"
+                    <*> optionalTyped "content" toolResultContentDecoder
+            _ ->
+                UnknownContentBlock contentType
+                    <$> Json.liftObjectDecoder rawJsonDecoder
+    _ -> fail "content block must be a JSON object"
+
+toolResultContentDecoder :: Json.Decoder ToolResultContent
+toolResultContentDecoder =
+    ToolResultContent <$> rawJsonDecoder <*> renderedToolResultDecoder
+
+renderedToolResultDecoder :: Json.Decoder Text
+renderedToolResultDecoder =
+    Json.withRawJsonByteString \raw ->
+        Json.withType \case
+            Json.VString -> Json.text
+            Json.VArray ->
+                Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
+            Json.VObject -> Json.object do
+                textValue <- optionalText "text"
+                pure (fromMaybe (displayBytes raw) textValue)
+            Json.VNull -> pure ""
+            _ -> pure (displayBytes raw)
+
+usageDecoder :: Json.Decoder Usage
+usageDecoder = Json.object do
+    directInput <- nonNegativeNumber "input_tokens"
+    cacheCreation <- nonNegativeNumber "cache_creation_input_tokens"
+    cacheRead <- nonNegativeNumber "cache_read_input_tokens"
+    outputTokens <- nonNegativeNumber "output_tokens"
+    pure Usage
         { inputTokens = directInput + cacheCreation + cacheRead
-        , outputTokens = intAt "output_tokens" object
         , cachedTokens = cacheRead
+        , ..
         }
 
-modelUsageFromResult :: Object -> Map Text ModelUsage
-modelUsageFromResult object =
-    case objectAt "modelUsage" object of
-        Nothing -> Map.empty
-        Just models ->
-            maybe Map.empty Map.fromList $
-                traverse parseEntry
-                    [ (Key.toText key, value)
-                    | (key, value) <- KeyMap.toList models
-                    ]
+modelUsageDecoder :: Json.Decoder (Map Text ModelUsage)
+modelUsageDecoder = Json.withType \case
+    Json.VObject -> do
+        entries <- Json.objectAsKeyValues
+            (\key -> pure key)
+            tolerantModelUsageDecoder
+        pure $ case traverse sequenceEntry entries of
+            Just valid -> Map.fromList valid
+            Nothing -> Map.empty
+    _ -> pure Map.empty
   where
-    parseEntry (modelName, Aeson.Object usageObject) = do
-        directInput <- nonNegativeIntAt "inputTokens" usageObject
-        output <- nonNegativeIntAt "outputTokens" usageObject
-        cacheRead <-
-            optionalNonNegativeIntAt "cacheReadInputTokens" usageObject
-        cacheCreation <-
-            optionalNonNegativeIntAt
-                "cacheCreationInputTokens"
-                usageObject
-        pure
-            ( modelName
-            , ModelUsage
-                { inputTokens = directInput
+    sequenceEntry (key, usage) = (key,) <$> usage
+
+tolerantModelUsageDecoder :: Json.Decoder (Maybe ModelUsage)
+tolerantModelUsageDecoder = Json.withType \case
+    Json.VObject -> Json.object do
+        inputTokens <- optionalNonNegativeNumber "inputTokens"
+        outputTokens <- optionalNonNegativeNumber "outputTokens"
+        cacheReadInputTokens <- optionalNonNegativeNumberDefault
+            "cacheReadInputTokens"
+        cacheCreationInputTokens <- optionalNonNegativeNumberDefault
+            "cacheCreationInputTokens"
+        costUSD <- optionalNumber "costUSD" Json.double
+        pure do
+            input <- inputTokens
+            output <- outputTokens
+            pure ModelUsage
+                { inputTokens = input
                 , outputTokens = output
-                , cacheReadInputTokens = cacheRead
-                , cacheCreationInputTokens = cacheCreation
-                , costUSD = optionalDoubleAt "costUSD" usageObject
-                , raw = usageObject
+                , ..
                 }
-            )
-    parseEntry _ = Nothing
+    _ -> pure Nothing
 
-messageParseError :: Text -> Value -> ClaudeSDKError
-messageParseError parseError raw =
-    MessageParseError
-        { parseError
-        , rawMessage = Just raw
-        }
+optionalOrigin
+    :: Text
+    -> Json.FieldsDecoder (Maybe MessageOrigin)
+optionalOrigin key =
+    (Json.atKeyOptional key $
+        Json.withType \case
+            Json.VObject -> Json.object do
+                kind <- fromMaybe "unclassified"
+                    <$> optionalNonEmptyText "kind"
+                pure (Just MessageOrigin{kind})
+            _ -> pure Nothing)
+        >>= pure . (>>= id)
 
-requireObjectAt
-    :: Key.Key
-    -> Object
-    -> Either ClaudeSDKError Object
-requireObjectAt key object =
-    case KeyMap.lookup key object of
-        Just (Aeson.Object nested) -> Right nested
-        Just value ->
-            Left $
-                messageParseError
-                    ("`" <> Key.toText key <> "` must be an object")
-                    value
-        Nothing ->
-            Left $
-                messageParseError
-                    ("message is missing `" <> Key.toText key <> "`")
-                    (Aeson.Object object)
-
-requireTextAt
-    :: Key.Key
-    -> Object
+requiredText
+    :: Text
     -> Text
-    -> Either ClaudeSDKError Text
-requireTextAt key object err =
-    case textAt key object of
-        Just value -> Right value
-        Nothing ->
-            Left $
-                messageParseError err (Aeson.Object object)
+    -> Json.FieldsDecoder Text
+requiredText key err =
+    Json.atKeyOptional key tolerantOptionalText >>= \value ->
+        maybe (fail (Text.unpack err)) pure (value >>= id)
 
-requireNonEmptyTextAt
-    :: Key.Key
-    -> Object
+requiredNonEmptyText
+    :: Text
     -> Text
-    -> Either ClaudeSDKError Text
-requireNonEmptyTextAt key object err =
-    case nonEmptyTextAt key object of
-        Just value -> Right value
-        Nothing ->
-            Left $
-                messageParseError err (Aeson.Object object)
+    -> Json.FieldsDecoder Text
+requiredNonEmptyText key err =
+    Json.atKeyOptional key tolerantOptionalText >>= \value ->
+        maybe (fail (Text.unpack err)) pure
+            (value >>= id >>= nonEmptyText)
 
-requireSessionIdAt
-    :: Key.Key
-    -> Object
+requiredBool
+    :: Text
     -> Text
-    -> Either ClaudeSDKError Text
-requireSessionIdAt key object err =
-    normalizeSessionId <$> requireNonEmptyTextAt key object err
+    -> Json.FieldsDecoder Bool
+requiredBool key err =
+    Json.atKeyOptional key tolerantOptionalBool >>= \value ->
+        maybe (fail (Text.unpack err)) pure (value >>= id)
 
-objectAt :: Key.Key -> Object -> Maybe Object
-objectAt key object =
-    case KeyMap.lookup key object of
-        Just (Aeson.Object nested) -> Just nested
-        _ -> Nothing
+optionalText :: Text -> Json.FieldsDecoder (Maybe Text)
+optionalText key =
+    (Json.atKeyOptional key tolerantOptionalText)
+        >>= pure . (>>= id)
 
-messageOriginAt :: Key.Key -> Object -> Maybe MessageOrigin
-messageOriginAt key object =
-    case KeyMap.lookup key object of
-        Nothing -> Nothing
-        Just Aeson.Null -> Nothing
-        Just (Aeson.Object originObject) ->
-            Just MessageOrigin
-                { kind =
-                    maybe "unclassified" id
-                        (nonEmptyTextAt "kind" originObject)
-                , raw = originObject
-                }
-        Just _ ->
-            Just MessageOrigin
-                { kind = "unclassified"
-                , raw = KeyMap.empty
-                }
+optionalNonEmptyText :: Text -> Json.FieldsDecoder (Maybe Text)
+optionalNonEmptyText key =
+    Json.atKeyOptional key tolerantOptionalText >>= \value ->
+        pure (value >>= id >>= nonEmptyText)
 
-stringArrayAt :: Key.Key -> Object -> [Text]
-stringArrayAt key object =
-    case KeyMap.lookup key object of
-        Just (Aeson.Array values) ->
-            [text | Aeson.String text <- toList values]
-        _ -> []
+optionalBool :: Text -> Json.FieldsDecoder (Maybe Bool)
+optionalBool key =
+    (Json.atKeyOptional key tolerantOptionalBool)
+        >>= pure . (>>= id)
 
-strictOptionalStringArrayAt
-    :: Key.Key
-    -> Object
-    -> Either ClaudeSDKError [Text]
-strictOptionalStringArrayAt key object =
-    case KeyMap.lookup key object of
-        Nothing ->
-            Right []
-        Just Aeson.Null ->
-            Right []
-        Just (Aeson.Array values) ->
-            traverse parseElement (toList values)
-        Just value ->
-            Left $
-                messageParseError
-                    ( "`"
-                        <> Key.toText key
-                        <> "` must be an array of non-empty strings"
-                    )
-                    value
-  where
-    parseElement = \case
-        Aeson.String raw ->
-            let stripped = Text.strip raw
-            in if Text.null stripped
-                then invalidElement (Aeson.String raw)
-                else Right stripped
-        value ->
-            invalidElement value
+optionalRaw :: Text -> Json.FieldsDecoder (Maybe RawJson)
+optionalRaw key =
+    (Json.atKeyOptional key $
+        Json.withType \case
+            Json.VNull -> pure Nothing
+            _ -> Just <$> rawJsonDecoder)
+        >>= pure . (>>= id)
 
-    invalidElement value =
-        Left $
-            messageParseError
-                ( "`"
-                    <> Key.toText key
-                    <> "` must contain only non-empty strings"
-                )
-                value
+optionalTyped
+    :: Text
+    -> Json.Decoder a
+    -> Json.FieldsDecoder (Maybe a)
+optionalTyped key decoder =
+    (Json.atKeyOptional key $
+        Json.withType \case
+            Json.VNull -> pure Nothing
+            _ -> Just <$> decoder)
+        >>= pure . (>>= id)
 
-textAt :: Key.Key -> Object -> Maybe Text
-textAt key object =
-    case KeyMap.lookup key object of
-        Just (Aeson.String text) -> Just text
-        _ -> Nothing
+optionalNumber
+    :: Text
+    -> Json.Decoder number
+    -> Json.FieldsDecoder (Maybe number)
+optionalNumber key decoder =
+    (Json.atKeyOptional key $
+        Json.withType \case
+            Json.VNumber -> Just <$> decoder
+            _ -> pure Nothing)
+        >>= pure . (>>= id)
 
-nonEmptyTextAt :: Key.Key -> Object -> Maybe Text
-nonEmptyTextAt key object = do
-    text <- textAt key object
-    let stripped = Text.strip text
-    if Text.null stripped then Nothing else Just stripped
+nonNegativeNumber :: Text -> Json.FieldsDecoder Int
+nonNegativeNumber key =
+    max 0 . fromMaybe 0 <$> optionalNumber key Json.int
+
+optionalNonNegativeNumber :: Text -> Json.FieldsDecoder (Maybe Int)
+optionalNonNegativeNumber key =
+    fmap (\value -> if value >= 0 then Just value else Nothing)
+        <$> optionalNumber key Json.int
+        >>= pure . (>>= id)
+
+optionalNonNegativeNumberDefault :: Text -> Json.FieldsDecoder Int
+optionalNonNegativeNumberDefault key =
+    fromMaybe 0 <$> optionalNonNegativeNumber key
+
+strictOptionalNonEmptyTextList
+    :: Text
+    -> Text
+    -> Json.FieldsDecoder [Text]
+strictOptionalNonEmptyTextList key err = do
+    value <- Json.atKeyOptional key $
+        Json.withType \case
+            Json.VNull -> pure (Just [])
+            Json.VArray -> Just <$> Json.list
+                (Json.withType \case
+                    Json.VString -> nonEmptyText <$> Json.text
+                    _ -> pure Nothing)
+            _ -> pure Nothing
+    case value of
+        Nothing -> pure []
+        Just (Just elements)
+            | Just texts <- sequence elements -> pure texts
+        _ -> fail (Text.unpack err)
+
+parentFieldPresent :: Json.FieldsDecoder Bool
+parentFieldPresent =
+    maybe False id <$> Json.atKeyOptional
+        "parent_tool_use_id"
+        (Json.withType \case
+            Json.VNull -> pure False
+            _ -> pure True)
+
+tolerantOptionalText :: Json.Decoder (Maybe Text)
+tolerantOptionalText = Json.withType \case
+    Json.VString -> Just <$> Json.text
+    _ -> pure Nothing
+
+tolerantOptionalBool :: Json.Decoder (Maybe Bool)
+tolerantOptionalBool = Json.withType \case
+    Json.VBoolean -> Just <$> Json.bool
+    _ -> pure Nothing
+
+nonEmptyText :: Text -> Maybe Text
+nonEmptyText value =
+    let stripped = Text.strip value
+    in if Text.null stripped then Nothing else Just stripped
 
 normalizeSessionId :: Text -> Text
 normalizeSessionId value =
     maybe value UUID.toText (UUID.fromText value)
 
-boolAt :: Key.Key -> Object -> Maybe Bool
-boolAt key object =
-    case KeyMap.lookup key object of
-        Just (Aeson.Bool value) -> Just value
-        _ -> Nothing
+displayBytes :: ByteString -> Text
+displayBytes =
+    Text.take 2_000 . TextEncoding.decodeUtf8With lenientDecode
 
-intAt :: Key.Key -> Object -> Int
-intAt key object =
-    case optionalIntAt key object of
-        Just value -> max 0 value
-        Nothing -> 0
+conciseDecodeError :: Text -> Text
+conciseDecodeError message
+    | "expected a JSON object" `Text.isInfixOf` message =
+        "expected a JSON object"
+    | otherwise = message
 
-optionalIntAt :: Key.Key -> Object -> Maybe Int
-optionalIntAt key object = do
-    value <- KeyMap.lookup key object
-    case Aeson.fromJSON value of
-        Aeson.Success number -> Just number
-        Aeson.Error _ -> Nothing
-
-nonNegativeIntAt :: Key.Key -> Object -> Maybe Int
-nonNegativeIntAt key object = do
-    value <- optionalIntAt key object
-    if value >= 0 then Just value else Nothing
-
-optionalNonNegativeIntAt :: Key.Key -> Object -> Maybe Int
-optionalNonNegativeIntAt key object =
-    case KeyMap.lookup key object of
-        Nothing -> Just 0
-        Just Aeson.Null -> Just 0
-        Just _ -> nonNegativeIntAt key object
-
-optionalDoubleAt :: Key.Key -> Object -> Maybe Double
-optionalDoubleAt key object =
-    case KeyMap.lookup key object of
-        Just value ->
-            case Aeson.fromJSON value of
-                Aeson.Success number -> Just number
-                Aeson.Error _ -> Nothing
-        _ -> Nothing
+emptyObjectJson :: RawJson
+emptyObjectJson = rawJsonFromEncoding (Aeson.pairs mempty)

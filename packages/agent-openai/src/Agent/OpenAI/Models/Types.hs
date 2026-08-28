@@ -1,11 +1,9 @@
 {-# LANGUAGE TemplateHaskell #-}
 
--- | Forward-compatible metadata returned by the Codex @/models@ endpoint.
+-- | Metadata returned by the Codex @/models@ endpoint.
 --
--- Unknown enum values are retained in @Other@ constructors and unknown model
--- fields are preserved in 'extraFields'.  This lets a newer service catalog be
--- cached and round-tripped by an older client without making model discovery
--- unusable.
+-- Unknown enum values are retained in @Other@ constructors. Unknown object
+-- fields are ignored.
 module Agent.OpenAI.Models.Types
     ( ReasoningEffort(..)
     , reasoningEffortText
@@ -48,6 +46,8 @@ module Agent.OpenAI.Models.Types
     , ModelPersonality(..)
     , ModelInfo(..)
     , ModelsResponse(..)
+    , modelsResponseDecoder
+    , modelInfoDecoder
     , ModelPreset(..)
     , defaultInputModalities
     , resolvedContextWindow
@@ -70,24 +70,19 @@ module Agent.OpenAI.Models.Types
     ) where
 
 import Control.Applicative ((<|>))
+import qualified Agent.Json.Decode as Json
+import Agent.OpenAI.Models.Types.Enums
+import Control.Monad (join)
 import Data.Aeson
-    ( FromJSON(..)
-    , Object
-    , ToJSON(..)
-    , Value(..)
+    ( ToJSON(..)
     , object
-    , withObject
-    , withText
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
 import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (Parser)
+import Data.Aeson.Types (Pair)
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (fromMaybe)
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import Language.Haskell.TH.Syntax
@@ -97,359 +92,11 @@ import Language.Haskell.TH.Syntax
     , runIO
     )
 
-data ReasoningEffort
-    = ReasoningEffortNone
-    | ReasoningEffortMinimal
-    | ReasoningEffortLow
-    | ReasoningEffortMedium
-    | ReasoningEffortHigh
-    | ReasoningEffortXHigh
-    | ReasoningEffortMax
-    | ReasoningEffortUltra
-    | ReasoningEffortOther !Text
-    deriving (Eq, Ord, Show)
-
-reasoningEffortText :: ReasoningEffort -> Text
-reasoningEffortText = \case
-    ReasoningEffortNone -> "none"
-    ReasoningEffortMinimal -> "minimal"
-    ReasoningEffortLow -> "low"
-    ReasoningEffortMedium -> "medium"
-    ReasoningEffortHigh -> "high"
-    ReasoningEffortXHigh -> "xhigh"
-    ReasoningEffortMax -> "max"
-    ReasoningEffortUltra -> "ultra"
-    ReasoningEffortOther value -> value
-
-instance ToJSON ReasoningEffort where
-    toJSON = String . reasoningEffortText
-
-instance FromJSON ReasoningEffort where
-    parseJSON = withText "ReasoningEffort" \value ->
-        if Text.null value
-            then fail "reasoning_effort must not be empty"
-            else pure case value of
-                "none" -> ReasoningEffortNone
-                "minimal" -> ReasoningEffortMinimal
-                "low" -> ReasoningEffortLow
-                "medium" -> ReasoningEffortMedium
-                "high" -> ReasoningEffortHigh
-                "xhigh" -> ReasoningEffortXHigh
-                "max" -> ReasoningEffortMax
-                "ultra" -> ReasoningEffortUltra
-                unknown -> ReasoningEffortOther unknown
-
-data ReasoningSummary
-    = ReasoningSummaryNone
-    | ReasoningSummaryAuto
-    | ReasoningSummaryConcise
-    | ReasoningSummaryDetailed
-    | ReasoningSummaryOther !Text
-    deriving (Eq, Ord, Show)
-
-reasoningSummaryText :: ReasoningSummary -> Text
-reasoningSummaryText = \case
-    ReasoningSummaryNone -> "none"
-    ReasoningSummaryAuto -> "auto"
-    ReasoningSummaryConcise -> "concise"
-    ReasoningSummaryDetailed -> "detailed"
-    ReasoningSummaryOther value -> value
-
-instance ToJSON ReasoningSummary where
-    toJSON = String . reasoningSummaryText
-
-instance FromJSON ReasoningSummary where
-    parseJSON = parseTextEnum "ReasoningSummary" \case
-        "none" -> ReasoningSummaryNone
-        "auto" -> ReasoningSummaryAuto
-        "concise" -> ReasoningSummaryConcise
-        "detailed" -> ReasoningSummaryDetailed
-        value -> ReasoningSummaryOther value
-
-data Verbosity
-    = VerbosityLow
-    | VerbosityMedium
-    | VerbosityHigh
-    | VerbosityOther !Text
-    deriving (Eq, Ord, Show)
-
-verbosityText :: Verbosity -> Text
-verbosityText = \case
-    VerbosityLow -> "low"
-    VerbosityMedium -> "medium"
-    VerbosityHigh -> "high"
-    VerbosityOther value -> value
-
-instance ToJSON Verbosity where
-    toJSON = String . verbosityText
-
-instance FromJSON Verbosity where
-    parseJSON = parseTextEnum "Verbosity" \case
-        "low" -> VerbosityLow
-        "medium" -> VerbosityMedium
-        "high" -> VerbosityHigh
-        value -> VerbosityOther value
-
-data InputModality
-    = InputModalityText
-    | InputModalityImage
-    | InputModalityAudio
-    | InputModalityOther !Text
-    deriving (Eq, Ord, Show)
-
-inputModalityText :: InputModality -> Text
-inputModalityText = \case
-    InputModalityText -> "text"
-    InputModalityImage -> "image"
-    InputModalityAudio -> "audio"
-    InputModalityOther value -> value
-
-instance ToJSON InputModality where
-    toJSON = String . inputModalityText
-
-instance FromJSON InputModality where
-    parseJSON = parseTextEnum "InputModality" \case
-        "text" -> InputModalityText
-        "image" -> InputModalityImage
-        "audio" -> InputModalityAudio
-        value -> InputModalityOther value
-
-defaultInputModalities :: [InputModality]
-defaultInputModalities = [InputModalityText, InputModalityImage]
-
-data ModelVisibility
-    = ModelVisibilityList
-    | ModelVisibilityHide
-    | ModelVisibilityNone
-    | ModelVisibilityOther !Text
-    deriving (Eq, Ord, Show)
-
-modelVisibilityText :: ModelVisibility -> Text
-modelVisibilityText = \case
-    ModelVisibilityList -> "list"
-    ModelVisibilityHide -> "hide"
-    ModelVisibilityNone -> "none"
-    ModelVisibilityOther value -> value
-
-instance ToJSON ModelVisibility where
-    toJSON = String . modelVisibilityText
-
-instance FromJSON ModelVisibility where
-    parseJSON = parseTextEnum "ModelVisibility" \case
-        "list" -> ModelVisibilityList
-        "hide" -> ModelVisibilityHide
-        "none" -> ModelVisibilityNone
-        value -> ModelVisibilityOther value
-
-data ShellToolType
-    = ShellToolUnifiedExec
-    | ShellToolDisabled
-    | ShellToolOther !Text
-    deriving (Eq, Ord, Show)
-
-shellToolTypeText :: ShellToolType -> Text
-shellToolTypeText = \case
-    ShellToolUnifiedExec -> "unified_exec"
-    ShellToolDisabled -> "disabled"
-    ShellToolOther value -> value
-
-instance ToJSON ShellToolType where
-    toJSON = String . shellToolTypeText
-
-instance FromJSON ShellToolType where
-    parseJSON = parseTextEnum "ShellToolType" \case
-        "unified_exec" -> ShellToolUnifiedExec
-        "default" -> ShellToolUnifiedExec
-        "local" -> ShellToolUnifiedExec
-        "shell_command" -> ShellToolUnifiedExec
-        "disabled" -> ShellToolDisabled
-        value -> ShellToolOther value
-
-data ApplyPatchToolType
-    = ApplyPatchFreeform
-    | ApplyPatchOther !Text
-    deriving (Eq, Ord, Show)
-
-applyPatchToolTypeText :: ApplyPatchToolType -> Text
-applyPatchToolTypeText = \case
-    ApplyPatchFreeform -> "freeform"
-    ApplyPatchOther value -> value
-
-instance ToJSON ApplyPatchToolType where
-    toJSON = String . applyPatchToolTypeText
-
-instance FromJSON ApplyPatchToolType where
-    parseJSON = parseTextEnum "ApplyPatchToolType" \case
-        "freeform" -> ApplyPatchFreeform
-        value -> ApplyPatchOther value
-
-data WebSearchToolType
-    = WebSearchText
-    | WebSearchTextAndImage
-    | WebSearchOther !Text
-    deriving (Eq, Ord, Show)
-
-webSearchToolTypeText :: WebSearchToolType -> Text
-webSearchToolTypeText = \case
-    WebSearchText -> "text"
-    WebSearchTextAndImage -> "text_and_image"
-    WebSearchOther value -> value
-
-instance ToJSON WebSearchToolType where
-    toJSON = String . webSearchToolTypeText
-
-instance FromJSON WebSearchToolType where
-    parseJSON = parseTextEnum "WebSearchToolType" \case
-        "text" -> WebSearchText
-        "text_and_image" -> WebSearchTextAndImage
-        value -> WebSearchOther value
-
-data TruncationMode
-    = TruncationBytes
-    | TruncationTokens
-    | TruncationOther !Text
-    deriving (Eq, Ord, Show)
-
-truncationModeText :: TruncationMode -> Text
-truncationModeText = \case
-    TruncationBytes -> "bytes"
-    TruncationTokens -> "tokens"
-    TruncationOther value -> value
-
-instance ToJSON TruncationMode where
-    toJSON = String . truncationModeText
-
-instance FromJSON TruncationMode where
-    parseJSON = parseTextEnum "TruncationMode" \case
-        "bytes" -> TruncationBytes
-        "tokens" -> TruncationTokens
-        value -> TruncationOther value
-
-data ToolMode
-    = ToolModeDirect
-    | ToolModeCode
-    | ToolModeCodeOnly
-    | ToolModeOther !Text
-    deriving (Eq, Ord, Show)
-
-toolModeText :: ToolMode -> Text
-toolModeText = \case
-    ToolModeDirect -> "direct"
-    ToolModeCode -> "code_mode"
-    ToolModeCodeOnly -> "code_mode_only"
-    ToolModeOther value -> value
-
-instance ToJSON ToolMode where
-    toJSON = String . toolModeText
-
-instance FromJSON ToolMode where
-    parseJSON = parseTextEnum "ToolMode" \case
-        "direct" -> ToolModeDirect
-        "code_mode" -> ToolModeCode
-        "code_mode_only" -> ToolModeCodeOnly
-        value -> ToolModeOther value
-
-data MultiAgentVersion
-    = MultiAgentDisabled
-    | MultiAgentV1
-    | MultiAgentV2
-    | MultiAgentVersionOther !Text
-    deriving (Eq, Ord, Show)
-
-multiAgentVersionText :: MultiAgentVersion -> Text
-multiAgentVersionText = \case
-    MultiAgentDisabled -> "disabled"
-    MultiAgentV1 -> "v1"
-    MultiAgentV2 -> "v2"
-    MultiAgentVersionOther value -> value
-
-instance ToJSON MultiAgentVersion where
-    toJSON = String . multiAgentVersionText
-
-instance FromJSON MultiAgentVersion where
-    parseJSON = parseTextEnum "MultiAgentVersion" \case
-        "disabled" -> MultiAgentDisabled
-        "v1" -> MultiAgentV1
-        "v2" -> MultiAgentV2
-        value -> MultiAgentVersionOther value
-
-data ReasoningEffortPreset = ReasoningEffortPreset
-    { effort :: !ReasoningEffort
-    , description :: !Text
-    } deriving (Eq, Show)
-
-instance FromJSON ReasoningEffortPreset where
-    parseJSON = withObject "ReasoningEffortPreset" \value ->
-        ReasoningEffortPreset
-            <$> value .:? "effort" .!= ReasoningEffortNone
-            <*> value .:? "description" .!= ""
-
-instance ToJSON ReasoningEffortPreset where
-    toJSON preset = object
-        [ "effort" .= preset.effort
-        , "description" .= preset.description
-        ]
-
-data TruncationPolicy = TruncationPolicy
-    { mode :: !TruncationMode
-    , limit :: !Int
-    } deriving (Eq, Show)
-
-instance FromJSON TruncationPolicy where
-    parseJSON = withObject "TruncationPolicy" \value ->
-        TruncationPolicy
-            <$> value .:? "mode" .!= TruncationBytes
-            <*> value .:? "limit" .!= 10_000
-
-instance ToJSON TruncationPolicy where
-    toJSON policy = object
-        [ "mode" .= policy.mode
-        , "limit" .= policy.limit
-        ]
-
-data ModelServiceTier = ModelServiceTier
-    { tierId :: !Text
-    , name :: !Text
-    , description :: !Text
-    } deriving (Eq, Show)
-
-instance FromJSON ModelServiceTier where
-    parseJSON = withObject "ModelServiceTier" \value ->
-        ModelServiceTier
-            <$> value .:? "id" .!= ""
-            <*> value .:? "name" .!= ""
-            <*> value .:? "description" .!= ""
-
-instance ToJSON ModelServiceTier where
-    toJSON tier = object
-        [ "id" .= tier.tierId
-        , "name" .= tier.name
-        , "description" .= tier.description
-        ]
-
-newtype ModelAvailabilityNux = ModelAvailabilityNux
-    { message :: Text
-    } deriving (Eq, Show)
-
-instance FromJSON ModelAvailabilityNux where
-    parseJSON = withObject "ModelAvailabilityNux" \value ->
-        ModelAvailabilityNux <$> value .:? "message" .!= ""
-
-instance ToJSON ModelAvailabilityNux where
-    toJSON nux = object ["message" .= nux.message]
-
 data ModelInfoUpgrade = ModelInfoUpgrade
     { model :: !Text
     , migrationMarkdown :: !Text
     , retirementAt :: !(Maybe Text)
     } deriving (Eq, Show)
-
-instance FromJSON ModelInfoUpgrade where
-    parseJSON = withObject "ModelInfoUpgrade" \value ->
-        ModelInfoUpgrade
-            <$> value .:? "model" .!= ""
-            <*> value .:? "migration_markdown" .!= ""
-            <*> value .:? "retirement_at"
 
 instance ToJSON ModelInfoUpgrade where
     toJSON upgrade = object $
@@ -465,16 +112,6 @@ data ModelUpgrade = ModelUpgrade
     , migrationMarkdown :: !(Maybe Text)
     , retirementAt :: !(Maybe Text)
     } deriving (Eq, Show)
-
-instance FromJSON ModelUpgrade where
-    parseJSON = withObject "ModelUpgrade" \value ->
-        ModelUpgrade
-            <$> value .:? "id" .!= ""
-            <*> value .:? "migration_config_key" .!= ""
-            <*> value .:? "model_link"
-            <*> value .:? "upgrade_copy"
-            <*> value .:? "migration_markdown"
-            <*> value .:? "retirement_at"
 
 instance ToJSON ModelUpgrade where
     toJSON upgrade = object $
@@ -492,13 +129,6 @@ data ModelInstructionsVariables = ModelInstructionsVariables
     , personalityPragmatic :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON ModelInstructionsVariables where
-    parseJSON = withObject "ModelInstructionsVariables" \value ->
-        ModelInstructionsVariables
-            <$> value .:? "personality_default"
-            <*> value .:? "personality_friendly"
-            <*> value .:? "personality_pragmatic"
-
 instance ToJSON ModelInstructionsVariables where
     toJSON variables = object $
         maybeField "personality_default" variables.personalityDefault
@@ -512,14 +142,6 @@ data ApprovalMessages = ApprovalMessages
     , unlessTrusted :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON ApprovalMessages where
-    parseJSON = withObject "ApprovalMessages" \value ->
-        ApprovalMessages
-            <$> value .:? "on_request"
-            <*> value .:? "on_request_auto_review"
-            <*> value .:? "never"
-            <*> value .:? "unless_trusted"
-
 instance ToJSON ApprovalMessages where
     toJSON messages = object $
         maybeField "on_request" messages.onRequest
@@ -532,12 +154,6 @@ data CollaborationModeMessages = CollaborationModeMessages
     , planMessage :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON CollaborationModeMessages where
-    parseJSON = withObject "CollaborationModeMessages" \value ->
-        CollaborationModeMessages
-            <$> value .:? "default"
-            <*> value .:? "plan"
-
 instance ToJSON CollaborationModeMessages where
     toJSON messages = object $
         maybeField "default" messages.defaultMessage
@@ -549,14 +165,6 @@ data AutoReviewMessages = AutoReviewMessages
     , rejectionInstructions :: !(Maybe Text)
     , timeoutInstructions :: !(Maybe Text)
     } deriving (Eq, Show)
-
-instance FromJSON AutoReviewMessages where
-    parseJSON = withObject "AutoReviewMessages" \value ->
-        AutoReviewMessages
-            <$> value .:? "policy"
-            <*> value .:? "policy_template"
-            <*> value .:? "rejection_instructions"
-            <*> value .:? "timeout_instructions"
 
 instance ToJSON AutoReviewMessages where
     toJSON messages = object $
@@ -571,13 +179,6 @@ data PermissionMessages = PermissionMessages
     , readOnly :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON PermissionMessages where
-    parseJSON = withObject "PermissionMessages" \value ->
-        PermissionMessages
-            <$> value .:? "danger_full_access"
-            <*> value .:? "workspace_write"
-            <*> value .:? "read_only"
-
 instance ToJSON PermissionMessages where
     toJSON messages = object $
         maybeField "danger_full_access" messages.dangerFullAccess
@@ -589,12 +190,6 @@ data MultiAgentMessages = MultiAgentMessages
     , mode :: !(Maybe MultiAgentModeMessages)
     } deriving (Eq, Show)
 
-instance FromJSON MultiAgentMessages where
-    parseJSON = withObject "MultiAgentMessages" \value ->
-        MultiAgentMessages
-            <$> value .:? "role"
-            <*> value .:? "mode"
-
 instance ToJSON MultiAgentMessages where
     toJSON messages = object $
         maybeField "role" messages.role
@@ -605,12 +200,6 @@ data MultiAgentRoleMessages = MultiAgentRoleMessages
     , subagent :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON MultiAgentRoleMessages where
-    parseJSON = withObject "MultiAgentRoleMessages" \value ->
-        MultiAgentRoleMessages
-            <$> value .:? "root"
-            <*> value .:? "subagent"
-
 instance ToJSON MultiAgentRoleMessages where
     toJSON messages = object $
         maybeField "root" messages.root
@@ -620,12 +209,6 @@ data MultiAgentModeMessages = MultiAgentModeMessages
     { explicit :: !(Maybe Text)
     , hintText :: !(Maybe Text)
     } deriving (Eq, Show)
-
-instance FromJSON MultiAgentModeMessages where
-    parseJSON = withObject "MultiAgentModeMessages" \value ->
-        MultiAgentModeMessages
-            <$> value .:? "explicit"
-            <*> value .:? "hint_text"
 
 instance ToJSON MultiAgentModeMessages where
     toJSON messages = object $
@@ -639,15 +222,6 @@ data ModelTokenBudgetConfig = ModelTokenBudgetConfig
     , autoCompactFallbackPrompt :: !Text
     , autoCompactFallbackBufferTokens :: !Int
     } deriving (Eq, Show)
-
-instance FromJSON ModelTokenBudgetConfig where
-    parseJSON = withObject "ModelTokenBudgetConfig" \value ->
-        ModelTokenBudgetConfig
-            <$> value .:? "reminder_threshold_tokens" .!= 0
-            <*> value .:? "reminder_message_template" .!= ""
-            <*> value .:? "guidance_message" .!= ""
-            <*> value .:? "auto_compact_fallback_prompt" .!= ""
-            <*> value .:? "auto_compact_fallback_buffer_tokens" .!= 0
 
 instance ToJSON ModelTokenBudgetConfig where
     toJSON config = object
@@ -667,37 +241,18 @@ data ModelMessages = ModelMessages
     , permissions :: !(Maybe PermissionMessages)
     , multiAgent :: !(Maybe MultiAgentMessages)
     , tokenBudget :: !(Maybe ModelTokenBudgetConfig)
-    , guardianV2 :: !(Maybe Value)
-    , extraFields :: !Object
     } deriving (Eq, Show)
 
-instance FromJSON ModelMessages where
-    parseJSON = withObject "ModelMessages" \value ->
-        ModelMessages
-            <$> value .:? "instructions_template"
-            <*> value .:? "instructions_variables"
-            <*> value .:? "approvals"
-            <*> value .:? "collaboration_modes"
-            <*> value .:? "auto_review"
-            <*> value .:? "permissions"
-            <*> value .:? "multi_agent"
-            <*> value .:? "token_budget"
-            <*> value .:? "guardian_v2"
-            <*> pure (removeFields modelMessageFieldNames value)
-
 instance ToJSON ModelMessages where
-    toJSON messages = objectWithExtra messages.extraFields $
-        catMaybes
-            [ jsonField "instructions_template" messages.instructionsTemplate
-            , jsonField "instructions_variables" messages.instructionsVariables
-            , jsonField "approvals" messages.approvals
-            , jsonField "collaboration_modes" messages.collaborationModes
-            , jsonField "auto_review" messages.autoReview
-            , jsonField "permissions" messages.permissions
-            , jsonField "multi_agent" messages.multiAgent
-            , jsonField "token_budget" messages.tokenBudget
-            , jsonField "guardian_v2" messages.guardianV2
-            ]
+    toJSON messages = object $
+        maybeField "instructions_template" messages.instructionsTemplate
+        <> maybeField "instructions_variables" messages.instructionsVariables
+        <> maybeField "approvals" messages.approvals
+        <> maybeField "collaboration_modes" messages.collaborationModes
+        <> maybeField "auto_review" messages.autoReview
+        <> maybeField "permissions" messages.permissions
+        <> maybeField "multi_agent" messages.multiAgent
+        <> maybeField "token_budget" messages.tokenBudget
 
 data ModelPersonality
     = ModelPersonalityDefault
@@ -739,7 +294,6 @@ data ModelInfo = ModelInfo
     , supportedReasoningLevels :: ![ReasoningEffortPreset]
     , shellType :: !ShellToolType
     , visibility :: !ModelVisibility
-    , minimalClientVersion :: !(Maybe Value)
     , supportedInApi :: !Bool
     , availabilityNux :: !(Maybe ModelAvailabilityNux)
     , upgrade :: !(Maybe ModelInfoUpgrade)
@@ -755,165 +309,341 @@ data ModelInfo = ModelInfo
     , supportsReasoningSummaries :: !Bool
     , baseInstructions :: !(Maybe Text)
     , usedFallbackModelMetadata :: !Bool
-    , extraFields :: !Object
     } deriving (Eq, Show)
 
-instance FromJSON ModelInfo where
-    parseJSON = withObject "ModelInfo" \value -> do
-        slug <- value .: "slug"
-        displayName <- value .:? "display_name" .!= slug
-        description <- value .:? "description"
-        preferWebSockets <- value .:? "prefer_websockets" .!= False
-        supportVerbosity <- value .:? "support_verbosity" .!= False
-        defaultVerbosity <- value .:? "default_verbosity"
-        applyPatchToolType <- value .:? "apply_patch_tool_type"
-        webSearchToolType <- value .:? "web_search_tool_type" .!= WebSearchText
-        inputModalities <- value .:? "input_modalities" .!= defaultInputModalities
-        supportsImageDetailOriginal <-
-            value .:? "supports_image_detail_original" .!= False
-        truncationPolicy <-
-            value .:? "truncation_policy"
-                .!= TruncationPolicy TruncationBytes 10_000
-        supportsParallelToolCalls <-
-            value .:? "supports_parallel_tool_calls" .!= False
-        toolMode <- value .:? "tool_mode"
-        multiAgentVersion <- value .:? "multi_agent_version"
-        useResponsesLite <- value .:? "use_responses_lite" .!= False
-        includeSkillsUsageInstructions <-
-            value .:? "include_skills_usage_instructions" .!= False
-        includeAppsUsageInstructions <-
-            value .:? "include_apps_usage_instructions" .!= True
-        includePluginUsageInstructions <-
-            value .:? "include_plugin_usage_instructions" .!= False
-        nodeReplAutoReviewRequired <-
-            value .:? "node_repl_auto_review_required" .!= False
-        nodeReplDisabled <- value .:? "node_repl_disabled" .!= False
-        autoReviewModelOverride <- value .:? "auto_review_model_override"
-        modelSpecialty <- value .:? "model_specialty"
-        contextWindow <- value .:? "context_window"
-        maxContextWindow <- value .:? "max_context_window"
-        autoCompactTokenLimit <- value .:? "auto_compact_token_limit"
-        compHash <- value .:? "comp_hash"
-        effectiveContextWindowPercent <-
-            value .:? "effective_context_window_percent" .!= 95
-        defaultReasoningSummary <-
-            value .:? "default_reasoning_summary" .!= ReasoningSummaryAuto
-        defaultReasoningLevel <- value .:? "default_reasoning_level"
-        supportedReasoningLevels <-
-            value .:? "supported_reasoning_levels" .!= []
-        shellType <- value .:? "shell_type" .!= ShellToolUnifiedExec
-        visibility <- value .:? "visibility" .!= ModelVisibilityNone
-        minimalClientVersion <- value .:? "minimal_client_version"
-        supportedInApi <- value .:? "supported_in_api" .!= True
-        availabilityNux <- value .:? "availability_nux"
-        upgrade <- value .:? "upgrade"
-        priority <- value .:? "priority" .!= 99
-        parsedMessages <- value .:? "model_messages"
-        experimentalSupportedTools <-
-            value .:? "experimental_supported_tools" .!= []
-        availableInPlans <- value .:? "available_in_plans" .!= []
-        supportsSearchTool <- value .:? "supports_search_tool" .!= False
-        defaultServiceTier <- value .:? "default_service_tier"
-        serviceTiers <- value .:? "service_tiers" .!= []
-        additionalSpeedTiers <- value .:? "additional_speed_tiers" .!= []
-        supportsReasoningSummaryParameter <-
-            value .:? "supports_reasoning_summary_parameter" .!= True
-        supportsReasoningSummaries <-
-            value .:? "supports_reasoning_summaries" .!= False
-        legacyBaseInstructions <- value .:? "base_instructions"
-        let modelMessages =
-                promoteLegacyInstructions
-                    legacyBaseInstructions
-                    parsedMessages
-            -- The canonical V2 representation owns the instruction template.
-            -- Keep the legacy field only as an input compatibility shim; the
-            -- ModelsResponse serializer below re-emits it for older clients.
-            baseInstructions = Nothing
-        case modelMessages >>= (.instructionsTemplate) of
-            Nothing ->
-                fail
-                    ( "model `" <> Text.unpack slug
-                        <> "` is missing both base_instructions and "
-                        <> "model_messages.instructions_template"
-                    )
-            Just _ -> pure ()
-        pure ModelInfo
-            { usedFallbackModelMetadata = False
-            , extraFields = removeFields modelInfoFieldNames value
-            , ..
-            }
-
 instance ToJSON ModelInfo where
-    toJSON info = objectWithExtra info.extraFields $
-        [ ("slug", toJSON info.slug)
-        , ("display_name", toJSON info.displayName)
-        , ("prefer_websockets", toJSON info.preferWebSockets)
-        , ("support_verbosity", toJSON info.supportVerbosity)
-        , ("web_search_tool_type", toJSON info.webSearchToolType)
-        , ("input_modalities", toJSON info.inputModalities)
-        , ("supports_image_detail_original", toJSON info.supportsImageDetailOriginal)
-        , ("truncation_policy", toJSON info.truncationPolicy)
-        , ("supports_parallel_tool_calls", toJSON info.supportsParallelToolCalls)
-        , ("use_responses_lite", toJSON info.useResponsesLite)
-        , ("include_skills_usage_instructions", toJSON info.includeSkillsUsageInstructions)
-        , ("include_apps_usage_instructions", toJSON info.includeAppsUsageInstructions)
-        , ("include_plugin_usage_instructions", toJSON info.includePluginUsageInstructions)
-        , ("node_repl_auto_review_required", toJSON info.nodeReplAutoReviewRequired)
-        , ("node_repl_disabled", toJSON info.nodeReplDisabled)
-        , ("effective_context_window_percent", toJSON info.effectiveContextWindowPercent)
-        , ("default_reasoning_summary", toJSON info.defaultReasoningSummary)
-        , ("supported_reasoning_levels", toJSON info.supportedReasoningLevels)
-        , ("shell_type", toJSON info.shellType)
-        , ("visibility", toJSON info.visibility)
-        , ("supported_in_api", toJSON info.supportedInApi)
-        , ("priority", toJSON info.priority)
-        , ("experimental_supported_tools", toJSON info.experimentalSupportedTools)
-        , ("available_in_plans", toJSON info.availableInPlans)
-        , ("supports_search_tool", toJSON info.supportsSearchTool)
-        , ("service_tiers", toJSON info.serviceTiers)
-        , ("additional_speed_tiers", toJSON info.additionalSpeedTiers)
-        , ("supports_reasoning_summary_parameter", toJSON info.supportsReasoningSummaryParameter)
-        , ("supports_reasoning_summaries", toJSON info.supportsReasoningSummaries)
-        ] <> catMaybes
-            [ jsonField "description" info.description
-            , jsonField "default_verbosity" info.defaultVerbosity
-            , jsonField "apply_patch_tool_type" info.applyPatchToolType
-            , jsonField "tool_mode" info.toolMode
-            , jsonField "multi_agent_version" info.multiAgentVersion
-            , jsonField "auto_review_model_override" info.autoReviewModelOverride
-            , jsonField "model_specialty" info.modelSpecialty
-            , jsonField "context_window" info.contextWindow
-            , jsonField "max_context_window" info.maxContextWindow
-            , jsonField "auto_compact_token_limit" info.autoCompactTokenLimit
-            , jsonField "comp_hash" info.compHash
-            , jsonField "default_reasoning_level" info.defaultReasoningLevel
-            , jsonField "minimal_client_version" info.minimalClientVersion
-            , jsonField "availability_nux" info.availabilityNux
-            , jsonField "upgrade" info.upgrade
-            , jsonField "model_messages" info.modelMessages
-            , jsonField "default_service_tier" info.defaultServiceTier
-            , jsonField "base_instructions" info.baseInstructions
-            ]
+    toJSON info = object $
+        modelInfoFields info
+        <> maybeField "base_instructions" info.baseInstructions
 
 data ModelsResponse = ModelsResponse
     { models :: ![ModelInfo]
-    , extraFields :: !Object
+    , catalogGeneration :: !(Maybe Scientific)
     } deriving (Eq, Show)
 
-instance FromJSON ModelsResponse where
-    parseJSON = withObject "ModelsResponse" \value ->
-        ModelsResponse
-            <$> value .: "models"
-            <*> pure (removeFields ["models"] value)
+-- | Decode the Codex model catalog directly with Hermes. Unknown fields are
+-- intentionally ignored; Aeson remains responsible only for encoding.
+modelsResponseDecoder :: Json.Decoder ModelsResponse
+modelsResponseDecoder = Json.object do
+    models <- Json.atKey "models" (Json.list modelInfoDecoder)
+    catalogGeneration <-
+        optionalField "catalog_generation" Json.scientific
+    pure ModelsResponse
+        { models
+        , catalogGeneration
+        }
+
+modelInfoDecoder :: Json.Decoder ModelInfo
+modelInfoDecoder = Json.object do
+    slug <- Json.atKey "slug" Json.text
+    displayName <- fieldDefault "display_name" Json.text slug
+    description <- optionalField "description" Json.text
+    preferWebSockets <- fieldDefault "prefer_websockets" Json.bool False
+    supportVerbosity <- fieldDefault "support_verbosity" Json.bool False
+    defaultVerbosity <- optionalField "default_verbosity" verbosityDecoder
+    applyPatchToolType <-
+        optionalField "apply_patch_tool_type" applyPatchToolTypeDecoder
+    webSearchToolType <-
+        fieldDefault "web_search_tool_type" webSearchToolTypeDecoder WebSearchText
+    inputModalities <-
+        fieldDefault "input_modalities"
+            (Json.list inputModalityDecoder) defaultInputModalities
+    supportsImageDetailOriginal <-
+        fieldDefault "supports_image_detail_original" Json.bool False
+    truncationPolicy <-
+        fieldDefault "truncation_policy" truncationPolicyDecoder
+            (TruncationPolicy TruncationBytes 10_000)
+    supportsParallelToolCalls <-
+        fieldDefault "supports_parallel_tool_calls" Json.bool False
+    toolMode <- optionalField "tool_mode" toolModeDecoder
+    multiAgentVersion <-
+        optionalField "multi_agent_version" multiAgentVersionDecoder
+    useResponsesLite <- fieldDefault "use_responses_lite" Json.bool False
+    includeSkillsUsageInstructions <-
+        fieldDefault "include_skills_usage_instructions" Json.bool False
+    includeAppsUsageInstructions <-
+        fieldDefault "include_apps_usage_instructions" Json.bool True
+    includePluginUsageInstructions <-
+        fieldDefault "include_plugin_usage_instructions" Json.bool False
+    nodeReplAutoReviewRequired <-
+        fieldDefault "node_repl_auto_review_required" Json.bool False
+    nodeReplDisabled <- fieldDefault "node_repl_disabled" Json.bool False
+    autoReviewModelOverride <-
+        optionalField "auto_review_model_override" Json.text
+    modelSpecialty <- optionalField "model_specialty" Json.text
+    contextWindow <- optionalField "context_window" Json.int
+    maxContextWindow <- optionalField "max_context_window" Json.int
+    autoCompactTokenLimit <-
+        optionalField "auto_compact_token_limit" Json.int
+    compHash <- optionalField "comp_hash" Json.text
+    effectiveContextWindowPercent <-
+        fieldDefault "effective_context_window_percent" Json.int 95
+    defaultReasoningSummary <-
+        fieldDefault "default_reasoning_summary"
+            reasoningSummaryDecoder ReasoningSummaryAuto
+    defaultReasoningLevel <-
+        optionalField "default_reasoning_level" reasoningEffortDecoder
+    supportedReasoningLevels <-
+        fieldDefault "supported_reasoning_levels"
+            (Json.list reasoningEffortPresetDecoder) []
+    shellType <-
+        fieldDefault "shell_type" shellToolTypeDecoder ShellToolUnifiedExec
+    visibility <-
+        fieldDefault "visibility" modelVisibilityDecoder ModelVisibilityNone
+    supportedInApi <- fieldDefault "supported_in_api" Json.bool True
+    availabilityNux <-
+        optionalField "availability_nux" modelAvailabilityNuxDecoder
+    upgrade <- optionalField "upgrade" modelInfoUpgradeDecoder
+    priority <- fieldDefault "priority" Json.int 99
+    parsedMessages <- optionalField "model_messages" modelMessagesDecoder
+    experimentalSupportedTools <-
+        fieldDefault "experimental_supported_tools" (Json.list Json.text) []
+    availableInPlans <-
+        fieldDefault "available_in_plans" (Json.list Json.text) []
+    supportsSearchTool <-
+        fieldDefault "supports_search_tool" Json.bool False
+    defaultServiceTier <- optionalField "default_service_tier" Json.text
+    serviceTiers <-
+        fieldDefault "service_tiers" (Json.list modelServiceTierDecoder) []
+    additionalSpeedTiers <-
+        fieldDefault "additional_speed_tiers" (Json.list Json.text) []
+    supportsReasoningSummaryParameter <-
+        fieldDefault "supports_reasoning_summary_parameter" Json.bool True
+    supportsReasoningSummaries <-
+        fieldDefault "supports_reasoning_summaries" Json.bool False
+    legacyBaseInstructions <- optionalField "base_instructions" Json.text
+    let modelMessages =
+            promoteLegacyInstructions legacyBaseInstructions parsedMessages
+        baseInstructions = Nothing
+    case modelMessages >>= (.instructionsTemplate) of
+        Nothing -> fail
+            ("model `" <> Text.unpack slug
+                <> "` is missing both base_instructions and "
+                <> "model_messages.instructions_template")
+        Just _ -> pure ()
+    pure ModelInfo
+        { usedFallbackModelMetadata = False
+        , ..
+        }
+
+reasoningEffortDecoder :: Json.Decoder ReasoningEffort
+reasoningEffortDecoder = nonEmptyTextEnum "reasoning_effort" \case
+    "none" -> ReasoningEffortNone
+    "minimal" -> ReasoningEffortMinimal
+    "low" -> ReasoningEffortLow
+    "medium" -> ReasoningEffortMedium
+    "high" -> ReasoningEffortHigh
+    "xhigh" -> ReasoningEffortXHigh
+    "max" -> ReasoningEffortMax
+    "ultra" -> ReasoningEffortUltra
+    value -> ReasoningEffortOther value
+
+reasoningSummaryDecoder :: Json.Decoder ReasoningSummary
+reasoningSummaryDecoder = textEnum \case
+    "none" -> ReasoningSummaryNone
+    "auto" -> ReasoningSummaryAuto
+    "concise" -> ReasoningSummaryConcise
+    "detailed" -> ReasoningSummaryDetailed
+    value -> ReasoningSummaryOther value
+
+verbosityDecoder :: Json.Decoder Verbosity
+verbosityDecoder = textEnum \case
+    "low" -> VerbosityLow
+    "medium" -> VerbosityMedium
+    "high" -> VerbosityHigh
+    value -> VerbosityOther value
+
+inputModalityDecoder :: Json.Decoder InputModality
+inputModalityDecoder = textEnum \case
+    "text" -> InputModalityText
+    "image" -> InputModalityImage
+    "audio" -> InputModalityAudio
+    value -> InputModalityOther value
+
+modelVisibilityDecoder :: Json.Decoder ModelVisibility
+modelVisibilityDecoder = textEnum \case
+    "list" -> ModelVisibilityList
+    "hide" -> ModelVisibilityHide
+    "none" -> ModelVisibilityNone
+    value -> ModelVisibilityOther value
+
+shellToolTypeDecoder :: Json.Decoder ShellToolType
+shellToolTypeDecoder = textEnum \case
+    "unified_exec" -> ShellToolUnifiedExec
+    "default" -> ShellToolUnifiedExec
+    "local" -> ShellToolUnifiedExec
+    "shell_command" -> ShellToolUnifiedExec
+    "disabled" -> ShellToolDisabled
+    value -> ShellToolOther value
+
+applyPatchToolTypeDecoder :: Json.Decoder ApplyPatchToolType
+applyPatchToolTypeDecoder = textEnum \case
+    "freeform" -> ApplyPatchFreeform
+    value -> ApplyPatchOther value
+
+webSearchToolTypeDecoder :: Json.Decoder WebSearchToolType
+webSearchToolTypeDecoder = textEnum \case
+    "text" -> WebSearchText
+    "text_and_image" -> WebSearchTextAndImage
+    value -> WebSearchOther value
+
+truncationModeDecoder :: Json.Decoder TruncationMode
+truncationModeDecoder = textEnum \case
+    "bytes" -> TruncationBytes
+    "tokens" -> TruncationTokens
+    value -> TruncationOther value
+
+toolModeDecoder :: Json.Decoder ToolMode
+toolModeDecoder = textEnum \case
+    "direct" -> ToolModeDirect
+    "code_mode" -> ToolModeCode
+    "code_mode_only" -> ToolModeCodeOnly
+    value -> ToolModeOther value
+
+multiAgentVersionDecoder :: Json.Decoder MultiAgentVersion
+multiAgentVersionDecoder = textEnum \case
+    "disabled" -> MultiAgentDisabled
+    "v1" -> MultiAgentV1
+    "v2" -> MultiAgentV2
+    value -> MultiAgentVersionOther value
+
+reasoningEffortPresetDecoder :: Json.Decoder ReasoningEffortPreset
+reasoningEffortPresetDecoder = Json.object $
+    ReasoningEffortPreset
+        <$> fieldDefault "effort" reasoningEffortDecoder ReasoningEffortNone
+        <*> fieldDefault "description" Json.text ""
+
+truncationPolicyDecoder :: Json.Decoder TruncationPolicy
+truncationPolicyDecoder = Json.object $
+    TruncationPolicy
+        <$> fieldDefault "mode" truncationModeDecoder TruncationBytes
+        <*> fieldDefault "limit" Json.int 10_000
+
+modelServiceTierDecoder :: Json.Decoder ModelServiceTier
+modelServiceTierDecoder = Json.object $
+    ModelServiceTier
+        <$> fieldDefault "id" Json.text ""
+        <*> fieldDefault "name" Json.text ""
+        <*> fieldDefault "description" Json.text ""
+
+modelAvailabilityNuxDecoder :: Json.Decoder ModelAvailabilityNux
+modelAvailabilityNuxDecoder =
+    Json.object $ ModelAvailabilityNux <$> fieldDefault "message" Json.text ""
+
+modelInfoUpgradeDecoder :: Json.Decoder ModelInfoUpgrade
+modelInfoUpgradeDecoder = Json.object $
+    ModelInfoUpgrade
+        <$> fieldDefault "model" Json.text ""
+        <*> fieldDefault "migration_markdown" Json.text ""
+        <*> optionalField "retirement_at" Json.text
+
+modelInstructionsVariablesDecoder :: Json.Decoder ModelInstructionsVariables
+modelInstructionsVariablesDecoder = Json.object $
+    ModelInstructionsVariables
+        <$> optionalField "personality_default" Json.text
+        <*> optionalField "personality_friendly" Json.text
+        <*> optionalField "personality_pragmatic" Json.text
+
+approvalMessagesDecoder :: Json.Decoder ApprovalMessages
+approvalMessagesDecoder = Json.object $
+    ApprovalMessages
+        <$> optionalField "on_request" Json.text
+        <*> optionalField "on_request_auto_review" Json.text
+        <*> optionalField "never" Json.text
+        <*> optionalField "unless_trusted" Json.text
+
+collaborationModeMessagesDecoder :: Json.Decoder CollaborationModeMessages
+collaborationModeMessagesDecoder = Json.object $
+    CollaborationModeMessages
+        <$> optionalField "default" Json.text
+        <*> optionalField "plan" Json.text
+
+autoReviewMessagesDecoder :: Json.Decoder AutoReviewMessages
+autoReviewMessagesDecoder = Json.object $
+    AutoReviewMessages
+        <$> optionalField "policy" Json.text
+        <*> optionalField "policy_template" Json.text
+        <*> optionalField "rejection_instructions" Json.text
+        <*> optionalField "timeout_instructions" Json.text
+
+permissionMessagesDecoder :: Json.Decoder PermissionMessages
+permissionMessagesDecoder = Json.object $
+    PermissionMessages
+        <$> optionalField "danger_full_access" Json.text
+        <*> optionalField "workspace_write" Json.text
+        <*> optionalField "read_only" Json.text
+
+multiAgentMessagesDecoder :: Json.Decoder MultiAgentMessages
+multiAgentMessagesDecoder = Json.object $
+    MultiAgentMessages
+        <$> optionalField "role" multiAgentRoleMessagesDecoder
+        <*> optionalField "mode" multiAgentModeMessagesDecoder
+
+multiAgentRoleMessagesDecoder :: Json.Decoder MultiAgentRoleMessages
+multiAgentRoleMessagesDecoder = Json.object $
+    MultiAgentRoleMessages
+        <$> optionalField "root" Json.text
+        <*> optionalField "subagent" Json.text
+
+multiAgentModeMessagesDecoder :: Json.Decoder MultiAgentModeMessages
+multiAgentModeMessagesDecoder = Json.object $
+    MultiAgentModeMessages
+        <$> optionalField "explicit" Json.text
+        <*> optionalField "hint_text" Json.text
+
+modelTokenBudgetConfigDecoder :: Json.Decoder ModelTokenBudgetConfig
+modelTokenBudgetConfigDecoder = Json.object $
+    ModelTokenBudgetConfig
+        <$> fieldDefault "reminder_threshold_tokens" Json.int 0
+        <*> fieldDefault "reminder_message_template" Json.text ""
+        <*> fieldDefault "guidance_message" Json.text ""
+        <*> fieldDefault "auto_compact_fallback_prompt" Json.text ""
+        <*> fieldDefault "auto_compact_fallback_buffer_tokens" Json.int 0
+
+modelMessagesDecoder :: Json.Decoder ModelMessages
+modelMessagesDecoder = Json.object do
+    instructionsTemplate <- optionalField "instructions_template" Json.text
+    instructionsVariables <-
+        optionalField "instructions_variables" modelInstructionsVariablesDecoder
+    approvals <- optionalField "approvals" approvalMessagesDecoder
+    collaborationModes <-
+        optionalField "collaboration_modes" collaborationModeMessagesDecoder
+    autoReview <- optionalField "auto_review" autoReviewMessagesDecoder
+    permissions <- optionalField "permissions" permissionMessagesDecoder
+    multiAgent <- optionalField "multi_agent" multiAgentMessagesDecoder
+    tokenBudget <- optionalField "token_budget" modelTokenBudgetConfigDecoder
+    pure ModelMessages
+        { .. }
+
+optionalField
+    :: Text
+    -> Json.Decoder value
+    -> Json.FieldsDecoder (Maybe value)
+optionalField key decoder =
+    join <$> Json.atKeyOptional key (Json.nullable decoder)
+
+fieldDefault
+    :: Text
+    -> Json.Decoder value
+    -> value
+    -> Json.FieldsDecoder value
+fieldDefault key decoder fallback =
+    fromMaybe fallback <$> optionalField key decoder
+
+textEnum :: (Text -> value) -> Json.Decoder value
+textEnum constructor =
+    constructor <$> Json.text
+
+nonEmptyTextEnum :: String -> (Text -> value) -> Json.Decoder value
+nonEmptyTextEnum label constructor = Json.withText \value ->
+    if Text.null value
+        then fail (label <> " must not be empty")
+        else pure (constructor value)
 
 instance ToJSON ModelsResponse where
-    toJSON response =
-        objectWithExtra response.extraFields
-            [ ( "models"
-              , toJSON
-                    (map modelInfoWithLegacyBaseInstructions response.models)
-              )
-            ]
+    toJSON response = object $
+        [ "models" .= map ModelInfoWithLegacyBaseInstructions response.models ]
+        <> maybeField "catalog_generation" response.catalogGeneration
 
 data ModelPreset = ModelPreset
     { presetId :: !Text
@@ -1109,7 +839,6 @@ fallbackModelInfo requested = ModelInfo
     , supportedReasoningLevels = []
     , shellType = ShellToolUnifiedExec
     , visibility = ModelVisibilityNone
-    , minimalClientVersion = Nothing
     , supportedInApi = True
     , availabilityNux = Nothing
     , upgrade = Nothing
@@ -1125,7 +854,6 @@ fallbackModelInfo requested = ModelInfo
     , supportsReasoningSummaries = False
     , baseInstructions = Nothing
     , usedFallbackModelMetadata = True
-    , extraFields = KeyMap.empty
     }
 
 -- | The upstream Codex fallback instructions for unknown model slugs.
@@ -1142,7 +870,8 @@ fallbackModelInstructions =
 mergeModelCatalogs :: ModelsResponse -> ModelsResponse -> ModelsResponse
 mergeModelCatalogs bundled remote = ModelsResponse
     { models = foldl' overlay bundled.models remote.models
-    , extraFields = KeyMap.union remote.extraFields bundled.extraFields
+    , catalogGeneration =
+        remote.catalogGeneration <|> bundled.catalogGeneration
     }
   where
     overlay current replacement =
@@ -1155,9 +884,6 @@ mergeModelCatalogs bundled remote = ModelsResponse
                 ]
             else current <> [replacement]
 
-parseTextEnum :: String -> (Text -> value) -> Value -> Parser value
-parseTextEnum label constructor = withText label (pure . constructor)
-
 legacyModelMessages :: Text -> ModelMessages
 legacyModelMessages instructions = ModelMessages
     { instructionsTemplate = Just instructions
@@ -1168,8 +894,6 @@ legacyModelMessages instructions = ModelMessages
     , permissions = Nothing
     , multiAgent = Nothing
     , tokenBudget = Nothing
-    , guardianV2 = Nothing
-    , extraFields = KeyMap.empty
     }
 
 promoteLegacyInstructions
@@ -1197,104 +921,75 @@ toPresetUpgrade source upgrade = ModelUpgrade
     , retirementAt = upgrade.retirementAt
     }
 
-modelMessageFieldNames :: [Text]
-modelMessageFieldNames =
-    [ "instructions_template"
-    , "instructions_variables"
-    , "approvals"
-    , "collaboration_modes"
-    , "auto_review"
-    , "permissions"
-    , "multi_agent"
-    , "token_budget"
-    , "guardian_v2"
-    ]
-
-modelInfoFieldNames :: [Text]
-modelInfoFieldNames =
-    [ "slug"
-    , "display_name"
-    , "description"
-    , "prefer_websockets"
-    , "support_verbosity"
-    , "default_verbosity"
-    , "apply_patch_tool_type"
-    , "web_search_tool_type"
-    , "input_modalities"
-    , "supports_image_detail_original"
-    , "truncation_policy"
-    , "supports_parallel_tool_calls"
-    , "tool_mode"
-    , "multi_agent_version"
-    , "use_responses_lite"
-    , "include_skills_usage_instructions"
-    , "include_apps_usage_instructions"
-    , "include_plugin_usage_instructions"
-    , "node_repl_auto_review_required"
-    , "node_repl_disabled"
-    , "auto_review_model_override"
-    , "model_specialty"
-    , "context_window"
-    , "max_context_window"
-    , "auto_compact_token_limit"
-    , "comp_hash"
-    , "effective_context_window_percent"
-    , "default_reasoning_summary"
-    , "default_reasoning_level"
-    , "supported_reasoning_levels"
-    , "shell_type"
-    , "visibility"
-    , "minimal_client_version"
-    , "supported_in_api"
-    , "availability_nux"
-    , "upgrade"
-    , "priority"
-    , "model_messages"
-    , "experimental_supported_tools"
-    , "available_in_plans"
-    , "supports_search_tool"
-    , "default_service_tier"
-    , "service_tiers"
-    , "additional_speed_tiers"
-    , "supports_reasoning_summary_parameter"
-    , "supports_reasoning_summaries"
-    , "base_instructions"
-    ]
-
-removeFields :: [Text] -> Object -> Object
-removeFields fields value =
-    foldl' (\current name -> KeyMap.delete (Key.fromText name) current) value fields
-
-objectWithExtra :: Object -> [(Text, Value)] -> Value
-objectWithExtra extras fields =
-    Object $ foldl'
-        (\current (name, value) ->
-            KeyMap.insert (Key.fromText name) value current)
-        extras
-        fields
-
 -- | Upstream's ModelsResponse codec emits the deprecated top-level
 -- @base_instructions@ field alongside every model, even when the canonical
 -- @model_messages.instructions_template@ field is present. This is required
 -- for older Codex clients that still read the legacy field.
-modelInfoWithLegacyBaseInstructions :: ModelInfo -> Value
-modelInfoWithLegacyBaseInstructions info =
-    case toJSON info of
-        Object fields ->
-            Object
-                (KeyMap.insert
-                    (Key.fromText "base_instructions")
-                    (String
-                        (renderModelInstructions
-                            ModelPersonalityDefault
-                            info))
-                    fields)
-        value -> value
+newtype ModelInfoWithLegacyBaseInstructions =
+    ModelInfoWithLegacyBaseInstructions ModelInfo
 
-jsonField :: ToJSON value => Text -> Maybe value -> Maybe (Text, Value)
-jsonField name = fmap (name,) . fmap toJSON
+instance ToJSON ModelInfoWithLegacyBaseInstructions where
+    toJSON (ModelInfoWithLegacyBaseInstructions info) =
+        object $
+            modelInfoFields info
+            <> [ "base_instructions"
+                 .= renderModelInstructions ModelPersonalityDefault info
+               ]
 
-maybeField :: ToJSON value => Text -> Maybe value -> [(Key.Key, Value)]
+modelInfoFields :: ModelInfo -> [Pair]
+modelInfoFields info =
+    [ "slug" .= info.slug
+    , "display_name" .= info.displayName
+    , "prefer_websockets" .= info.preferWebSockets
+    , "support_verbosity" .= info.supportVerbosity
+    , "web_search_tool_type" .= info.webSearchToolType
+    , "input_modalities" .= info.inputModalities
+    , "supports_image_detail_original" .= info.supportsImageDetailOriginal
+    , "truncation_policy" .= info.truncationPolicy
+    , "supports_parallel_tool_calls" .= info.supportsParallelToolCalls
+    , "use_responses_lite" .= info.useResponsesLite
+    , "include_skills_usage_instructions"
+        .= info.includeSkillsUsageInstructions
+    , "include_apps_usage_instructions" .= info.includeAppsUsageInstructions
+    , "include_plugin_usage_instructions"
+        .= info.includePluginUsageInstructions
+    , "node_repl_auto_review_required" .= info.nodeReplAutoReviewRequired
+    , "node_repl_disabled" .= info.nodeReplDisabled
+    , "effective_context_window_percent"
+        .= info.effectiveContextWindowPercent
+    , "default_reasoning_summary" .= info.defaultReasoningSummary
+    , "supported_reasoning_levels" .= info.supportedReasoningLevels
+    , "shell_type" .= info.shellType
+    , "visibility" .= info.visibility
+    , "supported_in_api" .= info.supportedInApi
+    , "priority" .= info.priority
+    , "experimental_supported_tools" .= info.experimentalSupportedTools
+    , "available_in_plans" .= info.availableInPlans
+    , "supports_search_tool" .= info.supportsSearchTool
+    , "service_tiers" .= info.serviceTiers
+    , "additional_speed_tiers" .= info.additionalSpeedTiers
+    , "supports_reasoning_summary_parameter"
+        .= info.supportsReasoningSummaryParameter
+    , "supports_reasoning_summaries" .= info.supportsReasoningSummaries
+    ]
+    <> maybeField "description" info.description
+    <> maybeField "default_verbosity" info.defaultVerbosity
+    <> maybeField "apply_patch_tool_type" info.applyPatchToolType
+    <> maybeField "tool_mode" info.toolMode
+    <> maybeField "multi_agent_version" info.multiAgentVersion
+    <> maybeField "auto_review_model_override" info.autoReviewModelOverride
+    <> maybeField "model_specialty" info.modelSpecialty
+    <> maybeField "context_window" info.contextWindow
+    <> maybeField "max_context_window" info.maxContextWindow
+    <> maybeField "auto_compact_token_limit" info.autoCompactTokenLimit
+    <> maybeField "comp_hash" info.compHash
+    <> maybeField "default_reasoning_level" info.defaultReasoningLevel
+    <> maybeField "availability_nux" info.availabilityNux
+    <> maybeField "upgrade" info.upgrade
+    <> maybeField "model_messages" info.modelMessages
+    <> maybeField "default_service_tier" info.defaultServiceTier
+
+maybeField :: ToJSON value => Text -> Maybe value -> [Pair]
 maybeField name = maybe [] (\value -> [Key.fromText name .= value])
 
 findIndexBy :: (value -> Bool) -> [value] -> Maybe Int

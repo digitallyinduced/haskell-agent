@@ -23,6 +23,7 @@ module Agent.CLI.AgentSessions
 
 import Agent.CLI.Options (ApprovalPolicy(..))
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
+import Agent.CLI.AgentSessions.Render (renderAgentSession)
 import Agent.CLI.Error (formatException)
 import Agent.Process
     ( terminateProcessGroupWith
@@ -30,10 +31,8 @@ import Agent.Process
     )
 import Agent.CLI.Session
     ( SessionCreate(..)
-    , SessionActivity(..)
     , SessionHandle(..)
     , SessionMeta(..)
-    , SessionTurn(..)
     , SessionTurnPage(..)
     , createSession
     , loadSessionActivity
@@ -57,10 +56,10 @@ import Agent.OsPath (fromText, unsafeToFilePath)
 import Agent.Dialect
     ( DialectId
     , dialectIdForModel
-    , dialectSlug
     )
-import Agent.Provider (Provider, providerSlug)
-import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
+import Agent.Provider (Provider)
+import Agent.Json.Decode (optionalKey)
+import qualified Agent.Json.Decode as Hermes
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
@@ -94,7 +93,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (void)
-import Data.Aeson (FromJSON(..), encode)
+import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -271,11 +270,12 @@ sessionThreadStatus manager sessionId =
                 poll worker >>= \case
                     Nothing -> pure (state, "running")
                     Just (Right ()) ->
-                        terminalStatus state "completed"
+                        settle state ManagedSessionThreadCompleted "completed"
                     Just (Left err) ->
-                        terminalStatus
-                            state
-                            ("failed (" <> formatException err <> ")")
+                        let message = "failed (" <> formatException err <> ")"
+                        in settle state
+                            (ManagedSessionThreadFailed message)
+                            message
             Just ManagedSessionThreadCompleted ->
                 terminalStatus state "completed"
             Just (ManagedSessionThreadFailed err) ->
@@ -286,15 +286,26 @@ sessionThreadStatus manager sessionId =
             (sessionLockPath
                 (manager.threadManagerRoot
                     </> unsafeEncodeUtf (Text.unpack sessionId)))
-    terminalStatus state terminal = do
+    -- Persist the terminal outcome instead of deleting it, so repeated status
+    -- polls stay observable. The background worker itself records the same
+    -- terminal constructor on exit (launchSessionThread); deleting it here
+    -- destroyed that record, making a failed session report "idle" on the
+    -- second poll (and never report its failure at all when a poll landed
+    -- while the session lock was still held). A still-active lock only masks
+    -- the outcome as "running" for this poll; the retained record surfaces the
+    -- real status once the lock clears.
+    settle state record terminal = do
         locked <- lockIsActive
         pure
             ( state
                 { managedThreads =
-                    Map.delete sessionId state.managedThreads
+                    Map.insert sessionId record state.managedThreads
                 }
             , if locked then "running" else terminal
             )
+    terminalStatus state terminal = do
+        locked <- lockIsActive
+        pure (state, if locked then "running" else terminal)
 
 closeSessionThreadManager :: SessionThreadManager -> IO ()
 closeSessionThreadManager manager = do
@@ -614,26 +625,19 @@ sessionProcessStatus manager sessionId =
             Just ManagedSessionStarting{} ->
                 pure (state, "running")
             Just (ManagedSessionRunning managedHandle) ->
+                -- Keep the exited process record rather than deleting it on
+                -- read: getProcessExitCode returns a stable code once the
+                -- process has exited, so retaining the handle lets repeated
+                -- polls keep reporting "completed"/"failed" instead of
+                -- decaying to "idle" after the first read. Re-launch tolerates
+                -- a retained exited record (startSessionProcess treats a
+                -- Just exit code as not-running).
                 getProcessExitCode managedHandle >>= \case
                     Nothing -> pure (state, "running")
-                    Just ExitSuccess ->
-                        pure
-                            ( state
-                                { sessionManagerProcesses =
-                                    Map.delete sessionId
-                                        state.sessionManagerProcesses
-                                }
-                            , "completed"
-                            )
+                    Just ExitSuccess -> pure (state, "completed")
                     Just (ExitFailure code) ->
                         pure
-                            ( state
-                                { sessionManagerProcesses =
-                                    Map.delete sessionId
-                                        state.sessionManagerProcesses
-                                }
-                            , "failed (" <> Text.pack (show code) <> ")"
-                            )
+                            (state, "failed (" <> Text.pack (show code) <> ")")
 
 closeSessionProcessManager :: SessionProcessManager -> IO ()
 closeSessionProcessManager manager = do
@@ -768,12 +772,13 @@ data CreateAgentSessionArgs = CreateAgentSessionArgs
     , reasoningEffort :: Maybe Text
     }
 
-instance FromJSON CreateAgentSessionArgs where
-    parseJSON = objectArgs \input -> CreateAgentSessionArgs
-        <$> reqText input "message"
-        <*> optText input "title"
-        <*> optText input "model"
-        <*> optText input "reasoning_effort"
+createAgentSessionArgsDecoder :: Hermes.Decoder CreateAgentSessionArgs
+createAgentSessionArgsDecoder = Hermes.object $
+    CreateAgentSessionArgs
+        <$> Hermes.atKey "message" Hermes.text
+        <*> optionalKey "title" Hermes.text
+        <*> optionalKey "model" Hermes.text
+        <*> optionalKey "reasoning_effort" Hermes.text
 
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
@@ -790,7 +795,8 @@ createAgentSessionTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "create_agent_session" (runCreateAgentSession env))
+    (typedTool "create_agent_session" createAgentSessionArgsDecoder
+        (runCreateAgentSession env))
 
 runCreateAgentSession
     :: AgentSessionToolsEnv
@@ -854,10 +860,11 @@ data ReadAgentSessionArgs = ReadAgentSessionArgs
     , limit :: Maybe Int
     }
 
-instance FromJSON ReadAgentSessionArgs where
-    parseJSON = objectArgs \input -> ReadAgentSessionArgs
-        <$> reqText input "session_id"
-        <*> optInt input "limit"
+readAgentSessionArgsDecoder :: Hermes.Decoder ReadAgentSessionArgs
+readAgentSessionArgsDecoder = Hermes.object $
+    ReadAgentSessionArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> optionalKey "limit" Hermes.int
 
 readAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 readAgentSessionTool env = jsonTool
@@ -870,7 +877,8 @@ readAgentSessionTool env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "read_agent_session" (runReadAgentSession env))
+    (typedTool "read_agent_session" readAgentSessionArgsDecoder
+        (runReadAgentSession env))
 
 runReadAgentSession
     :: AgentSessionToolsEnv
@@ -903,10 +911,12 @@ data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     , message :: Text
     }
 
-instance FromJSON SendAgentSessionMessageArgs where
-    parseJSON = objectArgs \input -> SendAgentSessionMessageArgs
-        <$> reqText input "session_id"
-        <*> reqText input "message"
+sendAgentSessionMessageArgsDecoder
+    :: Hermes.Decoder SendAgentSessionMessageArgs
+sendAgentSessionMessageArgsDecoder = Hermes.object $
+    SendAgentSessionMessageArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> Hermes.atKey "message" Hermes.text
 
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
@@ -919,7 +929,8 @@ sendAgentSessionMessageTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "send_agent_session_message" (runSendAgentSessionMessage env))
+    (typedTool "send_agent_session_message" sendAgentSessionMessageArgsDecoder
+        (runSendAgentSessionMessage env))
 
 runSendAgentSessionMessage
     :: AgentSessionToolsEnv
@@ -979,63 +990,3 @@ statusAfterLaunch env sessionId launchResult
 renderSessionLaunch :: Text -> Text -> Text
 renderSessionLaunch sessionId status =
     "Session: " <> sessionId <> "\nStatus: " <> status
-
-renderAgentSession
-    :: SessionMeta
-    -> Text
-    -> Maybe SessionActivity
-    -> [SessionTurn]
-    -> Text
-renderAgentSession meta status activity turns =
-    Text.intercalate "\n" $
-        [ "Session"
-        , "  ID: " <> meta.metaId
-        , "  Status: " <> status
-        , "  Title: " <> meta.metaTitle
-        , "  Provider: " <> providerSlug meta.metaProvider
-        , "  Connection: " <> meta.metaConnection
-        , "  Model: " <> meta.metaModel
-        , "  Dialect: " <> dialectSlug meta.metaDialect
-        , "  Reasoning effort: " <> meta.metaEffort
-        , "  Working directory: " <> Text.pack (unsafeToFilePath meta.metaCwd)
-        , "  Created at: " <> Text.pack (show meta.metaCreatedAt)
-        , "  Updated at: " <> Text.pack (show meta.metaUpdatedAt)
-        ]
-            <> maybe [] renderActivity activity
-            <> ["", "Recent turns: " <> Text.pack (show (length turns))]
-            <> case turns of
-                [] -> ["  (none)"]
-                _ -> [""] <> intercalateBlank
-                    (zipWith renderSessionTurn [1 :: Int ..] turns)
-
-renderActivity :: SessionActivity -> [Text]
-renderActivity activity =
-    [ ""
-    , "Current activity"
-    , "  Kind: " <> activity.activityKind
-    , "  Message: " <> activity.activityMessage
-    ]
-        <> maybe []
-            (\retryAt -> ["  Retry at: " <> Text.pack (show retryAt)])
-            activity.activityRetryAt
-        <> ["  Updated at: " <> Text.pack (show activity.activityUpdatedAt)]
-
-renderSessionTurn :: Int -> SessionTurn -> [Text]
-renderSessionTurn index turn =
-    [ "Turn " <> Text.pack (show index)
-    , "At: " <> Text.pack (show turn.turnAt)
-    , "User:"
-    , indentText turn.turnUserText
-    ]
-        <> maybe [] (\text -> ["Assistant:", indentText text])
-            turn.turnAssistantText
-        <> maybe [] (\text -> ["Error:", indentText text])
-            turn.turnError
-
-intercalateBlank :: [[Text]] -> [Text]
-intercalateBlank = \case
-    [] -> []
-    first : rest -> first <> concatMap ("" :) rest
-
-indentText :: Text -> Text
-indentText = Text.intercalate "\n" . map ("  " <>) . Text.lines

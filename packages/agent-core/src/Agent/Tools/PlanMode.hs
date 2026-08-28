@@ -31,6 +31,7 @@ module Agent.Tools.PlanMode
     ) where
 
 import Agent.FileRetry (retryOnFileBusy)
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optList, optText, reqText)
 import Agent.ToolDSL
@@ -45,7 +46,6 @@ import Agent.Tools.Types
     )
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
-import Data.Aeson (FromJSON(..), withObject)
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
@@ -193,8 +193,8 @@ data EnterPlanArgs = EnterPlanArgs
     { explanation :: Maybe Text
     }
 
-instance FromJSON EnterPlanArgs where
-    parseJSON = objectArgs \object -> EnterPlanArgs
+enterPlanArgsDecoder :: Decoder EnterPlanArgs
+enterPlanArgsDecoder = objectArgs \object -> EnterPlanArgs
         <$> optText object "explanation"
 
 enterPlanModeTool :: PlanModeEnv -> AppTool
@@ -215,7 +215,7 @@ enterPlanModeToolWith completion env = jsonTool "enter_plan_mode"
     -- planConfirmEnter, so it must not also trigger generic tool approval.
     True
     TurnSequential
-    (typedTool "enter_plan_mode" (runEnterPlanMode completion env))
+    (typedTool "enter_plan_mode" enterPlanArgsDecoder (runEnterPlanMode completion env))
 
 enterPlanDescription :: PlanCompletion -> Text
 enterPlanDescription completion =
@@ -254,8 +254,8 @@ data WritePlanArgs = WritePlanArgs
     { content :: Text
     }
 
-instance FromJSON WritePlanArgs where
-    parseJSON = withObject "write_plan" \object ->
+writePlanArgsDecoder :: Decoder WritePlanArgs
+writePlanArgsDecoder = objectArgs \object ->
         WritePlanArgs <$> reqText object "content"
 
 writePlanTool :: PlanModeEnv -> AppTool
@@ -265,7 +265,7 @@ writePlanTool env = jsonTool "write_plan" writePlanDescription
     ]
     True
     TurnSequential
-    (typedTool "write_plan" (runWritePlan env))
+    (typedTool "write_plan" writePlanArgsDecoder (runWritePlan env))
 
 writePlanDescription :: Text
 writePlanDescription =
@@ -289,8 +289,8 @@ data ExitPlanArgs = ExitPlanArgs
     { summary :: Maybe Text
     }
 
-instance FromJSON ExitPlanArgs where
-    parseJSON = objectArgs \object -> ExitPlanArgs
+exitPlanArgsDecoder :: Decoder ExitPlanArgs
+exitPlanArgsDecoder = objectArgs \object -> ExitPlanArgs
         <$> optText object "summary"
 
 exitPlanModeTool :: PlanModeEnv -> AppTool
@@ -300,7 +300,7 @@ exitPlanModeTool env = jsonTool "exit_plan_mode" exitPlanDescription
     ]
     False
     TurnSequential
-    (typedTool "exit_plan_mode" (runExitPlanMode env))
+    (typedTool "exit_plan_mode" exitPlanArgsDecoder (runExitPlanMode env))
 
 exitPlanDescription :: Text
 exitPlanDescription =
@@ -345,8 +345,8 @@ data AskUserQuestionOption = AskUserQuestionOption
     , preview :: Maybe Text
     }
 
-instance FromJSON AskUserQuestionOption where
-    parseJSON = withObject "ask_user_question option" \object ->
+askUserQuestionOptionDecoder :: Decoder AskUserQuestionOption
+askUserQuestionOptionDecoder = objectArgs \object ->
         AskUserQuestionOption
             <$> reqText object "label"
             <*> reqText object "description"
@@ -358,10 +358,10 @@ data AskUserQuestion = AskUserQuestion
     , multiSelect :: Maybe Bool
     }
 
-instance FromJSON AskUserQuestion where
-    parseJSON = withObject "ask_user_question question" \object -> do
+askUserQuestionDecoder :: Decoder AskUserQuestion
+askUserQuestionDecoder = objectArgs \object -> do
         question <- reqText object "question"
-        options <- optList object "options" "Expected array for key: options"
+        options <- optList askUserQuestionOptionDecoder object "options" "Expected array for key: options"
             >>= maybe (fail "Missing parameter: options") pure
         multiSelectSnake <- optBool object "multi_select"
         multiSelectCamel <- optBool object "multiSelect"
@@ -372,9 +372,9 @@ newtype AskUserQuestionArgs = AskUserQuestionArgs
     { questions :: [AskUserQuestion]
     }
 
-instance FromJSON AskUserQuestionArgs where
-    parseJSON = withObject "ask_user_question" \object -> do
-        modern <- optList object "questions" "Expected array for key: questions"
+askUserQuestionArgsDecoder :: Decoder AskUserQuestionArgs
+askUserQuestionArgsDecoder = objectArgs \object -> do
+        modern <- optList askUserQuestionDecoder object "questions" "Expected array for key: questions"
         case modern of
             Just questions -> pure AskUserQuestionArgs { questions }
             Nothing -> do
@@ -424,7 +424,7 @@ askUserQuestionTool env = jsonTool "ask_user_question" askUserDescription
     ]
     True
     TurnSequential
-    (typedTool "ask_user_question" (runAskUserQuestion env))
+    (typedTool "ask_user_question" askUserQuestionArgsDecoder (runAskUserQuestion env))
 
 askUserDescription :: Text
 askUserDescription =

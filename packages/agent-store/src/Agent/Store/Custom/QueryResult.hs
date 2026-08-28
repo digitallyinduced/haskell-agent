@@ -1,11 +1,12 @@
 {-# LANGUAGE NoFieldSelectors #-}
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Boundary encoding for arbitrary custom-query result rows.
+-- | Text rendering for arbitrary custom-query result rows.
 --
--- Unlike harness-owned records, the columns returned by a user query are not
--- known when the Haskell statement is compiled. This adapter turns that
--- dynamic row shape into one opaque result payload for the CLI boundary.
+-- Hasql decoders require a statically known result shape, while user queries
+-- select columns dynamically. PostgreSQL therefore renders each row into one
+-- labeled text value that Hasql can decode without exposing JSON at the store
+-- boundary.
 module Agent.Store.Custom.QueryResult
     ( CustomQueryResult(..)
     , customQueryStatement
@@ -20,7 +21,7 @@ import Hasql.Statement (Statement)
 import qualified Hasql.Statement as Statement
 
 data CustomQueryResult = CustomQueryResult
-    { customQueryRows :: !Text
+    { customQueryOutput :: !Text
     , customQueryTruncated :: !Bool
     }
     deriving (Eq, Show)
@@ -35,10 +36,18 @@ customQueryStatement rowCap query =
     cap = Text.pack (show rowCap)
     capPlusOne = Text.pack (show overflowCap)
     sql =
-        "select coalesce(jsonb_agg("
-            <> "q._ha_row order by q._ha_row_number"
-            <> ") filter (where q._ha_row_number <= " <> cap
-            <> "), '[]'::jsonb)::text,"
+        "select coalesce(string_agg("
+            <> "'row ' || q._ha_row_number::text || E':\n' || "
+            <> "coalesce((select string_agg("
+            <> "'  ' || field.key || ': ' || "
+            <> "replace(coalesce(field.value #>> '{}', 'null'), "
+            <> "E'\n', E'\n    '), E'\n' "
+            <> "order by field.key) "
+            <> "from jsonb_each(q._ha_row) as field), "
+            <> "'  (empty row)'), "
+            <> "E'\n\n' order by q._ha_row_number) "
+            <> "filter (where q._ha_row_number <= " <> cap <> "), "
+            <> "'(no rows)'),"
             <> " coalesce(max(q._ha_row_number), 0) > " <> cap
             <> " from ("
             <> "select to_jsonb(_ha_data) as _ha_row, "

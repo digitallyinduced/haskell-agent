@@ -4,6 +4,7 @@ module Agent.Tools.FileSystem.ReadFile
     , formatReadFile
     ) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (fromText)
 import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -26,7 +27,6 @@ import Agent.Tools.Types
     , jsonTool
     , withToolResourceClaims
     )
-import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -40,8 +40,8 @@ data ReadFileArgs = ReadFileArgs
     , format :: Maybe Text
     } deriving (Eq, Show)
 
-instance FromJSON ReadFileArgs where
-    parseJSON = objectArgs \object -> ReadFileArgs
+readFileArgsDecoder :: Decoder ReadFileArgs
+readFileArgsDecoder = objectArgs \object -> ReadFileArgs
         <$> reqText object "target_file"
         <*> optInt object "offset"
         <*> optInt object "limit"
@@ -60,7 +60,7 @@ readFileTool env = withToolResourceClaims (readFileClaims env) $
     ]
     True
     ParallelSafe
-    (typedTool "read_file" (runReadFile env))
+    (typedTool "read_file" readFileArgsDecoder (runReadFile env))
 
 readFileClaims
     :: ToolEnv
@@ -68,7 +68,7 @@ readFileClaims
     -> IO (Either Text [ToolResourceClaim])
 readFileClaims env call =
     case
-        decodeToolArguments (toolArgumentsValue call.arguments)
+        decodeToolArguments readFileArgsDecoder (toolArgumentsValue call.arguments)
             :: Either Text ReadFileArgs
     of
         Left err -> pure (Left err)

@@ -5,30 +5,23 @@
 -- callbacks so the provider-neutral tool surface remains easy to test.
 module Agent.CLI.Database
     ( DatabaseScope(..)
+    , databaseScopeDecoder
+    , ConversationSearchMatch(..)
     , DatabaseToolsEnv(..)
     , databaseTools
     ) where
 
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
+import Agent.Json.Decode (defaultKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     , jsonTool
     )
-import Data.Aeson
-    ( FromJSON(..)
-    , Value
-    , (.:?)
-    , withObject
-    , withText
-    , (.:)
-    )
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
 
 data DatabaseScope
     = DatabaseUserScope
@@ -36,8 +29,8 @@ data DatabaseScope
     | DatabaseCheckoutScope
     deriving (Eq, Show)
 
-instance FromJSON DatabaseScope where
-    parseJSON = withText "DatabaseScope" \case
+databaseScopeDecoder :: Hermes.Decoder DatabaseScope
+databaseScopeDecoder = Hermes.withText \case
         "user" -> pure DatabaseUserScope
         "repository" -> pure DatabaseRepositoryScope
         "checkout" -> pure DatabaseCheckoutScope
@@ -49,40 +42,39 @@ instance FromJSON DatabaseScope where
 
 -- | Storage callbacks for the three model-facing database operations.
 --
--- Structured database values are encoded as JSON in the tool result. Conversation
--- search is rendered as labeled text because its results are primarily read by
--- the model and by humans rather than consumed as a machine-readable payload.
+-- Database and conversation-search results are rendered as labeled text because
+-- they are read by the model and humans rather than consumed as an API.
 -- Store errors are already sanitized 'Text' because database exception details
 -- can contain SQL values that should not be copied into the transcript.
 data DatabaseToolsEnv = DatabaseToolsEnv
     { databaseDescribeScope
-        :: !(DatabaseScope -> IO (Either Text Value))
+        :: !(DatabaseScope -> IO (Either Text Text))
     , databaseRunQuery
-        :: !(DatabaseScope -> Text -> IO (Either Text Value))
+        :: !(DatabaseScope -> Text -> IO (Either Text Text))
     , databaseRunExecute
-        :: !(DatabaseScope -> Text -> Text -> IO (Either Text Value))
+        :: !(DatabaseScope -> Text -> Text -> IO (Either Text Text))
     , databaseSearchConversations
-        :: !(Text -> Int -> IO (Either Text Value))
+        :: !(Text -> Int -> IO (Either Text [ConversationSearchMatch]))
     }
 
 data SchemaArgs = SchemaArgs
     { schemaScope :: !DatabaseScope
     }
 
-instance FromJSON SchemaArgs where
-    parseJSON = withObject "SchemaArgs" \object ->
-        SchemaArgs <$> object .: "scope"
+schemaArgsDecoder :: Hermes.Decoder SchemaArgs
+schemaArgsDecoder = Hermes.object $
+    SchemaArgs <$> Hermes.atKey "scope" databaseScopeDecoder
 
 data QueryArgs = QueryArgs
     { queryScope :: !DatabaseScope
     , querySql :: !Text
     }
 
-instance FromJSON QueryArgs where
-    parseJSON = withObject "QueryArgs" \object ->
+queryArgsDecoder :: Hermes.Decoder QueryArgs
+queryArgsDecoder = Hermes.object $
         QueryArgs
-            <$> object .: "scope"
-            <*> object .: "sql"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "sql" Hermes.text
 
 data ExecuteArgs = ExecuteArgs
     { executeScope :: !DatabaseScope
@@ -90,40 +82,27 @@ data ExecuteArgs = ExecuteArgs
     , executePurpose :: !Text
     }
 
-instance FromJSON ExecuteArgs where
-    parseJSON = withObject "ExecuteArgs" \object ->
+executeArgsDecoder :: Hermes.Decoder ExecuteArgs
+executeArgsDecoder = Hermes.object $
         ExecuteArgs
-            <$> object .: "scope"
-            <*> object .: "sql"
-            <*> object .: "purpose"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "sql" Hermes.text
+            <*> Hermes.atKey "purpose" Hermes.text
 
 data ConversationSearchArgs = ConversationSearchArgs
     { conversationSearchQuery :: !Text
     , conversationSearchLimit :: !Int
     }
 
-instance FromJSON ConversationSearchArgs where
-    parseJSON = withObject "ConversationSearchArgs" \object ->
+conversationSearchArgsDecoder :: Hermes.Decoder ConversationSearchArgs
+conversationSearchArgsDecoder = Hermes.object $
         ConversationSearchArgs
-            <$> object .: "query"
-            <*> (object .:? "limit" >>= pure . maybe 10 id)
+            <$> Hermes.atKey "query" Hermes.text
+            <*> defaultKey 10 "limit" Hermes.int
 
 data ConversationSearchMatch
-    = ConversationSearchMatch
-        !Text
-        !Integer
-        !(Maybe Text)
-        !Text
-        !(Maybe Text)
-
-instance FromJSON ConversationSearchMatch where
-    parseJSON = withObject "ConversationSearchMatch" \object ->
-        ConversationSearchMatch
-            <$> object .: "session_id"
-            <*> object .: "turn_index"
-            <*> object .:? "occurred_at"
-            <*> object .: "user_text"
-            <*> object .:? "assistant_text"
+    = ConversationSearchMatch !Text !Integer !(Maybe Text) !Text !(Maybe Text)
+    deriving (Eq, Show)
 
 databaseTools :: DatabaseToolsEnv -> [AppTool]
 databaseTools env =
@@ -144,8 +123,8 @@ schemaTool env = jsonTool
     [scopeProperty]
     True
     ParallelSafe
-    (typedTool "database_schema" \(SchemaArgs scope) ->
-        encodeResult <$> env.databaseDescribeScope scope)
+    (typedTool "database_schema" schemaArgsDecoder \(SchemaArgs scope) ->
+        env.databaseDescribeScope scope)
 
 queryTool :: DatabaseToolsEnv -> AppTool
 queryTool env = jsonTool
@@ -161,11 +140,10 @@ queryTool env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "database_query" \(QueryArgs scope sql) ->
+    (typedTool "database_query" queryArgsDecoder \(QueryArgs scope sql) ->
         if Text.null (Text.strip sql)
             then pure (Left "database query must not be empty")
-            else encodeResult
-                <$> env.databaseRunQuery scope sql)
+            else env.databaseRunQuery scope sql)
 
 executeTool :: DatabaseToolsEnv -> AppTool
 executeTool env = jsonTool
@@ -187,16 +165,12 @@ executeTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "database_execute" \(ExecuteArgs scope sql purpose) ->
+    (typedTool "database_execute" executeArgsDecoder \(ExecuteArgs scope sql purpose) ->
         if Text.null (Text.strip sql)
             then pure (Left "database SQL must not be empty")
             else if Text.null (Text.strip purpose)
                 then pure (Left "database change purpose must not be empty")
-                else encodeResult
-                    <$> env.databaseRunExecute
-                        scope
-                        purpose
-                        sql)
+                else env.databaseRunExecute scope purpose sql)
 
 conversationSearchTool :: DatabaseToolsEnv -> AppTool
 conversationSearchTool env = jsonTool
@@ -213,12 +187,13 @@ conversationSearchTool env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "conversation_search" \(ConversationSearchArgs query limit) ->
+    (typedTool "conversation_search" conversationSearchArgsDecoder
+        \(ConversationSearchArgs query limit) ->
         if Text.null (Text.strip query)
             then pure (Left "conversation search query must not be empty")
             else if limit < 1 || limit > 100
                 then pure (Left "conversation search limit must be between 1 and 100")
-                else fmap (>>= renderConversationSearchResult) $
+                else fmap (fmap renderConversationSearchResult) $
                     env.databaseSearchConversations query limit)
 
 scopeProperty :: PropertySchema
@@ -231,19 +206,9 @@ scopeProperty = PropertySchema
             <> "for data shared by clones/worktrees, or checkout for this worktree."
         ))
 
-encodeResult :: Either Text Value -> Either Text Text
-encodeResult =
-    fmap (Text.decodeUtf8 . LBS.toStrict . Aeson.encode)
-
-renderConversationSearchResult :: Value -> Either Text Text
-renderConversationSearchResult value =
-    case Aeson.fromJSON value of
-        Aeson.Error errorMessage ->
-            Left $
-                "conversation search returned an unexpected result: "
-                    <> Text.pack errorMessage
-        Aeson.Success matches ->
-            Right $ case matches of
+renderConversationSearchResult :: [ConversationSearchMatch] -> Text
+renderConversationSearchResult matches =
+    case matches of
                 [] -> "(no matching conversations)"
                 _ -> Text.intercalate "\n\n" $
                     zipWith renderConversationSearchMatch [1 :: Int ..] matches

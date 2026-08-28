@@ -34,6 +34,10 @@ module Agent.CLI.AgentViewport
     ) where
 
 import Agent.CLI.Render (summarizeToolCallRelative)
+import Agent.CLI.AgentViewport.Status
+    ( agentStatusGlyph
+    , formatAgentStatus
+    )
 import Agent.CLI.Picker (PickerKey(..), runOverlay)
 import Agent.CLI.Style (roleMuted, rolePrompt, roleSuccess)
 import Agent.CLI.TextLayout
@@ -42,6 +46,8 @@ import Agent.CLI.TextLayout
     , renderSplitPaneFrame
     )
 import Agent.Loop (LoopEvent(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -62,8 +68,6 @@ import Agent.TUI.Model
     , visibleTodoList
     )
 import Agent.TUI.Presentation (liveTodoPanelLines)
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef)
 import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
@@ -114,30 +118,6 @@ data AgentEntry = AgentEntry
     , agentConversation :: !UiState
     }
     deriving (Eq, Show)
-
-formatAgentStatus :: SubagentStatus -> Text
-formatAgentStatus status = case status of
-    Pending -> "pending"
-    Running -> "running"
-    Completed _ -> "done"
-    Errored _ -> "error"
-    Interrupted -> "interrupted"
-    Closed -> "closed"
-    NotFound -> "missing"
-
-agentStatusGlyph :: Text -> Text
-agentStatusGlyph status = case Text.toLower status of
-    "active" -> "●"
-    "running" -> "●"
-    "ready" -> "○"
-    "pending" -> "○"
-    "done" -> "✓"
-    "error" -> "✕"
-    "interrupted" -> "■"
-    "cancelled" -> "■"
-    "closed" -> "×"
-    "missing" -> "?"
-    _ -> "·"
 
 data AgentViewportEnv = AgentViewportEnv
     { viewportSelected :: !(IORef AgentTarget)
@@ -827,13 +807,14 @@ agentMessagePlainText message =
             _ -> []
         ]
 
-renderToolOutputValue :: Aeson.Value -> Text
-renderToolOutputValue = \case
-    Aeson.String text -> text
-    Aeson.Null -> ""
-    value ->
-        TextEncoding.decodeUtf8 $
-            LBS.toStrict (Aeson.encode value)
+renderToolOutputValue :: RawJson -> Text
+renderToolOutputValue value =
+    case Hermes.decodeEither
+            (Hermes.nullable Hermes.text)
+            (rawJsonBytes value) of
+        Right (Just text) -> text
+        Right Nothing -> ""
+        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)
 
 normalizeTranscriptUi :: UiState -> UiState
 normalizeTranscriptUi state =

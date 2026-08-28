@@ -1,10 +1,8 @@
 -- | A fail-closed host for short-lived JavaScript code-mode cells.
 --
--- Every cell gets a fresh Node process. The process can only request effects
--- through the typed 'CodeModeToolHandler' callback; malformed or unexpected
--- protocol messages terminate the cell.
-{-# LANGUAGE TemplateHaskell #-}
-
+-- Every cell gets a fresh VM context. Healthy Bun processes may be retained
+-- between cells, but malformed or unexpected protocol messages retire the
+-- worker. Effects remain restricted to the typed 'CodeModeToolHandler'.
 module Agent.Tools.CodeMode.Host
     ( CodeModeConfig(..)
     , CodeModeError(..)
@@ -33,7 +31,30 @@ import Agent.Tools.CodeMode.Protocol
     , encodeToolFailure
     , encodeToolSuccess
     )
-import Paths_agent_core (getDataFileName)
+import Agent.Json (RawJson)
+import Agent.Tools.CodeMode.Host.Types
+    ( Cell(..)
+    , CellObservation(..)
+    , CellOutcome(..)
+    , CodeModeConfig(..)
+    , CodeModeError(..)
+    , CodeModeHost(..)
+    , CodeModeResult(..)
+    , CodeModeToolHandler
+    , ImageDetailVisibility(..)
+    , IdleWorker(..)
+    , WorkerPool(..)
+    , defaultCodeModeConfig
+    )
+import Agent.Tools.CodeMode.Host.Availability
+    ( checkCodeModeAvailability
+    , resolveBunExecutable
+    , resolveWorkerScript
+    )
+import Agent.Tools.CodeMode.Host.Worker
+    ( bundledCodeModeWorkerPath
+    , codeModeWorkerPath
+    )
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
@@ -75,11 +96,11 @@ import Control.Exception.Safe
     , try
     )
 import Control.Monad (void)
-import Data.Aeson (Value(..), object, (.=))
+import Data.Aeson (ToJSON(toJSON), Value(..), object, (.=))
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
-import Data.IORef (IORef, atomicModifyIORef', newIORef)
+import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
@@ -96,283 +117,43 @@ import System.IO
     , hSetBinaryMode
     , hSetBuffering
     )
-import System.Directory
-    ( canonicalizePath
-    , doesFileExist
-    , findExecutable
-    , getTemporaryDirectory
-    , renameFile
-    )
-import System.Exit (ExitCode(..))
-import System.FilePath
-    ( isPathSeparator
-    , (</>)
-    )
 import System.Process
     ( CreateProcess(..)
     , ProcessHandle
     , StdStream(..)
     , createProcess
     , proc
-    , readProcessWithExitCode
     , terminateProcess
     , waitForProcess
     )
-import Data.Bits (xor)
-import Data.Word (Word64)
-import qualified Language.Haskell.TH.Syntax as TH
-import Language.Haskell.TH.Syntax
-    ( makeRelativeToProject
-    , qAddDependentFile
-    , runIO
-    )
-import System.Posix.Process (getProcessID)
-import Text.Read (readMaybe)
-
-type CodeModeToolHandler =
-    Text -> Value -> IO (Either Text Value)
-
-data ImageDetailVisibility
-    = ImageDetailVisible
-    | ImageDetailHidden
-    deriving (Eq, Show)
-
-data CodeModeConfig = CodeModeConfig
-    { nodeExecutable :: !FilePath
-    , workerScript :: !FilePath
-    , startupTimeoutMs :: !Int
-    , maxActiveCells :: !Int
-    , maxSourceBytes :: !Int
-    , maxOldSpaceMb :: !Int
-    , toolHandler :: !CodeModeToolHandler
-    , notifyHandler :: !(Text -> IO ())
-    , imageDetailVisibility :: !ImageDetailVisibility
-    }
-
-defaultCodeModeConfig :: FilePath -> CodeModeToolHandler -> CodeModeConfig
-defaultCodeModeConfig script handler = CodeModeConfig
-    { nodeExecutable = "node"
-    , workerScript = script
-    , startupTimeoutMs = 3000
-    , maxActiveCells = 64
-    , maxSourceBytes = 1024 * 1024
-    , maxOldSpaceMb = 128
-    , toolHandler = handler
-    , notifyHandler = \_ -> pure ()
-    , imageDetailVisibility = ImageDetailVisible
-    }
-
--- | Resolve the worker through Cabal's data-file lookup, so installed
--- executables do not depend on the source tree. When the data file is not
--- present — interpreted development sessions, fresh worktrees, or a stale
--- data-directory override — the compile-time embedded worker source is
--- materialized into a content-addressed temporary file for Node.
-bundledCodeModeWorkerPath :: IO FilePath
-bundledCodeModeWorkerPath = do
-    installedPath <- getDataFileName workerRelativePath
-    installedExists <- doesFileExist installedPath
-    if installedExists
-        then pure installedPath
-        else materializeEmbeddedWorker
-  where
-    workerRelativePath = "data/code-mode/worker.mjs"
-
--- | Preferred public name for the bundled worker lookup.
---
--- 'bundledCodeModeWorkerPath' is retained as a compatibility alias.
-codeModeWorkerPath :: IO FilePath
-codeModeWorkerPath = bundledCodeModeWorkerPath
-
--- | The worker source embedded at compile time.
-embeddedCodeModeWorkerSource :: Text
-embeddedCodeModeWorkerSource =
-    Text.pack
-        $(do
-            path <- makeRelativeToProject "data/code-mode/worker.mjs"
-            qAddDependentFile path
-            contents <- runIO (readFile path)
-            TH.lift contents
-         )
-
--- | Write the embedded worker into the temporary directory under a
--- content-hashed name. Concurrent materialization is safe: each writer
--- creates a private file and renames it into place.
-materializeEmbeddedWorker :: IO FilePath
-materializeEmbeddedWorker = do
-    -- Node's permission model implicitly allows reading the entry script by
-    -- its real path. Canonicalize the target directory so a symlinked
-    -- temporary directory (such as macOS @/tmp@) cannot defeat that grant.
-    tmpDir <- getTemporaryDirectory >>= canonicalizePath
-    let bytes = Text.encodeUtf8 embeddedCodeModeWorkerSource
-        target =
-            tmpDir
-                </> ("haskell-agent-code-mode-worker-"
-                    <> embeddedWorkerFingerprint bytes
-                    <> ".mjs")
-    exists <- doesFileExist target
-    if exists
-        then pure target
-        else do
-            processId <- getProcessID
-            let staging = target <> "." <> show processId <> ".tmp"
-            BS.writeFile staging bytes
-            renameFile staging target
-            pure target
-
-embeddedWorkerFingerprint :: BS.ByteString -> String
-embeddedWorkerFingerprint bytes =
-    show (BS.length bytes) <> "-" <> show (BS.foldl' step seed bytes)
-  where
-    -- FNV-1a, enough to key a cache file on content identity.
-    seed = 14695981039346656037 :: Word64
-    step acc byte =
-        (acc `xor` fromIntegral byte) * 1099511628211
-
-data CodeModeError
-    = CodeModeStartupError !Text
-    | CodeModeProtocolError !Text
-    | CodeModeExecutionError !Text
-    | CodeModeResourceError !Text
-    | CodeModeUnknownCell !Text
-    | CodeModeBusyObserver !Text
-    | CodeModeAlreadyTerminating !Text
-    | CodeModeClosedCell !Text
-    deriving (Eq, Show)
-
-data CodeModeResult
-    = CodeModeFinished
-        { cellId :: !Text
-        , cellValue :: !Value
-        }
-    | CodeModeFailed
-        { cellId :: !Text
-        , cellValue :: !Value
-        , cellError :: !Text
-        }
-    | CodeModeRunning
-        { cellId :: !Text
-        , cellOutput :: !Value
-        }
-    | CodeModeTerminated
-        { cellId :: !Text
-        , cellValue :: !Value
-        }
-    deriving (Eq, Show)
-
-data CellOutcome
-    = CellSucceeded !Value
-    | CellFailed !Value !Text
-
-data CellObservation
-    = CellIdle
-    | CellObserved
-    | CellTerminating
-    | CellClosed
-
-data Cell = Cell
-    { cellIdentifier :: !Text
-    , cellInput :: !Handle
-    , cellOutput :: !Handle
-    , cellErrorOutput :: !Handle
-    , cellProcess :: !ProcessHandle
-    , cellWriterLock :: !(MVar ())
-    , cellResult :: !(TMVar (Either CodeModeError CellOutcome))
-    , cellYields :: !(TQueue Value)
-    , cellContent :: !(TQueue Value)
-    , cellMonitor :: !(Async ())
-    , cellStderr :: !(Async Text)
-    , cellCallbacks :: !(MVar [Async ()])
-    , cellObservation :: !(MVar CellObservation)
-    }
-
-data CodeModeHost = CodeModeHost
-    { hostConfig :: !CodeModeConfig
-    , hostCells :: !(MVar (Map Text Cell))
-    , hostNextId :: !(IORef Int)
-    , hostStoredValues :: !(MVar (Map Text Value))
-    }
-
 newCodeModeHost :: CodeModeConfig -> IO CodeModeHost
-newCodeModeHost config =
-    CodeModeHost config
+newCodeModeHost config = do
+    host <- CodeModeHost config
         <$> newMVar Map.empty
         <*> newIORef 0
         <*> newMVar Map.empty
-
--- | Check the external runtime before exposing @exec@/@wait@ to the model.
---
--- In ordinary code mode the caller can use this failure to fall back to
--- direct tools. In code-mode-only it is a fail-closed startup error rather
--- than an advertised tool that is guaranteed to fail on first use.
-checkCodeModeAvailability :: CodeModeConfig -> IO (Either Text ())
-checkCodeModeAvailability config = do
-    executable <- resolveNodeExecutable config.nodeExecutable
-    worker <- resolveWorkerScript config.workerScript
-    runtime <- case executable of
-        Nothing -> pure Nothing
-        Just path -> Just <$> inspectNode path
-    pure $ case (runtime, worker) of
-        (Nothing, _) ->
-            Left $
-                "Node/V8 runtime executable was not found: "
-                    <> Text.pack config.nodeExecutable
-        (Just (Left err), _) -> Left err
-        (_, Nothing) ->
-            Left $
-                "code-mode worker script was not found: "
-                    <> Text.pack config.workerScript
-        (Just (Right ()), Just _) -> Right ()
-  where
-    inspectNode executable = do
-        checked <- try @_ @SomeException $
-            readProcessWithExitCode executable ["--version"] ""
-        pure $ case checked of
-            Left err ->
-                Left $
-                    "failed to inspect Node/V8 runtime: "
-                        <> Text.pack (displayException err)
-            Right (ExitFailure code, _, stderrText) ->
-                Left $
-                    "failed to inspect Node/V8 runtime (exit "
-                        <> Text.pack (show code)
-                        <> "): "
-                        <> Text.strip (Text.pack stderrText)
-            Right (ExitSuccess, stdoutText, _) ->
-                case nodeMajorVersion (Text.strip (Text.pack stdoutText)) of
-                    Just major
-                        | major >= 22 -> Right ()
-                        | otherwise -> Left $
-                            "code mode requires Node.js 22 or later; found "
-                                <> Text.pack (show major)
-                    Nothing -> Left $
-                        "unable to parse Node.js version: "
-                            <> Text.strip (Text.pack stdoutText)
-
-    nodeMajorVersion :: Text -> Maybe Int
-    nodeMajorVersion raw = do
-        version <- Text.stripPrefix "v" raw
-        let (major, _) = Text.breakOn "." version
-        readMaybe (Text.unpack major)
-
-resolveNodeExecutable :: FilePath -> IO (Maybe FilePath)
-resolveNodeExecutable executable
-    | any isPathSeparator executable = do
-        exists <- doesFileExist executable
-        pure (if exists then Just executable else Nothing)
-    | otherwise = findExecutable executable
-
-resolveWorkerScript :: FilePath -> IO (Maybe FilePath)
-resolveWorkerScript script = do
-    exists <- doesFileExist script
-    if exists
-        then Just <$> canonicalizePath script
-        else pure Nothing
+        <*> newMVar (WorkerPool [] Nothing False)
+    if config.workerPoolSize > 0
+        then spawnIdleWorker config >>= \case
+            Right worker -> modifyMVar_ host.hostWorkerPool \pool ->
+                pure pool { poolIdle = [worker] }
+            Left _ -> pure ()
+        else pure ()
+    pure host
 
 closeCodeModeHost :: CodeModeHost -> IO ()
 closeCodeModeHost host = do
     cells <- modifyMVar host.hostCells \current ->
         pure (Map.empty, Map.elems current)
     mapM_ (\cell -> markCellClosed cell >> stopCell cell) cells
+    (idle, filler) <- modifyMVar host.hostWorkerPool \pool ->
+        pure
+            ( pool { poolIdle = [], poolFiller = Nothing, poolClosed = True }
+            , (pool.poolIdle, pool.poolFiller)
+            )
+    mapM_ cancel filler
+    mapM_ (void . waitCatch) filler
+    mapM_ stopIdleWorker idle
 
 execCodeCell
     :: CodeModeHost
@@ -480,7 +261,7 @@ terminateCodeCell host identifier =
                         observed <- atomically $ tryReadTMVar cell.cellResult
                         case observed of
                             Just result -> do
-                                finishCell cell
+                                releaseCell host cell
                                 pure $ fmap (cellOutcomeResult identifier) result
                             Nothing -> do
                                 beforeStop <- atomically $
@@ -506,27 +287,94 @@ startCell
     -> [CodeModeToolMetadata]
     -> IO (Either CodeModeError Cell)
 startCell host identifier tools = do
-    resolveNodeExecutable host.hostConfig.nodeExecutable >>= \case
+    idle <- modifyMVar host.hostWorkerPool \pool ->
+        if pool.poolClosed
+            then pure (pool, Left ())
+            else case pool.poolIdle of
+                [] -> pure (pool, Right Nothing)
+                worker : rest -> pure
+                    (pool { poolIdle = rest }, Right (Just worker))
+    case idle of
+        Left () ->
+            pure $ Left $ CodeModeResourceError "code-mode host is closed"
+        Right (Just worker) -> do
+            replenishPool host
+            startCellFromIdleWorker host identifier tools worker
+        Right Nothing -> startFreshCell host identifier tools
+
+startFreshCell
+    :: CodeModeHost
+    -> Text
+    -> [CodeModeToolMetadata]
+    -> IO (Either CodeModeError Cell)
+startFreshCell host identifier tools =
+    spawnIdleWorker host.hostConfig >>= \case
+        Left err -> pure (Left err)
+        Right worker -> startCellFromIdleWorker host identifier tools worker
+
+startCellFromIdleWorker
+    :: CodeModeHost
+    -> Text
+    -> [CodeModeToolMetadata]
+    -> IdleWorker
+    -> IO (Either CodeModeError Cell)
+startCellFromIdleWorker host identifier tools
+        (IdleWorker input output stderr process writer stderrReader) =
+    startCellFromProcess host identifier tools True
+        (input, output, stderr, process, Just writer, Just stderrReader)
+
+-- Keep one standby worker once the eagerly-created worker is checked out.
+-- The tracked filler is cancelled and joined when the host closes.
+replenishPool :: CodeModeHost -> IO ()
+replenishPool host = do
+    gate <- newEmptyMVar
+    filler <- asyncWithUnmask \unmask -> do
+        readMVar gate
+        result <- unmask (spawnIdleWorker host.hostConfig)
+        discarded <- modifyMVar host.hostWorkerPool \pool -> do
+            let poolWithoutFiller = pool { poolFiller = Nothing }
+            case result of
+                Right worker
+                    | not pool.poolClosed
+                    , length pool.poolIdle < max 0 host.hostConfig.workerPoolSize ->
+                        pure
+                            ( poolWithoutFiller { poolIdle = [worker] }
+                            , Nothing
+                            )
+                Right worker -> pure (poolWithoutFiller, Just worker)
+                Left _ -> pure (poolWithoutFiller, Nothing)
+        mapM_ stopIdleWorker discarded
+    registered <- modifyMVar host.hostWorkerPool \pool ->
+        if pool.poolClosed || not (null pool.poolIdle)
+                || maybe False (const True) pool.poolFiller
+            then pure (pool, False)
+            else pure (pool { poolFiller = Just filler }, True)
+    if registered
+        then putMVar gate ()
+        else do
+            cancel filler
+            void $ waitCatch filler
+
+spawnIdleWorker :: CodeModeConfig -> IO (Either CodeModeError IdleWorker)
+spawnIdleWorker config =
+  resolveBunExecutable config.bunExecutable >>= \case
         Nothing ->
             pure $ Left $ CodeModeStartupError $
-                "Node/V8 runtime executable was not found: "
-                    <> Text.pack host.hostConfig.nodeExecutable
+                "Bun runtime executable was not found: "
+                    <> Text.pack config.bunExecutable
         Just executable -> do
-            resolveWorkerScript host.hostConfig.workerScript >>= \case
+            resolveWorkerScript config.workerScript >>= \case
                 Nothing ->
                     pure $ Left $ CodeModeStartupError $
                         "code-mode worker script was not found: "
-                            <> Text.pack host.hostConfig.workerScript
+                            <> Text.pack config.workerScript
                 Just worker -> do
                     started <- try @_ @SomeException $ createProcess $
                         (proc executable
-                            [ "--experimental-permission"
-                            , "--disallow-code-generation-from-strings"
-                            , "--disable-proto=delete"
-                            , "--experimental-vm-modules"
-                            , "--max-old-space-size="
-                                <> show
-                                    (max 16 host.hostConfig.maxOldSpaceMb)
+                            [ "--smol"
+                            , "--no-install"
+                            , "--no-env-file"
+                            , "--no-addons"
                             , worker
                             ])
                             { std_in = CreatePipe
@@ -544,6 +392,47 @@ startCell host identifier tools = do
                                 , Just stderr
                                 , processHandle
                                 ) -> do
+                            mapM_ configurePipe [input, output, stderr]
+                            writer <- newMVar ()
+                            stderrReader <- asyncWithUnmask
+                                (\unmask -> unmask (readAll stderr))
+                                `onException` stopIncompleteProcess
+                                    input output stderr processHandle
+                            let idleWorker = IdleWorker input output stderr
+                                    processHandle writer stderrReader
+                            (do
+                                startup <- race
+                                    (threadDelay
+                                        (max 1 config.startupTimeoutMs * 1000))
+                                    (try @_ @SomeException (BS8.hGetLine output))
+                                case startup of
+                                    Right (Right line) ->
+                                        case decodeProtocolMessage line of
+                                            Right WorkerReady -> pure (Right idleWorker)
+                                            _ -> stopIdleWorker idleWorker >> pure
+                                                (Left (CodeModeProtocolError
+                                                    "worker did not send ready"))
+                                    Right (Left err) -> stopIdleWorker idleWorker >> pure
+                                        (Left (CodeModeStartupError
+                                            (Text.pack (displayException err))))
+                                    Left () -> stopIdleWorker idleWorker >> pure
+                                        (Left (CodeModeStartupError
+                                            "code-mode worker did not become ready")))
+                                `onException` stopIdleWorker idleWorker
+                        Right (input, output, stderr, processHandle) -> do
+                            stopIncompleteProcessMaybe input output stderr processHandle
+                            pure $ Left $ CodeModeStartupError
+                                "failed to create all code-mode worker pipes"
+
+startCellFromProcess
+    :: CodeModeHost
+    -> Text
+    -> [CodeModeToolMetadata]
+    -> Bool
+    -> (Handle, Handle, Handle, ProcessHandle, Maybe (MVar ()), Maybe (Async Text))
+    -> IO (Either CodeModeError Cell)
+startCellFromProcess host identifier tools alreadyReady
+        (input, output, stderr, processHandle, existingWriter, existingStderr) = do
                             ( ready
                                 , result
                                 , yields
@@ -552,26 +441,29 @@ startCell host identifier tools = do
                                 , callbacks
                                 ) <-
                                 (do
-                                    configurePipe input
-                                    configurePipe output
-                                    configurePipe stderr
+                                    if alreadyReady
+                                        then pure ()
+                                        else mapM_ configurePipe [input, output, stderr]
                                     (,,,,,)
                                         <$> newEmptyTMVarIO
                                         <*> newEmptyTMVarIO
                                         <*> newTQueueIO
                                         <*> newTQueueIO
-                                        <*> newMVar ()
+                                        <*> maybe (newMVar ()) pure existingWriter
                                         <*> newMVar [])
                                 `onException`
                                     stopIncompleteProcess
                                         input output stderr processHandle
                             observation <- newMVar CellIdle
                             stderrReader <-
-                                asyncWithUnmask
-                                    (\unmask -> unmask (readAll stderr))
-                                `onException`
-                                    stopIncompleteProcess
-                                        input output stderr processHandle
+                                case (alreadyReady, existingStderr) of
+                                    (True, Just reader) -> pure reader
+                                    _ ->
+                                        asyncWithUnmask
+                                            (\unmask -> unmask (readAll stderr))
+                                        `onException`
+                                            stopIncompleteProcess
+                                                input output stderr processHandle
                             monitor <-
                                 asyncWithUnmask
                                     (\unmask -> unmask $
@@ -590,13 +482,15 @@ startCell host identifier tools = do
                                             ready
                                             result
                                             yields
-                                            content)
+                                            content
+                                            alreadyReady)
                                 `onException`
                                     stopIncompleteReader
                                         input output stderr
                                         processHandle stderrReader
-                            startup <-
-                                race
+                            startup <- if alreadyReady
+                                then pure (Right (Right ()))
+                                else race
                                     (threadDelay
                                         (max 1
                                             host.hostConfig.startupTimeoutMs
@@ -634,11 +528,6 @@ startCell host identifier tools = do
                                         processHandle monitor stderrReader
                                     pure $ Left $ CodeModeStartupError
                                         "code-mode worker did not become ready"
-                        Right (input, output, stderr, processHandle) -> do
-                            stopIncompleteProcessMaybe
-                                input output stderr processHandle
-                            pure $ Left $ CodeModeStartupError
-                                "failed to create all code-mode worker pipes"
 
 monitorWorker
     :: CodeModeToolHandler
@@ -653,11 +542,12 @@ monitorWorker
     -> TMVar (Either CodeModeError CellOutcome)
     -> TQueue Value
     -> TQueue Value
+    -> Bool
     -> IO ()
 monitorWorker
         handler notify storedValues allowedTools
-        input writerLock callbacks output ready result yields content =
-    try @_ @SomeException (loop False) >>= \case
+        input writerLock callbacks output ready result yields content initialReady =
+    try @_ @SomeException (loop initialReady) >>= \case
         Right () -> pure ()
         Left err -> atomically do
             let failure = Left $ CodeModeProtocolError $
@@ -695,7 +585,8 @@ monitorWorker
                             atomically do
                                 values <- drainTQueue content
                                 writeTQueue yields $
-                                    preferStreamedContent values responseValue
+                                    preferStreamedContent values
+                                        (protocolValue responseValue)
                             loop True
                         | otherwise ->
                             failClosed False "yield received before ready"
@@ -707,7 +598,8 @@ monitorWorker
                             failClosed False "notification received before ready"
                     Right WorkerContent{..}
                         | hasStarted -> do
-                            atomically $ writeTQueue content contentValue
+                            atomically $
+                                writeTQueue content (protocolValue contentValue)
                             loop True
                         | otherwise ->
                             failClosed False "content received before ready"
@@ -715,13 +607,17 @@ monitorWorker
                         | hasStarted && responseId == "exec" ->
                             do
                                 modifyMVar_ storedValues $
-                                    pure . Map.union responseStoredValueWrites
+                                    pure
+                                        . Map.union
+                                            (Map.map protocolValue
+                                                responseStoredValueWrites)
                                 atomically do
                                     values <- drainTQueue content
                                     void $ tryPutTMVar result $
                                         Right (CellSucceeded
                                             (preferStreamedContent
-                                                values responseValue))
+                                                values
+                                                (protocolValue responseValue)))
                         | otherwise ->
                             failClosed hasStarted
                                 "unexpected execution response id"
@@ -729,13 +625,17 @@ monitorWorker
                         | hasStarted && responseId == "exec" ->
                             do
                                 modifyMVar_ storedValues $
-                                    pure . Map.union responseStoredValueWrites
+                                    pure
+                                        . Map.union
+                                            (Map.map protocolValue
+                                                responseStoredValueWrites)
                                 atomically do
                                     values <- drainTQueue content
                                     void $ tryPutTMVar result $
                                         Right (CellFailed
                                             (preferStreamedContent
-                                                values responseValue)
+                                                values
+                                                (protocolValue responseValue))
                                             responseError)
                         | otherwise ->
                             failClosed hasStarted
@@ -751,7 +651,7 @@ monitorWorker
                 handled <- try @_ @SomeException $
                     handler
                         invocation.invocationName
-                        invocation.invocationArguments
+                        (protocolValue invocation.invocationArguments)
                 case handled of
                     Left err ->
                         send $ encodeToolFailure invocation.invocationId $
@@ -820,7 +720,7 @@ waitForCell host cell yieldMs = do
         Right (Right result) -> do
             markCellClosed cell
             void $ takeCell host cell.cellIdentifier
-            finishCell cell
+            releaseCell host cell
             pure $ fmap (cellOutcomeResult cell.cellIdentifier) result
 
 observeCell
@@ -910,6 +810,12 @@ preferStreamedContent :: [Value] -> Value -> Value
 preferStreamedContent [] fallback = fallback
 preferStreamedContent values _ = contentResult values
 
+-- The host evaluator and public code-mode result API still operate on Aeson
+-- values. Keep that materialisation at this explicit boundary rather than in
+-- the worker protocol decoder.
+protocolValue :: RawJson -> Value
+protocolValue = toJSON
+
 cellOutcomeResult :: Text -> CellOutcome -> CodeModeResult
 cellOutcomeResult identifier = \case
     CellSucceeded value -> CodeModeFinished
@@ -922,15 +828,33 @@ cellOutcomeResult identifier = \case
         , cellError = err
         }
 
-finishCell :: Cell -> IO ()
-finishCell cell = do
+releaseCell :: CodeModeHost -> Cell -> IO ()
+releaseCell host cell = do
     _ <- waitCatch cell.cellMonitor
     cancelCellCallbacks cell
-    closeQuietly cell.cellInput
-    _ <- try @_ @SomeException $ waitForProcess cell.cellProcess
-    void $ waitCatch cell.cellStderr
-    closeQuietly cell.cellOutput
-    closeQuietly cell.cellErrorOutput
+    outcome <- atomically $ tryReadTMVar cell.cellResult
+    case outcome of
+        Just (Right _) -> do
+            retained <- modifyMVar host.hostWorkerPool \pool ->
+                if not pool.poolClosed
+                    && host.hostConfig.workerPoolSize > length pool.poolIdle
+                    then
+                        pure
+                            ( pool
+                                { poolIdle = IdleWorker
+                                    cell.cellInput
+                                    cell.cellOutput
+                                    cell.cellErrorOutput
+                                    cell.cellProcess
+                                    cell.cellWriterLock
+                                    cell.cellStderr
+                                    : pool.poolIdle
+                                }
+                            , True
+                            )
+                    else pure (pool, False)
+            if not retained then stopCell cell else pure ()
+        _ -> stopCell cell
 
 stopCell :: Cell -> IO ()
 stopCell cell = do
@@ -944,6 +868,16 @@ stopCell cell = do
     closeQuietly cell.cellOutput
     closeQuietly cell.cellErrorOutput
     void $ try @_ @SomeException $ waitForProcess cell.cellProcess
+
+stopIdleWorker :: IdleWorker -> IO ()
+stopIdleWorker (IdleWorker input output errOut process _ stderrReader) = do
+    terminateQuietly process
+    closeQuietly input
+    cancel stderrReader
+    void $ waitCatch stderrReader
+    closeQuietly output
+    closeQuietly errOut
+    void $ try @_ @SomeException $ waitForProcess process
 
 cancelCellCallbacks :: Cell -> IO ()
 cancelCellCallbacks cell = do

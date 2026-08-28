@@ -55,11 +55,7 @@ renderMarkdown color text
     cleaned = displayTerminalText text
     renderChunk (FenceText prose) = renderProse prose
     renderChunk (FenceBlock block) =
-        let header
-                | Text.null block.fencedInfo = ""
-                | otherwise = md [terminalCyan] block.fencedInfo <> "\n"
-            body = renderFenceBody block.fencedBody
-        in header <> body
+        renderFenceBody block.fencedBody
 
 renderProse :: Text -> Text
 renderProse text =

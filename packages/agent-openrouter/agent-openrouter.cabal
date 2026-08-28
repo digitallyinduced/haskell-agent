@@ -50,11 +50,11 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-json            >= 0.1 && < 0.2
                     , agent-responses       >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , text
                     , bytestring
-                    , aeson                 >= 2.0
                     , containers
                     , http-client
                     , http-client-tls
@@ -79,6 +79,7 @@ test-suite agent-openrouter-test
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json
                     , agent-responses
                     , agent-responses-types
                     , agent-openrouter

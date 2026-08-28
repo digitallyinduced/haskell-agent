@@ -37,30 +37,28 @@ module Agent.TUI.Model
     , uiTokensPerSecond
     , warningNotice
     , advanceUiTime
+    , blockCodeLanguage
     ) where
 
 import Agent.TUI.Presentation
-    ( TodoDisplayLine
-    , formatSearchReplaceDiffRelative
+    ( formatSearchReplaceDiffRelative
     , formatToolOutputRelative
     , todoListFromToolOutput
-    , todoListHasInProgress
-    , todoListHasOpenWork
     , toolCallInput
     , toolCallTitleRelative
     )
 import Agent.TUI.TextWidth (clampGraphemeCursor)
+import Agent.TUI.Model.Edit
+import Agent.TUI.Model.State
+import Agent.TUI.Model.Timing
+import Agent.TUI.Model.Types
 import Agent.TUI.Motion
-    ( completionStatusDurationMillis
-    , transientNoticeDurationMillis
-    )
+    ( completionStatusDurationMillis )
 import Agent.Loop
     ( LoopEvent(..)
     , TokenUsage(..)
     , TurnOutput(..)
-    , emptyTokenUsage
     , generationTokensPerSecond
-    , liveTokensPerSecond
     )
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -77,236 +75,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import Data.Char (isSpace)
 import Data.Maybe (fromMaybe)
-
-newtype BlockId = BlockId Int
-    deriving (Eq, Ord, Show)
-
-data BlockKind
-    = BlockUser
-    | BlockAssistant
-    | BlockThinking
-    | BlockTool
-    | BlockTodo
-    | BlockShell
-    | BlockEdit
-    | BlockSystem
-    | BlockRecap
-    | BlockError
-    deriving (Eq, Show)
-
-data NoticeKind
-    = NoticeInfo
-    | NoticeSuccess
-    | NoticeWarning
-    | NoticeProgress
-    | NoticeError
-    deriving (Eq, Show)
-
-data UiNotice = UiNotice
-    { noticeKind :: !NoticeKind
-    , noticeText :: !Text
-    , noticeTransient :: !Bool
-    }
-    deriving (Eq, Show)
-
--- | A live retry deadline attached to one retained error block.
-data RetryCountdown = RetryCountdown
-    { retryCountdownBlockId :: !BlockId
-    , retryCountdownPrefix :: !Text
-    , retryCountdownRemainingMillis :: !Int
-    , retryCountdownSuffix :: !Text
-    }
-    deriving (Eq, Show)
-
-data BlockState
-    = BlockStreaming
-    | BlockRunning
-    | BlockComplete
-    | BlockFailed
-    | BlockCancelled
-    | BlockDenied
-    deriving (Eq, Show)
-
-data UiBlock = UiBlock
-    { blockId :: !BlockId
-    , blockKind :: !BlockKind
-    , blockTitle :: !Text
-    , blockBody :: !Text
-    , blockTimestamp :: !Text
-    , blockDetail :: !Text
-    , blockState :: !BlockState
-    , blockExpanded :: !Bool
-    , blockCallId :: !(Maybe Text)
-    }
-    deriving (Eq, Show)
-
-data Focus
-    = FocusComposer
-    | FocusScrollback
-    | FocusPermission
-    deriving (Eq, Show)
-
-data PermissionOverlay = PermissionOverlay
-    { permissionSummary :: !Text
-    , permissionIndex :: !Int
-    }
-    deriving (Eq, Show)
-
-data PromptLimitStatus = PromptLimitStatus
-    { promptLimitText :: !Text
-    , promptLimitWarning :: !Bool
-    }
-    deriving (Eq, Show)
-
-data PromptState = PromptState
-    { promptModel :: !Text
-    , promptEffort :: !Text
-    , promptEffortOptions :: ![Text]
-    , promptMode :: !Text
-    , promptAccount :: !Text
-    , promptAccountSelectable :: !Bool
-    , promptUsage :: !TokenUsage
-    , promptLimitStatus :: !(Maybe PromptLimitStatus)
-    , promptAttachments :: !Int
-    }
-    deriving (Eq, Show)
-
-data UiState = UiState
-    { uiBlocks :: !(Seq UiBlock)
-    , uiNextBlockId :: !Int
-    , uiDraft :: !Text
-    , uiCursor :: !Int
-    , uiQueuedInputs :: !(Seq Text)
-    , uiFocus :: !Focus
-    , uiSelectedBlock :: !(Maybe BlockId)
-    , uiSelectedBlockIndex :: !(Maybe Int)
-    , uiBlockIndices :: !(Map.Map BlockId Int)
-    , uiFollow :: !Bool
-    , uiRunning :: !Bool
-    , uiAwaitingInput :: !Bool
-    , uiActivity :: !Text
-    , uiPrompt :: !PromptState
-    , uiBranch :: !Text
-    , uiCwd :: !Text
-    , uiWorkspaceRoot :: !Text
-    , uiPermission :: !(Maybe PermissionOverlay)
-    , uiNotice :: !(Maybe UiNotice)
-    , uiRetryCountdown :: !(Maybe RetryCountdown)
-    , uiNoticeElapsedMillis :: !Int
-    , uiElapsedMillis :: !Int
-    , uiCompletionRemainingMillis :: !Int
-    , uiTurnStartBlock :: !Int
-    , uiAttemptStartBlock :: !Int
-    , uiToolCalls :: !(Map.Map Text (Int, ToolCall))
-    , uiTodos :: ![TodoDisplayLine]
-    , uiGenerating :: !Bool
-    , uiGenerationChars :: !Int
-    , uiGenerationMillis :: !Int
-    , uiLastTokensPerSecond :: !(Maybe Double)
-    }
-    deriving (Eq, Show)
-
-data UiEvent
-    = UiLoop !LoopEvent
-    | UiUserSubmitted !Text
-    | UiDraftSubmitted
-    | UiInputSteered !Text
-    | UiInputQueued !Text
-    | UiInputPromoted !Text
-    | UiQueuedInputStarted
-    | UiSetDraft !Text !Int
-    | UiSetPrompt !PromptState
-    | UiSetPromptEffort !Text
-    | UiSetPromptLimitStatus !(Maybe PromptLimitStatus)
-    | UiSetAwaitingInput !Bool
-    | UiSetRepository !Text !Text !Text
-    | UiSetNotice !(Maybe UiNotice)
-    | UiMoveSelection !Int
-    | UiSelectBlock !BlockId
-    | UiActivateBlock !BlockId
-    | UiToggleSelected
-    | UiFocusChanged !Focus
-    | UiPermissionShown !Text
-    | UiPermissionMoved !Int
-    | UiPermissionHidden
-    | UiHistory !Text
-    | UiAssistantHistory !Text
-    | UiSystemMessage !Text
-    | UiRecapStarted
-    | UiRecapReady !Text
-    | UiRecapUnavailable !Text
-    | UiErrorMessage !Text
-    -- | Append an error whose retry guidance counts down in place.
-    | UiRetryCountdown !Text !Int !Text
-    | UiConversationCleared
-    | UiSetFollow !Bool
-    | UiTurnEnded !BlockState
-    | UiTurnRestarted
-    deriving (Eq, Show)
-
-initialUiState :: UiState
-initialUiState = UiState
-    { uiBlocks = Seq.empty
-    , uiNextBlockId = 1
-    , uiDraft = ""
-    , uiCursor = 0
-    , uiQueuedInputs = Seq.empty
-    , uiFocus = FocusComposer
-    , uiSelectedBlock = Nothing
-    , uiSelectedBlockIndex = Nothing
-    , uiBlockIndices = Map.empty
-    , uiFollow = True
-    , uiRunning = False
-    , uiAwaitingInput = False
-    , uiActivity = "Ready"
-    , uiPrompt = PromptState
-        { promptModel = ""
-        , promptEffort = ""
-        , promptEffortOptions = []
-        , promptMode = "ask"
-        , promptAccount = ""
-        , promptAccountSelectable = False
-        , promptUsage = emptyTokenUsage
-        , promptLimitStatus = Nothing
-        , promptAttachments = 0
-        }
-    , uiBranch = ""
-    , uiCwd = ""
-    , uiWorkspaceRoot = ""
-    , uiPermission = Nothing
-    , uiNotice = Nothing
-    , uiRetryCountdown = Nothing
-    , uiNoticeElapsedMillis = 0
-    , uiElapsedMillis = 0
-    , uiCompletionRemainingMillis = 0
-    , uiTurnStartBlock = 0
-    , uiAttemptStartBlock = 0
-    , uiToolCalls = Map.empty
-    , uiTodos = []
-    , uiGenerating = False
-    , uiGenerationChars = 0
-    , uiGenerationMillis = 0
-    , uiLastTokensPerSecond = Nothing
-    }
-
--- | Checklist shown above the prompt during a turn, or while an item is still
--- in progress. Pending-only lists hide once the session is idle so they do
--- not linger into the next prompt.
-visibleTodoList :: UiState -> [TodoDisplayLine]
-visibleTodoList state
-    | todoListHasInProgress state.uiTodos = state.uiTodos
-    | state.uiRunning && todoListHasOpenWork state.uiTodos = state.uiTodos
-    | otherwise = []
-
--- | Status-only blocks can appear before the first user turn, but the
--- conversation is still empty from the user's perspective.
-conversationIsEmpty :: UiState -> Bool
-conversationIsEmpty state =
-    all isStartupStatus state.uiBlocks
-  where
-    isStartupStatus block =
-        block.blockKind == BlockSystem
-            && block.blockTitle == "System"
 
 reduceUi :: UiEvent -> UiState -> UiState
 reduceUi event state = case event of
@@ -538,58 +306,6 @@ reduceUi event state = case event of
             , uiAttemptStartBlock = state.uiTurnStartBlock
             }
 
-advanceUiTime :: Int -> UiState -> UiState
-advanceUiTime rawElapsedMillis state =
-    let
-        elapsedMillis = max 0 rawElapsedMillis
-        completionRemainingMillis =
-            max 0
-                (state.uiCompletionRemainingMillis - elapsedMillis)
-        noticeElapsedMillis =
-            case state.uiNotice of
-                Just notice
-                    | notice.noticeTransient ->
-                        state.uiNoticeElapsedMillis + elapsedMillis
-                _ ->
-                    0
-        notice
-            | noticeElapsedMillis >= transientNoticeDurationMillis
-            , maybe False (.noticeTransient) state.uiNotice =
-                Nothing
-            | otherwise = state.uiNotice
-        countdown =
-            advanceRetryCountdown elapsedMillis state
-    in countdown
-        { uiElapsedMillis =
-            if state.uiRunning
-                then state.uiElapsedMillis + elapsedMillis
-                else state.uiElapsedMillis
-        , uiGenerationMillis =
-            if state.uiGenerating
-                then state.uiGenerationMillis + elapsedMillis
-                else state.uiGenerationMillis
-        , uiActivity =
-            if state.uiCompletionRemainingMillis > 0
-                && completionRemainingMillis == 0
-                then "Ready"
-                else state.uiActivity
-        , uiCompletionRemainingMillis = completionRemainingMillis
-        , uiNotice = notice
-        , uiNoticeElapsedMillis =
-            if notice == Nothing then 0 else noticeElapsedMillis
-        }
-
--- | Live generation speed while the model is streaming; otherwise the last
--- completed model response.
-uiTokensPerSecond :: UiState -> Maybe Double
-uiTokensPerSecond state
-    | state.uiGenerating =
-        liveTokensPerSecond
-            state.uiGenerationChars
-            state.uiGenerationMillis
-            <|> state.uiLastTokensPerSecond
-    | otherwise = state.uiLastTokensPerSecond
-
 resetGeneration :: UiState -> UiState
 resetGeneration state =
     state
@@ -616,115 +332,6 @@ snapshotGenerationRate usage state =
                 state.uiGenerationMillis
                 <|> state.uiLastTokensPerSecond
         }
-
-uiNeedsTick :: UiState -> Bool
-uiNeedsTick state =
-    state.uiRunning
-        || state.uiCompletionRemainingMillis > 0
-        || maybe False ((> 0) . (.retryCountdownRemainingMillis))
-            state.uiRetryCountdown
-        || maybe False noticeNeedsTick state.uiNotice
-  where
-    noticeNeedsTick notice =
-        notice.noticeTransient
-
-uiNextDeadlineMillis :: UiState -> Maybe Int
-uiNextDeadlineMillis state =
-    minimumMaybe $
-        completionDeadline <> countdownDeadline <> noticeDeadline
-  where
-    completionDeadline =
-        [state.uiCompletionRemainingMillis
-        | state.uiCompletionRemainingMillis > 0]
-    countdownDeadline =
-        case state.uiRetryCountdown of
-            Just countdown ->
-                [ min
-                    countdown.retryCountdownRemainingMillis
-                    (millisecondsUntilNextDisplayedSecond
-                        countdown.retryCountdownRemainingMillis)
-                ]
-            Nothing -> []
-    noticeDeadline =
-        case state.uiNotice of
-            Just notice
-                | notice.noticeTransient ->
-                    [ max 0
-                        (transientNoticeDurationMillis
-                            - state.uiNoticeElapsedMillis)
-                    ]
-            _ ->
-                []
-    minimumMaybe [] = Nothing
-    minimumMaybe values = Just (minimum values)
-
-advanceRetryCountdown :: Int -> UiState -> UiState
-advanceRetryCountdown elapsedMillis state =
-    case state.uiRetryCountdown of
-        Nothing -> state
-        Just countdown ->
-            let
-                remaining =
-                    max 0
-                        ( countdown.retryCountdownRemainingMillis
-                            - elapsedMillis
-                        )
-                body =
-                    retryCountdownText
-                        countdown.retryCountdownPrefix
-                        remaining
-                        countdown.retryCountdownSuffix
-                blocks =
-                    case Map.lookup
-                        countdown.retryCountdownBlockId
-                        state.uiBlockIndices of
-                        Nothing -> state.uiBlocks
-                        Just index ->
-                            Seq.adjust
-                                (\block -> block { blockBody = body })
-                                index
-                                state.uiBlocks
-            in state
-                { uiBlocks = blocks
-                , uiRetryCountdown =
-                    if remaining == 0
-                        then Nothing
-                        else Just countdown
-                            { retryCountdownRemainingMillis = remaining }
-                }
-
-retryCountdownText :: Text -> Int -> Text -> Text
-retryCountdownText prefix remainingMillis suffix =
-    prefix
-        <> (if remainingMillis <= 0
-                then "Try again now"
-                else
-                    "Try again in "
-                        <> formatCountdownSeconds
-                            ((remainingMillis + 999) `div` 1000))
-        <> suffix
-
-formatCountdownSeconds :: Int -> Text
-formatCountdownSeconds rawSeconds =
-    let
-        total = max 0 rawSeconds
-        hours = total `div` 3600
-        minutes = (total `mod` 3600) `div` 60
-        seconds = total `mod` 60
-        showText = Text.pack . show
-        pad2 value
-            | value < 10 = "0" <> showText value
-            | otherwise = showText value
-    in if hours > 0
-        then showText hours <> "h" <> pad2 minutes <> "m" <> pad2 seconds <> "s"
-        else if minutes > 0
-            then showText minutes <> "m" <> pad2 seconds <> "s"
-            else showText seconds <> "s"
-
-millisecondsUntilNextDisplayedSecond :: Int -> Int
-millisecondsUntilNextDisplayedSecond remainingMillis =
-    let remainder = remainingMillis `mod` 1000
-    in if remainder == 0 then 1000 else remainder
 
 reduceLoop :: LoopEvent -> UiState -> UiState
 reduceLoop event state = case event of
@@ -1274,83 +881,6 @@ selectedBlockIndex state =
   where
     fallback = max 0 (Seq.length state.uiBlocks - 1)
 
--- | Delete whitespace and the previous non-whitespace word before the cursor.
-deleteWordBefore :: Text -> Int -> (Text, Int)
-deleteWordBefore text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        before = Text.take cursor' text
-        after = Text.drop cursor' text
-        reversed = Text.reverse before
-        withoutSpace = Text.dropWhile isSpace reversed
-        remaining = Text.dropWhile (not . isSpace) withoutSpace
-        kept = Text.reverse remaining
-        after'
-            | Text.isSuffixOf " " kept
-            , Text.isPrefixOf " " after =
-                Text.drop 1 after
-            | otherwise = after
-    in (kept <> after', Text.length kept)
-
--- | Delete whitespace and the next non-whitespace word after the cursor.
-deleteWordAfter :: Text -> Int -> (Text, Int)
-deleteWordAfter text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        before = Text.take cursor' text
-        after = Text.drop cursor' text
-        withoutSpace = Text.dropWhile isSpace after
-        remaining = Text.dropWhile (not . isSpace) withoutSpace
-    in (before <> remaining, cursor')
-
--- | Delete from the cursor to the beginning of its logical line.
-deleteToLineStart :: Text -> Int -> (Text, Int)
-deleteToLineStart text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        before = Text.take cursor' text
-        after = Text.drop cursor' text
-        kept = case Text.breakOnEnd "\n" before of
-            ("", _) -> ""
-            (prefix, _) -> prefix
-    in (kept <> after, Text.length kept)
-
--- | Delete from the cursor to the end of its logical line.
-deleteToLineEnd :: Text -> Int -> (Text, Int)
-deleteToLineEnd text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        before = Text.take cursor' text
-        after = Text.drop cursor' text
-        keptAfter = case Text.break (== '\n') after of
-            (_, rest) -> rest
-    in (before <> keptAfter, cursor')
-
-lineStartCursor :: Text -> Int -> Int
-lineStartCursor text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        before = Text.take cursor' text
-    in Text.length (fst (Text.breakOnEnd "\n" before))
-
-lineEndCursor :: Text -> Int -> Int
-lineEndCursor text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        after = Text.drop cursor' text
-        (line, _) = Text.break (== '\n') after
-    in cursor' + Text.length line
-
-moveWordLeft :: Text -> Int -> Int
-moveWordLeft text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        reversed = Text.reverse (Text.take cursor' text)
-        withoutSpace = Text.dropWhile isSpace reversed
-        remaining = Text.dropWhile (not . isSpace) withoutSpace
-    in Text.length remaining
-
-moveWordRight :: Text -> Int -> Int
-moveWordRight text cursor =
-    let cursor' = max 0 (min (Text.length text) cursor)
-        after = Text.drop cursor' text
-        withoutWord = Text.dropWhile (not . isSpace) after
-        remaining = Text.dropWhile isSpace withoutWord
-    in Text.length text - Text.length remaining
-
 toggleSelected :: UiState -> UiState
 toggleSelected state =
     case selectedBlockEntry state of
@@ -1395,7 +925,7 @@ isTodoTool name =
 
 toolBlockKind :: Text -> BlockKind
 toolBlockKind rawName
-    | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci"] =
+    | name `elem` ["run_terminal_cmd", "shell_command", "write_stdin", "run_ghci", "exec"] =
         BlockShell
     | name `elem` ["search_replace", "apply_patch"] =
         BlockEdit
@@ -1404,6 +934,16 @@ toolBlockKind rawName
     | otherwise = BlockTool
   where
     name = canonicalToolName rawName
+
+-- | Syntax grammar for code carried in a shell-style tool block.
+-- The title is retained alongside the source after the original call leaves
+-- the live-tool map, so it also identifies exec's JavaScript code here.
+blockCodeLanguage :: UiBlock -> Maybe Text
+blockCodeLanguage block
+    | block.blockKind /= BlockShell = Nothing
+    | Text.null (Text.strip block.blockDetail) = Nothing
+    | block.blockTitle == "$ exec" = Just "javascript"
+    | otherwise = Just "haskell"
 
 outputLooksFailed :: Text -> Bool
 outputLooksFailed output =

@@ -2,8 +2,8 @@ cabal-version:      2.2
 name:               agent-responses-types
 version:            0.1.0.0
 synopsis:           Canonical wire types for Responses-compatible APIs
-description:        Lossless request, response, item, tool, and streaming
-                    event types shared by the agent loop and provider adapters.
+description:        Known request, response, item, tool, and streaming event
+                    fields shared by the agent loop and provider adapters.
 license:            BSD-3-Clause
 license-file:       LICENSE
 author:             digitally induced GmbH
@@ -54,6 +54,8 @@ library
     other-modules:    Agent.Responses.Types.Common
     hs-source-dirs:   src
     build-depends:    base       >= 4.14 && < 5
+                    , agent-json >= 0.1 && < 0.2
                     , aeson      >= 2.0
+                    , hermes-json
                     , scientific
                     , text

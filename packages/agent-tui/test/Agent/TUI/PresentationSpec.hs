@@ -74,7 +74,7 @@ spec = describe "tool presentation" do
                     "computer"
                     "{\"actions\":[{\"type\":\"click\",\"x\":10,\"y\":20},{\"type\":\"type\",\"text\":\"password\"}]}"
         summarizeToolCall call
-            `shouldBe` "Control computer click, type 8 chars"
+            `shouldBe` "Control computer computer action"
         permissionToolCallPrompt call
             `shouldSatisfy` (not . Text.isInfixOf "password")
 
@@ -124,6 +124,22 @@ spec = describe "tool presentation" do
             `shouldBe`
                 "Evaluate this Haskell code in GHCi?\n\n\
                 \do { putStrLn \"one\"; putStrLn \"two\" }"
+
+    it "renders exec source and hides successful protocol boilerplate" do
+        let source = "const result = await tools.grep({pattern: \"needle\"});\ntext(result);"
+            call = customToolCall "exec" "exec" source
+        toolCallTitle call `shouldBe` "$ exec"
+        toolCallInput call `shouldBe` source
+        formatToolOutput call
+            "Script completed\nWall time 0.1 seconds\nOutput:\nmatch"
+            `shouldBe` "match"
+        formatToolOutput call
+            "Script completed\nWall time 0.0 seconds\nOutput:\n"
+            `shouldBe` ""
+        formatToolOutput call
+            "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\nboom"
+            `shouldBe`
+                "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\nboom"
 
     it "shows complete multiline code and shell commands for permission" do
         permissionToolCallPrompt

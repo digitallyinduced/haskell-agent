@@ -11,8 +11,8 @@ module Agent.OpenAI.Models.Bundled
     , loadBundledModelsOrThrow
     ) where
 
-import Agent.OpenAI.Models.Types (ModelsResponse)
-import qualified Data.Aeson as Aeson
+import qualified Agent.Json.Decode as Json
+import Agent.OpenAI.Models.Types (ModelsResponse, modelsResponseDecoder)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
@@ -36,11 +36,9 @@ bundledModelsText =
 
 loadBundledModels :: IO (Either Text ModelsResponse)
 loadBundledModels =
-    pure $ case
-        Aeson.eitherDecodeStrict'
-            (TextEncoding.encodeUtf8 bundledModelsText)
-    of
-        Left err -> Left (Text.pack err)
+    pure $ case Json.decodeEither modelsResponseDecoder
+        (TextEncoding.encodeUtf8 bundledModelsText) of
+        Left err -> Left (Json.jsonErrorMessage err)
         Right response -> Right response
 
 loadBundledModelsOrThrow :: IO ModelsResponse

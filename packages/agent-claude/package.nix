@@ -1,6 +1,6 @@
-{ mkDerivation, aeson, agent-core, agent-responses
+{ mkDerivation, aeson, agent-core, agent-json, agent-responses
 , agent-responses-types, base, bytestring, claude-agent-sdk-haskell
-, containers, directory, filepath, hspec, lib, process
+, containers, directory, filepath, hermes-json, hspec, lib, process
 , safe-exceptions, text, unix, uuid-types
 }:
 mkDerivation {
@@ -8,9 +8,9 @@ mkDerivation {
   version = "0.1.0.0";
   src = ./.;
   libraryHaskellDepends = [
-    aeson agent-core agent-responses agent-responses-types base
-    bytestring claude-agent-sdk-haskell containers directory filepath
-    process safe-exceptions text uuid-types
+    aeson agent-core agent-json agent-responses agent-responses-types
+    base bytestring claude-agent-sdk-haskell containers directory
+    filepath hermes-json process safe-exceptions text uuid-types
   ];
   testHaskellDepends = [
     agent-core agent-responses agent-responses-types base bytestring

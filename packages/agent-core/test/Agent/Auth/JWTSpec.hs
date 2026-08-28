@@ -1,6 +1,7 @@
 module Agent.Auth.JWTSpec (spec) where
 
 import Agent.Auth.JWT (decodeJwtPayload)
+import qualified Agent.Json.Decode as Json
 import qualified Data.Aeson as Aeson
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import qualified Data.ByteString as BS
@@ -12,22 +13,22 @@ import Test.Hspec
 spec :: Spec
 spec = describe "decodeJwtPayload" do
     it "decodes an unpadded base64url JSON payload" do
-        decodeJwtPayload (unsignedJwt (Aeson.object
+        decodeJwtPayload
+            (Json.object (Json.atKey "account_id" Json.text))
+            (unsignedJwt (Aeson.object
             [ "account_id" Aeson..= ("account-123" :: Text) ]))
-            `shouldBe`
-                Just (Aeson.object
-                    [ "account_id" Aeson..= ("account-123" :: Text) ])
+            `shouldBe` Just "account-123"
 
     it "supports typed payload decoding" do
-        decodeJwtPayload (unsignedJwt (Aeson.String "claims")) `shouldBe`
+        decodeJwtPayload Json.text (unsignedJwt (Aeson.String "claims")) `shouldBe`
             Just ("claims" :: Text)
 
     it "rejects missing, malformed, or non-JSON payloads" do
-        (decodeJwtPayload "" :: Maybe Aeson.Value) `shouldBe` Nothing
-        (decodeJwtPayload "one-segment" :: Maybe Aeson.Value) `shouldBe` Nothing
-        (decodeJwtPayload "header.%%%.signature" :: Maybe Aeson.Value)
+        decodeJwtPayload Json.text "" `shouldBe` Nothing
+        decodeJwtPayload Json.text "one-segment" `shouldBe` Nothing
+        decodeJwtPayload Json.text "header.%%%.signature"
             `shouldBe` Nothing
-        (decodeJwtPayload "header.bm90LWpzb24.signature" :: Maybe Aeson.Value)
+        decodeJwtPayload Json.text "header.bm90LWpzb24.signature"
             `shouldBe` Nothing
 
 unsignedJwt :: Aeson.Value -> Text

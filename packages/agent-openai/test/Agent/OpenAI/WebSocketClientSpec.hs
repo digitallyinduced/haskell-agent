@@ -4,6 +4,7 @@ import Test.Hspec
 import Agent.Error
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import qualified Agent.Responses.Codec as ResponsesCodec
 import Agent.OpenAI.WebSocketClient
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
@@ -31,10 +32,10 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 ])
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
@@ -47,13 +48,11 @@ spec = do
                     , content = Nothing
                     , encryptedContent = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 ])
                 { status = ResponseIncomplete
                 , incompleteDetails = Just IncompleteDetails
                     { reason = "max_output_tokens"
-                    , extraFields = KeyMap.empty
                     }
                 })
         readCodexTurnState turnState `shouldReturn` Just "ts-first"
@@ -71,13 +70,11 @@ spec = do
                             "done"
                             Nothing
                             Nothing
-                            KeyMap.empty
                         ]
                     , role = RoleAssistant
                     , status = Just ItemCompleted
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 ])
         readCodexTurnState turnState `shouldReturn` Nothing
@@ -594,7 +591,7 @@ sampleLitePrefixRequest = sampleRequest
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , content = MessageContentParts
-                [InputTextPart "base instructions" Nothing KeyMap.empty]
+                [InputTextPart "base instructions" Nothing]
             , role = RoleDeveloper
             , status = Nothing
             , phase = Nothing
@@ -603,9 +600,7 @@ sampleLitePrefixRequest = sampleRequest
                 , createTime = Nothing
                 , contentItemKinds = Just ["model.base_instructions"]
                 , executedToolCalls = Nothing
-                , extraFields = KeyMap.empty
                 }
-            , extraFields = KeyMap.empty
             }
         ])
     }
@@ -622,7 +617,6 @@ sampleRequest = defaultResponseCreateParams
         , generateSummary = Nothing
         , reasoningMode = Nothing
         , summary = Nothing
-        , extraFields = mempty
         }
     , include = Just []
     , promptCacheKey = Just "cache-key"
@@ -645,12 +639,12 @@ withModel nextModel ResponseCreateParams { model = _, .. } =
 
 responseWithOutput :: [ResponseItem] -> Response
 responseWithOutput output =
-    case Aeson.fromJSON $ Aeson.object
+    case ResponsesCodec.decodeResponse . LBS.toStrict . Aeson.encode $ Aeson.object
             [ "id" Aeson..= ("resp-test" :: Text)
             , "created_at" Aeson..= (0 :: Int)
             , "model" Aeson..= ("gpt-test" :: Text)
             , "status" Aeson..= ("completed" :: Text)
             , "output" Aeson..= output
             ] of
-        Aeson.Success response -> response
-        Aeson.Error err -> error err
+        Right response -> response
+        Left err -> error err

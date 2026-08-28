@@ -15,25 +15,21 @@ module Agent.Tools.CodeMode.Protocol
     , encodeToolSuccess
     ) where
 
+import qualified Agent.Json.Decode as Json
+import Agent.Json
+    ( RawJson
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
 import Data.Aeson
-    ( FromJSON(..)
-    , Object
-    , ToJSON(..)
-    , Value(..)
-    , eitherDecodeStrict'
+    ( ToJSON(..)
+    , Value
     , encode
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
-import Data.Aeson.Types (Parser)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -53,127 +49,96 @@ instance ToJSON CodeModeToolMetadata where
 data ToolInvocation = ToolInvocation
     { invocationId :: !Text
     , invocationName :: !Text
-    , invocationArguments :: !Value
+    , invocationArguments :: !RawJson
     } deriving (Eq, Show)
 
 data ProtocolMessage
     = WorkerReady
     | WorkerToolInvocation !ToolInvocation
     | WorkerYielded
-        { responseValue :: !Value
+        { responseValue :: !RawJson
         }
     | WorkerNotification
         { notificationText :: !Text
         }
     | WorkerContent
-        { contentValue :: !Value
+        { contentValue :: !RawJson
         }
     | WorkerExecSucceeded
         { responseId :: !Text
-        , responseValue :: !Value
-        , responseStoredValueWrites :: !(Map Text Value)
+        , responseValue :: !RawJson
+        , responseStoredValueWrites :: !(Map Text RawJson)
         }
     | WorkerExecFailed
         { responseId :: !Text
         , responseError :: !Text
-        , responseValue :: !Value
-        , responseStoredValueWrites :: !(Map Text Value)
+        , responseValue :: !RawJson
+        , responseStoredValueWrites :: !(Map Text RawJson)
         }
     deriving (Eq, Show)
 
-instance FromJSON ProtocolMessage where
-    parseJSON = withObject "code-mode protocol message" \message -> do
-        ensureOnly ["jsonrpc", "method", "id", "params", "result", "error", "partial_result", "stored_value_writes"] message
-        version <- message .: "jsonrpc"
+protocolMessageDecoder :: Json.Decoder ProtocolMessage
+protocolMessageDecoder = Json.object do
+        version <- Json.atKey "jsonrpc" Json.text
         if (version :: Text) /= "2.0"
             then fail "unsupported jsonrpc version"
-            else parseBody message
+            else parseBody
       where
-        parseBody message = do
-            method <- message .:? "method"
+        parseBody = do
+            method <- Json.atKeyOptional "method" Json.text
             case (method :: Maybe Text) of
-                Just "ready" -> do
-                    ensureOnly ["jsonrpc", "method"] message
-                    pure WorkerReady
+                Just "ready" -> pure WorkerReady
                 Just "tool/call" -> do
-                    ensureOnly ["jsonrpc", "method", "id", "params"] message
-                    requestId <- message .: "id"
-                    params <- message .: "params"
-                    invocation <- withObject "tool/call params" (\paramsObject -> do
-                        ensureOnly ["name", "arguments"] paramsObject
-                        parseJSON (Object paramsObject)) params
+                    requestId <- Json.atKey "id" Json.text
+                    invocation <- Json.atKey "params" toolInvocationDecoder
                     pure $ WorkerToolInvocation invocation
                         { invocationId = requestId }
-                Just "yield" -> do
-                    ensureOnly ["jsonrpc", "method", "params"] message
-                    params <- message .: "params"
-                    withObject "yield params" (\paramsObject -> do
-                        ensureOnly ["value"] paramsObject
-                        WorkerYielded <$> paramsObject .: "value") params
-                Just "notify" -> do
-                    ensureOnly ["jsonrpc", "method", "params"] message
-                    params <- message .: "params"
-                    withObject "notify params" (\paramsObject -> do
-                        ensureOnly ["text"] paramsObject
-                        WorkerNotification <$> paramsObject .: "text") params
-                Just "content" -> do
-                    ensureOnly ["jsonrpc", "method", "params"] message
-                    params <- message .: "params"
-                    withObject "content params" (\paramsObject -> do
-                        ensureOnly ["value"] paramsObject
-                        WorkerContent <$> paramsObject .: "value") params
+                Just "yield" ->
+                    Json.atKey "params" $
+                        Json.object (WorkerYielded <$> Json.atKey "value" rawJsonDecoder)
+                Just "notify" ->
+                    Json.atKey "params" $
+                        Json.object (WorkerNotification <$> Json.atKey "text" Json.text)
+                Just "content" ->
+                    Json.atKey "params" $
+                        Json.object (WorkerContent <$> Json.atKey "value" rawJsonDecoder)
                 Just unknown ->
                     fail $ "unsupported worker method: " <> show unknown
                 Nothing -> do
-                    ensureOnly
-                        ["jsonrpc", "id", "result", "error", "partial_result", "stored_value_writes"]
-                        message
-                    requestId <- message .: "id"
-                    result <- message .:? "result"
-                    err <- message .:? "error"
+                    requestId <- Json.atKey "id" Json.text
+                    result <- Json.atKeyOptional "result" rawJsonDecoder
+                    err <- Json.atKeyOptional "error" errorDecoder
+                    writes <- maybe Map.empty id
+                        <$> Json.atKeyOptional "stored_value_writes"
+                            (Json.objectAsMap pure rawJsonDecoder)
                     case (result, err) of
                         (Just value, Nothing) ->
-                            WorkerExecSucceeded
-                                <$> pure requestId
-                                <*> pure value
-                                <*> message .:? "stored_value_writes"
-                                    .!= Map.empty
-                        (Nothing, Just errorObject) ->
-                            WorkerExecFailed requestId
-                                <$> parseError errorObject
-                                <*> message .:? "partial_result"
-                                    .!= object
-                                        [ "content" .= ([] :: [Value]) ]
-                                <*> message .:? "stored_value_writes"
-                                    .!= Map.empty
+                            pure (WorkerExecSucceeded requestId value writes)
+                        (Nothing, Just message) -> do
+                            partial <- maybe emptyResult id
+                                <$> Json.atKeyOptional "partial_result" rawJsonDecoder
+                            pure (WorkerExecFailed requestId message partial writes)
                         _ -> fail "response must contain exactly one of result or error"
 
-        parseError = withObject "JSON-RPC error" \errorObject -> do
-            ensureOnly ["code", "message"] errorObject
-            (_ :: Int) <- errorObject .: "code"
-            errorObject .: "message"
+        errorDecoder = Json.object do
+            (_ :: Int) <- Json.atKey "code" Json.int
+            Json.atKey "message" Json.text
 
-instance FromJSON ToolInvocation where
-    parseJSON = withObject "tool invocation" \params ->
+toolInvocationDecoder :: Json.Decoder ToolInvocation
+toolInvocationDecoder = Json.object $
         ToolInvocation
             <$> pure ""
-            <*> params .: "name"
-            <*> params .: "arguments"
-
-ensureOnly :: [Text] -> Object -> Parser ()
-ensureOnly allowed object =
-    case
-        [ Key.toText key
-        | key <- KeyMap.keys object
-        , Key.toText key `notElem` allowed
-        ]
-    of
-        [] -> pure ()
-        unknown : _ ->
-            fail $ "unexpected field `" <> Text.unpack unknown <> "`"
+            <*> Json.atKey "name" Json.text
+            <*> Json.atKey "arguments" rawJsonDecoder
 
 decodeProtocolMessage :: BS.ByteString -> Either String ProtocolMessage
-decodeProtocolMessage = eitherDecodeStrict'
+decodeProtocolMessage =
+    either (Left . Text.unpack . (.jsonErrorMessage)) Right
+        . Json.decodeEither protocolMessageDecoder
+
+emptyResult :: RawJson
+emptyResult =
+    rawJsonFromEncoding (toEncoding (object ["content" .= ([] :: [Value])]))
 
 encodeExecRequest :: Text -> Text -> [Text] -> BS.ByteString
 encodeExecRequest requestId source toolNames =

@@ -28,7 +28,6 @@ import Agent.Tools.PlanMode
     , activatePlanMode
     , newPlanModeEnv
     )
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.IORef (readIORef, writeIORef)
 import Data.Time.Calendar (fromGregorian)
 import qualified Data.Text as Text
@@ -170,13 +169,11 @@ spec = do
                                     "partial answer"
                                     Nothing
                                     Nothing
-                                    KeyMap.empty
                                 ]
                         , role = RoleAssistant
                         , status = Nothing
                         , phase = Nothing
                         , passthrough = Nothing
-                        , extraFields = KeyMap.empty
                         }
                 inputs = [UserMessage "fix the failure"]
                 partialTranscript = history <> [partialAssistant]

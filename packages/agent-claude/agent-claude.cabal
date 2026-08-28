@@ -46,6 +46,7 @@ library
                     , Agent.Claude.Internal.Messages
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-json            >= 0.1 && < 0.2
                     , agent-responses       >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , claude-agent-sdk-haskell >= 0.1 && < 0.2
@@ -54,6 +55,7 @@ library
                     , containers
                     , directory
                     , filepath
+                    , hermes-json
                     , process               >= 1.6.26
                     , safe-exceptions
                     , text

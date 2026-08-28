@@ -1,8 +1,9 @@
--- | Lossless wire types for the OpenAI Responses API.
+-- | Known wire fields for the OpenAI Responses API.
 module Agent.Responses.Types
     ( -- * Create request
       ResponseCreateParams(..)
     , defaultResponseCreateParams
+    , responseCreateParamsDecoder
     , ResponseInput(..)
     , ResponseInclude(..)
     , ContextManagement(..)
@@ -47,7 +48,9 @@ module Agent.Responses.Types
     , ComputerPoint(..)
     , SafetyCheck(..)
     , ComputerCall(..)
+    , computerCallDecoder
     , ComputerCallOutput(..)
+    , computerCallOutputDecoder
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
     , ItemReference(..)
@@ -59,9 +62,12 @@ module Agent.Responses.Types
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , CustomTool(..)
+    , NamespaceTool(..)
 
       -- * Response
     , Response(..)
+    , responseDecoder
     , ResponseStatus(..)
     , ResponseError(..)
     , IncompleteDetails(..)
@@ -71,11 +77,14 @@ module Agent.Responses.Types
       -- * Streaming
     , ResponseStreamEvent(..)
     , ResponseStreamError(..)
+    , CodexRateLimits(..)
     , StreamEventType(..)
     , responseStreamEventType
     , responseStreamEventSequenceNumber
     , streamEventTypeText
     , parseStreamEventWithType
+    , responseStreamEventDecoder
+    , responseStreamEventDecoderWithType
     , unparsedStreamEventTypeText
     ) where
 

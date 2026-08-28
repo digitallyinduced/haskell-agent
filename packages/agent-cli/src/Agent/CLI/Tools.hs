@@ -11,6 +11,9 @@ module Agent.CLI.Tools
     ) where
 
 import Agent.Responses.Types
+import Agent.Responses.Types.Tools
+    ( ResponseTool(..), CustomTool(..), NamespaceTool(..) )
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Dialect
     ( Dialect
     , DialectId(..)
@@ -34,7 +37,6 @@ import Agent.Tools.Types
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
@@ -59,11 +61,11 @@ lookupAppTool name tools =
 -- | Built-in Responses @web_search@ tool, enabled for every provider by default.
 -- The host runs the search server-side; the agent loop never dispatches it.
 webSearchTool :: ResponseTool
-webSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+webSearchTool = knownResponseTool ToolWebSearch
 
 -- | Grok Build hosted @x_search@ tool. Server-side; the loop never dispatches it.
 xSearchTool :: ResponseTool
-xSearchTool = knownResponseTool ToolXSearch KeyMap.empty
+xSearchTool = knownResponseTool ToolXSearch
 
 hostedSearchToolTypes :: Dialect -> [ResponseToolType]
 hostedSearchToolTypes dialect =
@@ -72,7 +74,7 @@ hostedSearchToolTypes dialect =
 
 hostedSearchTools :: Dialect -> [ResponseTool]
 hostedSearchTools dialect =
-    map (`knownResponseTool` KeyMap.empty) (hostedSearchToolTypes dialect)
+    map knownResponseTool (hostedSearchToolTypes dialect)
 
 -- | Model-facing names for hosted search tools advertised in this dialect.
 hostedSearchToolNames :: Dialect -> [Text]
@@ -106,7 +108,7 @@ isMultiAgentTool tool = tool.appToolName `elem` multiAgentToolNames
 schemaFromAppTool :: Dialect -> AppTool -> Maybe ResponseTool
 schemaFromAppTool dialect tool
     | tool.appToolName == "computer" =
-        Just (knownResponseTool ToolComputer KeyMap.empty)
+        Just (knownResponseTool ToolComputer)
     | otherwise = case tool.appToolSchema of
         JsonFunctionSchema parameters ->
             case dialectFunctionSchemaStyle dialect of
@@ -120,12 +122,12 @@ schemaFromAppTool dialect tool
             Just (FunctionToolValue FunctionTool
                 { name = tool.appToolName
                 , description = Just tool.appToolDescription
-                , parameters = Just parameters
+                , parameters =
+                    Just (rawJsonFromEncoding (Aeson.toEncoding parameters))
                 , strict = case dialectFunctionSchemaStyle dialect of
                     StrictFunctionSchemas -> Just False
                     LooseFunctionSchemas -> Nothing
                     NoFunctionSchemas -> Nothing
-                , extraFields = KeyMap.empty
                 })
         FreeformApplyPatchSchema ->
             case dialectFunctionSchemaStyle dialect of
@@ -186,21 +188,21 @@ grokPublicText =
 
 -- | Codex collaboration namespace: nested non-strict function tools.
 multiAgentNamespaceTool :: [AppTool] -> ResponseTool
-multiAgentNamespaceTool tools = knownResponseTool ToolNamespace $
-    KeyMap.fromList
-        [ (Key.fromText "name", Aeson.String multiAgentNamespace)
-        , (Key.fromText "description", Aeson.String
-            "Tools for spawning and managing sub-agents.")
-        , (Key.fromText "tools", Aeson.toJSON (map nestedFunction tools))
-        ]
+multiAgentNamespaceTool tools =
+    NamespaceToolValue NamespaceTool
+        { name = multiAgentNamespace
+        , description = Just "Tools for spawning and managing sub-agents."
+        , tools = map nestedFunction tools
+        }
   where
-    nestedFunction tool = Aeson.object
-        [ "type" .= ("function" :: Text)
-        , "name" .= tool.appToolName
-        , "description" .= tool.appToolDescription
-        , "strict" .= False
-        , "parameters" .= namespaceParameters (appToolJsonParameters tool)
-        ]
+    nestedFunction tool =
+        FunctionToolValue FunctionTool
+            { name = tool.appToolName
+            , description = Just tool.appToolDescription
+            , strict = Just False
+            , parameters = Just . rawJsonFromEncoding . Aeson.toEncoding $
+                namespaceParameters (appToolJsonParameters tool)
+            }
 
     namespaceParameters parameters = case parametersObjectLoose parameters of
         Aeson.Object schema
@@ -224,16 +226,16 @@ applyPatchCustomTool name description =
 -- Codex wire shape for tools such as code-mode @exec@.
 grammarCustomTool :: Text -> Text -> Text -> Text -> ResponseTool
 grammarCustomTool name description syntax definition =
-    knownResponseTool ToolCustom $
-        KeyMap.fromList
-            [ (Key.fromText "name", Aeson.String name)
-            , (Key.fromText "description", Aeson.String description)
-            , (Key.fromText "format", Aeson.object
+    CustomToolValue CustomTool
+        { name
+        , description = Just description
+        , format = Just . rawJsonFromEncoding . Aeson.toEncoding $
+            Aeson.object
                 [ "type" .= ("grammar" :: Text)
                 , "syntax" .= syntax
                 , "definition" .= definition
-                ])
-            ]
+                ]
+        }
 
 -- | Code-mode tool surface: the @exec@/@wait@ entry points first, hosted
 -- search tools last, matching the upstream Codex wire order.

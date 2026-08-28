@@ -1,6 +1,15 @@
 -- | Model-facing tools and startup context for reusable learned skills.
 module Agent.CLI.LearnedSkills
     ( LearnedSkillToolsEnv(..)
+    , LearnedSkillSearchResponse(..)
+    , LearnedSkillSearchMatch(..)
+    , LearnedSkillSummary(..)
+    , LearnedSkillDetails(..)
+    , LearnedSkillRevisionSummary(..)
+    , LearnedSkillRevisionDetails(..)
+    , LearnedSkillSourceDetails(..)
+    , LearnedSkillView(..)
+    , LearnedSkillMutationResponse(..)
     , LearnedSkillCreateRequest(..)
     , LearnedSkillUpdateRequest(..)
     , LearnedSkillArchiveRequest(..)
@@ -11,7 +20,7 @@ module Agent.CLI.LearnedSkills
     , queueLearnedSkillContextWithOmissions
     ) where
 
-import Agent.CLI.Database (DatabaseScope(..))
+import Agent.CLI.Database (DatabaseScope(..), databaseScopeDecoder)
 import Agent.OsPath (toText)
 import Agent.Skills
     ( Skill(..)
@@ -31,21 +40,14 @@ import Agent.Store.Postgres.Skill
     )
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
+import Agent.CLI.Json (integer)
+import Agent.Json.Decode (defaultKey, optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Tools.Types
     ( AppTool
     , ToolExecutionPolicy(..)
     , jsonTool
     )
-import Data.Aeson
-    ( FromJSON(..)
-    , Value
-    , (.:)
-    , (.:?)
-    , withObject
-    )
-import qualified Data.Aeson as Aeson
-import Data.Aeson.Types (Parser)
-import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.IORef (IORef, modifyIORef', readIORef)
 import Data.List (sortOn)
@@ -54,7 +56,7 @@ import Data.Maybe (fromMaybe, isJust)
 import Data.Ord (Down(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Data.Text.Encoding as Text
+import Data.Time.Clock (UTCTime)
 
 data LearnedSkillCreateRequest = LearnedSkillCreateRequest
     { createRequestScope :: !DatabaseScope
@@ -104,86 +106,320 @@ data LearnedSkillRollbackRequest = LearnedSkillRollbackRequest
     }
     deriving (Eq, Show)
 
+data LearnedSkillSearchResponse = LearnedSkillSearchResponse
+    { searchMatches :: ![LearnedSkillSearchMatch]
+    } deriving (Eq, Show)
+
+data LearnedSkillSearchMatch = LearnedSkillSearchMatch
+    { searchMatchSkill :: !LearnedSkillSummary
+    , searchMatchRank :: !Double
+    } deriving (Eq, Show)
+
+data LearnedSkillSummary = LearnedSkillSummary
+    { summaryScope :: !Text
+    , summarySlug :: !Text
+    , summaryTitle :: !Text
+    , summaryDescription :: !Text
+    , summaryAppliesWhen :: !Text
+    , summaryActivation :: !Text
+    , summaryPriority :: !Int64
+    , summaryStatus :: !Text
+    , summaryRevision :: !Int64
+    , summaryUpdatedAt :: !UTCTime
+    } deriving (Eq, Show)
+
+data LearnedSkillDetails = LearnedSkillDetails
+    { detailScope :: !Text
+    , detailSlug :: !Text
+    , detailTitle :: !Text
+    , detailDescription :: !Text
+    , detailAppliesWhen :: !Text
+    , detailInstructions :: !Text
+    , detailActivation :: !Text
+    , detailPriority :: !Int64
+    , detailStatus :: !Text
+    , detailRevision :: !Int64
+    , detailCreatedAt :: !UTCTime
+    , detailUpdatedAt :: !UTCTime
+    } deriving (Eq, Show)
+
+data LearnedSkillRevisionSummary = LearnedSkillRevisionSummary
+    { revisionSummaryRevision :: !Int64
+    , revisionSummaryTitle :: !Text
+    , revisionSummaryDescription :: !Text
+    , revisionSummaryAppliesWhen :: !Text
+    , revisionSummaryActivation :: !Text
+    , revisionSummaryPriority :: !Int64
+    , revisionSummaryStatus :: !Text
+    , revisionSummaryChangeSummary :: !Text
+    , revisionSummaryCreatedAt :: !UTCTime
+    } deriving (Eq, Show)
+
+data LearnedSkillRevisionDetails = LearnedSkillRevisionDetails
+    { revisionDetailRevision :: !Int64
+    , revisionDetailTitle :: !Text
+    , revisionDetailDescription :: !Text
+    , revisionDetailAppliesWhen :: !Text
+    , revisionDetailInstructions :: !Text
+    , revisionDetailActivation :: !Text
+    , revisionDetailPriority :: !Int64
+    , revisionDetailStatus :: !Text
+    , revisionDetailChangeSummary :: !Text
+    , revisionDetailCreatedAt :: !UTCTime
+    } deriving (Eq, Show)
+
+data LearnedSkillSourceDetails = LearnedSkillSourceDetails
+    { sourceDetailRevision :: !Int64
+    , sourceDetailSessionId :: !(Maybe Text)
+    , sourceDetailTurnIndex :: !(Maybe Int64)
+    , sourceDetailResponseItemId :: !(Maybe Text)
+    , sourceDetailEvidence :: !Text
+    , sourceDetailCreatedAt :: !UTCTime
+    } deriving (Eq, Show)
+
+data LearnedSkillView = LearnedSkillView
+    { viewSkill :: !LearnedSkillDetails
+    , viewSelectedRevision :: !LearnedSkillRevisionDetails
+    , viewSources :: ![LearnedSkillSourceDetails]
+    , viewRevisions :: ![LearnedSkillRevisionSummary]
+    } deriving (Eq, Show)
+
+data FilesystemSkillView = FilesystemSkillView
+    { filesystemName :: !Text
+    , filesystemTitle :: !(Maybe Text)
+    , filesystemDescription :: !Text
+    , filesystemWhenToUse :: !(Maybe Text)
+    , filesystemInstructions :: !Text
+    , filesystemSkillFile :: !Text
+    , filesystemSkillDirectory :: !Text
+    } deriving (Eq, Show)
+
+data LearnedSkillMutationResponse = LearnedSkillMutationResponse
+    { mutationStatus :: !Text
+    , mutationSkill :: !LearnedSkillDetails
+    } deriving (Eq, Show)
+
+renderLearnedSkillSearchResponse :: LearnedSkillSearchResponse -> Text
+renderLearnedSkillSearchResponse response =
+    case response.searchMatches of
+        [] -> "(no matching learned skills)"
+        matches -> Text.intercalate "\n\n" $
+            zipWith renderLearnedSkillSearchMatch [1 :: Int ..] matches
+
+renderLearnedSkillSearchMatch :: Int -> LearnedSkillSearchMatch -> Text
+renderLearnedSkillSearchMatch matchNumber match = Text.intercalate "\n"
+    [ "match " <> Text.pack (show matchNumber)
+    , indentText (renderLearnedSkillSummary match.searchMatchSkill)
+    , "  rank: " <> Text.pack (show match.searchMatchRank)
+    ]
+
+renderLearnedSkillSummary :: LearnedSkillSummary -> Text
+renderLearnedSkillSummary summary = Text.intercalate "\n"
+    [ textField "scope" summary.summaryScope
+    , textField "slug" summary.summarySlug
+    , textField "title" summary.summaryTitle
+    , textField "description" summary.summaryDescription
+    , textField "applies when" summary.summaryAppliesWhen
+    , textField "activation" summary.summaryActivation
+    , showField "priority" summary.summaryPriority
+    , textField "status" summary.summaryStatus
+    , showField "revision" summary.summaryRevision
+    , showField "updated at" summary.summaryUpdatedAt
+    ]
+
+renderLearnedSkillDetails :: LearnedSkillDetails -> Text
+renderLearnedSkillDetails detail = Text.intercalate "\n"
+    [ textField "scope" detail.detailScope
+    , textField "slug" detail.detailSlug
+    , textField "title" detail.detailTitle
+    , textField "description" detail.detailDescription
+    , textField "applies when" detail.detailAppliesWhen
+    , blockField "instructions" detail.detailInstructions
+    , textField "activation" detail.detailActivation
+    , showField "priority" detail.detailPriority
+    , textField "status" detail.detailStatus
+    , showField "revision" detail.detailRevision
+    , showField "created at" detail.detailCreatedAt
+    , showField "updated at" detail.detailUpdatedAt
+    ]
+
+renderLearnedSkillRevisionSummary :: LearnedSkillRevisionSummary -> Text
+renderLearnedSkillRevisionSummary revision = Text.intercalate "\n"
+    [ showField "revision" revision.revisionSummaryRevision
+    , textField "title" revision.revisionSummaryTitle
+    , textField "description" revision.revisionSummaryDescription
+    , textField "applies when" revision.revisionSummaryAppliesWhen
+    , textField "activation" revision.revisionSummaryActivation
+    , showField "priority" revision.revisionSummaryPriority
+    , textField "status" revision.revisionSummaryStatus
+    , textField "change summary" revision.revisionSummaryChangeSummary
+    , showField "created at" revision.revisionSummaryCreatedAt
+    ]
+
+renderLearnedSkillRevisionDetails :: LearnedSkillRevisionDetails -> Text
+renderLearnedSkillRevisionDetails revision = Text.intercalate "\n"
+    [ showField "revision" revision.revisionDetailRevision
+    , textField "title" revision.revisionDetailTitle
+    , textField "description" revision.revisionDetailDescription
+    , textField "applies when" revision.revisionDetailAppliesWhen
+    , blockField "instructions" revision.revisionDetailInstructions
+    , textField "activation" revision.revisionDetailActivation
+    , showField "priority" revision.revisionDetailPriority
+    , textField "status" revision.revisionDetailStatus
+    , textField "change summary" revision.revisionDetailChangeSummary
+    , showField "created at" revision.revisionDetailCreatedAt
+    ]
+
+renderLearnedSkillSourceDetails :: LearnedSkillSourceDetails -> Text
+renderLearnedSkillSourceDetails source = Text.intercalate "\n" $
+    [showField "revision" source.sourceDetailRevision]
+        <> maybe [] (pure . textField "session id") source.sourceDetailSessionId
+        <> maybe [] (pure . showField "turn index") source.sourceDetailTurnIndex
+        <> maybe [] (pure . textField "response item id")
+            source.sourceDetailResponseItemId
+        <> [ blockField "evidence" source.sourceDetailEvidence
+           , showField "created at" source.sourceDetailCreatedAt
+           ]
+
+renderLearnedSkillView :: LearnedSkillView -> Text
+renderLearnedSkillView view = Text.intercalate "\n\n"
+    [ "skill:\n" <> indentText (renderLearnedSkillDetails view.viewSkill)
+    , "selected revision:\n"
+        <> indentText
+            (renderLearnedSkillRevisionDetails view.viewSelectedRevision)
+    , renderCollection
+        "sources"
+        renderLearnedSkillSourceDetails
+        view.viewSources
+    , renderCollection
+        "revision history"
+        renderLearnedSkillRevisionSummary
+        view.viewRevisions
+    ]
+
+renderFilesystemSkillView :: FilesystemSkillView -> Text
+renderFilesystemSkillView skill = Text.intercalate "\n" $
+    [ "kind: filesystem"
+    , textField "name" skill.filesystemName
+    ]
+        <> maybe [] (pure . textField "title") skill.filesystemTitle
+        <> [textField "description" skill.filesystemDescription]
+        <> maybe [] (pure . textField "when to use") skill.filesystemWhenToUse
+        <> [ blockField "instructions" skill.filesystemInstructions
+           , textField "skill file" skill.filesystemSkillFile
+           , textField "skill directory" skill.filesystemSkillDirectory
+           ]
+
+renderLearnedSkillMutationResponse :: LearnedSkillMutationResponse -> Text
+renderLearnedSkillMutationResponse response = Text.intercalate "\n"
+    [ textField "status" response.mutationStatus
+    , "skill:"
+    , indentText (renderLearnedSkillDetails response.mutationSkill)
+    ]
+
+renderCollection :: Text -> (value -> Text) -> [value] -> Text
+renderCollection label render values =
+    case values of
+        [] -> label <> ": (none)"
+        _ -> label <> ":\n" <> Text.intercalate "\n\n" (map renderEntry values)
+  where
+    renderEntry value = indentText ("-\n" <> indentText (render value))
+
+textField :: Text -> Text -> Text
+textField label value = label <> ": " <> indentContinuation value
+
+showField :: Show value => Text -> value -> Text
+showField label = textField label . Text.pack . show
+
+blockField :: Text -> Text -> Text
+blockField label value = label <> ":\n" <> indentText value
+
+indentText :: Text -> Text
+indentText = Text.intercalate "\n" . map ("  " <>) . Text.lines
+
+indentContinuation :: Text -> Text
+indentContinuation = Text.intercalate "\n  " . Text.lines
+
 data LearnedSkillToolsEnv = LearnedSkillToolsEnv
     { learnedSkillSearch
-        :: !(Text -> Int -> IO (Either Text Value))
+        :: !(Text -> Int -> IO (Either Text LearnedSkillSearchResponse))
     , learnedSkillRead
-        :: !(DatabaseScope -> Text -> Maybe Integer -> IO (Either Text Value))
+        :: !(DatabaseScope -> Text -> Maybe Integer -> IO (Either Text LearnedSkillView))
     , learnedSkillCreate
-        :: !(LearnedSkillCreateRequest -> IO (Either Text Value))
+        :: !(LearnedSkillCreateRequest -> IO (Either Text LearnedSkillMutationResponse))
     , learnedSkillUpdate
-        :: !(LearnedSkillUpdateRequest -> IO (Either Text Value))
+        :: !(LearnedSkillUpdateRequest -> IO (Either Text LearnedSkillMutationResponse))
     , learnedSkillArchive
-        :: !(LearnedSkillArchiveRequest -> IO (Either Text Value))
+        :: !(LearnedSkillArchiveRequest -> IO (Either Text LearnedSkillMutationResponse))
     , learnedSkillRollback
-        :: !(LearnedSkillRollbackRequest -> IO (Either Text Value))
+        :: !(LearnedSkillRollbackRequest -> IO (Either Text LearnedSkillMutationResponse))
     }
 
 data SearchArgs = SearchArgs !Text !Int
 
-instance FromJSON SearchArgs where
-    parseJSON = withObject "SearchArgs" \object ->
+searchArgsDecoder :: Hermes.Decoder SearchArgs
+searchArgsDecoder = Hermes.object $
         SearchArgs
-            <$> object .: "query"
-            <*> (object .:? "limit" >>= pure . fromMaybe 10)
+            <$> Hermes.atKey "query" Hermes.text
+            <*> defaultKey 10 "limit" Hermes.int
 
 data ViewArgs = ViewArgs !Text !(Maybe DatabaseScope) !(Maybe Integer)
 
-instance FromJSON ViewArgs where
-    parseJSON = withObject "ViewArgs" \object ->
+viewArgsDecoder :: Hermes.Decoder ViewArgs
+viewArgsDecoder = Hermes.object $
         ViewArgs
-            <$> object .: "name"
-            <*> object .:? "scope"
-            <*> object .:? "revision"
+            <$> Hermes.atKey "name" Hermes.text
+            <*> optionalKey "scope" databaseScopeDecoder
+            <*> optionalKey "revision" integer
 
-instance FromJSON LearnedSkillCreateRequest where
-    parseJSON = withObject "LearnedSkillCreateRequest" \object -> do
-        activation <- parseOptionalActivation object
+learnedSkillCreateRequestDecoder :: Hermes.Decoder LearnedSkillCreateRequest
+learnedSkillCreateRequestDecoder = Hermes.object do
+        activation <- optionalKey "activation" learnedSkillActivationDecoder
         LearnedSkillCreateRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "title"
-            <*> object .: "description"
-            <*> object .: "applies_when"
-            <*> object .: "instructions"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "title" Hermes.text
+            <*> Hermes.atKey "description" Hermes.text
+            <*> Hermes.atKey "applies_when" Hermes.text
+            <*> Hermes.atKey "instructions" Hermes.text
             <*> pure (fromMaybe SkillRelevant activation)
-            <*> (object .:? "priority" >>= pure . fromMaybe 0)
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <*> defaultKey 0 "priority" Hermes.int
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
-instance FromJSON LearnedSkillUpdateRequest where
-    parseJSON = withObject "LearnedSkillUpdateRequest" \object ->
+learnedSkillUpdateRequestDecoder :: Hermes.Decoder LearnedSkillUpdateRequest
+learnedSkillUpdateRequestDecoder = Hermes.object $
         LearnedSkillUpdateRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "expected_revision"
-            <*> object .:? "title"
-            <*> object .:? "description"
-            <*> object .:? "applies_when"
-            <*> object .:? "instructions"
-            <*> parseOptionalActivation object
-            <*> object .:? "priority"
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "expected_revision" integer
+            <*> optionalKey "title" Hermes.text
+            <*> optionalKey "description" Hermes.text
+            <*> optionalKey "applies_when" Hermes.text
+            <*> optionalKey "instructions" Hermes.text
+            <*> optionalKey "activation" learnedSkillActivationDecoder
+            <*> optionalKey "priority" Hermes.int
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
-instance FromJSON LearnedSkillArchiveRequest where
-    parseJSON = withObject "LearnedSkillArchiveRequest" \object ->
+learnedSkillArchiveRequestDecoder :: Hermes.Decoder LearnedSkillArchiveRequest
+learnedSkillArchiveRequestDecoder = Hermes.object $
         LearnedSkillArchiveRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "expected_revision"
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "expected_revision" integer
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
-instance FromJSON LearnedSkillRollbackRequest where
-    parseJSON = withObject "LearnedSkillRollbackRequest" \object ->
+learnedSkillRollbackRequestDecoder :: Hermes.Decoder LearnedSkillRollbackRequest
+learnedSkillRollbackRequestDecoder = Hermes.object $
         LearnedSkillRollbackRequest
-            <$> object .: "scope"
-            <*> object .: "slug"
-            <*> object .: "expected_revision"
-            <*> object .: "target_revision"
-            <*> object .: "change_summary"
-            <*> object .: "evidence"
+            <$> Hermes.atKey "scope" databaseScopeDecoder
+            <*> Hermes.atKey "slug" Hermes.text
+            <*> Hermes.atKey "expected_revision" integer
+            <*> Hermes.atKey "target_revision" integer
+            <*> Hermes.atKey "change_summary" Hermes.text
+            <*> Hermes.atKey "evidence" Hermes.text
 
 learnedSkillTools :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> [AppTool]
 learnedSkillTools invocationsRef env =
@@ -211,10 +447,10 @@ searchTool env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "skill_search" \(SearchArgs query limit) ->
+    (typedTool "skill_search" searchArgsDecoder \(SearchArgs query limit) ->
         case validateSearch query limit of
             Left err -> pure (Left err)
-            Right () -> encodeResult <$> env.learnedSkillSearch query limit)
+            Right () -> fmap renderLearnedSkillSearchResponse <$> env.learnedSkillSearch query limit)
 
 viewTool :: IORef [SkillInvocation] -> LearnedSkillToolsEnv -> AppTool
 viewTool invocationsRef env = jsonTool
@@ -236,7 +472,7 @@ viewTool invocationsRef env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "view_skill" \(ViewArgs name scope revision) ->
+    (typedTool "view_skill" viewArgsDecoder \(ViewArgs name scope revision) ->
         case scope of
             Nothing ->
                 case revision of
@@ -247,8 +483,8 @@ viewTool invocationsRef env = jsonTool
                     Nothing -> do
                         invocations <- readIORef invocationsRef
                         pure $
-                            encodeResult $
-                                filesystemSkillValue
+                            fmap renderFilesystemSkillView $
+                                filesystemSkillView
                                     <$> resolveSkillInvocation
                                         invocations
                                         (normalizeFilesystemSkillName name)
@@ -262,22 +498,21 @@ viewTool invocationsRef env = jsonTool
                 of
                     Left err -> pure (Left err)
                     Right () ->
-                        encodeResult
+                        fmap renderLearnedSkillView
                             <$> env.learnedSkillRead selected name revision)
 
-filesystemSkillValue :: SkillInvocation -> Value
-filesystemSkillValue invocation =
+filesystemSkillView :: SkillInvocation -> FilesystemSkillView
+filesystemSkillView invocation =
     let skill = invocation.invocationSkill
-    in Aeson.object
-        [ "kind" Aeson..= ("filesystem" :: Text)
-        , "name" Aeson..= invocation.invocationName
-        , "title" Aeson..= skill.skillDisplayName
-        , "description" Aeson..= skill.skillDescription
-        , "when_to_use" Aeson..= skill.skillWhenToUse
-        , "instructions" Aeson..= skill.skillBody
-        , "skill_file" Aeson..= toText skill.skillPath
-        , "skill_directory" Aeson..= toText skill.skillDirectory
-        ]
+    in FilesystemSkillView
+        { filesystemName = invocation.invocationName
+        , filesystemTitle = skill.skillDisplayName
+        , filesystemDescription = skill.skillDescription
+        , filesystemWhenToUse = skill.skillWhenToUse
+        , filesystemInstructions = skill.skillBody
+        , filesystemSkillFile = toText skill.skillPath
+        , filesystemSkillDirectory = toText skill.skillDirectory
+        }
 
 normalizeFilesystemSkillName :: Text -> Text
 normalizeFilesystemSkillName raw =
@@ -314,10 +549,10 @@ createTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_create" \request ->
+    (typedTool "skill_create" learnedSkillCreateRequestDecoder \request ->
         case validateCreate request of
             Left err -> pure (Left err)
-            Right () -> encodeResult <$> env.learnedSkillCreate request)
+            Right () -> fmap renderLearnedSkillMutationResponse <$> env.learnedSkillCreate request)
 
 updateTool :: LearnedSkillToolsEnv -> AppTool
 updateTool env = jsonTool
@@ -346,10 +581,10 @@ updateTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_update" \request ->
+    (typedTool "skill_update" learnedSkillUpdateRequestDecoder \request ->
         case validateUpdate request of
             Left err -> pure (Left err)
-            Right () -> encodeResult <$> env.learnedSkillUpdate request)
+            Right () -> fmap renderLearnedSkillMutationResponse <$> env.learnedSkillUpdate request)
 
 archiveTool :: LearnedSkillToolsEnv -> AppTool
 archiveTool env = jsonTool
@@ -367,10 +602,10 @@ archiveTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_archive" \request ->
+    (typedTool "skill_archive" learnedSkillArchiveRequestDecoder \request ->
         case validateArchive request of
             Left err -> pure (Left err)
-            Right () -> encodeResult <$> env.learnedSkillArchive request)
+            Right () -> fmap renderLearnedSkillMutationResponse <$> env.learnedSkillArchive request)
 
 rollbackTool :: LearnedSkillToolsEnv -> AppTool
 rollbackTool env = jsonTool
@@ -390,10 +625,10 @@ rollbackTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "skill_rollback" \request ->
+    (typedTool "skill_rollback" learnedSkillRollbackRequestDecoder \request ->
         case validateRollback request of
             Left err -> pure (Left err)
-            Right () -> encodeResult <$> env.learnedSkillRollback request)
+            Right () -> fmap renderLearnedSkillMutationResponse <$> env.learnedSkillRollback request)
 
 scopeProperty :: PropertySchema
 scopeProperty = PropertySchema
@@ -455,15 +690,8 @@ evidenceProperty = PropertySchema
             <> "lesson, decision, preference, or procedure."
         ))
 
-parseOptionalActivation
-    :: Aeson.Object
-    -> Parser (Maybe LearnedSkillActivation)
-parseOptionalActivation object = do
-    value <- object .:? "activation" :: Parser (Maybe Text)
-    traverse parseActivation value
-  where
-    parseActivation :: Text -> Parser LearnedSkillActivation
-    parseActivation = \case
+learnedSkillActivationDecoder :: Hermes.Decoder LearnedSkillActivation
+learnedSkillActivationDecoder = Hermes.withText \case
         "always" -> pure SkillAlways
         "relevant" -> pure SkillRelevant
         "manual" -> pure SkillManual
@@ -615,10 +843,6 @@ validateRevisionMetadata :: Text -> Text -> Either Text ()
 validateRevisionMetadata summary evidence = do
     validateRequiredText "skill change_summary" 2000 summary
     validateRequiredText "skill evidence" 8000 evidence
-
-encodeResult :: Either Text Value -> Either Text Text
-encodeResult =
-    fmap (Text.decodeUtf8 . LBS.toStrict . Aeson.encode)
 
 defaultLearnedSkillContextMaxChars :: Int
 defaultLearnedSkillContextMaxChars = 8000

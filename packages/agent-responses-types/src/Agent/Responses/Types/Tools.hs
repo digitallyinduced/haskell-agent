@@ -5,11 +5,14 @@ module Agent.Responses.Types.Tools
     , responseToolTypeText
     , knownResponseTool
     , FunctionTool(..)
+    , CustomTool(..)
+    , NamespaceTool(..)
+    , responseToolDecoder
     ) where
 
 import Agent.Responses.Types.Common
 import Data.Aeson hiding (TaggedObject)
-import qualified Data.Aeson as Aeson
+import qualified Data.Hermes as Hermes
 import Data.Text (Text)
 
 data ResponseToolType
@@ -79,15 +82,15 @@ parseResponseToolType value = case value of
 data FunctionTool = FunctionTool
     { name        :: !Text
     , description :: !(Maybe Text)
-    , parameters  :: !(Maybe Aeson.Value)
+    , parameters  :: !(Maybe RawJson)
     , strict      :: !(Maybe Bool)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionTool where
     toJSON FunctionTool
-        { name, description, parameters, strict, extraFields } =
-            objectWith extraFields
+        { name, description, parameters, strict } =
+            objectWith
                 [ Just (field "type" ("function" :: Text))
                 , Just (field "name" name)
                 , optionalField "description" description
@@ -95,41 +98,91 @@ instance ToJSON FunctionTool where
                 , optionalField "strict" strict
                 ]
 
-instance FromJSON FunctionTool where
-    parseJSON = withObject "FunctionTool" $ \o -> FunctionTool
-        <$> o .: "name"
-        <*> o .:? "description"
-        <*> o .:? "parameters"
-        <*> o .:? "strict"
-        <*> pure
-            (without
-                ["type", "name", "description", "parameters", "strict"] o)
+data CustomTool = CustomTool
+    { name        :: !Text
+    , description :: !(Maybe Text)
+    , format      :: !(Maybe RawJson)
+    } deriving stock (Eq, Show)
+
+instance ToJSON CustomTool where
+    toJSON CustomTool { name, description, format } =
+        objectWith
+            [ Just (field "type" ("custom" :: Text))
+            , Just (field "name" name)
+            , optionalField "description" description
+            , optionalField "format" format
+            ]
+
+data NamespaceTool = NamespaceTool
+    { name        :: !Text
+    , description :: !(Maybe Text)
+    , tools       :: ![ResponseTool]
+    } deriving stock (Eq, Show)
+
+instance ToJSON NamespaceTool where
+    toJSON NamespaceTool { name, description, tools } =
+        objectWith
+            [ Just (field "type" ("namespace" :: Text))
+            , Just (field "name" name)
+            , optionalField "description" description
+            , Just (field "tools" tools)
+            ]
 
 data ResponseTool
     = FunctionToolValue !FunctionTool
-    | KnownResponseTool !ResponseToolType !TaggedObject
+    | CustomToolValue !CustomTool
+    | NamespaceToolValue !NamespaceTool
+    | KnownResponseTool !ResponseToolType
     | UnknownResponseTool !TaggedObject
     deriving stock (Eq, Show)
 
 -- | Hosted or built-in Responses tool whose wire @type@ comes from
 -- 'ResponseToolType', not a caller-supplied tag string.
-knownResponseTool :: ResponseToolType -> Aeson.Object -> ResponseTool
-knownResponseTool toolType fields =
-    KnownResponseTool toolType TaggedObject
-        { tag = responseToolTypeText toolType
-        , fields
-        }
+knownResponseTool :: ResponseToolType -> ResponseTool
+knownResponseTool = KnownResponseTool
 
 instance ToJSON ResponseTool where
     toJSON (FunctionToolValue value) = toJSON value
-    toJSON (KnownResponseTool toolType TaggedObject { fields }) =
-        objectWith fields [Just (field "type" (responseToolTypeText toolType))]
+    toJSON (CustomToolValue value) = toJSON value
+    toJSON (NamespaceToolValue value) = toJSON value
+    toJSON (KnownResponseTool toolType) =
+        objectWith [Just (field "type" (responseToolTypeText toolType))]
     toJSON (UnknownResponseTool value) = toJSON value
 
-instance FromJSON ResponseTool where
-    parseJSON value = withObject "ResponseTool" (\o -> do
-        tag <- o .: "type"
-        case parseResponseToolType tag of
-            ToolFunction -> FunctionToolValue <$> parseJSON value
-            ToolUnknownType{} -> UnknownResponseTool <$> parseJSON value
-            toolType -> KnownResponseTool toolType <$> parseJSON value) value
+
+responseToolDecoder :: Hermes.Decoder ResponseTool
+responseToolDecoder =
+    Hermes.object do
+        wireType <- Hermes.atKey "type" Hermes.text
+        Hermes.liftObjectDecoder $
+            case parseResponseToolType wireType of
+                ToolFunction -> FunctionToolValue <$> functionToolDecoder
+                ToolCustom -> CustomToolValue <$> customToolDecoder
+                ToolNamespace -> NamespaceToolValue <$> namespaceToolDecoder
+                ToolUnknownType{} ->
+                    pure (UnknownResponseTool (TaggedObject wireType))
+                toolType ->
+                    pure (KnownResponseTool toolType)
+
+functionToolDecoder :: Hermes.Decoder FunctionTool
+functionToolDecoder = Hermes.object $
+    FunctionTool
+        <$> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "description" Hermes.text
+        <*> optionalAtKey "parameters" rawJsonDecoder
+        <*> optionalAtKey "strict" Hermes.bool
+
+customToolDecoder :: Hermes.Decoder CustomTool
+customToolDecoder = Hermes.object $
+    CustomTool
+        <$> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "description" Hermes.text
+        <*> optionalAtKey "format" rawJsonDecoder
+
+namespaceToolDecoder :: Hermes.Decoder NamespaceTool
+namespaceToolDecoder = Hermes.object $
+    NamespaceTool
+        <$> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "description" Hermes.text
+        <*> (maybe [] id
+            <$> optionalAtKey "tools" (Hermes.list responseToolDecoder))

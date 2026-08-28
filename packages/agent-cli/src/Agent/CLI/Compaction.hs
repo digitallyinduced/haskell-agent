@@ -25,6 +25,11 @@ module Agent.CLI.Compaction
     ) where
 
 import Agent.CLI.Error (formatApiError, formatException)
+import Agent.CLI.Compaction.Continuation
+    ( boundCompletedToolContinuations
+    )
+import Agent.CLI.Compaction.Projection
+import Agent.CLI.Compaction.Types
 import Agent.CLI.Session.History
     ( LiveConversation
     , writeLivePreviousResponseId
@@ -67,7 +72,6 @@ import Agent.Responses.LoopBackend
     , withRequestInput
     )
 import Agent.Responses.Types
-import Agent.ToolDispatch (ToolCallResult(..))
 import Agent.Provider
     ( Provider(..)
     , TokenProvider
@@ -86,53 +90,12 @@ import Control.Applicative ((<|>))
 import Control.Exception.Safe (catchAny, mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
-import Data.List (partition)
-import Data.Maybe (fromMaybe, isJust)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
 
 codexAutoCompactTokenLimit :: Int
 codexAutoCompactTokenLimit = defaultCodexAutoCompactTokenLimit
-
-data CompactOutcome = CompactOutcome
-    { compactBeforeTokens :: !Int
-    , compactAfterTokens :: !Int
-    , compactHistory :: ![ResponseItem]
-    , compactSummary :: !Text
-    } deriving (Eq, Show)
-
--- | Whether cached occupancy is provider-reported full-request usage or an
--- items-only estimate. Estimated snapshots must not be treated as complete
--- occupancy because they omit instructions, skills, and tool schemas.
-data OccupancyKind
-    = ReportedOccupancy
-    | EstimatedOccupancy
-    deriving (Eq, Show)
-
-data OccupancySnapshot = OccupancySnapshot
-    { occupancyTokens :: !Int
-    , occupancyLength :: !Int
-    , occupancyKind :: !OccupancyKind
-    } deriving (Eq, Show)
-
-reportedOccupancy :: Int -> Int -> OccupancySnapshot
-reportedOccupancy tokens historyLength =
-    OccupancySnapshot
-        { occupancyTokens = tokens
-        , occupancyLength = historyLength
-        , occupancyKind = ReportedOccupancy
-        }
-
-estimatedOccupancy :: Int -> Int -> OccupancySnapshot
-estimatedOccupancy tokens historyLength =
-    OccupancySnapshot
-        { occupancyTokens = tokens
-        , occupancyLength = historyLength
-        , occupancyKind = EstimatedOccupancy
-        }
-
-type OpenAiCompactionSender =
-    ResponseCreateParams -> IO (Either ApiError Response)
 
 data CompactAttempt error = CompactAttempt
     { compactAttemptUsage :: !TokenUsage
@@ -877,172 +840,6 @@ rejectOversizedInitialRequest getParams (Backend submit) =
                     else submit history previous inputs onEvent
             else submit history previous inputs onEvent
 
--- A completed tool result must be submitted against its live response chain
--- before that call/output pair can be compacted. If the result itself would
--- overflow the model context, cap only its output text while preserving the
--- protocol identifiers and continuation id. Prefer the last provider-reported
--- occupancy so skills, instructions, and tool schemas already counted in
--- @input_tokens@ are not re-estimated with JSON length.
---
--- When a previous_response_id is present and occupancy is unknown, Codex only
--- sends the new tool outputs, so size the continuation against that delta.
--- Stateless providers and full-history replays trim older transcript items,
--- keeping the unpaired function calls that match the in-flight results.
-boundCompletedToolContinuations
-    :: (ResponseCreateParams -> Int)
-    -> IO ResponseCreateParams
-    -> IORef (Maybe OccupancySnapshot)
-    -> Backend
-    -> Backend
-boundCompletedToolContinuations contextWindowFor getParams contextTokensRef (Backend submit) =
-    Backend \history previous inputs onEvent ->
-        if not (any isCompletedTool inputs)
-            then submit history previous inputs onEvent
-            else do
-                params <- getParams
-                occupancy <- readIORef contextTokensRef
-                let contextWindow = contextWindowFor params
-                let liveChain = isJust previous
-                    requestTokens candidate
-                        | liveChain =
-                            case occupancy of
-                                Just snapshot
-                                    | snapshot.occupancyLength == length history
-                                    , snapshot.occupancyTokens > 0
-                                    , snapshot.occupancyKind == ReportedOccupancy ->
-                                        snapshot.occupancyTokens
-                                            + estimateItemsTokens
-                                                (turnInputsToItems candidate)
-                                _ ->
-                                    estimateRequestTokensWithItems
-                                        params
-                                        (turnInputsToItems candidate)
-                        | otherwise =
-                            projectRequestTokens
-                                (Just params)
-                                occupancy
-                                history
-                                candidate
-                    truncated =
-                        fromMaybe inputs $
-                            fitCompletedToolOutputsToLimit
-                                ( max 0
-                                    ( contextWindow
-                                        - automaticCompactionHeadroom
-                                            contextWindow
-                                    )
-                                )
-                                requestTokens
-                                inputs
-                            <|> fitCompletedToolOutputsToLimit
-                                contextWindow
-                                requestTokens
-                                inputs
-                if requestTokens inputs <= contextWindow
-                    then submit history previous inputs onEvent
-                    else if requestTokens truncated <= contextWindow
-                        then submit history previous truncated onEvent
-                        else submitTrimmedHistory
-                            params
-                            contextWindow
-                            history
-                            truncated
-                            onEvent
-  where
-    isCompletedTool = \case
-        CompletedTool{} -> True
-        _ -> False
-
-    submitTrimmedHistory params contextWindow history inputs onEvent = do
-        let callIds = pendingToolCallIds inputs
-            (danglingCalls, prefix) =
-                partition (isPendingToolCall callIds) history
-            trailing = danglingCalls <> turnInputsToItems inputs
-            fittedPrefix =
-                trimResponseHistoryToFit
-                    contextWindow
-                    params
-                    trailing
-                    prefix
-            fittedHistory = fittedPrefix <> danglingCalls
-            fittedTokens =
-                estimateRequestTokensWithItems
-                    params
-                    (fittedHistory <> turnInputsToItems inputs)
-        if fittedTokens <= contextWindow
-            then submit fittedHistory Nothing inputs onEvent
-            else pure (Left toolContinuationTooLargeError)
-
-pendingToolCallIds :: [TurnInput] -> [Text]
-pendingToolCallIds inputs =
-    [ result.callId
-    | CompletedTool result <- inputs
-    ]
-
-isPendingToolCall :: [Text] -> ResponseItem -> Bool
-isPendingToolCall callIds = \case
-    FunctionCallItem call -> call.callId `elem` callIds
-    CustomToolCallItem call -> call.callId `elem` callIds
-    _ -> False
-
-fitCompletedToolOutputsToLimit
-    :: Int
-    -> ([TurnInput] -> Int)
-    -> [TurnInput]
-    -> Maybe [TurnInput]
-fitCompletedToolOutputsToLimit limit requestTokens inputs
-    | requestTokens inputs <= limit = Just inputs
-    | requestTokens minimal > limit = Nothing
-    | otherwise = Just (search 0 maximumOutputLength minimal)
-  where
-    maximumOutputLength =
-        maximum
-            ( 0 :
-                [ Text.length result.output
-                | CompletedTool result <- inputs
-                ]
-            )
-    minimal = capCompletedToolOutputs 0 inputs
-
-    search low high best
-        | low > high = best
-        | otherwise =
-            let middle = (low + high) `div` 2
-                candidate = capCompletedToolOutputs middle inputs
-            in if requestTokens candidate <= limit
-                then search (middle + 1) high candidate
-                else search low (middle - 1) best
-
-capCompletedToolOutputs :: Int -> [TurnInput] -> [TurnInput]
-capCompletedToolOutputs maximumCharacters =
-    map \case
-        CompletedTool result ->
-            CompletedTool ToolCallResult
-                { callId = result.callId
-                , output =
-                    capToolOutput maximumCharacters result.output
-                , callKind = result.callKind
-                }
-        input -> input
-
-capToolOutput :: Int -> Text -> Text
-capToolOutput maximumCharacters text
-    | Text.length text <= maximumCharacters = text
-    | maximumCharacters <= 0 = ""
-    | maximumCharacters <= noticeLength =
-        Text.take maximumCharacters toolOutputTruncationNotice
-    | otherwise =
-        Text.take
-            (maximumCharacters - noticeLength)
-            text
-            <> toolOutputTruncationNotice
-  where
-    noticeLength = Text.length toolOutputTruncationNotice
-
-toolOutputTruncationNotice :: Text
-toolOutputTruncationNotice =
-    "\n[tool output truncated to fit the model context]"
-
 autoCompactOpenAiBackendWith
     :: IO (Either Text CompactOutcome)
     -> IORef (Maybe OccupancySnapshot)
@@ -1185,105 +982,3 @@ estimateProjectedFromCache
     -> IO Int
 estimateProjectedFromCache occupancy history inputs =
     pure (projectRequestTokens Nothing occupancy history inputs)
-
--- | Last provider-reported context occupancy after a committed response.
--- @input_tokens@ already includes instructions, tools, and skills in the
--- request; @output_tokens@ remain in the next turn's context.
-reportedContextTokens :: TokenUsage -> Maybe Int
-reportedContextTokens usage
-    | usage.inputTokens <= 0 && usage.outputTokens <= 0 = Nothing
-    | otherwise =
-        Just (max 0 usage.inputTokens + max 0 usage.outputTokens)
-
-occupancySnapshot :: BackendResult -> Maybe OccupancySnapshot
-occupancySnapshot result
-    | Text.null result.backendOutput.responseId = Nothing
-    | otherwise =
-        reportedContextTokens result.backendOutput.tokenUsage >>= \tokens ->
-            Just (reportedOccupancy tokens (length result.backendState))
-
--- | Project the next request from last occupancy when that snapshot still
--- describes @history@. Provider-reported occupancy already includes
--- instructions, tools, and skills, so only unsent items are estimated.
--- Estimated compaction snapshots are items-only; recompute against the
--- complete request when params are available so those fields are counted.
-projectRequestTokens
-    :: Maybe ResponseCreateParams
-    -> Maybe OccupancySnapshot
-    -> [ResponseItem]
-    -> [TurnInput]
-    -> Int
-projectRequestTokens params occupancy history inputs =
-    case occupancy of
-        Just snapshot
-            | snapshot.occupancyLength == length history
-            , snapshot.occupancyTokens > 0
-            , snapshot.occupancyKind == ReportedOccupancy ->
-                snapshot.occupancyTokens + estimateItemsTokens pendingItems
-        Just snapshot
-            | snapshot.occupancyLength == length history
-            , snapshot.occupancyTokens > 0
-            , snapshot.occupancyKind == EstimatedOccupancy
-            , Nothing <- params ->
-                snapshot.occupancyTokens + estimateItemsTokens pendingItems
-        _ ->
-            case params of
-                Just requestParams ->
-                    estimateRequestTokensWithItems
-                        requestParams
-                        (history <> pendingItems)
-                Nothing ->
-                    estimateItemsTokens (history <> pendingItems)
-  where
-    pendingItems = turnInputsToItems inputs
-
-automaticCompactionHeadroom :: Int -> Int
-automaticCompactionHeadroom tokenLimit =
-    max 1_024 (max 0 tokenLimit `div` 10)
-
-requireTokenProvider
-    :: Provider
-    -> Maybe TokenProvider
-    -> ExceptT Text IO TokenProvider
-requireTokenProvider provider =
-    maybe (throwE (providerLabel provider <> " compact requires a token provider")) pure
-
-requireHistory :: [ResponseItem] -> ExceptT Text IO ()
-requireHistory history
-    | null history = throwE "nothing to compact"
-    | otherwise = pure ()
-
-providerLabel :: Provider -> Text
-providerLabel = \case
-    OpenAIProvider -> "openai"
-    XAIProvider -> "xai"
-    OpenRouterProvider -> "openrouter"
-    ClaudeCodeProvider -> "claude-code"
-
-requestTooLargeError :: Text -> ApiError
-requestTooLargeError label =
-    ProviderError InvalidRequestError
-        (label <> " request cannot fit within the model context window")
-        Nothing
-
-compactedSnapshotThresholdError :: Int -> Int -> ApiError
-compactedSnapshotThresholdError tokenLimit compactedTokens =
-    ProviderError InvalidRequestError
-        ( "compaction produced a "
-            <> Text.pack (show compactedTokens)
-            <> "-token snapshot at or above the automatic compaction threshold "
-            <> Text.pack (show tokenLimit)
-            <> "; increase --compact-threshold"
-        )
-        Nothing
-
-toolContinuationTooLargeError :: ApiError
-toolContinuationTooLargeError =
-    ProviderError InvalidRequestError
-        "tool continuation request cannot fit within the model context window \
-        \even after truncating completed tool output"
-        Nothing
-
-hasFocus :: Maybe Text -> Bool
-hasFocus =
-    maybe False (not . Text.null . Text.strip)

@@ -6,13 +6,13 @@ import Agent.XAI.Client
 import Agent.XAI.Options
 import Agent.Provider (Credential(..), Provider(..))
 import Agent.Responses.Types
+import qualified Agent.Json.Decode as Json
 import Control.Concurrent.Async (cancel, withAsync)
 import Control.Concurrent.MVar
 import Control.Exception.Safe (finally)
 import Control.Monad (void, when)
 import Control.Retry (constantDelay, limitRetries)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.CaseInsensitive as CI
@@ -56,7 +56,7 @@ spec = do
                 `shouldBe` Just (grokUserAgent defaultGrokClientVersion)
             requestModel request `shouldBe` Just "grok-4.6"
             -- instructions travel as the leading system item
-            (inputRoles <$> requestBodyObject request) `shouldBe` Just ["system", "user"]
+            requestInputRoles request `shouldBe` Just ["system", "user"]
 
         it "streams callbacks before the response completes" do
             recorded <- newIORef []
@@ -431,7 +431,7 @@ helloRequest prompt = defaultResponseCreateParams
     , instructions = Just "You are a test agent."
     , input = Just (ResponseInputText prompt)
     , tools = Just []
-    , reasoning = Just (ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing mempty)
+    , reasoning = Just (ReasoningConfig Nothing (Just "low") Nothing Nothing Nothing)
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     }
 
@@ -447,26 +447,22 @@ extractAssistantText response = case
         [] -> Nothing
         values -> Just (Text.intercalate "\n" values)
 
-requestBodyObject :: RecordedRequest -> Maybe Aeson.Object
-requestBodyObject request = case Aeson.decode request.body of
-    Just (Aeson.Object object) -> Just object
-    _ -> Nothing
-
 requestModel :: RecordedRequest -> Maybe Text
-requestModel request = do
-    object <- requestBodyObject request
-    case KeyMap.lookup "model" object of
-        Just (Aeson.String model) -> Just model
-        _ -> Nothing
+requestModel request =
+    either (const Nothing) Just $
+        Json.decodeEither
+            (Json.object (Json.atKey "model" Json.text))
+            (LBS.toStrict request.body)
 
-inputRoles :: Aeson.Object -> [Text]
-inputRoles object = case KeyMap.lookup "input" object of
-    Just (Aeson.Array items) ->
-        [ role
-        | Aeson.Object item <- foldr (:) [] items
-        , Just (Aeson.String role) <- [KeyMap.lookup "role" item]
-        ]
-    _ -> []
+requestInputRoles :: RecordedRequest -> Maybe [Text]
+requestInputRoles request =
+    either (const Nothing) Just $
+        Json.decodeEither
+            (Json.object
+                (Json.atKey "input"
+                    (Json.list
+                        (Json.object (Json.atKey "role" Json.text)))))
+            (LBS.toStrict request.body)
 
 expectRight :: Show e => Either e a -> IO a
 expectRight = \case

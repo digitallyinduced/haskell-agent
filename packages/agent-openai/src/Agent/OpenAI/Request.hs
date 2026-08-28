@@ -5,9 +5,6 @@ module Agent.OpenAI.Request
 
 import Agent.OpenAI.ModelMetadata (isCodexResponsesLiteModel)
 import Agent.Responses.Types
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 
 -- | Keep Codex-incompatible fields out of the serialized request.
 --
@@ -52,74 +49,12 @@ stripContentItemKindsItem = \case
     MessageItem message ->
         MessageItem message
             { passthrough = stripItemPassthrough message.passthrough
-            , extraFields = stripContentItemKindsFields message.extraFields
             }
     AgentMessageItem message ->
         AgentMessageItem message
             { passthrough = stripItemPassthrough message.passthrough
-            , extraFields = stripContentItemKindsFields message.extraFields
             }
-    FunctionCallItem value ->
-        FunctionCallItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    FunctionCallOutputItem value ->
-        FunctionCallOutputItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    CustomToolCallItem value ->
-        CustomToolCallItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    CustomToolCallOutputItem value ->
-        CustomToolCallOutputItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    ComputerCallItem value ->
-        ComputerCallItem value
-            { computerCallExtra =
-                stripContentItemKindsFields value.computerCallExtra
-            }
-    ComputerCallOutputItem value ->
-        ComputerCallOutputItem value
-            { computerOutputExtra =
-                stripContentItemKindsFields value.computerOutputExtra
-            }
-    ReasoningItemValue value ->
-        ReasoningItemValue value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    ItemReferenceValue value ->
-        ItemReferenceValue value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    AdditionalToolsItemValue value ->
-        AdditionalToolsItemValue value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    LocalShellCallItem value ->
-        LocalShellCallItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    ToolSearchCallItem value ->
-        ToolSearchCallItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    ToolSearchOutputItem value ->
-        ToolSearchOutputItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    WebSearchCallItem value ->
-        WebSearchCallItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    ImageGenerationCallItem value ->
-        ImageGenerationCallItem value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    CompactionItemValue value ->
-        CompactionItemValue value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    CompactionTriggerItemValue value ->
-        CompactionTriggerItemValue value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    ContextCompactionItemValue value ->
-        ContextCompactionItemValue value
-            { extraFields = stripContentItemKindsFields value.extraFields }
-    KnownResponseItem itemType tagged ->
-        KnownResponseItem itemType tagged
-            { fields = stripContentItemKindsFields tagged.fields }
-    UnknownResponseItem tagged ->
-        UnknownResponseItem tagged
-            { fields = stripContentItemKindsFields tagged.fields }
+    other -> other
 
 stripItemPassthrough
     :: Maybe InternalChatMetadata
@@ -133,24 +68,6 @@ stripItemPassthrough = \case
                 , createTime = Nothing
                 , contentItemKinds = Nothing
                 , executedToolCalls = Nothing
-                , extraFields = KeyMap.empty
                 }
             then Nothing
             else Just cleaned
-
-stripContentItemKindsFields :: Aeson.Object -> Aeson.Object
-stripContentItemKindsFields fields =
-    case KeyMap.lookup passthroughKey fields of
-        Just (Aeson.Object metadata) ->
-            let cleaned = KeyMap.delete contentItemKindsKey metadata
-            in if KeyMap.null cleaned
-                then KeyMap.delete passthroughKey fields
-                else KeyMap.insert
-                    passthroughKey
-                    (Aeson.Object cleaned)
-                    fields
-        _ -> fields
-  where
-    passthroughKey =
-        Key.fromText "internal_chat_message_metadata_passthrough"
-    contentItemKindsKey = Key.fromText "content_item_kinds"

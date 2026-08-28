@@ -27,18 +27,20 @@ import Agent.Dialect
     , parseDialect
     )
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (toText, unsafeToFilePath)
 import Agent.Provider (Provider, parseProvider, providerSlug)
 import Agent.Responses.Types
+import Agent.Responses.Types.Items (responseItemDecoder)
 import Agent.Subagents (SubagentId(..), SubagentIdentity(..), SubagentStatus(..))
 import Agent.Subagents.TaskPath (taskPathText)
 import Agent.ToolArgs (readExactInt)
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
-import Data.Aeson (FromJSON(..), ToJSON(..), object, withObject, (.:?), (.=))
+import Data.Aeson (ToJSON(..), object, (.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isAlphaNum)
 import Data.Text (Text)
@@ -141,28 +143,25 @@ instance ToJSON SubagentDiskMeta where
                 , legacy.legacyDiskDialect
                 )
 
-instance FromJSON SubagentDiskMeta where
-    parseJSON = withObject "SubagentDiskMeta" \o -> do
-        statusValue <- o .:? "status"
-        diskStatus <- traverse decodeDiskStatus statusValue
-        providerText <- o .:? "provider"
-        diskProvider <- traverse parseDiskProvider providerText
-        storedConnection <- o .:? "connection"
+subagentDiskMetaDecoder :: Hermes.Decoder SubagentDiskMeta
+subagentDiskMetaDecoder = Hermes.object do
+        diskStatus <- optionalKey "status" diskStatusDecoder
+        diskProvider <- optionalKey "provider" diskProviderDecoder
+        storedConnection <- optionalKey "connection" Hermes.text
         let diskConnection =
                 storedConnection <|> (providerSlug <$> diskProvider)
-        dialectText <- o .:? "dialect"
-        diskDialect <- traverse parseDiskDialect dialectText
-        diskEffectiveModel <- o .:? "effectiveModel"
+        diskDialect <- optionalKey "dialect" diskDialectDecoder
+        diskEffectiveModel <- optionalKey "effectiveModel" Hermes.text
         fields <- SubagentDiskFields
-            <$> o .:? "previousResponseId"
+            <$> optionalKey "previousResponseId" Hermes.text
             <*> pure diskStatus
-            <*> o .:? "agentType"
-            <*> o .:? "agentModel"
-            <*> o .:? "reasoningEffort"
-            <*> (fmap unsafeEncodeUtf <$> o .:? "cwd")
-            <*> o .:? "taskPath"
-            <*> o .:? "parentId"
-            <*> o .:? "depth"
+            <*> optionalKey "agentType" Hermes.text
+            <*> optionalKey "agentModel" Hermes.text
+            <*> optionalKey "reasoningEffort" Hermes.text
+            <*> (fmap unsafeEncodeUtf <$> optionalKey "cwd" Hermes.string)
+            <*> optionalKey "taskPath" Hermes.text
+            <*> (fmap SubagentId <$> optionalKey "parentId" Hermes.text)
+            <*> optionalKey "depth" Hermes.int
         pure $ case
                 (diskProvider, diskConnection, diskEffectiveModel, diskDialect)
                 of
@@ -181,14 +180,14 @@ instance FromJSON SubagentDiskMeta where
                     , legacyDiskDialect = diskDialect
                     }
 
-parseDiskDialect :: Text -> Parser DialectId
-parseDiskDialect text =
+diskDialectDecoder :: Hermes.Decoder DialectId
+diskDialectDecoder = Hermes.withText \text ->
     case parseDialect text of
         Just dialect -> pure dialect
         Nothing -> fail ("unknown persisted subagent dialect: " <> Text.unpack text)
 
-parseDiskProvider :: Text -> Parser Provider
-parseDiskProvider text =
+diskProviderDecoder :: Hermes.Decoder Provider
+diskProviderDecoder = Hermes.withText \text ->
     case parseProvider text of
         Just provider -> pure provider
         Nothing -> fail ("unknown persisted subagent provider: " <> Text.unpack text)
@@ -203,21 +202,25 @@ encodeDiskStatus = \case
     Completed finalText -> Aeson.object ["completed" .= finalText]
     Errored err -> Aeson.object ["errored" .= err]
 
-decodeDiskStatus :: Aeson.Value -> Parser SubagentStatus
-decodeDiskStatus = \case
-    Aeson.String "pending" -> pure Pending
-    Aeson.String "pending_init" -> pure Pending
-    Aeson.String "running" -> pure Running
-    Aeson.String "interrupted" -> pure Interrupted
-    Aeson.String "closed" -> pure Closed
-    Aeson.String "shutdown" -> pure Closed
-    Aeson.String "not_found" -> pure NotFound
-    Aeson.Object object
-        | Just value <- KeyMap.lookup "completed" object ->
-            Completed <$> Aeson.parseJSON value
-        | Just value <- KeyMap.lookup "errored" object ->
-            Errored <$> Aeson.parseJSON value
-    value -> fail ("invalid persisted subagent status: " <> show value)
+diskStatusDecoder :: Hermes.Decoder SubagentStatus
+diskStatusDecoder = Hermes.withType \case
+    Hermes.VString -> Hermes.withText \case
+        "pending" -> pure Pending
+        "pending_init" -> pure Pending
+        "running" -> pure Running
+        "interrupted" -> pure Interrupted
+        "closed" -> pure Closed
+        "shutdown" -> pure Closed
+        "not_found" -> pure NotFound
+        value -> fail ("invalid persisted subagent status: " <> Text.unpack value)
+    Hermes.VObject -> Hermes.object do
+        completed <- Hermes.atKeyOptional "completed" (Hermes.nullable Hermes.text)
+        errored <- optionalKey "errored" Hermes.text
+        case (completed, errored) of
+            (Just value, _) -> pure (Completed value)
+            (_, Just value) -> pure (Errored value)
+            _ -> fail "invalid persisted subagent status object"
+    _ -> fail "invalid persisted subagent status"
 
 -- | Generated ids look like @agent-<hex>-<n>@. Reject path separators and
 -- traversal so resume paths cannot escape @agents/@.
@@ -320,7 +323,7 @@ loadSubagentState sessionDir agentId =
                 then pure (Right Nothing)
                 else do
                     metaResult <- if hasMeta
-                        then decodeFile metaPath
+                        then decodeMetaFile metaPath
                         else pure (Right (LegacySubagentDiskMeta
                             (SubagentDiskFields
                                 Nothing Nothing Nothing Nothing Nothing
@@ -328,7 +331,7 @@ loadSubagentState sessionDir agentId =
                             (LegacySubagentTargetFields
                                 Nothing Nothing Nothing Nothing)))
                     itemsResult <- if hasTranscript
-                        then decodeFile transcriptPath
+                        then decodeItemsFile transcriptPath
                         else pure (Right [])
                     pure $ case (metaResult, itemsResult) of
                         (Left err, _) -> Left err
@@ -336,13 +339,23 @@ loadSubagentState sessionDir agentId =
                         (Right meta, Right items) ->
                             Right (Just (items, meta))
   where
-    decodeFile path = do
+    decodeMetaFile path = do
         raw <- retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
-        case Aeson.eitherDecode raw of
+        case decodeLazy subagentDiskMetaDecoder raw of
             Left err ->
                 pure $ Left $
                     "failed to decode "
                         <> toText path
                         <> ": "
-                        <> Text.pack err
+                        <> err
+            Right value -> pure (Right value)
+    decodeItemsFile path = do
+        raw <- retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
+        case Hermes.decodeEither
+                (Hermes.list responseItemDecoder)
+                (LBS.toStrict raw) of
+            Left err ->
+                pure $ Left $
+                    "failed to decode " <> toText path <> ": "
+                        <> Hermes.jsonErrorMessage err
             Right value -> pure (Right value)

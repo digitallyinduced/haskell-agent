@@ -2,6 +2,7 @@ module Agent.CLI.NativeAgentsSpec (spec) where
 
 import Agent.CLI.AgentViewport (AgentEntry(..), AgentTarget(..))
 import Agent.CLI.NativeAgents
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Loop (LoopEvent(..), NativeAgentStatus(..))
 import Agent.Responses.Types
     ( FunctionCall(..)
@@ -11,7 +12,6 @@ import Agent.Responses.Types
     )
 import Agent.TUI.Model (BlockState(..), UiBlock(..), UiState(..))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Foldable as Foldable
 import Data.List (find)
 import qualified Data.Map.Strict as Map
@@ -95,28 +95,26 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentTranscript `shouldBe` []
 
     it "restores completed Claude-native agents from canonical tool items" do
-        let provider =
-                KeyMap.singleton "provider"
-                    (Aeson.String "claude-code")
-            call = FunctionCallItem FunctionCall
+        let call = FunctionCallItem FunctionCall
                 { itemId = Nothing
                 , callId = "agent-1"
                 , name = "Agent"
                 , namespace = Nothing
+                , provider = Just "claude-code"
                 , arguments =
                     "{\"description\":\"Review API\",\"model\":\"sonnet\"}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
-                , extraFields = provider
                 }
             output = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
                 , callId = "agent-1"
                 , name = Nothing
                 , namespace = Nothing
-                , output = Aeson.String "review complete"
+                , provider = Just "claude-code"
+                , output =
+                    rawJsonFromEncoding (Aeson.toEncoding ("review complete" :: String))
                 , status = Just ItemCompleted
-                , extraFields = provider
                 }
             restored = restoreNativeAgents [call, output] Map.empty
             view = restored Map.! "agent-1"
@@ -126,36 +124,31 @@ spec = describe "provider-native agent tracking" do
         view.nativeAgentTranscript `shouldBe` ["review complete"]
 
     it "does not restore unpaired or non-Claude canonical calls" do
-        let claudeFields =
-                KeyMap.singleton "provider"
-                    (Aeson.String "claude-code")
-            otherFields =
-                KeyMap.singleton "provider"
-                    (Aeson.String "openai")
-            call identifier fields = FunctionCallItem FunctionCall
+        let call identifier provider = FunctionCallItem FunctionCall
                 { itemId = Nothing
                 , callId = identifier
                 , name = "Task"
                 , namespace = Nothing
+                , provider = Just provider
                 , arguments = "{}"
                 , encryptedFunctionArgs = Nothing
                 , status = Just ItemCompleted
-                , extraFields = fields
                 }
             wrongOutput = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
                 , callId = "claude-unpaired"
                 , name = Nothing
                 , namespace = Nothing
-                , output = Aeson.String "not Claude metadata"
+                , provider = Just "openai"
+                , output = rawJsonFromEncoding
+                    (Aeson.toEncoding ("not Claude metadata" :: String))
                 , status = Just ItemCompleted
-                , extraFields = otherFields
                 }
             restored =
                 restoreNativeAgents
-                    [ call "claude-unpaired" claudeFields
+                    [ call "claude-unpaired" "claude-code"
                     , wrongOutput
-                    , call "other" otherFields
+                    , call "other" "openai"
                     ]
                     Map.empty
         restored `shouldBe` Map.empty

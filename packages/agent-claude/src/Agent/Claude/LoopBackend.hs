@@ -40,7 +40,6 @@ import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types
     ( CustomToolCall(..)
     , CustomToolCallOutput(..)
-    , ComputerCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
     , ItemStatus(..)
@@ -54,6 +53,8 @@ import Agent.Responses.Types
     , TaggedObject
     )
 import qualified Agent.ToolDispatch as ToolDispatch
+import Agent.Json (RawJson, rawJsonBytes)
+import qualified Agent.Json.Decode as Json
 import Claude.Agent.SDK.Client
     ( ClaudeSDKClient
     , ClaudeSDKTurn
@@ -63,7 +64,6 @@ import Claude.Agent.SDK.Client
     , withClaudeSDKTurn
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.Char as Char
 import Data.IORef
@@ -470,17 +470,15 @@ renderResponseItem = \case
     FunctionCallOutputItem output ->
         labelled
             ("Tool result " <> output.callId)
-            (renderJsonValue output.output)
+            (renderRawJson output.output)
     CustomToolCallOutputItem output ->
         labelled
             ("Tool result " <> output.callId)
-            (renderJsonValue output.output)
+            (renderRawJson output.output)
     ComputerCallItem item ->
         labelled "Assistant computer call" (renderJsonValue (Aeson.toJSON item))
     ComputerCallOutputItem item ->
-        labelled
-            ("Computer result " <> item.computerOutputCallId)
-            (renderJsonValue (Aeson.toJSON item))
+        labelled "Computer result" (renderJsonValue (Aeson.toJSON item))
     -- Reasoning is deliberately excluded from imported history. In
     -- particular, never copy private chain-of-thought into a Claude prompt.
     ReasoningItemValue{} ->
@@ -559,6 +557,19 @@ renderJsonValue = \case
     value ->
         TextEncoding.decodeUtf8With lenientDecode
             (LazyByteString.toStrict (Aeson.encode value))
+
+renderRawJson :: RawJson -> Text
+renderRawJson raw =
+    case Json.decodeEither
+        (Json.withType \case
+            Json.VString -> Json.text
+            _ -> pure rawText)
+        bytes of
+        Right value -> value
+        Left _ -> rawText
+  where
+    bytes = rawJsonBytes raw
+    rawText = TextEncoding.decodeUtf8With lenientDecode bytes
 
 hostTranscriptMatches
     :: IORef (Maybe HostTranscriptCheckpoint)
@@ -662,14 +673,12 @@ assistantMessageItem assistantText =
                 { text = fromMaybe "" assistantText
                 , annotations = Nothing
                 , logprobs = Nothing
-                , extraFields = KeyMap.empty
                 }
             ]
         , role = RoleAssistant
         , status = Just ItemCompleted
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
 
 sdkErrorToApiError :: ClaudeSDKError -> ApiError
@@ -685,7 +694,10 @@ sdkErrorToApiError = \case
             , rawBody =
                 maybe
                     ""
-                    (Text.take 2_000 . renderJsonValue)
+                    ( Text.take 2_000
+                        . TextEncoding.decodeUtf8With lenientDecode
+                        . rawJsonBytes
+                    )
                     rawMessage
             }
     sdkError@ResultError{} ->

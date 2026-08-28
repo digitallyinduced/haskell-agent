@@ -10,6 +10,7 @@ import Agent.Loop (ImageAttachment(..))
 import Agent.Responses.Types
     ( ComputerAction(..)
     , ComputerCall(..)
+    , computerCallDecoder
     , ComputerCallOutput(..)
     , ComputerPoint(..)
     , TaggedObject(..)
@@ -50,7 +51,7 @@ computerUseTool = jsonAppToolWithExecution
     handler
   where
     handler
-        | os == "darwin" = typedTool "computer" executeComputerCall
+        | os == "darwin" = typedTool "computer" computerCallDecoder executeComputerCall
         | otherwise = noArgsTool "computer"
             (pure (Left "Local computer use is currently supported only on macOS."))
 

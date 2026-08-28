@@ -1,7 +1,9 @@
 -- | Input and output items carried by Responses requests and responses.
 module Agent.Responses.Types.Items
     ( ResponseInput(..)
+    , responseInputDecoder
     , ResponseItem(..)
+    , responseItemDecoder
     , ResponseItemType(..)
     , parseResponseItemType
     , responseItemTypeText
@@ -14,9 +16,12 @@ module Agent.Responses.Types.Items
     , ComputerPoint(..)
     , SafetyCheck(..)
     , ComputerCall(..)
+    , computerCallDecoder
     , ComputerCallOutput(..)
+    , computerCallOutputDecoder
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
+    , reasoningSummaryPartDecoder
     , ItemReference(..)
     , ResponseAgentMessage(..)
     , InternalChatMetadata(..)
@@ -38,6 +43,9 @@ import Agent.Responses.Types.Content
 import Agent.Responses.Types.Items.Known
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Hermes as Hermes
+import Data.Scientific (floatingOrInteger)
 import Data.Text (Text)
 
 
@@ -48,13 +56,13 @@ data ResponseMessage = ResponseMessage
     , status      :: !(Maybe ItemStatus)
     , phase       :: !(Maybe Text)
     , passthrough :: !(Maybe InternalChatMetadata)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseMessage where
     toJSON ResponseMessage
-        { messageId, content, role, status, phase, passthrough, extraFields } =
-            objectWith extraFields
+        { messageId, content, role, status, phase, passthrough } =
+            objectWith
                 [ Just (field "type" ("message" :: Text))
                 , optionalField "id" messageId
                 , Just (field "content" content)
@@ -66,100 +74,141 @@ instance ToJSON ResponseMessage where
                     passthrough
                 ]
 
-instance FromJSON ResponseMessage where
-    parseJSON = withObject "ResponseMessage" $ \o -> ResponseMessage
-        <$> o .:? "id"
-        <*> o .: "content"
-        <*> o .: "role"
-        <*> o .:? "status"
-        <*> o .:? "phase"
-        <*> o .:? "internal_chat_message_metadata_passthrough"
-        <*> pure
-            (without
-                [ "type", "id", "content", "role", "status", "phase"
-                , "internal_chat_message_metadata_passthrough"
-                ]
-                o)
 
 data FunctionCall = FunctionCall
     { itemId                 :: !(Maybe Text)
     , callId                 :: !Text
     , name                   :: !Text
     , namespace              :: !(Maybe Text)
+    , provider               :: !(Maybe Text)
     , arguments              :: !Text
     , encryptedFunctionArgs  :: !(Maybe [Text])
     , status                 :: !(Maybe ItemStatus)
-    , extraFields            :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCall where
     toJSON FunctionCall
-        { itemId, callId, name, namespace, arguments, encryptedFunctionArgs
-        , status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, namespace, provider, arguments, encryptedFunctionArgs
+        , status } =
+            objectWith
                 [ Just (field "type" ("function_call" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
                 , Just (field "name" name)
                 , optionalField "namespace" namespace
+                , optionalField "provider" provider
                 , Just (field "arguments" arguments)
                 , optionalField "encrypted_function_args" encryptedFunctionArgs
                 , optionalField "status" status
                 ]
 
-instance FromJSON FunctionCall where
-    parseJSON = withObject "FunctionCall" $ \o -> FunctionCall
-        <$> o .:? "id"
-        <*> o .: "call_id"
-        <*> o .: "name"
-        <*> o .:? "namespace"
-        <*> o .: "arguments"
-        <*> o .:? "encrypted_function_args"
-        <*> o .:? "status"
-        <*> pure
-            (without
-                [ "type", "id", "call_id", "name", "namespace", "arguments"
-                , "encrypted_function_args", "status"
-                ]
-                o)
+data ComputerPoint = ComputerPoint { pointX :: !Int, pointY :: !Int }
+    deriving stock (Eq, Show)
+
+instance ToJSON ComputerPoint where
+    toJSON ComputerPoint{pointX, pointY} = object ["x" .= pointX, "y" .= pointY]
+
+data ComputerAction
+    = ScreenshotAction
+    | ClickAction { clickX :: !Int, clickY :: !Int, clickButton :: !Text }
+    | DoubleClickAction { doubleClickX :: !Int, doubleClickY :: !Int }
+    | TypeAction !Text
+    | KeypressAction ![Text]
+    | ScrollAction { scrollX :: !Int, scrollY :: !Int, scrollDx :: !Int, scrollDy :: !Int }
+    | MoveAction { moveX :: !Int, moveY :: !Int }
+    | WaitAction !Int
+    | DragAction ![ComputerPoint]
+    | UnknownComputerAction !TaggedObject
+    deriving stock (Eq, Show)
+
+instance ToJSON ComputerAction where
+    toJSON = \case
+        ScreenshotAction -> object ["type" .= ("screenshot" :: Text)]
+        ClickAction{clickX, clickY, clickButton} -> object
+            ["type" .= ("click" :: Text), "x" .= clickX, "y" .= clickY, "button" .= clickButton]
+        DoubleClickAction{doubleClickX, doubleClickY} -> object
+            ["type" .= ("double_click" :: Text), "x" .= doubleClickX, "y" .= doubleClickY]
+        TypeAction text -> object ["type" .= ("type" :: Text), "text" .= text]
+        KeypressAction keys -> object ["type" .= ("keypress" :: Text), "keys" .= keys]
+        ScrollAction{scrollX, scrollY, scrollDx, scrollDy} -> object
+            ["type" .= ("scroll" :: Text), "x" .= scrollX, "y" .= scrollY,
+             "scroll_x" .= scrollDx, "scroll_y" .= scrollDy]
+        MoveAction{moveX, moveY} -> object
+            ["type" .= ("move" :: Text), "x" .= moveX, "y" .= moveY]
+        WaitAction ms -> object ["type" .= ("wait" :: Text), "ms" .= ms]
+        DragAction path -> object ["type" .= ("drag" :: Text), "path" .= path]
+        UnknownComputerAction tagged -> toJSON tagged
+
+data SafetyCheck = SafetyCheck
+    { safetyCheckId :: !Text, safetyCheckCode :: !(Maybe Text)
+    , safetyCheckMessage :: !(Maybe Text), safetyCheckExtra :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON SafetyCheck where
+    toJSON SafetyCheck{safetyCheckId, safetyCheckCode, safetyCheckMessage} = objectWith
+        [Just (field "id" safetyCheckId), optionalField "code" safetyCheckCode,
+         optionalField "message" safetyCheckMessage]
+
+data ComputerCall = ComputerCall
+    { computerCallItemId :: !(Maybe Text), computerCallId :: !Text
+    , computerActions :: ![ComputerAction], pendingSafetyChecks :: ![SafetyCheck]
+    , computerCallStatus :: !(Maybe ItemStatus), computerCallExtra :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerCall where
+    toJSON ComputerCall{computerCallItemId, computerCallId, computerActions,
+            pendingSafetyChecks, computerCallStatus} = objectWith
+        [ Just (field "type" ("computer_call" :: Text))
+        , optionalField "id" computerCallItemId, Just (field "call_id" computerCallId)
+        , Just (field "actions" computerActions)
+        , optionalField "pending_safety_checks" (nonEmpty pendingSafetyChecks)
+        , optionalField "status" computerCallStatus ]
+      where nonEmpty [] = Nothing; nonEmpty xs = Just xs
+
+data ComputerCallOutput = ComputerCallOutput
+    { computerOutputItemId :: !(Maybe Text), computerOutputCallId :: !Text
+    , screenshotDataUrl :: !Text, acknowledgedChecks :: ![SafetyCheck]
+    , computerOutputStatus :: !(Maybe ItemStatus), computerOutputExtra :: !Aeson.Object
+    } deriving stock (Eq, Show)
+
+instance ToJSON ComputerCallOutput where
+    toJSON ComputerCallOutput{computerOutputItemId, computerOutputCallId,
+            screenshotDataUrl, acknowledgedChecks, computerOutputStatus} = objectWith
+        [ Just (field "type" ("computer_call_output" :: Text))
+        , optionalField "id" computerOutputItemId, Just (field "call_id" computerOutputCallId)
+        , Just (field "output" (object ["type" .= ("computer_screenshot" :: Text),
+            "image_url" .= screenshotDataUrl, "detail" .= ("original" :: Text)]))
+        , optionalField "acknowledged_safety_checks" (nonEmpty acknowledgedChecks)
+        , optionalField "status" computerOutputStatus ]
+      where nonEmpty [] = Nothing; nonEmpty xs = Just xs
+
 
 data FunctionCallOutput = FunctionCallOutput
     { itemId      :: !(Maybe Text)
     , callId      :: !Text
     , name        :: !(Maybe Text)
     , namespace   :: !(Maybe Text)
-    , output      :: !Aeson.Value
+    , provider    :: !(Maybe Text)
+    , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON FunctionCallOutput where
     toJSON FunctionCallOutput
-        { itemId, callId, name, namespace, output, status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, namespace, provider, output, status } =
+            objectWith
                 [ Just (field "type" ("function_call_output" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
                 , optionalField "name" name
                 , optionalField "namespace" namespace
+                , optionalField "provider" provider
                 , Just (field "output" output)
                 , optionalField "status" status
                 ]
 
-instance FromJSON FunctionCallOutput where
-    parseJSON = withObject "FunctionCallOutput" $ \o -> FunctionCallOutput
-        <$> o .:? "id"
-        <*> o .: "call_id"
-        <*> o .:? "name"
-        <*> o .:? "namespace"
-        <*> o .: "output"
-        <*> o .:? "status"
-        <*> pure
-            (without
-                [ "type", "id", "call_id", "name", "namespace", "output"
-                , "status"
-                ]
-                o)
 
 data CustomToolCall = CustomToolCall
     { itemId      :: !(Maybe Text)
@@ -168,13 +217,13 @@ data CustomToolCall = CustomToolCall
     , namespace   :: !(Maybe Text)
     , input       :: !Text
     , status      :: !(Maybe ItemStatus)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCall where
     toJSON CustomToolCall
-        { itemId, callId, name, namespace, input, status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, namespace, input, status } =
+            objectWith
                 [ Just (field "type" ("custom_tool_call" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
@@ -184,34 +233,20 @@ instance ToJSON CustomToolCall where
                 , optionalField "status" status
                 ]
 
-instance FromJSON CustomToolCall where
-    parseJSON = withObject "CustomToolCall" $ \o -> CustomToolCall
-        <$> o .:? "id"
-        <*> o .: "call_id"
-        <*> o .: "name"
-        <*> o .:? "namespace"
-        <*> o .: "input"
-        <*> o .:? "status"
-        <*> pure
-            (without
-                [ "type", "id", "call_id", "name", "namespace", "input"
-                , "status"
-                ]
-                o)
 
 data CustomToolCallOutput = CustomToolCallOutput
     { itemId      :: !(Maybe Text)
     , callId      :: !Text
     , name        :: !(Maybe Text)
-    , output      :: !Aeson.Value
+    , output      :: !RawJson
     , status      :: !(Maybe ItemStatus)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON CustomToolCallOutput where
     toJSON CustomToolCallOutput
-        { itemId, callId, name, output, status, extraFields } =
-            objectWith extraFields
+        { itemId, callId, name, output, status } =
+            objectWith
                 [ Just (field "type" ("custom_tool_call_output" :: Text))
                 , optionalField "id" itemId
                 , Just (field "call_id" callId)
@@ -220,258 +255,18 @@ instance ToJSON CustomToolCallOutput where
                 , optionalField "status" status
                 ]
 
-instance FromJSON CustomToolCallOutput where
-    parseJSON = withObject "CustomToolCallOutput" $ \o ->
-        CustomToolCallOutput
-            <$> o .:? "id"
-            <*> o .: "call_id"
-            <*> o .:? "name"
-            <*> o .: "output"
-            <*> o .:? "status"
-            <*> pure
-                (without
-                    ["type", "id", "call_id", "name", "output", "status"] o)
-
--- | A point in the screen coordinate space used by the Responses computer
--- tool. Coordinates are intentionally integers: providers reject fractional
--- input and native executors can pass these values without rounding.
-data ComputerPoint = ComputerPoint
-    { pointX :: !Int
-    , pointY :: !Int
-    } deriving stock (Eq, Show)
-
-instance ToJSON ComputerPoint where
-    toJSON ComputerPoint { pointX, pointY } =
-        object ["x" .= pointX, "y" .= pointY]
-
-instance FromJSON ComputerPoint where
-    parseJSON = withObject "ComputerPoint" $ \o ->
-        ComputerPoint <$> o .: "x" <*> o .: "y"
-
--- | Actions emitted by a provider-native computer-use tool.
---
--- The unknown constructor is deliberately lossless. Providers occasionally
--- add actions before the API client is updated; retaining those items allows
--- a session to be resumed instead of making its transcript undecodable.
-data ComputerAction
-    = ScreenshotAction
-    | ClickAction
-        { clickX      :: !Int
-        , clickY      :: !Int
-        , clickButton :: !Text
-        }
-    | DoubleClickAction
-        { doubleClickX :: !Int
-        , doubleClickY :: !Int
-        }
-    | TypeAction !Text
-    | KeypressAction ![Text]
-    | ScrollAction
-        { scrollX  :: !Int
-        , scrollY  :: !Int
-        , scrollDx :: !Int
-        , scrollDy :: !Int
-        }
-    | MoveAction
-        { moveX :: !Int
-        , moveY :: !Int
-        }
-    | WaitAction !Int
-    | DragAction ![ComputerPoint]
-    | UnknownComputerAction !TaggedObject
-    deriving stock (Eq, Show)
-
-instance ToJSON ComputerAction where
-    toJSON = \case
-        ScreenshotAction -> object ["type" .= ("screenshot" :: Text)]
-        ClickAction { clickX, clickY, clickButton } ->
-            object
-                [ "type" .= ("click" :: Text)
-                , "x" .= clickX
-                , "y" .= clickY
-                , "button" .= clickButton
-                ]
-        DoubleClickAction { doubleClickX, doubleClickY } ->
-            object
-                [ "type" .= ("double_click" :: Text)
-                , "x" .= doubleClickX
-                , "y" .= doubleClickY
-                ]
-        TypeAction value -> object
-            [ "type" .= ("type" :: Text), "text" .= value ]
-        KeypressAction keys -> object
-            [ "type" .= ("keypress" :: Text), "keys" .= keys ]
-        ScrollAction { scrollX, scrollY, scrollDx, scrollDy } ->
-            object
-                [ "type" .= ("scroll" :: Text)
-                , "x" .= scrollX
-                , "y" .= scrollY
-                , "scroll_x" .= scrollDx
-                , "scroll_y" .= scrollDy
-                ]
-        MoveAction { moveX, moveY } ->
-            object
-                [ "type" .= ("move" :: Text)
-                , "x" .= moveX
-                , "y" .= moveY
-                ]
-        WaitAction milliseconds -> object
-            [ "type" .= ("wait" :: Text), "ms" .= milliseconds ]
-        DragAction path -> object
-            [ "type" .= ("drag" :: Text), "path" .= path ]
-        UnknownComputerAction value -> toJSON value
-
-instance FromJSON ComputerAction where
-    parseJSON value = withObject "ComputerAction" (\o -> do
-        tag <- o .: "type"
-        case tag of
-            "screenshot" -> pure ScreenshotAction
-            "click" -> ClickAction
-                <$> o .: "x" <*> o .: "y" <*> o .:? "button" .!= "left"
-            "double_click" -> DoubleClickAction <$> o .: "x" <*> o .: "y"
-            "type" -> TypeAction <$> o .: "text"
-            "keypress" -> KeypressAction <$> o .: "keys"
-            "scroll" -> ScrollAction
-                <$> o .: "x" <*> o .: "y"
-                <*> o .:? "scroll_x" .!= 0
-                <*> o .:? "scroll_y" .!= 0
-            "move" -> MoveAction <$> o .: "x" <*> o .: "y"
-            "wait" -> WaitAction <$> o .:? "ms" .!= 1000
-            "drag" -> DragAction <$> o .:? "path" .!= []
-            _ -> pure (UnknownComputerAction TaggedObject
-                { tag
-                , fields = without ["type"] o
-                })) value
-
-data SafetyCheck = SafetyCheck
-    { safetyCheckId      :: !Text
-    , safetyCheckCode    :: !(Maybe Text)
-    , safetyCheckMessage :: !(Maybe Text)
-    , safetyCheckExtra   :: !Aeson.Object
-    } deriving stock (Eq, Show)
-
-instance ToJSON SafetyCheck where
-    toJSON SafetyCheck
-        { safetyCheckId, safetyCheckCode, safetyCheckMessage, safetyCheckExtra } =
-            objectWith safetyCheckExtra
-                [ Just (field "id" safetyCheckId)
-                , optionalField "code" safetyCheckCode
-                , optionalField "message" safetyCheckMessage
-                ]
-
-instance FromJSON SafetyCheck where
-    parseJSON = withObject "SafetyCheck" $ \o -> SafetyCheck
-        <$> o .: "id"
-        <*> o .:? "code"
-        <*> o .:? "message"
-        <*> pure (without ["id", "code", "message"] o)
-
-data ComputerCall = ComputerCall
-    { computerCallItemId    :: !(Maybe Text)
-    , computerCallId        :: !Text
-    , computerActions       :: ![ComputerAction]
-    , pendingSafetyChecks   :: ![SafetyCheck]
-    , computerCallStatus    :: !(Maybe ItemStatus)
-    , computerCallExtra     :: !Aeson.Object
-    } deriving stock (Eq, Show)
-
-instance ToJSON ComputerCall where
-    toJSON ComputerCall
-        { computerCallItemId, computerCallId, computerActions
-        , pendingSafetyChecks, computerCallStatus, computerCallExtra } =
-            objectWith computerCallExtra
-                [ Just (field "type" ("computer_call" :: Text))
-                , optionalField "id" computerCallItemId
-                , Just (field "call_id" computerCallId)
-                , Just (field "actions" computerActions)
-                , optionalField "pending_safety_checks"
-                    (nonEmpty pendingSafetyChecks)
-                , optionalField "status" computerCallStatus
-                ]
-      where
-        nonEmpty [] = Nothing
-        nonEmpty values = Just values
-
-instance FromJSON ComputerCall where
-    parseJSON = withObject "ComputerCall" $ \o -> ComputerCall
-        <$> o .:? "id"
-        <*> o .: "call_id"
-        <*> o .:? "actions" .!= []
-        <*> o .:? "pending_safety_checks" .!= []
-        <*> o .:? "status"
-        <*> pure (without
-            [ "type", "id", "call_id", "actions", "pending_safety_checks"
-            , "status"
-            ] o)
-
-data ComputerCallOutput = ComputerCallOutput
-    { computerOutputItemId   :: !(Maybe Text)
-    , computerOutputCallId   :: !Text
-    , screenshotDataUrl      :: !Text
-    , acknowledgedChecks     :: ![SafetyCheck]
-    , computerOutputStatus   :: !(Maybe ItemStatus)
-    , computerOutputExtra    :: !Aeson.Object
-    } deriving stock (Eq, Show)
-
-instance ToJSON ComputerCallOutput where
-    toJSON ComputerCallOutput
-        { computerOutputItemId, computerOutputCallId, screenshotDataUrl
-        , acknowledgedChecks, computerOutputStatus, computerOutputExtra } =
-            objectWith computerOutputExtra
-                [ Just (field "type" ("computer_call_output" :: Text))
-                , optionalField "id" computerOutputItemId
-                , Just (field "call_id" computerOutputCallId)
-                , Just (field "output" (object
-                    [ "type" .= ("computer_screenshot" :: Text)
-                    , "image_url" .= screenshotDataUrl
-                    -- The Responses API requires the screenshot detail
-                    -- discriminator.  Computer-use screenshots are always
-                    -- sent at their native resolution.
-                    , "detail" .= ("original" :: Text)
-                    ]))
-                , optionalField "acknowledged_safety_checks"
-                    (nonEmpty acknowledgedChecks)
-                , optionalField "status" computerOutputStatus
-                ]
-      where
-        nonEmpty [] = Nothing
-        nonEmpty values = Just values
-
-instance FromJSON ComputerCallOutput where
-    parseJSON = withObject "ComputerCallOutput" $ \o -> do
-        outputValue <- o .:? "output" .!= Aeson.Null
-        image <- case outputValue of
-            Aeson.Object outputObject ->
-                outputObject .:? "image_url" .!= ""
-            _ -> pure ""
-        ComputerCallOutput
-            <$> o .:? "id"
-            <*> o .: "call_id"
-            <*> pure image
-            <*> o .:? "acknowledged_safety_checks" .!= []
-            <*> o .:? "status"
-            <*> pure (without
-                [ "type", "id", "call_id", "output"
-                , "acknowledged_safety_checks", "status"
-                ] o)
 
 data ReasoningSummaryPart = ReasoningSummaryPart
     { partType    :: !Text
     , text        :: !(Maybe Text)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ReasoningSummaryPart where
-    toJSON ReasoningSummaryPart { partType, text, extraFields } =
-        objectWith extraFields
+    toJSON ReasoningSummaryPart { partType, text } =
+        objectWith
             [Just (field "type" partType), optionalField "text" text]
 
-instance FromJSON ReasoningSummaryPart where
-    parseJSON = withObject "ReasoningSummaryPart" $ \o ->
-        ReasoningSummaryPart
-            <$> o .: "type"
-            <*> o .:? "text"
-            <*> pure (without ["type", "text"] o)
 
 data ReasoningItem = ReasoningItem
     { itemId           :: !(Maybe Text)
@@ -479,7 +274,7 @@ data ReasoningItem = ReasoningItem
     , content          :: !(Maybe [ResponseContentPart])
     , encryptedContent :: !(Maybe Text)
     , status           :: !(Maybe ItemStatus)
-    , extraFields      :: !Aeson.Object
+
     } deriving stock (Eq)
 
 -- Keep opaque encrypted reasoning payloads out of logs while retaining enough
@@ -492,13 +287,12 @@ instance Show ReasoningItem where
             <> ", encryptedContent = "
             <> maybe "Nothing" (const "Just <redacted>") item.encryptedContent
             <> ", status = " <> show item.status
-            <> ", extraFields = " <> show item.extraFields
             <> " }"
 
 instance ToJSON ReasoningItem where
     toJSON ReasoningItem
-        { itemId, summary, content, encryptedContent, status, extraFields } =
-            objectWith extraFields
+        { itemId, summary, content, encryptedContent, status } =
+            objectWith
                 [ Just (field "type" ("reasoning" :: Text))
                 , optionalField "id" itemId
                 , Just (field "summary" summary)
@@ -507,36 +301,19 @@ instance ToJSON ReasoningItem where
                 , optionalField "status" status
                 ]
 
-instance FromJSON ReasoningItem where
-    parseJSON = withObject "ReasoningItem" $ \o -> ReasoningItem
-        <$> o .:? "id"
-        <*> o .:? "summary" .!= []
-        <*> o .:? "content"
-        <*> o .:? "encrypted_content"
-        <*> o .:? "status"
-        <*> pure
-            (without
-                [ "type", "id", "summary", "content", "encrypted_content"
-                , "status"
-                ]
-                o)
 
 data ItemReference = ItemReference
     { itemId      :: !Text
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ItemReference where
-    toJSON ItemReference { itemId, extraFields } =
-        objectWith extraFields
+    toJSON ItemReference { itemId } =
+        objectWith
             [ Just (field "type" ("item_reference" :: Text))
             , Just (field "id" itemId)
             ]
 
-instance FromJSON ItemReference where
-    parseJSON = withObject "ItemReference" $ \o -> ItemReference
-        <$> o .: "id"
-        <*> pure (without ["type", "id"] o)
 
 data ResponseAgentMessage = ResponseAgentMessage
     { messageId   :: !(Maybe Text)
@@ -544,13 +321,13 @@ data ResponseAgentMessage = ResponseAgentMessage
     , recipient   :: !(Maybe Text)
     , content     :: ![ResponseContentPart]
     , passthrough :: !(Maybe InternalChatMetadata)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ResponseAgentMessage where
     toJSON ResponseAgentMessage
-        { messageId, author, recipient, content, passthrough, extraFields } =
-            objectWith extraFields
+        { messageId, author, recipient, content, passthrough } =
+            objectWith
                 [ Just (field "type" ("agent_message" :: Text))
                 , optionalField "id" messageId
                 , optionalField "author" author
@@ -561,61 +338,40 @@ instance ToJSON ResponseAgentMessage where
                     passthrough
                 ]
 
-instance FromJSON ResponseAgentMessage where
-    parseJSON = withObject "ResponseAgentMessage" $ \o ->
-        ResponseAgentMessage
-            <$> o .:? "id"
-            <*> o .:? "author"
-            <*> o .:? "recipient"
-            <*> o .:? "content" .!= []
-            <*> o .:? "internal_chat_message_metadata_passthrough"
-            <*> pure
-                (without
-                    [ "type", "id", "author", "recipient", "content"
-                    , "internal_chat_message_metadata_passthrough"
-                    ]
-                    o)
 
 data AdditionalToolsItem = AdditionalToolsItem
     { itemId      :: !(Maybe Text)
     , role        :: !Text
-    , tools       :: ![Aeson.Value]
-    , extraFields :: !Aeson.Object
+    , tools       :: ![RawJson]
+
     } deriving stock (Eq, Show)
 
 instance ToJSON AdditionalToolsItem where
-    toJSON AdditionalToolsItem { itemId, role, tools, extraFields } =
-        objectWith extraFields
+    toJSON AdditionalToolsItem { itemId, role, tools } =
+        objectWith
             [ Just (field "type" ("additional_tools" :: Text))
             , optionalField "id" itemId
             , Just (field "role" role)
             , Just (field "tools" tools)
             ]
 
-instance FromJSON AdditionalToolsItem where
-    parseJSON = withObject "AdditionalToolsItem" $ \o ->
-        AdditionalToolsItem
-            <$> o .:? "id"
-            <*> o .:? "role" .!= "developer"
-            <*> o .:? "tools" .!= []
-            <*> pure (without ["type", "id", "role", "tools"] o)
 
 data LocalShellAction
     = LocalShellExec
         { command           :: ![Text]
         , timeoutMs         :: !(Maybe Integer)
         , workingDirectory  :: !(Maybe Text)
-        , env               :: !(Maybe Aeson.Object)
+        , env               :: !(Maybe RawJson)
         , user              :: !(Maybe Text)
-        , extraFields       :: !Aeson.Object
+
         }
     | LocalShellActionOther !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON LocalShellAction where
     toJSON LocalShellExec
-        { command, timeoutMs, workingDirectory, env, user, extraFields } =
-            objectWith extraFields
+        { command, timeoutMs, workingDirectory, env, user } =
+            objectWith
                 [ Just (field "type" ("exec" :: Text))
                 , Just (field "command" command)
                 , optionalField "timeout_ms" timeoutMs
@@ -625,35 +381,18 @@ instance ToJSON LocalShellAction where
                 ]
     toJSON (LocalShellActionOther tagged) = toJSON tagged
 
-instance FromJSON LocalShellAction where
-    parseJSON value = withObject "LocalShellAction" (\o -> do
-        tag <- o .:? "type"
-        case tag of
-            Just ("exec" :: Text) -> LocalShellExec
-                <$> o .:? "command" .!= []
-                <*> o .:? "timeout_ms"
-                <*> o .:? "working_directory"
-                <*> o .:? "env"
-                <*> o .:? "user"
-                <*> pure
-                    (without
-                        [ "type", "command", "timeout_ms", "working_directory"
-                        , "env", "user"
-                        ]
-                        o)
-            _ -> LocalShellActionOther <$> parseJSON value) value
 
 data LocalShellCall = LocalShellCall
     { itemId      :: !(Maybe Text)
     , callId      :: !(Maybe Text)
     , status      :: !(Maybe ItemStatus)
     , action      :: !(Maybe LocalShellAction)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON LocalShellCall where
-    toJSON LocalShellCall { itemId, callId, status, action, extraFields } =
-        objectWith extraFields
+    toJSON LocalShellCall { itemId, callId, status, action } =
+        objectWith
             [ Just (field "type" ("local_shell_call" :: Text))
             , optionalField "id" itemId
             , optionalField "call_id" callId
@@ -661,27 +400,20 @@ instance ToJSON LocalShellCall where
             , optionalField "action" action
             ]
 
-instance FromJSON LocalShellCall where
-    parseJSON = withObject "LocalShellCall" $ \o -> LocalShellCall
-        <$> o .:? "id"
-        <*> o .:? "call_id"
-        <*> o .:? "status"
-        <*> o .:? "action"
-        <*> pure (without ["type", "id", "call_id", "status", "action"] o)
 
 data ToolSearchCall = ToolSearchCall
     { itemId      :: !(Maybe Text)
     , callId      :: !(Maybe Text)
     , status      :: !(Maybe Text)
     , execution   :: !(Maybe Text)
-    , arguments   :: !(Maybe Aeson.Value)
-    , extraFields :: !Aeson.Object
+    , arguments   :: !(Maybe RawJson)
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ToolSearchCall where
     toJSON ToolSearchCall
-        { itemId, callId, status, execution, arguments, extraFields } =
-            objectWith extraFields
+        { itemId, callId, status, execution, arguments } =
+            objectWith
                 [ Just (field "type" ("tool_search_call" :: Text))
                 , optionalField "id" itemId
                 , optionalField "call_id" callId
@@ -690,30 +422,20 @@ instance ToJSON ToolSearchCall where
                 , optionalField "arguments" arguments
                 ]
 
-instance FromJSON ToolSearchCall where
-    parseJSON = withObject "ToolSearchCall" $ \o -> ToolSearchCall
-        <$> o .:? "id"
-        <*> o .:? "call_id"
-        <*> o .:? "status"
-        <*> o .:? "execution"
-        <*> o .:? "arguments"
-        <*> pure
-            (without
-                ["type", "id", "call_id", "status", "execution", "arguments"] o)
 
 data ToolSearchOutput = ToolSearchOutput
     { itemId      :: !(Maybe Text)
     , callId      :: !(Maybe Text)
     , status      :: !(Maybe Text)
     , execution   :: !(Maybe Text)
-    , tools       :: ![Aeson.Value]
-    , extraFields :: !Aeson.Object
+    , tools       :: ![RawJson]
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ToolSearchOutput where
     toJSON ToolSearchOutput
-        { itemId, callId, status, execution, tools, extraFields } =
-            objectWith extraFields
+        { itemId, callId, status, execution, tools } =
+            objectWith
                 [ Just (field "type" ("tool_search_output" :: Text))
                 , optionalField "id" itemId
                 , optionalField "call_id" callId
@@ -722,107 +444,75 @@ instance ToJSON ToolSearchOutput where
                 , Just (field "tools" tools)
                 ]
 
-instance FromJSON ToolSearchOutput where
-    parseJSON = withObject "ToolSearchOutput" $ \o -> ToolSearchOutput
-        <$> o .:? "id"
-        <*> o .:? "call_id"
-        <*> o .:? "status"
-        <*> o .:? "execution"
-        <*> o .:? "tools" .!= []
-        <*> pure
-            (without
-                ["type", "id", "call_id", "status", "execution", "tools"] o)
 
 data WebSearchAction
     = WebSearchQuery
         { query       :: !(Maybe Text)
         , queries     :: !(Maybe [Text])
-        , extraFields :: !Aeson.Object
+
         }
     | WebSearchOpenPage
         { url         :: !(Maybe Text)
-        , extraFields :: !Aeson.Object
+
         }
     | WebSearchFindInPage
         { url         :: !(Maybe Text)
         , pattern     :: !(Maybe Text)
-        , extraFields :: !Aeson.Object
+
         }
     | WebSearchActionOther !TaggedObject
     deriving stock (Eq, Show)
 
 instance ToJSON WebSearchAction where
-    toJSON WebSearchQuery { query, queries, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchQuery { query, queries } =
+        objectWith
             [ Just (field "type" ("search" :: Text))
             , optionalField "query" query
             , optionalField "queries" queries
             ]
-    toJSON WebSearchOpenPage { url, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchOpenPage { url } =
+        objectWith
             [ Just (field "type" ("open_page" :: Text))
             , optionalField "url" url
             ]
-    toJSON WebSearchFindInPage { url, pattern, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchFindInPage { url, pattern } =
+        objectWith
             [ Just (field "type" ("find_in_page" :: Text))
             , optionalField "url" url
             , optionalField "pattern" pattern
             ]
     toJSON (WebSearchActionOther tagged) = toJSON tagged
 
-instance FromJSON WebSearchAction where
-    parseJSON value = withObject "WebSearchAction" (\o -> do
-        tag <- o .:? "type"
-        case tag of
-            Just ("search" :: Text) -> WebSearchQuery
-                <$> o .:? "query"
-                <*> o .:? "queries"
-                <*> pure (without ["type", "query", "queries"] o)
-            Just "open_page" -> WebSearchOpenPage
-                <$> o .:? "url"
-                <*> pure (without ["type", "url"] o)
-            Just "find_in_page" -> WebSearchFindInPage
-                <$> o .:? "url"
-                <*> o .:? "pattern"
-                <*> pure (without ["type", "url", "pattern"] o)
-            _ -> WebSearchActionOther <$> parseJSON value) value
 
 data WebSearchCall = WebSearchCall
     { itemId      :: !(Maybe Text)
     , status      :: !(Maybe Text)
     , action      :: !(Maybe WebSearchAction)
-    , extraFields :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON WebSearchCall where
-    toJSON WebSearchCall { itemId, status, action, extraFields } =
-        objectWith extraFields
+    toJSON WebSearchCall { itemId, status, action } =
+        objectWith
             [ Just (field "type" ("web_search_call" :: Text))
             , optionalField "id" itemId
             , optionalField "status" status
             , optionalField "action" action
             ]
 
-instance FromJSON WebSearchCall where
-    parseJSON = withObject "WebSearchCall" $ \o -> WebSearchCall
-        <$> o .:? "id"
-        <*> o .:? "status"
-        <*> o .:? "action"
-        <*> pure (without ["type", "id", "status", "action"] o)
 
 data ImageGenerationCall = ImageGenerationCall
     { itemId         :: !(Maybe Text)
     , status         :: !(Maybe Text)
     , revisedPrompt  :: !(Maybe Text)
     , result         :: !(Maybe Text)
-    , extraFields    :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ImageGenerationCall where
     toJSON ImageGenerationCall
-        { itemId, status, revisedPrompt, result, extraFields } =
-            objectWith extraFields
+        { itemId, status, revisedPrompt, result } =
+            objectWith
                 [ Just (field "type" ("image_generation_call" :: Text))
                 , optionalField "id" itemId
                 , optionalField "status" status
@@ -830,70 +520,45 @@ instance ToJSON ImageGenerationCall where
                 , optionalField "result" result
                 ]
 
-instance FromJSON ImageGenerationCall where
-    parseJSON = withObject "ImageGenerationCall" $ \o ->
-        ImageGenerationCall
-            <$> o .:? "id"
-            <*> o .:? "status"
-            <*> o .:? "revised_prompt"
-            <*> o .:? "result"
-            <*> pure
-                (without
-                    ["type", "id", "status", "revised_prompt", "result"] o)
 
 data CompactionItem = CompactionItem
     { itemId            :: !(Maybe Text)
     , encryptedContent  :: !(Maybe Text)
-    , extraFields       :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON CompactionItem where
-    toJSON CompactionItem { itemId, encryptedContent, extraFields } =
-        objectWith extraFields
+    toJSON CompactionItem { itemId, encryptedContent } =
+        objectWith
             [ Just (field "type" ("compaction" :: Text))
             , optionalField "id" itemId
             , optionalField "encrypted_content" encryptedContent
             ]
 
-instance FromJSON CompactionItem where
-    parseJSON = withObject "CompactionItem" $ \o -> CompactionItem
-        <$> o .:? "id"
-        <*> o .:? "encrypted_content"
-        <*> pure (without ["type", "id", "encrypted_content"] o)
 
 data CompactionTriggerItem = CompactionTriggerItem
-    { extraFields :: !Aeson.Object
-    } deriving stock (Eq, Show)
+    deriving stock (Eq, Show)
 
 instance ToJSON CompactionTriggerItem where
-    toJSON CompactionTriggerItem { extraFields } =
-        objectWith extraFields
+    toJSON CompactionTriggerItem {} =
+        objectWith
             [Just (field "type" ("compaction_trigger" :: Text))]
 
-instance FromJSON CompactionTriggerItem where
-    parseJSON = withObject "CompactionTriggerItem" $ \o ->
-        CompactionTriggerItem <$> pure (without ["type"] o)
 
 data ContextCompactionItem = ContextCompactionItem
     { itemId           :: !(Maybe Text)
     , encryptedContent :: !(Maybe Text)
-    , extraFields      :: !Aeson.Object
+
     } deriving stock (Eq, Show)
 
 instance ToJSON ContextCompactionItem where
-    toJSON ContextCompactionItem { itemId, encryptedContent, extraFields } =
-        objectWith extraFields
+    toJSON ContextCompactionItem { itemId, encryptedContent } =
+        objectWith
             [ Just (field "type" ("context_compaction" :: Text))
             , optionalField "id" itemId
             , optionalField "encrypted_content" encryptedContent
             ]
 
-instance FromJSON ContextCompactionItem where
-    parseJSON = withObject "ContextCompactionItem" $ \o ->
-        ContextCompactionItem
-            <$> o .:? "id"
-            <*> o .:? "encrypted_content"
-            <*> pure (without ["type", "id", "encrypted_content"] o)
 
 data ResponseItem
     = MessageItem !ResponseMessage
@@ -943,36 +608,6 @@ instance ToJSON ResponseItem where
         KnownResponseItem _ value -> toJSON value
         UnknownResponseItem value -> toJSON value
 
-instance FromJSON ResponseItem where
-    parseJSON value = withObject "ResponseItem" (\o -> do
-        tag <- o .: "type"
-        case parseResponseItemType tag of
-            ItemMessage -> MessageItem <$> parseJSON value
-            ItemFunctionCall -> FunctionCallItem <$> parseJSON value
-            ItemFunctionCallOutput ->
-                FunctionCallOutputItem <$> parseJSON value
-            ItemCustomToolCall -> CustomToolCallItem <$> parseJSON value
-            ItemCustomToolCallOutput ->
-                CustomToolCallOutputItem <$> parseJSON value
-            ItemComputerCall -> ComputerCallItem <$> parseJSON value
-            ItemComputerCallOutput -> ComputerCallOutputItem <$> parseJSON value
-            ItemReasoning -> ReasoningItemValue <$> parseJSON value
-            ItemReferenceType -> ItemReferenceValue <$> parseJSON value
-            ItemAgentMessage -> AgentMessageItem <$> parseJSON value
-            ItemAdditionalTools -> AdditionalToolsItemValue <$> parseJSON value
-            ItemLocalShellCall -> LocalShellCallItem <$> parseJSON value
-            ItemToolSearchCall -> ToolSearchCallItem <$> parseJSON value
-            ItemToolSearchOutput -> ToolSearchOutputItem <$> parseJSON value
-            ItemWebSearchCall -> WebSearchCallItem <$> parseJSON value
-            ItemImageGenerationCall ->
-                ImageGenerationCallItem <$> parseJSON value
-            ItemCompaction -> CompactionItemValue <$> parseJSON value
-            ItemCompactionTrigger ->
-                CompactionTriggerItemValue <$> parseJSON value
-            ItemContextCompaction ->
-                ContextCompactionItemValue <$> parseJSON value
-            ItemUnknownType{} -> UnknownResponseItem <$> parseJSON value
-            itemType -> KnownResponseItem itemType <$> parseJSON value) value
 
 data ResponseInput
     = ResponseInputText !Text
@@ -983,8 +618,306 @@ instance ToJSON ResponseInput where
     toJSON (ResponseInputText value) = Aeson.String value
     toJSON (ResponseInputItems values) = toJSON values
 
-instance FromJSON ResponseInput where
-    parseJSON (Aeson.String value) = pure (ResponseInputText value)
-    parseJSON value@(Aeson.Array _) = ResponseInputItems <$> parseJSON value
-    parseJSON value =
-        fail ("ResponseInput: expected string or array, got " <> show value)
+
+responseInputDecoder :: Hermes.Decoder ResponseInput
+responseInputDecoder =
+    Hermes.getType >>= \case
+        Hermes.VString -> ResponseInputText <$> Hermes.text
+        Hermes.VArray -> ResponseInputItems <$> Hermes.list responseItemDecoder
+        _ -> fail "ResponseInput: expected string or array"
+
+responseItemDecoder :: Hermes.Decoder ResponseItem
+responseItemDecoder =
+    Hermes.object do
+        wireType <- Hermes.atKey "type" Hermes.text
+        Hermes.liftObjectDecoder $ case parseResponseItemType wireType of
+            ItemMessage -> MessageItem <$> responseMessageDecoder
+            ItemFunctionCall -> FunctionCallItem <$> functionCallDecoder
+            ItemFunctionCallOutput ->
+                FunctionCallOutputItem <$> functionCallOutputDecoder
+            ItemCustomToolCall -> CustomToolCallItem <$> customToolCallDecoder
+            ItemCustomToolCallOutput ->
+                CustomToolCallOutputItem <$> customToolCallOutputDecoder
+            ItemComputerCall -> ComputerCallItem <$> computerCallDecoder
+            ItemComputerCallOutput ->
+                ComputerCallOutputItem <$> computerCallOutputDecoder
+            ItemReasoning -> ReasoningItemValue <$> reasoningItemDecoder
+            ItemReferenceType -> ItemReferenceValue <$> itemReferenceDecoder
+            ItemAgentMessage ->
+                AgentMessageItem <$> responseAgentMessageDecoder
+            ItemAdditionalTools ->
+                AdditionalToolsItemValue <$> additionalToolsItemDecoder
+            ItemLocalShellCall -> LocalShellCallItem <$> localShellCallDecoder
+            ItemToolSearchCall -> ToolSearchCallItem <$> toolSearchCallDecoder
+            ItemToolSearchOutput ->
+                ToolSearchOutputItem <$> toolSearchOutputDecoder
+            ItemWebSearchCall -> WebSearchCallItem <$> webSearchCallDecoder
+            ItemImageGenerationCall ->
+                ImageGenerationCallItem <$> imageGenerationCallDecoder
+            ItemCompaction -> CompactionItemValue <$> compactionItemDecoder
+            ItemCompactionTrigger ->
+                CompactionTriggerItemValue <$> compactionTriggerItemDecoder
+            ItemContextCompaction ->
+                ContextCompactionItemValue <$> contextCompactionItemDecoder
+            ItemUnknownType{} ->
+                pure (UnknownResponseItem (TaggedObject wireType))
+            itemType ->
+                pure (KnownResponseItem itemType (TaggedObject wireType))
+
+responseMessageDecoder :: Hermes.Decoder ResponseMessage
+responseMessageDecoder = Hermes.object $
+    ResponseMessage
+        <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "content" messageContentDecoder
+        <*> Hermes.atKey "role" responseRoleDecoder
+        <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "phase" Hermes.text
+        <*> optionalAtKey
+            "internal_chat_message_metadata_passthrough"
+            internalChatMetadataDecoder
+
+computerPointDecoder :: Hermes.Decoder ComputerPoint
+computerPointDecoder = Hermes.object $
+    ComputerPoint <$> intAtKey "x" <*> intAtKey "y"
+
+computerActionDecoder :: Hermes.Decoder ComputerAction
+computerActionDecoder = Hermes.object do
+    wireType <- Hermes.atKey "type" Hermes.text
+    case wireType of
+        "screenshot" -> pure ScreenshotAction
+        "click" -> ClickAction <$> intAtKey "x" <*> intAtKey "y"
+            <*> (maybe "left" id <$> optionalAtKey "button" Hermes.text)
+        "double_click" -> DoubleClickAction <$> intAtKey "x" <*> intAtKey "y"
+        "type" -> TypeAction <$> Hermes.atKey "text" Hermes.text
+        "keypress" -> KeypressAction <$> Hermes.atKey "keys" (Hermes.list Hermes.text)
+        "scroll" -> ScrollAction <$> intAtKey "x" <*> intAtKey "y"
+            <*> optionalIntAtKeyWithDefault "scroll_x" 0
+            <*> optionalIntAtKeyWithDefault "scroll_y" 0
+        "move" -> MoveAction <$> intAtKey "x" <*> intAtKey "y"
+        "wait" -> WaitAction <$> optionalIntAtKeyWithDefault "ms" 1000
+        "drag" -> DragAction . maybe [] id
+            <$> optionalAtKey "path" (Hermes.list computerPointDecoder)
+        _ -> pure (UnknownComputerAction (TaggedObject wireType))
+
+safetyCheckDecoder :: Hermes.Decoder SafetyCheck
+safetyCheckDecoder = Hermes.object $
+    SafetyCheck <$> Hermes.atKey "id" Hermes.text
+        <*> optionalAtKey "code" Hermes.text
+        <*> optionalAtKey "message" Hermes.text
+        <*> pure KeyMap.empty
+
+computerCallDecoder :: Hermes.Decoder ComputerCall
+computerCallDecoder = Hermes.object $
+    ComputerCall <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> (maybe [] id <$> optionalAtKey "actions" (Hermes.list computerActionDecoder))
+        <*> (maybe [] id <$> optionalAtKey "pending_safety_checks" (Hermes.list safetyCheckDecoder))
+        <*> optionalAtKey "status" itemStatusDecoder
+        <*> pure KeyMap.empty
+
+computerScreenshotDataUrlDecoder :: Hermes.Decoder Text
+computerScreenshotDataUrlDecoder = Hermes.object $
+    maybe "" id <$> optionalAtKey "image_url" Hermes.text
+
+computerCallOutputDecoder :: Hermes.Decoder ComputerCallOutput
+computerCallOutputDecoder = Hermes.object $
+    ComputerCallOutput <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> (maybe "" id <$> optionalAtKey "output" computerScreenshotDataUrlDecoder)
+        <*> (maybe [] id <$> optionalAtKey "acknowledged_safety_checks" (Hermes.list safetyCheckDecoder))
+        <*> optionalAtKey "status" itemStatusDecoder
+        <*> pure KeyMap.empty
+
+intAtKey key = fromIntegral <$> Hermes.atKey key integerDecoder
+
+optionalIntAtKeyWithDefault key fallback =
+    maybe fallback fromIntegral <$> optionalAtKey key integerDecoder
+
+functionCallDecoder :: Hermes.Decoder FunctionCall
+functionCallDecoder = Hermes.object $
+    FunctionCall
+        <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "namespace" Hermes.text
+        <*> optionalAtKey "provider" Hermes.text
+        <*> Hermes.atKey "arguments" Hermes.text
+        <*> optionalAtKey "encrypted_function_args" (Hermes.list Hermes.text)
+        <*> optionalAtKey "status" itemStatusDecoder
+
+functionCallOutputDecoder :: Hermes.Decoder FunctionCallOutput
+functionCallOutputDecoder = Hermes.object $
+    FunctionCallOutput
+        <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> optionalAtKey "name" Hermes.text
+        <*> optionalAtKey "namespace" Hermes.text
+        <*> optionalAtKey "provider" Hermes.text
+        <*> Hermes.atKey "output" rawJsonDecoder
+        <*> optionalAtKey "status" itemStatusDecoder
+
+customToolCallDecoder :: Hermes.Decoder CustomToolCall
+customToolCallDecoder = Hermes.object $
+    CustomToolCall
+        <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> Hermes.atKey "name" Hermes.text
+        <*> optionalAtKey "namespace" Hermes.text
+        <*> Hermes.atKey "input" Hermes.text
+        <*> optionalAtKey "status" itemStatusDecoder
+
+customToolCallOutputDecoder :: Hermes.Decoder CustomToolCallOutput
+customToolCallOutputDecoder = Hermes.object $
+    CustomToolCallOutput
+        <$> optionalAtKey "id" Hermes.text
+        <*> Hermes.atKey "call_id" Hermes.text
+        <*> optionalAtKey "name" Hermes.text
+        <*> Hermes.atKey "output" rawJsonDecoder
+        <*> optionalAtKey "status" itemStatusDecoder
+
+reasoningSummaryPartDecoder :: Hermes.Decoder ReasoningSummaryPart
+reasoningSummaryPartDecoder = Hermes.object $
+    ReasoningSummaryPart
+        <$> Hermes.atKey "type" Hermes.text
+        <*> optionalAtKey "text" Hermes.text
+
+reasoningItemDecoder :: Hermes.Decoder ReasoningItem
+reasoningItemDecoder = Hermes.object $
+    ReasoningItem
+        <$> optionalAtKey "id" Hermes.text
+        <*> (maybe [] id
+            <$> optionalAtKey
+                "summary"
+                (Hermes.list reasoningSummaryPartDecoder))
+        <*> optionalAtKey
+            "content"
+            (Hermes.list responseContentPartDecoder)
+        <*> optionalAtKey "encrypted_content" Hermes.text
+        <*> optionalAtKey "status" itemStatusDecoder
+
+itemReferenceDecoder :: Hermes.Decoder ItemReference
+itemReferenceDecoder = Hermes.object $
+    ItemReference
+        <$> Hermes.atKey "id" Hermes.text
+
+responseAgentMessageDecoder :: Hermes.Decoder ResponseAgentMessage
+responseAgentMessageDecoder = Hermes.object $
+    ResponseAgentMessage
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "author" Hermes.text
+        <*> optionalAtKey "recipient" Hermes.text
+        <*> (maybe [] id <$> optionalAtKey
+            "content"
+            (Hermes.list responseContentPartDecoder))
+        <*> optionalAtKey
+            "internal_chat_message_metadata_passthrough"
+            internalChatMetadataDecoder
+
+additionalToolsItemDecoder :: Hermes.Decoder AdditionalToolsItem
+additionalToolsItemDecoder = Hermes.object $
+    AdditionalToolsItem
+        <$> optionalAtKey "id" Hermes.text
+        <*> (maybe "developer" id <$> optionalAtKey "role" Hermes.text)
+        <*> (maybe [] id <$> optionalAtKey
+            "tools"
+            (Hermes.list rawJsonDecoder))
+
+localShellActionDecoder :: Hermes.Decoder LocalShellAction
+localShellActionDecoder =
+    Hermes.object do
+        wireType <- optionalAtKey "type" Hermes.text
+        case wireType of
+            Just "exec" -> LocalShellExec
+                <$> (maybe [] id <$> optionalAtKey
+                    "command"
+                    (Hermes.list Hermes.text))
+                <*> optionalAtKey "timeout_ms" integerDecoder
+                <*> optionalAtKey "working_directory" Hermes.text
+                <*> optionalAtKey "env" rawJsonDecoder
+                <*> optionalAtKey "user" Hermes.text
+            _ -> pure $
+                LocalShellActionOther
+                    (TaggedObject (maybe "" id wireType))
+
+localShellCallDecoder :: Hermes.Decoder LocalShellCall
+localShellCallDecoder = Hermes.object $
+    LocalShellCall
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "call_id" Hermes.text
+        <*> optionalAtKey "status" itemStatusDecoder
+        <*> optionalAtKey "action" localShellActionDecoder
+
+toolSearchCallDecoder :: Hermes.Decoder ToolSearchCall
+toolSearchCallDecoder = Hermes.object $
+    ToolSearchCall
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "call_id" Hermes.text
+        <*> optionalAtKey "status" Hermes.text
+        <*> optionalAtKey "execution" Hermes.text
+        <*> optionalAtKey "arguments" rawJsonDecoder
+
+toolSearchOutputDecoder :: Hermes.Decoder ToolSearchOutput
+toolSearchOutputDecoder = Hermes.object $
+    ToolSearchOutput
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "call_id" Hermes.text
+        <*> optionalAtKey "status" Hermes.text
+        <*> optionalAtKey "execution" Hermes.text
+        <*> (maybe [] id <$> optionalAtKey
+            "tools"
+            (Hermes.list rawJsonDecoder))
+
+webSearchActionDecoder :: Hermes.Decoder WebSearchAction
+webSearchActionDecoder =
+    Hermes.object do
+        wireType <- optionalAtKey "type" Hermes.text
+        Hermes.liftObjectDecoder $ Hermes.object $ case wireType of
+            Just "search" -> WebSearchQuery
+                <$> optionalAtKey "query" Hermes.text
+                <*> optionalAtKey "queries" (Hermes.list Hermes.text)
+            Just "open_page" -> WebSearchOpenPage
+                <$> optionalAtKey "url" Hermes.text
+            Just "find_in_page" -> WebSearchFindInPage
+                <$> optionalAtKey "url" Hermes.text
+                <*> optionalAtKey "pattern" Hermes.text
+            _ -> pure $
+                WebSearchActionOther
+                    (TaggedObject (maybe "" id wireType))
+
+webSearchCallDecoder :: Hermes.Decoder WebSearchCall
+webSearchCallDecoder = Hermes.object $
+    WebSearchCall
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "status" Hermes.text
+        <*> optionalAtKey "action" webSearchActionDecoder
+
+imageGenerationCallDecoder :: Hermes.Decoder ImageGenerationCall
+imageGenerationCallDecoder = Hermes.object $
+    ImageGenerationCall
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "status" Hermes.text
+        <*> optionalAtKey "revised_prompt" Hermes.text
+        <*> optionalAtKey "result" Hermes.text
+
+compactionItemDecoder :: Hermes.Decoder CompactionItem
+compactionItemDecoder = Hermes.object $
+    CompactionItem
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "encrypted_content" Hermes.text
+
+compactionTriggerItemDecoder :: Hermes.Decoder CompactionTriggerItem
+compactionTriggerItemDecoder =
+    CompactionTriggerItem <$ Hermes.object (pure ())
+
+contextCompactionItemDecoder :: Hermes.Decoder ContextCompactionItem
+contextCompactionItemDecoder = Hermes.object $
+    ContextCompactionItem
+        <$> optionalAtKey "id" Hermes.text
+        <*> optionalAtKey "encrypted_content" Hermes.text
+
+integerDecoder :: Hermes.Decoder Integer
+integerDecoder = do
+    value <- Hermes.scientific
+    case floatingOrInteger value of
+        Right integer -> pure integer
+        Left (_ :: Double) -> fail "expected an integer"

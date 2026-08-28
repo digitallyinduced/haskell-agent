@@ -70,11 +70,11 @@ spec = do
             out `shouldSatisfy` Text.isInfixOf "use `code` here"
             Text.count "`code`" out `shouldBe` 1
 
-        it "dims fence bodies and drops fence markers" do
+        it "dims fence bodies and drops fence markers and language labels" do
             let out = renderMarkdown True "```haskell\nmain = pure ()\n```"
             out `shouldSatisfy` Text.isInfixOf "main = pure ()"
             out `shouldSatisfy` (not . Text.isInfixOf "```")
-            out `shouldSatisfy` Text.isInfixOf "haskell"
+            out `shouldSatisfy` (not . Text.isInfixOf "haskell")
             out `shouldSatisfy` Text.isInfixOf "\ESC["
 
         it "supports tilde fences" do

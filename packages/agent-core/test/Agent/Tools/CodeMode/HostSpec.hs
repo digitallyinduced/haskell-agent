@@ -1,6 +1,7 @@
 module Agent.Tools.CodeMode.HostSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -40,7 +41,13 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Test.Hspec
 
 spec :: Spec
-spec = describe "code-mode Node host" do
+spec = describe "code-mode Bun host" do
+    it "defaults to two retained workers" do
+        let config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                (\_ _ -> pure $ Left "no tools")
+        config.workerPoolSize `shouldBe` 2
+
     it "resolves the bundled worker independently of the current directory" do
         worker <- bundledCodeModeWorkerPath
         doesFileExist worker `shouldReturn` True
@@ -77,10 +84,11 @@ spec = describe "code-mode Node host" do
                 Right _ -> False
         parseExecSource
             "// @exec: {\"yield_time_ms\": 10, \"surprise\": true}\ntext(\"hi\");"
-            `shouldSatisfy` \case
-                Left errorText ->
-                    "got `surprise`" `Text.isInfixOf` errorText
-                Right _ -> False
+            `shouldBe`
+                Right
+                    ( "text(\"hi\");"
+                    , ExecPragma (Just 10) Nothing
+                    )
         parseExecSource
             ("// @exec: {\"yield" <> "_time_ms\": -1}\ntext(\"hi\");")
             `shouldSatisfy` \case
@@ -117,6 +125,33 @@ spec = describe "code-mode Node host" do
                         ]
                     ]
                 }
+
+    it "keeps JavaScript globals isolated when reusing a pooled worker" do
+        let config = defaultCodeModeConfig
+                "data/code-mode/worker.mjs"
+                (\_ _ -> pure $ Left "no tools")
+        host <- newCodeModeHost config
+        first <- execCodeCell
+            host
+            "globalThis.cellSecret = 42; text(globalThis.cellSecret);"
+            []
+            3000
+        second <- execCodeCell
+            host
+            "text(typeof globalThis.cellSecret);"
+            []
+            3000
+        first `shouldBe`
+            Right CodeModeFinished
+                { cellId = "1"
+                , cellValue = textContent "42"
+                }
+        second `shouldBe`
+            Right CodeModeFinished
+                { cellId = "2"
+                , cellValue = textContent "undefined"
+                }
+        closeCodeModeHost host
 
     it "rejects a second observer without racing cell output queues" do
         let config = defaultCodeModeConfig
@@ -536,7 +571,7 @@ spec = describe "code-mode Node host" do
                 [ PropertySchema "value" PropertyInteger True Nothing ]
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool "double" \(args :: DoubleArgs) ->
+                (typedTool "double" doubleArgsDecoder \(args :: DoubleArgs) ->
                     pure (Right (Text.pack (show (args.value * 2)))))
             invoke call = do
                 modifyIORef' approvals (+ 1)
@@ -570,7 +605,7 @@ spec = describe "code-mode Node host" do
                 [ PropertySchema "key" PropertyString True Nothing ]
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool "lookup" \(_ :: Value) -> pure (Right "value"))
+                (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
             invoke _ = pure (Right "value")
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
@@ -622,7 +657,7 @@ spec = describe "code-mode Node host" do
                 []
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool name \(_ :: Value) ->
+                (typedTool name emptyObjectDecoder \() ->
                     pure (Right ("from " <> name)))
             invoke call = do
                 result <- dispatchToolCall
@@ -651,7 +686,7 @@ spec = describe "code-mode Node host" do
                 []
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool "lookup" \(_ :: Value) ->
+                (typedTool "lookup" emptyObjectDecoder \() ->
                     pure (Right "namespaced result"))
             invoke call = do
                 call.name `shouldBe` "lookup"
@@ -703,9 +738,12 @@ runRegisteredExec toolSet source =
 
 newtype DoubleArgs = DoubleArgs { value :: Int }
 
-instance Aeson.FromJSON DoubleArgs where
-    parseJSON = objectArgsExact ["value"] \object_ ->
+doubleArgsDecoder :: Json.Decoder DoubleArgs
+doubleArgsDecoder = objectArgsExact ["value"] \object_ ->
         DoubleArgs <$> reqInt object_ "value"
+
+emptyObjectDecoder :: Json.Decoder ()
+emptyObjectDecoder = Json.object (pure ())
 
 emptyContent :: Value
 emptyContent = Aeson.object

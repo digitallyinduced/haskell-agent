@@ -1,6 +1,7 @@
 module Agent.OpenRouter.RequestSpec (spec) where
 
 import Agent.Error (ApiError(..))
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Responses.Types
 import Agent.OpenRouter.Options
 import Agent.OpenRouter.Request
@@ -60,22 +61,20 @@ spec = do
                 [ Just (Aeson.String "function")
                 , Just (Aeson.String "web_search")
                 ]
-            Maybe.mapMaybe (KeyMap.lookup "external_web_access") toolObjects `shouldBe`
-                [Aeson.Bool True]
+            Maybe.mapMaybe (KeyMap.lookup "external_web_access") toolObjects
+                `shouldBe` []
 
         it "preserves Codex custom and namespace tools" do
             let codexTools =
-                    [ KnownResponseTool ToolCustom TaggedObject
-                        { tag = "custom"
-                        , fields = KeyMap.singleton
-                            "name"
-                            (Aeson.String "apply_patch")
+                    [ CustomToolValue CustomTool
+                        { name = "grammar"
+                        , description = Nothing
+                        , format = Nothing
                         }
-                    , KnownResponseTool ToolNamespace TaggedObject
-                        { tag = "namespace"
-                        , fields = KeyMap.singleton
-                            "name"
-                            (Aeson.String "collaboration")
+                    , NamespaceToolValue NamespaceTool
+                        { name = "tools"
+                        , description = Nothing
+                        , tools = []
                         }
                     ]
                 request = withTools (Just codexTools) sampleRequest
@@ -167,29 +166,22 @@ sampleRequest = defaultResponseCreateParams
         [ MessageItem ResponseMessage
             { messageId = Nothing
             , role = RoleUser
-            , content = MessageContentParts [InputTextPart "hello" Nothing mempty]
+            , content = MessageContentParts [InputTextPart "hello" Nothing]
             , status = Nothing
             , phase = Nothing
             , passthrough = Nothing
-            , extraFields = mempty
             }
         ])
     , tools = Just
         [ FunctionToolValue FunctionTool
             { name = "echo_text"
             , description = Just "Echo the text back"
-            , parameters = Just (Aeson.object [])
+            , parameters = Just $
+                rawJsonFromEncoding (Aeson.toEncoding (Aeson.object []))
             , strict = Nothing
-            , extraFields = mempty
             }
-        , KnownResponseTool ToolWebSearch TaggedObject
-            { tag = "web_search"
-            , fields = KeyMap.singleton "external_web_access" (Aeson.Bool True)
-            }
-        , KnownResponseTool ToolComputer TaggedObject
-            { tag = "computer"
-            , fields = mempty
-            }
+        , KnownResponseTool ToolWebSearch
+        , KnownResponseTool ToolComputer
         ]
     , reasoning = Just ReasoningConfig
         { context = Nothing
@@ -197,7 +189,6 @@ sampleRequest = defaultResponseCreateParams
         , generateSummary = Nothing
         , reasoningMode = Nothing
         , summary = Nothing
-        , extraFields = mempty
         }
     , include = Just [ResponseInclude "reasoning.encrypted_content"]
     , promptCacheKey = Just "cache-1"

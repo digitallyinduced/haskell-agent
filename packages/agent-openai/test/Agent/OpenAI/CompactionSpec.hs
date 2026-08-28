@@ -1,6 +1,8 @@
 module Agent.OpenAI.CompactionSpec (spec) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import Agent.Json (RawJson, rawJsonDecoder, rawJsonFromEncoding)
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.CompactClient
 import Agent.OpenAI.Compaction
 import Agent.OpenAI.ModelMetadata
@@ -8,6 +10,7 @@ import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
 import Agent.Provider
 import Agent.Responses.Types
+import qualified Agent.Responses.Codec as ResponsesCodec
 import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Either (isLeft)
@@ -15,6 +18,9 @@ import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import qualified Data.Vector as Vector
 import Test.Hspec
+
+raw :: Aeson.Value -> RawJson
+raw = rawJsonFromEncoding . Aeson.toEncoding
 
 spec :: Spec
 spec = do
@@ -45,7 +51,6 @@ spec = do
                     , generateSummary = Nothing
                     , reasoningMode = Nothing
                     , summary = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 params = defaultResponseCreateParams
                     { instructions = Just "instructions"
@@ -109,7 +114,7 @@ spec = do
                 tool = FunctionToolValue FunctionTool
                     { name = "large_schema"
                     , description = Just schemaText
-                    , parameters = Just (Aeson.object
+                    , parameters = Just (raw (Aeson.object
                         [ "type" .= ("object" :: Text.Text)
                         , "properties" .= Aeson.object
                             [ "value" .= Aeson.object
@@ -117,9 +122,8 @@ spec = do
                                 , "description" .= schemaText
                                 ]
                             ]
-                        ])
+                        ]))
                     , strict = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { tools = Just [tool]
@@ -138,13 +142,13 @@ spec = do
                     , callId = "call-oversized"
                     , name = "apply_patch"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments =
                         Text.replicate
                             (remoteCompactionMaxStringLength + 1)
                             "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -157,11 +161,11 @@ spec = do
                     call.name `shouldBe` "apply_patch"
                     Text.length call.arguments
                         `shouldSatisfy` (<= remoteCompactionMaxStringLength)
-                    Aeson.eitherDecodeStrict'
+                    Json.decodeEither
+                        rawJsonDecoder
                         (TextEncoding.encodeUtf8 call.arguments)
                         `shouldSatisfy`
-                            (either (const False) (const True)
-                                :: Either String Aeson.Value -> Bool)
+                            (either (const False) (const True))
                 other ->
                     expectationFailure
                         ("expected sanitized function call, got " <> show other)
@@ -177,7 +181,6 @@ spec = do
                             (remoteCompactionMaxStringLength + 1)
                             "x"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionRequestToFit
@@ -204,10 +207,10 @@ spec = do
                     , callId = "call-portable"
                     , name = "portable_tool"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments
                     , encryptedFunctionArgs = Nothing
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimResponseHistoryToFit
@@ -242,10 +245,10 @@ spec = do
                     , callId = "call-1"
                     , name = "shell_command"
                     , namespace = Nothing
+                    , provider = Nothing
                     , arguments = "{}"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 history =
                     [ user "old"
@@ -261,13 +264,12 @@ spec = do
                 rich = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [ InputTextPart "keep this" Nothing KeyMap.empty
+                        [ InputTextPart "keep this" Nothing
                         , InputImagePart
                             { detail = Just "auto"
                             , fileId = Nothing
                             , imageUrl = Just ("data:image/png;base64," <> payload)
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         , InputFilePart
                             { detail = Just "auto"
@@ -276,22 +278,18 @@ spec = do
                             , fileUrl = Nothing
                             , filename = Just "notes.txt"
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         , InputAudioPart
-                            { inputAudio = Aeson.String payload
-                            , extraFields = KeyMap.empty
+                            { inputAudio = raw (Aeson.String payload)
                             }
                         , UnknownContentPart TaggedObject
                             { tag = "input_unknown"
-                            , fields = KeyMap.empty
                             }
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 compacted =
                     buildRemoteCompactedHistory 1_000 [rich] (checkpoint "opaque")
@@ -312,20 +310,18 @@ spec = do
                 multimodal = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [ InputTextPart "inspect this" Nothing KeyMap.empty
+                        [ InputTextPart "inspect this" Nothing
                         , InputImagePart
                             { detail = Just "auto"
                             , fileId = Nothing
                             , imageUrl = Just imageUrl
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 compacted =
                     buildRemoteCompactedHistory
@@ -339,7 +335,7 @@ spec = do
                         MessageContentParts parts ->
                             all (\case InputImagePart{} -> False; _ -> True) parts
                                 && any (\case
-                                    InputTextPart text _ _ ->
+                                    InputTextPart text _ ->
                                         Text.isInfixOf
                                             "image attachment omitted"
                                             text
@@ -357,14 +353,12 @@ spec = do
                             , fileId = Nothing
                             , imageUrl = Just "data:image/png;base64,huge"
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         ]
                     , role = RoleAssistant
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
             sanitizeCompactionHistory [rich] `shouldSatisfy` \case
                 [MessageItem message] ->
@@ -380,20 +374,18 @@ spec = do
                 multimodal = MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [ InputTextPart "inspect this" Nothing KeyMap.empty
+                        [ InputTextPart "inspect this" Nothing
                         , InputImagePart
                             { detail = Just "auto"
                             , fileId = Nothing
                             , imageUrl = Just imageUrl
                             , promptCacheBreakpoint = Nothing
-                            , extraFields = KeyMap.empty
                             }
                         ]
                     , role = RoleUser
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -409,6 +401,7 @@ spec = do
                         _ -> False
                 _ -> False
 
+        {- Known-field decoding deliberately drops provider extension payloads.
         it "drops an unrewritable oldest item to guarantee the request fits" do
             let params = (defaultResponseCreateParams :: ResponseCreateParams)
                     { tools = Just []
@@ -451,6 +444,7 @@ spec = do
             estimateResponseCreateParamsTokens
                 (buildRemoteCompactionRequest params trimmed)
                 `shouldSatisfy` (> 200)
+        -}
 
         it "drops harness-generated user-role context wrappers" do
             let opaque = checkpoint "opaque"
@@ -506,9 +500,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String (Text.replicate 10_000 "x")
+                    , provider = Nothing
+                    , output = raw (Aeson.String (Text.replicate 10_000 "x"))
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -517,7 +511,7 @@ spec = do
                         [user "keep", oversized]
             case reverse trimmed of
                 FunctionCallOutputItem output : _ ->
-                    output.output `shouldBe` Aeson.String
+                    Aeson.toJSON output.output `shouldBe` Aeson.String
                         "Output exceeded the available model context and was truncated"
                 other ->
                     expectationFailure
@@ -530,9 +524,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String "ok"
+                    , provider = Nothing
+                    , output = raw (Aeson.String "ok")
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -541,12 +535,12 @@ spec = do
                         [huge, tiny]
             trimmed `shouldSatisfy` any \case
                 FunctionCallOutputItem output ->
-                    output.output == Aeson.String "ok"
+                    Aeson.toJSON output.output == Aeson.String "ok"
                 _ -> False
             trimmed `shouldSatisfy` any \case
                 MessageItem message ->
                     case message.content of
-                        MessageContentParts [InputTextPart text _ _] ->
+                        MessageContentParts [InputTextPart text _] ->
                             Text.length text < 20_000
                         MessageContentText text ->
                             Text.length text < 20_000
@@ -560,9 +554,9 @@ spec = do
                     , callId = "call-1"
                     , name = Nothing
                     , namespace = Nothing
-                    , output = Aeson.String (Text.replicate 20_000 "y")
+                    , provider = Nothing
+                    , output = raw (Aeson.String (Text.replicate 20_000 "y"))
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -576,11 +570,13 @@ spec = do
                 _ -> False
             trimmed `shouldSatisfy` any \case
                 FunctionCallOutputItem result ->
-                    result.output
+                    Aeson.toJSON result.output
                         == Aeson.String
                             "Output exceeded the available model context and was truncated"
                 _ -> False
 
+        {- Opaque provider extension payload rewriting was removed with
+        known-field-only Responses decoding.
         it "drops an irreducible old item so a recent small output can fit" do
             let old = KnownResponseItem ItemReasoning TaggedObject
                     { tag = "reasoning"
@@ -596,7 +592,6 @@ spec = do
                     , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 trimmed =
                     trimRemoteCompactionHistoryToFit
@@ -647,7 +642,6 @@ spec = do
                     , arguments = Text.replicate 20_000 "x"
                     , encryptedFunctionArgs = Nothing
                     , status = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 output = FunctionCallOutputItem FunctionCallOutput
                     { itemId = Nothing
@@ -656,7 +650,6 @@ spec = do
                     , namespace = Nothing
                     , output = Aeson.String "ok"
                     , status = Just ItemCompleted
-                    , extraFields = KeyMap.empty
                     }
                 recent = user "recent"
                 trimmed =
@@ -882,6 +875,7 @@ spec = do
                             == Just (Aeson.String
                                 "Output exceeded the available model context and was truncated")
                 _ -> False
+        -}
 
     describe "image payload token estimates" do
         it "does not treat inline image payloads as model-visible text" do
@@ -911,7 +905,8 @@ spec = do
 
         it "still counts tool-output data URLs as model-visible text" do
             let payload = Text.replicate 200_000 "A"
-                item = toolOutput (Aeson.String ("data:image/png;base64," <> payload))
+                item = toolOutput
+                    (raw (Aeson.String ("data:image/png;base64," <> payload)))
             estimateItemsTokens [item]
                 `shouldBe` naiveEncodedTokens item
 
@@ -924,7 +919,7 @@ spec = do
         it "discounts structured input_image parts in tool output" do
             let payload = Text.replicate 200_000 "A"
                 item =
-                    toolOutput $
+                    toolOutput $ raw $
                         Aeson.Array $
                             Vector.fromList
                                 [ Aeson.object
@@ -1126,53 +1121,49 @@ spec = do
 
     user text = MessageItem ResponseMessage
         { messageId = Nothing
-        , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , content = MessageContentParts [InputTextPart text Nothing]
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
     imageUser payload = MessageItem ResponseMessage
         { messageId = Nothing
         , content = MessageContentParts
-            [ InputTextPart "inspect this" Nothing KeyMap.empty
+            [ InputTextPart "inspect this" Nothing
             , InputImagePart
                 { detail = Just "auto"
                 , fileId = Nothing
                 , imageUrl = Just ("data:image/png;base64," <> payload)
                 , promptCacheBreakpoint = Nothing
-                , extraFields = KeyMap.empty
                 }
             ]
         , role = RoleUser
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
     toolOutput output = FunctionCallOutputItem FunctionCallOutput
         { itemId = Nothing
         , callId = "call-image"
         , name = Nothing
         , namespace = Nothing
+        , provider = Nothing
         , output
         , status = Just ItemCompleted
-        , extraFields = KeyMap.empty
         }
     assistant text = MessageItem ResponseMessage
         { messageId = Nothing
-        , content = MessageContentParts [InputTextPart text Nothing KeyMap.empty]
+        , content = MessageContentParts [InputTextPart text Nothing]
         , role = RoleAssistant
         , status = Nothing
         , phase = Nothing
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
     isSummary (MessageItem m) =
         m.role == RoleAssistant
             && case m.content of
-                MessageContentParts (OutputTextPart text _ _ _ : _) ->
+                MessageContentParts (OutputTextPart text _ _ : _) ->
                     Text.isPrefixOf summaryPrefix text
                 _ -> False
     isSummary _ = False
@@ -1185,34 +1176,32 @@ spec = do
                 _ -> False
     isWireValidAssistantSummary _ = False
     userOnly m = case m.content of
-        MessageContentParts (InputTextPart text _ _ : _) -> text
+        MessageContentParts (InputTextPart text _ : _) -> text
         MessageContentText text -> text
         _ -> ""
     requestItems request = case request.input of
         Just (ResponseInputItems items) -> items
         _ -> []
     completedResponse output =
-        case Aeson.fromJSON $ Aeson.object
+        case ResponsesCodec.decodeResponse . LBS.toStrict . Aeson.encode $ Aeson.object
             [ "id" .= ("resp-compact" :: Text.Text)
             , "created_at" .= (0 :: Int)
             , "status" .= ("completed" :: Text.Text)
             , "model" .= ("gpt-test" :: Text.Text)
             , "output" .= output
             ] of
-            Aeson.Success response -> response
-            Aeson.Error err -> error err
+            Right response -> response
+            Left err -> error err
     agentMessage :: Text.Text -> Text.Text -> Text.Text -> ResponseItem
     agentMessage author recipient text =
         AgentMessageItem ResponseAgentMessage
             { messageId = Nothing
             , author = Just author
             , recipient = Just recipient
-            , content = [InputTextPart text Nothing KeyMap.empty]
+            , content = [InputTextPart text Nothing]
             , passthrough = Nothing
-            , extraFields = KeyMap.empty
             }
     checkpoint name = CompactionItemValue CompactionItem
         { itemId = Nothing
         , encryptedContent = Nothing
-        , extraFields = KeyMap.fromList [("name", Aeson.String name)]
         }

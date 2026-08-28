@@ -6,6 +6,7 @@ module Agent.CLI.TUI.Scroll
     , ConversationScrollGesture(..)
     , conversationScrollGesture
     , conversationAnchorSticky
+    , conversationFollowScroll
     , followConversationTail
     , reconcileConversationFollow
     , reflowConversationAnchor
@@ -88,6 +89,16 @@ reconcileConversationFollow storedFollow = \case
     Just (top, height, contentHeight) ->
         storedFollow
             || top + max 0 height >= max 0 contentHeight
+
+-- | Resolve the viewport after its content geometry may have changed. Live
+-- blocks can be replaced by a much shorter durable projection, and hidden-tab
+-- redraw suppression can defer that transition until focus returns. A
+-- following viewport must resolve the current tail; paused scrollback stays
+-- fixed.
+conversationFollowScroll :: Bool -> ConversationScroll
+conversationFollowScroll following
+    | following = ScrollConversationToEnd
+    | otherwise = KeepConversationPosition
 
 startConversationAnchor :: BlockId -> Text -> Int -> ConversationAnchor
 startConversationAnchor blockId text top = ConversationAnchor

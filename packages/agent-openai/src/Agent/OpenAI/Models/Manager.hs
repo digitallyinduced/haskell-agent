@@ -206,7 +206,7 @@ tryLoadCache manager =
                 Right (Just entry) -> do
                     let catalog = applyRemoteCatalog manager ModelsResponse
                             { models = entry.models
-                            , extraFields = entry.catalogExtraFields
+                            , catalogGeneration = entry.catalogGeneration
                             }
                     modifyMVar_ manager.state \_ -> pure ModelsManagerState
                         { catalog
@@ -284,7 +284,7 @@ storeCache manager cacheKey catalog etag =
                 , clientVersion = Just manager.options.clientVersion
                 , cacheKey = Just cacheKey
                 , models = catalog.models
-                , catalogExtraFields = catalog.extraFields
+                , catalogGeneration = catalog.catalogGeneration
                 }
             pure ()
 

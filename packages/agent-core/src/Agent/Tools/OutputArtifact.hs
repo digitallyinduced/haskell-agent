@@ -19,6 +19,7 @@ module Agent.Tools.OutputArtifact
     , readOutputArtifact
     ) where
 
+import Agent.Json.Decode (Decoder)
 import Agent.OsPath (unsafeToFilePath)
 import Agent.ToolArgs (objectArgs, optBool, optInt, reqText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
@@ -40,7 +41,6 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (unless)
-import Data.Aeson (FromJSON(..))
 import qualified Data.ByteString as BS
 import Data.IORef (readIORef)
 import Data.Maybe (fromMaybe)
@@ -112,7 +112,7 @@ artifactTools env analysis =
             (Just "Maximum 1000 lines; defaults to 200.")
         ]
         True ParallelSafe
-        (typedTool "read_tool_output" (readToolOutput env))
+        (typedTool "read_tool_output" readArgsDecoder (readToolOutput env))
     , jsonTool "search_tool_output"
         "Search an oversized tool-output artifact for a literal string and return bounded matching lines."
         [ PropertySchema "handle" PropertyString True Nothing
@@ -122,7 +122,7 @@ artifactTools env analysis =
             (Just "Maximum 200 matching lines; defaults to 50.")
         ]
         True ParallelSafe
-        (typedTool "search_tool_output" (searchToolOutput env))
+        (typedTool "search_tool_output" searchArgsDecoder (searchToolOutput env))
     ]
     <> maybe [] (\spawn ->
         [ jsonTool "analyze_tool_output"
@@ -131,7 +131,7 @@ artifactTools env analysis =
             , PropertySchema "instruction" PropertyString True Nothing
             ]
             True TurnSequential
-            (typedToolWithCall "analyze_tool_output"
+            (typedToolWithCall "analyze_tool_output" analyzeArgsDecoder
                 (\call (AnalyzeArgs handle instruction) ->
                     artifactExists env handle >>= \case
                         Left err -> pure (Left err)
@@ -144,8 +144,8 @@ data ReadArgs = ReadArgs
     , limit :: Maybe Int
     }
 
-instance FromJSON ReadArgs where
-    parseJSON = objectArgs \o ->
+readArgsDecoder :: Decoder ReadArgs
+readArgsDecoder = objectArgs \o ->
         ReadArgs <$> reqText o "handle" <*> optInt o "offset" <*> optInt o "limit"
 
 data SearchArgs = SearchArgs
@@ -155,8 +155,8 @@ data SearchArgs = SearchArgs
     , headLimit :: Maybe Int
     }
 
-instance FromJSON SearchArgs where
-    parseJSON = objectArgs \o ->
+searchArgsDecoder :: Decoder SearchArgs
+searchArgsDecoder = objectArgs \o ->
         SearchArgs
             <$> reqText o "handle"
             <*> reqText o "pattern"
@@ -165,8 +165,8 @@ instance FromJSON SearchArgs where
 
 data AnalyzeArgs = AnalyzeArgs Text Text
 
-instance FromJSON AnalyzeArgs where
-    parseJSON = objectArgs \o ->
+analyzeArgsDecoder :: Decoder AnalyzeArgs
+analyzeArgsDecoder = objectArgs \o ->
         AnalyzeArgs <$> reqText o "handle" <*> reqText o "instruction"
 
 readToolOutput :: ToolEnv -> ReadArgs -> IO (Either Text Text)

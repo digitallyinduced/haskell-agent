@@ -6,11 +6,11 @@ module Agent.Telegram.Bridge
     , processTelegramCallbacks
     , processBridgeRequestBatch
     , telegramActivityDraftHtml
+    , telegramActivityMessageText
     ) where
 
 import Agent.CLI.GatewayBridge
     ( ManagedActivity(..)
-    , ManagedBridgeRequest(..)
     , ManagedBridgeResponse(..)
     , managedBridgeActivityPath
     , managedBridgeRequestsDirectory
@@ -18,6 +18,8 @@ import Agent.CLI.GatewayBridge
     , writeManagedBridgeResponseAt
     )
 import Agent.CLI.ManagedTurn (ManagedTurnRequest(..))
+import Agent.Json (RawJson, rawJsonBytes, rawJsonDecoder)
+import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
@@ -28,17 +30,9 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (race, wait, withAsync)
 import Control.Exception.Safe (SomeException, displayException, try)
 import Control.Monad (forM_, void, when)
-import Data.Aeson
-    ( FromJSON(..)
-    , Result(..)
-    , Value(..)
-    , eitherDecode
-    , fromJSON
-    , withObject
-    , (.:)
-    , (.:?)
-    )
+import Data.Aeson (Value(..))
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef (IORef, readIORef, writeIORef)
 import Data.List (isPrefixOf, sort)
 import Data.Functor ((<&>))
 import qualified Data.Map.Strict as Map
@@ -66,6 +60,8 @@ data TelegramBridgeEnv = TelegramBridgeEnv
     , telegramBridgeChat :: !TelegramChatKey
     , telegramBridgeUserId :: !Integer
     , telegramBridgeReplyTo :: !(Maybe Integer)
+    , telegramBridgeProgressMessageId :: !(IORef (Maybe Integer))
+    , telegramBridgeGroupActivityEnabled :: !Bool
     , telegramBridgeAllowedRoot :: !FilePath
     , telegramBridgeModifyState ::
         !((TelegramState -> TelegramState) -> IO ())
@@ -74,54 +70,68 @@ data TelegramBridgeEnv = TelegramBridgeEnv
     , telegramBridgeListUsers :: !(IO Text)
     }
 
+data BridgeRequest = BridgeRequest
+    { bridgeRequestId :: !Text
+    , bridgeRequestKind :: !Text
+    , bridgeRequestPayload :: !RawJson
+    }
+
 data PathRequest = PathRequest
     { pathRequestPath :: !FilePath
     , pathRequestCaption :: !(Maybe Text)
     , pathRequestFilename :: !(Maybe Text)
     }
 
-instance FromJSON PathRequest where
-    parseJSON = withObject "PathRequest" \o ->
+pathRequestDecoder :: Hermes.Decoder PathRequest
+pathRequestDecoder = Hermes.object $
         PathRequest
-            <$> (Text.unpack <$> o .: "path")
-            <*> o .:? "caption"
-            <*> o .:? "filename"
+            <$> (Text.unpack <$> Hermes.atKey "path" Hermes.text)
+            <*> Hermes.optionalKey "caption" Hermes.text
+            <*> Hermes.optionalKey "filename" Hermes.text
 
 data ReactionRequest = ReactionRequest
     { reactionRequestEmoji :: !Text
     , reactionRequestMessageId :: !(Maybe Integer)
     }
 
-instance FromJSON ReactionRequest where
-    parseJSON = withObject "ReactionRequest" \o ->
-        ReactionRequest <$> o .: "emoji" <*> o .:? "message_id"
+reactionRequestDecoder :: Hermes.Decoder ReactionRequest
+reactionRequestDecoder = Hermes.object $
+    ReactionRequest
+        <$> Hermes.atKey "emoji" Hermes.text
+        <*> Hermes.optionalKey "message_id" integerDecoder
 
 data ChoiceRequest = ChoiceRequest
     { choiceRequestQuestion :: !Text
     , choiceRequestOptions :: ![Text]
     }
 
-instance FromJSON ChoiceRequest where
-    parseJSON = withObject "ChoiceRequest" \o ->
-        ChoiceRequest <$> o .: "question" <*> o .: "options"
+choiceRequestDecoder :: Hermes.Decoder ChoiceRequest
+choiceRequestDecoder = Hermes.object $
+    ChoiceRequest
+        <$> Hermes.atKey "question" Hermes.text
+        <*> Hermes.atKey "options" (Hermes.list Hermes.text)
 
 data ApprovalRequest = ApprovalRequest
     { approvalToolName :: !Text
     , approvalArguments :: !Text
     }
 
-instance FromJSON ApprovalRequest where
-    parseJSON = withObject "ApprovalRequest" \o ->
-        ApprovalRequest <$> o .: "tool_name" <*> o .: "arguments"
+approvalRequestDecoder :: Hermes.Decoder ApprovalRequest
+approvalRequestDecoder = Hermes.object $
+    ApprovalRequest
+        <$> Hermes.atKey "tool_name" Hermes.text
+        <*> Hermes.atKey "arguments" Hermes.text
 
 data AllowlistRequest = AllowlistRequest
     { allowlistQuery :: !(Maybe Text)
     , allowlistUserId :: !(Maybe Integer)
     }
 
-instance FromJSON AllowlistRequest where
-    parseJSON = withObject "AllowlistRequest" \o ->
-        AllowlistRequest <$> o .:? "query" <*> o .:? "user_id"
+allowlistRequestDecoder :: Hermes.Decoder AllowlistRequest
+allowlistRequestDecoder = Hermes.object $
+    AllowlistRequest
+        <$> Hermes.optionalKey "query" Hermes.text
+        <*> Hermes.optionalKey "user_id" integerDecoder
 
 allowlistRequestQuery :: AllowlistRequest -> Text
 allowlistRequestQuery request =
@@ -216,7 +226,7 @@ processBridgeRequestBatch seen files decode dispatch = do
 telegramBridgeConcurrency :: Int
 telegramBridgeConcurrency = 4
 
-decodeBridgeRequest :: FilePath -> IO (Either Text ManagedBridgeRequest)
+decodeBridgeRequest :: FilePath -> IO (Either Text BridgeRequest)
 decodeBridgeRequest path =
     try @_ @SomeException
         (retryOnFileBusy (LBS.readFile path)) >>= \case
@@ -225,13 +235,15 @@ decodeBridgeRequest path =
                     "failed to read bridge request: "
                         <> Text.pack (displayException err)
             Right bytes ->
-                pure $ case eitherDecode bytes of
+                pure $ case Hermes.decodeEither managedBridgeRequestDecoder
+                        (LBS.toStrict bytes) of
                     Left err ->
-                        Left ("invalid bridge request JSON: " <> Text.pack err)
+                        Left ("invalid bridge request JSON: "
+                            <> Hermes.jsonErrorMessage err)
                     Right request ->
                         Right request
 
-processBridgeRequest :: TelegramBridgeEnv -> ManagedBridgeRequest -> IO ()
+processBridgeRequest :: TelegramBridgeEnv -> BridgeRequest -> IO ()
 processBridgeRequest env request =
     try @_ @SomeException (dispatch request) >>= \case
         Left err ->
@@ -244,16 +256,16 @@ processBridgeRequest env request =
     dispatch current =
         case current.bridgeRequestKind of
             "send_document" ->
-                withPathPayload current \(payload :: PathRequest) ->
+                withPathPayload pathRequestDecoder current \payload ->
                     sendPath Client.sendTelegramDocument payload
             "send_photo" ->
-                withPathPayload current \(payload :: PathRequest) ->
+                withPathPayload pathRequestDecoder current \payload ->
                     sendPath Client.sendTelegramPhoto payload
             "send_voice" ->
-                withPathPayload current \(payload :: PathRequest) ->
+                withPathPayload pathRequestDecoder current \payload ->
                     sendPath Client.sendTelegramVoice payload
             "react" ->
-                withPayload current \(payload :: ReactionRequest) -> do
+                withPayload reactionRequestDecoder current \payload -> do
                     let messageId =
                             fromMaybe
                                 (fromMaybe 0 env.telegramBridgeReplyTo)
@@ -269,14 +281,14 @@ processBridgeRequest env request =
                                 payload.reactionRequestEmoji
                                 >>= pure . fmap (const (Just (String "reaction sent")))
             "ask_choice" ->
-                withPayload current \(payload :: ChoiceRequest) ->
+                withPayload choiceRequestDecoder current \payload ->
                     registerChoice env current
                         payload.choiceRequestQuestion
                         [ (label, label)
                         | label <- payload.choiceRequestOptions
                         ]
             "approval" ->
-                withPayload current \(payload :: ApprovalRequest) ->
+                withPayload approvalRequestDecoder current \payload ->
                     registerChoice env current
                         (approvalText payload)
                         [ ("Allow once", "allow_once")
@@ -285,12 +297,12 @@ processBridgeRequest env request =
                         , ("Deny", "deny")
                         ]
             "allow_user" ->
-                withPayload current \(payload :: AllowlistRequest) ->
+                withPayload allowlistRequestDecoder current \payload ->
                     Right . Just . String
                         <$> env.telegramBridgeGrantUser
                             (allowlistRequestQuery payload)
             "deny_user" ->
-                withPayload current \(payload :: AllowlistRequest) ->
+                withPayload allowlistRequestDecoder current \payload ->
                     Right . Just . String
                         <$> env.telegramBridgeRevokeUser
                             (allowlistRequestQuery payload)
@@ -299,8 +311,8 @@ processBridgeRequest env request =
             other ->
                 pure (Left ("unknown Telegram bridge request: " <> other))
 
-    withPathPayload current use =
-        withPayload current \payload -> do
+    withPathPayload decoder current use =
+        withPayload decoder current \payload -> do
             allowed <- pathIsAllowed
                 env.telegramBridgeAllowedRoot
                 payload.pathRequestPath
@@ -321,18 +333,40 @@ processBridgeRequest env request =
                     "sent Telegram message " <> Text.pack (show messageId)))
 
 withPayload
-    :: FromJSON a
-    => ManagedBridgeRequest
+    :: Hermes.Decoder a
+    -> BridgeRequest
     -> (a -> IO (Either Text (Maybe Value)))
     -> IO (Either Text (Maybe Value))
-withPayload request use =
-    case fromJSON request.bridgeRequestPayload of
-        Error err -> pure (Left (Text.pack err))
-        Success payload -> use payload
+withPayload decoder request use =
+    case Hermes.decodeEither decoder
+            (rawJsonBytes request.bridgeRequestPayload) of
+        Left err -> pure (Left (Hermes.jsonErrorMessage err))
+        Right payload -> use payload
+
+
+defaultField
+    :: Text
+    -> a
+    -> Hermes.Decoder a
+    -> Hermes.FieldsDecoder a
+defaultField key fallback decoder =
+    Hermes.defaultKey fallback key decoder
+
+integerDecoder :: Hermes.Decoder Integer
+integerDecoder = fromIntegral <$> Hermes.int
+
+managedBridgeRequestDecoder :: Hermes.Decoder BridgeRequest
+managedBridgeRequestDecoder = Hermes.object do
+    version <- defaultField "version" 1 Hermes.int
+    when (version /= 1) (fail "unsupported managed bridge request version")
+    BridgeRequest
+        <$> Hermes.atKey "id" Hermes.text
+        <*> Hermes.atKey "kind" Hermes.text
+        <*> Hermes.atKey "payload" rawJsonDecoder
 
 registerChoice
     :: TelegramBridgeEnv
-    -> ManagedBridgeRequest
+    -> BridgeRequest
     -> Text
     -> [(Text, Text)]
     -> IO (Either Text (Maybe Value))
@@ -527,25 +561,72 @@ publishActivity env previous forceRefresh = do
                     (retryOnFileBusy (LBS.readFile path)) >>= \case
                         Left _ -> pure Nothing
                         Right bytes ->
-                            pure case
-                                    eitherDecode bytes
-                                        :: Either String ManagedActivity
-                                of
+                            pure case Hermes.decodeEither
+                                    managedActivityDecoder
+                                    (LBS.toStrict bytes) of
                                 Right value -> Just value
                                 Left _ -> Nothing
     let next = activity <&> \value ->
-            telegramActivityDraftHtml
-                value.managedActivityMessage
-                value.managedActivityReasoning
-                value.managedActivityResponse
-    forM_ next \html ->
-        when (forceRefresh || Just html /= previous) $
-            void $ try @_ @SomeException $
-                Client.sendStreamingDraft
-                    env.telegramBridgeClient
-                    env.telegramBridgeChat
-                    html
+            if env.telegramBridgeChat.chatId < 0
+                    && env.telegramBridgeGroupActivityEnabled
+                then telegramActivityMessageText
+                    value.managedActivityMessage
+                    value.managedActivityReasoning
+                    value.managedActivityResponse
+                else telegramActivityDraftHtml
+                    value.managedActivityMessage
+                    value.managedActivityReasoning
+                    value.managedActivityResponse
+    forM_ next \rendered ->
+        when (forceRefresh || Just rendered /= previous) $
+            if env.telegramBridgeChat.chatId < 0
+                then when env.telegramBridgeGroupActivityEnabled $
+                    publishGroupActivity env rendered
+                else void $ try @_ @SomeException $
+                    Client.sendStreamingDraft
+                        env.telegramBridgeClient
+                        env.telegramBridgeChat
+                        rendered
     pure (next <|> previous)
+
+publishGroupActivity :: TelegramBridgeEnv -> Text -> IO ()
+publishGroupActivity env message =
+    readIORef env.telegramBridgeProgressMessageId >>= \case
+        Just messageId ->
+            void $ Client.editRichMessageText
+                env.telegramBridgeClient
+                env.telegramBridgeChat
+                messageId
+                message
+        Nothing ->
+            Client.sendRichMessage
+                env.telegramBridgeClient
+                env.telegramBridgeChat
+                env.telegramBridgeReplyTo
+                message >>= \case
+                    Right (Just messageId) -> do
+                        writeIORef env.telegramBridgeProgressMessageId
+                            (Just messageId)
+                        env.telegramBridgeModifyState \state ->
+                            state
+                                { outboundMessageIds =
+                                    Map.insertWith
+                                        Set.union
+                                        env.telegramBridgeChat
+                                        (Set.singleton messageId)
+                                        state.outboundMessageIds
+                                }
+                    _ -> pure ()
+
+managedActivityDecoder :: Hermes.Decoder ManagedActivity
+managedActivityDecoder = Hermes.object $
+    ManagedActivity
+        <$> defaultField "version" 1 Hermes.int
+        <*> Hermes.atKey "kind" Hermes.text
+        <*> Hermes.atKey "message" Hermes.text
+        <*> defaultField "reasoning" "" Hermes.text
+        <*> defaultField "response" "" Hermes.text
+        <*> Hermes.atKey "updated_at" Hermes.utcTime
 
 telegramActivityDraftHtml :: Text -> Text -> Text -> Text
 telegramActivityDraftHtml status reasoningText responseText =
@@ -568,6 +649,25 @@ telegramActivityDraftHtml status reasoningText responseText =
                         else status <> "\n" <> reasoning
     response = Text.takeEnd 2600 responseText
 
+
+telegramActivityMessageText :: Text -> Text -> Text -> Text
+telegramActivityMessageText status reasoningText responseText =
+    Text.takeEnd 4096 $
+        Text.intercalate "\n\n" $
+            filter (not . Text.null) [thinkingText, response]
+  where
+    reasoning = Text.strip reasoningText
+    thinkingText =
+        Text.takeEnd 1400 $
+            if Text.null reasoning
+                then status
+                else
+                    if status `elem`
+                        ["Thinking…", "Writing reply…", "Finishing…"]
+                        then reasoning
+                        else status <> "\n" <> reasoning
+    response = Text.takeEnd 2600 responseText
+
 escapeDraftText :: Text -> Text
 escapeDraftText =
     Text.replace "\n" "<br>" . Text.concatMap \case
@@ -578,7 +678,7 @@ escapeDraftText =
         '\'' -> "&#39;"
         character -> Text.singleton character
 
-respondOk :: TelegramBridgeEnv -> ManagedBridgeRequest -> Value -> IO ()
+respondOk :: TelegramBridgeEnv -> BridgeRequest -> Value -> IO ()
 respondOk env request result =
     writeManagedBridgeResponse env.telegramBridgeRequest ManagedBridgeResponse
         { bridgeResponseVersion = 1
@@ -588,7 +688,7 @@ respondOk env request result =
         , bridgeResponseError = Nothing
         }
 
-respondError :: TelegramBridgeEnv -> ManagedBridgeRequest -> Text -> IO ()
+respondError :: TelegramBridgeEnv -> BridgeRequest -> Text -> IO ()
 respondError env request err =
     writeManagedBridgeResponse env.telegramBridgeRequest ManagedBridgeResponse
         { bridgeResponseVersion = 1

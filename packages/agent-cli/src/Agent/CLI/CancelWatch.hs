@@ -1,12 +1,18 @@
--- | Watch stdin for a bare Esc during an agent turn and soft-cancel.
+-- | Watch stdin for Esc during an agent turn and soft-cancel. Terminals with
+-- the Kitty keyboard protocol active encode the Esc key as @CSI 27 u@ rather
+-- than a bare ESC byte, so the watcher must decode that sequence too.
 module Agent.CLI.CancelWatch
-    ( drainEscapeContinuation
+    ( EscapeContinuation(..)
+    , readEscapeContinuation
+    , escapeContinuationCancels
     , withEscCancel
     , withStdinPaused
     , isBareEscape
     ) where
 
 import Agent.Cancel (CancelFlag, requestCancel)
+import Agent.CLI.Input.KeyDecoder (kittyRelease, parseKittyKey)
+import Agent.CLI.Input.Types (KittyKey(..))
 import Agent.CLI.Terminal (rawAttrs)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
@@ -19,7 +25,6 @@ import System.IO
     , hGetBuffering
     , hGetChar
     , hIsTerminalDevice
-    , hReady
     , hSetBuffering
     , hWaitForInput
     , stdin
@@ -135,34 +140,64 @@ escLoop cancel paused stopped = go
                                             if c /= '\ESC'
                                                 then go
                                                 else do
-                                                    -- Peek for CSI / SS3 so arrows do not cancel.
+                                                    -- Peek for CSI / SS3 so arrows do not cancel,
+                                                    -- but a Kitty-encoded Esc key press must.
                                                     more <- hWaitForInput stdin 50
                                                     if not more
                                                         then requestCancel cancel
                                                         else do
                                                             c2 <- hGetChar stdin
-                                                            drainEscapeContinuation stdin c2
-                                                            go
+                                                            continuation <-
+                                                                readEscapeContinuation stdin c2
+                                                            if escapeContinuationCancels continuation
+                                                                then requestCancel cancel
+                                                                else go
+
+-- | The tail of an escape sequence read after a leading ESC byte.
+data EscapeContinuation
+    = EscapeCsi !String
+    -- ^ A CSI body, including its final byte when one arrived in time.
+    | EscapeOther
+    deriving (Eq, Show)
 
 -- | Consume the remainder of an escape sequence without ever waiting
 -- indefinitely for a fragmented terminal input. SS3 sequences normally have
 -- one byte after @ESC O@, but terminals, tmux, or a truncated paste may omit
--- it while the writer remains open.
-drainEscapeContinuation :: Handle -> Char -> IO ()
-drainEscapeContinuation h = \case
-    '[' -> drainCsi h
+-- it while the writer remains open. CSI bytes are read with short timed waits
+-- rather than a non-blocking peek: a tail that trickles in must still be
+-- consumed here, or it leaks into the next stdin reader as typed text.
+readEscapeContinuation :: Handle -> Char -> IO EscapeContinuation
+readEscapeContinuation h = \case
+    '[' -> EscapeCsi <$> readCsiTail h
     'O' -> do
         ready <- hWaitForInput h 50
         when ready (void (hGetChar h))
-    _ -> pure ()
+        pure EscapeOther
+    _ -> pure EscapeOther
 
-drainCsi :: Handle -> IO ()
-drainCsi h = go
+readCsiTail :: Handle -> IO String
+readCsiTail h = go (0 :: Int) []
   where
-    go = do
-        ready <- hReady h
-        when ready do
-            c <- hGetChar h
-            if c >= '@' && c <= '~'
-                then pure ()
-                else go
+    go count reversed
+        | count >= 32 = pure (reverse reversed)
+        | otherwise = do
+            ready <- hWaitForInput h 50
+            if not ready
+                then pure (reverse reversed)
+                else do
+                    c <- hGetChar h
+                    let next = c : reversed
+                    if c >= '@' && c <= '~'
+                        then pure (reverse next)
+                        else go (count + 1) next
+
+-- | Kitty's keyboard protocol encodes the Esc key as @CSI 27 u@. A press (or
+-- repeat) of that key must cancel exactly like a bare ESC byte; releases and
+-- every other sequence (arrows, function keys) must not.
+escapeContinuationCancels :: EscapeContinuation -> Bool
+escapeContinuationCancels = \case
+    EscapeCsi body -> case parseKittyKey body of
+        Just KittyKey{kittyCodepoint, kittyEvent} ->
+            kittyCodepoint == 27 && kittyEvent /= kittyRelease
+        Nothing -> False
+    EscapeOther -> False

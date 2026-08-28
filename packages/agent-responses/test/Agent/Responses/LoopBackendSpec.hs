@@ -15,6 +15,7 @@ import Agent.Provider
     , Provider(..)
     , tokenProvider
     )
+import Agent.Json (rawJsonFromEncoding)
 import Agent.Responses.LoopBackend
     ( newStreamEventToLoopEvents
     , statelessResponsesBackend
@@ -145,9 +146,11 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningTextDelta
                     , sequenceNumber = Just 1
-                    , eventExtraFields =
-                        KeyMap.singleton "delta"
-                            (Aeson.String "checking the implementation")
+                    , eventDelta = Just "checking the implementation"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -167,14 +170,20 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningTextDelta
                     , sequenceNumber = Just 1
-                    , eventExtraFields =
-                        KeyMap.singleton "delta" (Aeson.String "raw")
+                    , eventDelta = Just "raw"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
                     , sequenceNumber = Just 2
-                    , eventExtraFields =
-                        KeyMap.singleton "delta" (Aeson.String "summary")
+                    , eventDelta = Just "summary"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -195,14 +204,16 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , summaryIndex = Just 0
                     , partValue = Nothing
                     , sequenceNumber = Just 1
-                    , eventExtraFields = KeyMap.empty
+
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
                     , sequenceNumber = Just 2
-                    , eventExtraFields =
-                        KeyMap.singleton "delta"
-                            (Aeson.String "**Inspecting dependencies**")
+                    , eventDelta = Just "**Inspecting dependencies**"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 onStreamEvent ResponseReasoningSummaryPartAddedEvent
                     { streamItemId = Just "reasoning-1"
@@ -210,14 +221,16 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                     , summaryIndex = Just 1
                     , partValue = Nothing
                     , sequenceNumber = Just 3
-                    , eventExtraFields = KeyMap.empty
+
                     }
                 onStreamEvent OtherResponseStreamEvent
                     { otherEventType = EventReasoningSummaryTextDelta
                     , sequenceNumber = Just 4
-                    , eventExtraFields =
-                        KeyMap.singleton "delta"
-                            (Aeson.String "**Planning the fix**")
+                    , eventDelta = Just "**Planning the fix**"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
                     }
                 pure (Left (ConnectionError "stop after reasoning"))
             backend =
@@ -236,7 +249,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
     it "preserves request input prefixes when adding transcript items" do
         let prefix = UnknownResponseItem TaggedObject
                 { tag = "additional_tools"
-                , fields = KeyMap.empty
+
                 }
             params = paramsWithInputItems [prefix]
             request = withRequestInput params (turnInputsToItems [UserMessage "hello"])
@@ -256,7 +269,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
     it "preserves only developer items marked as base instructions" do
         let additional = UnknownResponseItem TaggedObject
                 { tag = "additional_tools"
-                , fields = KeyMap.empty
+
                 }
             unmarkedDeveloper = developerMessage
                 "not base"
@@ -281,7 +294,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
     it "strips image detail hints from Lite messages and tool outputs" do
         let additional = UnknownResponseItem TaggedObject
                 { tag = "additional_tools"
-                , fields = KeyMap.empty
+
                 }
             imageMessage = MessageItem ResponseMessage
                 { messageId = Nothing
@@ -291,27 +304,29 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                         , fileId = Nothing
                         , imageUrl = Just "data:image/png;base64,AA=="
                         , promptCacheBreakpoint = Nothing
-                        , extraFields = KeyMap.empty
+
                         }
                     ]
                 , role = RoleUser
                 , status = Nothing
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
+
                 }
+            toolOutputValue = rawJsonFromEncoding (Aeson.toEncoding (Aeson.object
+                [ "type" Aeson..= ("input_image" :: Text.Text)
+                , "detail" Aeson..= ("high" :: Text.Text)
+                , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
+                ]))
             toolOutput = FunctionCallOutputItem FunctionCallOutput
                 { itemId = Nothing
                 , callId = "call-1"
                 , name = Nothing
                 , namespace = Nothing
-                , output = Aeson.object
-                    [ "type" Aeson..= ("input_image" :: Text.Text)
-                    , "detail" Aeson..= ("high" :: Text.Text)
-                    , "image_url" Aeson..= ("data:image/png;base64,AA==" :: Text.Text)
-                    ]
+                , provider = Nothing
+                , output = toolOutputValue
                 , status = Nothing
-                , extraFields = KeyMap.empty
+
                 }
             params = paramsWithInputItems [additional]
             request = withRequestInput params [imageMessage, toolOutput]
@@ -324,7 +339,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , FunctionCallOutputItem FunctionCallOutput{output}
                 ]) -> do
                     detail `shouldBe` Nothing
-                    jsonField "detail" output `shouldBe` Nothing
+                    output `shouldBe` toolOutputValue
             other -> expectationFailure
                 ("unexpected normalized Lite input: " <> show other)
 
@@ -335,7 +350,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , content = Nothing
                 , encryptedContent = Nothing
                 , status = Nothing
-                , extraFields = KeyMap.empty
+
                 }
             user = turnInputsToItems [UserMessage "hello"]
             params = defaultResponseCreateParams
@@ -353,7 +368,7 @@ backendSpec = describe "tokenProviderStatelessResponsesBackend" do
                 , content = Nothing
                 , encryptedContent = Nothing
                 , status = Nothing
-                , extraFields = KeyMap.empty
+
                 }
             items = turnInputsToItems [UserMessage "hello"] <> [reasoning]
                 <> turnInputsToItems [UserMessage "continue"]
@@ -414,8 +429,11 @@ streamProjectionSpec = describe "newStreamEventToLoopEvents" do
         events <- projectEvent OtherResponseStreamEvent
             { otherEventType = EventOutputTextDelta
             , sequenceNumber = Just 1
-            , eventExtraFields =
-                KeyMap.singleton "delta" (Aeson.String "hi")
+            , eventDelta = Just "hi"
+                    , streamItemId = Nothing
+                    , streamOutputIndex = Nothing
+                    , summaryIndex = Nothing
+                    , turnState = Nothing
             }
         events `shouldBe` [TextDelta "hi"]
 
@@ -427,14 +445,15 @@ functionCallAdded functionItemId functionCallId functionName =
             , callId = functionCallId
             , name = functionName
             , namespace = Nothing
+            , provider = Nothing
             , arguments = ""
             , encryptedFunctionArgs = Nothing
             , status = Nothing
-            , extraFields = KeyMap.empty
+
             }
         , outputIndex = Just 0
         , sequenceNumber = Just 1
-        , eventExtraFields = KeyMap.empty
+
         }
 
 customToolCallAdded :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
@@ -447,11 +466,11 @@ customToolCallAdded customItemId customCallId customName =
             , namespace = Nothing
             , input = ""
             , status = Nothing
-            , extraFields = KeyMap.empty
+
             }
         , outputIndex = Just 0
         , sequenceNumber = Just 1
-        , eventExtraFields = KeyMap.empty
+
         }
 
 argumentsDelta :: Text.Text -> Text.Text -> ResponseStreamEvent
@@ -461,7 +480,7 @@ argumentsDelta deltaItemId deltaText =
         , streamItemId = Just deltaItemId
         , streamOutputIndex = Just 0
         , sequenceNumber = Nothing
-        , eventExtraFields = KeyMap.empty
+
         }
 
 customInputDelta :: Text.Text -> Text.Text -> Text.Text -> ResponseStreamEvent
@@ -472,7 +491,7 @@ customInputDelta deltaItemId deltaCallId deltaText =
         , streamCallId = Just deltaCallId
         , streamOutputIndex = Just 0
         , sequenceNumber = Nothing
-        , eventExtraFields = KeyMap.empty
+
         }
 
 -- | 'input' is also a field on 'CustomToolCall', so a record update on
@@ -528,7 +547,7 @@ developerMessage messageText contentItemKinds =
     MessageItem ResponseMessage
         { messageId = Nothing
         , content = MessageContentParts
-            [InputTextPart messageText Nothing KeyMap.empty]
+            [InputTextPart messageText Nothing]
         , role = RoleDeveloper
         , status = Nothing
         , phase = Nothing
@@ -537,9 +556,9 @@ developerMessage messageText contentItemKinds =
             , createTime = Nothing
             , contentItemKinds = Just contentItemKinds
             , executedToolCalls = Nothing
-            , extraFields = KeyMap.empty
+
             }
-        , extraFields = KeyMap.empty
+
         }
 
 jsonField :: Text.Text -> Aeson.Value -> Maybe Aeson.Value

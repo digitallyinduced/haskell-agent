@@ -72,11 +72,15 @@ library
                     , Agent.OpenAI.CompactClient
                     , Agent.OpenAI.Compaction
                     , Agent.OpenAI.ToolDSL
-    other-modules:    Paths_agent_openai
+    other-modules:    Agent.OpenAI.Compaction.Commands
+                    , Agent.OpenAI.Compaction.Request
+                    , Agent.OpenAI.Models.Types.Enums
+                    , Paths_agent_openai
     autogen-modules:  Paths_agent_openai
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-json            >= 0.1 && < 0.2
                     , agent-responses       >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , text
@@ -95,6 +99,7 @@ library
                     , safe-exceptions
                     , containers
                     , vector
+                    , scientific
                     , time
                     , directory
                     , filepath
@@ -128,13 +133,13 @@ test-suite agent-openai-test
                     , Agent.OpenAI.ModelsManagerSpec
                     , Agent.OpenAI.ModelsTypesSpec
                     , Agent.OpenAI.CompactionSpec
-                    , Agent.OpenAI.ResponsesSpec
                     , Agent.OpenAI.ToolDSLSpec
                     , Agent.OpenAI.UsageSpec
                     , Agent.OpenAI.WebSocketClientSpec
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json
                     , agent-openai
                     , agent-responses
                     , agent-responses-types
@@ -156,17 +161,3 @@ test-suite agent-openai-test
                     , http-types
                     , wai
                     , warp
-
-benchmark openai-json-decoding-bench
-    import:           common-opts
-    type:             exitcode-stdio-1.0
-    hs-source-dirs:   benchmark
-    main-is:          JsonDecoding.hs
-    ghc-options:      -O2
-                      -rtsopts
-    build-depends:    base >= 4.14 && < 5
-                    , agent-openai
-                    , agent-responses-types
-                    , aeson
-                    , bytestring
-                    , text
