@@ -28,6 +28,7 @@ data ReplLine
     | ReplChooseModel Text
     | ReplChooseEffort Text
     | ReplChooseAccount Text
+    | ReplRemovePendingImage !Text !Int
     | ReplQuitInterrupt
     deriving (Eq, Show)
 

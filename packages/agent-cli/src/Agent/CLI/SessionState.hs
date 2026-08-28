@@ -2,10 +2,12 @@
 module Agent.CLI.SessionState
     ( SessionState(..)
     , newSessionState
+    , removeImageAttachmentAt
     ) where
 
 import Agent.CLI.Session.ConversationStore (newConversationStore)
 import Agent.CLI.Session.History (LiveConversation)
+import Agent.Loop (ImageAttachment)
 import Data.IORef (IORef, newIORef)
 import Data.Text (Text)
 
@@ -29,3 +31,15 @@ newSessionState = do
         , sessionConversation = conversation
         , sessionPreviewId = previewId
         }
+
+-- | Remove one pending attachment by its stable zero-based composer index.
+removeImageAttachmentAt
+    :: Int
+    -> [ImageAttachment]
+    -> ([ImageAttachment], Bool)
+removeImageAttachmentAt index pending
+    | index < 0 = (pending, False)
+    | otherwise =
+        case splitAt index pending of
+            (before, _ : after) -> (before <> after, True)
+            _ -> (pending, False)

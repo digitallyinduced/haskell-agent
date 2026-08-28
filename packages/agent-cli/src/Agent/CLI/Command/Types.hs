@@ -46,6 +46,7 @@ data ReplAction
     | ReplPaste !Bool !Text
     | ReplClearAttachments
     | ReplShowAttachments
+    | ReplRemoveAttachment !Int
     | ReplCopyLast
     | ReplCopyCode Int
     | ReplCopyDiff

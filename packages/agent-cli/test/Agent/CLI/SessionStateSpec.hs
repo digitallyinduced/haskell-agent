@@ -24,6 +24,19 @@ spec =
             readLiveAttachments state.sessionConversation `shouldReturn` [image]
             readIORef state.sessionPreviewId `shouldReturn` 42
 
+        it "removes only the selected pending image" do
+            let first = ImageAttachment "image/png" "first"
+                second = ImageAttachment "image/jpeg" "second"
+                pending = [first, second]
+            removeImageAttachmentAt 0 pending
+                `shouldBe` ([second], True)
+            removeImageAttachmentAt 1 pending
+                `shouldBe` ([first], True)
+            removeImageAttachmentAt (-1) pending
+                `shouldBe` (pending, False)
+            removeImageAttachmentAt 2 pending
+                `shouldBe` (pending, False)
+
         it "starts a new user session with empty composer state" do
             state <- newSessionState
             readIORef state.sessionDraft `shouldReturn` ""

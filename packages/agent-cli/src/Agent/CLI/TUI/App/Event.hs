@@ -651,6 +651,8 @@ handleEventInner event = case event of
                                 Composer.handleControlMouseDown ComposerMode
                             (ComposerAccount, V.BLeft) ->
                                 Composer.handleControlMouseDown ComposerAccount
+                            (name@ComposerImageRemove{}, V.BLeft) ->
+                                Composer.handleControlMouseDown name
                             (name, V.BLeft)
                                 | isQuickStartControl name ->
                                     Composer.handleControlMouseDown name

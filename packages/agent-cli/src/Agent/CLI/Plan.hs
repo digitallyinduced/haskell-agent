@@ -235,6 +235,8 @@ readChangeNotes interrupt color = do
             readChangeNotes interrupt color
         ReplChooseAccount _ ->
             readChangeNotes interrupt color
+        ReplRemovePendingImage _ _ ->
+            readChangeNotes interrupt color
         ReplText text
             | Text.null (Text.strip text) -> pure "(no notes)"
             | otherwise -> pure (Text.strip text)
@@ -277,6 +279,8 @@ askQuestion interrupt resolveColor question options = do
                         ReplChooseEffort _ ->
                             askQuestion interrupt resolveColor question []
                         ReplChooseAccount _ ->
+                            askQuestion interrupt resolveColor question []
+                        ReplRemovePendingImage _ _ ->
                             askQuestion interrupt resolveColor question []
                         ReplText text
                             | Text.null (Text.strip text) -> pure Nothing
