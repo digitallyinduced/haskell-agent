@@ -91,7 +91,7 @@ import Agent.CLI.Session.History
       replaceLiveConversation )
 import Agent.CLI.Session.Lifecycle ()
 import Agent.CLI.Session.Runtime.Types
-    ( SessionRequest(codexCatalogSession, SessionRequest, catalog,
+    ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
@@ -518,6 +518,7 @@ runAgentSession
                         sessionCompactRunner =
                             SessionRequest
                                 { catalog
+                                , modelInfo = codexModelInfo
                                 , connectionId =
                                     inferredTarget.targetConnectionId
                                 , options

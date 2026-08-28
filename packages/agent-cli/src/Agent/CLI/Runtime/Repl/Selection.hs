@@ -20,7 +20,7 @@ import Agent.CLI.Clipboard ()
 import Agent.CLI.Command
     ( currentEffort,
       currentModel,
-      ReplAction(ReplSetModel, ReplShowEffort, ReplSetEffort,
+      ReplAction(ReplSetModel, ReplShowEffort, ReplSetEffort, ReplToggleFast,
                  ReplShowModel) )
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config ()
@@ -121,6 +121,7 @@ import Agent.Loop ( LoopEvent(ActivityUpdated) )
 import Agent.OpenAI.Compaction ()
 import Agent.OpenAI.Usage ()
 import Agent.OpenAI.WebSocketClient ()
+import Agent.OpenAI.Models.Types (ModelInfo(..), modelServiceTierForRequest)
 import Agent.OpenRouter.LoopBackend ()
 import Agent.OsPath ()
 import Agent.Provider
@@ -130,7 +131,7 @@ import Agent.Provider
 import Agent.ReasoningEffort (reasoningEffortText)
 import Agent.Responses.GenericBackend ()
 import Agent.Responses.GenericClient ()
-import Agent.Responses.Types ()
+import Agent.Responses.Types (ResponseCreateParams(..))
 import Agent.Skills ()
 import Agent.Store.Postgres ()
 import Agent.Store.Types ()
@@ -239,6 +240,32 @@ handleSelection
         continue
     Right (ReplSetEffort level) -> do
         setEffort level
+        continue
+    Right ReplToggleFast -> do
+        color <- resolveColor stdout
+        params <- readIORef paramsRef
+        let enabled = params.serviceTier == Just "priority"
+            supported = maybe False
+                (\info ->
+                    let ModelInfo { slug = infoSlug } = info
+                    in infoSlug == currentModel params
+                        && modelServiceTierForRequest info (Just "priority")
+                            == Just "priority")
+                env.sessionModelInfo
+        if not supported
+            then do
+                let message = "fast mode is not available for the active model"
+                displayError message $
+                    Text.hPutStrLn stderr (roleError color message)
+            else do
+                let next = not enabled
+                    message =
+                        if next then "fast mode enabled"
+                        else "fast mode disabled"
+                writeIORef paramsRef
+                    params { serviceTier = if next then Just "priority" else Nothing }
+                displayInfo message $
+                    Text.putStrLn (roleMuted color (glyphOk <> message))
         continue
     Right ReplShowModel -> do
         chooseModel continue

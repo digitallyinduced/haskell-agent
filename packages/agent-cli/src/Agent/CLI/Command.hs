@@ -75,22 +75,25 @@ import qualified Data.Text as Text
 -- callers with a live session should use 'mkSlashCatalog'.
 defaultSlashCatalog :: SlashCatalog
 defaultSlashCatalog =
-    mkSlashCatalog CodexDialect [] [] []
+    mkSlashCatalog False CodexDialect [] [] []
 
 mkSlashCatalog
-    :: DialectId
+    :: Bool
+    -> DialectId
     -> [Text]
     -> [SkillCommand]
     -> [Text]
     -> SlashCatalog
-mkSlashCatalog dialect toolNames skills modelIds =
+mkSlashCatalog fastMode dialect toolNames skills modelIds =
     let tools =
             Set.fromList
                 (map (Text.toLower . Text.strip) toolNames)
         commands =
             filter
-                (commandAvailable dialect tools)
-                (map (commandForDialect dialect) slashCommands)
+                (\command -> command.slashName /= "fast" || fastMode)
+                (filter
+                    (commandAvailable dialect tools)
+                    (map (commandForDialect dialect) slashCommands))
     in SlashCatalog
         { slashCatalogDialect = dialect
         , slashCatalogToolNames = tools
@@ -210,6 +213,10 @@ parseSlash catalog raw line = case Text.words line of
         Just spec -> case spec.slashName of
             "help" -> parseHelpCommand catalog args
             "effort" -> parseEffortCommand args
+            "fast" ->
+                if null args
+                    then ReplToggleFast
+                    else ReplCommandError "usage: /fast"
             "model" -> parseModelCommand args
             "plan" ->
                 let description =

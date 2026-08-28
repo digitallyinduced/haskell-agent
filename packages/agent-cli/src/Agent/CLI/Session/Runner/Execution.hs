@@ -815,6 +815,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             pure result
         env = SessionEnv
             { sessionLoop = config
+            , sessionModelInfo = modelInfo
             , sessionBtwBackend = btwBackend
             , sessionQueueRecap = writeChan recapRequests
             , sessionCompact = compactRunnerWithContext

@@ -24,6 +24,7 @@ import Agent.Loop (LoopConfig, TokenUsage)
 import Agent.MCP (McpToolRegistration)
 import qualified Agent.OpenAI.Auth as OpenAI
 import Agent.Responses.Types (ResponseCreateParams)
+import Agent.OpenAI.Models.Types (ModelInfo)
 import System.OsPath (OsPath)
 import Agent.Provider (Credential, Provider, TokenProvider)
 import Agent.CLI.ProviderTransition (PendingTurn)
@@ -38,6 +39,7 @@ import Control.Concurrent.STM (STM)
 
 data SessionEnv = SessionEnv
     { sessionLoop :: !LoopConfig
+    , sessionModelInfo :: !(Maybe ModelInfo)
     , sessionBtwBackend :: !BtwBackendFactory
     , sessionQueueRecap :: !(RecapRequest -> IO ())
     , sessionCompact :: !(Maybe Text -> IO (Either Text CompactOutcome))

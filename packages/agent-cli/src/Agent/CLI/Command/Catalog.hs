@@ -10,6 +10,7 @@ slashCommands =
     [ cmd "help" [] "/help [NAME]" "List slash commands, or describe one" True
     , cmd "model" ["m"] "/model [NAME]" "Open the model picker, or set a model" True
     , cmd "effort" [] "/effort [none|low|medium|high|xhigh|max]" "Show or set reasoning effort" True
+    , codexCmd "fast" [] "/fast" "Toggle the Fast service tier" False
     , cmd "plan" [] "/plan [description]" "Enter plan mode (or Shift+Tab)" True
     , cmd "btw" [] "/btw <QUESTION>" "Ask a side question without changing the conversation" True
     , cmd "recap" ["summarize"] "/recap" "Summarize the session so far" False
@@ -63,3 +64,6 @@ slashCommands =
             { slashDialects = Just [GrokBuildDialect]
             , slashRequiredTools = [requiredTool]
             }
+    codexCmd name aliases usage summary takesArguments =
+        (cmd name aliases usage summary takesArguments)
+            { slashDialects = Just [CodexDialect] }
