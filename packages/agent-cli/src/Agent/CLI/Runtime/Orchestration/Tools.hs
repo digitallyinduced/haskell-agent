@@ -47,6 +47,7 @@ import Agent.CLI.Lsp
     ( LspStartup(..), closeLspRuntime, lspRuntimeTool, newLspRuntime )
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.McpManager ()
+import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
 import Agent.CLI.McpStatus
     ( formatMcpModelNoticeFor,
       formatMcpProgress,
@@ -223,7 +224,7 @@ import Data.Text ()
 import Data.Time.Clock ()
 import System.Console.ANSI ()
 import System.Console.ANSI.Codes ()
-import System.Directory.OsPath ()
+import System.Directory.OsPath (getHomeDirectory)
 import System.Environment ()
 import System.Exit ()
 import System.IO ()
@@ -244,7 +245,7 @@ import qualified Agent.MCP as MCP
                       mcpServerName, mcpServerUrl, mcpServerCommand, mcpServerArgs, mcpServerCwd,
                       mcpServerEnv, mcpServerStartupTimeoutSeconds) )
 import qualified Data.Map.Strict as Map
-    ( toAscList, empty, lookup )
+    ( toAscList, empty, lookup, notMember )
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter
     ( clientOptionsFromEnv, mapModel )
@@ -569,6 +570,7 @@ runAgentTools
                 (sessionId, tempDir) <- allocateSessionTemp root
                 pure (tempDir, Just sessionId)
     setToolSessionTmp baseToolEnv (Just sessionTmp)
+    home <- getHomeDirectory
     let cleanupScratch = do
             cleanupPendingPersistence persist
             forM_ ephemeralSessionId \sessionId -> do
@@ -587,7 +589,11 @@ runAgentTools
                 , MCP.mcpServerEnv =
                     [ (Text.unpack name, Text.unpack value)
                     | (name, value) <- Map.toAscList config.mcpEnv
-                    ]
+                    ] <> case config.mcpUrl of
+                        Just url
+                            | Map.notMember "MCP_OAUTH_TOKEN_FILE" config.mcpEnv ->
+                                [("MCP_OAUTH_TOKEN_FILE", unsafeToFilePath (mcpOAuthStorePath home url))]
+                        _ -> []
                 , MCP.mcpServerStartupTimeoutSeconds =
                     config.mcpStartupTimeoutSeconds
                 , MCP.mcpServerRequestTimeoutSeconds =

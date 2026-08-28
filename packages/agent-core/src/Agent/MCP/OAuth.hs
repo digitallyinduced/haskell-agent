@@ -138,17 +138,18 @@ refreshAccessToken manager endpoint clientId oldRefresh = do
         Right response | statusCode (responseStatus response) < 200 || statusCode (responseStatus response) >= 300 -> pure (OAuthTokenFailure "OAuth token request failed")
                        | otherwise -> pure $ either (OAuthTokenFailure . Text.pack) OAuthTokenSuccess (Aeson.eitherDecode (responseBody response))
 
-exchangeAuthorizationCode :: Manager -> Text -> Text -> Text -> Text -> Text -> IO OAuthTokenResponse
-exchangeAuthorizationCode manager endpoint clientId code redirectUri verifier = do
+exchangeAuthorizationCode :: Manager -> Text -> Text -> Text -> Text -> Text -> Maybe Text -> IO OAuthTokenResponse
+exchangeAuthorizationCode manager endpoint clientId code redirectUri verifier resource = do
     result <- tryAny $ do
         request <- parseRequest (Text.unpack endpoint)
-        let request' = urlEncodedBody
+        let parameters =
                 [ ("grant_type", "authorization_code")
                 , ("code", Encoding.encodeUtf8 code)
                 , ("redirect_uri", Encoding.encodeUtf8 redirectUri)
                 , ("client_id", Encoding.encodeUtf8 clientId)
                 , ("code_verifier", Encoding.encodeUtf8 verifier)
-                ] request { HC.method = "POST" }
+                ] <> maybe [] (\value -> [("resource", Encoding.encodeUtf8 value)]) resource
+            request' = urlEncodedBody parameters request { HC.method = "POST" }
         httpLbs request' manager
     case result of
         Left e -> pure (OAuthTokenFailure (Text.pack (show e)))

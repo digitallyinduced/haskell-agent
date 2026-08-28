@@ -54,19 +54,21 @@ loginMcp serverUrl = do
         state <- randomUrlBytes 24
         let challenge = Base64.encodeUnpadded (BA.convert (hash (Encoding.encodeUtf8 verifier) :: Digest SHA256))
             scope = Text.unwords metadata.scopesSupportedByServer
+            resourceUrl = fromMaybe serverUrl resource.resource
             authUrl = metadata.authorizationEndpoint
                 <> "?response_type=code&client_id=" <> encode registration.clientId
                 <> "&redirect_uri=" <> encode redirect
                 <> "&code_challenge=" <> Encoding.decodeUtf8 challenge
                 <> "&code_challenge_method=S256&state=" <> encode state
-                <> if Text.null scope then "" else "&scope=" <> encode scope
+                <> (if Text.null scope then "" else "&scope=" <> encode scope)
+                <> "&resource=" <> encode resourceUrl
         putStrLn ("Opening browser for MCP authorization: " <> Text.unpack authUrl)
         _ <- openBrowser authUrl
         callback <- timeout (5 * 60 * 1000000) (receiveCallback listener)
             >>= maybe (failText "Timed out waiting for MCP OAuth callback") pure
         when (callback.state /= Just state) (failText "MCP OAuth callback state mismatch")
         code <- maybe (failText "MCP OAuth callback did not contain an authorization code") pure callback.code
-        OAuth.exchangeAuthorizationCode manager metadata.tokenEndpoint registration.clientId code redirect verifier
+        OAuth.exchangeAuthorizationCode manager metadata.tokenEndpoint registration.clientId code redirect verifier (Just resourceUrl)
             >>= \case
                 OAuth.OAuthTokenFailure err -> failText err
                 OAuth.OAuthTokenSuccess tokens -> do
