@@ -350,8 +350,8 @@ handleComposerKey
                 EscapeDismissSlashMenu ->
                     modify' \current ->
                         current { appSlashDismissed = True }
-                EscapeClearDraft ->
-                    cancelOrClear
+                EscapePreserveDraft ->
+                    pure ()
         V.EvKey V.KBackTab []
             | ui.uiAwaitingInput ->
                 submitRaw (ReplCycleMode ui.uiDraft)
