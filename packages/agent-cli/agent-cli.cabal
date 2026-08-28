@@ -153,6 +153,7 @@ library
                     , Agent.CLI.Command
                     , Agent.CLI.Config
                     , Agent.CLI.CredentialStore
+                    , Agent.CLI.McpOAuthStore
                     , Agent.CLI.Database
                     , Agent.CLI.Database.Store
                     , Agent.CLI.Database.Storage
