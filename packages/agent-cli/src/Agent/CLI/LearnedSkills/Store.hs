@@ -14,6 +14,15 @@ import Agent.CLI.LearnedSkills
     , LearnedSkillCreateRequest(..)
     , LearnedSkillRollbackRequest(..)
     , LearnedSkillToolsEnv(..)
+    , LearnedSkillDetails(..)
+    , LearnedSkillMutationResponse(..)
+    , LearnedSkillRevisionDetails(..)
+    , LearnedSkillRevisionSummary(..)
+    , LearnedSkillSearchMatch(..)
+    , LearnedSkillSearchResponse(..)
+    , LearnedSkillSourceDetails(..)
+    , LearnedSkillSummary(..)
+    , LearnedSkillView(..)
     , LearnedSkillUpdateRequest(..)
     )
 import Agent.Store.Postgres
@@ -49,7 +58,6 @@ import Agent.Store.Postgres.Skill
     , updateLearnedSkill
     )
 import Agent.Store.Types (StoreError, renderStoreError)
-import Data.Aeson (Value, object, (.=))
 import Data.Bifunctor (first)
 import Data.List (find)
 import Data.Text (Text)
@@ -69,7 +77,8 @@ learnedSkillToolsEnvForStore store scopes currentSessionId =
                 (searchLearnedSkills pool applicableScopes query limit)
                 >>= pure . fmap
                     (\results ->
-                        object ["matches" .= map searchResultValue results])
+                        LearnedSkillSearchResponse
+                            (map searchResultValue results))
         , learnedSkillRead = \selected slug revision ->
             readSkillValue
                 (scopeForDatabase scopes selected)
@@ -198,14 +207,11 @@ learnedSkillToolsEnvForStore store scopes currentSessionId =
                                             selectedRevision.learnedSkillRevisionNumber)
                                 pure do
                                     sources <- sourcesResult
-                                    Right $ object
-                                        [ "skill" .= skillValue skill
-                                        , "selected_revision" .=
-                                            revisionDetailValue selectedRevision
-                                        , "sources" .= map sourceValue sources
-                                        , "revisions" .=
-                                            map revisionValue revisions
-                                        ]
+                                    Right $ LearnedSkillView
+                                        (skillValue skill)
+                                        (revisionDetailValue selectedRevision)
+                                        (map sourceValue sources)
+                                        (map revisionValue revisions)
 
     selectRevision skill revisions requested =
         let revisionNumber =
@@ -251,13 +257,11 @@ storeResultIO
 storeResultIO action =
     first renderStoreError <$> action
 
-mutationResultValue :: LearnedSkillMutationResult -> Either Text Value
+mutationResultValue :: LearnedSkillMutationResult
+    -> Either Text LearnedSkillMutationResponse
 mutationResultValue = \case
     LearnedSkillMutationApplied skill ->
-        Right $ object
-            [ "status" .= ("applied" :: Text)
-            , "skill" .= skillValue skill
-            ]
+        Right $ LearnedSkillMutationResponse "applied" (skillValue skill)
     LearnedSkillMutationAlreadyExists ->
         Left
             "a learned skill with this scope and slug already exists; read it and use skill_update"
@@ -271,83 +275,69 @@ mutationResultValue = \case
     LearnedSkillMutationRevisionNotFound ->
         Left "target learned-skill revision not found"
 
-searchResultValue :: LearnedSkillSearchResult -> Value
-searchResultValue result = object
-    [ "skill" .= skillSummaryValue result.learnedSkillSearchSkill
-    , "rank" .= result.learnedSkillSearchRank
-    ]
+searchResultValue :: LearnedSkillSearchResult -> LearnedSkillSearchMatch
+searchResultValue result = LearnedSkillSearchMatch
+    (skillSummaryValue result.learnedSkillSearchSkill)
+    result.learnedSkillSearchRank
 
-skillSummaryValue :: LearnedSkill -> Value
-skillSummaryValue skill = object
-    [ "scope" .= scopeKindText skill.learnedSkillScope.scopeKind
-    , "slug" .= skill.learnedSkillSlug
-    , "title" .= skill.learnedSkillTitle
-    , "description" .= skill.learnedSkillDescription
-    , "applies_when" .= skill.learnedSkillAppliesWhen
-    , "activation" .=
-        learnedSkillActivationText skill.learnedSkillActivation
-    , "priority" .= skill.learnedSkillPriority
-    , "status" .= learnedSkillStatusText skill.learnedSkillStatus
-    , "revision" .= skill.learnedSkillRevision
-    , "updated_at" .= skill.learnedSkillUpdatedAt
-    ]
+skillSummaryValue :: LearnedSkill -> LearnedSkillSummary
+skillSummaryValue skill = LearnedSkillSummary
+    (scopeKindText skill.learnedSkillScope.scopeKind)
+    skill.learnedSkillSlug
+    skill.learnedSkillTitle
+    skill.learnedSkillDescription
+    skill.learnedSkillAppliesWhen
+    (learnedSkillActivationText skill.learnedSkillActivation)
+    (fromIntegral skill.learnedSkillPriority)
+    (learnedSkillStatusText skill.learnedSkillStatus)
+    skill.learnedSkillRevision
+    skill.learnedSkillUpdatedAt
 
-skillValue :: LearnedSkill -> Value
-skillValue skill = object
-    [ "scope" .= scopeKindText skill.learnedSkillScope.scopeKind
-    , "slug" .= skill.learnedSkillSlug
-    , "title" .= skill.learnedSkillTitle
-    , "description" .= skill.learnedSkillDescription
-    , "applies_when" .= skill.learnedSkillAppliesWhen
-    , "instructions" .= skill.learnedSkillInstructions
-    , "activation" .=
-        learnedSkillActivationText skill.learnedSkillActivation
-    , "priority" .= skill.learnedSkillPriority
-    , "status" .= learnedSkillStatusText skill.learnedSkillStatus
-    , "revision" .= skill.learnedSkillRevision
-    , "created_at" .= skill.learnedSkillCreatedAt
-    , "updated_at" .= skill.learnedSkillUpdatedAt
-    ]
+skillValue :: LearnedSkill -> LearnedSkillDetails
+skillValue skill = LearnedSkillDetails
+    (scopeKindText skill.learnedSkillScope.scopeKind)
+    skill.learnedSkillSlug
+    skill.learnedSkillTitle
+    skill.learnedSkillDescription
+    skill.learnedSkillAppliesWhen
+    skill.learnedSkillInstructions
+    (learnedSkillActivationText skill.learnedSkillActivation)
+    (fromIntegral skill.learnedSkillPriority)
+    (learnedSkillStatusText skill.learnedSkillStatus)
+    skill.learnedSkillRevision
+    skill.learnedSkillCreatedAt
+    skill.learnedSkillUpdatedAt
 
-revisionValue :: LearnedSkillRevision -> Value
-revisionValue revision = object
-    [ "revision" .= revision.learnedSkillRevisionNumber
-    , "title" .= revision.learnedSkillRevisionTitle
-    , "description" .= revision.learnedSkillRevisionDescription
-    , "applies_when" .= revision.learnedSkillRevisionAppliesWhen
-    , "activation" .=
-        learnedSkillActivationText
-            revision.learnedSkillRevisionActivation
-    , "priority" .= revision.learnedSkillRevisionPriority
-    , "status" .=
-        learnedSkillStatusText revision.learnedSkillRevisionStatus
-    , "change_summary" .= revision.learnedSkillRevisionSummary
-    , "created_at" .= revision.learnedSkillRevisionCreatedAt
-    ]
+revisionValue :: LearnedSkillRevision -> LearnedSkillRevisionSummary
+revisionValue revision = LearnedSkillRevisionSummary
+    revision.learnedSkillRevisionNumber
+    revision.learnedSkillRevisionTitle
+    revision.learnedSkillRevisionDescription
+    revision.learnedSkillRevisionAppliesWhen
+    (learnedSkillActivationText revision.learnedSkillRevisionActivation)
+    (fromIntegral revision.learnedSkillRevisionPriority)
+    (learnedSkillStatusText revision.learnedSkillRevisionStatus)
+    revision.learnedSkillRevisionSummary
+    revision.learnedSkillRevisionCreatedAt
 
-revisionDetailValue :: LearnedSkillRevision -> Value
-revisionDetailValue revision = object
-    [ "revision" .= revision.learnedSkillRevisionNumber
-    , "title" .= revision.learnedSkillRevisionTitle
-    , "description" .= revision.learnedSkillRevisionDescription
-    , "applies_when" .= revision.learnedSkillRevisionAppliesWhen
-    , "instructions" .= revision.learnedSkillRevisionInstructions
-    , "activation" .=
-        learnedSkillActivationText
-            revision.learnedSkillRevisionActivation
-    , "priority" .= revision.learnedSkillRevisionPriority
-    , "status" .=
-        learnedSkillStatusText revision.learnedSkillRevisionStatus
-    , "change_summary" .= revision.learnedSkillRevisionSummary
-    , "created_at" .= revision.learnedSkillRevisionCreatedAt
-    ]
+revisionDetailValue :: LearnedSkillRevision -> LearnedSkillRevisionDetails
+revisionDetailValue revision = LearnedSkillRevisionDetails
+    revision.learnedSkillRevisionNumber
+    revision.learnedSkillRevisionTitle
+    revision.learnedSkillRevisionDescription
+    revision.learnedSkillRevisionAppliesWhen
+    revision.learnedSkillRevisionInstructions
+    (learnedSkillActivationText revision.learnedSkillRevisionActivation)
+    (fromIntegral revision.learnedSkillRevisionPriority)
+    (learnedSkillStatusText revision.learnedSkillRevisionStatus)
+    revision.learnedSkillRevisionSummary
+    revision.learnedSkillRevisionCreatedAt
 
-sourceValue :: LearnedSkillSource -> Value
-sourceValue source = object
-    [ "revision" .= source.learnedSkillSourceRevision
-    , "session_id" .= source.learnedSkillSourceSessionKey
-    , "turn_index" .= source.learnedSkillSourceTurnIndex
-    , "response_item_id" .= source.learnedSkillSourceResponseItemId
-    , "evidence" .= source.learnedSkillSourceEvidence
-    , "created_at" .= source.learnedSkillSourceCreatedAt
-    ]
+sourceValue :: LearnedSkillSource -> LearnedSkillSourceDetails
+sourceValue source = LearnedSkillSourceDetails
+    source.learnedSkillSourceRevision
+    source.learnedSkillSourceSessionKey
+    source.learnedSkillSourceTurnIndex
+    source.learnedSkillSourceResponseItemId
+    source.learnedSkillSourceEvidence
+    source.learnedSkillSourceCreatedAt

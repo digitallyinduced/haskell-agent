@@ -14,6 +14,7 @@ module Agent.Responses.Types.Items
     , CustomToolCallOutput(..)
     , ReasoningItem(..)
     , ReasoningSummaryPart(..)
+    , reasoningSummaryPartDecoder
     , ItemReference(..)
     , ResponseAgentMessage(..)
     , InternalChatMetadata(..)
