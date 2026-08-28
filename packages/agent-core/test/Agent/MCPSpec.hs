@@ -2,7 +2,7 @@ module Agent.MCPSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
-import Agent.Json (rawJsonFromEncoding)
+import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , dispatchToolCall
@@ -20,6 +20,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, wait, waitCatch, withAsync)
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (find)
@@ -52,6 +53,28 @@ spec = describe "Agent.MCP" do
         rendered `shouldContain` "API_TOKEN"
         rendered `shouldContain` "<redacted>"
         rendered `shouldNotContain` "super-secret"
+
+    describe "decodeHttpMcpResponse" do
+        it "unwraps the JSON-RPC result before MCP payload decoding" do
+            let response = BS8.pack
+                    "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"read\"}]}}"
+            case decodeHttpMcpResponse response of
+                Left err -> expectationFailure (Text.unpack err)
+                Right result ->
+                    Data.Aeson.decodeStrict (rawJsonBytes result)
+                        `shouldBe`
+                            Just (object
+                                [ "tools" .=
+                                    [object ["name" .= ("read" :: Text.Text)]]
+                                ])
+
+        it "surfaces JSON-RPC errors instead of treating them as payloads" do
+            decodeHttpMcpResponse
+                (BS8.pack
+                    "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-1,\"message\":\"denied\"}}")
+                `shouldSatisfy` \case
+                    Left err -> "denied" `Text.isInfixOf` err
+                    Right _ -> False
 
     describe "normalizeMcpToolResult" do
         it "extracts successful text content" do

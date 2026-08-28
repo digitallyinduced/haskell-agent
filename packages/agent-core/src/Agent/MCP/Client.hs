@@ -82,6 +82,7 @@ import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
+import Data.Bifunctor (first)
 import Data.Char (isAlphaNum)
 import Data.IORef
     ( IORef
@@ -716,11 +717,13 @@ httpRequestMcpWithId client timeoutMicros url method parameters requestId = do
                 let bytes = LBS.toStrict (responseBody response)
                 if BS.null bytes
                     then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
-                else case Json.decodeEither rawJsonDecoder bytes of
-                    Right value -> pure (Right value)
-                    Left jsonError -> case find (BS8.isPrefixOf "data: ") (BS8.lines bytes) of
-                        Just eventData -> pure (either (Left . ("Invalid MCP SSE response: " <>) . Text.pack . show) Right (Json.decodeEither rawJsonDecoder (BS8.drop 6 eventData)))
-                        Nothing -> pure (Left ("Invalid MCP HTTP response: " <> Text.pack (show jsonError)))
+                    else case decodeHttpMcpResponse bytes of
+                        Right value -> pure (Right value)
+                        Left jsonError -> case find (BS8.isPrefixOf "data: ") (BS8.lines bytes) of
+                            Just eventData -> pure $
+                                first ("Invalid MCP SSE response: " <>)
+                                    (decodeHttpMcpResponse (BS8.drop 6 eventData))
+                            Nothing -> pure (Left ("Invalid MCP HTTP response: " <> jsonError))
     perform configuredToken >>= \case
         Left exception -> pure (Left ("MCP HTTP request failed: " <> exceptionSummary exception))
         Right Nothing -> pure (Left ("MCP request " <> method <> " timed out"))
@@ -734,6 +737,16 @@ httpRequestMcpWithId client timeoutMicros url method parameters requestId = do
                         Right Nothing -> pure (Left ("MCP request " <> method <> " timed out"))
                         Left retryException -> pure (Left ("MCP HTTP request failed: " <> exceptionSummary retryException))
             | otherwise -> decodeResponse response
+
+decodeHttpMcpResponse :: BS.ByteString -> Either Text RawJson
+decodeHttpMcpResponse bytes = do
+    envelope <- first (.jsonErrorMessage) $
+        Json.decodeEither responseEnvelopeDecoder bytes
+    case envelope.envelopeError of
+        Just err -> Left ("MCP error: " <> compactRawJson err)
+        Nothing -> case envelope.envelopeResult of
+            Just result -> Right result
+            Nothing -> Left "MCP response omitted result"
 
 sendNotification
     :: McpClient
