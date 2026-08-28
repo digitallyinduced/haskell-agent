@@ -40,11 +40,11 @@ library
     exposed-modules:  Claude.Agent.SDK
                     , Claude.Agent.SDK.Client
                     , Claude.Agent.SDK.Errors
+                    , Claude.Agent.SDK.Internal.MessageParser
                     , Claude.Agent.SDK.Query
                     , Claude.Agent.SDK.Transport
                     , Claude.Agent.SDK.Types
     other-modules:    Claude.Agent.SDK.Internal.Client.Usage
-                    , Claude.Agent.SDK.Internal.MessageParser
                     , Claude.Agent.SDK.Internal.Process
                     , Claude.Agent.SDK.Internal.Query
                     , Claude.Agent.SDK.Internal.Transport.SubprocessCLI
@@ -71,6 +71,7 @@ test-suite claude-agent-sdk-haskell-test
     hs-source-dirs:   test
     main-is:          Spec.hs
     other-modules:    Claude.Agent.SDK.ClientSpec
+                    , Claude.Agent.SDK.MessageParserSpec
                     , Claude.Agent.SDK.QuerySpec
                     , Claude.Agent.SDK.TestSupport
     ghc-options:      -threaded
