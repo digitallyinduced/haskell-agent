@@ -69,7 +69,10 @@ import Agent.CLI.Options
                  optGhci, optBash, optNoYolo) )
 import Agent.CLI.PendingInputs
     ( enqueuePendingInput, newPendingInputs )
-import Agent.CLI.Plan ( cliPlanHooks )
+import Agent.CLI.Plan
+    ( cliPlanHooks
+    , resumedPlanNeedsApproval
+    )
 import Agent.CLI.Project ( saveRememberedModel )
 import Agent.CLI.Prompt ( subscriptionSubagentModelGuidance )
 import Agent.CLI.PromptHooks
@@ -109,7 +112,8 @@ import Agent.CLI.Session
       Persistence(PersistenceDisabled),
       SessionHandle(sessionDir, sessionMeta),
       SessionMeta(metaId, metaTransportModel, metaProvider,
-                  metaConnection, metaModel, metaDialect, metaEffort) )
+                  metaConnection, metaModel, metaDialect, metaEffort),
+      SessionTurn(turnAssistantText) )
 import Agent.CLI.Session.Attachments ()
 import Agent.CLI.Session.Choices ()
 import Agent.CLI.Session.History ()
@@ -198,6 +202,7 @@ import Agent.Tools.MultiAgents
     ( MultiAgentContext(..), SubagentWorktree(..) )
 import Agent.Tools.PlanMode
     ( PlanModeEnv(planSessionDir),
+      activatePlanMode,
       PlanModeHooks(planAskQuestion, PlanModeHooks, planConfirmEnter,
                     planDecideExit),
       PlanDecision(PlanCancel) )
@@ -449,6 +454,10 @@ runAgentTools
         claudeBypassEnabled =
             not options.optNoYolo
                 && (options.optYolo || projectSettings.settingsAutoApprove)
+    -- Plan mode itself is process-local, while the assistant's proposed plan
+    -- is durable in the session transcript. Reconstruct the approval phase
+    -- before entering the REPL so a resumed Codex session cannot interpret
+    -- the user's approval as ordinary steering input.
     -- Provider transitions commit their selection separately: manual switches
     -- immediately, automatic fallbacks only after the replacement succeeds.
     when (isNothing transition) $
@@ -813,6 +822,12 @@ runAgentTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
         planMode = coding.codingPlanMode
+        resumedPlanPending =
+            case resumed of
+                Just (_, turns) ->
+                    resumedPlanNeedsApproval
+                        (map turnAssistantText turns)
+                Nothing -> False
         -- Keep planSessionDir and subagent store root in sync.
         noteSessionDir dir = do
             writeIORef planMode.planSessionDir (Just dir)
@@ -840,6 +855,7 @@ runAgentTools
                                                     (join (readIORef codeModeCloseRef)
                                                         `finally`
                                                             cleanupScratch)))))
+    when resumedPlanPending (activatePlanMode planMode)
     runAgentSession
         loaded
         learnAboutUserRequested
