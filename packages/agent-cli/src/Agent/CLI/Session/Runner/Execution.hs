@@ -5,6 +5,11 @@ module Agent.CLI.Session.Runner.Execution
     , runSession
     ) where
 import Agent.CLI.CodeModeRuntime
+import Agent.CLI.Compaction
+    ( AutomaticCompactionBoundary(..)
+    , CompactOutcome(..)
+    , CompactionInstall(CompactionInstalled)
+    )
 import Agent.CLI.Session.Runner.Types
     ( AgentStepCache(..)
     , SessionRunnerContinuation(..)
@@ -69,7 +74,7 @@ import Agent.OsPath
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception.Safe (catchAny)
+import Control.Exception.Safe (catchAny, mask_)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -807,6 +812,43 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 reportSessionError
                     ("failed to reload generated context: "
                         <> formatException err)
+        commitAutomaticCompaction outcome pendingInputs = mask_ do
+            case persist of
+                PersistenceDisabled -> pure ()
+                PersistenceEnabled slotRef -> do
+                    now <- getCurrentTime
+                    handle <- ensureSession slotRef
+                    let checkpointTurn = SessionTurn
+                            { turnAt = now
+                            , turnUserText = ""
+                            , turnAssistantText = Nothing
+                            , turnError = Nothing
+                            , turnResponseId = Nothing
+                            , turnEffect = TranscriptReplace
+                            , turnItems = outcome.compactHistory
+                            , turnUsage = Nothing
+                            }
+                    (updated, _) <-
+                        appendTurnWithMetaUpdateIndexed
+                            handle
+                            checkpointTurn
+                            \meta -> meta { metaLastResponseId = Nothing }
+                    writeIORef slotRef (PersistenceActive updated)
+            let boundary = AutomaticCompactionBoundary
+                    { automaticCompactionHistory = outcome.compactHistory
+                    , automaticCompactionPendingInputs = pendingInputs
+                    }
+            -- Publish the durable boundary before replacing the live state so
+            -- turn cleanup can recover the checkpoint if a later write or
+            -- continuation throws.
+            writeIORef automaticCompactionRef (Just boundary)
+            _ <-
+                replaceLiveConversation
+                    conversationRef
+                    Nothing
+                    outcome.compactHistory
+            reloadGeneratedContextSafely
+            pure CompactionInstalled
         compactRunnerWithContext focus = do
             result <- compactRunner focus
             case result of
@@ -826,6 +868,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionUnavailableProviders = unavailableProvidersRef
             , sessionStartupUnavailable = startupUnavailableRef
             , sessionConversation = conversationRef
+            , sessionAutomaticCompaction = automaticCompactionRef
             , sessionParams = paramsRef
             , sessionPolicy = policyRef
             , sessionPersist = persist
@@ -879,7 +922,7 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
             , sessionOnPersisted = onPersisted
             , sessionReset = sessionReset
             }
-    writeIORef generatedContextReloadRef reloadGeneratedContextSafely
+    writeIORef automaticCompactionHookRef commitAutomaticCompaction
     writeIORef startup.startupRestartEffort \level -> do
         setSessionEffortText env level
         writeIORef restartEffortRef (Just level)

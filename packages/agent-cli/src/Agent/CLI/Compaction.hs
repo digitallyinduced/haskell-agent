@@ -1,6 +1,8 @@
 -- | Run provider compaction and rewrite the local transcript.
 module Agent.CLI.Compaction
-    ( CompactOutcome(..)
+    ( AutomaticCompactionBoundary(..)
+    , CompactOutcome(..)
+    , CompactionInstall(..)
     , OpenAiCompactionSender
     , codexAutoCompactTokenLimit
     , autoCompactOpenAiBackend
@@ -24,7 +26,7 @@ module Agent.CLI.Compaction
     , reportedOccupancy
     ) where
 
-import Agent.CLI.Error (formatApiError, formatException)
+import Agent.CLI.Error (formatApiError)
 import Agent.CLI.Compaction.Continuation
     ( boundCompletedToolContinuations
     )
@@ -87,7 +89,7 @@ import Control.Monad.Trans.Except
     , throwE
     )
 import Control.Applicative ((<|>))
-import Control.Exception.Safe (catchAny, mask, onException)
+import Control.Exception.Safe (mask, onException)
 import Control.Monad (when)
 import Data.IORef (IORef, readIORef, writeIORef)
 import Data.Maybe (fromMaybe)
@@ -683,19 +685,20 @@ autoCompactOpenAiBackendWithSender configuredThreshold send recordUsage
         send
         recordUsage
         getParams
-        (pure ())
+        (\_outcome _inputs -> pure CompactionNotInstalled)
         contextTokensRef
         backend
 
--- | Variant that runs a best-effort hook after a compacted continuation is
--- accepted. The root CLI uses it to queue fresh generated project/skill
--- context for the next turn.
+-- | Variant that commits a successful compaction before submitting its
+-- continuation. The root CLI uses the hook as a first-class persistence
+-- boundary: once it returns, the compacted transcript must survive a failed
+-- or cancelled continuation.
 autoCompactOpenAiBackendWithSenderAndHook
     :: Maybe Int
     -> OpenAiCompactionSender
     -> (TokenUsage -> IO ())
     -> IO ResponseCreateParams
-    -> IO ()
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
@@ -854,7 +857,7 @@ autoCompactOpenAiBackendWith compactAction =
                     compactAction))
         (const (pure ()))
         estimateProjectedFromCache
-        (pure ())
+        (\_outcome _inputs -> pure CompactionNotInstalled)
   where
     textCompactionError message =
         ProviderError ApiErrorType message Nothing
@@ -871,14 +874,14 @@ autoCompactOpenAiBackendWithApi compactAction =
             CompactAttempt emptyTokenUsage <$> compactAction)
         (const (pure ()))
         estimateProjectedFromCache
-        (pure ())
+        (\_outcome _inputs -> pure CompactionNotInstalled)
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
     -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
     -> (Maybe OccupancySnapshot -> [ResponseItem] -> [TurnInput] -> IO Int)
-    -> IO ()
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
@@ -931,7 +934,6 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                             outcome
                             inputs
                             onEvent
-                            `onException` rollback
 
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
@@ -941,17 +943,23 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                         outcome.compactAfterTokens
                         (length compactedHistory)
         writeIORef contextTokensRef compactSnapshot
-        result <- restore (submit compactedHistory Nothing inputs onEvent)
+        -- Match Codex's compaction lifecycle: install and durably record the
+        -- checkpoint before issuing the model continuation. A continuation
+        -- failure must not resurrect the superseded response chain.
+        installation <-
+            onCompacted outcome inputs `onException` rollback
+        let rollbackIfDeferred =
+                case installation of
+                    CompactionInstalled -> pure ()
+                    CompactionNotInstalled -> rollback
+        result <-
+            restore (submit compactedHistory Nothing inputs onEvent)
+                `onException` rollbackIfDeferred
         case result of
-            Left _ -> rollback
+            Left _ -> rollbackIfDeferred
             Right backendResult -> do
                 writeIORef contextTokensRef $
                     occupancySnapshot backendResult <|> compactSnapshot
-                onCompacted `catchAny` \err ->
-                    onEvent $
-                        WarningRaised
-                            ("failed to reload generated context after compaction: "
-                                <> formatException err)
         pure result
 
     submitAndTrack oldTokens history previous inputs onEvent = do

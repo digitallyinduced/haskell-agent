@@ -6,7 +6,8 @@ import Agent.CLI.Session
     )
 import Agent.CLI.Session.ConversationStore (newConversationStore)
 import Agent.CLI.Session.History
-    ( hydrateUiHistory
+    ( foldSessionItems
+    , hydrateUiHistory
     , readLiveAttachments
     , readLivePreviousResponseId
     , readLiveTranscript
@@ -82,11 +83,75 @@ spec = do
                 , (BlockSystem, "Context compacted remotely.")
                 ]
 
+      it "keeps visual scrollback across an automatic checkpoint boundary" do
+        let before = sessionTurn "question" (Just "answer") TranscriptAppend
+            automatic = sessionTurn "" Nothing TranscriptReplace
+            after = sessionTurn "follow up" (Just "done") TranscriptAppend
+            blocks =
+                Foldable.toList
+                    (hydrateUiHistory [before, automatic, after]).uiBlocks
+        map (\block -> (block.blockKind, block.blockBody)) blocks
+            `shouldBe`
+                [ (BlockUser, "question")
+                , (BlockAssistant, "answer")
+                , (BlockUser, "follow up")
+                , (BlockAssistant, "done")
+                ]
+
       it "still clears displayed history for an explicit clear" do
         let before = sessionTurn "question" (Just "answer") TranscriptAppend
             cleared = sessionTurn "/clear" Nothing TranscriptReset
         Foldable.toList (hydrateUiHistory [before, cleared]).uiBlocks
             `shouldBe` []
+
+    describe "foldSessionItems" do
+      it "resumes from a committed checkpoint after continuation failure" do
+        let old = turnInputsToItems [UserMessage "superseded"]
+            checkpoint =
+                turnInputsToItems [UserMessage "compacted checkpoint"]
+            pending = turnInputsToItems [UserMessage "failed request"]
+            oldTurn =
+                (sessionTurn "old" (Just "old answer") TranscriptAppend)
+                    { turnItems = old }
+            compactTurn =
+                (sessionTurn "" Nothing TranscriptReplace)
+                    { turnItems = checkpoint }
+            failedTurn =
+                (sessionTurn "failed request" Nothing TranscriptAppend)
+                    { turnItems = pending
+                    , turnError = Just "cancelled"
+                    }
+        foldSessionItems [oldTurn, compactTurn, failedTurn]
+            `shouldBe` checkpoint <> pending
+
+      it "appends only the successful post-checkpoint suffix" do
+        let checkpoint =
+                turnInputsToItems [UserMessage "compacted checkpoint"]
+            suffix =
+                turnInputsToItems
+                    [ UserMessage "current request"
+                    , UserMessage "current response"
+                    ]
+            compactTurn =
+                (sessionTurn "" Nothing TranscriptReplace)
+                    { turnItems = checkpoint }
+            completedTurn =
+                (sessionTurn "current request" (Just "current response")
+                    TranscriptAppend)
+                    { turnItems = suffix }
+        foldSessionItems [compactTurn, completedTurn]
+            `shouldBe` checkpoint <> suffix
+
+      it "leaves non-compacted append history unchanged" do
+        let first = turnInputsToItems [UserMessage "first"]
+            second = turnInputsToItems [UserMessage "second"]
+        foldSessionItems
+            [ (sessionTurn "first" Nothing TranscriptAppend)
+                { turnItems = first }
+            , (sessionTurn "second" Nothing TranscriptAppend)
+                { turnItems = second }
+            ]
+            `shouldBe` first <> second
 
 sessionTurn :: Text -> Maybe Text -> TranscriptEffect -> SessionTurn
 sessionTurn user assistant effect = SessionTurn

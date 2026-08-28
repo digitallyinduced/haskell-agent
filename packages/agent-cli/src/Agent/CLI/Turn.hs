@@ -103,6 +103,7 @@ import Agent.CLI.TurnState
     , StartupUpdate(..)
     , finishConversation
     , inputOnlyTurnItems
+    , rebasePreparedTurn
     , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
@@ -183,6 +184,10 @@ runOneTurnWithContext includeTurnContext env promptText inputs = do
     -- A newly submitted turn supersedes any older retry candidate. If this
     -- attempt fails, finishTurn installs its own PendingTurn afterwards.
     writeIORef env.sessionLastFailedTurn Nothing
+    -- Automatic compaction is scoped to one enclosing user turn. A committed
+    -- boundary from an earlier attempt is already represented by the live and
+    -- durable transcripts and must not affect this turn's suffix calculation.
+    writeIORef env.sessionAutomaticCompaction Nothing
     bracket_
         env.sessionBeginWindowTitleBusy
         env.sessionEndWindowTitleBusy
@@ -325,11 +330,17 @@ runOneTurnBusy includeTurnContext env@SessionEnv
     rootTurnId <- beginSubagentTurn
     execution <- runLoopInputsDetailed config prev turnInputs
         `onException`
-            ( commitConversationPatch
-                (finishConversation prepared ConversationInterrupted)
+            ( readIORef env.sessionAutomaticCompaction >>= \boundary ->
+              commitConversationPatch
+                (finishConversation
+                    (rebasePreparedTurn boundary prepared)
+                    ConversationInterrupted)
                 >> restorePlanStateAfterIncomplete planMode initialPlanState
                 >> abortSubagentTurn rootTurnId
             )
+    automaticCompaction <- readIORef env.sessionAutomaticCompaction
+    let committedPrepared =
+            rebasePreparedTurn automaticCompaction prepared
     let result = execution.executionResult
     clearThinking render
     finishedAt <- getCurrentTime
@@ -372,7 +383,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
         (Just level, _) -> do
             abortSubagentTurn rootTurnId
             commitConversationPatch
-                (finishConversation prepared ConversationRestarted)
+                (finishConversation committedPrepared ConversationRestarted)
             planState <- readIORef planMode.planStateRef
             case fullscreen of
                 Just runtime ->
@@ -393,7 +404,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             -- Checkpoint it instead of restoring it separately, which would
             -- duplicate the instructions on the next full-history request.
             commitConversationPatch
-                (finishConversation prepared ConversationCancelled)
+                (finishConversation committedPrepared ConversationCancelled)
             model <- readIORef render.renderModelRef
             case fullscreen of
                 Just runtime -> do
@@ -408,7 +419,10 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         (formatLoopErrorColored color cancelled)
                     putTextLn stderrHandle
                         (formatTurnStatus color "cancelled" (elapsedDetail model))
-            persistIncomplete (inputOnlyTurnItems prepared) "cancelled" Nothing
+            persistIncomplete
+                (inputOnlyTurnItems committedPrepared)
+                "cancelled"
+                Nothing
             pure TurnCancelled
         (Nothing, Left err) -> do
             abortSubagentTurn rootTurnId
@@ -418,7 +432,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     , isProviderUnavailable apiError -> do
                         commitConversationPatch
                             (finishConversation
-                                prepared
+                                committedPrepared
                                 ConversationProviderUnavailable)
                         case fullscreen of
                             Nothing -> pure ()
@@ -441,7 +455,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                         stdoutHandle terminal wallStarted finishedAt 1
                         (Just "Agent turn failed")
                     commitConversationPatch
-                        (finishConversation prepared ConversationFailed)
+                        (finishConversation committedPrepared ConversationFailed)
                     model <- readIORef render.renderModelRef
                     case fullscreen of
                         Just runtime ->
@@ -469,7 +483,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     -- terminal failures checkpoint only the prepared input.
                     -- Partial assistant text, response id, usage, and the
                     -- incomplete reason remain available in turn metadata.
-                    persistIncomplete (inputOnlyTurnItems prepared)
+                    persistIncomplete (inputOnlyTurnItems committedPrepared)
                         (formatLoopErrorPersistedAt finishedAt err)
                         maybeIncompleteTurn
                     planState <- readIORef planMode.planStateRef
@@ -529,10 +543,12 @@ runOneTurnBusy includeTurnContext env@SessionEnv
                     putTextLn stdoutHandle (renderAssistantText useColor text)
                 _ -> pure ()
             let newItems =
-                    turnNewItems beforeItems execution.executionState
+                    turnNewItems
+                        committedPrepared.preparedBeforeItems
+                        execution.executionState
                 effect =
                     if turnReplacesTranscript
-                        beforeItems
+                        committedPrepared.preparedBeforeItems
                         execution.executionState
                         then TranscriptReplace
                         else TranscriptAppend

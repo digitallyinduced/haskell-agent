@@ -2,6 +2,7 @@ module Agent.CLI.CompactionSpec (spec) where
 
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , CompactionInstall(..)
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactOpenAiBackendWithSender
@@ -832,15 +833,16 @@ spec = do
             readIORef continuationCalls `shouldReturn` 0
             readIORef contextState `shouldReturn` Nothing
 
-        it "reports a throwing post-compaction hook instead of swallowing it" do
+        it "does not continue when the durable compaction hook fails" do
             let history = [userTextItem "old"]
                 threshold = 20
             contextState <- newIORef
                 (Just (reportedOccupancy threshold (length history)))
-            events <- newIORef []
+            continuationCalls <- newIORef (0 :: Int)
             let sender _request =
                     pure (Right remoteCompactionResponse)
-                base = Backend \state _ _ _ ->
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' continuationCalls (+ 1)
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -854,30 +856,31 @@ spec = do
                         sender
                         (const (pure ()))
                         (pure defaultResponseCreateParams)
-                        (throwIO (ErrorCall "reload failed"))
+                        (\_outcome _inputs ->
+                            throwIO (ErrorCall "checkpoint failed"))
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
-                [UserMessage "new"]
-                (\event -> modifyIORef' events (<> [event]))
-            result `shouldSatisfy` either (const False) (const True)
-            events' <- readIORef events
-            events' `shouldSatisfy` any \case
-                WarningRaised message ->
-                    "failed to reload generated context after compaction"
-                        `Text.isInfixOf` message
-                    && "reload failed" `Text.isInfixOf` message
-                _ -> False
+            result <- try $
+                backend.submitTurn history Nothing
+                    [UserMessage "new"] (const (pure ()))
+                :: IO
+                    (Either ErrorCall (Either ApiError BackendResult))
+            result `shouldBe` Left (ErrorCall "checkpoint failed")
+            readIORef continuationCalls `shouldReturn` 0
+            readIORef contextState `shouldReturn`
+                Just (reportedOccupancy threshold (length history))
 
-        it "runs the post-compaction hook only after a successful continuation" do
+        it "commits the compaction hook before its continuation" do
             let history = [userTextItem "old"]
                 threshold = 20
             contextState <- newIORef
                 (Just (reportedOccupancy threshold (length history)))
             hookCalls <- newIORef (0 :: Int)
+            hookWasCommitted <- newIORef False
             let sender _request =
                     pure (Right remoteCompactionResponse)
-                base = Backend \state _ _ _ ->
+                base = Backend \state _ _ _ -> do
+                    readIORef hookWasCommitted `shouldReturn` True
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -891,7 +894,11 @@ spec = do
                         sender
                         (const (pure ()))
                         (pure defaultResponseCreateParams)
-                        (modifyIORef' hookCalls (+ 1))
+                        (\_outcome inputs -> do
+                            inputs `shouldBe` [UserMessage "new"]
+                            writeIORef hookWasCommitted True
+                            modifyIORef' hookCalls (+ 1)
+                            pure CompactionInstalled)
                         contextState
                         base
             result <- backend.submitTurn history Nothing
@@ -1290,7 +1297,10 @@ spec = do
                         sender
                         (\usage -> modifyIORef' recordedUsage (<> [usage]))
                         (pure defaultResponseCreateParams)
-                        (modifyIORef' hookCalls (+ 1))
+                        (\_outcome inputs -> do
+                            inputs `shouldBe` [UserMessage "new"]
+                            modifyIORef' hookCalls (+ 1)
+                            pure CompactionInstalled)
                         contextState
                         base
             backend.submitTurn history Nothing
@@ -1299,10 +1309,11 @@ spec = do
             map requestItems <$> readIORef requests
                 `shouldReturn` [history <> [compactionTriggerItem]]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
-            readIORef contextState `shouldReturn` oldContextState
-            readIORef hookCalls `shouldReturn` 0
+            readIORef contextState `shouldSatisfy`
+                (/= oldContextState)
+            readIORef hookCalls `shouldReturn` 1
 
-        it "rolls back compacted state when the continuation is cancelled" do
+        it "keeps compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
                 threshold = 20
                 oldContextState =
@@ -1332,7 +1343,8 @@ spec = do
                         (Either ApiError BackendResult))
             result `shouldBe` Left UserInterrupt
             readIORef continuationMasking `shouldReturn` Unmasked
-            readIORef contextState `shouldReturn` oldContextState
+            readIORef contextState `shouldSatisfy`
+                (/= oldContextState)
 
         it "does not rerun compaction while its continuation reconnects" do
             let history = [userTextItem "old"]

@@ -5,7 +5,9 @@ module Agent.CLI.Provider.OpenAI
     ) where
 
 import Agent.CLI.Compaction
-    ( OccupancySnapshot
+    ( CompactOutcome
+    , CompactionInstall
+    , OccupancySnapshot
     , OpenAiCompactionSender
     , autoCompactOpenAiBackendWithSenderAndHook
     )
@@ -13,6 +15,7 @@ import Agent.CLI.Connectivity (withConnectionRecovery)
 import Agent.Loop
     ( Backend(..)
     , TokenUsage
+    , TurnInput
     )
 import qualified Agent.OpenAI.Client as OpenAIClient
 import Agent.OpenAI.LoopBackend
@@ -63,7 +66,7 @@ lockedOpenAiSession
     -> IO ResponseCreateParams
     -> IORef (Maybe OccupancySnapshot)
     -> (TokenUsage -> IO ())
-    -> IO ()
+    -> (CompactOutcome -> [TurnInput] -> IO CompactionInstall)
     -> (OpenAiCompactionSender, Backend)
 lockedOpenAiSession compactThreshold showRawReasoning wsLock fallbackActive
         provider activeConnection getParams contextTokens

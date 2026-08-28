@@ -9,7 +9,10 @@ import Agent.CLI.ModelConfig (ModelCatalog)
 import Agent.CLI.Btw (BtwBackendFactory)
 import Agent.CLI.Recap (RecapRequest)
 import Agent.CLI.Command (ShellMode)
-import Agent.CLI.Compaction (CompactOutcome)
+import Agent.CLI.Compaction
+    ( AutomaticCompactionBoundary
+    , CompactOutcome
+    )
 import Agent.CLI.Options (ApprovalPolicy)
 import Agent.CLI.Render (RenderConfig)
 import Agent.CLI.Session (Persistence, SessionHandle)
@@ -49,6 +52,8 @@ data SessionEnv = SessionEnv
     , sessionUnavailableProviders :: !(IORef (Set Provider))
     , sessionStartupUnavailable :: !(IORef (Maybe (STM ApiError)))
     , sessionConversation :: !(IORef LiveConversation)
+    , sessionAutomaticCompaction
+        :: !(IORef (Maybe AutomaticCompactionBoundary))
     , sessionParams :: !(IORef ResponseCreateParams)
     , sessionPolicy :: !(IORef ApprovalPolicy)
     , sessionPersist :: !Persistence

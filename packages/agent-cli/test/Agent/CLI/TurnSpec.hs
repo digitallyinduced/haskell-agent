@@ -9,6 +9,7 @@ import Agent.CLI.Turn
     , restorePlanStateAfterIncomplete
     )
 import Agent.CLI.TurnState
+import Agent.CLI.Compaction (AutomaticCompactionBoundary(..))
 import Agent.Loop
     ( ImageAttachment(..)
     , TokenUsage(..)
@@ -145,6 +146,55 @@ spec = do
         it "uses the complete replacement after compaction" do
             let replacement = turnInputsToItems [UserMessage "compacted"]
             turnNewItems history replacement `shouldBe` replacement
+
+    describe "automatic compaction boundary" do
+        it "keeps the checkpoint plus pending input after failure or cancel" do
+            let checkpoint =
+                    turnInputsToItems [UserMessage "compacted checkpoint"]
+                pending = [UserMessage "current request"]
+                committed =
+                    rebasePreparedTurn
+                        (Just AutomaticCompactionBoundary
+                            { automaticCompactionHistory = checkpoint
+                            , automaticCompactionPendingInputs = pending
+                            })
+                        prepared
+                expected = checkpoint <> turnInputsToItems pending
+                cancelled =
+                    applyConversationPatch
+                        (finishConversation committed ConversationCancelled)
+                        runningState
+                failed =
+                    applyConversationPatch
+                        (finishConversation committed ConversationFailed)
+                        runningState
+            cancelled.conversationTranscript `shouldBe` expected
+            failed.conversationTranscript `shouldBe` expected
+            inputOnlyTurnItems committed
+                `shouldBe` turnInputsToItems pending
+
+        it "persists only the post-checkpoint suffix after success" do
+            let checkpoint =
+                    turnInputsToItems [UserMessage "compacted checkpoint"]
+                pending = [UserMessage "current request"]
+                response =
+                    turnInputsToItems [UserMessage "assistant response"]
+                committed =
+                    rebasePreparedTurn
+                        (Just AutomaticCompactionBoundary
+                            { automaticCompactionHistory = checkpoint
+                            , automaticCompactionPendingInputs = pending
+                            })
+                        prepared
+                completed =
+                    checkpoint <> turnInputsToItems pending <> response
+            turnNewItems committed.preparedBeforeItems completed
+                `shouldBe` turnInputsToItems pending <> response
+            turnReplacesTranscript committed.preparedBeforeItems completed
+                `shouldBe` False
+
+        it "leaves ordinary turns unchanged when no compaction committed" do
+            rebasePreparedTurn Nothing prepared `shouldBe` prepared
 
     describe "checkpointIncompleteTurn" do
         it "describes the complete input-only checkpoint transition" do

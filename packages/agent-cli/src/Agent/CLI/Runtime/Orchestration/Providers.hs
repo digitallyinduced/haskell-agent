@@ -227,7 +227,7 @@ runAgentProviders
     cwd
     dialect
     fullscreen
-    generatedContextReloadRef
+    automaticCompactionHookRef
     home
     initialPrevious
     model
@@ -471,7 +471,11 @@ runAgentProviders
                                             (readIORef paramsRef)
                                             contextTokensRef
                                             recordCompactionUsage
-                                            (readIORef generatedContextReloadRef >>= id)
+                                            (\outcome inputs ->
+                                                readIORef
+                                                    automaticCompactionHookRef
+                                                    >>= \hook ->
+                                                        hook outcome inputs)
                                     noticingBackend =
                                         withPendingInputs pendingNotices
                                             lockedBackend
