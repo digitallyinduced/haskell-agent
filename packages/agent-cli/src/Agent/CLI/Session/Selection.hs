@@ -15,6 +15,7 @@ import Agent.CLI.AgentViewport
     )
 import Agent.CLI.ManagedTurn
     ( ManagedTurnRequest
+    , loadTextPrompt
     , loadManagedTurnRequest
     , managedTurnRequestFromText
     )
@@ -78,8 +79,7 @@ loadPrompt options =
     of
     (Just text, _, _) ->
         pure (Just (managedTurnRequestFromText (Text.strip text)))
-    (_, Just path, _) ->
-        loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
+    (_, Just path, _) -> Just <$> loadTextPrompt path
     (_, _, Just path) ->
         loadManagedTurnRequest path >>= either (die . Text.unpack) (pure . Just)
     _ -> pure Nothing
