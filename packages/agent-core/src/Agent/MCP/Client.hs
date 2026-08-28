@@ -99,6 +99,7 @@ import Data.Ord (Down(..))
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
 import Data.Text (Text)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
 import Data.Text.Encoding.Error (lenientDecode)
@@ -556,7 +557,13 @@ httpRequestMcp client timeoutMicros url method parameters = do
     file <- case lookup "MCP_OAUTH_TOKEN_FILE" client.clientConfig.mcpServerEnv of
         Nothing -> pure Nothing
         Just path -> OAuth.loadOAuthTokenFile path >>= \case
-            Right (OAuth.OAuthTokenFile _ _ token _ _) -> pure (Just token)
+            Right (OAuth.OAuthTokenFile _ _ token _ expiresAt) -> do
+                now <- floor <$> getPOSIXTime
+                if maybe False (<= now + 60) expiresAt
+                    then OAuth.refreshOAuthTokenFile mcpHttpManager path >>= \case
+                        Right (OAuth.OAuthTokenFile _ _ refreshed _ _) -> pure (Just refreshed)
+                        Left _ -> pure (Just token)
+                    else pure (Just token)
             Left _ -> pure Nothing
     let configuredToken = case file of
             Just token -> Just token

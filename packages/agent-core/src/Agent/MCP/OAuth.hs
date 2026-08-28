@@ -19,6 +19,7 @@ import qualified Data.ByteString.Lazy as LBS
 import System.Posix.Files (ownerReadMode, ownerWriteMode)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Text (Text)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
 import Network.HTTP.Client (Manager, RequestBody(..), httpLbs, parseRequest, responseBody, responseStatus, urlEncodedBody)
@@ -71,9 +72,11 @@ refreshOAuthTokenFile manager path = withMVar oauthRefreshLock $ \_ ->
         Right current -> refreshAccessToken manager current.tokenEndpoint current.tokenClientId current.tokenRefreshToken >>= \case
             OAuthTokenFailure err -> pure (Left err)
             OAuthTokenSuccess tokens -> do
+                now <- floor <$> getPOSIXTime
                 let updated = current
                         { tokenAccessToken = tokens.accessToken
                         , tokenRefreshToken = maybe current.tokenRefreshToken id tokens.refreshToken
+                        , tokenExpiresAt = fmap (now +) tokens.expiresIn
                         }
                 writeLazyFileAtomically (unsafeEncodeUtf path) (ownerReadMode .|. ownerWriteMode) (Aeson.encode updated)
                 pure (Right updated)
