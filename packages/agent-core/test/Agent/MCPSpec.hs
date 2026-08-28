@@ -123,6 +123,39 @@ spec = describe "Agent.MCP" do
                     firstResult.output `shouldBe` "first response"
                     second.output `shouldBe` "second response"
 
+    it "discovers and reads Skills over MCP without fetching content during listing" $
+        withSkillsFakeServer \script -> do
+            fleet <- startMcpFleet [baseConfig "skills" script]
+            bracket (pure fleet) closeMcpFleet \_ -> do
+                registrations <- mcpFleetSkillRegistrations fleet
+                case registrations of
+                    [McpSkillRegistration "skills" entry] -> do
+                        entry.mcpSkillUri
+                            `shouldBe` "skill://demo/SKILL.md"
+                        entry.mcpSkillResources
+                            `shouldBe`
+                                McpSkillResourcesListed
+                                    [ McpSkillResource
+                                        "skill://demo/SKILL.md"
+                                        "sha256:demo"
+                                        42
+                                    ]
+                        mcpFleetGetSkill fleet "skills"
+                            "skill://demo/SKILL.md"
+                            `shouldReturn` Right entry
+                        mcpFleetReadResource fleet "skills"
+                            "skill://demo/SKILL.md"
+                            `shouldReturn`
+                                Right
+                                    [ McpResourceContent
+                                        "skill://demo/SKILL.md"
+                                        (Just "text/markdown")
+                                        (Just "---\nname: demo\n---\n")
+                                        Nothing
+                                    ]
+                    other -> expectationFailure
+                        ("unexpected skill registrations: " <> show other)
+
     it "starts servers concurrently and preserves configured tool order" $
         withConcurrentFakeServer \script barrier -> do
             progress <- newIORef []
@@ -422,6 +455,19 @@ withFakeServer action = do
         removeFile
         action
 
+withSkillsFakeServer :: (FilePath -> IO a) -> IO a
+withSkillsFakeServer action = do
+    temporary <- getTemporaryDirectory
+    bracket
+        (do
+            (path, handle) <- openTempFile temporary "agent-mcp-skills.sh"
+            LBS.hPutStr handle skillsFakeServer
+            hClose handle
+            setFileMode path 0o700
+            pure path)
+        removeFile
+        action
+
 withCountingFakeServer :: (FilePath -> FilePath -> IO a) -> IO a
 withCountingFakeServer = withCountingServer countingFakeServer
 
@@ -593,6 +639,30 @@ fakeServer =
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"second response\"}]}}'\n\
     \        printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"first response\"}]}}'\n\
     \      fi\n\
+    \      ;;\n\
+    \  esac\n\
+    \done\n"
+
+skillsFakeServer :: LBS.ByteString
+skillsFakeServer =
+    "#!/bin/sh\n\
+    \while IFS= read -r line; do\n\
+    \  case \"$line\" in\n\
+    \    *'\"method\":\"initialize\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2026-07-28\",\"capabilities\":{\"extensions\":{\"io.modelcontextprotocol/skills\":{}}},\"serverInfo\":{\"name\":\"skills\",\"version\":\"1\"}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"notifications/initialized\"'*) ;;\n\
+    \    *'\"method\":\"tools/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"skills/list\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"resultType\":\"complete\",\"skills\":[{\"uri\":\"skill://demo/SKILL.md\",\"frontmatter\":{\"name\":\"demo\",\"description\":\"Demo skill\"},\"resources\":[{\"uri\":\"skill://demo/SKILL.md\",\"digest\":\"sha256:demo\",\"size\":42}]}]}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"skills/get\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"resultType\":\"complete\",\"skill\":{\"uri\":\"skill://demo/SKILL.md\",\"frontmatter\":{\"name\":\"demo\",\"description\":\"Demo skill\"},\"resources\":[{\"uri\":\"skill://demo/SKILL.md\",\"digest\":\"sha256:demo\",\"size\":42}]}}}'\n\
+    \      ;;\n\
+    \    *'\"method\":\"resources/read\"'*)\n\
+    \      printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"contents\":[{\"uri\":\"skill://demo/SKILL.md\",\"mimeType\":\"text/markdown\",\"text\":\"---\\nname: demo\\n---\\n\"}]}}'\n\
     \      ;;\n\
     \  esac\n\
     \done\n"

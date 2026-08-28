@@ -8,6 +8,7 @@ module Agent.CLI.ManagedTurn
     , managedTurnRequestWithFiles
     , managedTurnRequestWithGateway
     , renderManagedTurnPrompt
+    , loadTextPrompt
     , loadManagedTurnRequest
     , managedTurnInputs
     ) where
@@ -34,6 +35,7 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as TextEncoding
+import qualified Data.Text.IO as Text
 import System.Directory.OsPath (doesFileExist)
 import System.OsPath (OsPath)
 
@@ -137,6 +139,11 @@ managedTurnRequestWithGateway bridgeDirectory context request =
         { managedTurnBridgeDirectory = Just bridgeDirectory
         , managedTurnContext = Just context
         }
+
+loadTextPrompt :: OsPath -> IO ManagedTurnRequest
+loadTextPrompt path =
+    managedTurnRequestFromText . Text.strip
+        <$> Text.readFile (unsafeToFilePath path)
 
 loadManagedTurnRequest :: OsPath -> IO (Either Text ManagedTurnRequest)
 loadManagedTurnRequest path = do

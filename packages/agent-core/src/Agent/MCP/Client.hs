@@ -93,7 +93,7 @@ import Data.IORef
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import Data.List (find, sortOn)
-import Data.Maybe (catMaybes, isJust)
+import Data.Maybe (catMaybes, isJust, mapMaybe)
 import Data.Ord (Down(..))
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
@@ -160,6 +160,8 @@ startMcpClient config = case config.mcpServerUrl of
                 stderrRef <- newIORef emptyCapturedStderr
                 closed <- newMVar False
                 lifecycle <- newTVarIO ClientPending
+                skillsCapability <- newTVarIO Nothing
+                discoveredSkills <- newTVarIO []
                 reader <- asyncWithUnmask \unmask ->
                     unmask (readerLoop output pending failure)
                         `finally` void (tryAny (hClose output))
@@ -182,6 +184,8 @@ startMcpClient config = case config.mcpServerUrl of
                         , clientStderrReader = Just stderrReader
                         , clientClosed = closed
                         , clientLifecycle = lifecycle
+                        , clientSkillsCapability = skillsCapability
+                        , clientDiscoveredSkills = discoveredSkills
                         }
                 pure client
             _ -> do
@@ -204,6 +208,8 @@ startMcpHttpClient config _url = mask $ \_ -> do
     stderrRef <- newIORef emptyCapturedStderr
     closed <- newMVar False
     lifecycle <- newTVarIO ClientPending
+    skillsCapability <- newTVarIO Nothing
+    discoveredSkills <- newTVarIO []
     session <- newIORef Nothing
     -- HTTP has no subprocess or background reader.  Its lifecycle is driven
     -- by requestMcp and closeMcpClient below.
@@ -214,7 +220,9 @@ startMcpHttpClient config _url = mask $ \_ -> do
         , clientPending = pending, clientFailure = failure
         , clientWriteLock = writeLock, clientStderr = stderrRef
         , clientReader = Nothing, clientStderrReader = Nothing
-        , clientClosed = closed, clientLifecycle = lifecycle }
+        , clientClosed = closed, clientLifecycle = lifecycle
+        , clientSkillsCapability = skillsCapability
+        , clientDiscoveredSkills = discoveredSkills }
 
 data InitializeRole
     = InitializeLeader
@@ -273,7 +281,9 @@ ensureMcpClientReadyWith publishReady client = mask \restore -> do
                     closeMcpClient client
                 initialize = do
                     initializeClient client
-                    discoverMcpTools client
+                    (tools, warnings) <- discoverMcpTools client
+                    skillWarnings <- discoverMcpSkills client
+                    pure (tools, warnings <> skillWarnings)
             outcome <-
                 restore (tryAny initialize)
                     `onException` cancelled
@@ -327,7 +337,7 @@ initializeClient client = do
     let timeoutMicros =
             secondsToMicros client.clientConfig.mcpServerStartupTimeoutSeconds
         parameters = object
-            [ "protocolVersion" .= ("2025-11-25" :: Text)
+            [ "protocolVersion" .= ("2026-07-28" :: Text)
             , "capabilities" .= object []
             , "clientInfo" .= object
                 [ "name" .= ("haskell-agent" :: Text)
@@ -338,10 +348,49 @@ initializeClient client = do
         (Aeson.toEncoding parameters)
     case result of
         Left err -> startupFailure client err
-        Right _ ->
+        Right response -> do
+            case parseSkillsCapability response of
+                Left err -> startupFailure client ("invalid initialize response: " <> err)
+                Right capability ->
+                    atomically $
+                        writeTVar client.clientSkillsCapability capability
             sendNotification client "notifications/initialized"
                 (Aeson.toEncoding (object []))
                 >>= either (startupFailure client) pure
+
+parseSkillsCapability :: RawJson -> Either Text (Maybe McpSkillsCapability)
+parseSkillsCapability raw =
+    case Json.decodeEither capabilitiesDecoder (rawJsonBytes raw) of
+        Left err -> Left err.jsonErrorMessage
+        Right capabilities ->
+            case capabilities of
+                Nothing -> Right Nothing
+                Just value -> decodeExtensions value
+  where
+    capabilitiesDecoder =
+        Json.object (Json.optionalKey "capabilities" rawJsonDecoder)
+    decodeExtensions capabilities =
+        case Json.decodeEither extensionsDecoder (rawJsonBytes capabilities) of
+            Left err -> Left err.jsonErrorMessage
+            Right extensions -> case extensions of
+                Nothing -> Right Nothing
+                Just value -> decodeSkills value
+    extensionsDecoder =
+        Json.object (Json.optionalKey "extensions" rawJsonDecoder)
+    decodeSkills extensions =
+        case Json.decodeEither skillsDecoder (rawJsonBytes extensions) of
+            Left err -> Left err.jsonErrorMessage
+            Right Nothing -> Right Nothing
+            Right (Just raw) ->
+                case Json.decodeEither directoryDecoder (rawJsonBytes raw) of
+                    Left err -> Left err.jsonErrorMessage
+                    Right directoryRead ->
+                        Right (Just McpSkillsCapability{mcpSkillsDirectoryRead = directoryRead})
+    skillsDecoder =
+        Json.object
+            (Json.atKeyOptional "io.modelcontextprotocol/skills" rawJsonDecoder)
+    directoryDecoder =
+        Json.object (Json.defaultKey False "directoryRead" Json.bool)
 
 startupFailure :: McpClient -> Text -> IO a
 startupFailure client err = do
@@ -402,6 +451,101 @@ discoverMcpTools client = go Nothing [] []
         (,)
             <$> Json.defaultKey [] "tools" (Json.list mcpToolDecoder)
             <*> Json.optionalKey "nextCursor" rawJsonDecoder
+
+-- | Enumerate skill metadata only.  Skill resources are intentionally not
+-- fetched here; hosts retrieve and verify SKILL.md when the user activates a
+-- skill.
+discoverMcpSkills :: McpClient -> IO [Text]
+discoverMcpSkills client = do
+    capability <- readTVarIO client.clientSkillsCapability
+    case capability of
+        Nothing -> pure []
+        Just _ -> go Nothing []
+  where
+    go cursor warnings = do
+        let parameters = maybe
+                (Aeson.toEncoding (object []))
+                (\value -> Aeson.pairs
+                    (AesonEncoding.pair "cursor" (rawJsonEncoding value)))
+                cursor
+        requestMcp client
+            (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
+            "skills/list" parameters >>= \case
+            Left err -> pure ["MCP server " <> client.clientConfig.mcpServerName
+                <> " skills/list failed: " <> err]
+            Right result ->
+                case parseSkillPage result of
+                    Left err -> pure ["MCP server "
+                        <> client.clientConfig.mcpServerName
+                        <> " returned invalid skills/list response: " <> err]
+                    Right (rawSkills, nextCursor) -> do
+                        let skills = mapMaybe decodeSkill rawSkills
+                            invalid = length skills /= length rawSkills
+                        atomically $ modifyTVar' client.clientDiscoveredSkills
+                            (<> skills)
+                        let pageWarnings =
+                                [ "MCP server " <> client.clientConfig.mcpServerName
+                                    <> " returned invalid skills/list entry"
+                                | invalid
+                                ]
+                        case nextCursor of
+                            Nothing -> pure (warnings <> pageWarnings)
+                            Just next -> go (Just next) (warnings <> pageWarnings)
+
+    parseSkillPage raw =
+        case Json.decodeEither pageDecoder (rawJsonBytes raw) of
+            Left err -> Left err.jsonErrorMessage
+            Right page -> Right page
+    pageDecoder = Json.object $
+        (,) <$> Json.defaultKey [] "skills" (Json.list rawJsonDecoder)
+            <*> Json.optionalKey "nextCursor" rawJsonDecoder
+    decodeSkill value =
+        case Json.decodeEither mcpSkillEntryDecoder (rawJsonBytes value) of
+            Left _ -> Nothing
+            Right skill -> Just skill
+
+-- | Retrieve one skill manifest by URI.  Unlike 'skills/list', this also
+-- supports servers whose catalog is not enumerable.
+getMcpSkill :: McpClient -> Text -> IO (Either Text McpSkillEntry)
+getMcpSkill client uri = do
+    capability <- readTVarIO client.clientSkillsCapability
+    case capability of
+        Nothing -> pure (Left ("MCP server "
+            <> client.clientConfig.mcpServerName
+            <> " does not support io.modelcontextprotocol/skills"))
+        Just _ -> do
+            let parameters = Aeson.toEncoding (object ["uri" .= uri])
+            requestMcp client
+                (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
+                "skills/get" parameters >>= \case
+                Left err -> pure (Left err)
+                Right result ->
+                    case Json.decodeEither
+                            (Json.object (Json.atKey "skill" mcpSkillEntryDecoder))
+                            (rawJsonBytes result) of
+                        Left err -> pure (Left ("invalid skills/get response: "
+                            <> err.jsonErrorMessage))
+                        Right skill -> pure (Right skill)
+
+-- | Read one or more resource contents using the standard MCP resources/read
+-- method.  This does not activate a skill; callers must perform their own
+-- approval, frontmatter, and manifest verification.
+readMcpResource :: McpClient -> Text -> IO (Either Text [McpResourceContent])
+readMcpResource client uri = do
+    let parameters = Aeson.toEncoding (object ["uri" .= uri])
+    requestMcp client
+        (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
+        "resources/read" parameters >>= \case
+        Left err -> pure (Left err)
+        Right result ->
+            case Json.decodeEither
+                    (Json.object
+                        (Json.defaultKey [] "contents"
+                            (Json.list mcpResourceContentDecoder)))
+                    (rawJsonBytes result) of
+                Left err -> pure (Left ("invalid resources/read response: "
+                    <> err.jsonErrorMessage))
+                Right contents -> pure (Right contents)
 
 appToolFor :: McpClient -> McpTool -> AppTool
 appToolFor client tool = AppTool

@@ -13,7 +13,12 @@ module Agent.Responses.Types.Streaming
     ) where
 
 import Agent.Responses.Types.Common
-import Agent.Responses.Types.Items (ResponseItem, responseItemDecoder)
+import Agent.Responses.Types.Items
+    ( ReasoningSummaryPart
+    , ResponseItem
+    , reasoningSummaryPartDecoder
+    , responseItemDecoder
+    )
 import Agent.Responses.Types.Response (Response, responseDecoder)
 import Data.Aeson hiding (TaggedObject)
 import qualified Data.Hermes as Hermes
@@ -356,7 +361,7 @@ data ResponseStreamEvent
         { streamItemId      :: !(Maybe Text)
         , streamOutputIndex :: !(Maybe Int)
         , summaryIndex      :: !(Maybe Int)
-        , partValue         :: !(Maybe RawJson)
+        , partValue         :: !(Maybe ReasoningSummaryPart)
         , sequenceNumber    :: !(Maybe Int)
 
         }
@@ -615,7 +620,7 @@ eventDecoder wireType = Hermes.object do
                 <$> optionalAtKey "item_id" Hermes.text
                 <*> optionalAtKey "output_index" Hermes.int
                 <*> optionalAtKey "summary_index" Hermes.int
-                <*> optionalAtKey "part" rawJsonDecoder
+                <*> optionalAtKey "part" reasoningSummaryPartDecoder
                 <*> pure sequenceNumber
         EventReasoningSummaryTextDone ->
             ResponseReasoningSummaryTextDoneEvent

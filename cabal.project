@@ -28,5 +28,5 @@ constraints:
 
 source-repository-package
     type: git
-    location: https://github.com/mpscholten/hermes.git
-    tag: f70adba535051516b51b1aff8147bc77bac4f335
+    location: https://github.com/velveteer/hermes.git
+    tag: c04619a2b490fb49c67cacc0d2eb15368b78505f

@@ -63,10 +63,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forM, unless, void, when)
-import Data.Aeson
-    ( object
-    , (.=)
-    )
+import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
@@ -164,8 +161,43 @@ data McpServerStatus = McpServerStatus
     , mcpStatusToolCount :: !Int
     } deriving (Eq, Show)
 
+mcpSkillEntryDecoder :: Json.Decoder McpSkillEntry
+mcpSkillEntryDecoder = Json.object do
+    mcpSkillUri <- Json.atKey "uri" Json.text
+    mcpSkillFrontmatter <- Json.atKey "frontmatter" rawJsonDecoder
+    mcpSkillResources <- Json.atKey "resources" mcpSkillResourcesDecoder
+    pure McpSkillEntry{..}
+
+mcpSkillResourcesDecoder :: Json.Decoder McpSkillResources
+mcpSkillResourcesDecoder =
+    Json.getType >>= \case
+        Json.VString -> do
+            value <- Json.text
+            if value == "dynamic"
+                then pure McpSkillResourcesDynamic
+                else fail "resources must be an array or \"dynamic\""
+        Json.VArray ->
+            McpSkillResourcesListed <$> Json.list mcpSkillResourceDecoder
+        _ -> fail "resources must be an array or \"dynamic\""
+
+mcpSkillResourceDecoder :: Json.Decoder McpSkillResource
+mcpSkillResourceDecoder = Json.object do
+    mcpSkillResourceUri <- Json.atKey "uri" Json.text
+    mcpSkillResourceDigest <- Json.atKey "digest" Json.text
+    mcpSkillResourceSize <- Json.atKey "size" Json.int
+    pure McpSkillResource{..}
+
+mcpResourceContentDecoder :: Json.Decoder McpResourceContent
+mcpResourceContentDecoder = Json.object do
+    mcpResourceUri <- Json.atKey "uri" Json.text
+    mcpResourceMimeType <- Json.optionalKey "mimeType" Json.text
+    mcpResourceText <- Json.optionalKey "text" Json.text
+    mcpResourceBlob <- Json.optionalKey "blob" Json.text
+    pure McpResourceContent{..}
+
 data McpFleet = McpFleet
     { mcpFleetRegistrations :: ![McpToolRegistration]
+    , mcpFleetSkills :: !(TVar [McpSkillRegistration])
     , mcpFleetWarnings :: ![Text]
     , mcpFleetClients :: !(TVar (Map.Map Text McpClient))
     , mcpFleetServerOrder :: ![Text]
@@ -238,7 +270,44 @@ data McpClient = McpClient
     , clientStderrReader :: !(Maybe (Async ()))
     , clientClosed :: !(MVar Bool)
     , clientLifecycle :: !(TVar McpClientLifecycle)
+    -- Set after initialize.  A missing value means the server did not
+    -- negotiate the optional Skills over MCP extension.
+    , clientSkillsCapability :: !(TVar (Maybe McpSkillsCapability))
+    , clientDiscoveredSkills :: !(TVar [McpSkillEntry])
     }
+
+data McpSkillsCapability = McpSkillsCapability
+    { mcpSkillsDirectoryRead :: !Bool
+    } deriving (Eq, Show)
+
+data McpSkillRegistration = McpSkillRegistration
+    { mcpSkillServer :: !Text
+    , mcpSkillEntry :: !McpSkillEntry
+    } deriving (Eq, Show)
+
+data McpSkillResources
+    = McpSkillResourcesListed ![McpSkillResource]
+    | McpSkillResourcesDynamic
+    deriving (Eq, Show)
+
+data McpSkillResource = McpSkillResource
+    { mcpSkillResourceUri :: !Text
+    , mcpSkillResourceDigest :: !Text
+    , mcpSkillResourceSize :: !Int
+    } deriving (Eq, Show)
+
+data McpSkillEntry = McpSkillEntry
+    { mcpSkillUri :: !Text
+    , mcpSkillFrontmatter :: !RawJson
+    , mcpSkillResources :: !McpSkillResources
+    } deriving (Eq, Show)
+
+data McpResourceContent = McpResourceContent
+    { mcpResourceUri :: !Text
+    , mcpResourceMimeType :: !(Maybe Text)
+    , mcpResourceText :: !(Maybe Text)
+    , mcpResourceBlob :: !(Maybe Text)
+    } deriving (Eq, Show)
 
 data McpClientLifecycle
     = ClientPending

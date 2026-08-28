@@ -16,6 +16,7 @@ module Agent.Telegram.Types.State
     , insertPendingAction
     , enqueuePendingAction
     , deletePendingAction
+    , pendingReplyTarget
     , telegramStateDecoder
     ) where
 
@@ -349,6 +350,7 @@ data TelegramPendingReply = TelegramPendingReply
     { pendingUpdateId :: !Integer
     , pendingChat :: !TelegramChatKey
     , pendingReplyToMessageId :: !(Maybe Integer)
+    , pendingEditMessageId :: !(Maybe Integer)
     , pendingText :: !Text
     } deriving (Eq, Show)
 
@@ -357,6 +359,7 @@ instance ToJSON TelegramPendingReply where
         [ "updateId" .= pending.pendingUpdateId
         , "chat" .= pending.pendingChat
         , "replyToMessageId" .= pending.pendingReplyToMessageId
+        , "editMessageId" .= pending.pendingEditMessageId
         , "text" .= pending.pendingText
         ]
 
@@ -366,6 +369,7 @@ telegramPendingReplyDecoder = Hermes.object $
             <$> Hermes.atKey "updateId" integerDecoder
             <*> Hermes.atKey "chat" telegramChatKeyDecoder
             <*> Hermes.optionalKey "replyToMessageId" integerDecoder
+            <*> Hermes.optionalKey "editMessageId" integerDecoder
             <*> Hermes.atKey "text" Hermes.text
 
 data TelegramPendingMediaTurn = TelegramPendingMediaTurn
@@ -605,6 +609,25 @@ deletePendingAction action state =
                 (pendingActionChat action)
                 state.pendingQueues
         }
+
+-- | Use Telegram's visible reply chrome only when a newer inbound message is
+-- already waiting in the same conversation. A response to the latest message
+-- reads naturally as the next ordinary chat message.
+pendingReplyTarget :: TelegramPendingReply -> TelegramState -> Maybe Integer
+pendingReplyTarget pending state
+    | hasNewerInbound = pending.pendingReplyToMessageId
+    | otherwise = Nothing
+  where
+    hasNewerInbound =
+        maybe False
+            (any isInbound . Map.elems . snd
+                . Map.split pending.pendingUpdateId)
+            (Map.lookup pending.pendingChat state.pendingQueues)
+    isInbound = \case
+        RunPendingTurn _ -> True
+        RunPendingMediaTurn _ -> True
+        DeliverReply _ -> False
+        LeaveUnauthorizedChat _ -> False
 
 emptyTelegramState :: TelegramState
 emptyTelegramState = TelegramState
