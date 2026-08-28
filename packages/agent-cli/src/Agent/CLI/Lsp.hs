@@ -24,10 +24,22 @@ import Agent.CLI.Lsp.Path
     , sanitizeName
     )
 import Agent.CLI.Lsp.Protocol
-    ( encodeLspFrame
+    ( IncomingMessage(..)
+    , encodeLspFrame
     , readMessage
     , sendMessage
     )
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
+import Agent.Json.Decode
+    ( decodeEither
+    , optionalKey
+    )
+import Agent.Json.Decode qualified as Hermes
 import Agent.GrokBuild.Dialect.Lsp
     ( LspOperation(..)
     , LspRequest(..)
@@ -64,9 +76,7 @@ import Control.Monad
     )
 import qualified Data.Aeson as Aeson
 import Data.Aeson ((.=))
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
-import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
     ( IORef
     , atomicModifyIORef'
@@ -82,7 +92,6 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Text.Encoding.Error (lenientDecode)
-import qualified Data.Vector as Vector
 import System.Directory
     ( canonicalizePath
     , createDirectoryIfMissing
@@ -399,8 +408,7 @@ initializeClient client = do
                     ]
                 , "capabilities" .= clientCapabilities
                 , "initializationOptions"
-                    .= fromMaybe Aeson.Null
-                        client.clientConfig.lspInitializationOptions
+                    .= client.clientConfig.lspInitializationOptions
                 ]
     requestClient
         client
@@ -697,12 +705,27 @@ clientForPath clients path =
             && Map.member extension
                 client.clientConfig.lspExtensionToLanguage
 
+configurationCountDecoder :: Hermes.Decoder Int
+configurationCountDecoder =
+    Hermes.object $
+        maybe 0 length
+            <$> optionalKey "items" (Hermes.list rawJsonDecoder)
+
+decodeRawJson :: Hermes.Decoder a -> RawJson -> Either Text a
+decodeRawJson decoder =
+    either (Left . Hermes.jsonErrorMessage) Right
+        . decodeEither decoder
+        . rawJsonBytes
+
+nullRawJson :: RawJson
+nullRawJson = rawJsonFromEncoding (Aeson.toEncoding Aeson.Null)
+
 requestClient
     :: LspClient
     -> Int
     -> Text
     -> Aeson.Value
-    -> IO (Either Text Aeson.Value)
+    -> IO (Either Text RawJson)
 requestClient client timeoutMilliseconds method params =
     withMVar client.clientRequestLock \() -> do
         closed <- readIORef client.clientClosed
@@ -755,50 +778,39 @@ requestClient client timeoutMilliseconds method params =
 awaitResponse
     :: LspClient
     -> Int
-    -> IO (Either Text Aeson.Value)
+    -> IO (Either Text RawJson)
 awaitResponse client requestId =
     readMessage client.clientOutput >>= \case
         Left err -> pure (Left err)
-        Right value ->
-            case value of
-                Aeson.Object object
-                    | Just incomingId <- KeyMap.lookup "id" object
-                    , incomingId == Aeson.toJSON requestId ->
-                        pure (decodeResponse object)
-                    | Just (Aeson.String method) <-
-                        KeyMap.lookup "method" object
-                    , Just serverRequestId <- KeyMap.lookup "id" object -> do
-                        answerServerRequest
-                            client method serverRequestId
-                            (fromMaybe Aeson.Null
-                                (KeyMap.lookup "params" object))
-                        awaitResponse client requestId
-                    | otherwise ->
-                        awaitResponse client requestId
-                _ -> awaitResponse client requestId
+        Right message
+            | message.incomingNumericId == Just requestId ->
+                pure case message.incomingError of
+                    Just errorValue ->
+                        Left
+                            ( "LSP server returned an error: "
+                                <> compactJson errorValue
+                            )
+                    Nothing ->
+                        Right
+                            (fromMaybe nullRawJson message.incomingResult)
+            | Just method <- message.incomingMethod
+            , Just serverRequestId <- message.incomingId -> do
+                answerServerRequest
+                    client method serverRequestId
+                    (fromMaybe nullRawJson message.incomingParams)
+                awaitResponse client requestId
+            | otherwise ->
+                awaitResponse client requestId
 
-decodeResponse
-    :: KeyMap.KeyMap Aeson.Value
-    -> Either Text Aeson.Value
-decodeResponse object =
-    case KeyMap.lookup "error" object of
-        Just errorValue ->
-            Left ("LSP server returned an error: " <> compactJson errorValue)
-        Nothing ->
-            Right
-                (fromMaybe Aeson.Null (KeyMap.lookup "result" object))
-
-compactJson :: Aeson.Value -> Text
+compactJson :: RawJson -> Text
 compactJson =
-    Text.decodeUtf8With lenientDecode
-        . LBS.toStrict
-        . Aeson.encode
+    Text.decodeUtf8With lenientDecode . rawJsonBytes
 
 answerServerRequest
     :: LspClient
     -> Text
-    -> Aeson.Value
-    -> Aeson.Value
+    -> RawJson
+    -> RawJson
     -> IO ()
 answerServerRequest client method requestId params =
     sendMessage client.clientInput $
@@ -844,14 +856,9 @@ answerServerRequest client method requestId params =
             , "result" .= result
             ]
     configurationCount =
-        case params of
-            Aeson.Object object ->
-                case KeyMap.lookup "items" object of
-                    Just (Aeson.Array items) ->
-                        min maxLspConfigurationItems
-                            (Vector.length items)
-                    _ -> 0
-            _ -> 0
+        min maxLspConfigurationItems $
+            either (const 0) id $
+                decodeRawJson configurationCountDecoder params
 
     maxLspConfigurationItems = 256
 

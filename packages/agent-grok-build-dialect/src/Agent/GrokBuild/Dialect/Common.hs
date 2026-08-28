@@ -1,21 +1,13 @@
 module Agent.GrokBuild.Dialect.Common
     ( jsonTool
-    , optionalTimeout
     , stripAnsi
     ) where
 
-import Agent.ToolArgs (optIntOrString)
 import Agent.Tools.Types
     ( jsonTool
     )
-import Data.Aeson (Object)
-import Data.Aeson.Types (Parser)
 import Data.Text (Text)
 import qualified Data.Text as Text
-
-optionalTimeout :: Object -> Parser (Maybe Int)
-optionalTimeout object =
-    optIntOrString object "timeout"
 
 stripAnsi :: Text -> Text
 stripAnsi = Text.concat . go

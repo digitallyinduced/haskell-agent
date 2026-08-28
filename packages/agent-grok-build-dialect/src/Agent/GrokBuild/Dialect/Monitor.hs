@@ -3,14 +3,14 @@ module Agent.GrokBuild.Dialect.Monitor
     ( monitorTool
     ) where
 
-import Agent.ToolArgs (objectArgs, optBool, optIntOrString, reqText)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Dangerous (commandLooksLikeRmRf, forbiddenRmRfReason)
 import Agent.GrokBuild.Dialect.Common (jsonTool)
+import Agent.GrokBuild.Dialect.Json (optionalBool, optionalIntOrString)
 import Agent.GrokBuild.Dialect.Shell (GrokSession, startMonitor)
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
-import Data.Aeson (FromJSON(..))
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -22,12 +22,13 @@ data MonitorArgs = MonitorArgs
     , persistent :: !Bool
     }
 
-instance FromJSON MonitorArgs where
-    parseJSON = objectArgs \object -> MonitorArgs
-        <$> reqText object "command"
-        <*> reqText object "description"
-        <*> optIntOrString object "timeout_ms"
-        <*> (fromMaybe False <$> optBool object "persistent")
+monitorArgsDecoder :: Json.Decoder MonitorArgs
+monitorArgsDecoder = Json.object $
+    MonitorArgs
+        <$> Json.atKey "command" Json.text
+        <*> Json.atKey "description" Json.text
+        <*> optionalIntOrString "timeout_ms"
+        <*> (fromMaybe False <$> optionalBool "persistent")
 
 monitorTool :: GrokSession -> AppTool
 monitorTool session = jsonTool "monitor" monitorDescription
@@ -42,7 +43,7 @@ monitorTool session = jsonTool "monitor" monitorDescription
     ]
     False
     TurnSequential
-    (typedTool "monitor" (runMonitor session))
+    (typedTool "monitor" monitorArgsDecoder (runMonitor session))
 
 monitorDescription :: Text
 monitorDescription =

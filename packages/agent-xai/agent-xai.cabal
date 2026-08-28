@@ -51,6 +51,7 @@ library
     hs-source-dirs:   src
     build-depends:    base                  >= 4.14 && < 5
                     , agent-core            >= 0.1 && < 0.2
+                    , agent-json            >= 0.1 && < 0.2
                     , agent-responses       >= 0.1 && < 0.2
                     , agent-responses-types >= 0.1 && < 0.2
                     , text
@@ -63,7 +64,6 @@ library
                     , http-conduit
                     , retry >= 0.9.3.1 && < 0.10
                     , safe-exceptions
-                    , scientific
                     , process
                     , time
                     , websockets
@@ -83,6 +83,7 @@ test-suite agent-xai-test
     ghc-options:      -threaded
     build-depends:    base >= 4.14 && < 5
                     , agent-core
+                    , agent-json
                     , agent-responses
                     , agent-responses-types
                     , agent-xai

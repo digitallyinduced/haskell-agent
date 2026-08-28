@@ -38,12 +38,8 @@ import Agent.Subagents
     , SubagentStatus(..)
     , getStatus
     )
-import Agent.ToolArgs
-    ( objectArgsLenient
-    , optBool
-    , optText
-    , reqText
-    )
+import qualified Agent.Json.Decode as Json
+import Agent.GrokBuild.Dialect.Json (optionalBool, optionalText)
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.MultiAgents (MultiAgentContext(..))
@@ -71,7 +67,7 @@ import Control.Concurrent.MVar
     )
 import Control.Exception.Safe (tryAny)
 import Control.Monad (void)
-import Data.Aeson (FromJSON(..), Value, object, (.=))
+import Data.Aeson (Value, object, (.=))
 import qualified Data.Aeson.Text as Aeson
 import Data.Char (isDigit)
 import Data.List (sortOn)
@@ -242,15 +238,16 @@ data SchedulerCreateArgs = SchedulerCreateArgs
     , fireImmediately :: !Bool
     }
 
-instance FromJSON SchedulerCreateArgs where
-    parseJSON = objectArgsLenient \object_ -> SchedulerCreateArgs
-        <$> optText object_ "task_id"
-        <*> optText object_ "interval"
-        <*> optText object_ "prompt"
-        <*> (fromMaybe True <$> optBool object_ "recurring")
-        <*> optBool object_ "durable"
-        <*> optBool object_ "foreground"
-        <*> (fromMaybe False <$> optBool object_ "fire_immediately")
+schedulerCreateArgsDecoder :: Json.Decoder SchedulerCreateArgs
+schedulerCreateArgsDecoder = Json.object $
+    SchedulerCreateArgs
+        <$> optionalText "task_id"
+        <*> optionalText "interval"
+        <*> optionalText "prompt"
+        <*> (fromMaybe True <$> optionalBool "recurring")
+        <*> optionalBool "durable"
+        <*> optionalBool "foreground"
+        <*> (fromMaybe False <$> optionalBool "fire_immediately")
 
 schedulerCreateTool :: SchedulerRuntime -> AppTool
 schedulerCreateTool runtime =
@@ -272,7 +269,7 @@ schedulerCreateTool runtime =
         ]
         False
         TurnSequential
-        (typedTool "scheduler_create" (runSchedulerCreate runtime))
+        (typedTool "scheduler_create" schedulerCreateArgsDecoder (runSchedulerCreate runtime))
 
 schedulerCreateDescription :: Text
 schedulerCreateDescription =
@@ -459,9 +456,9 @@ data SchedulerDeleteArgs = SchedulerDeleteArgs
     { deleteId :: !Text
     }
 
-instance FromJSON SchedulerDeleteArgs where
-    parseJSON = objectArgsLenient \object_ ->
-        SchedulerDeleteArgs <$> reqText object_ "id"
+schedulerDeleteArgsDecoder :: Json.Decoder SchedulerDeleteArgs
+schedulerDeleteArgsDecoder = Json.object $
+    SchedulerDeleteArgs <$> Json.atKey "id" Json.text
 
 schedulerDeleteTool :: SchedulerRuntime -> AppTool
 schedulerDeleteTool runtime =
@@ -473,7 +470,7 @@ schedulerDeleteTool runtime =
         ]
         False
         TurnSequential
-        (typedTool "scheduler_delete" (runSchedulerDelete runtime))
+        (typedTool "scheduler_delete" schedulerDeleteArgsDecoder (runSchedulerDelete runtime))
 
 runSchedulerDelete
     :: SchedulerRuntime
@@ -504,8 +501,8 @@ runSchedulerDelete runtime args = do
 
 data SchedulerListArgs = SchedulerListArgs
 
-instance FromJSON SchedulerListArgs where
-    parseJSON = objectArgsLenient \_ -> pure SchedulerListArgs
+schedulerListArgsDecoder :: Json.Decoder SchedulerListArgs
+schedulerListArgsDecoder = Json.object (pure SchedulerListArgs)
 
 schedulerListTool :: SchedulerRuntime -> AppTool
 schedulerListTool runtime =
@@ -515,7 +512,7 @@ schedulerListTool runtime =
         []
         True
         TurnSequential
-        (typedTool "scheduler_list" \SchedulerListArgs ->
+        (typedTool "scheduler_list" schedulerListArgsDecoder \SchedulerListArgs ->
             Right . schedulerListOutput <$> listScheduledTasks runtime)
 
 listScheduledTasks

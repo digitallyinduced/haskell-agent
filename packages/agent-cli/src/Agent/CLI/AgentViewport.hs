@@ -46,6 +46,8 @@ import Agent.CLI.TextLayout
     , renderSplitPaneFrame
     )
 import Agent.Loop (LoopEvent(..))
+import Agent.Json (RawJson, rawJsonBytes)
+import Agent.Json.Decode qualified as Hermes
 import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
 import Agent.Subagents (SubagentId(..), SubagentStatus(..))
@@ -66,8 +68,6 @@ import Agent.TUI.Model
     , visibleTodoList
     )
 import Agent.TUI.Presentation (liveTodoPanelLines)
-import qualified Data.Aeson as Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (IORef)
 import Data.List (find, findIndex, sortOn)
 import qualified Data.Map.Strict as Map
@@ -792,13 +792,14 @@ agentMessagePlainText message =
             _ -> []
         ]
 
-renderToolOutputValue :: Aeson.Value -> Text
-renderToolOutputValue = \case
-    Aeson.String text -> text
-    Aeson.Null -> ""
-    value ->
-        TextEncoding.decodeUtf8 $
-            LBS.toStrict (Aeson.encode value)
+renderToolOutputValue :: RawJson -> Text
+renderToolOutputValue value =
+    case Hermes.decodeEither
+            (Hermes.nullable Hermes.text)
+            (rawJsonBytes value) of
+        Right (Just text) -> text
+        Right Nothing -> ""
+        Left _ -> TextEncoding.decodeUtf8 (rawJsonBytes value)
 
 normalizeTranscriptUi :: UiState -> UiState
 normalizeTranscriptUi state =

@@ -2,6 +2,7 @@ module Agent.MCPSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
 import Agent.MCP
+import Agent.Json (rawJsonFromEncoding)
 import Agent.ToolDispatch
     ( ToolCallResult(..)
     , dispatchToolCall
@@ -16,6 +17,7 @@ import Control.Exception.Safe (bracket)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, wait, waitCatch, withAsync)
 import Data.Aeson (object, (.=))
+import qualified Data.Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (find)
@@ -51,7 +53,7 @@ spec = describe "Agent.MCP" do
     describe "normalizeMcpToolResult" do
         it "extracts successful text content" do
             normalizeMcpToolResult
-                (object
+                (rawJsonFromEncoding . Data.Aeson.toEncoding $ object
                     [ "content" .=
                         [ object
                             [ "type" .= ("text" :: Text.Text)
@@ -63,12 +65,13 @@ spec = describe "Agent.MCP" do
 
         it "keeps structured content as compact JSON" do
             normalizeMcpToolResult
-                (object ["structuredContent" .= object ["answer" .= (42 :: Int)]])
+                (rawJsonFromEncoding . Data.Aeson.toEncoding $
+                    object ["structuredContent" .= object ["answer" .= (42 :: Int)]])
                 `shouldBe` Right "{\"answer\":42}"
 
         it "turns MCP isError results into handler errors" do
             normalizeMcpToolResult
-                (object
+                (rawJsonFromEncoding . Data.Aeson.toEncoding $ object
                     [ "isError" .= True
                     , "content" .=
                         [ object

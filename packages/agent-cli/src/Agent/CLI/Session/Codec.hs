@@ -16,6 +16,8 @@ module Agent.CLI.Session.Codec
 
 import Agent.CLI.Session.StoreCodec (fromStoredResponseItem, toStoredResponseItem)
 import Agent.CLI.Session.Types
+import Agent.CLI.Json (decodeLazy)
+import qualified Agent.Json.Decode as Hermes
 import Agent.Dialect (dialectSlug, parseDialect, providerSupportsDialect)
 import Agent.FileRetry (retryOnFileBusy)
 import Agent.Loop (TokenUsage(..))
@@ -27,8 +29,6 @@ import Agent.Store.Types (renderStoreError)
 import Control.Monad (unless, when)
 import Control.Monad.Trans.Class (lift)
 import Control.Monad.Trans.Except (ExceptT, except, throwE)
-import Data.Aeson (FromJSON)
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits (xor)
 import Data.Text (Text)
@@ -53,18 +53,24 @@ loadTranscript path = do
 
 decodeTurnLine :: Text -> Either Text SessionTurn
 decodeTurnLine line =
-    case Aeson.eitherDecodeStrict' (TextEncoding.encodeUtf8 line) of
-        Left err -> Left ("invalid transcript line: " <> Text.pack err)
+    case Hermes.decodeEither sessionTurnDecoder
+            (TextEncoding.encodeUtf8 line) of
+        Left err ->
+            Left ("invalid transcript line: "
+                <> Hermes.jsonErrorMessage err)
         Right turn -> Right turn
 
-decodeFileEither :: FromJSON a => OsPath -> ExceptT Text IO a
-decodeFileEither path = do
+decodeFileEither
+    :: Hermes.Decoder a
+    -> OsPath
+    -> ExceptT Text IO a
+decodeFileEither decoder path = do
     exists <- lift (doesFileExist path)
     unless exists $
         throwE ("missing file: " <> toText path)
     bytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath path)))
-    case Aeson.eitherDecode' bytes of
-        Left err -> throwE (toText path <> ": " <> Text.pack err)
+    case decodeLazy decoder bytes of
+        Left err -> throwE (toText path <> ": " <> err)
         Right value -> pure value
 
 decodeStoredSession
@@ -282,7 +288,7 @@ importLegacySession schemaVersion validId sessionDirForId pool sessionId = do
     if not exists
         then pure False
         else do
-            meta <- decodeFileEither metaPath
+            meta <- decodeFileEither sessionMetaDecoder metaPath
             validateSessionMeta schemaVersion validId sessionId meta
             turns <- loadTranscript transcriptPath
             metaBytes <- lift (retryOnFileBusy (LBS.readFile (unsafeToFilePath metaPath)))

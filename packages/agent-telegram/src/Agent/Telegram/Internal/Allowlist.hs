@@ -77,6 +77,7 @@ import Agent.Telegram.Markdown
     , telegramRenderedLength
     )
 import Agent.Telegram.Voice (transcribeWithXAI)
+import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
@@ -116,7 +117,6 @@ import Control.Exception.Safe
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
     ( Value(..)
-    , eitherDecode
     , encode
     , object
     , (.=)
@@ -348,9 +348,10 @@ persistAllowedUserIdsToConfig runtime = do
         exists <- doesFileExist path
         when exists do
             bytes <- LBS.readFile (unsafeToFilePath path)
-            case eitherDecode bytes of
+            case Hermes.decodeEither telegramConfigDecoder (LBS.toStrict bytes) of
                 Left err ->
-                    fail ("could not decode Telegram config: " <> err)
+                    fail ("could not decode Telegram config: "
+                        <> Text.unpack (Hermes.jsonErrorMessage err))
                 Right config ->
                     writeLazyFileAtomically
                         path

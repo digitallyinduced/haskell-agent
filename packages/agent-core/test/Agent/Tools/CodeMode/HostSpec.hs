@@ -1,6 +1,7 @@
 module Agent.Tools.CodeMode.HostSpec (spec) where
 
 import Agent.Loop (defaultLoopDispatch)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolArgs (objectArgsExact, reqInt)
 import Agent.ToolDispatch
     ( ToolCall(..)
@@ -83,10 +84,11 @@ spec = describe "code-mode Bun host" do
                 Right _ -> False
         parseExecSource
             "// @exec: {\"yield_time_ms\": 10, \"surprise\": true}\ntext(\"hi\");"
-            `shouldSatisfy` \case
-                Left errorText ->
-                    "got `surprise`" `Text.isInfixOf` errorText
-                Right _ -> False
+            `shouldBe`
+                Right
+                    ( "text(\"hi\");"
+                    , ExecPragma (Just 10) Nothing
+                    )
         parseExecSource
             ("// @exec: {\"yield" <> "_time_ms\": -1}\ntext(\"hi\");")
             `shouldSatisfy` \case
@@ -569,7 +571,7 @@ spec = describe "code-mode Bun host" do
                 [ PropertySchema "value" PropertyInteger True Nothing ]
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool "double" \(args :: DoubleArgs) ->
+                (typedTool "double" doubleArgsDecoder \(args :: DoubleArgs) ->
                     pure (Right (Text.pack (show (args.value * 2)))))
             invoke call = do
                 modifyIORef' approvals (+ 1)
@@ -603,7 +605,7 @@ spec = describe "code-mode Bun host" do
                 [ PropertySchema "key" PropertyString True Nothing ]
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool "lookup" \(_ :: Value) -> pure (Right "value"))
+                (typedTool "lookup" emptyObjectDecoder \() -> pure (Right "value"))
             invoke _ = pure (Right "value")
         codeOnly <- newCodeModeToolSet
             CodeOnlyToolMode ImageDetailVisible worker invoke
@@ -655,7 +657,7 @@ spec = describe "code-mode Bun host" do
                 []
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool name \(_ :: Value) ->
+                (typedTool name emptyObjectDecoder \() ->
                     pure (Right ("from " <> name)))
             invoke call = do
                 result <- dispatchToolCall
@@ -684,7 +686,7 @@ spec = describe "code-mode Bun host" do
                 []
                 AlwaysReadOnly
                 ParallelSafe
-                (typedTool "lookup" \(_ :: Value) ->
+                (typedTool "lookup" emptyObjectDecoder \() ->
                     pure (Right "namespaced result"))
             invoke call = do
                 call.name `shouldBe` "lookup"
@@ -736,9 +738,12 @@ runRegisteredExec toolSet source =
 
 newtype DoubleArgs = DoubleArgs { value :: Int }
 
-instance Aeson.FromJSON DoubleArgs where
-    parseJSON = objectArgsExact ["value"] \object_ ->
+doubleArgsDecoder :: Json.Decoder DoubleArgs
+doubleArgsDecoder = objectArgsExact ["value"] \object_ ->
         DoubleArgs <$> reqInt object_ "value"
+
+emptyObjectDecoder :: Json.Decoder ()
+emptyObjectDecoder = Json.object (pure ())
 
 emptyContent :: Value
 emptyContent = Aeson.object

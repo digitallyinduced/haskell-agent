@@ -85,6 +85,16 @@
                     ];
                 };
 
+                agentJsonSource = nix-filter.lib {
+                    root = ./packages/agent-json;
+                    include = [
+                        "src"
+                        "test"
+                        "agent-json.cabal"
+                        "LICENSE"
+                    ];
+                };
+
                 agentResponsesTypesSource = nix-filter.lib {
                     root = ./packages/agent-responses-types;
                     include = [
@@ -273,6 +283,16 @@
                                         (pkgs.haskell.lib.disableSharedLibraries
                                             (pkgs.haskell.lib.disableLibraryProfiling package)));
                     in {
+                        hermes-json =
+                            pkgs.haskell.lib.overrideSrc previous.hermes-json {
+                                src = pkgs.fetchFromGitHub {
+                                    owner = "mpscholten";
+                                    repo = "hermes";
+                                    rev = "f70adba535051516b51b1aff8147bc77bac4f335";
+                                    hash = "sha256-BZEIcQrQTYE7Vf3FVq1EOaeH/dLnFvU+INZZNNQSMcw=";
+                                    fetchSubmodules = true;
+                                };
+                            };
                         pqi = pkgs.haskell.lib.dontCheck
                             (final.callHackageDirect {
                                 pkg = "pqi";
@@ -357,6 +377,11 @@
                             {
                                 src = agentProcessSource;
                             });
+                        agent-json = localPackage (pkgs.haskell.lib.overrideSrc
+                            (final.callPackage ./packages/agent-json/package.nix { })
+                            {
+                                src = agentJsonSource;
+                            });
                         agent-responses-types = localPackage (pkgs.haskell.lib.overrideSrc (final.callPackage ./packages/agent-responses-types/package.nix { }) {
                             src = agentResponsesTypesSource;
                         });
@@ -437,6 +462,7 @@
                 haskellPackages = mkHaskellPackages true;
                 productionHaskellPackages = mkHaskellPackages false;
                 agentCorePackage = productionHaskellPackages.agent-core;
+                agentJsonPackage = productionHaskellPackages.agent-json;
                 agentProcessPackage = productionHaskellPackages.agent-process;
                 agentCodexDialectPackage = productionHaskellPackages.agent-codex-dialect;
                 agentGrokBuildDialectPackage = productionHaskellPackages.agent-grok-build-dialect;
@@ -618,6 +644,7 @@
                 packages.agent-cli = agentCliExecutable;
                 packages.agent-telegram = agentTelegramExecutable;
                 packages.agent-core = agentCorePackage;
+                packages.agent-json = agentJsonPackage;
                 packages.agent-process = agentProcessPackage;
                 packages.agent-codex-dialect = agentCodexDialectPackage;
                 packages.agent-grok-build-dialect = agentGrokBuildDialectPackage;
@@ -652,6 +679,7 @@
                         packages.agent-cli
                         packages.agent-telegram
                         packages.agent-core
+                        packages.agent-json
                         packages.agent-process
                         packages.agent-codex-dialect
                         packages.agent-grok-build-dialect
@@ -701,6 +729,7 @@
                     agent-cli = haskellPackages.agent-cli;
                     agent-telegram = haskellPackages.agent-telegram;
                     agent-core = haskellPackages.agent-core;
+                    agent-json = haskellPackages.agent-json;
                     agent-process = haskellPackages.agent-process;
                     agent-codex-dialect = haskellPackages.agent-codex-dialect;
                     agent-grok-build-dialect = haskellPackages.agent-grok-build-dialect;

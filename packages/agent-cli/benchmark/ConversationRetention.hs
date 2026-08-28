@@ -1,14 +1,15 @@
 module Main (main) where
 
 import Agent.Responses.Types
+import Agent.Json (rawJsonBytes, rawJsonFromEncoding)
 -- 'evaluate' is the primitive for forcing the benchmark result;
 -- safe-exceptions does not re-export it.
 import Control.Exception (evaluate)
 import Control.Exception.Safe (bracket, catchAny)
 import Control.Monad (forM)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LazyByteString
+import qualified Data.ByteString as ByteString
 import Data.List (sort)
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -170,7 +171,6 @@ buildTurn sampleIndex turnIndex payloadBytes =
         , status = Nothing
         , phase = Just "final_answer"
         , passthrough = Nothing
-        , extraFields = KeyMap.empty
         }
     , ReasoningItemValue ReasoningItem
         { itemId = Just (itemId "reasoning")
@@ -178,32 +178,32 @@ buildTurn sampleIndex turnIndex payloadBytes =
             [ ReasoningSummaryPart
                 { partType = "summary_text"
                 , text = Just "representative retained reasoning"
-                , extraFields = KeyMap.empty
                 }
             ]
         , content = Nothing
         , encryptedContent = Just (payload "reasoning" reasoningBytes)
         , status = Nothing
-        , extraFields = KeyMap.empty
         }
     , FunctionCallItem FunctionCall
         { itemId = Just (itemId "call")
         , callId = callId
         , name = "shell_command"
         , namespace = Nothing
+        , provider = Nothing
         , arguments = "{\"command\":\"representative tool call\"}"
         , encryptedFunctionArgs = Nothing
         , status = Nothing
-        , extraFields = KeyMap.empty
         }
     , FunctionCallOutputItem FunctionCallOutput
         { itemId = Just (itemId "output")
         , callId = callId
         , name = Just "shell_command"
         , namespace = Nothing
-        , output = Aeson.String (payload "tool-output" toolOutputBytes)
+        , provider = Nothing
+        , output = rawJsonFromEncoding $
+            Aeson.toEncoding (Aeson.String
+                (payload "tool-output" toolOutputBytes))
         , status = Nothing
-        , extraFields = KeyMap.empty
         }
     ]
   where
@@ -228,9 +228,10 @@ checksumItem checksum = \case
     FunctionCallItem call ->
         checksumText checksum call.arguments
     FunctionCallOutputItem output ->
-        case output.output of
-            Aeson.String text -> checksumText checksum text
-            _ -> checksum + 1
+        ByteString.foldl'
+            (\value byte -> value * 33 + fromIntegral byte)
+            checksum
+            (rawJsonBytes output.output)
     _ -> checksum + 1
 
 messageText :: MessageContent -> Text

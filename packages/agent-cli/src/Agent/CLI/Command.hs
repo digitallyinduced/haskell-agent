@@ -60,7 +60,6 @@ import Agent.ReasoningEffort
     )
 import Agent.Responses.Types
 
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Char (isAlphaNum, isDigit, isSpace)
 import Data.List (isPrefixOf, sortOn)
 import qualified Data.Map.Strict as Map
@@ -575,7 +574,6 @@ setReasoningEffort level ResponseCreateParams{..} =
             , generateSummary = Nothing
             , reasoningMode = Nothing
             , summary = Nothing
-            , extraFields = KeyMap.empty
             }
 
 currentEffort :: ResponseCreateParams -> ReasoningEffort

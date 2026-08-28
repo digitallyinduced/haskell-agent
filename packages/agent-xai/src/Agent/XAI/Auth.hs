@@ -32,9 +32,9 @@ module Agent.XAI.Auth
 import Agent.Http.Url (trimTrailingSlash)
 import Agent.Error (ApiError(..), ErrorType(..))
 import Agent.Auth.JWT (decodeJwtPayload)
+import qualified Agent.Json.Decode as Json
 import Control.Concurrent (threadDelay)
 import Control.Exception.Safe (tryAny)
-import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Maybe as Maybe
@@ -95,15 +95,14 @@ instance Show DeviceAuthorization where
             <> ", expiresInSeconds = " <> show authorization.expiresInSeconds
             <> " }"
 
-instance Aeson.FromJSON DeviceAuthorization where
-    parseJSON = Aeson.withObject "DeviceAuthorization" \object -> do
-        deviceCode <- object Aeson..: "device_code"
-        userCode <- object Aeson..: "user_code"
-        verificationUri <- object Aeson..: "verification_uri"
-        verificationUriComplete <- object Aeson..:? "verification_uri_complete"
-        pollIntervalSeconds <- max 1 . Maybe.fromMaybe 5
-            <$> object Aeson..:? "interval"
-        expiresInSeconds <- object Aeson..:? "expires_in"
+deviceAuthorizationDecoder :: Json.Decoder DeviceAuthorization
+deviceAuthorizationDecoder = Json.object do
+        deviceCode <- Json.atKey "device_code" Json.text
+        userCode <- Json.atKey "user_code" Json.text
+        verificationUri <- Json.atKey "verification_uri" Json.text
+        verificationUriComplete <- Json.optionalKey "verification_uri_complete" Json.text
+        pollIntervalSeconds <- max 1 <$> Json.defaultKey 5 "interval" Json.int
+        expiresInSeconds <- Json.optionalKey "expires_in" Json.int
         pure DeviceAuthorization
             { deviceCode
             , userCode
@@ -119,12 +118,12 @@ data OAuthTokens = OAuthTokens
     , expiresInSeconds :: !(Maybe Int)
     } deriving (Eq)
 
-instance Aeson.FromJSON OAuthTokens where
-    parseJSON = Aeson.withObject "OAuthTokens" \object -> OAuthTokens
-        <$> object Aeson..: "access_token"
-        <*> object Aeson..:? "refresh_token"
-        <*> object Aeson..:? "id_token"
-        <*> object Aeson..:? "expires_in"
+oAuthTokensDecoder :: Json.Decoder OAuthTokens
+oAuthTokensDecoder = Json.object $ OAuthTokens
+    <$> Json.atKey "access_token" Json.text
+    <*> Json.optionalKey "refresh_token" Json.text
+    <*> Json.optionalKey "id_token" Json.text
+    <*> Json.optionalKey "expires_in" Json.int
 
 -- Keep bearer/refresh tokens out of logs.
 instance Show OAuthTokens where
@@ -153,7 +152,7 @@ requestDeviceAuthorization options = safely do
             fail ("device code request failed with HTTP " <> show status
                 <> ": " <> lbsPreview (getResponseBody response))
         _ -> pure ()
-    decodeResponse "device code response" response
+    decodeResponse deviceAuthorizationDecoder "device code response" response
 
 deviceFlowDisabledMessage :: String
 deviceFlowDisabledMessage =
@@ -243,7 +242,7 @@ postTokenForm options formFields = do
         $ setRequestBodyURLEncoded formFields request
 
 parseTokens :: Response LBS.ByteString -> IO OAuthTokens
-parseTokens = decodeResponse "token response"
+parseTokens = decodeResponse oAuthTokensDecoder "token response"
 
 -- | Stable per-account identity for pooling, from the access-token JWT
 -- claims. Personal tokens carry the xAI user id in @sub@; team tokens
@@ -251,7 +250,7 @@ parseTokens = decodeResponse "token response"
 -- namespaces accounts, it grants nothing.
 accountIdFromAccessToken :: Text -> Maybe Text
 accountIdFromAccessToken accessToken = do
-    payload <- decodeJwtPayload @JwtClaims accessToken
+    payload <- decodeJwtPayload jwtClaimsDecoder accessToken
     payload.subject
         `orElse` payload.principalIdSnake
         `orElse` payload.principalIdCamel
@@ -262,7 +261,7 @@ accountIdFromAccessToken accessToken = do
 
 emailFromToken :: Text -> Maybe Text
 emailFromToken token = do
-    payload <- decodeJwtPayload @JwtClaims token
+    payload <- decodeJwtPayload jwtClaimsDecoder token
     email <- payload.email
     let trimmed = Text.strip email
     if Text.null trimmed then Nothing else Just trimmed
@@ -274,12 +273,12 @@ data JwtClaims = JwtClaims
     , email :: !(Maybe Text)
     }
 
-instance Aeson.FromJSON JwtClaims where
-    parseJSON = Aeson.withObject "JwtClaims" \object -> JwtClaims
-        <$> object Aeson..:? "sub"
-        <*> object Aeson..:? "principal_id"
-        <*> object Aeson..:? "principalId"
-        <*> object Aeson..:? "email"
+jwtClaimsDecoder :: Json.Decoder JwtClaims
+jwtClaimsDecoder = Json.object $ JwtClaims
+    <$> Json.optionalKey "sub" Json.text
+    <*> Json.optionalKey "principal_id" Json.text
+    <*> Json.optionalKey "principalId" Json.text
+    <*> Json.optionalKey "email" Json.text
 
 --------------------------------------------------------------------------------
 -- Small helpers
@@ -292,18 +291,25 @@ safely action = tryAny action >>= \case
 
 newtype OAuthError = OAuthError { errorCode :: Text }
 
-instance Aeson.FromJSON OAuthError where
-    parseJSON = Aeson.withObject "OAuthError" \object ->
-        OAuthError <$> object Aeson..: "error"
+oAuthErrorDecoder :: Json.Decoder OAuthError
+oAuthErrorDecoder = Json.object $
+    OAuthError <$> Json.atKey "error" Json.text
 
 oauthErrorCode :: Response LBS.ByteString -> Maybe Text
-oauthErrorCode response = case Aeson.decode (getResponseBody response) of
-    Just OAuthError { errorCode } -> Just errorCode
-    Nothing -> Nothing
+oauthErrorCode response = case
+    Json.decodeEither oAuthErrorDecoder (LBS.toStrict (getResponseBody response)) of
+        Right OAuthError { errorCode } -> Just errorCode
+        Left _ -> Nothing
 
-decodeResponse :: Aeson.FromJSON value => String -> Response LBS.ByteString -> IO value
-decodeResponse label response = case Aeson.eitherDecode (getResponseBody response) of
-    Left err -> fail (label <> " is invalid JSON: " <> err)
+decodeResponse
+    :: Json.Decoder value
+    -> String
+    -> Response LBS.ByteString
+    -> IO value
+decodeResponse decoder label response =
+    case Json.decodeEither decoder (LBS.toStrict (getResponseBody response)) of
+    Left err -> fail
+        (label <> " is invalid JSON: " <> Text.unpack err.jsonErrorMessage)
     Right value -> pure value
 
 lbsPreview :: LBS.ByteString -> String

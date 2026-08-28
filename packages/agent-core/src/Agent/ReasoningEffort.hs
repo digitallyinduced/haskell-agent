@@ -8,9 +8,11 @@ module Agent.ReasoningEffort
     , reasoningEfforts
     , reasoningEffortText
     , parseReasoningEffort
+    , reasoningEffortDecoder
     ) where
 
-import Data.Aeson (FromJSON(..), ToJSON(..), withText)
+import qualified Agent.Json.Decode as Json
+import Data.Aeson (ToJSON(..))
 import Data.Text (Text)
 import qualified Data.Text as Text
 
@@ -52,6 +54,6 @@ parseReasoningEffort raw =
 instance ToJSON ReasoningEffort where
     toJSON = toJSON . reasoningEffortText
 
-instance FromJSON ReasoningEffort where
-    parseJSON = withText "ReasoningEffort" $
+reasoningEffortDecoder :: Json.Decoder ReasoningEffort
+reasoningEffortDecoder = Json.withText $
         either (fail . Text.unpack) pure . parseReasoningEffort

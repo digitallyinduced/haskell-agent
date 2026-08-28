@@ -1,13 +1,12 @@
 module Agent.OpenAI.Auth.Refresh (refreshAccessTokenHTTP) where
 
 import Agent.Error (ApiError(..), ErrorType(..))
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Auth.JWT (deriveAccountId)
 import Agent.OpenAI.Auth.Types (AuthState(..))
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (tryAny)
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString.Lazy as LBS
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
@@ -53,37 +52,37 @@ refreshAccessTokenHTTP oauthClientId state = do
                         <> Text.decodeUtf8With Text.lenientDecode
                             (LBS.toStrict (LBS.take 500 (getResponseBody response))))
                     Nothing
-                else case Aeson.eitherDecode (getResponseBody response) of
+                else case Json.decodeEither refreshResponseDecoder
+                        (LBS.toStrict (getResponseBody response)) of
                     Left err ->
                         pure $ Left $ ProviderError AuthenticationError
-                            ("Failed to parse token refresh response: " <> Text.pack err)
+                            ("Failed to parse token refresh response: "
+                                <> Json.jsonErrorMessage err)
                             Nothing
-                    Right (object :: Aeson.Value) ->
-                        case jsonTextMaybe object "access_token" of
-                            Nothing ->
-                                pure $ Left $ ProviderError AuthenticationError
-                                    "Token refresh response missing access_token"
-                                    Nothing
-                            Just newAccessToken -> do
-                                let newRefreshToken =
-                                        fromMaybe state.refreshToken
-                                            (jsonTextMaybe object "refresh_token")
-                                    newIdToken = jsonTextMaybe object "id_token"
-                                    newAccountId =
-                                        fromMaybe state.accountId
-                                            (newIdToken >>= deriveAccountId)
-                                now <- getCurrentTime
-                                pure $ Right state
-                                    { accessToken = newAccessToken
-                                    , refreshToken = newRefreshToken
-                                    , accountId = newAccountId
-                                    , idToken = newIdToken <|> state.idToken
-                                    , lastRefresh = now
-                                    }
+                    Right RefreshResponse{..} -> do
+                        let newRefreshToken =
+                                fromMaybe state.refreshToken refreshToken
+                            newAccountId =
+                                fromMaybe state.accountId
+                                    (idToken >>= deriveAccountId)
+                        now <- getCurrentTime
+                        pure $ Right state
+                            { accessToken
+                            , refreshToken = newRefreshToken
+                            , accountId = newAccountId
+                            , idToken = idToken <|> state.idToken
+                            , lastRefresh = now
+                            }
 
-jsonTextMaybe :: Aeson.Value -> Text -> Maybe Text
-jsonTextMaybe (Aeson.Object object) key =
-    case KeyMap.lookup (Key.fromText key) object of
-        Just (Aeson.String text) -> Just text
-        _ -> Nothing
-jsonTextMaybe _ _ = Nothing
+data RefreshResponse = RefreshResponse
+    { accessToken :: !Text
+    , refreshToken :: !(Maybe Text)
+    , idToken :: !(Maybe Text)
+    }
+
+refreshResponseDecoder :: Json.Decoder RefreshResponse
+refreshResponseDecoder = Json.object $
+    RefreshResponse
+        <$> Json.atKey "access_token" Json.text
+        <*> Json.atKeyOptional "refresh_token" Json.text
+        <*> Json.atKeyOptional "id_token" Json.text

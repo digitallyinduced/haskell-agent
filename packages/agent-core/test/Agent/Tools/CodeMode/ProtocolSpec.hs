@@ -1,11 +1,14 @@
 module Agent.Tools.CodeMode.ProtocolSpec (spec) where
 
+import Agent.Json (RawJson, rawJsonDecoder)
+import qualified Agent.Json.Decode as Json
 import Agent.Tools.CodeMode.Protocol
 import Data.Aeson (object, (.=))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
+import qualified Data.Text as Text
 import Test.Hspec
 
 spec :: Spec
@@ -38,32 +41,25 @@ spec = describe "code-mode worker protocol" do
                 Left _ -> True
                 Right _ -> False
 
-    it "rejects unknown protocol fields at every message boundary" do
+    it "ignores unknown protocol fields at every message boundary" do
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"ready\",\"unexpected\":true}"
-            `shouldSatisfy` \case
-                Left _ -> True
-                Right _ -> False
+            `shouldBe` Right WorkerReady
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"content\",\"params\":{\"value\":null,\"unexpected\":true}}"
-            `shouldSatisfy` \case
-                Left _ -> True
-                Right _ -> False
+            `shouldBe` Right (WorkerContent (raw "null"))
 
     it "decodes content, yield, and notification messages" do
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"content\",\"params\":{\"value\":{\"type\":\"text\",\"text\":\"partial\"}}}"
             `shouldBe`
                 Right (WorkerContent
-                    (object
-                        [ "type" .= ("text" :: String)
-                        , "text" .= ("partial" :: String)
-                        ]))
+                    (raw "{\"type\":\"text\",\"text\":\"partial\"}"))
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"yield\",\"params\":{\"value\":{\"content\":[]}}}"
             `shouldBe`
                 Right (WorkerYielded
-                    (object ["content" .= ([] :: [Aeson.Value])]))
+                    (raw "{\"content\":[]}"))
         decodeProtocolMessage
             "{\"jsonrpc\":\"2.0\",\"method\":\"notify\",\"params\":{\"text\":\"working\"}}"
             `shouldBe` Right (WorkerNotification "working")
@@ -74,10 +70,9 @@ spec = describe "code-mode worker protocol" do
             `shouldBe`
                 Right WorkerExecSucceeded
                     { responseId = "exec"
-                    , responseValue =
-                        object ["content" .= ([] :: [Aeson.Value])]
+                    , responseValue = raw "{\"content\":[]}"
                     , responseStoredValueWrites =
-                        Map.singleton "answer" (Aeson.Number 42)
+                        Map.singleton "answer" (raw "42")
                     }
 
     it "decodes failed execution state without discarding partial effects" do
@@ -87,10 +82,9 @@ spec = describe "code-mode worker protocol" do
                 Right WorkerExecFailed
                     { responseId = "exec"
                     , responseError = "boom"
-                    , responseValue =
-                        object ["content" .= ([] :: [Aeson.Value])]
+                    , responseValue = raw "{\"content\":[]}"
                     , responseStoredValueWrites =
-                        Map.singleton "candidate" (Aeson.Bool True)
+                        Map.singleton "candidate" (raw "true")
                     }
 
     it "encodes enabled tool metadata and the session store" do
@@ -99,23 +93,32 @@ spec = describe "code-mode worker protocol" do
                 "text(load(\"answer\"));"
                 [ CodeModeToolMetadata "inspect" "Inspect a value." ]
                 (Map.singleton "answer" (Aeson.Number 42))
-        case Aeson.decodeStrict' encoded of
-            Just (Aeson.Object request) ->
-                case KeyMap.lookup "params" request of
-                    Just (Aeson.Object params) -> do
-                        KeyMap.lookup "tools" params `shouldBe`
-                            Just (Aeson.toJSON
-                                [ object
-                                    [ "name" .= ("inspect" :: String)
-                                    , "description" .=
-                                        ("Inspect a value." :: String)
-                                    ]
-                                ])
-                        KeyMap.lookup "stored_values" params `shouldBe`
-                            Just (object ["answer" .= (42 :: Int)])
-                        KeyMap.lookup "image_detail_visible" params
-                            `shouldBe` Just (Aeson.Bool True)
-                    other -> expectationFailure
-                        ("expected params object, got " <> show other)
-            other -> expectationFailure
-                ("expected request object, got " <> show other)
+        Json.decodeEither execRequestProjection encoded
+            `shouldBe`
+                Right
+                    ( [("inspect", "Inspect a value.")]
+                    , 42
+                    , True
+                    )
+
+raw :: BS.ByteString -> RawJson
+raw bytes =
+    case Json.decodeEither rawJsonDecoder bytes of
+        Right value -> value
+        Left err -> error (Text.unpack err.jsonErrorMessage)
+
+execRequestProjection :: Json.Decoder ([(Text.Text, Text.Text)], Int, Bool)
+execRequestProjection =
+    Json.object $
+        Json.atKey "params" $
+            Json.object $
+                (,,)
+                    <$> Json.atKey "tools"
+                        (Json.list $
+                            Json.object $
+                                (,)
+                                    <$> Json.atKey "name" Json.text
+                                    <*> Json.atKey "description" Json.text)
+                    <*> Json.atKey "stored_values"
+                        (Json.object (Json.atKey "answer" Json.int))
+                    <*> Json.atKey "image_detail_visible" Json.bool

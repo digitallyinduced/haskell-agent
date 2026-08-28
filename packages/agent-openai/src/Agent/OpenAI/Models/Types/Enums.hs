@@ -29,13 +29,8 @@ module Agent.OpenAI.Models.Types.Enums
     , ModelAvailabilityNux(..)
     ) where
 
-import Data.Aeson
-    ( FromJSON(..), ToJSON(..), Value(..), object, withObject, withText
-    , (.:?), (.!=), (.=)
-    )
+import Data.Aeson (ToJSON(..), object, (.=))
 import Data.Text (Text)
-import qualified Data.Text as Text
-import Data.Aeson.Types (Parser)
 
 data ReasoningEffort
     = ReasoningEffortNone
@@ -62,22 +57,7 @@ reasoningEffortText = \case
     ReasoningEffortOther value -> value
 
 instance ToJSON ReasoningEffort where
-    toJSON = String . reasoningEffortText
-
-instance FromJSON ReasoningEffort where
-    parseJSON = withText "ReasoningEffort" \value ->
-        if Text.null value
-            then fail "reasoning_effort must not be empty"
-            else pure case value of
-                "none" -> ReasoningEffortNone
-                "minimal" -> ReasoningEffortMinimal
-                "low" -> ReasoningEffortLow
-                "medium" -> ReasoningEffortMedium
-                "high" -> ReasoningEffortHigh
-                "xhigh" -> ReasoningEffortXHigh
-                "max" -> ReasoningEffortMax
-                "ultra" -> ReasoningEffortUltra
-                unknown -> ReasoningEffortOther unknown
+    toJSON = toJSON . reasoningEffortText
 
 data ReasoningSummary
     = ReasoningSummaryNone
@@ -96,15 +76,7 @@ reasoningSummaryText = \case
     ReasoningSummaryOther value -> value
 
 instance ToJSON ReasoningSummary where
-    toJSON = String . reasoningSummaryText
-
-instance FromJSON ReasoningSummary where
-    parseJSON = parseTextEnum "ReasoningSummary" \case
-        "none" -> ReasoningSummaryNone
-        "auto" -> ReasoningSummaryAuto
-        "concise" -> ReasoningSummaryConcise
-        "detailed" -> ReasoningSummaryDetailed
-        value -> ReasoningSummaryOther value
+    toJSON = toJSON . reasoningSummaryText
 
 data Verbosity
     = VerbosityLow
@@ -121,14 +93,7 @@ verbosityText = \case
     VerbosityOther value -> value
 
 instance ToJSON Verbosity where
-    toJSON = String . verbosityText
-
-instance FromJSON Verbosity where
-    parseJSON = parseTextEnum "Verbosity" \case
-        "low" -> VerbosityLow
-        "medium" -> VerbosityMedium
-        "high" -> VerbosityHigh
-        value -> VerbosityOther value
+    toJSON = toJSON . verbosityText
 
 data InputModality
     = InputModalityText
@@ -145,14 +110,7 @@ inputModalityText = \case
     InputModalityOther value -> value
 
 instance ToJSON InputModality where
-    toJSON = String . inputModalityText
-
-instance FromJSON InputModality where
-    parseJSON = parseTextEnum "InputModality" \case
-        "text" -> InputModalityText
-        "image" -> InputModalityImage
-        "audio" -> InputModalityAudio
-        value -> InputModalityOther value
+    toJSON = toJSON . inputModalityText
 
 defaultInputModalities :: [InputModality]
 defaultInputModalities = [InputModalityText, InputModalityImage]
@@ -172,14 +130,7 @@ modelVisibilityText = \case
     ModelVisibilityOther value -> value
 
 instance ToJSON ModelVisibility where
-    toJSON = String . modelVisibilityText
-
-instance FromJSON ModelVisibility where
-    parseJSON = parseTextEnum "ModelVisibility" \case
-        "list" -> ModelVisibilityList
-        "hide" -> ModelVisibilityHide
-        "none" -> ModelVisibilityNone
-        value -> ModelVisibilityOther value
+    toJSON = toJSON . modelVisibilityText
 
 data ShellToolType
     = ShellToolUnifiedExec
@@ -194,16 +145,7 @@ shellToolTypeText = \case
     ShellToolOther value -> value
 
 instance ToJSON ShellToolType where
-    toJSON = String . shellToolTypeText
-
-instance FromJSON ShellToolType where
-    parseJSON = parseTextEnum "ShellToolType" \case
-        "unified_exec" -> ShellToolUnifiedExec
-        "default" -> ShellToolUnifiedExec
-        "local" -> ShellToolUnifiedExec
-        "shell_command" -> ShellToolUnifiedExec
-        "disabled" -> ShellToolDisabled
-        value -> ShellToolOther value
+    toJSON = toJSON . shellToolTypeText
 
 data ApplyPatchToolType
     = ApplyPatchFreeform
@@ -216,12 +158,7 @@ applyPatchToolTypeText = \case
     ApplyPatchOther value -> value
 
 instance ToJSON ApplyPatchToolType where
-    toJSON = String . applyPatchToolTypeText
-
-instance FromJSON ApplyPatchToolType where
-    parseJSON = parseTextEnum "ApplyPatchToolType" \case
-        "freeform" -> ApplyPatchFreeform
-        value -> ApplyPatchOther value
+    toJSON = toJSON . applyPatchToolTypeText
 
 data WebSearchToolType
     = WebSearchText
@@ -236,13 +173,7 @@ webSearchToolTypeText = \case
     WebSearchOther value -> value
 
 instance ToJSON WebSearchToolType where
-    toJSON = String . webSearchToolTypeText
-
-instance FromJSON WebSearchToolType where
-    parseJSON = parseTextEnum "WebSearchToolType" \case
-        "text" -> WebSearchText
-        "text_and_image" -> WebSearchTextAndImage
-        value -> WebSearchOther value
+    toJSON = toJSON . webSearchToolTypeText
 
 data TruncationMode
     = TruncationBytes
@@ -257,13 +188,7 @@ truncationModeText = \case
     TruncationOther value -> value
 
 instance ToJSON TruncationMode where
-    toJSON = String . truncationModeText
-
-instance FromJSON TruncationMode where
-    parseJSON = parseTextEnum "TruncationMode" \case
-        "bytes" -> TruncationBytes
-        "tokens" -> TruncationTokens
-        value -> TruncationOther value
+    toJSON = toJSON . truncationModeText
 
 data ToolMode
     = ToolModeDirect
@@ -280,14 +205,7 @@ toolModeText = \case
     ToolModeOther value -> value
 
 instance ToJSON ToolMode where
-    toJSON = String . toolModeText
-
-instance FromJSON ToolMode where
-    parseJSON = parseTextEnum "ToolMode" \case
-        "direct" -> ToolModeDirect
-        "code_mode" -> ToolModeCode
-        "code_mode_only" -> ToolModeCodeOnly
-        value -> ToolModeOther value
+    toJSON = toJSON . toolModeText
 
 data MultiAgentVersion
     = MultiAgentDisabled
@@ -304,28 +222,12 @@ multiAgentVersionText = \case
     MultiAgentVersionOther value -> value
 
 instance ToJSON MultiAgentVersion where
-    toJSON = String . multiAgentVersionText
-
-instance FromJSON MultiAgentVersion where
-    parseJSON = parseTextEnum "MultiAgentVersion" \case
-        "disabled" -> MultiAgentDisabled
-        "v1" -> MultiAgentV1
-        "v2" -> MultiAgentV2
-        value -> MultiAgentVersionOther value
-
-parseTextEnum :: String -> (Text -> value) -> Value -> Parser value
-parseTextEnum label constructor = withText label (pure . constructor)
+    toJSON = toJSON . multiAgentVersionText
 
 data ReasoningEffortPreset = ReasoningEffortPreset
     { effort :: !ReasoningEffort
     , description :: !Text
     } deriving (Eq, Show)
-
-instance FromJSON ReasoningEffortPreset where
-    parseJSON = withObject "ReasoningEffortPreset" \value ->
-        ReasoningEffortPreset
-            <$> value .:? "effort" .!= ReasoningEffortNone
-            <*> value .:? "description" .!= ""
 
 instance ToJSON ReasoningEffortPreset where
     toJSON preset = object
@@ -337,12 +239,6 @@ data TruncationPolicy = TruncationPolicy
     { mode :: !TruncationMode
     , limit :: !Int
     } deriving (Eq, Show)
-
-instance FromJSON TruncationPolicy where
-    parseJSON = withObject "TruncationPolicy" \value ->
-        TruncationPolicy
-            <$> value .:? "mode" .!= TruncationBytes
-            <*> value .:? "limit" .!= 10_000
 
 instance ToJSON TruncationPolicy where
     toJSON policy = object
@@ -356,13 +252,6 @@ data ModelServiceTier = ModelServiceTier
     , description :: !Text
     } deriving (Eq, Show)
 
-instance FromJSON ModelServiceTier where
-    parseJSON = withObject "ModelServiceTier" \value ->
-        ModelServiceTier
-            <$> value .:? "id" .!= ""
-            <*> value .:? "name" .!= ""
-            <*> value .:? "description" .!= ""
-
 instance ToJSON ModelServiceTier where
     toJSON tier = object
         [ "id" .= tier.tierId
@@ -373,10 +262,6 @@ instance ToJSON ModelServiceTier where
 newtype ModelAvailabilityNux = ModelAvailabilityNux
     { message :: Text
     } deriving (Eq, Show)
-
-instance FromJSON ModelAvailabilityNux where
-    parseJSON = withObject "ModelAvailabilityNux" \value ->
-        ModelAvailabilityNux <$> value .:? "message" .!= ""
 
 instance ToJSON ModelAvailabilityNux where
     toJSON nux = object ["message" .= nux.message]

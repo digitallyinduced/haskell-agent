@@ -18,16 +18,14 @@ import Agent.Loop
     , TurnInput(..)
     )
 import Agent.Concurrent (mapConcurrentlyBounded)
+import Agent.CLI.Json (decodeLazy, integer)
+import Agent.Json.Decode (defaultKey, optionalKey)
 import Agent.FileRetry (retryOnFileBusy)
+import Agent.Json.Decode qualified as Hermes
 import Agent.OsPath (unsafeToFilePath)
 import Data.Aeson
-    ( FromJSON(..)
-    , ToJSON(..)
+    ( ToJSON(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
 import qualified Data.Aeson as Aeson
@@ -52,12 +50,13 @@ instance ToJSON ManagedTurnMedia where
         , "name" .= media.managedTurnMediaName
         ]
 
-instance FromJSON ManagedTurnMedia where
-    parseJSON = withObject "ManagedTurnMedia" \o ->
+managedTurnMediaDecoder :: Hermes.Decoder ManagedTurnMedia
+managedTurnMediaDecoder =
+    Hermes.object $
         ManagedTurnMedia
-            <$> o .: "path"
-            <*> o .: "mime"
-            <*> o .:? "name"
+            <$> Hermes.atKey "path" Hermes.string
+            <*> Hermes.atKey "mime" Hermes.text
+            <*> optionalKey "name" Hermes.text
 
 data ManagedTurnContext = ManagedTurnContext
     { managedGateway :: !Text
@@ -76,14 +75,15 @@ instance ToJSON ManagedTurnContext where
         , "user_id" .= context.managedUserId
         ]
 
-instance FromJSON ManagedTurnContext where
-    parseJSON = withObject "ManagedTurnContext" \o ->
+managedTurnContextDecoder :: Hermes.Decoder ManagedTurnContext
+managedTurnContextDecoder =
+    Hermes.object $
         ManagedTurnContext
-            <$> o .: "gateway"
-            <*> o .: "chat_id"
-            <*> o .:? "message_thread_id"
-            <*> o .:? "reply_to_message_id"
-            <*> o .: "user_id"
+            <$> Hermes.atKey "gateway" Hermes.text
+            <*> Hermes.atKey "chat_id" integer
+            <*> optionalKey "message_thread_id" integer
+            <*> optionalKey "reply_to_message_id" integer
+            <*> Hermes.atKey "user_id" integer
 
 data ManagedTurnRequest = ManagedTurnRequest
     { managedTurnVersion :: !Int
@@ -104,15 +104,16 @@ instance ToJSON ManagedTurnRequest where
         , "context" .= request.managedTurnContext
         ]
 
-instance FromJSON ManagedTurnRequest where
-    parseJSON = withObject "ManagedTurnRequest" \o ->
+managedTurnRequestDecoder :: Hermes.Decoder ManagedTurnRequest
+managedTurnRequestDecoder =
+    Hermes.object $
         ManagedTurnRequest
-            <$> (o .:? "version" .!= 1)
-            <*> o .: "text"
-            <*> (o .:? "images" .!= [])
-            <*> (o .:? "files" .!= [])
-            <*> o .:? "bridge_directory"
-            <*> o .:? "context"
+            <$> defaultKey 1 "version" Hermes.int
+            <*> Hermes.atKey "text" Hermes.text
+            <*> defaultKey [] "images" (Hermes.list managedTurnMediaDecoder)
+            <*> defaultKey [] "files" (Hermes.list managedTurnMediaDecoder)
+            <*> optionalKey "bridge_directory" Hermes.string
+            <*> optionalKey "context" managedTurnContextDecoder
 
 managedTurnRequestFromText :: Text -> ManagedTurnRequest
 managedTurnRequestFromText text =
@@ -144,7 +145,7 @@ loadManagedTurnRequest path = do
         then pure (Left "managed turn request file does not exist")
         else do
             bytes <- retryOnFileBusy (LBS.readFile (unsafeToFilePath path))
-            case Aeson.eitherDecode bytes of
+            case decodeLazy managedTurnRequestDecoder bytes of
                 Right request@ManagedTurnRequest{managedTurnVersion = version}
                     | version == 1 ->
                         pure (Right request)
@@ -155,7 +156,7 @@ loadManagedTurnRequest path = do
                 Left err ->
                     pure (Left
                         ("could not decode managed turn request: "
-                            <> Text.pack err))
+                            <> err))
 
 managedTurnInputs :: OsPath -> ManagedTurnRequest -> IO [TurnInput]
 managedTurnInputs _ request

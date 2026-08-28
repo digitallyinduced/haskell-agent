@@ -1,8 +1,9 @@
 module Claude.Agent.SDK.QuerySpec (spec) where
 
+import Agent.Json (rawJsonBytes)
 import Claude.Agent.SDK
 import Claude.Agent.SDK.TestSupport
-import qualified Data.Aeson as Aeson
+import qualified Data.ByteString as ByteString
 import Data.IORef
     ( modifyIORef'
     , newIORef
@@ -59,7 +60,7 @@ spec = describe "query" do
                 any isUnknownBlock content
             _ -> False
         messages `shouldSatisfy` any \case
-            MessageUnknown (Aeson.Object _) -> True
+            MessageUnknown{} -> True
             _ -> False
 
     it "scopes nested supersedes so subagents cannot retract top-level output" do
@@ -105,10 +106,19 @@ spec = describe "query" do
             `shouldSatisfy` \case
                 [message] ->
                     messageParentToolUseId message == Just "agent-tool"
-                        && "original" `Text.isInfixOf` Text.pack (show message)
+                        && case message of
+                            MessageUnknown opaque ->
+                                "\"original\""
+                                    `ByteString.isInfixOf`
+                                        rawJsonBytes opaque.raw
+                            _ -> False
                         && not
-                            ("duplicate"
-                                `Text.isInfixOf` Text.pack (show message))
+                            (case message of
+                                MessageUnknown opaque ->
+                                    "\"duplicate\""
+                                        `ByteString.isInfixOf`
+                                            rawJsonBytes opaque.raw
+                                _ -> False)
                 _ ->
                     False
 

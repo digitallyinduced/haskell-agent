@@ -2,13 +2,17 @@
 module Agent.CLI.Session
     ( SessionHandle(..)
     , SessionMeta(..)
+    , sessionMetaDecoder
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
+    , sessionTurnDecoder
     , SessionTurnPage(..)
     , SessionResumeStats(..)
     , SessionActivity(..)
+    , sessionActivityDecoder
     , SessionTransfer(..)
+    , sessionTransferDecoder
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -68,16 +72,21 @@ import Agent.CLI.SessionLock
     ( acquireSessionLock
     , releaseSessionLock
     )
+import Agent.CLI.Json (decodeLazy)
 import Agent.CLI.Session.Types
     ( SessionHandle(..)
     , SessionMeta(..)
+    , sessionMetaDecoder
     , LegacySubagentTarget(..)
     , TranscriptEffect(..)
     , SessionTurn(..)
+    , sessionTurnDecoder
     , SessionTurnPage(..)
     , SessionResumeStats(..)
     , SessionActivity(..)
+    , sessionActivityDecoder
     , SessionTransfer(..)
+    , sessionTransferDecoder
     , SessionCreate(..)
     , Persistence(..)
     , PersistenceState(..)
@@ -237,7 +246,7 @@ loadSessionActivity root sessionId =
                             Left _ -> Nothing
                             Right bytes ->
                                 either (const Nothing) Just
-                                    (Aeson.eitherDecode bytes)
+                                    (decodeLazy sessionActivityDecoder bytes)
 
 sessionActivityPath :: OsPath -> OsPath
 sessionActivityPath tempDir =

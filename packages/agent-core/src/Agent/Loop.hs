@@ -30,6 +30,7 @@ module Agent.Loop
     , liveTokensPerSecond
     , runLoop
     , tokensPerSecond
+    , tokenUsageDecoder
     , runLoopInputs
     , runLoopInputsDetailed
     ) where

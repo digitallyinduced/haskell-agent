@@ -549,19 +549,9 @@ responseKeepsTurnOpen response =
         _ -> False
 
 responseEventTurnState :: ResponseStreamEvent -> Maybe Text
-responseEventTurnState OtherResponseStreamEvent { eventExtraFields } =
-    extractTurnState eventExtraFields
-responseEventTurnState _ = Nothing
-
-extractTurnState :: Aeson.Object -> Maybe Text
-extractTurnState fields =
-    textFieldCaseInsensitive "x-codex-turn-state" fields
-        <|> textFieldCaseInsensitive "turn_state" fields
-        <|> (lookupFieldCaseInsensitive "headers" fields >>= \case
-            Aeson.Object headers ->
-                textFieldCaseInsensitive "x-codex-turn-state" headers
-                    <|> textFieldCaseInsensitive "turn_state" headers
-            _ -> Nothing)
+responseEventTurnState = \case
+    OtherResponseStreamEvent{turnState} -> turnState
+    _ -> Nothing
 
 addTurnStateToPayload :: Maybe Text -> Aeson.Value -> Aeson.Value
 addTurnStateToPayload Nothing payload = payload
@@ -650,9 +640,10 @@ receiveWsResponseWithActions
     -> StreamEventCallback
     -> IO (Either ApiError Response)
 receiveWsResponseWithActions modelHint actions onEvent =
-    loop emptyStreamAssemblyState 0 0
+    ResponsesCodec.withResponseStreamEventDecoder \decodeEvent ->
+        loop decodeEvent emptyStreamAssemblyState 0 0
   where
-    loop assembly frames bytes = do
+    loop decodeEvent assembly frames bytes = do
         msgResult <- actions.receiveFrame
         case msgResult of
             Left e ->
@@ -667,7 +658,8 @@ receiveWsResponseWithActions modelHint actions onEvent =
             Right (msgBytes :: LBS.ByteString) -> do
                 let frames' = frames + 1
                     bytes' = bytes + LBS.length msgBytes
-                case ResponsesCodec.decodeResponseStreamEvent msgBytes of
+                decoded <- decodeEvent (LBS.toStrict msgBytes)
+                case decoded of
                     Left err -> do
                         -- Keep receiving so one bad frame cannot strand an
                         -- otherwise valid turn, but surface the dropped
@@ -675,22 +667,22 @@ receiveWsResponseWithActions modelHint actions onEvent =
                         -- or tool-call frame can leave the loop in thinking.
                         logStreamStats "json_decode_error" frames' bytes'
                         onEvent (unparsedStreamEvent err msgBytes)
-                        loop assembly frames' bytes'
+                        loop decodeEvent assembly frames' bytes'
                     Right event -> do
                         onEvent event
                         let assembly' = applyStreamEvent assembly event
                         case event of
-                            ResponseErrorEvent { streamError, eventExtraFields } -> do
+                            ResponseErrorEvent { streamError } -> do
                                 logStreamStats "error_event" frames' bytes'
                                 actions.invalidateRequest "WebSocket response error"
                                 pure $ Left
-                                    (parseWsErrorEvent eventExtraFields streamError)
+                                    (parseWsErrorEvent KeyMap.empty streamError)
 
-                            ResponseNestedErrorEvent { streamError, eventExtraFields } -> do
+                            ResponseNestedErrorEvent { streamError } -> do
                                 logStreamStats "error_event" frames' bytes'
                                 actions.invalidateRequest "WebSocket response error"
                                 pure $ Left
-                                    (parseWsErrorEvent eventExtraFields streamError)
+                                    (parseWsErrorEvent KeyMap.empty streamError)
 
                             ResponseCompletedEvent{} ->
                                 finishTerminal "completed" assembly' frames' bytes' event
@@ -711,7 +703,7 @@ receiveWsResponseWithActions modelHint actions onEvent =
 
                             -- Ignore other event variants (added, content
                             -- deltas, and future event types).
-                            _ -> loop assembly' frames' bytes'
+                            _ -> loop decodeEvent assembly' frames' bytes'
 
     finishTerminal label assembly frames bytes event = do
         logStreamStats label frames bytes
@@ -764,10 +756,12 @@ unparsedStreamEvent err bytes =
     OtherResponseStreamEvent
         { otherEventType = StreamEventUnknown unparsedStreamEventTypeText
         , sequenceNumber = Nothing
-        , eventExtraFields = KeyMap.fromList
-            [ (Key.fromText "error", Aeson.String (Text.pack err))
-            , (Key.fromText "payload", Aeson.String (framePreview bytes))
-            ]
+        , eventDelta = Just
+            (Text.pack err <> ": " <> framePreview bytes)
+        , streamItemId = Nothing
+        , streamOutputIndex = Nothing
+        , summaryIndex = Nothing
+        , turnState = Nothing
         }
 
 framePreview :: LBS.ByteString -> Text
@@ -835,9 +829,7 @@ outerRetryAfter outerFields = do
 
 jsonInt :: Aeson.Value -> Maybe Int
 jsonInt = \case
-    Aeson.Number value -> case Aeson.fromJSON (Aeson.Number value) of
-        Aeson.Success parsed -> Just parsed
-        Aeson.Error _ -> Nothing
+    Aeson.Number value -> Just (round value)
     Aeson.String value -> case TextRead.decimal value of
         Right (parsed, remainder) | Text.null remainder -> Just parsed
         _ -> Nothing
@@ -850,11 +842,6 @@ lookupFieldCaseInsensitive wanted object =
             Text.toCaseFold (Key.toText key) == Text.toCaseFold wanted)
         (KeyMap.toList object)
 
-textFieldCaseInsensitive :: Text -> Aeson.Object -> Maybe Text
-textFieldCaseInsensitive name object =
-    lookupFieldCaseInsensitive name object >>= \case
-        Aeson.String value -> Just value
-        _ -> Nothing
 
 nonBlank :: Text -> Maybe Text
 nonBlank value

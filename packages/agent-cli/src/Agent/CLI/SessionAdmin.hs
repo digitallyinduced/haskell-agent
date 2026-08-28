@@ -21,6 +21,7 @@ import Agent.CLI.Session
     , loadSession
     , sessionDirForId
     , sessionsRoot
+    , sessionTransferDecoder
     )
 import Agent.CLI.SessionLock
     ( sessionLockIsActive
@@ -40,7 +41,7 @@ import Control.Monad
     ( unless
     , when
     )
-import qualified Data.Aeson as Aeson
+import qualified Agent.Json.Decode as Hermes
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -145,8 +146,10 @@ runWaitSession sessionId = do
 runImportSession :: Maybe OsPath -> IO ()
 runImportSession cwd = do
     bytes <- LBS.getContents
-    transfer <- case Aeson.eitherDecode bytes of
-        Left err -> die ("invalid transferred session: " <> err)
+    transfer <- case Hermes.decodeEither sessionTransferDecoder (LBS.toStrict bytes) of
+        Left err ->
+            die ("invalid transferred session: "
+                <> Text.unpack (Hermes.jsonErrorMessage err))
         Right value -> pure value
     home <- getHomeDirectory
     withStoreForHome home \store ->

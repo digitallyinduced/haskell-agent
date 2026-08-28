@@ -23,6 +23,9 @@ module Agent.CLI.Project
     ) where
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
+import Agent.CLI.Json (decodeLazy)
+import Agent.Json.Decode (defaultKey, optionalKey)
+import Agent.Json.Decode qualified as Hermes
 import Agent.CLI.Models (ModelTarget(..))
 import Agent.Dialect
     ( DialectId
@@ -36,17 +39,12 @@ import Agent.Provider (Provider, parseProvider, providerSlug)
 import Control.Exception.Safe (tryIO)
 import Control.Monad (unless)
 import Data.Aeson
-    ( FromJSON(..)
-    , ToJSON(..)
+    ( ToJSON(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
 import qualified Data.Aeson as Aeson
-import Data.Aeson.Types (parseMaybe)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd)
@@ -113,14 +111,14 @@ instance ToJSON ProjectAccount where
         , "accountId" .= account.projectAccountId
         ]
 
-instance FromJSON ProjectAccount where
-    parseJSON = withObject "ProjectAccount" \o -> do
-        providerText <- o .: "provider"
+projectAccountDecoder :: Hermes.Decoder ProjectAccount
+projectAccountDecoder = Hermes.object do
+        providerText <- Hermes.atKey "provider" Hermes.text
         provider <- case parseProvider providerText of
             Just parsed -> pure parsed
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
-        selectionId <- o .: "selectionId"
-        accountId <- o .:? "accountId" .!= ""
+        selectionId <- Hermes.atKey "selectionId" Hermes.text
+        accountId <- defaultKey "" "accountId" Hermes.text
         if Text.null (Text.strip selectionId)
             then fail "account selection id must not be empty"
             else pure ProjectAccount
@@ -140,16 +138,18 @@ instance ToJSON ProjectModel where
       where
         target = model.projectModelTarget
 
-instance FromJSON ProjectModel where
-    parseJSON = withObject "ProjectModel" \o -> do
-        providerText <- o .: "provider"
+projectModelDecoder :: Hermes.Decoder ProjectModel
+projectModelDecoder = Hermes.object do
+        providerText <- Hermes.atKey "provider" Hermes.text
         provider <- case parseProvider providerText of
             Just parsed -> pure parsed
             Nothing -> fail ("unknown provider: " <> Text.unpack providerText)
-        model <- o .: "model"
-        connection <- fromMaybe (providerSlug provider) <$> o .:? "connection"
-        transportModel <- fromMaybe model <$> o .:? "transportModel"
-        dialectText <- o .:? "dialect"
+        model <- Hermes.atKey "model" Hermes.text
+        connection <- fromMaybe (providerSlug provider)
+            <$> optionalKey "connection" Hermes.text
+        transportModel <- fromMaybe model
+            <$> optionalKey "transportModel" Hermes.text
+        dialectText <- optionalKey "dialect" Hermes.text
         dialect <- case dialectText of
             Nothing -> pure (legacyDialectIdForProvider provider)
             Just text -> case parseDialect text of
@@ -185,24 +185,29 @@ instance ToJSON ProjectSettings where
         , "maxConcurrentAgents" .= settings.settingsMaxConcurrentAgents
         ]
 
-instance FromJSON ProjectSettings where
-    parseJSON = withObject "ProjectSettings" \o -> do
-        version <- fromMaybe settingsSchemaVersion <$> o .:? "version"
-        autoApprove <- fromMaybe False <$> o .:? "autoApprove"
-        lastModelValue <- o .:? "lastModel"
-        lastAccountsValue <- o .:? "lastAccounts"
-        maxConcurrentAgents <- o .:? "maxConcurrentAgents"
+projectSettingsDecoder :: Hermes.Decoder ProjectSettings
+projectSettingsDecoder = Hermes.object do
+        version <- defaultKey settingsSchemaVersion "version" Hermes.int
+        autoApprove <- defaultKey False "autoApprove" Hermes.bool
+        lastModelValue <- optionalKey "lastModel" (lenient projectModelDecoder)
+        lastAccountsValue <- defaultKey [] "lastAccounts"
+            (Hermes.list (lenient projectAccountDecoder))
+        maxConcurrentAgents <- optionalKey "maxConcurrentAgents" Hermes.int
         pure ProjectSettings
             { settingsVersion = version
             , settingsAutoApprove = autoApprove
             -- A malformed or obsolete model selection should not discard
             -- unrelated project settings such as auto-approve.
-            , settingsLastModel =
-                lastModelValue >>= parseMaybe parseJSON
-            , settingsLastAccounts =
-                maybe [] (mapMaybe (parseMaybe parseJSON)) lastAccountsValue
+            , settingsLastModel = lastModelValue >>= id
+            , settingsLastAccounts = mapMaybe id lastAccountsValue
             , settingsMaxConcurrentAgents = maxConcurrentAgents
             }
+
+lenient :: Hermes.Decoder a -> Hermes.Decoder (Maybe a)
+lenient decoder =
+    Hermes.withRawJsonByteString \raw ->
+        pure $ either (const Nothing) Just
+            (Hermes.decodeEither decoder (BS.copy raw))
 
 -- | Settings root for the checkout that contains @cwd@.
 -- Uses @git rev-parse --show-toplevel@ so a linked worktree stays in that
@@ -227,7 +232,7 @@ loadProjectSettings projectRoot = do
             pure $ case result of
                 Left _ -> defaultProjectSettings
                 Right bytes ->
-                    case Aeson.eitherDecode' bytes of
+                    case decodeLazy projectSettingsDecoder bytes of
                         Left _ -> defaultProjectSettings
                         Right settings -> settings
 

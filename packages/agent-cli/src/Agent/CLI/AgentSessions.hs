@@ -58,7 +58,8 @@ import Agent.Dialect
     , dialectIdForModel
     )
 import Agent.Provider (Provider)
-import Agent.ToolArgs (objectArgs, optInt, optText, reqText)
+import Agent.Json.Decode (optionalKey)
+import qualified Agent.Json.Decode as Hermes
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
 import Agent.Tools.Types
@@ -92,7 +93,7 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (void)
-import Data.Aeson (FromJSON(..), encode)
+import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -766,12 +767,13 @@ data CreateAgentSessionArgs = CreateAgentSessionArgs
     , reasoningEffort :: Maybe Text
     }
 
-instance FromJSON CreateAgentSessionArgs where
-    parseJSON = objectArgs \input -> CreateAgentSessionArgs
-        <$> reqText input "message"
-        <*> optText input "title"
-        <*> optText input "model"
-        <*> optText input "reasoning_effort"
+createAgentSessionArgsDecoder :: Hermes.Decoder CreateAgentSessionArgs
+createAgentSessionArgsDecoder = Hermes.object $
+    CreateAgentSessionArgs
+        <$> Hermes.atKey "message" Hermes.text
+        <*> optionalKey "title" Hermes.text
+        <*> optionalKey "model" Hermes.text
+        <*> optionalKey "reasoning_effort" Hermes.text
 
 createAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 createAgentSessionTool env = jsonTool
@@ -788,7 +790,8 @@ createAgentSessionTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "create_agent_session" (runCreateAgentSession env))
+    (typedTool "create_agent_session" createAgentSessionArgsDecoder
+        (runCreateAgentSession env))
 
 runCreateAgentSession
     :: AgentSessionToolsEnv
@@ -852,10 +855,11 @@ data ReadAgentSessionArgs = ReadAgentSessionArgs
     , limit :: Maybe Int
     }
 
-instance FromJSON ReadAgentSessionArgs where
-    parseJSON = objectArgs \input -> ReadAgentSessionArgs
-        <$> reqText input "session_id"
-        <*> optInt input "limit"
+readAgentSessionArgsDecoder :: Hermes.Decoder ReadAgentSessionArgs
+readAgentSessionArgsDecoder = Hermes.object $
+    ReadAgentSessionArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> optionalKey "limit" Hermes.int
 
 readAgentSessionTool :: AgentSessionToolsEnv -> AppTool
 readAgentSessionTool env = jsonTool
@@ -868,7 +872,8 @@ readAgentSessionTool env = jsonTool
     ]
     True
     ParallelSafe
-    (typedTool "read_agent_session" (runReadAgentSession env))
+    (typedTool "read_agent_session" readAgentSessionArgsDecoder
+        (runReadAgentSession env))
 
 runReadAgentSession
     :: AgentSessionToolsEnv
@@ -901,10 +906,12 @@ data SendAgentSessionMessageArgs = SendAgentSessionMessageArgs
     , message :: Text
     }
 
-instance FromJSON SendAgentSessionMessageArgs where
-    parseJSON = objectArgs \input -> SendAgentSessionMessageArgs
-        <$> reqText input "session_id"
-        <*> reqText input "message"
+sendAgentSessionMessageArgsDecoder
+    :: Hermes.Decoder SendAgentSessionMessageArgs
+sendAgentSessionMessageArgsDecoder = Hermes.object $
+    SendAgentSessionMessageArgs
+        <$> Hermes.atKey "session_id" Hermes.text
+        <*> Hermes.atKey "message" Hermes.text
 
 sendAgentSessionMessageTool :: AgentSessionToolsEnv -> AppTool
 sendAgentSessionMessageTool env = jsonTool
@@ -917,7 +924,8 @@ sendAgentSessionMessageTool env = jsonTool
     ]
     False
     TurnSequential
-    (typedTool "send_agent_session_message" (runSendAgentSessionMessage env))
+    (typedTool "send_agent_session_message" sendAgentSessionMessageArgsDecoder
+        (runSendAgentSessionMessage env))
 
 runSendAgentSessionMessage
     :: AgentSessionToolsEnv

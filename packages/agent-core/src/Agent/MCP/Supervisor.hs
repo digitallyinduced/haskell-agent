@@ -56,19 +56,6 @@ import Control.Exception.Safe
     , tryAny
     )
 import Control.Monad (forM, unless, void, when)
-import Data.Aeson
-    ( FromJSON(..)
-    , Value(..)
-    , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
-    , (.=)
-    )
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS

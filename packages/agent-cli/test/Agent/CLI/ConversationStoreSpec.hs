@@ -10,7 +10,6 @@ import Control.Concurrent.MVar
     , takeMVar
     )
 import Control.Exception.Safe (throwString)
-import Data.Aeson.KeyMap qualified as KeyMap
 import Data.IORef
 import Data.Text (Text)
 import Test.Hspec
@@ -205,5 +204,4 @@ messageItem text = MessageItem ResponseMessage
     , status = Nothing
     , phase = Nothing
     , passthrough = Nothing
-    , extraFields = KeyMap.empty
     }

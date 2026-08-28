@@ -4,11 +4,9 @@ import Agent.Error (ApiError(..))
 import Agent.OpenAI.Models
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently)
-import qualified Data.Aeson as Aeson
 import Data.Bits ((.&.))
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.Text (Text)
 import Data.Time.Clock
 import System.FilePath ((</>))
@@ -127,13 +125,9 @@ spec = do
                 let path = directory </> "models_cache.json"
                     key = testCacheKey "account-a"
                     cached = testModel "cached" 0
-                    cachedExtras =
-                        KeyMap.singleton
-                            "catalog_generation"
-                            (Aeson.toJSON (7 :: Int))
                 _ <- storeModelsCache path
                     (cacheEntry now key "1.2.3" [cached])
-                        { catalogExtraFields = cachedExtras }
+                        { catalogGeneration = Just 7 }
                 manager <- newModelsManagerWithBundled
                     (catalogOf [testModel "bundled" 10])
                     defaultModelsManagerOptions
@@ -144,7 +138,7 @@ spec = do
                         }
                 catalog <- refreshModelCatalog manager RefreshOnlineIfUncached
                 map (.slug) catalog.models `shouldBe` ["cached"]
-                catalog.extraFields `shouldBe` cachedExtras
+                catalog.catalogGeneration `shouldBe` Just 7
                 readIORef calls `shouldReturn` 0
 
         it "falls back to bundled models when the endpoint fails" do
@@ -162,10 +156,7 @@ spec = do
             calls <- newIORef (0 :: Int)
             let remote = ModelsResponse
                     { models = [testModel "remote" 0]
-                    , extraFields =
-                        KeyMap.singleton
-                            "catalog_generation"
-                            (Aeson.toJSON (7 :: Int))
+                    , catalogGeneration = Just 7
                     }
             manager <- newModelsManagerWithBundled
                 (catalogOf [testModel "bundled" 10])
@@ -182,7 +173,7 @@ spec = do
                     }
             catalog <- refreshModelCatalog manager RefreshOnline
             map (.slug) catalog.models `shouldBe` ["remote"]
-            catalog.extraFields `shouldBe` remote.extraFields
+            catalog.catalogGeneration `shouldBe` remote.catalogGeneration
 
         it "merges visible remote models when the endpoint is not using ChatGPT auth" do
             calls <- newIORef (0 :: Int)
@@ -315,7 +306,7 @@ spec = do
                         , clientVersion = Just "1.2.3"
                         , cacheKey = Just key
                         , models = [testModel "remote" 0]
-                        , catalogExtraFields = KeyMap.empty
+                        , catalogGeneration = Nothing
                         }
                 storeModelsCache path staleEntry `shouldReturn` Right ()
                 _ <- refreshIfNewEtag manager "\"etag-1\""
@@ -413,13 +404,13 @@ cacheEntry fetchedAt cacheKey clientVersion models = ModelsCacheEntry
     , clientVersion = Just clientVersion
     , cacheKey = Just cacheKey
     , models
-    , catalogExtraFields = KeyMap.empty
+    , catalogGeneration = Nothing
     }
 
 catalogOf :: [ModelInfo] -> ModelsResponse
 catalogOf models = ModelsResponse
     { models
-    , extraFields = KeyMap.empty
+    , catalogGeneration = Nothing
     }
 
 testModel :: Text -> Int -> ModelInfo

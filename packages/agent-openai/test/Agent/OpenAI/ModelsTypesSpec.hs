@@ -1,9 +1,12 @@
 module Agent.OpenAI.ModelsTypesSpec (spec) where
 
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Models
 import qualified Agent.Tools.CodeMode.Tool as CoreTools
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text as Text
 import qualified Data.Vector as Vector
 import Test.Hspec
@@ -16,17 +19,8 @@ spec = do
             length catalog.models `shouldBe` 10
             defaultModelForCatalog True catalog
                 `shouldBe` Just "gpt-5.6-sol"
-            KeyMap.keys catalog.extraFields `shouldBe` []
-            let unmodeledFields =
-                    [ ( KeyMap.keys model.extraFields
-                      , maybe []
-                            (KeyMap.keys . (.extraFields))
-                            model.modelMessages
-                      )
-                    | model <- catalog.models
-                    ]
-            unmodeledFields `shouldBe` replicate 10 ([], [])
-            decodeOrFail (Aeson.toJSON catalog) `shouldBe` catalog
+            catalog.catalogGeneration `shouldBe` Nothing
+            decodeModelsOrFail (Aeson.toJSON catalog) `shouldBe` catalog
 
         it "serializes legacy base instructions for older Codex clients" do
             catalog <- loadBundledModelsOrThrow
@@ -117,8 +111,8 @@ spec = do
                         && upgrade.migrationConfigKey == "gpt-5.4"
                 Nothing -> False
 
-    describe "forward-compatible decoding" do
-        it "preserves unknown model fields and enum values" do
+    describe "known-field decoding" do
+        it "ignores unknown model fields and preserves unknown enum values" do
             let encoded = Aeson.object
                     [ "models" Aeson..=
                         [ Aeson.object
@@ -127,38 +121,54 @@ spec = do
                             , "shell_type" Aeson..= ("quantum_shell" :: String)
                             , "tool_mode" Aeson..= ("future_mode" :: String)
                             , "visibility" Aeson..= ("preview" :: String)
-                            , "base_instructions" Aeson..= ("future prompt" :: String)
+                            , "minimal_client_version" Aeson..= Aeson.object
+                                ["major" Aeson..= (99 :: Int)]
+                            , "model_messages" Aeson..= Aeson.object
+                                [ "instructions_template" Aeson..=
+                                    ("future prompt" :: String)
+                                , "guardian_v2" Aeson..= Aeson.object
+                                    ["enabled" Aeson..= True]
+                                ]
                             , "future_capability" Aeson..= Aeson.object
                                 ["enabled" Aeson..= True]
                             ]
                         ]
                     , "catalog_generation" Aeson..= (42 :: Int)
                     ]
-                decoded = decodeOrFail encoded :: ModelsResponse
+                decoded = decodeModelsOrFail encoded
                 model = modelInfoForSlug "future-model" decoded
                 roundtripped =
-                    decodeOrFail (Aeson.toJSON decoded) :: ModelsResponse
+                    decodeModelsOrFail (Aeson.toJSON decoded)
                 roundtrippedModel =
                     modelInfoForSlug "future-model" roundtripped
+                encodedModel = Aeson.toJSON model
             model.shellType `shouldBe` ShellToolOther "quantum_shell"
             model.toolMode `shouldBe` Just (ToolModeOther "future_mode")
             model.visibility `shouldBe` ModelVisibilityOther "preview"
-            KeyMap.lookup "future_capability" model.extraFields
-                `shouldBe` KeyMap.lookup
-                    "future_capability"
-                    roundtrippedModel.extraFields
-            KeyMap.lookup "catalog_generation" decoded.extraFields
-                `shouldBe` KeyMap.lookup
-                    "catalog_generation"
-                    roundtripped.extraFields
+            jsonObjectField "future_capability" encodedModel
+                `shouldBe` Nothing
+            jsonObjectField "minimal_client_version" encodedModel
+                `shouldBe` Nothing
+            (jsonObjectField "model_messages" encodedModel
+                >>= jsonObjectField "guardian_v2")
+                `shouldBe` Nothing
+            roundtrippedModel.shellType
+                `shouldBe` ShellToolOther "quantum_shell"
+            decoded.catalogGeneration `shouldBe` Just 42
+            roundtripped.catalogGeneration `shouldBe` Just 42
 
         it "accepts legacy shell aliases as unified exec" do
-            map (decodeOrFail . Aeson.String)
-                ["default", "local", "shell_command", "unified_exec"]
+            map
+                (\shell -> (.shellType) $ decodeModelOrFail $ Aeson.object
+                    [ "slug" Aeson..= ("alias" :: String)
+                    , "shell_type" Aeson..= shell
+                    , "base_instructions" Aeson..= ("prompt" :: String)
+                    ])
+                (["default", "local", "shell_command", "unified_exec"] :: [Text.Text])
                 `shouldBe` replicate 4 ShellToolUnifiedExec
 
         it "promotes legacy base instructions into an incomplete messages object" do
-            let model = decodeOrFail (Aeson.object
+            let model = decodeModelOrFail (Aeson.object
                     [ "slug" Aeson..= ("legacy-model" :: String)
                     , "base_instructions" Aeson..= ("legacy prompt" :: String)
                     , "model_messages" Aeson..= Aeson.object
@@ -166,31 +176,31 @@ spec = do
                         , "approvals" Aeson..= Aeson.object
                             ["never" Aeson..= ("approval prompt" :: String)]
                         ]
-                    ]) :: ModelInfo
+                    ])
             renderModelInstructions ModelPersonalityDefault model
                 `shouldBe` "legacy prompt"
             (model.modelMessages >>= (.approvals) >>= (.never))
                 `shouldBe` Just "approval prompt"
 
         it "rejects endpoint models without any instruction template" do
-            Aeson.fromJSON @ModelInfo
-                (Aeson.object
+            Json.decodeEither modelInfoDecoder
+                (LBS.toStrict (Aeson.encode (Aeson.object
                     [ "slug" Aeson..= ("missing-prompt" :: String)
-                    ])
+                    ])))
                 `shouldSatisfy` \case
-                    Aeson.Error message ->
+                    Left err ->
                         "missing both base_instructions"
-                            `Text.isInfixOf` Text.pack message
-                    Aeson.Success _ -> False
+                            `Text.isInfixOf` Json.jsonErrorMessage err
+                    Right _ -> False
 
         it "treats an instruction template as literal when variables are absent" do
-            let model = decodeOrFail (Aeson.object
+            let model = decodeModelOrFail (Aeson.object
                     [ "slug" Aeson..= ("literal-model" :: String)
                     , "model_messages" Aeson..= Aeson.object
                         [ "instructions_template" Aeson..=
                             ("keep {{ personality }} literal" :: String)
                         ]
-                    ]) :: ModelInfo
+                    ])
             renderModelInstructions ModelPersonalityFriendly model
                 `shouldBe` "keep {{ personality }} literal"
 
@@ -200,7 +210,7 @@ spec = do
                         [ fallbackModelInfo "gpt-5"
                         , fallbackModelInfo "gpt-5.6"
                         ]
-                    , extraFields = KeyMap.empty
+                    , catalogGeneration = Nothing
                     }
             (.slug) <$> findModelInfo "gpt-5.6-2026-08-23" catalog
                 `shouldBe` Just "gpt-5.6"
@@ -217,11 +227,19 @@ spec = do
             renderModelInstructions ModelPersonalityPragmatic model
                 `shouldSatisfy` Text.isInfixOf "You are a deeply pragmatic"
 
-decodeOrFail :: Aeson.FromJSON value => Aeson.Value -> value
-decodeOrFail value =
-    case Aeson.fromJSON value of
-        Aeson.Error err -> error err
-        Aeson.Success decoded -> decoded
+decodeModelsOrFail :: Aeson.Value -> ModelsResponse
+decodeModelsOrFail =
+    decodeOrFail modelsResponseDecoder
+
+decodeModelOrFail :: Aeson.Value -> ModelInfo
+decodeModelOrFail =
+    decodeOrFail modelInfoDecoder
+
+decodeOrFail :: Json.Decoder value -> Aeson.Value -> value
+decodeOrFail decoder value =
+    case Json.decodeEither decoder (LBS.toStrict (Aeson.encode value)) of
+        Left err -> error (Text.unpack (Json.jsonErrorMessage err))
+        Right decoded -> decoded
 
 hasLegacyBaseInstructions :: Aeson.Value -> Bool
 hasLegacyBaseInstructions (Aeson.Object object) =
@@ -229,3 +247,7 @@ hasLegacyBaseInstructions (Aeson.Object object) =
         Just (Aeson.String instructions) -> not (Text.null instructions)
         _ -> False
 hasLegacyBaseInstructions _ = False
+
+jsonObjectField :: Key.Key -> Aeson.Value -> Maybe Aeson.Value
+jsonObjectField key (Aeson.Object object) = KeyMap.lookup key object
+jsonObjectField _ _ = Nothing

@@ -6,7 +6,7 @@ module Claude.Agent.SDK.Errors
     ) where
 
 import Control.Exception (Exception)
-import Data.Aeson (Value)
+import Agent.Json (RawJson)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import System.Exit (ExitCode)
@@ -32,7 +32,7 @@ data ClaudeSDKError
         }
     | MessageParseError
         { parseError :: !Text
-        , rawMessage :: !(Maybe Value)
+        , rawMessage :: !(Maybe RawJson)
         }
     deriving (Eq, Show)
 

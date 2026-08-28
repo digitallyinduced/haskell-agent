@@ -31,22 +31,26 @@ module Agent.Telegram.Types.Wire
     , TelegramResponseParameters(..)
     , TelegramResponse(..)
     , TelegramClient(..)
+    , telegramVoiceDecoder
+    , telegramMediaDecoder
+    , telegramUserDecoder
+    , telegramChatMemberDecoder
+    , telegramMessageDecoder
+    , telegramUpdateDecoder
+    , telegramResponseDecoder
     ) where
 
+import Agent.Json (RawJson, rawJsonDecoder)
+import qualified Agent.Json.Decode as Hermes
+import Control.Applicative ((<|>))
 import Data.Aeson
-    ( FromJSON(..)
-    , ToJSON(..)
-    , Value
+    ( ToJSON(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
-import qualified Data.Aeson as Aeson
 import Data.Text (Text)
 import qualified Data.Text as Text
+import Data.Maybe (fromMaybe)
 import qualified Network.HTTP.Client as Http
 
 data TelegramVoice = TelegramVoice
@@ -64,13 +68,24 @@ instance ToJSON TelegramVoice where
         , "fileSize" .= voice.voiceFileSize
         ]
 
-instance FromJSON TelegramVoice where
-    parseJSON = withObject "TelegramVoice" \o ->
-        TelegramVoice
-            <$> (o .:? "file_id" >>= maybe (o .: "fileId") pure)
-            <*> (o .:? "duration" .!= 0)
-            <*> (o .:? "mime_type" >>= maybe (o .:? "mimeType") (pure . Just))
-            <*> (o .:? "file_size" >>= maybe (o .:? "fileSize") (pure . Just))
+telegramVoiceDecoder :: Hermes.Decoder TelegramVoice
+telegramVoiceDecoder = Hermes.object do
+    snakeFileId <- Hermes.optionalKey "file_id" Hermes.text
+    camelFileId <- Hermes.optionalKey "fileId" Hermes.text
+    snakeMime <- Hermes.optionalKey "mime_type" Hermes.text
+    camelMime <- Hermes.optionalKey "mimeType" Hermes.text
+    snakeSize <- Hermes.optionalKey "file_size" integerDecoder
+    camelSize <- Hermes.optionalKey "fileSize" integerDecoder
+    duration <- defaultField "duration" 0 Hermes.int
+    case snakeFileId <|> camelFileId of
+        Nothing -> fail "missing Telegram voice file id"
+        Just fileId ->
+            pure $
+                TelegramVoice
+                    fileId
+                    duration
+                    (snakeMime <|> camelMime)
+                    (snakeSize <|> camelSize)
 
 data TelegramUser = TelegramUser
     { userId :: !Integer
@@ -89,14 +104,20 @@ instance ToJSON TelegramUser where
         , "username" .= user.userUsername
         ]
 
-instance FromJSON TelegramUser where
-    parseJSON = withObject "TelegramUser" \o ->
-        TelegramUser
-            <$> o .: "id"
-            <*> (o .:? "is_bot" >>= maybe (o .:? "isBot" .!= False) pure)
-            <*> (o .:? "first_name" >>= maybe (o .:? "firstName") (pure . Just))
-            <*> (o .:? "last_name" >>= maybe (o .:? "lastName") (pure . Just))
-            <*> o .:? "username"
+telegramUserDecoder :: Hermes.Decoder TelegramUser
+telegramUserDecoder = Hermes.object do
+    snakeBot <- Hermes.optionalKey "is_bot" Hermes.bool
+    camelBot <- Hermes.optionalKey "isBot" Hermes.bool
+    snakeFirst <- Hermes.optionalKey "first_name" Hermes.text
+    camelFirst <- Hermes.optionalKey "firstName" Hermes.text
+    snakeLast <- Hermes.optionalKey "last_name" Hermes.text
+    camelLast <- Hermes.optionalKey "lastName" Hermes.text
+    TelegramUser
+        <$> Hermes.atKey "id" integerDecoder
+        <*> pure (fromMaybe False (snakeBot <|> camelBot))
+        <*> pure (snakeFirst <|> camelFirst)
+        <*> pure (snakeLast <|> camelLast)
+        <*> Hermes.optionalKey "username" Hermes.text
 
 data TelegramMessageEntity = TelegramMessageEntity
     { entityType :: !Text
@@ -105,22 +126,24 @@ data TelegramMessageEntity = TelegramMessageEntity
     , entityUser :: !(Maybe TelegramUser)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramMessageEntity where
-    parseJSON = withObject "TelegramMessageEntity" \o ->
-        TelegramMessageEntity
-            <$> o .: "type"
-            <*> o .: "offset"
-            <*> o .: "length"
-            <*> o .:? "user"
+telegramMessageEntityDecoder :: Hermes.Decoder TelegramMessageEntity
+telegramMessageEntityDecoder = Hermes.object $
+    TelegramMessageEntity
+        <$> Hermes.atKey "type" Hermes.text
+        <*> Hermes.atKey "offset" Hermes.int
+        <*> Hermes.atKey "length" Hermes.int
+        <*> Hermes.optionalKey "user" telegramUserDecoder
 
 data TelegramChat = TelegramChat
     { telegramChatId :: !Integer
     , telegramChatType :: !Text
     } deriving (Eq, Show)
 
-instance FromJSON TelegramChat where
-    parseJSON = withObject "TelegramChat" \o ->
-        TelegramChat <$> o .: "id" <*> o .: "type"
+telegramChatDecoder :: Hermes.Decoder TelegramChat
+telegramChatDecoder = Hermes.object $
+    TelegramChat
+        <$> Hermes.atKey "id" integerDecoder
+        <*> Hermes.atKey "type" Hermes.text
 
 data TelegramChatMember = TelegramChatMember
     { chatMemberUser :: !TelegramUser
@@ -128,12 +151,12 @@ data TelegramChatMember = TelegramChatMember
     , chatMemberIsMember :: !(Maybe Bool)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramChatMember where
-    parseJSON = withObject "TelegramChatMember" \o ->
-        TelegramChatMember
-            <$> o .: "user"
-            <*> o .: "status"
-            <*> o .:? "is_member"
+telegramChatMemberDecoder :: Hermes.Decoder TelegramChatMember
+telegramChatMemberDecoder = Hermes.object $
+    TelegramChatMember
+        <$> Hermes.atKey "user" telegramUserDecoder
+        <*> Hermes.atKey "status" Hermes.text
+        <*> Hermes.optionalKey "is_member" Hermes.bool
 
 data TelegramChatMemberUpdated = TelegramChatMemberUpdated
     { chatMemberUpdatedChat :: !TelegramChat
@@ -142,13 +165,13 @@ data TelegramChatMemberUpdated = TelegramChatMemberUpdated
     , chatMemberUpdatedNew :: !TelegramChatMember
     } deriving (Eq, Show)
 
-instance FromJSON TelegramChatMemberUpdated where
-    parseJSON = withObject "TelegramChatMemberUpdated" \o ->
-        TelegramChatMemberUpdated
-            <$> o .: "chat"
-            <*> o .: "from"
-            <*> o .: "old_chat_member"
-            <*> o .: "new_chat_member"
+telegramChatMemberUpdatedDecoder :: Hermes.Decoder TelegramChatMemberUpdated
+telegramChatMemberUpdatedDecoder = Hermes.object $
+    TelegramChatMemberUpdated
+        <$> Hermes.atKey "chat" telegramChatDecoder
+        <*> Hermes.atKey "from" telegramUserDecoder
+        <*> Hermes.atKey "old_chat_member" telegramChatMemberDecoder
+        <*> Hermes.atKey "new_chat_member" telegramChatMemberDecoder
 
 data TelegramMessage = TelegramMessage
     { messageId :: !Integer
@@ -171,7 +194,7 @@ data TelegramMessage = TelegramMessage
     , messagePoll :: !(Maybe TelegramPoll)
     , messageDice :: !(Maybe TelegramDice)
     , messageMediaGroupId :: !(Maybe Text)
-    , messageForwardOrigin :: !(Maybe Value)
+    , messageForwardOrigin :: !(Maybe RawJson)
     , messageEditDate :: !(Maybe Integer)
     , messageReplyTo :: !(Maybe TelegramMessage)
     , messageNewChatMembers :: ![TelegramUser]
@@ -179,35 +202,35 @@ data TelegramMessage = TelegramMessage
     , messageCaptionEntities :: ![TelegramMessageEntity]
     } deriving (Eq, Show)
 
-instance FromJSON TelegramMessage where
-    parseJSON = withObject "TelegramMessage" \o ->
-        TelegramMessage
-            <$> o .: "message_id"
-            <*> o .:? "from"
-            <*> o .: "chat"
-            <*> o .:? "message_thread_id"
-            <*> o .:? "text"
-            <*> o .:? "caption"
-            <*> o .:? "voice"
-            <*> o .:? "audio"
-            <*> o .:? "document"
-            <*> (o .:? "photo" .!= [])
-            <*> o .:? "video"
-            <*> o .:? "video_note"
-            <*> o .:? "animation"
-            <*> o .:? "sticker"
-            <*> o .:? "location"
-            <*> o .:? "contact"
-            <*> o .:? "venue"
-            <*> o .:? "poll"
-            <*> o .:? "dice"
-            <*> o .:? "media_group_id"
-            <*> o .:? "forward_origin"
-            <*> o .:? "edit_date"
-            <*> o .:? "reply_to_message"
-            <*> (o .:? "new_chat_members" .!= [])
-            <*> (o .:? "entities" .!= [])
-            <*> (o .:? "caption_entities" .!= [])
+telegramMessageDecoder :: Hermes.Decoder TelegramMessage
+telegramMessageDecoder = Hermes.object $
+    TelegramMessage
+        <$> Hermes.atKey "message_id" integerDecoder
+        <*> Hermes.optionalKey "from" telegramUserDecoder
+        <*> Hermes.atKey "chat" telegramChatDecoder
+        <*> Hermes.optionalKey "message_thread_id" integerDecoder
+        <*> Hermes.optionalKey "text" Hermes.text
+        <*> Hermes.optionalKey "caption" Hermes.text
+        <*> Hermes.optionalKey "voice" telegramVoiceDecoder
+        <*> Hermes.optionalKey "audio" telegramAudioDecoder
+        <*> Hermes.optionalKey "document" telegramDocumentDecoder
+        <*> defaultField "photo" [] (Hermes.list telegramPhotoSizeDecoder)
+        <*> Hermes.optionalKey "video" telegramVideoDecoder
+        <*> Hermes.optionalKey "video_note" telegramVideoNoteDecoder
+        <*> Hermes.optionalKey "animation" telegramAnimationDecoder
+        <*> Hermes.optionalKey "sticker" telegramStickerDecoder
+        <*> Hermes.optionalKey "location" telegramLocationDecoder
+        <*> Hermes.optionalKey "contact" telegramContactDecoder
+        <*> Hermes.optionalKey "venue" telegramVenueDecoder
+        <*> Hermes.optionalKey "poll" telegramPollDecoder
+        <*> Hermes.optionalKey "dice" telegramDiceDecoder
+        <*> Hermes.optionalKey "media_group_id" Hermes.text
+        <*> Hermes.optionalKey "forward_origin" rawJsonDecoder
+        <*> Hermes.optionalKey "edit_date" integerDecoder
+        <*> Hermes.optionalKey "reply_to_message" telegramMessageDecoder
+        <*> defaultField "new_chat_members" [] (Hermes.list telegramUserDecoder)
+        <*> defaultField "entities" [] (Hermes.list telegramMessageEntityDecoder)
+        <*> defaultField "caption_entities" [] (Hermes.list telegramMessageEntityDecoder)
 
 data TelegramReactionType = TelegramReactionType
     { reactionType :: !Text
@@ -215,12 +238,12 @@ data TelegramReactionType = TelegramReactionType
     , reactionCustomEmojiId :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramReactionType where
-    parseJSON = withObject "TelegramReactionType" \o ->
-        TelegramReactionType
-            <$> o .: "type"
-            <*> o .:? "emoji"
-            <*> o .:? "custom_emoji_id"
+telegramReactionTypeDecoder :: Hermes.Decoder TelegramReactionType
+telegramReactionTypeDecoder = Hermes.object $
+    TelegramReactionType
+        <$> Hermes.atKey "type" Hermes.text
+        <*> Hermes.optionalKey "emoji" Hermes.text
+        <*> Hermes.optionalKey "custom_emoji_id" Hermes.text
 
 data TelegramMessageReaction = TelegramMessageReaction
     { messageReactionChat :: !TelegramChat
@@ -230,14 +253,14 @@ data TelegramMessageReaction = TelegramMessageReaction
     , messageReactionNew :: ![TelegramReactionType]
     } deriving (Eq, Show)
 
-instance FromJSON TelegramMessageReaction where
-    parseJSON = withObject "TelegramMessageReaction" \o ->
-        TelegramMessageReaction
-            <$> o .: "chat"
-            <*> o .: "message_id"
-            <*> o .:? "user"
-            <*> (o .:? "old_reaction" .!= [])
-            <*> (o .:? "new_reaction" .!= [])
+telegramMessageReactionDecoder :: Hermes.Decoder TelegramMessageReaction
+telegramMessageReactionDecoder = Hermes.object $
+    TelegramMessageReaction
+        <$> Hermes.atKey "chat" telegramChatDecoder
+        <*> Hermes.atKey "message_id" integerDecoder
+        <*> Hermes.optionalKey "user" telegramUserDecoder
+        <*> defaultField "old_reaction" [] (Hermes.list telegramReactionTypeDecoder)
+        <*> defaultField "new_reaction" [] (Hermes.list telegramReactionTypeDecoder)
 
 data TelegramPhotoSize = TelegramPhotoSize
     { photoFileId :: !Text
@@ -246,13 +269,13 @@ data TelegramPhotoSize = TelegramPhotoSize
     , photoFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramPhotoSize where
-    parseJSON = withObject "TelegramPhotoSize" \o ->
-        TelegramPhotoSize
-            <$> o .: "file_id"
-            <*> o .:? "width" .!= 0
-            <*> o .:? "height" .!= 0
-            <*> o .:? "file_size"
+telegramPhotoSizeDecoder :: Hermes.Decoder TelegramPhotoSize
+telegramPhotoSizeDecoder = Hermes.object $
+    TelegramPhotoSize
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> defaultField "width" 0 Hermes.int
+        <*> defaultField "height" 0 Hermes.int
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramDocument = TelegramDocument
     { documentFileId :: !Text
@@ -261,13 +284,13 @@ data TelegramDocument = TelegramDocument
     , documentFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramDocument where
-    parseJSON = withObject "TelegramDocument" \o ->
-        TelegramDocument
-            <$> o .: "file_id"
-            <*> o .:? "file_name"
-            <*> o .:? "mime_type"
-            <*> o .:? "file_size"
+telegramDocumentDecoder :: Hermes.Decoder TelegramDocument
+telegramDocumentDecoder = Hermes.object $
+    TelegramDocument
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramVideo = TelegramVideo
     { videoFileId :: !Text
@@ -277,14 +300,14 @@ data TelegramVideo = TelegramVideo
     , videoFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramVideo where
-    parseJSON = withObject "TelegramVideo" \o ->
-        TelegramVideo
-            <$> o .: "file_id"
-            <*> o .:? "duration" .!= 0
-            <*> o .:? "mime_type"
-            <*> o .:? "file_name"
-            <*> o .:? "file_size"
+telegramVideoDecoder :: Hermes.Decoder TelegramVideo
+telegramVideoDecoder = Hermes.object $
+    TelegramVideo
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> defaultField "duration" 0 Hermes.int
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramVideoNote = TelegramVideoNote
     { videoNoteFileId :: !Text
@@ -293,13 +316,13 @@ data TelegramVideoNote = TelegramVideoNote
     , videoNoteFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramVideoNote where
-    parseJSON = withObject "TelegramVideoNote" \o ->
-        TelegramVideoNote
-            <$> o .: "file_id"
-            <*> o .:? "duration" .!= 0
-            <*> o .:? "length" .!= 0
-            <*> o .:? "file_size"
+telegramVideoNoteDecoder :: Hermes.Decoder TelegramVideoNote
+telegramVideoNoteDecoder = Hermes.object $
+    TelegramVideoNote
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> defaultField "duration" 0 Hermes.int
+        <*> defaultField "length" 0 Hermes.int
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramAudio = TelegramAudio
     { audioFileId :: !Text
@@ -309,14 +332,14 @@ data TelegramAudio = TelegramAudio
     , audioFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramAudio where
-    parseJSON = withObject "TelegramAudio" \o ->
-        TelegramAudio
-            <$> o .: "file_id"
-            <*> o .:? "duration" .!= 0
-            <*> o .:? "mime_type"
-            <*> o .:? "file_name"
-            <*> o .:? "file_size"
+telegramAudioDecoder :: Hermes.Decoder TelegramAudio
+telegramAudioDecoder = Hermes.object $
+    TelegramAudio
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> defaultField "duration" 0 Hermes.int
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramAnimation = TelegramAnimation
     { animationFileId :: !Text
@@ -325,13 +348,13 @@ data TelegramAnimation = TelegramAnimation
     , animationFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramAnimation where
-    parseJSON = withObject "TelegramAnimation" \o ->
-        TelegramAnimation
-            <$> o .: "file_id"
-            <*> o .:? "mime_type"
-            <*> o .:? "file_name"
-            <*> o .:? "file_size"
+telegramAnimationDecoder :: Hermes.Decoder TelegramAnimation
+telegramAnimationDecoder = Hermes.object $
+    TelegramAnimation
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> Hermes.optionalKey "mime_type" Hermes.text
+        <*> Hermes.optionalKey "file_name" Hermes.text
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramSticker = TelegramSticker
     { stickerFileId :: !Text
@@ -340,22 +363,24 @@ data TelegramSticker = TelegramSticker
     , stickerFileSize :: !(Maybe Integer)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramSticker where
-    parseJSON = withObject "TelegramSticker" \o ->
-        TelegramSticker
-            <$> o .: "file_id"
-            <*> o .:? "emoji"
-            <*> o .:? "is_animated" .!= False
-            <*> o .:? "file_size"
+telegramStickerDecoder :: Hermes.Decoder TelegramSticker
+telegramStickerDecoder = Hermes.object $
+    TelegramSticker
+        <$> Hermes.atKey "file_id" Hermes.text
+        <*> Hermes.optionalKey "emoji" Hermes.text
+        <*> defaultField "is_animated" False Hermes.bool
+        <*> Hermes.optionalKey "file_size" integerDecoder
 
 data TelegramLocation = TelegramLocation
     { locationLatitude :: !Double
     , locationLongitude :: !Double
     } deriving (Eq, Show)
 
-instance FromJSON TelegramLocation where
-    parseJSON = withObject "TelegramLocation" \o ->
-        TelegramLocation <$> o .: "latitude" <*> o .: "longitude"
+telegramLocationDecoder :: Hermes.Decoder TelegramLocation
+telegramLocationDecoder = Hermes.object $
+    TelegramLocation
+        <$> Hermes.atKey "latitude" Hermes.double
+        <*> Hermes.atKey "longitude" Hermes.double
 
 data TelegramContact = TelegramContact
     { contactPhoneNumber :: !Text
@@ -363,36 +388,45 @@ data TelegramContact = TelegramContact
     , contactLastName :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramContact where
-    parseJSON = withObject "TelegramContact" \o ->
-        TelegramContact <$> o .: "phone_number" <*> o .: "first_name" <*> o .:? "last_name"
+telegramContactDecoder :: Hermes.Decoder TelegramContact
+telegramContactDecoder = Hermes.object $
+    TelegramContact
+        <$> Hermes.atKey "phone_number" Hermes.text
+        <*> Hermes.atKey "first_name" Hermes.text
+        <*> Hermes.optionalKey "last_name" Hermes.text
 
 data TelegramVenue = TelegramVenue
     { venueTitle :: !Text
     , venueAddress :: !Text
     } deriving (Eq, Show)
 
-instance FromJSON TelegramVenue where
-    parseJSON = withObject "TelegramVenue" \o ->
-        TelegramVenue <$> o .: "title" <*> o .: "address"
+telegramVenueDecoder :: Hermes.Decoder TelegramVenue
+telegramVenueDecoder = Hermes.object $
+    TelegramVenue
+        <$> Hermes.atKey "title" Hermes.text
+        <*> Hermes.atKey "address" Hermes.text
 
 data TelegramPoll = TelegramPoll
     { pollId :: !Text
     , pollQuestion :: !Text
     } deriving (Eq, Show)
 
-instance FromJSON TelegramPoll where
-    parseJSON = withObject "TelegramPoll" \o ->
-        TelegramPoll <$> o .: "id" <*> o .: "question"
+telegramPollDecoder :: Hermes.Decoder TelegramPoll
+telegramPollDecoder = Hermes.object $
+    TelegramPoll
+        <$> Hermes.atKey "id" Hermes.text
+        <*> Hermes.atKey "question" Hermes.text
 
 data TelegramDice = TelegramDice
     { diceEmoji :: !Text
     , diceValue :: !Int
     } deriving (Eq, Show)
 
-instance FromJSON TelegramDice where
-    parseJSON = withObject "TelegramDice" \o ->
-        TelegramDice <$> o .: "emoji" <*> o .: "value"
+telegramDiceDecoder :: Hermes.Decoder TelegramDice
+telegramDiceDecoder = Hermes.object $
+    TelegramDice
+        <$> Hermes.atKey "emoji" Hermes.text
+        <*> Hermes.atKey "value" Hermes.int
 
 data TelegramMediaKind
     = TelegramMediaPhoto
@@ -424,8 +458,8 @@ instance ToJSON TelegramMediaKind where
         TelegramMediaPoll -> "poll"
         TelegramMediaDice -> "dice"
 
-instance FromJSON TelegramMediaKind where
-    parseJSON = Aeson.withText "TelegramMediaKind" \case
+telegramMediaKindDecoder :: Hermes.Decoder TelegramMediaKind
+telegramMediaKindDecoder = Hermes.withText \case
         "photo" -> pure TelegramMediaPhoto
         "document" -> pure TelegramMediaDocument
         "video" -> pure TelegramMediaVideo
@@ -457,14 +491,24 @@ instance ToJSON TelegramFileMedia where
         , "duration" .= media.fileMediaDuration
         ]
 
-instance FromJSON TelegramFileMedia where
-    parseJSON = withObject "TelegramFileMedia" \o ->
-        TelegramFileMedia
-            <$> (o .:? "file_id" >>= maybe (o .: "fileId") pure)
-            <*> (o .:? "file_name" >>= maybe (o .:? "name") (pure . Just))
-            <*> (o .:? "mime_type" >>= maybe (o .:? "mimeType") (pure . Just))
-            <*> (o .:? "file_size" >>= maybe (o .:? "fileSize") (pure . Just))
-            <*> o .:? "duration"
+telegramFileMediaDecoder :: Hermes.Decoder TelegramFileMedia
+telegramFileMediaDecoder = Hermes.object do
+    snakeId <- Hermes.optionalKey "file_id" Hermes.text
+    camelId <- Hermes.optionalKey "fileId" Hermes.text
+    snakeName <- Hermes.optionalKey "file_name" Hermes.text
+    camelName <- Hermes.optionalKey "name" Hermes.text
+    snakeMime <- Hermes.optionalKey "mime_type" Hermes.text
+    camelMime <- Hermes.optionalKey "mimeType" Hermes.text
+    snakeSize <- Hermes.optionalKey "file_size" integerDecoder
+    camelSize <- Hermes.optionalKey "fileSize" integerDecoder
+    case snakeId <|> camelId of
+        Nothing -> fail "missing Telegram media file id"
+        Just fileId ->
+            TelegramFileMedia fileId
+                (snakeName <|> camelName)
+                (snakeMime <|> camelMime)
+                (snakeSize <|> camelSize)
+                <$> Hermes.optionalKey "duration" Hermes.int
 
 data TelegramMedia = TelegramMedia
     { telegramMediaKind :: !TelegramMediaKind
@@ -479,12 +523,12 @@ instance ToJSON TelegramMedia where
         , "description" .= media.telegramMediaDescription
         ]
 
-instance FromJSON TelegramMedia where
-    parseJSON = withObject "TelegramMedia" \o ->
+telegramMediaDecoder :: Hermes.Decoder TelegramMedia
+telegramMediaDecoder = Hermes.object $
         TelegramMedia
-            <$> o .: "kind"
-            <*> o .:? "file"
-            <*> o .:? "description" .!= ""
+            <$> Hermes.atKey "kind" telegramMediaKindDecoder
+            <*> Hermes.optionalKey "file" telegramFileMediaDecoder
+            <*> defaultField "description" "" Hermes.text
 
 data TelegramUpdate = TelegramUpdate
     { updateId :: !Integer
@@ -495,15 +539,15 @@ data TelegramUpdate = TelegramUpdate
     , updateMyChatMember :: !(Maybe TelegramChatMemberUpdated)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramUpdate where
-    parseJSON = withObject "TelegramUpdate" \o ->
+telegramUpdateDecoder :: Hermes.Decoder TelegramUpdate
+telegramUpdateDecoder = Hermes.object $
         TelegramUpdate
-            <$> o .: "update_id"
-            <*> o .:? "message"
-            <*> o .:? "edited_message"
-            <*> o .:? "message_reaction"
-            <*> o .:? "callback_query"
-            <*> o .:? "my_chat_member"
+            <$> Hermes.atKey "update_id" integerDecoder
+            <*> Hermes.optionalKey "message" telegramMessageDecoder
+            <*> Hermes.optionalKey "edited_message" telegramMessageDecoder
+            <*> Hermes.optionalKey "message_reaction" telegramMessageReactionDecoder
+            <*> Hermes.optionalKey "callback_query" telegramCallbackQueryDecoder
+            <*> Hermes.optionalKey "my_chat_member" telegramChatMemberUpdatedDecoder
 
 data TelegramCallbackQuery = TelegramCallbackQuery
     { callbackQueryId :: !Text
@@ -512,13 +556,13 @@ data TelegramCallbackQuery = TelegramCallbackQuery
     , callbackQueryData :: !(Maybe Text)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramCallbackQuery where
-    parseJSON = withObject "TelegramCallbackQuery" \o ->
+telegramCallbackQueryDecoder :: Hermes.Decoder TelegramCallbackQuery
+telegramCallbackQueryDecoder = Hermes.object $
         TelegramCallbackQuery
-            <$> o .: "id"
-            <*> o .: "from"
-            <*> o .:? "message"
-            <*> o .:? "data"
+            <$> Hermes.atKey "id" Hermes.text
+            <*> Hermes.atKey "from" telegramUserDecoder
+            <*> Hermes.optionalKey "message" telegramMessageDecoder
+            <*> Hermes.optionalKey "data" Hermes.text
 
 data TelegramResponse a = TelegramResponse
     { responseOk :: !Bool
@@ -528,25 +572,39 @@ data TelegramResponse a = TelegramResponse
     , responseParameters :: !(Maybe TelegramResponseParameters)
     }
 
-instance FromJSON a => FromJSON (TelegramResponse a) where
-    parseJSON = withObject "TelegramResponse" \o ->
+telegramResponseDecoder
+    :: Hermes.Decoder a
+    -> Hermes.Decoder (TelegramResponse a)
+telegramResponseDecoder resultDecoder = Hermes.object $
         TelegramResponse
-            <$> o .: "ok"
-            <*> o .:? "result"
-            <*> o .:? "description"
-            <*> o .:? "error_code"
-            <*> o .:? "parameters"
+            <$> Hermes.atKey "ok" Hermes.bool
+            <*> Hermes.optionalKey "result" resultDecoder
+            <*> Hermes.optionalKey "description" Hermes.text
+            <*> Hermes.optionalKey "error_code" Hermes.int
+            <*> Hermes.optionalKey "parameters" telegramResponseParametersDecoder
 
 data TelegramResponseParameters = TelegramResponseParameters
     { responseRetryAfter :: !(Maybe Int)
     } deriving (Eq, Show)
 
-instance FromJSON TelegramResponseParameters where
-    parseJSON = withObject "TelegramResponseParameters" \o ->
-        TelegramResponseParameters <$> o .:? "retry_after"
+telegramResponseParametersDecoder :: Hermes.Decoder TelegramResponseParameters
+telegramResponseParametersDecoder = Hermes.object $
+    TelegramResponseParameters <$> Hermes.optionalKey "retry_after" Hermes.int
 
 data TelegramClient = TelegramClient
     { clientToken :: !Text
     , clientManager :: !Http.Manager
     }
+
+
+defaultField
+    :: Text
+    -> a
+    -> Hermes.Decoder a
+    -> Hermes.FieldsDecoder a
+defaultField key fallback decoder =
+    Hermes.defaultKey fallback key decoder
+
+integerDecoder :: Hermes.Decoder Integer
+integerDecoder = fromIntegral <$> Hermes.int
 

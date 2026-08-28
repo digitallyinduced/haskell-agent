@@ -1,6 +1,13 @@
 module Agent.MCP.Fleet where
 
 
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
+import qualified Agent.Json.Decode as Json
 import Agent.Tools.IO (terminateProcessGroup)
 import Agent.Tools.Types
     ( AppTool(..)
@@ -57,18 +64,11 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM, unless, void, when)
 import Data.Aeson
-    ( FromJSON(..)
-    , Value(..)
+    ( Value(..)
     , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
     , (.=)
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -112,7 +112,7 @@ import System.Process
     )
 import System.Timeout (timeout)
 import Agent.MCP.Types
-import Agent.MCP.Client
+import Agent.MCP.Client hiding (rawObjectDecoder)
 resolveEffectiveCwds :: [McpServerConfig] -> IO [McpServerConfig]
 resolveEffectiveCwds configs = do
     current <- getCurrentDirectory
@@ -469,10 +469,10 @@ mcpSearchTool fleet = AppTool
             ]
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_search" \arguments -> do
+    , appToolHandler = typedTool "mcp_search" searchArgumentsDecoder \arguments -> do
         entries <- readTVarIO fleet.mcpFleetCatalog
         statuses <- mcpFleetStatuses fleet
-        let (query, server, limit) = searchArguments arguments
+        let (query, server, limit) = arguments
             matches :: (Text, McpCatalogEntry) -> Bool
             matches (name, entry) =
                 maybe True
@@ -533,10 +533,8 @@ grokSearchTool fleet = AppTool
         , "required" .= (["query"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "search_tool" \arguments ->
-        case grokSearchArguments arguments of
-            Left err -> pure (Left err)
-            Right (query, limit) -> do
+    , appToolHandler = typedTool "search_tool" grokSearchArgumentsDecoder
+        \(query, limit) -> do
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 statuses <- mcpFleetStatuses fleet
                 let queryTokens = searchTokens query
@@ -635,7 +633,7 @@ callCatalogEntryWithReconnect
     :: McpFleet
     -> Text
     -> McpCatalogEntry
-    -> Value
+    -> RawJson
     -> IO (Either Text Text)
 callCatalogEntryWithReconnect fleet qualifiedName entry arguments =
     callDiscoveredTool entry.catalogClient entry.catalogTool arguments
@@ -744,10 +742,8 @@ mcpCallTool fleet = AppTool
         , "required" .= (["name"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "mcp_call" \arguments ->
-        case callArguments arguments of
-            Left err -> pure (Left err)
-            Right (name, toolArguments) -> do
+    , appToolHandler = typedTool "mcp_call" callArgumentsDecoder
+        \(name, toolArguments) -> do
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 case Map.lookup name entries of
                     Just entry ->
@@ -785,10 +781,8 @@ grokUseTool fleet = AppTool
         , "required" .= (["tool_name", "tool_input"] :: [Text])
         , "additionalProperties" .= False
         ]
-    , appToolHandler = typedTool "use_tool" \arguments ->
-        case grokCallArguments arguments of
-            Left err -> pure (Left err)
-            Right (name, toolArguments) -> do
+    , appToolHandler = typedTool "use_tool" grokCallArgumentsDecoder
+        \(name, toolArguments) -> do
                 entries <- readTVarIO fleet.mcpFleetCatalog
                 case Map.lookup name entries of
                     Just entry ->
@@ -806,41 +800,39 @@ grokUseTool fleet = AppTool
     , appToolResourceClaims = Nothing
     }
 
-searchArguments :: Value -> (Maybe Text, Maybe Text, Int)
-searchArguments (Object fields) =
-    ( textField "query"
-    , textField "server"
-    , case KeyMap.lookup "limit" fields >>= responseId of
-        Just value -> max 1 (min 50 value)
-        Nothing -> 20
-    )
-  where
-    textField name = case KeyMap.lookup name fields of
-        Just (String value)
-            | not (Text.null (Text.strip value)) -> Just (Text.strip value)
-        _ -> Nothing
-searchArguments _ = (Nothing, Nothing, 20)
+searchArgumentsDecoder :: Json.Decoder (Maybe Text, Maybe Text, Int)
+searchArgumentsDecoder = Json.object do
+    query <- nonEmptyOptionalText "query"
+    server <- nonEmptyOptionalText "server"
+    limit <- max 1 . min 50 <$> Json.defaultKey 20 "limit" Json.int
+    pure (query, server, limit)
 
-grokSearchArguments :: Value -> Either Text (Text, Int)
-grokSearchArguments (Object fields) =
-    case KeyMap.lookup "query" fields of
-        Just (String raw)
-            | not (Text.null (Text.strip raw)) -> do
-                limit <- case KeyMap.lookup "limit" fields of
-                    Nothing -> Right 5
-                    Just Null -> Right 5
-                    Just value ->
-                        case responseId value of
-                            Just parsed
-                                | parsed >= 1 && parsed <= 255 ->
-                                    Right parsed
-                            _ ->
-                                Left
-                                    "search_tool limit must be an integer from 1 through 255"
-                Right (Text.strip raw, limit)
-        _ -> Left "search_tool requires a non-empty query"
-grokSearchArguments _ =
-    Left "search_tool arguments must be an object"
+grokSearchArgumentsDecoder :: Json.Decoder (Text, Int)
+grokSearchArgumentsDecoder = Json.object do
+    query <- Text.strip <$> Json.atKey "query" Json.text
+    when (Text.null query) $
+        fail "search_tool requires a non-empty query"
+    rawLimit <- Json.optionalKey "limit" rawJsonDecoder
+    limit <- case rawLimit of
+        Nothing -> pure 5
+        Just value ->
+            case Json.decodeEither Json.int (rawJsonBytes value) of
+                Right parsed -> pure parsed
+                Left _ ->
+                    fail
+                        "search_tool limit must be an integer from 1 through 255"
+    unless (limit >= 1 && limit <= 255) $
+        fail "search_tool limit must be an integer from 1 through 255"
+    pure (query, limit)
+
+nonEmptyOptionalText
+    :: Text
+    -> Json.FieldsDecoder (Maybe Text)
+nonEmptyOptionalText key =
+    fmap (Text.strip <$>) (Json.optionalKey key Json.text)
+        >>= \case
+            Just "" -> pure Nothing
+            value -> pure value
 
 searchTokens :: Text -> [Text]
 searchTokens =
@@ -860,34 +852,38 @@ truncateMcpDescription description
     | Text.length description <= 2048 = description
     | otherwise = Text.take 2034 description <> "… [truncated]"
 
-callArguments :: Value -> Either Text (Text, Value)
-callArguments (Object fields) =
-    case KeyMap.lookup "name" fields of
-        Just (String name)
-            | not (Text.null (Text.strip name)) ->
-                Right
-                    ( Text.strip name
-                    , maybe (object []) id (KeyMap.lookup "arguments" fields)
-                    )
-        _ -> Left "mcp_call requires a non-empty name"
-callArguments _ = Left "mcp_call arguments must be an object"
+callArgumentsDecoder :: Json.Decoder (Text, RawJson)
+callArgumentsDecoder = Json.object do
+    name <- Text.strip <$> Json.atKey "name" Json.text
+    when (Text.null name) $
+        fail "mcp_call requires a non-empty name"
+    arguments <- Json.defaultKey emptyObject "arguments" rawObjectDecoder
+    pure (name, arguments)
 
-grokCallArguments :: Value -> Either Text (Text, Value)
-grokCallArguments (Object fields) =
-    case KeyMap.lookup "tool_name" fields of
-        Just (String name)
-            | not (Text.null (Text.strip name))
-            , "__" `Text.isInfixOf` name ->
-                case KeyMap.lookup "tool_input" fields of
-                    Just value@(Object _) -> Right (Text.strip name, value)
-                    Nothing ->
-                        Left "use_tool requires tool_input"
-                    _ -> Left "use_tool tool_input must be an object"
-            | not (Text.null (Text.strip name)) ->
-                Left
-                    "use_tool tool_name must be a qualified server__tool name returned by search_tool"
-        _ -> Left "use_tool requires a non-empty tool_name"
-grokCallArguments _ = Left "use_tool arguments must be an object"
+grokCallArgumentsDecoder :: Json.Decoder (Text, RawJson)
+grokCallArgumentsDecoder = Json.object do
+    name <- Text.strip <$> Json.atKey "tool_name" Json.text
+    when (Text.null name) $
+        fail "use_tool requires a non-empty tool_name"
+    unless ("__" `Text.isInfixOf` name) $
+        fail
+            "use_tool tool_name must be a qualified server__tool name returned by search_tool"
+    rawArguments <- Json.optionalKey "tool_input" rawJsonDecoder
+        >>= maybe (fail "use_tool requires tool_input") pure
+    arguments <-
+        case Json.decodeEither rawObjectDecoder (rawJsonBytes rawArguments) of
+            Right value -> pure value
+            Left _ -> fail "use_tool tool_input must be an object"
+    pure (name, arguments)
+
+rawObjectDecoder :: Json.Decoder RawJson
+rawObjectDecoder =
+    Json.getType >>= \case
+        Json.VObject -> rawJsonDecoder
+        _ -> fail "expected object"
+
+emptyObject :: RawJson
+emptyObject = rawJsonFromEncoding (Aeson.toEncoding (object []))
 
 statusJson :: McpServerStatus -> Value
 statusJson status = object

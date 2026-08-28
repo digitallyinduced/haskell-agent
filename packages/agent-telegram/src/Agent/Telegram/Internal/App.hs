@@ -77,6 +77,8 @@ import Agent.Telegram.Markdown
     , telegramRenderedLength
     )
 import Agent.Telegram.Voice (transcribeWithXAI)
+import Agent.Json (rawJsonDecoder)
+import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
@@ -115,9 +117,7 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
-    ( Value(..)
-    , eitherDecode
-    , encode
+    ( encode
     , object
     , (.=)
     )
@@ -376,8 +376,7 @@ setupTelegram options = do
     TelegramClient.telegramRequest client "getMe" (object []) 15 >>= \case
         Left err -> die (Text.unpack err)
         Right response -> case
-                TelegramClient.decodeTelegramResponse response
-                    :: Either Text Value
+                TelegramClient.decodeTelegramResponse rawJsonDecoder response
             of
             Left err -> die (Text.unpack err)
             Right _ -> pure ()
@@ -437,8 +436,10 @@ readSecretLine prompt = do
 
 loadTelegramConfig :: OsPath -> IO TelegramConfig
 loadTelegramConfig home =
-    eitherDecode <$> LBS.readFile (unsafeToFilePath (configPath home)) >>= \case
-        Left err -> die ("could not decode Telegram config: " <> err)
+    Hermes.decodeEither telegramConfigDecoder . LBS.toStrict
+        <$> LBS.readFile (unsafeToFilePath (configPath home)) >>= \case
+        Left err -> die ("could not decode Telegram config: "
+            <> Text.unpack (Hermes.jsonErrorMessage err))
         Right config -> pure config
 
 loadTelegramToken :: OsPath -> IO Text

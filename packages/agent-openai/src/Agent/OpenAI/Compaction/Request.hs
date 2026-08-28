@@ -37,8 +37,6 @@ buildRemoteCompactionRequest params history =
 compactionTriggerItem :: ResponseItem
 compactionTriggerItem =
     CompactionTriggerItemValue CompactionTriggerItem
-        { extraFields = KeyMap.empty
-        }
 
 estimateRequestTokensWithItems
     :: ResponseCreateParams

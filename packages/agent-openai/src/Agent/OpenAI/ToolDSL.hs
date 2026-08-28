@@ -15,7 +15,8 @@ import Agent.ToolDSL
     , parametersObjectLoose
     )
 import Data.Text (Text)
-import qualified Data.Aeson.KeyMap as KeyMap
+import Agent.Json (rawJsonFromEncoding)
+import qualified Data.Aeson as Aeson
 
 -- | Build a strict Structured Outputs function tool.
 --
@@ -27,9 +28,9 @@ buildTool :: Text -> Text -> [PropertySchema] -> ResponseTool
 buildTool name description properties = FunctionToolValue FunctionTool
     { name
     , description = Just description
-    , parameters = Just (parametersObject properties)
+    , parameters = Just
+        (rawJsonFromEncoding (Aeson.toEncoding (parametersObject properties)))
     , strict = Just True
-    , extraFields = KeyMap.empty
     }
 
 -- | grok-build function tool: optional fields stay optional, @strict@ omitted.
@@ -37,7 +38,8 @@ buildGrokTool :: Text -> Text -> [PropertySchema] -> ResponseTool
 buildGrokTool name description properties = FunctionToolValue FunctionTool
     { name
     , description = Just description
-    , parameters = Just (parametersObjectLoose properties)
+    , parameters = Just
+        (rawJsonFromEncoding
+            (Aeson.toEncoding (parametersObjectLoose properties)))
     , strict = Nothing
-    , extraFields = KeyMap.empty
     }

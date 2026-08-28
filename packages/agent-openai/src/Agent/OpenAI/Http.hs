@@ -8,7 +8,9 @@ module Agent.OpenAI.Http
     ) where
 
 import Agent.Error (ApiError(..), ErrorType(..), errorTypeFromText)
+import qualified Agent.Json.Decode as Json
 import Agent.OpenAI.Error (mkOpenAIError)
+import Agent.Responses.Codec (decodeResponse)
 import Agent.Responses.SSE (parseSseEventsBytes)
 import Agent.Responses.LoopBackend (hasRecoverableIncompleteOutput)
 import Agent.Responses.StreamAssembly
@@ -21,7 +23,6 @@ import Agent.Responses.StreamAssembly
 import qualified Agent.Responses.Types as OpenAI
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import Data.Text (Text)
@@ -128,26 +129,25 @@ decodeCodexHttpBodyBytesWithModel modelHint bodyBytes
         response <- buildStreamResponseWithModel streamConfig modelHint events
         rejectFailedCodexResponse response
     | otherwise =
-        case decodeJsonResponseBodyBytes bodyBytes of
-            Just jsonValue -> decodeResponseValue jsonValue bodyBytes
-            Nothing -> Left (JsonDecodeError
-                "Invalid Codex Responses body"
-                (bodyPreview bodyBytes))
+        decodeJsonResponseBodyBytes bodyBytes
 
-decodeJsonResponseBodyBytes :: BS.ByteString -> Maybe Aeson.Value
+decodeJsonResponseBodyBytes
+    :: BS.ByteString
+    -> Either ApiError OpenAI.Response
 decodeJsonResponseBodyBytes bodyBytes =
-    case Aeson.eitherDecodeStrict' bodyBytes of
-        Right (Aeson.Object object)
-            | Just inner <- KeyMap.lookup "response" object -> Just inner
-            | otherwise -> Just (Aeson.Object object)
-        _ -> Nothing
+    case decodeResponse bodyBytes of
+        Right response -> rejectFailedCodexResponse response
+        Left directError ->
+            case Json.decodeEither wrappedResponseDecoder bodyBytes of
+                Right response -> rejectFailedCodexResponse response
+                Left _ -> Left
+                    (JsonDecodeError
+                        (Text.pack directError)
+                        (bodyPreview bodyBytes))
 
-decodeResponseValue :: Aeson.Value -> BS.ByteString -> Either ApiError OpenAI.Response
-decodeResponseValue jsonValue bodyBytes =
-    case Aeson.fromJSON jsonValue of
-        Aeson.Success response -> rejectFailedCodexResponse response
-        Aeson.Error err ->
-            Left (JsonDecodeError (Text.pack err) (bodyPreview bodyBytes))
+wrappedResponseDecoder :: Json.Decoder OpenAI.Response
+wrappedResponseDecoder =
+    Json.object (Json.atKey "response" OpenAI.responseDecoder)
 
 -- | The Responses endpoint can return HTTP 200 with a terminal
 -- @status: "failed"@ payload. Normalize that wire shape into the same typed

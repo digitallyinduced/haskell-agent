@@ -26,6 +26,8 @@ import Agent.ToolArgs
     , optInt
     , reqText
     )
+import Agent.Json.Decode (Decoder)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL
     ( PropertySchema(..)
     , PropertyType(..)
@@ -34,6 +36,7 @@ import Agent.ToolDSL
 import Agent.ToolDispatch
     ( ToolCall(..)
     , ToolCallKind(..)
+    , streamingTextTool
     , typedStreamingTool
     )
 import Agent.Tools.CodeMode.Host
@@ -62,7 +65,7 @@ import Agent.Tools.Types
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (finally)
 import Control.Monad (foldM)
-import Data.Aeson (FromJSON(..), Value(..), eitherDecodeStrict', encode, object, (.=))
+import Data.Aeson (Value(..), encode)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KeyMap
@@ -303,18 +306,13 @@ runNestedTool invoke nextInvocation nested codeName arguments =
 
 newtype ExecArgs = ExecArgs { source :: Text }
 
-instance FromJSON ExecArgs where
-    parseJSON (String source) = pure ExecArgs { source }
-    parseJSON _ =
-        fail "exec expects raw JavaScript source text"
-
 data ExecPragma = ExecPragma
     { yieldTimeMs :: Maybe Int
     , maxOutputTokens :: Maybe Int
     } deriving (Eq, Show)
 
-instance FromJSON ExecPragma where
-    parseJSON = objectArgsExact
+execPragmaDecoder :: Decoder ExecPragma
+execPragmaDecoder = objectArgsExact
         ["yield_time_ms", "max_output_tokens"]
         \object_ -> ExecPragma
             <$> optInt object_ "yield_time_ms"
@@ -341,7 +339,8 @@ execTool host nestedTools description =
         -- wrapper as an exclusive call; concurrency requested inside the
         -- cell remains explicit in the JavaScript (for example Promise.all).
         TurnSequential
-        (typedStreamingTool "exec" (\_emit -> runExec host nestedTools))
+        (streamingTextTool "exec" \_emit source ->
+            runExec host nestedTools (ExecArgs source))
 
 runExec
     :: CodeModeHost
@@ -408,55 +407,19 @@ parseExecSource raw
                         "exec pragma must be a JSON object with supported fields \
                         \`yield_time_ms` and `max_output_tokens`"
                 | otherwise ->
-                    case
-                        ( eitherDecodeStrict'
-                            (TextEncoding.encodeUtf8 (Text.strip directive))
-                            :: Either String Value
-                        )
-                    of
-                            Left err -> Left $
-                                "exec pragma must be valid JSON with supported fields \
-                                \`yield_time_ms` and `max_output_tokens`: "
-                                    <> Text.pack err
-                            Right value@(Object object_) ->
-                                case
-                                    [ Key.toText key
-                                    | key <- KeyMap.keys object_
-                                    , Key.toText key `notElem`
-                                        ["yield_time_ms", "max_output_tokens"]
-                                    ]
-                                of
-                                    unexpected : _ ->
-                                        Left $
-                                            "exec pragma only supports `yield_time_ms` \
-                                            \and `max_output_tokens`; got `"
-                                                <> unexpected
-                                                <> "`"
-                                    [] -> case Aeson.fromJSON value of
-                                        Aeson.Error err ->
-                                            Left $
-                                                "exec pragma fields `yield_time_ms` and \
-                                                \`max_output_tokens` must be \
-                                                \non-negative safe integers: "
-                                                    <> Text.pack err
-                                        Aeson.Success pragma
-                                            | maybe False (< 0)
-                                                pragma.yieldTimeMs
-                                                || maybe False (< 0)
-                                                    pragma.maxOutputTokens ->
-                                                Left
-                                                    "exec pragma fields `yield_time_ms` and \
-                                                    \`max_output_tokens` must be \
-                                                    \non-negative safe integers"
-                                            | otherwise ->
-                                                Right
-                                                    ( Text.drop 1 restWithNewline
-                                                    , pragma
-                                                    )
-                            Right _ ->
+                    case Json.decodeText execPragmaDecoder (Text.strip directive) of
+                        Left err -> Left $
+                            "exec pragma must be valid JSON with supported fields \
+                            \`yield_time_ms` and `max_output_tokens`: "
+                                <> err.jsonErrorMessage
+                        Right pragma
+                            | maybe False (< 0) pragma.yieldTimeMs
+                                || maybe False (< 0) pragma.maxOutputTokens ->
                                 Left
-                                    "exec pragma must be a JSON object with supported \
-                                    \fields `yield_time_ms` and `max_output_tokens`"
+                                    "exec pragma fields `yield_time_ms` and \
+                                    \`max_output_tokens` must be non-negative safe integers"
+                            | otherwise ->
+                                Right (Text.drop 1 restWithNewline, pragma)
 
 data WaitArgs = WaitArgs
     { cellId :: Text
@@ -465,8 +428,8 @@ data WaitArgs = WaitArgs
     , terminate :: Bool
     }
 
-instance FromJSON WaitArgs where
-    parseJSON = objectArgsExact
+waitArgsDecoder :: Decoder WaitArgs
+waitArgsDecoder = objectArgsExact
         ["cell_id", "yield_time_ms", "max_tokens", "terminate"]
         \object_ -> WaitArgs
             <$> reqText object_ "cell_id"
@@ -490,7 +453,7 @@ waitTool host =
         ]
         AlwaysReadOnly
         ParallelSafe
-        (typedStreamingTool "wait" (\_emit -> runWait host))
+        (typedStreamingTool "wait" waitArgsDecoder (\_emit -> runWait host))
 
 runWait :: CodeModeHost -> WaitArgs -> IO (Either Text Text)
 runWait host args

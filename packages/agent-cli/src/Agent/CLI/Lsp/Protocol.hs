@@ -1,9 +1,21 @@
 module Agent.CLI.Lsp.Protocol
-    ( encodeLspFrame
+    ( IncomingMessage(..)
+    , encodeLspFrame
     , readMessage
     , sendMessage
     ) where
 
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    )
+import Agent.Json.Decode
+    ( JsonError(..)
+    , decodeEither
+    , optionalKey
+    )
+import Agent.Json.Decode qualified as Hermes
 import Control.Exception.Safe (displayException, tryAny)
 import Control.Monad (when)
 import qualified Data.Aeson as Aeson
@@ -17,6 +29,34 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import System.IO (Handle, hFlush)
 
+data IncomingMessage = IncomingMessage
+    { incomingId :: !(Maybe RawJson)
+    , incomingNumericId :: !(Maybe Int)
+    , incomingMethod :: !(Maybe Text)
+    , incomingParams :: !(Maybe RawJson)
+    , incomingError :: !(Maybe RawJson)
+    , incomingResult :: !(Maybe RawJson)
+    }
+
+incomingMessageDecoder :: Hermes.Decoder IncomingMessage
+incomingMessageDecoder =
+    Hermes.object do
+        identifier <- optionalKey "id" rawJsonDecoder
+        IncomingMessage
+            identifier
+            (identifier >>= either (const Nothing) Just
+                . decodeRawJson Hermes.int)
+            <$> optionalKey "method" Hermes.text
+            <*> optionalKey "params" rawJsonDecoder
+            <*> optionalKey "error" rawJsonDecoder
+            <*> optionalKey "result" rawJsonDecoder
+
+decodeRawJson :: Hermes.Decoder a -> RawJson -> Either Text a
+decodeRawJson decoder =
+    either (Left . jsonErrorMessage) Right
+        . decodeEither decoder
+        . rawJsonBytes
+
 sendMessage :: Handle -> Aeson.Value -> IO ()
 sendMessage handle value = do
     BS.hPut handle (encodeLspFrame value)
@@ -29,7 +69,7 @@ encodeLspFrame value =
         ("Content-Length: " <> show (BS.length body) <> "\r\n\r\n")
             <> body
 
-readMessage :: Handle -> IO (Either Text Aeson.Value)
+readMessage :: Handle -> IO (Either Text IncomingMessage)
 readMessage handle = do
     headers <- tryAny (readHeaders handle 0 0 Map.empty)
     case headers of
@@ -62,11 +102,11 @@ readMessage handle = do
                                 | BS.length body /= bodyLength ->
                                     Left "LSP response ended before Content-Length"
                                 | otherwise ->
-                                    case Aeson.eitherDecodeStrict' body of
-                                        Left err ->
+                                    case decodeEither incomingMessageDecoder body of
+                                        Left (JsonError err) ->
                                             Left
                                                 ( "LSP response was invalid JSON: "
-                                                    <> Text.pack err
+                                                    <> err
                                                 )
                                         Right value -> Right value
 

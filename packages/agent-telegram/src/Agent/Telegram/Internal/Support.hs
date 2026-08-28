@@ -84,6 +84,7 @@ import Agent.Telegram.Markdown
     , telegramRenderedLength
     )
 import Agent.Telegram.Voice (transcribeWithXAI)
+import qualified Agent.Json.Decode as Hermes
 import Agent.FileRetry (writeLazyFileAtomically)
 import Agent.Concurrent (mapConcurrentlyBounded)
 import Agent.OsPath (unsafeToFilePath)
@@ -123,7 +124,6 @@ import Control.Exception.Safe
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
     ( Value(..)
-    , eitherDecode
     , encode
     , object
     , (.=)
@@ -379,8 +379,10 @@ loadTelegramState path = do
     exists <- doesFileExist path
     if not exists
         then pure emptyTelegramState
-        else eitherDecode <$> LBS.readFile (unsafeToFilePath path) >>= \case
-            Left err -> fail ("could not decode Telegram state: " <> err)
+        else Hermes.decodeEither telegramStateDecoder . LBS.toStrict
+            <$> LBS.readFile (unsafeToFilePath path) >>= \case
+            Left err -> fail ("could not decode Telegram state: "
+                <> Text.unpack (Hermes.jsonErrorMessage err))
             Right state -> pure state
 
 saveTelegramState :: OsPath -> TelegramState -> IO ()

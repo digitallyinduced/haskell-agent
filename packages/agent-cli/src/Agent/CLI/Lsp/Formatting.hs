@@ -4,20 +4,25 @@ module Agent.CLI.Lsp.Formatting
 
 import Agent.CLI.FileUri (fileUriPath)
 import Agent.GrokBuild.Dialect.Lsp (LspOperation(..))
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    )
+import Agent.Json.Decode
+    ( decodeEither
+    , optionalKey
+    )
+import Agent.Json.Decode qualified as Hermes
 import Control.Applicative ((<|>))
-import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.ByteString.Lazy as LBS
-import Data.Maybe (fromMaybe)
-import Data.Scientific (toBoundedInteger)
+import qualified Data.ByteString as BS
+import Data.Maybe (fromMaybe, maybeToList)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 import Data.Text.Encoding.Error (lenientDecode)
-import qualified Data.Vector as Vector
 
-formatLspResult :: LspOperation -> Aeson.Value -> Text
+formatLspResult :: LspOperation -> RawJson -> Text
 formatLspResult operation value =
     case operation of
         GoToDefinition -> formatLocations "definition" value
@@ -27,105 +32,132 @@ formatLspResult operation value =
         DocumentSymbol -> formatSymbols value
         WorkspaceSymbol -> formatSymbols value
 
-formatLocations :: Text -> Aeson.Value -> Text
+formatLocations :: Text -> RawJson -> Text
 formatLocations label value =
-    case collectLocations value of
-        [] -> "No " <> label <> " found."
-        locations -> Text.intercalate "\n" locations
+    case decodeRawJson locationsDecoder value of
+        Left _ -> compactJson value
+        Right [] -> "No " <> label <> " found."
+        Right locations -> Text.intercalate "\n" locations
 
-collectLocations :: Aeson.Value -> [Text]
-collectLocations = \case
-    Aeson.Array values ->
-        concatMap collectLocations (Vector.toList values)
-    Aeson.Object object ->
-        maybe [] pure (locationFromObject object)
-    _ -> []
+locationsDecoder :: Hermes.Decoder [Text]
+locationsDecoder =
+    Hermes.getType >>= \case
+        Hermes.VArray ->
+            concat <$> Hermes.list locationsDecoder
+        Hermes.VObject ->
+            maybeToList <$> locationDecoder
+        _ -> [] <$ rawJsonDecoder
 
-locationFromObject :: KeyMap.KeyMap Aeson.Value -> Maybe Text
-locationFromObject object = do
-    uri <- stringField "uri" object <|> stringField "targetUri" object
-    let range =
-            KeyMap.lookup "range" object
-                <|> KeyMap.lookup "targetSelectionRange" object
-                <|> KeyMap.lookup "targetRange" object
-        (line, character) = fromMaybe (0, 0) (range >>= startPosition)
-        path = maybe uri Text.pack (fileUriPath uri)
-    pure $
-        path <> ":" <> Text.pack (show (line + 1))
-            <> ":" <> Text.pack (show (character + 1))
+locationDecoder :: Hermes.Decoder (Maybe Text)
+locationDecoder =
+    Hermes.object do
+        uriValue <- optionalKey "uri" Hermes.text
+        targetUri <- optionalKey "targetUri" Hermes.text
+        rangeValue <- optionalKey "range" startPositionDecoder
+        selectionRange <-
+            optionalKey "targetSelectionRange" startPositionDecoder
+        targetRange <- optionalKey "targetRange" startPositionDecoder
+        let uri = uriValue <|> targetUri
+            range = rangeValue <|> selectionRange <|> targetRange
+        pure do
+            locationUri <- uri
+            let (line, character) = fromMaybe (0, 0) range
+                path = maybe locationUri Text.pack (fileUriPath locationUri)
+            pure $
+                path
+                    <> ":"
+                    <> Text.pack (show (line + 1))
+                    <> ":"
+                    <> Text.pack (show (character + 1))
 
-startPosition :: Aeson.Value -> Maybe (Int, Int)
-startPosition (Aeson.Object range) = do
-    Aeson.Object start <- KeyMap.lookup "start" range
-    line <- integerField "line" start
-    character <- integerField "character" start
-    pure (line, character)
-startPosition _ = Nothing
+startPositionDecoder :: Hermes.Decoder (Int, Int)
+startPositionDecoder =
+    Hermes.object $
+        Hermes.atKey "start" $
+            Hermes.object $
+                (,)
+                    <$> Hermes.atKey "line" Hermes.int
+                    <*> Hermes.atKey "character" Hermes.int
 
-formatHover :: Aeson.Value -> Text
-formatHover Aeson.Null = "No hover information found."
-formatHover (Aeson.Object object) =
-    maybe
-        (compactJson (Aeson.Object object))
-        formatHoverContents
-        (KeyMap.lookup "contents" object)
-formatHover value = formatHoverContents value
+formatHover :: RawJson -> Text
+formatHover value =
+    either (const (compactJson value)) id $
+        decodeRawJson hoverDecoder value
 
-formatHoverContents :: Aeson.Value -> Text
-formatHoverContents = \case
-    Aeson.String value -> value
-    Aeson.Array values ->
-        Text.intercalate "\n\n"
-            (map formatHoverContents (Vector.toList values))
-    Aeson.Object object ->
-        fromMaybe
-            (compactJson (Aeson.Object object))
-            (stringField "value" object <|> stringField "language" object)
-    Aeson.Null -> "No hover information found."
-    value -> compactJson value
+hoverDecoder :: Hermes.Decoder Text
+hoverDecoder =
+    Hermes.getType >>= \case
+        Hermes.VNull ->
+            "No hover information found." <$ Hermes.isNull
+        Hermes.VString -> Hermes.text
+        Hermes.VArray ->
+            Text.intercalate "\n\n" <$> Hermes.list hoverDecoder
+        Hermes.VObject ->
+            Hermes.withRawJsonByteString \bytes ->
+                pure $
+                    either
+                        (const (Text.decodeUtf8With lenientDecode bytes))
+                        (fromMaybe (Text.decodeUtf8With lenientDecode bytes))
+                        (decodeEither hoverObjectDecoder (BS.copy bytes))
+        _ ->
+            rawTextDecoder
 
-formatSymbols :: Aeson.Value -> Text
+hoverObjectDecoder :: Hermes.Decoder (Maybe Text)
+hoverObjectDecoder =
+    Hermes.object do
+        contents <- optionalKey "contents" hoverDecoder
+        value <- optionalKey "value" Hermes.text
+        language <- optionalKey "language" Hermes.text
+        pure (contents <|> value <|> language)
+
+formatSymbols :: RawJson -> Text
 formatSymbols value =
-    case symbolLines 0 value of
-        [] -> "No symbols found."
-        lines' -> Text.intercalate "\n" lines'
+    case decodeRawJson (symbolLinesDecoder 0) value of
+        Left _ -> compactJson value
+        Right [] -> "No symbols found."
+        Right lines' -> Text.intercalate "\n" lines'
 
-symbolLines :: Int -> Aeson.Value -> [Text]
-symbolLines depth = \case
-    Aeson.Array values ->
-        concatMap (symbolLines depth) (Vector.toList values)
-    Aeson.Object object ->
-        case stringField "name" object of
-            Nothing -> []
-            Just name ->
-                let location =
-                        KeyMap.lookup "location" object >>= \case
-                            Aeson.Object locationObject ->
-                                locationFromObject locationObject
-                            _ -> Nothing
-                    directLocation = locationFromObject object
-                    suffix = maybe "" (" — " <>) (location <|> directLocation)
-                    current =
-                        Text.replicate depth "  " <> "- " <> name <> suffix
-                    children =
-                        maybe []
-                            (symbolLines (depth + 1))
-                            (KeyMap.lookup "children" object)
-                in current : children
-    _ -> []
+symbolLinesDecoder :: Int -> Hermes.Decoder [Text]
+symbolLinesDecoder depth =
+    Hermes.getType >>= \case
+        Hermes.VArray ->
+            concat <$> Hermes.list (symbolLinesDecoder depth)
+        Hermes.VObject ->
+            Hermes.object do
+                name <- optionalKey "name" Hermes.text
+                location <-
+                    optionalKey "location" locationDecoder
+                directLocation <- Hermes.liftObjectDecoder locationDecoder
+                children <-
+                    fromMaybe []
+                        <$> optionalKey "children"
+                            (symbolLinesDecoder (depth + 1))
+                pure case name of
+                    Nothing -> []
+                    Just symbolName ->
+                        let suffix =
+                                maybe ""
+                                    (" — " <>)
+                                    ((location >>= id) <|> directLocation)
+                            current =
+                                Text.replicate depth "  "
+                                    <> "- "
+                                    <> symbolName
+                                    <> suffix
+                        in current : children
+        _ -> [] <$ rawJsonDecoder
 
-stringField :: Text -> KeyMap.KeyMap Aeson.Value -> Maybe Text
-stringField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.String value) -> Just value
-        _ -> Nothing
+rawTextDecoder :: Hermes.Decoder Text
+rawTextDecoder =
+    Hermes.withRawJsonByteString $
+        pure . Text.decodeUtf8With lenientDecode
 
-integerField :: Text -> KeyMap.KeyMap Aeson.Value -> Maybe Int
-integerField name object =
-    case KeyMap.lookup (Key.fromText name) object of
-        Just (Aeson.Number value) -> toBoundedInteger value
-        _ -> Nothing
+decodeRawJson :: Hermes.Decoder a -> RawJson -> Either Text a
+decodeRawJson decoder =
+    either (Left . Hermes.jsonErrorMessage) Right
+        . decodeEither decoder
+        . rawJsonBytes
 
-compactJson :: Aeson.Value -> Text
+compactJson :: RawJson -> Text
 compactJson =
-    Text.decodeUtf8With lenientDecode . LBS.toStrict . Aeson.encode
+    Text.decodeUtf8With lenientDecode . rawJsonBytes

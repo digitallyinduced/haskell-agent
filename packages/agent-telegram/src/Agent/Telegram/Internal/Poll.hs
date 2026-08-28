@@ -117,7 +117,6 @@ import Control.Exception.Safe
 import Control.Monad (forM_, unless, void, when)
 import Data.Aeson
     ( Value(..)
-    , eitherDecode
     , encode
     , object
     , (.=)

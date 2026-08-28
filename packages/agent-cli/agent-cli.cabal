@@ -50,6 +50,7 @@ library
                     , Agent.CLI.Auth.OpenAI
                     , Agent.CLI.Auth.Types
                     , Agent.CLI.Command.Types
+                    , Agent.CLI.Json
                     , Agent.CLI.Command.Catalog
                     , Agent.CLI.Command.Instructions
                     , Agent.CLI.Compaction.Continuation
@@ -233,6 +234,7 @@ library
                     , Agent.CLI.WindowTitle
                     , Agent.CLI.Worktree
     build-depends:    agent-core >= 0.1 && < 0.2
+                    , agent-json >= 0.1 && < 0.2
                     , agent-process >= 0.1 && < 0.2
                     , agent-codex-dialect >= 0.1 && < 0.2
                     , agent-grok-build-dialect >= 0.1 && < 0.2
@@ -319,6 +321,7 @@ benchmark subagent-retention-bench
     main-is:          SubagentRetention.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
     build-depends:    agent-cli
+                    , agent-json
                     , agent-core
                     , agent-store
                     , agent-responses
@@ -334,7 +337,8 @@ benchmark conversation-retention-bench
     hs-source-dirs:   benchmark
     main-is:          ConversationRetention.hs
     ghc-options:      -O2 -threaded -rtsopts "-with-rtsopts=-T"
-    build-depends:    agent-responses-types
+    build-depends:    agent-json
+                    , agent-responses-types
                     , aeson
                     , base >= 4.17 && < 5
                     , bytestring
@@ -452,6 +456,7 @@ test-suite agent-cli-test
                     , Agent.CLI.WorktreeSpec
     build-depends:    agent-cli
                     , agent-core
+                    , agent-json
                     , agent-codex-dialect
                     , agent-grok-build-dialect
                     , agent-store

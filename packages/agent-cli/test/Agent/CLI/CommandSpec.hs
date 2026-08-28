@@ -5,7 +5,6 @@ import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
 import Agent.Responses.Types
-import qualified Data.Aeson.KeyMap as KeyMap
 import Data.List (isInfixOf)
 import qualified Data.Text as Text
 import Test.Hspec
@@ -679,7 +678,6 @@ spec = do
                             , generateSummary = Just "auto"
                             , reasoningMode = Nothing
                             , summary = Just "concise"
-                            , extraFields = KeyMap.empty
                             }
                         , ..
                         }

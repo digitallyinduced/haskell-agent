@@ -20,8 +20,6 @@ import Agent.XAI.ReasoningEffort
     )
 import Agent.Responses.Types
 import Agent.XAI.Options (ClientOptions(..))
-import qualified Data.Aeson.Key as Key
-import qualified Data.Aeson.KeyMap as KeyMap
 import qualified Data.Maybe as Maybe
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -61,7 +59,6 @@ buildRequest options request =
                 , generateSummary = Nothing
                 , reasoningMode = Nothing
                 , summary = Just "concise"
-                , extraFields = KeyMap.empty
                 }
             , include = request.include
             , promptCacheKey = request.promptCacheKey
@@ -73,21 +70,20 @@ buildRequest options request =
                 [ MessageItem ResponseMessage
                     { messageId = Nothing
                     , content = MessageContentParts
-                        [InputTextPart instructions Nothing KeyMap.empty]
+                        [InputTextPart instructions Nothing]
                     , role = RoleSystem
                     , status = Nothing
                     , phase = Nothing
                     , passthrough = Nothing
-                    , extraFields = KeyMap.empty
                     }
                 ]
         _ -> []
 
     xaiTool tool = case tool of
         FunctionToolValue {} -> Just tool
-        KnownResponseTool ToolWebSearch _ -> Just hostedWebSearchTool
-        KnownResponseTool ToolXSearch _ -> Just hostedXSearchTool
-        KnownResponseTool ToolComputer _ -> Nothing
+        KnownResponseTool ToolWebSearch -> Just hostedWebSearchTool
+        KnownResponseTool ToolXSearch -> Just hostedXSearchTool
+        KnownResponseTool ToolComputer -> Nothing
         _ -> Just tool
 
 -- | Grok Build always splices hosted @x_search@ onto grok-4.6 Responses
@@ -107,16 +103,16 @@ withHostedXSearch ResponseCreateParams { tools = existing, .. } =
 
 isHostedXSearch :: ResponseTool -> Bool
 isHostedXSearch = \case
-    KnownResponseTool ToolXSearch _ -> True
+    KnownResponseTool ToolXSearch -> True
     UnknownResponseTool tagged
         | tagged.tag == responseToolTypeText ToolXSearch -> True
     _ -> False
 
 hostedWebSearchTool :: ResponseTool
-hostedWebSearchTool = knownResponseTool ToolWebSearch KeyMap.empty
+hostedWebSearchTool = knownResponseTool ToolWebSearch
 
 hostedXSearchTool :: ResponseTool
-hostedXSearchTool = knownResponseTool ToolXSearch KeyMap.empty
+hostedXSearchTool = knownResponseTool ToolXSearch
 
 xaiReasoningEffort :: Maybe Text -> Text
 xaiReasoningEffort value =
@@ -138,7 +134,6 @@ requestInputItems request = case request.input of
             , status = Nothing
             , phase = Nothing
             , passthrough = Nothing
-            , extraFields = KeyMap.empty
             }
         ]
     Nothing -> []
@@ -154,12 +149,11 @@ normalizeInputItem =
             MessageItem ResponseMessage
                 { messageId = Nothing
                 , content = MessageContentParts
-                    [InputTextPart (agentMessageText message) Nothing KeyMap.empty]
+                    [InputTextPart (agentMessageText message) Nothing]
                 , role = RoleUser
                 , status = Nothing
                 , phase = Nothing
                 , passthrough = Nothing
-                , extraFields = KeyMap.empty
                 }
         item -> item
 
@@ -170,69 +164,48 @@ stripItemStatus = \case
     MessageItem message ->
         MessageItem message
             { status = Nothing
-            , extraFields = withoutStatusFields message.extraFields
             }
     FunctionCallItem call ->
         FunctionCallItem call
             { status = Nothing
-            , extraFields = withoutStatusFields call.extraFields
             }
     FunctionCallOutputItem output ->
         FunctionCallOutputItem output
             { status = Nothing
-            , extraFields = withoutStatusFields output.extraFields
             }
     CustomToolCallItem call ->
         CustomToolCallItem call
             { status = Nothing
-            , extraFields = withoutStatusFields call.extraFields
             }
     CustomToolCallOutputItem output ->
         CustomToolCallOutputItem output
             { status = Nothing
-            , extraFields = withoutStatusFields output.extraFields
             }
     ReasoningItemValue item ->
         ReasoningItemValue item
             { status = Nothing
-            , extraFields = withoutStatusFields item.extraFields
             }
     LocalShellCallItem item ->
         LocalShellCallItem item
             { status = Nothing
-            , extraFields = withoutStatusFields item.extraFields
             }
     ToolSearchCallItem item ->
         ToolSearchCallItem item
             { status = Nothing
-            , extraFields = withoutStatusFields item.extraFields
             }
     ToolSearchOutputItem item ->
         ToolSearchOutputItem item
             { status = Nothing
-            , extraFields = withoutStatusFields item.extraFields
             }
     WebSearchCallItem item ->
         WebSearchCallItem item
             { status = Nothing
-            , extraFields = withoutStatusFields item.extraFields
             }
     ImageGenerationCallItem item ->
         ImageGenerationCallItem item
             { status = Nothing
-            , extraFields = withoutStatusFields item.extraFields
-            }
-    KnownResponseItem itemType tagged ->
-        KnownResponseItem itemType tagged
-            { fields = withoutStatusFields tagged.fields
-            }
-    UnknownResponseItem tagged ->
-        UnknownResponseItem tagged
-            { fields = withoutStatusFields tagged.fields
             }
     item -> item
-
-withoutStatusFields = KeyMap.delete (Key.fromText "status")
 
 agentMessageText :: ResponseAgentMessage -> Text
 agentMessageText message =

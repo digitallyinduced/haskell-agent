@@ -1,6 +1,13 @@
 module Agent.MCP.Types where
 
 
+import Agent.Json
+    ( RawJson
+    , rawJsonBytes
+    , rawJsonDecoder
+    , rawJsonFromEncoding
+    )
+import qualified Agent.Json.Decode as Json
 import Agent.Tools.IO (terminateProcessGroup)
 import Agent.Tools.Types
     ( AppTool(..)
@@ -57,18 +64,10 @@ import Control.Exception.Safe
     )
 import Control.Monad (forM, unless, void, when)
 import Data.Aeson
-    ( FromJSON(..)
-    , Value(..)
-    , object
-    , withObject
-    , (.:)
-    , (.:?)
-    , (.!=)
+    ( object
     , (.=)
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.Aeson.KeyMap as KeyMap
-import qualified Data.Aeson.Types as AesonTypes
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as LBS
@@ -226,7 +225,7 @@ data McpClient = McpClient
     , clientProcess :: !ProcessHandle
     , clientGroupId :: !(Maybe ProcessGroupID)
     , clientNextId :: !(IORef Int)
-    , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text Value))))
+    , clientPending :: !(TVar (IntMap.IntMap (TMVar (Either Text RawJson))))
     , clientFailure :: !(TVar (Maybe Text))
     , clientWriteLock :: !(MVar ())
     , clientStderr :: !(IORef CapturedStderr)
@@ -258,25 +257,36 @@ stderrLimit = 16 * 1024
 data McpTool = McpTool
     { discoveredName :: !Text
     , discoveredDescription :: !Text
-    , discoveredInputSchema :: !Value
+    , discoveredInputSchema :: !RawJson
     , discoveredReadOnly :: !Bool
     }
 
-instance FromJSON McpTool where
-    parseJSON = withObject "MCP tool" \fields -> do
-        annotations <- fields .:? "annotations" .!= object []
-        readOnly <- withObject "MCP tool annotations"
-            (\values -> values .:? "readOnlyHint" .!= False)
-            annotations
-        McpTool
-            <$> fields .: "name"
-            <*> fields .:? "description" .!= ""
-            <*> fields .:? "inputSchema" .!= emptyInputSchema
-            <*> pure readOnly
+mcpToolDecoder :: Json.Decoder McpTool
+mcpToolDecoder = Json.object do
+    discoveredName <- Json.atKey "name" Json.text
+    rawDescription <- Json.optionalKey "description" rawJsonDecoder
+    let discoveredDescription =
+            maybe "" (projectRawOr "" Json.text) rawDescription
+    discoveredInputSchema <-
+        maybe emptyInputSchema id
+            <$> Json.atKeyOptional "inputSchema" rawJsonDecoder
+    rawAnnotations <- Json.optionalKey "annotations" rawJsonDecoder
+    let discoveredReadOnly =
+            maybe False (projectRawOr False annotationsDecoder) rawAnnotations
+    pure McpTool{..}
+  where
+    annotationsDecoder =
+        Json.object (Json.defaultKey False "readOnlyHint" Json.bool)
 
-emptyInputSchema :: Value
-emptyInputSchema = object
-    [ "type" .= ("object" :: Text)
-    , "properties" .= object []
-    , "additionalProperties" .= False
-    ]
+projectRawOr :: a -> Json.Decoder a -> RawJson -> a
+projectRawOr fallback decoder value =
+    either (const fallback) id $
+        Json.decodeEither decoder (rawJsonBytes value)
+
+emptyInputSchema :: RawJson
+emptyInputSchema =
+    rawJsonFromEncoding . Aeson.toEncoding $ object
+        [ "type" .= ("object" :: Text)
+        , "properties" .= object []
+        , "additionalProperties" .= False
+        ]

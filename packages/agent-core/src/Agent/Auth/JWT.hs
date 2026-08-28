@@ -6,24 +6,23 @@ module Agent.Auth.JWT
     ( decodeJwtPayload
     ) where
 
-import Data.Aeson (FromJSON)
-import qualified Data.Aeson as Aeson
+import Agent.Json.Decode (Decoder)
+import qualified Agent.Json.Decode as Json
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
 
 -- | Decode the JSON payload (the second dot-separated segment) of a JWT
 -- without verifying its signature.
-decodeJwtPayload :: FromJSON value => Text -> Maybe value
-decodeJwtPayload token = do
+decodeJwtPayload :: Decoder value -> Text -> Maybe value
+decodeJwtPayload decoder token = do
     payload <- case Text.splitOn "." token of
         (_header : encodedPayload : _) -> Just encodedPayload
         _ -> Nothing
     bytes <- either (const Nothing) Just $
         Base64.decode (Text.encodeUtf8 (base64UrlToBase64 payload))
-    Aeson.decode (LBS.fromStrict bytes)
+    either (const Nothing) Just (Json.decodeEither decoder bytes)
 
 base64UrlToBase64 :: Text -> Text
 base64UrlToBase64 input =

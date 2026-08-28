@@ -8,7 +8,8 @@ module Agent.CLI.Database.Store
     ) where
 
 import Agent.CLI.Database
-    ( DatabaseScope(..)
+    ( ConversationSearchMatch(..)
+    , DatabaseScope(..)
     , DatabaseToolsEnv(..)
     )
 import Agent.Store.Postgres
@@ -45,6 +46,8 @@ import Agent.Store.Postgres.Scope
     , provisionScope
     )
 import Agent.Store.Types (renderStoreError)
+import Agent.Json (RawJson)
+import Agent.Json.Decode (JsonError(..), validateRawJson)
 import Control.Exception.Safe (SomeException, try)
 import Data.Aeson (Value, toJSON)
 import qualified Data.Aeson as Aeson
@@ -126,16 +129,19 @@ databaseToolsEnvForStore store scopes currentSessionId = DatabaseToolsEnv
     , databaseSearchConversations = \query limit ->
         searchConversationTurns (trustedPool store) query limit >>= \case
             Left err -> pure (Left (renderStoreError err))
-            Right results -> pure $ Right $ toJSON (map searchResultValue results)
+            Right results -> pure $ Right $ map searchResultValue results
     }
 
-queryResultValue :: CustomQueryResult -> Either Text Value
+queryResultValue :: CustomQueryResult -> Either Text RawJson
 queryResultValue result = do
-    rows <- decodeJsonText "custom query rows" result.customQueryRows
-    pure $ Aeson.object
-        [ "rows" Aeson..= rows
-        , "truncated" Aeson..= result.customQueryTruncated
-        ]
+    _ <- decodeJsonText "custom query rows" result.customQueryRows
+    case validateRawJson $ Text.encodeUtf8 $
+            "{\"rows\":" <> result.customQueryRows
+                <> ",\"truncated\":"
+                <> (if result.customQueryTruncated then "true" else "false")
+                <> "}" of
+        Left err -> Left ("custom query result: " <> jsonErrorMessage err)
+        Right raw -> Right raw
 
 executionResultValue :: CustomExecutionResult -> Value
 executionResultValue result = Aeson.object
@@ -190,27 +196,25 @@ catalogIndexValue index = Aeson.object
     , "definition" Aeson..= index.indexDefinition
     ]
 
-decodeJsonText :: Text -> Text -> Either Text Value
+decodeJsonText :: Text -> Text -> Either Text RawJson
 decodeJsonText label value =
-    case Aeson.eitherDecodeStrict' (Text.encodeUtf8 value) of
-        Left err -> Left (label <> ": " <> Text.pack err)
+    case validateRawJson (Text.encodeUtf8 value) of
+        Left err -> Left (label <> ": " <> jsonErrorMessage err)
         Right decoded -> Right decoded
 
-searchResultValue :: ConversationSearchResult -> Value
-searchResultValue result = Aeson.object
-    [ "session_id" Aeson..= result.searchSessionId
-    , "turn_index" Aeson..= result.searchTurnIndex
-    , "occurred_at" Aeson..= result.searchOccurredAt
-    , "user_text" Aeson..= result.searchUserText
-    , "assistant_text" Aeson..= result.searchAssistantText
-    , "rank" Aeson..= result.searchRank
-    ]
+searchResultValue :: ConversationSearchResult -> ConversationSearchMatch
+searchResultValue result = ConversationSearchMatch
+    result.searchSessionId
+    (fromIntegral result.searchTurnIndex)
+    (Just (Text.pack (show result.searchOccurredAt)))
+    result.searchUserText
+    result.searchAssistantText
 
 withScopeDatabase
-    :: Store
+    :: forall value. Store
     -> Scope
-    -> (ScopeDatabase -> HasqlPool -> IO (Either Text Value))
-    -> IO (Either Text Value)
+    -> (ScopeDatabase -> HasqlPool -> IO (Either Text value))
+    -> IO (Either Text value)
 withScopeDatabase store scope action =
     provisionScope (storePool (provisioningPool store)) scope >>= \case
         Left err -> pure (Left err)

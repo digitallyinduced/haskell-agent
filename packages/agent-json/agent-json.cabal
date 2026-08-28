@@ -1,0 +1,63 @@
+cabal-version:      3.0
+name:               agent-json
+version:            0.1.0.0
+synopsis:           Concrete Hermes JSON decoding for the agent
+description:
+    Shared Hermes decoder sessions and owned raw JSON values. JSON encoding
+    remains with Aeson; this package deliberately provides no generic JSON DOM
+    or alternate decoder backend.
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             digitally induced GmbH
+maintainer:         marc@digitallyinduced.com
+copyright:          (c) 2026 digitally induced GmbH
+category:           Web
+build-type:         Simple
+
+common common-options
+    default-language: GHC2021
+    default-extensions:
+        BlockArguments
+        DerivingStrategies
+        LambdaCase
+        OverloadedStrings
+    ghc-options:
+        -Wall
+        -Wcompat
+        -Widentities
+        -Wincomplete-record-updates
+        -Wincomplete-uni-patterns
+        -Wpartial-fields
+        -Werror=incomplete-patterns
+
+library
+    import:          common-options
+    hs-source-dirs:  src
+    exposed-modules:
+        Agent.Json
+        Agent.Json.Decode
+    other-modules:
+        Agent.Json.Internal
+    build-depends:
+        aeson >= 2.0 && < 3
+        , base >= 4.17 && < 5
+        , bytestring >= 0.11 && < 0.13
+        , hermes-json >= 0.8 && < 0.9
+        , safe-exceptions >= 0.1.7 && < 0.2
+        , text >= 2.0 && < 2.2
+        , vector >= 0.13 && < 0.14
+        , vector
+
+test-suite agent-json-test
+    import:          common-options
+    type:            exitcode-stdio-1.0
+    hs-source-dirs:  test
+    main-is:         Spec.hs
+    build-depends:
+        agent-json
+        , aeson
+        , async >= 2.2 && < 2.3
+        , base >= 4.17 && < 5
+        , bytestring
+        , hspec >= 2.11 && < 2.12
+        , text

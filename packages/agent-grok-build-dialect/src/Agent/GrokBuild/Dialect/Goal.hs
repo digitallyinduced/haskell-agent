@@ -19,9 +19,10 @@ module Agent.GrokBuild.Dialect.Goal
     ) where
 
 import Agent.GrokBuild.Dialect.Common (jsonTool)
-import Agent.ToolArgs (objectArgsLenient, optBool, optText)
+import qualified Agent.Json.Decode as Json
 import Agent.ToolDSL (PropertySchema(..), PropertyType(..))
 import Agent.ToolDispatch (typedTool)
+import Agent.GrokBuild.Dialect.Json (optionalBool, optionalText)
 import Agent.Tools.Types (AppTool, ToolExecutionPolicy(..))
 import Control.Concurrent.MVar
     ( MVar
@@ -29,7 +30,7 @@ import Control.Concurrent.MVar
     , newMVar
     , readMVar
     )
-import Data.Aeson (FromJSON(..), object, (.=))
+import Data.Aeson (object, (.=))
 import qualified Data.Aeson.Text as Aeson
 import Data.Maybe (catMaybes)
 import Data.Text (Text)
@@ -155,11 +156,12 @@ data UpdateGoalArgs = UpdateGoalArgs
     , blockedReason :: !(Maybe Text)
     }
 
-instance FromJSON UpdateGoalArgs where
-    parseJSON = objectArgsLenient \object_ -> UpdateGoalArgs
-        <$> optBool object_ "completed"
-        <*> optText object_ "message"
-        <*> optText object_ "blocked_reason"
+updateGoalArgsDecoder :: Json.Decoder UpdateGoalArgs
+updateGoalArgsDecoder = Json.object $
+    UpdateGoalArgs
+        <$> optionalBool "completed"
+        <*> optionalText "message"
+        <*> optionalText "blocked_reason"
 
 updateGoalTool :: GoalRuntime -> AppTool
 updateGoalTool runtime =
@@ -175,7 +177,7 @@ updateGoalTool runtime =
         ]
         True
         TurnSequential
-        (typedTool "update_goal" (runUpdateGoal runtime))
+        (typedTool "update_goal" updateGoalArgsDecoder (runUpdateGoal runtime))
 
 runUpdateGoal
     :: GoalRuntime
