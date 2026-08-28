@@ -224,10 +224,20 @@ spec = do
                     KnownResponseItem ItemCompaction (TaggedObject "compaction")
                 remoteTrigger =
                     UnknownResponseItem (TaggedObject "COMPACTION_TRIGGER")
+                contextCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "ctx-compact"
+                        , encryptedContent = Just "opaque"
+                        }
+                knownContextCheckpoint =
+                    KnownResponseItem ItemContextCompaction
+                        (TaggedObject "context_compaction")
                 paramsValue = defaultResponseCreateParams
                 history =
                     [ userTextItem "old context"
                     , remoteCheckpoint
+                    , contextCheckpoint
+                    , knownContextCheckpoint
                     , remoteTrigger
                     ]
             params <- newIORef paramsValue
@@ -248,13 +258,18 @@ spec = do
                 [request] ->
                     requestItems request `shouldSatisfy`
                         all \case
+                            CompactionItemValue{} -> False
+                            ContextCompactionItemValue{} -> False
+                            CompactionTriggerItemValue{} -> False
                             KnownResponseItem ItemCompaction _ -> False
+                            KnownResponseItem ItemContextCompaction _ -> False
                             KnownResponseItem ItemCompactionTrigger _ -> False
                             UnknownResponseItem tagged ->
                                 Text.toLower (Text.strip tagged.tag)
                                     `notElem`
                                         [ "compaction"
                                         , "compaction_summary"
+                                        , "context_compaction"
                                         , "compaction_trigger"
                                         ]
                             _ -> True
@@ -1443,7 +1458,8 @@ spec = do
                         (pure defaultResponseCreateParams)
                         (\outcome pending -> do
                             pending `shouldBe` [UserMessage "steer"]
-                            writeIORef installedHistory outcome.compactHistory
+                            writeIORef installedHistory
+                                (outcome.compactHistory <> turnInputsToItems pending)
                             pure CompactionInstalled)
                         contextState
                         base
@@ -1460,7 +1476,7 @@ spec = do
                         <> [compactionTriggerItem]
                     ]
             readIORef seenPrevious `shouldReturn` [Nothing]
-            readIORef seenInputs `shouldReturn` [[UserMessage "steer"]]
+            readIORef seenInputs `shouldReturn` [[]]
             compacted <- readIORef installedHistory
             compacted `shouldSatisfy` hasCompactionCheckpoint
             fmap (.backendState) result `shouldBe` Right compacted

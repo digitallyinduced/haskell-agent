@@ -115,10 +115,10 @@ spec = do
                     { turnItems = old }
             compactTurn =
                 (sessionTurn "" Nothing TranscriptReplace)
-                    { turnItems = checkpoint }
+                    { turnItems = checkpoint <> pending }
             failedTurn =
                 (sessionTurn "failed request" Nothing TranscriptAppend)
-                    { turnItems = pending
+                    { turnItems = []
                     , turnError = Just "cancelled"
                     }
         foldSessionItems [oldTurn, compactTurn, failedTurn]

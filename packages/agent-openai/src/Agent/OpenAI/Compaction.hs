@@ -55,6 +55,8 @@ import Agent.Responses.Types
 import Agent.Json (RawJson, rawJsonFromEncoding)
 import qualified Data.Aeson as Aeson
 import Data.Maybe (listToMaybe, mapMaybe)
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
@@ -95,9 +97,9 @@ trimRemoteCompactionHistoryToFit
 trimRemoteCompactionHistoryToFit contextWindow instructionText history =
     trimCompactionHistoryToFitWith
         sanitizeRemoteCompactionHistory
-        False
         contextWindow
         requestTokens
+        (estimateItemsTokens . pure)
         history
   where
     requestTokens items =
@@ -116,9 +118,9 @@ trimRemoteCompactionRequestToFit
 trimRemoteCompactionRequestToFit contextWindow params =
     trimCompactionHistoryToFitWith
         sanitizeRemoteCompactionHistory
-        False
         contextWindow
         requestTokens
+        (estimateItemsTokens . pure)
   where
     requestTokens history =
         estimateEncodedValue (buildRemoteCompactionRequest params history)
@@ -135,130 +137,319 @@ trimResponseHistoryToFit
 trimResponseHistoryToFit contextWindow params trailing =
     trimCompactionHistoryToFitWith
         sanitizeCompactionHistory
-        True
         contextWindow
         requestTokens
+        (estimateItemsTokens . pure)
   where
     requestTokens history =
         estimateRequestTokensWithItems params (history <> trailing)
 
 trimCompactionHistoryToFitWith
     :: ([ResponseItem] -> [ResponseItem])
-    -> Bool
     -> Int
     -> ([ResponseItem] -> Int)
+    -> (ResponseItem -> Int)
     -> [ResponseItem]
     -> [ResponseItem]
-trimCompactionHistoryToFitWith sanitize dropIrreducible contextWindow
-        requestTokens history =
-    let rewritten =
-            rewriteNewest initialCost [] (reverse (zip sanitized itemCosts))
-    in if dropIrreducible
-        then dropOldestUntilFit rewritten
-        else rewritten
+trimCompactionHistoryToFitWith
+        sanitize
+        contextWindow
+        requestTokens
+        estimateItem
+        history =
+    let sanitized = sanitize history
+        -- A single exact check handles the common case without constructing
+        -- any accounting state. The old implementation called this for every
+        -- candidate while repeatedly rebuilding the whole prefix.
+        initialRequestTokens = requestTokens sanitized
+    in if initialRequestTokens <= contextWindow
+        then sanitized
+        else
+            let entries =
+                    [ (item, itemCost item)
+                    | item <- sanitized
+                    ]
+                itemTokens =
+                    sum [cost | (_, cost) <- entries]
+                -- Keep the exact request-level overhead (instructions,
+                -- tools, trailing items, and framing) out of the per-item
+                -- accounting.  The full initial estimate remains at least
+                -- the exact check, even when an item estimate rounds down.
+                fixedTokens =
+                    max
+                        (toInteger (max 0 (requestTokens [])))
+                        (toInteger initialRequestTokens - itemTokens)
+                initialTotal = fixedTokens + itemTokens
+                (rewritten, rewrittenTotal) =
+                    rewriteEntries initialTotal entries
+                (dropped, _) =
+                    dropOldestUntilFit rewrittenTotal rewritten
+                (retained, _) =
+                    rewriteEntries
+                        (fixedTokens + sum [cost | (_, cost) <- dropped])
+                        dropped
+            in repairExactFit fixedTokens retained
   where
-    sanitized = sanitize history
-    itemCosts = map itemTokenCount sanitized
-    itemsCost = sum itemCosts
-    requestCost = requestTokens sanitized
-    -- Request-level instructions, tools, and the envelope stay fixed while an
-    -- item is rewritten. Measure them once; independently rounded item costs
-    -- make the running estimate conservative.
-    fixedCost = max 0 (requestCost - itemsCost)
-    initialCost = max requestCost (fixedCost + itemsCost)
+    window = toInteger contextWindow
 
-    -- Codex considers each item once and updates a running total. Processing
-    -- newest-to-oldest matches its tool-output preflight and avoids quadratic
-    -- prefix appends and complete-request serialization.
-    rewriteNewest _ suffix [] = suffix
-    rewriteNewest totalCost suffix remaining@((item, cost) : older)
-        | totalCost <= contextWindow =
-            map fst (reverse remaining) <> suffix
+    -- Keep one independently rounded estimate per item.  Rewrites and group
+    -- selection update a running total rather than serializing the request.
+    itemCost item =
+        toInteger (max 1 (estimateItem item))
+
+    boundedBudget value =
+        fromInteger
+            (max 0 (min (toInteger (maxBound :: Int)) value))
+
+    -- Consider each item at most twice, newest first, and update the running
+    -- total after a successful rewrite. The second pass handles a boundary
+    -- item that could not be rewritten until older protocol units were
+    -- removed; this remains linear while preserving the newest usable item.
+    rewriteEntries initialTotal entries =
+        go initialTotal (reverse entries) []
+      where
+        go total [] rewritten =
+            (rewritten, total)
+        go total remaining@((item, oldCost) : rest) rewritten
+            | total <= window =
+                (reverse remaining <> rewritten, total)
+            | otherwise =
+                let available =
+                        max 0 (window - (total - oldCost))
+                in case rewriteItemForBudget
+                        (boundedBudget available)
+                        item of
+                    Just compacted
+                        | newCost <- itemCost compacted
+                        , newCost < oldCost ->
+                            go
+                                (total - oldCost + newCost)
+                                rest
+                                ((compacted, newCost) : rewritten)
+                    _ ->
+                        go total rest ((item, oldCost) : rewritten)
+
+    -- Drop complete protocol units in one pass. In particular, this avoids
+    -- repeatedly appending a growing prefix (`prefix <> rest`) for large
+    -- histories. Checkpoints are never put in a droppable unit.
+    dropOldestUntilFit total entries =
+        dropOldestWithBoundary True total entries
+
+    -- Once the rewrite boundary has had a chance to shrink, an irreducible
+    -- final unit may still exceed the window. At that point it is safe to
+    -- discard it as a last resort, matching the old exact-fit fallback.
+    dropAllOldestUntilFit total entries =
+        dropOldestWithBoundary False total entries
+
+    dropOldestWithBoundary preserveBoundary total entries =
+        let items = map fst entries
+            units = protocolDropUnits items
+            costs =
+                Map.fromList
+                    [ (index, cost)
+                    | (index, (_, cost)) <- zip [0 ..] entries
+                    ]
+            dropped = chooseDrops preserveBoundary total units costs
+            result =
+                [ entry
+                | (index, entry) <- zip [0 ..] entries
+                , not (Set.member index dropped)
+                ]
+            removedTotal =
+                sum
+                    [ Map.findWithDefault 0 index costs
+                    | index <- Set.toList dropped
+                    ]
+        in (result, total - removedTotal)
+
+    chooseDrops preserveBoundary total units costs =
+        go total units dropCount Set.empty
+      where
+        itemCostAt index = Map.findWithDefault 0 index costs
+        dropCount = length [() | DropUnit{} <- units]
+
+        go _current [] _remainingDrops dropped = dropped
+        go current (unit : rest) remainingDrops dropped
+            | current <= window = dropped
+            | otherwise =
+                case unit of
+                    KeepUnit -> go current rest remainingDrops dropped
+                    DropUnit indices ->
+                        if preserveBoundary && remainingDrops <= 1
+                            then dropped
+                            else
+                                let newIndices =
+                                        filter (`Set.notMember` dropped) indices
+                                    removedTokens =
+                                        sum (map itemCostAt newIndices)
+                                in go
+                                    (current - removedTokens)
+                                    rest
+                                    (remainingDrops - 1)
+                                    (foldr Set.insert dropped newIndices)
+
+    -- This final check is intentionally outside the accounting loop. Usually
+    -- the additive estimate is conservative, but a request adapter can add
+    -- conditional fields. If that rare under-estimate occurs, run one final
+    -- linear drop pass rather than recursively serializing each candidate.
+    repairExactFit fixedTokens entries =
+        let items = map fst entries
+            exactTokens = requestTokens items
+            estimatedTokens =
+                fixedTokens + sum [cost | (_, cost) <- entries]
+        in if exactTokens <= contextWindow
+            then items
+            else
+                map fst
+                    (fst
+                        (dropAllOldestUntilFit
+                            (max estimatedTokens (toInteger exactTokens))
+                            entries))
+
+data ProtocolDropUnit
+    = KeepUnit
+    | DropUnit [Int]
+
+data OutputKey
+    = FunctionOutputKey
+    | CustomToolOutputKey
+    | ComputerOutputKey
+    deriving stock (Eq, Ord, Show)
+
+protocolDropUnits :: [ResponseItem] -> [ProtocolDropUnit]
+protocolDropUnits items =
+    let indexed = zip [0 ..] items
+        outputIndices = buildOutputIndices indexed
+    in go outputIndices Set.empty indexed
+  where
+    go _ _ [] = []
+    go outputIndices paired ((index, item) : rest)
+        | Set.member index paired =
+            go outputIndices paired rest
+        | isCompactionCheckpoint item =
+            KeepUnit : go outputIndices paired rest
         | otherwise =
-            let availableTokens =
-                    max 0 (contextWindow - (totalCost - cost))
-            in case rewriteItemForBudget availableTokens item of
-                Just compacted
-                    | let compactedCost = itemTokenCount compacted
-                    , compactedCost < cost ->
-                        rewriteNewest
-                            (totalCost - cost + compactedCost)
-                            (compacted : suffix)
-                            older
-                _ -> rewriteNewest totalCost (item : suffix) older
+            case item of
+                FunctionCallItem call ->
+                    let outputIndex =
+                            findOutputIndex
+                                outputIndices
+                                paired
+                                index
+                                (FunctionOutputKey, call.callId)
+                        nextPaired = maybe paired (`Set.insert` paired) outputIndex
+                    in DropUnit (index : maybe [] pure outputIndex)
+                        : go outputIndices nextPaired rest
+                CustomToolCallItem call ->
+                    let outputIndex =
+                            findOutputIndex
+                                outputIndices
+                                paired
+                                index
+                                (CustomToolOutputKey, call.callId)
+                        nextPaired = maybe paired (`Set.insert` paired) outputIndex
+                    in DropUnit (index : maybe [] pure outputIndex)
+                        : go outputIndices nextPaired rest
+                ComputerCallItem call ->
+                    let outputIndex =
+                            findOutputIndex
+                                outputIndices
+                                paired
+                                index
+                                (ComputerOutputKey, call.computerCallId)
+                        nextPaired = maybe paired (`Set.insert` paired) outputIndex
+                    in DropUnit (index : maybe [] pure outputIndex)
+                        : go outputIndices nextPaired rest
+                KnownResponseItem itemType tagged
+                    | Just outputType <- pairedOutputType itemType ->
+                        DropUnit
+                            (index : maybe [] pure
+                                (findTaggedOutputIndex
+                                    ((== outputType) . fst)
+                                    (taggedProtocolIds tagged)
+                                    rest))
+                            : go outputIndices paired rest
+                UnknownResponseItem tagged
+                    | Just outputTag <- pairedUnknownOutputTag tagged.tag ->
+                        DropUnit
+                            (index : maybe [] pure
+                                (findTaggedOutputIndex
+                                    (\(itemType, _) ->
+                                        case itemType of
+                                            ItemUnknownType value ->
+                                                value == outputTag
+                                            _ -> False)
+                                    (taggedProtocolIds tagged)
+                                    rest))
+                            : go outputIndices paired rest
+                _ ->
+                    DropUnit [index] : go outputIndices paired rest
 
-    itemTokenCount item = estimateItemsTokens [item]
+    findOutputIndex outputIndices paired minIndex (outputType, rawId) =
+        case nonEmptyIdentifiers [rawId] of
+            [callId] ->
+                Map.lookup (outputType, callId) outputIndices
+                    >>= listToMaybe
+                        . filter
+                            (\index ->
+                                index > minIndex
+                                    && index `Set.notMember` paired)
+            _ -> Nothing
 
-    -- Local summarization follows Codex's context-error fallback and may drop
-    -- old protocol units. Remote V2 never enters this loop.
-    dropOldestUntilFit items
-        | requestTokens items <= contextWindow = items
+    buildOutputIndices =
+        foldl' addOutputIndex Map.empty
+
+    addOutputIndex outputIndices (index, item) =
+        case outputKey item of
+            Just key ->
+                Map.insertWith
+                    (\new old -> old <> new)
+                    key
+                    [index]
+                    outputIndices
+            Nothing -> outputIndices
+
+    outputKey = \case
+        FunctionCallOutputItem output ->
+            key FunctionOutputKey output.callId
+        CustomToolCallOutputItem output ->
+            key CustomToolOutputKey output.callId
+        ComputerCallOutputItem output ->
+            key ComputerOutputKey output.computerOutputCallId
+        _ -> Nothing
+      where
+        key outputType rawId =
+            case nonEmptyIdentifiers [rawId] of
+                [callId] -> Just (outputType, callId)
+                _ -> Nothing
+
+    findTaggedOutputIndex predicate callIds items
+        | null (nonEmptyIdentifiers callIds) = Nothing
         | otherwise =
-            case dropOldestProtocolUnit items of
-                Nothing -> items
-                Just smaller -> dropOldestUntilFit smaller
+            listToMaybe
+                [ index
+                | (index, item) <- items
+                , case item of
+                    KnownResponseItem itemType tagged ->
+                        predicate (itemType, tagged)
+                            && identifiersMatch
+                                callIds
+                                (taggedProtocolIds tagged)
+                    UnknownResponseItem tagged ->
+                        predicate (ItemUnknownType tagged.tag, tagged)
+                            && identifiersMatch
+                                callIds
+                                (taggedProtocolIds tagged)
+                    _ -> False
+                ]
 
-dropOldestProtocolUnit :: [ResponseItem] -> Maybe [ResponseItem]
-dropOldestProtocolUnit = go []
-  where
-    go _ [] = Nothing
-    go prefix (item@(KnownResponseItem ItemCompaction _) : rest) =
-        go (prefix <> [item]) rest
-    go prefix (item@(KnownResponseItem ItemContextCompaction _) : rest) =
-        go (prefix <> [item]) rest
-    go prefix (item@CompactionItemValue{} : rest) =
-        go (prefix <> [item]) rest
-    go prefix (item@ContextCompactionItemValue{} : rest) =
-        go (prefix <> [item]) rest
-    go prefix (FunctionCallItem call : rest) =
-        Just (prefix <> dropMatchingFunctionOutput call.callId rest)
-    go prefix (CustomToolCallItem call : rest) =
-        Just (prefix <> dropMatchingCustomToolOutput call.callId rest)
-    go prefix (ComputerCallItem call : rest) =
-        Just (prefix <> dropMatchingComputerCallOutput call.computerCallId rest)
-    go prefix (KnownResponseItem itemType tagged : rest)
-        | Just outputType <- pairedOutputType itemType =
-            Just $
-                prefix
-                    <> dropMatchingTaggedOutput
-                        (== outputType)
-                        (taggedProtocolIds tagged)
-                        rest
-    go prefix (UnknownResponseItem tagged : rest)
-        | Just outputTag <- pairedUnknownOutputTag tagged.tag =
-            Just $
-                prefix
-                    <> dropMatchingTaggedOutput
-                        (\case
-                            ItemUnknownType itemType -> itemType == outputTag
-                            _ -> False)
-                        (taggedProtocolIds tagged)
-                        rest
-    go prefix (_ : rest) = Just (prefix <> rest)
-
-dropMatchingFunctionOutput :: Text -> [ResponseItem] -> [ResponseItem]
-dropMatchingFunctionOutput callId = go
-  where
-    go [] = []
-    go (FunctionCallOutputItem output : rest)
-        | identifiersMatch [callId] [output.callId] = rest
-    go (item : rest) = item : go rest
-
-dropMatchingComputerCallOutput :: Text -> [ResponseItem] -> [ResponseItem]
-dropMatchingComputerCallOutput callId = go
-  where
-    go [] = []
-    go (ComputerCallOutputItem output : rest)
-        | identifiersMatch [callId] [output.computerOutputCallId] = rest
-    go (item : rest) = item : go rest
-
-dropMatchingCustomToolOutput :: Text -> [ResponseItem] -> [ResponseItem]
-dropMatchingCustomToolOutput callId = go
-  where
-    go [] = []
-    go (CustomToolCallOutputItem output : rest)
-        | identifiersMatch [callId] [output.callId] = rest
-    go (item : rest) = item : go rest
+isCompactionCheckpoint :: ResponseItem -> Bool
+isCompactionCheckpoint = \case
+    CompactionItemValue{} -> True
+    ContextCompactionItemValue{} -> True
+    KnownResponseItem ItemCompaction _ -> True
+    KnownResponseItem ItemContextCompaction _ -> True
+    _ -> False
 
 pairedOutputType :: ResponseItemType -> Maybe ResponseItemType
 pairedOutputType = \case
@@ -271,6 +462,12 @@ pairedOutputType = \case
     ItemProgram -> Just ItemProgramOutput
     _ -> Nothing
 
+compactedScreenshotDataUrl :: Text
+compactedScreenshotDataUrl =
+    "data:image/png;base64,"
+        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
+        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
+
 pairedUnknownOutputTag :: Text -> Maybe Text
 pairedUnknownOutputTag itemType
     | "_call" `Text.isSuffixOf` normalized =
@@ -278,24 +475,6 @@ pairedUnknownOutputTag itemType
     | otherwise = Nothing
   where
     normalized = Text.toLower (Text.strip itemType)
-
-dropMatchingTaggedOutput
-    :: (ResponseItemType -> Bool)
-    -> [Text]
-    -> [ResponseItem]
-    -> [ResponseItem]
-dropMatchingTaggedOutput isOutput callIds = go
-  where
-    go [] = []
-    go (KnownResponseItem itemType tagged : rest)
-        | isOutput itemType
-        , identifiersMatch callIds (taggedProtocolIds tagged) =
-            rest
-    go (UnknownResponseItem tagged : rest)
-        | isOutput (ItemUnknownType tagged.tag)
-        , identifiersMatch callIds (taggedProtocolIds tagged) =
-            rest
-    go (item : rest) = item : go rest
 
 taggedProtocolIds :: TaggedObject -> [Text]
 taggedProtocolIds _ = []
@@ -312,12 +491,6 @@ identifiersMatch expected actual =
 nonEmptyIdentifiers :: [Text] -> [Text]
 nonEmptyIdentifiers =
     filter (not . Text.null) . map Text.strip
-
-compactedScreenshotDataUrl :: Text
-compactedScreenshotDataUrl =
-    "data:image/png;base64,"
-        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
-        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
 
 sanitizeRemoteCompactionHistory :: [ResponseItem] -> [ResponseItem]
 sanitizeRemoteCompactionHistory =

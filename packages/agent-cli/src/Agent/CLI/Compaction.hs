@@ -632,11 +632,20 @@ isPortableLocalSummaryItem = \case
     -- OpenAI checkpoints are opaque provider protocol items. Preserve them
     -- for focused OpenAI summaries, but never replay them through
     -- xAI/OpenRouter or user-configured Responses endpoints.
+    CompactionItemValue{} -> False
+    ContextCompactionItemValue{} -> False
+    CompactionTriggerItemValue{} -> False
     KnownResponseItem ItemCompaction _ -> False
+    KnownResponseItem ItemContextCompaction _ -> False
     KnownResponseItem ItemCompactionTrigger _ -> False
     UnknownResponseItem tagged ->
         Text.toLower (Text.strip tagged.tag)
-            `notElem` ["compaction", "compaction_summary", "compaction_trigger"]
+            `notElem`
+                [ "compaction"
+                , "compaction_summary"
+                , "context_compaction"
+                , "compaction_trigger"
+                ]
     _ -> True
 
 autoCompactOpenAiBackend
@@ -711,6 +720,7 @@ autoCompactOpenAiBackendWithSenderAndHook configuredThreshold send recordUsage
             contextTokensRef $
             autoCompactOpenAiBackendWithLimit
                 getLimit
+                True
                 compactAction
                 recordUsage
                 estimateProjectedRequest
@@ -851,6 +861,7 @@ autoCompactOpenAiBackendWith
 autoCompactOpenAiBackendWith compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
+        False
         (\_history _inputs ->
             (CompactAttempt emptyTokenUsage
                 <$> fmap (either (Left . textCompactionError) Right)
@@ -870,6 +881,7 @@ autoCompactOpenAiBackendWithApi
 autoCompactOpenAiBackendWithApi compactAction =
     autoCompactOpenAiBackendWithLimit
         (pure codexAutoCompactTokenLimit)
+        False
         (\_history _inputs ->
             CompactAttempt emptyTokenUsage <$> compactAction)
         (const (pure ()))
@@ -878,6 +890,7 @@ autoCompactOpenAiBackendWithApi compactAction =
 
 autoCompactOpenAiBackendWithLimit
     :: IO Int
+    -> Bool
     -> ([ResponseItem] -> [TurnInput] -> IO (CompactAttempt ApiError))
     -> (TokenUsage -> IO ())
     -> (Maybe OccupancySnapshot -> [ResponseItem] -> [TurnInput] -> IO Int)
@@ -885,8 +898,8 @@ autoCompactOpenAiBackendWithLimit
     -> IORef (Maybe OccupancySnapshot)
     -> Backend
     -> Backend
-autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
-        estimateProjected
+autoCompactOpenAiBackendWithLimit getLimit absorbCompletedTools compactAction
+        recordUsage estimateProjected
         onCompacted
         contextTokensRef
         (Backend submit) =
@@ -898,6 +911,7 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
                 not (null history)
                     && projectedTokens >= tokenLimit
         if shouldCompact
+            && (absorbCompletedTools || not (any isCompletedTool inputs))
             then compactThenSubmit
                 tokenLimit
                 contextState history inputs onEvent
@@ -953,23 +967,30 @@ autoCompactOpenAiBackendWithLimit getLimit compactAction recordUsage
 
     installSubmitAndTrack restore rollback outcome inputs onEvent = do
         let compactedHistory = outcome.compactHistory
+            pendingItems = turnInputsToItems inputs
+            durableHistory = compactedHistory <> pendingItems
             compactSnapshot =
                 Just $
                     estimatedOccupancy
-                        outcome.compactAfterTokens
-                        (length compactedHistory)
+                        ( outcome.compactAfterTokens
+                            + estimateItemsTokens pendingItems
+                        )
+                        (length durableHistory)
         writeIORef contextTokensRef compactSnapshot
         -- Match Codex's compaction lifecycle: install and durably record the
-        -- checkpoint before issuing the model continuation. A continuation
-        -- failure must not resurrect the superseded response chain.
+        -- checkpoint before issuing the model continuation. Root sessions put
+        -- pending inputs in that checkpoint too, so a crash in this gap cannot
+        -- lose the user's request. Lightweight wrappers defer installation and
+        -- keep passing the inputs normally.
         installation <-
             onCompacted outcome inputs `onException` rollback
-        let rollbackIfDeferred =
+        let (continuationHistory, continuationInputs, rollbackIfDeferred) =
                 case installation of
-                    CompactionInstalled -> pure ()
-                    CompactionNotInstalled -> rollback
+                    CompactionInstalled -> (durableHistory, [], pure ())
+                    CompactionNotInstalled -> (compactedHistory, inputs, rollback)
         result <-
-            restore (submit compactedHistory Nothing inputs onEvent)
+            restore
+                (submit continuationHistory Nothing continuationInputs onEvent)
                 `onException` rollbackIfDeferred
         case result of
             Left _ -> rollbackIfDeferred

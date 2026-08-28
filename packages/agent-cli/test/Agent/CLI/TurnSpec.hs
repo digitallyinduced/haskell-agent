@@ -155,8 +155,9 @@ spec = do
                 committed =
                     rebasePreparedTurn
                         (Just AutomaticCompactionBoundary
-                            { automaticCompactionHistory = checkpoint
-                            , automaticCompactionPendingInputs = pending
+                            { automaticCompactionHistory =
+                                checkpoint <> turnInputsToItems pending
+                            , automaticCompactionPendingInputs = []
                             })
                         prepared
                 expected = checkpoint <> turnInputsToItems pending
@@ -170,8 +171,7 @@ spec = do
                         runningState
             cancelled.conversationTranscript `shouldBe` expected
             failed.conversationTranscript `shouldBe` expected
-            inputOnlyTurnItems committed
-                `shouldBe` turnInputsToItems pending
+            inputOnlyTurnItems committed `shouldBe` []
 
         it "persists only the post-checkpoint suffix after success" do
             let checkpoint =
@@ -182,14 +182,15 @@ spec = do
                 committed =
                     rebasePreparedTurn
                         (Just AutomaticCompactionBoundary
-                            { automaticCompactionHistory = checkpoint
-                            , automaticCompactionPendingInputs = pending
+                            { automaticCompactionHistory =
+                                checkpoint <> turnInputsToItems pending
+                            , automaticCompactionPendingInputs = []
                             })
                         prepared
                 completed =
                     checkpoint <> turnInputsToItems pending <> response
             turnNewItems committed.preparedBeforeItems completed
-                `shouldBe` turnInputsToItems pending <> response
+                `shouldBe` response
             turnReplacesTranscript committed.preparedBeforeItems completed
                 `shouldBe` False
 

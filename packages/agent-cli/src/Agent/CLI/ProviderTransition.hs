@@ -22,6 +22,9 @@ import Data.Text (Text)
 data PendingTurn = PendingTurn
     { pendingPromptText :: !Text
     , pendingInputs :: ![TurnInput]
+    -- | The exact continuation input is already durable in the transcript;
+    -- retry without regenerating plan/startup/provider framing.
+    , pendingCheckpointed :: !Bool
     , pendingExitAfter :: !Bool
     , pendingPlanState :: !PlanModeState
     }

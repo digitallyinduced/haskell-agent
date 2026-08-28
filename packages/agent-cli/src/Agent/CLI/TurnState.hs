@@ -105,6 +105,7 @@ rebasePreparedTurn boundary prepared =
             prepared
                 { preparedBeforeItems =
                     committed.automaticCompactionHistory
+                , preparedConsumedStartup = Nothing
                 , preparedTurnInputs =
                     committed.automaticCompactionPendingInputs
                 }

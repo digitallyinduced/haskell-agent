@@ -10,6 +10,7 @@ import Agent.CLI.Compaction
     , CompactOutcome(..)
     , CompactionInstall(CompactionInstalled)
     )
+import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.CLI.Session.Runner.Types
     ( AgentStepCache(..)
     , SessionRunnerContinuation(..)
@@ -812,45 +813,51 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 reportSessionError
                     ("failed to reload generated context: "
                         <> formatException err)
-        -- The durable replace and its in-memory publication form one
-        -- checkpoint transaction. Do not allow cancellation to land after
-        -- PostgreSQL commits but before the boundary becomes visible to turn
-        -- cleanup; that would resurrect the superseded response chain.
-        commitAutomaticCompaction outcome pendingInputs = uninterruptibleMask_ do
-            case persist of
-                PersistenceDisabled -> pure ()
-                PersistenceEnabled slotRef -> do
-                    now <- getCurrentTime
-                    handle <- ensureSession slotRef
-                    let checkpointTurn = SessionTurn
-                            { turnAt = now
-                            , turnUserText = ""
-                            , turnAssistantText = Nothing
-                            , turnError = Nothing
-                            , turnResponseId = Nothing
-                            , turnEffect = TranscriptReplace
-                            , turnItems = outcome.compactHistory
-                            , turnUsage = Nothing
-                            }
-                    (updated, _) <-
-                        appendTurnWithMetaUpdateIndexed
-                            handle
-                            checkpointTurn
-                            \meta -> meta { metaLastResponseId = Nothing }
-                    writeIORef slotRef (PersistenceActive updated)
-            let boundary = AutomaticCompactionBoundary
-                    { automaticCompactionHistory = outcome.compactHistory
-                    , automaticCompactionPendingInputs = pendingInputs
-                    }
-            -- Publish the durable boundary before replacing the live state so
-            -- turn cleanup can recover the checkpoint if a later write or
-            -- continuation throws.
-            writeIORef automaticCompactionRef (Just boundary)
-            _ <-
-                replaceLiveConversation
-                    conversationRef
-                    Nothing
-                    outcome.compactHistory
+        -- The durable replace, pending input, and in-memory publication form
+        -- one checkpoint transaction. Keeping pending input in the replacement
+        -- means a process death before the continuation cannot lose the user's
+        -- request. Do not allow cancellation after PostgreSQL commits but
+        -- before the boundary becomes visible to turn cleanup.
+        commitAutomaticCompaction outcome pendingInputs = do
+            let durableHistory =
+                    outcome.compactHistory <> turnInputsToItems pendingInputs
+            uninterruptibleMask_ do
+                case persist of
+                    PersistenceDisabled -> pure ()
+                    PersistenceEnabled slotRef -> do
+                        now <- getCurrentTime
+                        handle <- ensureSession slotRef
+                        let checkpointTurn = SessionTurn
+                                { turnAt = now
+                                , turnUserText = ""
+                                , turnAssistantText = Nothing
+                                , turnError = Nothing
+                                , turnResponseId = Nothing
+                                , turnEffect = TranscriptReplace
+                                , turnItems = durableHistory
+                                , turnUsage = Nothing
+                                }
+                        (updated, _) <-
+                            appendTurnWithMetaUpdateIndexed
+                                handle
+                                checkpointTurn
+                                \meta -> meta { metaLastResponseId = Nothing }
+                        writeIORef slotRef (PersistenceActive updated)
+                let boundary = AutomaticCompactionBoundary
+                        { automaticCompactionHistory = durableHistory
+                        -- These inputs are already part of the checkpoint.
+                        -- A failure/retry must not append or submit them again.
+                        , automaticCompactionPendingInputs = []
+                        }
+                writeIORef automaticCompactionRef (Just boundary)
+                _ <-
+                    replaceLiveConversation
+                        conversationRef
+                        Nothing
+                        durableHistory
+                pure ()
+            -- Reloading skills/project state may perform arbitrary I/O and is
+            -- not part of the atomic persistence critical section.
             reloadGeneratedContextSafely
             pure CompactionInstalled
         compactRunnerWithContext focus = do
