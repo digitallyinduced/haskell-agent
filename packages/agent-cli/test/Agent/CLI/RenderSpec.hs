@@ -28,6 +28,7 @@ import Control.Concurrent.MVar (newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Exception (finally)
 import Control.Monad (forM_)
 import Data.IORef (newIORef, readIORef)
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import Data.Time.Calendar (fromGregorian)
@@ -431,6 +432,23 @@ spec = do
             rendered `shouldSatisfy` Text.isInfixOf "Retry the message."
 
     describe "renderEvent" do
+        it "prints canonical streamed tool metadata once" do
+            withRenderConfig False False \config handle path -> do
+                let early = functionToolCall "c1" "shell_command" ""
+                    canonical =
+                        functionToolCall
+                            "c1"
+                            "shell_command"
+                            "{\"command\":\"git status\"}"
+                renderEvent config (ToolStarted early)
+                renderEvent config (ToolUpdated canonical)
+                renderEvent config (ToolStarted canonical)
+                hClose handle
+                body <- Text.readFile path
+                Text.count "◆ $ git status" body `shouldBe` 1
+                calls <- stateToolCalls <$> readIORef config.renderState
+                calls `shouldBe` Map.singleton "c1" canonical
+
         it "keeps concurrent tool lines intact" do
             withRenderConfig False False \config handle path -> do
                 let events =
