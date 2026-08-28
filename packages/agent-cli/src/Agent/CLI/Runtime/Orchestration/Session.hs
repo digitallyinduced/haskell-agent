@@ -16,7 +16,8 @@ import Agent.CLI.CodeModeRuntime
       codeModeSessionRuntimeFor,
       loadCodexCatalogModelInfo )
 import Agent.CLI.Command ()
-import Agent.CLI.Compaction ()
+import Agent.CLI.Compaction
+    ( CompactionInstall(CompactionNotInstalled) )
 import Agent.CLI.Config ()
 import Agent.CLI.Connectivity ()
 import Agent.CLI.Database ()
@@ -98,9 +99,9 @@ import Agent.CLI.Session.Runtime.Types
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
                      conversationRef, needsInitialContext, persist,
-                     startupWindowTitle,
+                     startupWindowTitle, automaticCompactionRef,
                      projectRoot, home, cwd, tokenProvider, openAiPool, startupContext,
-                     generatedContextReloadRef, skillsRef, skillInvocationsRef,
+                     automaticCompactionHookRef, skillsRef, skillInvocationsRef,
                      escPaused, interrupt, multiCtx, rootTurnRef, subagentSessions,
                      pendingNotices, storeRoot, agentTypes, legacyTarget, usageRef,
                      accountRef, accountIdRef, selectionRef, accountLabel,
@@ -382,7 +383,10 @@ runAgentSession
                     | otherwise ->
                         resumed >>= \(meta, _) -> meta.metaLastResponseId
         paramsRef <- newIORef params
-        generatedContextReloadRef <- newIORef (pure ())
+        automaticCompactionRef <- newIORef Nothing
+        automaticCompactionHookRef <-
+            newIORef
+                (\_outcome _inputs -> pure CompactionNotInstalled)
         let currentModelContextWindow mapTransportModel = do
                 currentParams <- readIORef paramsRef
                 pure $
@@ -544,6 +548,7 @@ runAgentSession
                                 , startupUnavailable
                                 , paramsRef
                                 , conversationRef
+                                , automaticCompactionRef
                                 , needsInitialContext =
                                     resumeNeedsFreshContext
                                         || (null initialTurns
@@ -556,7 +561,7 @@ runAgentSession
                                 , tokenProvider = sessionTokenProvider
                                 , openAiPool = sessionOpenAiPool
                                 , startupContext
-                                , generatedContextReloadRef
+                                , automaticCompactionHookRef
                                 , skillsRef
                                 , skillInvocationsRef
                                 , escPaused
@@ -614,7 +619,7 @@ runAgentSession
                         cwd
                         dialect
                         fullscreen
-                        generatedContextReloadRef
+                        automaticCompactionHookRef
                         home
                         initialPrevious
                         model

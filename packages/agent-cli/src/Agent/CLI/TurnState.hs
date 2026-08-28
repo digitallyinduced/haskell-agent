@@ -9,6 +9,7 @@ module Agent.CLI.TurnState
     , applyConversationPatch
     , finishConversation
     , inputOnlyTurnItems
+    , rebasePreparedTurn
     , restoreStartupContext
     , turnInputsWithContext
     , turnNewItems
@@ -20,6 +21,9 @@ import Agent.Loop
     , TurnInput(..)
     , addTokenUsage
     , emptyTokenUsage
+    )
+import Agent.CLI.Compaction.Types
+    ( AutomaticCompactionBoundary(..)
     )
 import Agent.Responses.LoopBackend (turnInputsToItems)
 import Agent.Responses.Types (ResponseItem)
@@ -85,6 +89,26 @@ turnInputsWithContext planReminder startup inputs =
 
 inputOnlyTurnItems :: PreparedTurn -> [ResponseItem]
 inputOnlyTurnItems = turnInputsToItems . (.preparedTurnInputs)
+
+-- | Once automatic compaction has committed, the enclosing turn no longer
+-- owns the superseded prefix. Rebase both its history and the exact inputs
+-- accepted by the compacted continuation so success and failure persist only
+-- post-checkpoint state.
+rebasePreparedTurn
+    :: Maybe AutomaticCompactionBoundary
+    -> PreparedTurn
+    -> PreparedTurn
+rebasePreparedTurn boundary prepared =
+    case boundary of
+        Nothing -> prepared
+        Just committed ->
+            prepared
+                { preparedBeforeItems =
+                    committed.automaticCompactionHistory
+                , preparedConsumedStartup = Nothing
+                , preparedTurnInputs =
+                    committed.automaticCompactionPendingInputs
+                }
 
 finishConversation :: PreparedTurn -> ConversationOutcome -> ConversationPatch
 finishConversation prepared = \case

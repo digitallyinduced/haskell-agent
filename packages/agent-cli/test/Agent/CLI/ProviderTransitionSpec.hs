@@ -36,6 +36,7 @@ spec = do
             let pending = PendingTurn
                     { pendingPromptText = "make a plan"
                     , pendingInputs = []
+                    , pendingCheckpointed = False
                     , pendingExitAfter = False
                     , pendingPlanState = PlanActive
                     }

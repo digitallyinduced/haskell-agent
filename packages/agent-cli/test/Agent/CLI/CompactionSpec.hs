@@ -2,6 +2,7 @@ module Agent.CLI.CompactionSpec (spec) where
 
 import Agent.CLI.Compaction
     ( CompactOutcome(..)
+    , CompactionInstall(..)
     , autoCompactOpenAiBackendWith
     , autoCompactOpenAiBackendWithApi
     , autoCompactOpenAiBackendWithSender
@@ -223,10 +224,20 @@ spec = do
                     KnownResponseItem ItemCompaction (TaggedObject "compaction")
                 remoteTrigger =
                     UnknownResponseItem (TaggedObject "COMPACTION_TRIGGER")
+                contextCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "ctx-compact"
+                        , encryptedContent = Just "opaque"
+                        }
+                knownContextCheckpoint =
+                    KnownResponseItem ItemContextCompaction
+                        (TaggedObject "context_compaction")
                 paramsValue = defaultResponseCreateParams
                 history =
                     [ userTextItem "old context"
                     , remoteCheckpoint
+                    , contextCheckpoint
+                    , knownContextCheckpoint
                     , remoteTrigger
                     ]
             params <- newIORef paramsValue
@@ -247,13 +258,18 @@ spec = do
                 [request] ->
                     requestItems request `shouldSatisfy`
                         all \case
+                            CompactionItemValue{} -> False
+                            ContextCompactionItemValue{} -> False
+                            CompactionTriggerItemValue{} -> False
                             KnownResponseItem ItemCompaction _ -> False
+                            KnownResponseItem ItemContextCompaction _ -> False
                             KnownResponseItem ItemCompactionTrigger _ -> False
                             UnknownResponseItem tagged ->
                                 Text.toLower (Text.strip tagged.tag)
                                     `notElem`
                                         [ "compaction"
                                         , "compaction_summary"
+                                        , "context_compaction"
                                         , "compaction_trigger"
                                         ]
                             _ -> True
@@ -832,15 +848,16 @@ spec = do
             readIORef continuationCalls `shouldReturn` 0
             readIORef contextState `shouldReturn` Nothing
 
-        it "reports a throwing post-compaction hook instead of swallowing it" do
+        it "does not continue when the durable compaction hook fails" do
             let history = [userTextItem "old"]
                 threshold = 20
             contextState <- newIORef
                 (Just (reportedOccupancy threshold (length history)))
-            events <- newIORef []
+            continuationCalls <- newIORef (0 :: Int)
             let sender _request =
                     pure (Right remoteCompactionResponse)
-                base = Backend \state _ _ _ ->
+                base = Backend \state _ _ _ -> do
+                    modifyIORef' continuationCalls (+ 1)
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -854,30 +871,31 @@ spec = do
                         sender
                         (const (pure ()))
                         (pure defaultResponseCreateParams)
-                        (throwIO (ErrorCall "reload failed"))
+                        (\_outcome _inputs ->
+                            throwIO (ErrorCall "checkpoint failed"))
                         contextState
                         base
-            result <- backend.submitTurn history Nothing
-                [UserMessage "new"]
-                (\event -> modifyIORef' events (<> [event]))
-            result `shouldSatisfy` either (const False) (const True)
-            events' <- readIORef events
-            events' `shouldSatisfy` any \case
-                WarningRaised message ->
-                    "failed to reload generated context after compaction"
-                        `Text.isInfixOf` message
-                    && "reload failed" `Text.isInfixOf` message
-                _ -> False
+            result <- try $
+                backend.submitTurn history Nothing
+                    [UserMessage "new"] (const (pure ()))
+                :: IO
+                    (Either ErrorCall (Either ApiError BackendResult))
+            result `shouldBe` Left (ErrorCall "checkpoint failed")
+            readIORef continuationCalls `shouldReturn` 0
+            readIORef contextState `shouldReturn`
+                Just (reportedOccupancy threshold (length history))
 
-        it "runs the post-compaction hook only after a successful continuation" do
+        it "commits the compaction hook before its continuation" do
             let history = [userTextItem "old"]
                 threshold = 20
             contextState <- newIORef
                 (Just (reportedOccupancy threshold (length history)))
             hookCalls <- newIORef (0 :: Int)
+            hookWasCommitted <- newIORef False
             let sender _request =
                     pure (Right remoteCompactionResponse)
-                base = Backend \state _ _ _ ->
+                base = Backend \state _ _ _ -> do
+                    readIORef hookWasCommitted `shouldReturn` True
                     pure $ successful state TurnOutput
                         { responseId = "resp-new"
                         , toolCalls = []
@@ -891,7 +909,11 @@ spec = do
                         sender
                         (const (pure ()))
                         (pure defaultResponseCreateParams)
-                        (modifyIORef' hookCalls (+ 1))
+                        (\_outcome inputs -> do
+                            inputs `shouldBe` [UserMessage "new"]
+                            writeIORef hookWasCommitted True
+                            modifyIORef' hookCalls (+ 1)
+                            pure CompactionInstalled)
                         contextState
                         base
             result <- backend.submitTurn history Nothing
@@ -1290,7 +1312,10 @@ spec = do
                         sender
                         (\usage -> modifyIORef' recordedUsage (<> [usage]))
                         (pure defaultResponseCreateParams)
-                        (modifyIORef' hookCalls (+ 1))
+                        (\_outcome inputs -> do
+                            inputs `shouldBe` [UserMessage "new"]
+                            modifyIORef' hookCalls (+ 1)
+                            pure CompactionInstalled)
                         contextState
                         base
             backend.submitTurn history Nothing
@@ -1299,10 +1324,11 @@ spec = do
             map requestItems <$> readIORef requests
                 `shouldReturn` [history <> [compactionTriggerItem]]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
-            readIORef contextState `shouldReturn` oldContextState
-            readIORef hookCalls `shouldReturn` 0
+            readIORef contextState >>= (`shouldSatisfy`
+                (/= oldContextState))
+            readIORef hookCalls `shouldReturn` 1
 
-        it "rolls back compacted state when the continuation is cancelled" do
+        it "rolls back deferred compacted state when the continuation is cancelled" do
             let history = [userTextItem "old"]
                 threshold = 20
                 oldContextState =
@@ -1383,7 +1409,7 @@ spec = do
             readIORef seenPrevious `shouldReturn` [Nothing, Nothing]
             readIORef recordedUsage `shouldReturn` [compactionUsage]
 
-        it "defers compaction while continuing a completed tool call" do
+        it "absorbs completed tool output before mid-turn compaction" do
             let danglingCall = FunctionCallItem FunctionCall
                     { itemId = Nothing
                     , callId = "call-1"
@@ -1408,8 +1434,11 @@ spec = do
             recordedUsage <- newIORef []
             seenPrevious <- newIORef []
             seenInputs <- newIORef []
-            let sender _request = do
+            requests <- newIORef []
+            installedHistory <- newIORef []
+            let sender request = do
                     modifyIORef' compactCalls (+ 1)
+                    modifyIORef' requests (<> [request])
                     pure (Right remoteCompactionResponse)
                 base = Backend \state previous inputs _ -> do
                     modifyIORef' seenPrevious (<> [previous])
@@ -1422,24 +1451,38 @@ spec = do
                         , completion = TurnCompleted
                         }
                 backend =
-                    autoCompactOpenAiBackendWithSender
+                    autoCompactOpenAiBackendWithSenderAndHook
                         (Just codexAutoCompactTokenLimit)
                         sender
                         (\usage -> modifyIORef' recordedUsage (<> [usage]))
                         (pure defaultResponseCreateParams)
+                        (\outcome pending -> do
+                            pending `shouldBe` [UserMessage "steer"]
+                            writeIORef installedHistory
+                                (outcome.compactHistory <> turnInputsToItems pending)
+                            pure CompactionInstalled)
                         contextState
                         base
-                inputs = [CompletedTool toolResult]
+                inputs = [CompletedTool toolResult, UserMessage "steer"]
+                completedInputs = [CompletedTool toolResult]
             result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
-            readIORef compactCalls `shouldReturn` 0
-            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
-            readIORef seenInputs `shouldReturn` [inputs]
-            fmap (.backendState) result `shouldBe` Right oldHistory
+            readIORef compactCalls `shouldReturn` 1
+            map requestItems <$> readIORef requests
+                `shouldReturn`
+                    [ oldHistory
+                        <> turnInputsToItems completedInputs
+                        <> [compactionTriggerItem]
+                    ]
+            readIORef seenPrevious `shouldReturn` [Nothing]
+            readIORef seenInputs `shouldReturn` [[]]
+            compacted <- readIORef installedHistory
+            compacted `shouldSatisfy` hasCompactionCheckpoint
+            fmap (.backendState) result `shouldBe` Right compacted
             readIORef contextState `shouldReturn`
-                Just (reportedOccupancy 25 (length oldHistory))
-            readIORef recordedUsage `shouldReturn` []
+                Just (reportedOccupancy 25 (length compacted))
+            readIORef recordedUsage `shouldReturn` [compactionUsage]
 
         it "truncates oversized tool output before continuing the call" do
             let params = defaultResponseCreateParams
@@ -1643,7 +1686,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef seenInputs `shouldReturn` [inputs]
 
-        it "truncates tool output against last reported occupancy" do
+        it "bounds tool output before absorbing it into compaction" do
             let params = defaultResponseCreateParams
                 contextWindow =
                     codexEffectiveContextWindowFor params.model
@@ -1673,7 +1716,11 @@ spec = do
             contextState <- newIORef
                 (Just (reportedOccupancy occupancy (length oldHistory)))
             seenInputs <- newIORef []
-            let base = Backend \_state _previous submitted _ -> do
+            requests <- newIORef []
+            let sender request = do
+                    modifyIORef' requests (<> [request])
+                    pure (Right remoteCompactionResponse)
+                base = Backend \_state _previous submitted _ -> do
                     modifyIORef' seenInputs (<> [submitted])
                     pure $ successful oldHistory TurnOutput
                         { responseId = "resp-new"
@@ -1685,7 +1732,7 @@ spec = do
                 backend =
                     autoCompactOpenAiBackendWithSender
                         Nothing
-                        (\_ -> error "occupancy-bounded tool output should not compact")
+                        sender
                         (const (pure ()))
                         (pure params)
                         contextState
@@ -1693,19 +1740,22 @@ spec = do
             result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
-            readIORef seenInputs >>= \case
-                [[CompletedTool bounded]] -> do
-                    bounded.callId `shouldBe` toolResult.callId
-                    Text.length bounded.output
+            readIORef seenInputs `shouldReturn` [[]]
+            readIORef requests >>= \case
+                [request] -> do
+                    let encoded =
+                            TextEncoding.decodeUtf8
+                                (LBS.toStrict (Aeson.encode request))
+                    Text.length encoded
                         `shouldSatisfy` (< Text.length originalOutput)
-                    bounded.output
+                    encoded
                         `shouldSatisfy`
-                            Text.isSuffixOf
+                            Text.isInfixOf
                                 "[tool output truncated to fit the model context]"
                 submitted ->
                     expectationFailure
-                        ("expected occupancy-bounded tool result, got "
-                            <> show submitted)
+                        ("expected one compact request, got "
+                            <> show (length submitted))
 
         it "forgets occupancy when the provider omits usage" do
             let history = [userTextItem "old"]
@@ -1733,7 +1783,7 @@ spec = do
             result `shouldSatisfy` either (const False) (const True)
             readIORef contextState `shouldReturn` Nothing
 
-        it "continues a live tool chain without counting retained history against the window" do
+        it "compacts an oversized live tool chain with its output absorbed" do
             let params = defaultResponseCreateParams
                 contextWindow =
                     codexEffectiveContextWindowFor params.model
@@ -1790,11 +1840,11 @@ spec = do
             result <- backend.submitTurn oldHistory (Just "resp-tool") inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
-            readIORef compactCalls `shouldReturn` 0
-            readIORef seenPrevious `shouldReturn` [Just "resp-tool"]
-            readIORef seenInputs `shouldReturn` [inputs]
+            readIORef compactCalls `shouldReturn` 1
+            readIORef seenPrevious `shouldReturn` [Nothing]
+            readIORef seenInputs `shouldReturn` [[]]
 
-        it "trims replay history when a tool continuation cannot fit the full transcript" do
+        it "compacts replay history when a tool continuation cannot fit" do
             let params = defaultResponseCreateParams
                 contextWindow =
                     codexEffectiveContextWindowFor params.model
@@ -1849,22 +1899,13 @@ spec = do
             result <- backend.submitTurn oldHistory Nothing inputs
                 (const (pure ()))
             result `shouldSatisfy` either (const False) (const True)
-            readIORef compactCalls `shouldReturn` 0
+            readIORef compactCalls `shouldReturn` 1
             readIORef seenHistory >>= \case
-                [fitted] -> do
-                    estimateRequestTokensWithItems
-                        params
-                        (fitted <> turnInputsToItems inputs)
-                        `shouldSatisfy` (<= contextWindow)
-                    any
-                        (\case
-                            FunctionCallItem call -> call.callId == "call-replay"
-                            _ -> False)
-                        fitted
-                        `shouldBe` True
+                [fitted] ->
+                    fitted `shouldSatisfy` hasCompactionCheckpoint
                 seen ->
                     expectationFailure
-                        ("expected one trimmed continuation, got "
+                        ("expected one compacted continuation, got "
                             <> show (length seen))
 
         it "preserves typed provider failures from automatic compaction" do

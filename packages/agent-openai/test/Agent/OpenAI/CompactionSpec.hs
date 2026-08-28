@@ -109,6 +109,66 @@ spec = do
                         Text.length (userOnly message) < 4_000
                     _ -> True
 
+        it "handles a large item history with incremental token accounting" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { instructions = Just (Text.replicate 2_000 "i")
+                    , tools = Just []
+                    }
+                history =
+                    [ user ("item-" <> Text.pack (show index))
+                    | index <- [1 :: Int .. 2_050]
+                    ]
+                contextWindow = 12_000
+                trimmed =
+                    trimRemoteCompactionRequestToFit
+                        contextWindow
+                        params
+                        history
+                request = buildRemoteCompactionRequest params trimmed
+            estimateResponseCreateParamsTokens request
+                `shouldSatisfy` (<= contextWindow)
+            length trimmed `shouldSatisfy` (< length history)
+            last trimmed `shouldBe` last history
+
+        it "does not drop typed context checkpoints while trimming" do
+            let params = (defaultResponseCreateParams :: ResponseCreateParams)
+                    { tools = Just []
+                    }
+                typedContextCheckpoint =
+                    ContextCompactionItemValue ContextCompactionItem
+                        { itemId = Just "context"
+                        , encryptedContent =
+                            Just (Text.replicate 1_000 "opaque")
+                        }
+                trimmed =
+                    trimRemoteCompactionRequestToFit
+                        20
+                        params
+                        [ user (Text.replicate 5_000 "old")
+                        , checkpoint "compaction"
+                        , typedContextCheckpoint
+                        ]
+            trimmed `shouldSatisfy` elem (checkpoint "compaction")
+            trimmed `shouldSatisfy` elem typedContextCheckpoint
+
+        it "rewrites the newest boundary after dropping older oversized items" do
+            let history =
+                    [ user (Text.replicate 20_000 "old")
+                    , user (Text.replicate 20_000 "new")
+                    ]
+                trimmed =
+                    trimRemoteCompactionHistoryToFit
+                        200
+                        Nothing
+                        history
+            estimateItemsTokens (trimmed <> [compactionTriggerItem])
+                `shouldSatisfy` (<= 200)
+            trimmed `shouldSatisfy` \items ->
+                case reverse items of
+                    MessageItem message : _ ->
+                        Text.length (userOnly message) < 20_000
+                    _ -> False
+
         it "accounts for large tool schemas when trimming remote requests" do
             let schemaText = Text.replicate 20_000 "s"
                 tool = FunctionToolValue FunctionTool
@@ -1067,9 +1127,20 @@ spec = do
             compactTranscriptAtLastCheckpoint history
                 `shouldBe` [latest, user "recent"]
 
+        it "recognizes context-compaction checkpoints as transcript boundaries" do
+            let history =
+                    [ user "old"
+                    , contextCheckpoint
+                    , assistant "middle"
+                    , user "recent"
+                    ]
+            compactTranscriptAtLastCheckpoint history
+                `shouldBe` [contextCheckpoint, assistant "middle", user "recent"]
+
     describe "hasCompactionCheckpoint" do
         it "recognizes typed and locally generated compaction checkpoints" do
             hasCompactionCheckpoint [checkpoint "remote"] `shouldBe` True
+            hasCompactionCheckpoint [contextCheckpoint] `shouldBe` True
             hasCompactionCheckpoint
                 (buildLocalCompactedHistory 1 [user "old"] "local summary")
                 `shouldBe` True
@@ -1204,4 +1275,8 @@ spec = do
     checkpoint name = CompactionItemValue CompactionItem
         { itemId = Nothing
         , encryptedContent = Nothing
+        }
+    contextCheckpoint = ContextCompactionItemValue ContextCompactionItem
+        { itemId = Just "context"
+        , encryptedContent = Just "opaque"
         }

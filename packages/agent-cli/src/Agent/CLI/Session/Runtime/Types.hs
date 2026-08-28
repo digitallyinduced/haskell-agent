@@ -17,7 +17,11 @@ import Agent.CLI.CodeModeRuntime
     ( CodeModeNestedSlot
     , CodexCatalogSession
     )
-import Agent.CLI.Compaction (CompactOutcome)
+import Agent.CLI.Compaction
+    ( AutomaticCompactionBoundary
+    , CompactOutcome
+    , CompactionInstall
+    )
 import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
@@ -48,6 +52,7 @@ import Agent.GrokBuild.Dialect.Task (GrokSubagentSpecs)
 import Agent.Loop
     ( Backend
     , TokenUsage
+    , TurnInput
     )
 import qualified Agent.MCP as MCP
 import qualified Agent.OpenAI.Auth as OpenAI
@@ -117,6 +122,8 @@ data SessionRequest = SessionRequest
     , startupUnavailable :: !(Maybe (STM ApiError))
     , paramsRef :: !(IORef ResponseCreateParams)
     , conversationRef :: !(IORef LiveConversation)
+    , automaticCompactionRef
+        :: !(IORef (Maybe AutomaticCompactionBoundary))
     , needsInitialContext :: !Bool
     , persist :: !Persistence
     , startupWindowTitle :: !Text
@@ -126,7 +133,9 @@ data SessionRequest = SessionRequest
     , tokenProvider :: !(Maybe TokenProvider)
     , openAiPool :: !(Maybe OpenAI.Pool)
     , startupContext :: !(IORef (Maybe Text))
-    , generatedContextReloadRef :: !(IORef (IO ()))
+    , automaticCompactionHookRef
+        :: !(IORef
+            (CompactOutcome -> [TurnInput] -> IO CompactionInstall))
     , skillsRef :: !(IORef SkillCatalog)
     , skillInvocationsRef :: !(IORef [SkillInvocation])
     , escPaused :: !(IORef Bool)
