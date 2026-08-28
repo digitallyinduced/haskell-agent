@@ -3,7 +3,7 @@ module Agent.MCP.OAuth
     ( OAuthTokens(..), OAuthTokenResponse(..), ProtectedResourceMetadata(..)
     , AuthorizationServerMetadata(..), ClientRegistration(..)
     , discoverProtectedResource, discoverAuthorizationServer, registerClient
-    , refreshAccessToken
+    , refreshAccessToken, oauthCallbackSuccessPage
     ) where
 
 import Control.Exception.Safe (tryAny)
@@ -82,6 +82,10 @@ metadataRoot url = case Text.breakOn "://" url of
                    | otherwise -> scheme <> "://" <> Text.takeWhile (/= '/') (Text.drop 3 rest)
 trimTrailingSlash :: Text -> Text
 trimTrailingSlash t = Text.dropWhileEnd (== '/') t
+
+-- | UTF-8 success page served by the interactive OAuth callback listener.
+oauthCallbackSuccessPage :: LBS.ByteString
+oauthCallbackSuccessPage = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Connected</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b1020;color:#e8ecf5;font:16px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}.card{max-width:430px;margin:24px;padding:36px;border:1px solid #28324a;border-radius:20px;background:#131a2d;box-shadow:0 24px 70px #0008;text-align:center}.check{display:grid;place-items:center;width:56px;height:56px;margin:0 auto 20px;border-radius:50%;background:#173d31;color:#6ee7b7;font-size:30px}h1{margin:0 0 10px;font-size:24px}p{margin:0;color:#aab4ca;line-height:1.55}</style></head><body><main class=\"card\"><div class=\"check\">&#10003;</div><h1>MCP connected</h1><p>Authorization completed successfully. You can close this tab and return to Haskell Agent.</p></main></body></html>"
 
 instance Aeson.FromJSON OAuthTokens where
     parseJSON = Aeson.withObject "OAuthTokens" $ \object ->
