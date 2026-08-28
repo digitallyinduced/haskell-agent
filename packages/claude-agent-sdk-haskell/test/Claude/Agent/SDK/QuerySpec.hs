@@ -173,6 +173,42 @@ spec = describe "query" do
                    \\"retracted_message_uuids\":\"visible-before-error\"}"
             ]
 
+    it "delivers tool results whose content is an array of blocks" do
+        (result, messages) <- runQueryLines
+            [ "{\"type\":\"assistant\",\"uuid\":\"tool-search\",\
+              \\"session_id\":\""
+                <> testSessionId
+                <> "\",\"message\":{\"content\":[{\"type\":\"tool_use\",\
+                   \\"id\":\"search-1\",\"name\":\"ToolSearch\",\
+                   \\"input\":{\"query\":\"select:WebFetch\"}}]}}"
+            , "{\"type\":\"user\",\"uuid\":\"tool-search-result\",\
+              \\"session_id\":\""
+                <> testSessionId
+                <> "\",\"message\":{\"role\":\"user\",\"content\":[{\
+                   \\"type\":\"tool_result\",\"tool_use_id\":\"search-1\",\
+                   \\"content\":[{\"type\":\"tool_reference\",\
+                   \\"tool_name\":\"WebFetch\"},{\"type\":\"text\",\
+                   \\"text\":\"loaded\"}]}]}}"
+            , successResult testSessionId
+            ]
+
+        completed <- expectRight result
+        completed.result `shouldBe` Just "ok"
+        [ renderedText
+            | MessageUser UserMessage
+                { content =
+                    [ ToolResultBlock
+                        { toolUseId = "search-1"
+                        , content = Just ToolResultContent{renderedText}
+                        }
+                    ]
+                } <- messages
+            ]
+            `shouldBe`
+                [ "{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"}\n\
+                  \loaded"
+                ]
+
     it "ignores autonomous results and keeps waiting for the human result" do
         (result, messages) <- runQueryLines
             [ assistantLine "human-before-background" "human text"

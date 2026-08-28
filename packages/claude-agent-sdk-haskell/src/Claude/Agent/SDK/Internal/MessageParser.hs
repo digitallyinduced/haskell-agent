@@ -5,6 +5,7 @@ module Claude.Agent.SDK.Internal.MessageParser
 
 import Agent.Json
     ( RawJson
+    , rawJsonBytes
     , rawJsonDecoder
     , rawJsonFromEncoding
     )
@@ -13,6 +14,7 @@ import Claude.Agent.SDK.Errors (ClaudeSDKError(..))
 import Claude.Agent.SDK.Types
 import qualified Data.Aeson.Encoding as Aeson
 import Data.ByteString (ByteString)
+import qualified Data.ByteString as ByteString
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (catMaybes, fromMaybe)
@@ -286,22 +288,51 @@ contentBlockDecoder = Json.withType \case
                     <$> Json.liftObjectDecoder rawJsonDecoder
     _ -> fail "content block must be a JSON object"
 
+-- | Capture the complete @content@ value once, then render the retained
+-- bytes in a separate decode pass.
+--
+-- Hermes values are forward-only simdjson On-Demand iterators. Capturing the
+-- raw bytes of an array or object consumes it, so a second decoder must not
+-- run on the same value; iterating the consumed array reads past its tape and
+-- fails with an opaque SIMD error. Scalars tolerate a re-read, which is why
+-- string content never exhibited the problem.
 toolResultContentDecoder :: Json.Decoder ToolResultContent
-toolResultContentDecoder =
-    ToolResultContent <$> rawJsonDecoder <*> renderedToolResultDecoder
+toolResultContentDecoder = do
+    raw <- rawJsonDecoder
+    pure ToolResultContent
+        { raw
+        , renderedText = renderToolResultBytes (rawJsonBytes raw)
+        }
 
+renderToolResultBytes :: ByteString -> Text
+renderToolResultBytes bytes =
+    either
+        (const (displayBytes bytes))
+        id
+        (Json.decodeEither renderedToolResultDecoder bytes)
+
+-- | Render tool result content as text. Arrays join their rendered elements,
+-- objects use their @text@ field when present, and anything else falls back
+-- to the raw JSON. Every branch consumes the current value exactly once.
 renderedToolResultDecoder :: Json.Decoder Text
 renderedToolResultDecoder =
-    Json.withRawJsonByteString \raw ->
-        Json.withType \case
-            Json.VString -> Json.text
-            Json.VArray ->
-                Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
-            Json.VObject -> Json.object do
-                textValue <- optionalText "text"
-                pure (fromMaybe (displayBytes raw) textValue)
-            Json.VNull -> pure ""
-            _ -> pure (displayBytes raw)
+    Json.withType \case
+        Json.VString -> Json.text
+        Json.VArray ->
+            Text.intercalate "\n" <$> Json.list renderedToolResultDecoder
+        Json.VObject ->
+            Json.withRawJsonByteString \raw ->
+                pure (renderToolResultObjectBytes raw)
+        Json.VNull -> pure ""
+        _ -> Json.withRawJsonByteString (pure . displayBytes)
+
+renderToolResultObjectBytes :: ByteString -> Text
+renderToolResultObjectBytes raw =
+    case Json.decodeEither (Json.object (optionalText "text")) owned of
+        Right (Just textValue) -> textValue
+        _ -> displayBytes owned
+  where
+    owned = ByteString.copy raw
 
 usageDecoder :: Json.Decoder Usage
 usageDecoder = Json.object do
