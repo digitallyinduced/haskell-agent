@@ -12,6 +12,7 @@ import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
 import Test.Hspec
 
 spec :: Spec
@@ -46,6 +47,46 @@ spec = describe "query" do
                 ]
         messages `shouldSatisfy` any hasCanonicalAssistant
         messages `shouldSatisfy` all (not . hasRetractedContent)
+
+    it "renders structured tool_result content and retains its raw JSON" do
+        (result, messages) <- runQueryLines
+            [ structuredToolResultUser
+            , successResult testSessionId
+            ]
+
+        _ <- expectRight result
+        let toolResults =
+                [ (toolUseId, rawJsonBytes content.raw, content.renderedText)
+                | MessageUser UserMessage{content = blocks} <- messages
+                , ToolResultBlock{toolUseId, content = Just content} <- blocks
+                ]
+        toolResults `shouldBe`
+            [ ( "tool-references"
+              , toolReferenceContent
+              , "Tool reference: WebSearch\nTool reference: WebFetch"
+              )
+            , ( "tool-text-blocks"
+              , "[{\"type\":\"text\",\"text\":\"first\"},\
+                \{\"type\":\"text\",\"text\":\"second\"}]"
+              , "first\nsecond"
+              )
+            , ( "tool-image"
+              , imageContent
+              , "[image image/png]"
+              )
+            , ( "tool-object"
+              , "{\"custom\":1}"
+              , "{\"custom\":1}"
+              )
+            , ( "tool-unknown-block"
+              , "[{\"type\":\"mystery\",\"value\":2}]"
+              , "{\"type\":\"mystery\",\"value\":2}"
+              )
+            , ( "tool-plain"
+              , "\"plain output\""
+              , "plain output"
+              )
+            ]
 
     it "retains unknown message and content variants for forward compatibility" do
         (result, messages) <- runQueryLines
@@ -205,9 +246,7 @@ spec = describe "query" do
                 } <- messages
             ]
             `shouldBe`
-                [ "{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"}\n\
-                  \loaded"
-                ]
+                [ "Tool reference: WebFetch\nloaded" ]
 
     it "ignores autonomous results and keeps waiting for the human result" do
         (result, messages) <- runQueryLines
@@ -727,6 +766,49 @@ assistantWithUnknownBlock =
     \\"session_id\":\"123e4567-e89b-42d3-a456-426614174000\",\
     \\"message\":{\"content\":[{\"type\":\"future_block\",\
     \\"value\":1}]}}"
+
+-- | A ToolSearch-style user record: structured tool_result content plus the
+-- top-level @tool_use_result@ summary Claude Code attaches to it.
+structuredToolResultUser :: Text
+structuredToolResultUser =
+    "{\"type\":\"user\",\"uuid\":\"structured-tool-results\",\
+    \\"session_id\":\""
+        <> testSessionId
+        <> "\",\"parent_tool_use_id\":null,\
+           \\"message\":{\"role\":\"user\",\"content\":["
+        <> Text.intercalate
+            ","
+            [ toolResult "tool-references" (Text.decodeUtf8 toolReferenceContent)
+            , toolResult
+                "tool-text-blocks"
+                "[{\"type\":\"text\",\"text\":\"first\"},\
+                \{\"type\":\"text\",\"text\":\"second\"}]"
+            , toolResult "tool-image" (Text.decodeUtf8 imageContent)
+            , toolResult "tool-object" "{\"custom\":1}"
+            , toolResult
+                "tool-unknown-block"
+                "[{\"type\":\"mystery\",\"value\":2}]"
+            , toolResult "tool-plain" "\"plain output\""
+            ]
+        <> "]},\"tool_use_result\":{\"matches\":[\"WebFetch\",\"WebSearch\"],\
+           \\"query\":\"select:WebFetch,WebSearch\",\"total_deferred_tools\":15}}"
+  where
+    toolResult toolUseId content =
+        "{\"type\":\"tool_result\",\"tool_use_id\":\""
+            <> toolUseId
+            <> "\",\"content\":"
+            <> content
+            <> "}"
+
+toolReferenceContent :: ByteString.ByteString
+toolReferenceContent =
+    "[{\"type\":\"tool_reference\",\"tool_name\":\"WebSearch\"},\
+    \{\"type\":\"tool_reference\",\"tool_name\":\"WebFetch\"}]"
+
+imageContent :: ByteString.ByteString
+imageContent =
+    "[{\"type\":\"image\",\"source\":{\"type\":\"base64\",\
+    \\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]"
 
 successResult :: Text -> Text
 successResult sessionId =
