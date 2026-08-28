@@ -484,7 +484,7 @@ spec = describe "Agent.MCP" do
         withCountingServer modernFakeServer \script log -> do
             elicited <- newIORef []
             let hooks = defaultMcpHostHooks
-                    { mcpHostElicit = Just \request -> do
+                    { mcpHostElicit = pure $ Just \request -> do
                         modifyIORef' elicited (<> [request])
                         pure (McpElicitAccept (Just (raw "{\"name\":\"octocat\"}")))
                     }

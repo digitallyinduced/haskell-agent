@@ -3,6 +3,7 @@ module Agent.CLI.McpManagerSpec (spec) where
 import Agent.CLI.Config
 import Agent.CLI.McpManager
 import Agent.CLI.Picker (PickerKey(..))
+import Agent.MCP (McpProtocolPreference(..))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as Text
@@ -115,4 +116,5 @@ server enabled command = McpServerConfig
     , mcpStartupTimeoutSeconds = 30
     , mcpRequestTimeoutSeconds = 60
     , mcpOAuth = Nothing
+    , mcpProtocol = McpProtocolAuto
     }

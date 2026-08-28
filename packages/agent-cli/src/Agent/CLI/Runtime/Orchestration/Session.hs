@@ -44,6 +44,7 @@ import Agent.CLI.Project ()
 import Agent.CLI.Prompt
     ( codexEnvironmentContext,
       subscriptionSubagentModelGuidance,
+      appendMcpInstructions,
       systemPromptForCatalogModel,
       systemPromptForTools )
 import Agent.CLI.PromptHooks ()
@@ -95,6 +96,7 @@ import Agent.CLI.Session.Runtime.Types
     ( SessionRequest(codexCatalogSession, SessionRequest, catalog, modelInfo,
                      connectionId, options, provider, dialect, policy, allTools,
                      suspendGhci, grokRuntime, mcpRegistrations, mcpWarnings,
+                     mcpInstructions, mcpFleet,
                      ghciEnabledRef, bashEnabledRef, toolEnv, planMode, startup,
                      learnAboutUserRequested, databaseScopes, promptRequest,
                      pendingTurn, unavailableProviders, startupUnavailable, paramsRef,
@@ -201,7 +203,7 @@ import System.OsPath ()
 import qualified Data.ByteString as BS ()
 import qualified Agent.Responses.GenericClient as GenericResponses
     ()
-import qualified Agent.MCP as MCP ()
+import qualified Agent.MCP as MCP
 import qualified Data.Map.Strict as Map ()
 import qualified Agent.OpenAI.Auth as OpenAI ()
 import qualified Agent.OpenRouter as OpenRouter ()
@@ -313,6 +315,7 @@ runAgentSession
                         ("Failed to initialize MCP tools: " <> Text.unpack err)
                 Nothing -> pure ()
         today <- utctDay <$> getCurrentTime
+        mcpInstructions <- MCP.mcpFleetInstructions mcpFleet
         -- Catalog models: per-model instructions template and, when the
         -- catalog selects code_mode_only, the exec/wait tool surface. The
         -- offline lookup never blocks startup on the network.
@@ -344,19 +347,20 @@ runAgentSession
                     , catalogEnvironmentContext =
                         codexEnvironmentContext cwd today Nothing Nothing
                     }
-            instructions = case catalogSession of
-                Just catalog ->
-                    catalog.catalogInstructionsFor
-                        (map (.appToolName) tools)
-                        (Just sessionTmp)
-                Nothing ->
-                    systemPromptForTools
-                        dialect
-                        (map (.appToolName) tools)
-                        cwd
-                        (Just sessionTmp)
-                        today
-                        (isOneShot options)
+            instructions =
+                appendMcpInstructions mcpInstructions case catalogSession of
+                    Just catalog ->
+                        catalog.catalogInstructionsFor
+                            (map (.appToolName) tools)
+                            (Just sessionTmp)
+                    Nothing ->
+                        systemPromptForTools
+                            dialect
+                            (map (.appToolName) tools)
+                            cwd
+                            (Just sessionTmp)
+                            today
+                            (isOneShot options)
             wireSchemas = case codeModeRuntime of
                 Just codeMode ->
                     schemasFromAppToolsCodeMode
@@ -535,6 +539,8 @@ runAgentSession
                                 , mcpRegistrations =
                                     mcpFleet.mcpFleetRegistrations
                                 , mcpWarnings = mcpFleet.mcpFleetWarnings
+                                , mcpInstructions
+                                , mcpFleet = Just mcpFleet
                                 , ghciEnabledRef
                                 , bashEnabledRef
                                 , toolEnv

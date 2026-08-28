@@ -77,6 +77,7 @@ import System.Exit ( die )
 import System.IO ( stderr )
 
 import qualified Agent.MCP as MCP
+import Data.IORef (newIORef, readIORef)
 import qualified Data.Text as Text
 
 -- | GHCi @:cmd@ helper: on 'DevReload', reload modules and resume that exact
@@ -182,13 +183,18 @@ runAgentWithRestarts options =
         (do
             home <- getHomeDirectory
             let root = sessionsRoot home
-            mcpSupervisor <- MCP.newMcpSupervisor
+            elicitationRef <- newIORef Nothing
+            mcpSupervisor <-
+                MCP.newMcpSupervisorWith
+                    MCP.defaultMcpHostHooks
+                        { MCP.mcpHostElicit = readIORef elicitationRef }
             sessionThreads <-
                 newSessionThreadManager root
                     `onException` MCP.closeMcpSupervisor mcpSupervisor
             let processRuntime = AgentProcessRuntime
                     { processMcpSupervisor = mcpSupervisor
                     , processSessionThreads = sessionThreads
+                    , processMcpElicitation = elicitationRef
                     }
             withRestoredCurrentDirectory
                 (runAgentWithRuntime processRuntime foregroundRunMode options)

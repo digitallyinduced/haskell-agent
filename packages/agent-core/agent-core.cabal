@@ -51,6 +51,7 @@ library
                     , Agent.Loop
                     , Agent.MCP
                     , Agent.MCP.Client
+                    , Agent.MCP.Elicitation
                     , Agent.MCP.Fleet
                     , Agent.MCP.Supervisor
                     , Agent.MCP.Types

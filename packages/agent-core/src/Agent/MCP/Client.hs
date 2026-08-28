@@ -525,9 +525,10 @@ selectFromVersions client supported
 -- | The @initialize@ handshake of protocol revisions up to @2025-11-25@.
 legacyInitialize :: McpClient -> Text -> IO ()
 legacyInitialize client requestedVersion = do
+    elicitEnabled <- isJust <$> client.clientHooks.mcpHostElicit
     let parameters =
             "protocolVersion" .= requestedVersion
-                <> "capabilities" .= legacyClientCapabilities client.clientHooks
+                <> "capabilities" .= legacyClientCapabilities elicitEnabled
                 <> "clientInfo" .= clientInfoValue client.clientHooks
     result <-
         requestMcpFull client
@@ -579,10 +580,10 @@ clientInfoValue hooks = object
     ]
 
 -- | Capabilities declared to modern servers on every request.
-clientCapabilitiesValue :: McpHostHooks -> Value
-clientCapabilitiesValue hooks = object $
+clientCapabilitiesValue :: Bool -> Value
+clientCapabilitiesValue elicitEnabled = object $
     [ "elicitation" .= object ["form" .= object [], "url" .= object []]
-    | isJust hooks.mcpHostElicit
+    | elicitEnabled
     ]
     <> [ "extensions" .= object
             [ "io.modelcontextprotocol/tasks" .= object []
@@ -591,10 +592,10 @@ clientCapabilitiesValue hooks = object $
        ]
 
 -- | Capabilities declared to legacy servers during @initialize@.
-legacyClientCapabilities :: McpHostHooks -> Value
-legacyClientCapabilities hooks = object $
+legacyClientCapabilities :: Bool -> Value
+legacyClientCapabilities elicitEnabled = object $
     [ "elicitation" .= object ["form" .= object [], "url" .= object []]
-    | isJust hooks.mcpHostElicit
+    | elicitEnabled
     ]
 
 startupFailure :: McpClient -> Text -> IO a
@@ -924,6 +925,27 @@ normalizeMcpToolResult result =
                     | otherwise = compactRawJson result
             in if isError then Left output else Right output
 
+-- | Flatten a resolved prompt into one user turn. Assistant-authored
+-- messages are labelled so the model can tell the two roles apart.
+renderMcpPromptResult :: McpPromptResult -> Text
+renderMcpPromptResult result =
+    Text.intercalate "\n\n" $
+        filter (not . Text.null) $
+            maybe [] (\description -> ["# " <> description]) result.promptResultDescription
+                <> map renderMessage result.promptResultMessages
+  where
+    renderMessage :: McpPromptMessage -> Text
+    renderMessage message =
+        let blocks = projectRawOr [] blocksDecoder message.promptMessageContent
+            body = Text.intercalate "\n" (mapMaybe renderContentBlock blocks)
+        in if message.promptMessageRole == "assistant"
+            then "[assistant]\n" <> body
+            else body
+    blocksDecoder =
+        Json.getType >>= \case
+            Json.VArray -> Json.list contentBlockDecoder
+            _ -> pure <$> contentBlockDecoder
+
 data McpContentBlock
     = McpTextBlock !Text
     | McpImageBlock !(Maybe Text) !Int
@@ -1188,7 +1210,11 @@ requestMcpFull client request = do
             pending <- newPendingRequest request
             atomically $
                 modifyTVar' client.clientPending (IntMap.insert requestId pending)
-            let meta = metaSeries client era request requestId
+            elicitEnabled <-
+                if request.requestMeta && era == Just McpEraModern
+                    then isJust <$> client.clientHooks.mcpHostElicit
+                    else pure False
+            let meta = metaSeries client era request requestId elicitEnabled
                 message = requestEnvelope (Just requestId) request.requestMethod
                     (request.requestParams <> meta)
             case client.clientConfig.mcpServerUrl of
@@ -1227,8 +1253,8 @@ requestEnvelope requestId method parameters =
 
 -- | Per-request metadata. Modern servers require the protocol version and
 -- client capabilities on every request; every era accepts a progress token.
-metaSeries :: McpClient -> Maybe McpProtocolEra -> McpRequest -> Int -> Series
-metaSeries client era request requestId
+metaSeries :: McpClient -> Maybe McpProtocolEra -> McpRequest -> Int -> Bool -> Series
+metaSeries client era request requestId elicitEnabled
     | not request.requestMeta = mempty
     | otherwise = "_meta" .= object (progress <> modern)
   where
@@ -1238,7 +1264,7 @@ metaSeries client era request requestId
             [ "io.modelcontextprotocol/protocolVersion" .= modernProtocolVersion
             , "io.modelcontextprotocol/clientInfo" .= clientInfoValue client.clientHooks
             , "io.modelcontextprotocol/clientCapabilities"
-                .= clientCapabilitiesValue client.clientHooks
+                .= clientCapabilitiesValue elicitEnabled
             ]
         _ -> []
 
@@ -1387,7 +1413,7 @@ fulfilInputRequests client = go []
 -- cancel; a crashing host hook also cancels rather than failing the call.
 runElicitation :: McpClient -> Maybe RawJson -> IO McpElicitResult
 runElicitation client params =
-    case client.clientHooks.mcpHostElicit of
+    client.clientHooks.mcpHostElicit >>= \case
         Nothing -> pure McpElicitCancel
         Just hook ->
             case params >>= decodeElicitRequest client.clientConfig.mcpServerName of
@@ -1945,16 +1971,25 @@ decodeErrorBody bytes =
 authorizationError :: Int -> [Header] -> McpError
 authorizationError status headers =
     McpHttpStatus status $
-        case lookup "WWW-Authenticate" headers of
-            Just challenge ->
-                (if status == 401
-                    then "MCP server requires OAuth authorization"
-                    else "MCP server denied the request (insufficient scope?)")
-                    <> "; challenge: "
-                    <> TextEncoding.decodeUtf8With lenientDecode challenge
+        case lookup "WWW-Authenticate" headers >>= OAuth.parseWwwAuthenticate of
+            Just challenge
+                | status == 403 || challenge.challengeError == Just "insufficient_scope" ->
+                    "MCP server requires additional authorization"
+                        <> scopeHint challenge
+                        <> "; run `agent mcp login <url> --scope <scope>` to re-authorize"
+                | otherwise ->
+                    "MCP server requires OAuth authorization"
+                        <> scopeHint challenge
+                        <> "; run `agent mcp login <url>`"
             Nothing
-                | status == 401 -> "MCP server requires OAuth authorization; run `/mcp login <url>` or configure MCP OAuth credentials"
+                | status == 401 -> "MCP server requires OAuth authorization; run `agent mcp login <url>` or configure MCP OAuth credentials"
                 | otherwise -> "MCP server denied the request"
+  where
+    scopeHint challenge =
+        (case OAuth.challengeScopes challenge of
+            [] -> ""
+            scopes -> " (scope: " <> Text.unwords scopes <> ")")
+            <> maybe "" (\description -> ": " <> description) challenge.challengeErrorDescription
 
 -- | Consume a Server-Sent Events response stream, routing every event
 -- through 'handleInbound' until the awaited response arrives or the stream

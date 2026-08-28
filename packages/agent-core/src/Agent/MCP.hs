@@ -71,6 +71,7 @@ module Agent.MCP
     , mcpFleetGetPrompt
     , mcpFleetComplete
     , normalizeMcpToolResult
+    , renderMcpPromptResult
     , decodeHttpMcpResponse
     , modernProtocolVersion
     , supportedLegacyVersions
@@ -81,6 +82,7 @@ import Agent.MCP.Client
     , decodeHttpMcpResponse
     , modernProtocolVersion
     , normalizeMcpToolResult
+    , renderMcpPromptResult
     , supportedLegacyVersions
     )
 import Agent.MCP.Fleet

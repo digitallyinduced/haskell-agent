@@ -49,8 +49,10 @@ import Agent.CLI.Lsp
 import Agent.CLI.ManagedTurn ( ManagedTurnRequest(..) )
 import Agent.CLI.McpManager ()
 import Agent.CLI.McpOAuthStore (mcpOAuthStorePath)
+import Agent.CLI.McpElicitation (cliMcpElicitation)
 import Agent.CLI.McpStatus
-    ( formatMcpModelNoticeFor,
+    ( formatMcpInstructionsNotice,
+      formatMcpModelNoticeFor,
       formatMcpProgress,
       summarizeMcpStatuses )
 import Agent.CLI.ModelConfig ( builtinConnectionId )
@@ -99,7 +101,7 @@ import Agent.CLI.Runtime.Orchestration.Restart ()
 import Agent.CLI.Runtime.Orchestration.Session ( runAgentSession )
 import Agent.CLI.Runtime.Orchestration.Startup
     ( reportStartupWarning )
-import Agent.CLI.Runtime.Orchestration.Types ()
+import Agent.CLI.Runtime.Orchestration.Types (AgentProcessRuntime(..))
 import Agent.CLI.Runtime.Persistence ( preparePersistence )
 import Agent.CLI.Runtime.Recap ()
 import Agent.CLI.Runtime.Repl ()
@@ -242,14 +244,16 @@ import qualified Agent.MCP as MCP
     ( acquireMcpFleetProgressive,
       acquireMcpFleetWithProgress,
       mcpFleetGrokMetaTools,
+      mcpFleetInstructions,
       mcpFleetMetaTools,
+      mcpFleetResourceTools,
       mcpFleetTools,
       releaseMcpFleetLease,
       McpFleet(mcpFleetRegistrations, mcpFleetWarnings),
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
                       mcpServerName, mcpServerUrl, mcpServerCommand, mcpServerArgs, mcpServerCwd,
-                      mcpServerEnv, mcpServerStartupTimeoutSeconds) )
+                      mcpServerEnv, mcpServerStartupTimeoutSeconds, mcpServerProtocol) )
 import qualified Data.Map.Strict as Map
     ( toAscList, empty, lookup, notMember )
 import qualified Agent.OpenAI.Auth as OpenAI ()
@@ -608,6 +612,7 @@ runAgentTools
                     config.mcpStartupTimeoutSeconds
                 , MCP.mcpServerRequestTimeoutSeconds =
                     config.mcpRequestTimeoutSeconds
+                , MCP.mcpServerProtocol = config.mcpProtocol
                 }
             | (label, config) <-
                 Map.toAscList harnessConfig.configMcpServers
@@ -618,6 +623,11 @@ runAgentTools
                 harnessConfig.configMcpInitStrategy
                 (isOneShot options)
     mcpStatusPhaseRef <- newIORef (Nothing :: Maybe Bool)
+    mcpFleetRef <- newIORef (Nothing :: Maybe MCP.McpFleet)
+    writeIORef processRuntime.processMcpElicitation
+        (if isOneShot options || not isTty
+            then Nothing
+            else Just (cliMcpElicitation escPaused uiRuntimeRef))
     let reportProgressiveMcp statuses = do
             finished <- readIORef startup.startupFinished
             unless finished do
@@ -634,9 +644,14 @@ runAgentTools
             settled <-
                 atomicModifyIORef' mcpStatusPhaseRef \previous ->
                     (Just isConnecting, previous == Just True && not isConnecting)
-            when (settled && not (null statuses)) $
+            when (settled && not (null statuses)) do
+                instructions <-
+                    readIORef mcpFleetRef
+                        >>= maybe (pure []) MCP.mcpFleetInstructions
                 enqueuePendingInput pendingNotices
-                    (UserMessage (formatMcpModelNoticeFor dialectId statuses))
+                    (UserMessage
+                        (formatMcpModelNoticeFor dialectId statuses
+                            <> formatMcpInstructionsNotice instructions))
     mcpLease <-
         try @_ @SomeException
             (if progressiveMcp
@@ -663,6 +678,7 @@ runAgentTools
                     ("Failed to initialize MCP tools: " <> show exception)
             Right lease -> pure lease
     let mcpFleet = mcpLease.mcpLeaseFleet
+    writeIORef mcpFleetRef (Just mcpFleet)
     mapM_ (reportStartupWarning startup) mcpFleet.mcpFleetWarnings
     setStartupNotice startup.startupFullscreen "Loading built-in tools…"
     coding <-
@@ -792,11 +808,13 @@ runAgentTools
         mcpTools =
             if null mcpServerConfigs
                 then []
-                else if dialectId == GrokBuildDialect
-                    then MCP.mcpFleetGrokMetaTools mcpFleet
-                    else if progressiveMcp
-                        then MCP.mcpFleetMetaTools mcpFleet
-                        else MCP.mcpFleetTools mcpFleet
+                else
+                    (if dialectId == GrokBuildDialect
+                        then MCP.mcpFleetGrokMetaTools mcpFleet
+                        else if progressiveMcp
+                            then MCP.mcpFleetMetaTools mcpFleet
+                            else MCP.mcpFleetTools mcpFleet)
+                        <> MCP.mcpFleetResourceTools mcpFleet
         databaseToolsEnv =
             databaseToolsEnvForStore
                 startup.startupDatabaseStore

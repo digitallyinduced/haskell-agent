@@ -17,6 +17,7 @@ module Agent.CLI.Config
 
 import Agent.FileRetry (retryOnFileBusy, writeLazyFileAtomically)
 import Agent.CLI.Json (decodeLazy)
+import Agent.MCP (McpProtocolPreference(..))
 import Agent.MCP.OAuth (validateClientIdMetadataUrl)
 import Agent.Json (RawJson, rawJsonDecoder)
 import Agent.Json.Decode (defaultKey, optionalKey)
@@ -71,6 +72,9 @@ data McpServerConfig = McpServerConfig
     , mcpStartupTimeoutSeconds :: !Int
     , mcpRequestTimeoutSeconds :: !Int
     , mcpOAuth :: !(Maybe McpOAuthConfig)
+    , mcpProtocol :: !McpProtocolPreference
+    -- ^ @auto@ probes for the 2026-07-28 protocol and falls back to the
+    -- legacy @initialize@ handshake; @modern@ and @legacy@ skip the probe.
     }
     deriving (Eq)
 
@@ -212,6 +216,8 @@ instance Show McpServerConfig where
             <> show server.mcpRequestTimeoutSeconds
             <> ", mcpOAuth = "
             <> show server.mcpOAuth
+            <> ", mcpProtocol = "
+            <> show server.mcpProtocol
             <> " }"
 
 instance Aeson.ToJSON McpServerConfig where
@@ -228,6 +234,7 @@ instance Aeson.ToJSON McpServerConfig where
             , "requestTimeoutSeconds"
                 Aeson..= server.mcpRequestTimeoutSeconds
             , "oauth" Aeson..= server.mcpOAuth
+            , "protocol" Aeson..= protocolPreferenceText server.mcpProtocol
             ]
 
 instance Aeson.ToJSON WebFetchConfig where
@@ -320,6 +327,26 @@ mcpServerConfigDecoder =
             <*> defaultKey defaultMcpRequestTimeoutSeconds
                 "requestTimeoutSeconds" Hermes.int
             <*> optionalKey "oauth" mcpOAuthConfigDecoder
+            <*> defaultKey McpProtocolAuto "protocol" protocolPreferenceDecoder
+
+protocolPreferenceDecoder :: Hermes.Decoder McpProtocolPreference
+protocolPreferenceDecoder =
+    Hermes.text >>= \case
+        "auto" -> pure McpProtocolAuto
+        "modern" -> pure McpProtocolModern
+        "legacy" -> pure McpProtocolLegacy
+        other ->
+            fail
+                (Text.unpack
+                    ("unknown MCP protocol preference: "
+                        <> other
+                        <> " (expected auto, modern, or legacy)"))
+
+protocolPreferenceText :: McpProtocolPreference -> Text
+protocolPreferenceText = \case
+    McpProtocolAuto -> "auto"
+    McpProtocolModern -> "modern"
+    McpProtocolLegacy -> "legacy"
 
 mcpOAuthConfigDecoder :: Hermes.Decoder McpOAuthConfig
 mcpOAuthConfigDecoder =

@@ -75,17 +75,18 @@ instance Show McpServerConfig where
 
 -- | Host-provided integration points shared by every server in a fleet.
 data McpHostHooks = McpHostHooks
-    { mcpHostElicit :: !(Maybe (McpElicitRequest -> IO McpElicitResult))
-    -- ^ Interactive elicitation. 'Nothing' means the host cannot ask the user
-    -- for input, so the @elicitation@ capability is not declared and any
-    -- request for input is cancelled.
+    { mcpHostElicit :: !(IO (Maybe (McpElicitRequest -> IO McpElicitResult)))
+    -- ^ Interactive elicitation, resolved when a request is built so hosts
+    -- can install or remove their UI over the life of a process. 'Nothing'
+    -- means the host cannot ask the user for input, so the @elicitation@
+    -- capability is not declared and any request for input is cancelled.
     , mcpHostClientName :: !Text
     , mcpHostClientVersion :: !Text
     }
 
 defaultMcpHostHooks :: McpHostHooks
 defaultMcpHostHooks = McpHostHooks
-    { mcpHostElicit = Nothing
+    { mcpHostElicit = pure Nothing
     , mcpHostClientName = "haskell-agent"
     , mcpHostClientVersion = "0.1.0"
     }

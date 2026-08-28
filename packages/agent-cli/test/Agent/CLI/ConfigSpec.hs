@@ -2,6 +2,7 @@ module Agent.CLI.ConfigSpec (spec) where
 
 import Agent.CLI.Config
 import Control.Exception.Safe (bracket)
+import Agent.MCP (McpProtocolPreference(..))
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Map.Strict as Map
 import Data.Maybe (isJust)
@@ -67,6 +68,7 @@ spec = describe "Agent.CLI.Config" do
                             , mcpStartupTimeoutSeconds = 12
                             , mcpRequestTimeoutSeconds = 34
                             , mcpOAuth = Nothing
+                            , mcpProtocol = McpProtocolAuto
                             }
                     Map.lookup "zeta" config.configMcpServers
                         `shouldBe` Just McpServerConfig
@@ -79,6 +81,7 @@ spec = describe "Agent.CLI.Config" do
                             , mcpStartupTimeoutSeconds = 30
                             , mcpRequestTimeoutSeconds = 60
                             , mcpOAuth = Nothing
+                            , mcpProtocol = McpProtocolAuto
                             }
 
     it "loads remote MCP servers by URL" $
@@ -267,6 +270,7 @@ spec = describe "Agent.CLI.Config" do
                     , mcpStartupTimeoutSeconds = 90
                     , mcpRequestTimeoutSeconds = 45
                     , mcpOAuth = Nothing
+                    , mcpProtocol = McpProtocolAuto
                     }
                 config = defaultHarnessConfig
                     { configMcpServers = Map.singleton "seo-mcp" server
@@ -291,6 +295,7 @@ spec = describe "Agent.CLI.Config" do
                             , mcpStartupTimeoutSeconds = 30
                             , mcpRequestTimeoutSeconds = 60
                             , mcpOAuth = Nothing
+                            , mcpProtocol = McpProtocolAuto
                             }
                     }
             saveHarnessConfig home broken
