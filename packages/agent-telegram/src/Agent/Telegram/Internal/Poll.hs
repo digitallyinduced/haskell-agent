@@ -56,6 +56,7 @@ import Agent.Telegram.Classify
     , nextPendingAction
     , reactionMessageText
     , recordSeenTelegramUsers
+    , recordLatestInboundMessage
     , resolveTelegramUser
     , storeUpdateAction
     , telegramCommand
@@ -204,7 +205,8 @@ pollForever runtime = do
 processUpdate :: TelegramRuntime -> TelegramUpdate -> IO ()
 processUpdate runtime update = do
     handled <- tryAny do
-        modifyState runtime (recordSeenTelegramUsers update)
+        modifyState runtime
+            (recordLatestInboundMessage update . recordSeenTelegramUsers update)
         action <- classifyUpdate runtime update
         modifyState runtime (storeUpdateAction update.updateId action)
     case handled of
