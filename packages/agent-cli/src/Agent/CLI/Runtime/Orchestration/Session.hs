@@ -360,7 +360,9 @@ runAgentSession
                 Just codeMode ->
                     schemasFromAppToolsCodeMode
                         dialect
-                        codeMode.codeModeWireTools
+                        ( codeMode.codeModeWireTools
+                            <> codeMode.codeModeDirectTools
+                        )
                 Nothing -> schemasFromAppTools dialect tools
             environmentContextBlock =
                 (.catalogEnvironmentContext) <$> catalogSession
