@@ -188,6 +188,8 @@ dropOldestProtocolUnit = go []
         Just (prefix <> dropMatchingFunctionOutput call.callId rest)
     go prefix (CustomToolCallItem call : rest) =
         Just (prefix <> dropMatchingCustomToolOutput call.callId rest)
+    go prefix (ComputerCallItem call : rest) =
+        Just (prefix <> dropMatchingComputerCallOutput call.computerCallId rest)
     go prefix (KnownResponseItem itemType tagged : rest)
         | Just outputType <- pairedOutputType itemType =
             Just $
@@ -216,6 +218,14 @@ dropMatchingFunctionOutput callId = go
         | identifiersMatch [callId] [output.callId] = rest
     go (item : rest) = item : go rest
 
+dropMatchingComputerCallOutput :: Text -> [ResponseItem] -> [ResponseItem]
+dropMatchingComputerCallOutput callId = go
+  where
+    go [] = []
+    go (ComputerCallOutputItem output : rest)
+        | identifiersMatch [callId] [output.computerOutputCallId] = rest
+    go (item : rest) = item : go rest
+
 dropMatchingCustomToolOutput :: Text -> [ResponseItem] -> [ResponseItem]
 dropMatchingCustomToolOutput callId = go
   where
@@ -234,6 +244,12 @@ pairedOutputType = \case
     ItemMcpApprovalRequest -> Just ItemMcpApprovalResponse
     ItemProgram -> Just ItemProgramOutput
     _ -> Nothing
+
+compactedScreenshotDataUrl :: Text
+compactedScreenshotDataUrl =
+    "data:image/png;base64,"
+        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
+        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
 
 pairedUnknownOutputTag :: Text -> Maybe Text
 pairedUnknownOutputTag itemType
@@ -328,6 +344,15 @@ rewriteOversizedToolOutput = \case
             , provider = output.provider
             , output = truncatedOutputJson
             , status = output.status
+            }
+    ComputerCallOutputItem output ->
+        Just $ ComputerCallOutputItem ComputerCallOutput
+            { computerOutputItemId = output.computerOutputItemId
+            , computerOutputCallId = output.computerOutputCallId
+            , screenshotDataUrl = compactedScreenshotDataUrl
+            , acknowledgedChecks = output.acknowledgedChecks
+            , computerOutputStatus = output.computerOutputStatus
+            , computerOutputExtra = output.computerOutputExtra
             }
     CustomToolCallOutputItem output ->
         Just $ CustomToolCallOutputItem CustomToolCallOutput

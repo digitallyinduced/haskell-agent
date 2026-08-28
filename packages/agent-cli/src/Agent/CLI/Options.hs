@@ -130,6 +130,8 @@ data CliOptions = CliOptions
       -- ^ Expose the persistent run_ghci tool (default: False).
     , optBash :: !Bool
       -- ^ Expose the provider's explicit shell execution tool (default: True).
+    , optComputerUse :: !Bool
+      -- ^ Allow the model to control the local macOS desktop (default: False).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -157,6 +159,7 @@ defaultCliOptions = CliOptions
     , optSkills = True
     , optGhci = False
     , optBash = True
+    , optComputerUse = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -382,6 +385,10 @@ optionUpdateParser = asum
         (\value options -> options { optBash = value })
     , boolFlagUpdate "no-bash" False "Disable shell execution tools"
         (\value options -> options { optBash = value })
+    , boolFlagUpdate "computer-use" True "Enable local macOS computer use"
+        (\value options -> options { optComputerUse = value })
+    , boolFlagUpdate "no-computer-use" False "Disable local computer use"
+        (\value options -> options { optComputerUse = value })
     , screenFlagUpdate "fullscreen" ScreenFullscreen
         "Use the retained full-screen TUI"
     , screenFlagUpdate "minimal" ScreenMinimal
@@ -544,6 +551,8 @@ usage = unlines
     , "      --no-ghci           Disable the persistent GHCi tool (default)"
     , "      --bash              Enable explicit shell execution tools (default)"
     , "      --no-bash           Disable explicit shell execution tools"
+    , "      --computer-use      Enable local macOS desktop control (opt-in)"
+    , "      --no-computer-use   Disable local desktop control (default)"
     , "      --fullscreen        Use the retained full-screen TUI"
     , "      --minimal           Use terminal-native append-only rendering"
     , "      --motion MODE       Animation policy: full, reduced, or off"

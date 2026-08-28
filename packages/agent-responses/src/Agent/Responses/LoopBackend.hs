@@ -53,7 +53,10 @@ import Agent.ToolDispatch
     )
 import Control.Applicative ((<|>))
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.KeyMap as KeyMap
+import qualified Data.Hermes as Hermes
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy as LBS
 import qualified "base64-bytestring" Data.ByteString.Base64 as Base64
 import Data.IORef (atomicModifyIORef', newIORef)
 import Data.Map.Strict (Map)
@@ -381,9 +384,25 @@ toolResultToItem result = case result.callKind of
         , name = Nothing
         , output = rawJsonFromEncoding (Aeson.toEncoding result.output)
         , status = Nothing
-
         }
+    ComputerCallKind -> case Hermes.decodeEither computerCallOutputDecoder
+            (Text.encodeUtf8 result.output) of
+        Right output -> ComputerCallOutputItem output
+            { computerOutputCallId = result.callId }
+        Left _ -> ComputerCallOutputItem ComputerCallOutput
+            { computerOutputItemId = Nothing
+            , computerOutputCallId = result.callId
+            , screenshotDataUrl = transparentPixelDataUrl
+            , acknowledgedChecks = []
+            , computerOutputStatus = Nothing
+            , computerOutputExtra = KeyMap.empty
+            }
 
+transparentPixelDataUrl :: Text
+transparentPixelDataUrl =
+    "data:image/png;base64,"
+        <> "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ"
+        <> "IHWP4z8DwHwAFgAI/ScL7WQAAAABJRU5ErkJggg=="
 responseToTurnOutput :: Response -> TurnOutput
 responseToTurnOutput response = TurnOutput
     { responseId = response.responseId
@@ -494,7 +513,20 @@ responseItemToToolCall = \case
         , callKind = CustomCallKind
         , argumentsEncrypted = False
         }
+    ComputerCallItem call -> Just ToolCall
+        { callId = call.computerCallId
+        , name = "computer"
+        , arguments = Text.decodeUtf8 (LBS.toStrict (Aeson.encode call))
+        , callKind = ComputerCallKind
+        , argumentsEncrypted = any isSensitiveComputerAction call.computerActions
+        }
     _ -> Nothing
+
+isSensitiveComputerAction :: ComputerAction -> Bool
+isSensitiveComputerAction = \case
+    TypeAction{} -> True
+    KeypressAction{} -> True
+    _ -> False
 
 encryptedCollaborationArguments :: Text -> Maybe [Text] -> Bool
 encryptedCollaborationArguments toolName encryptedFunctionArgs =

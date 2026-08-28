@@ -258,6 +258,15 @@ spec = do
             parseArgs ["--no-bash", "--bash"]
                 `shouldBe` Right (RunAgent defaultCliOptions { optBash = True })
 
+        it "keeps computer use opt-in" do
+            defaultCliOptions.optComputerUse `shouldBe` False
+            parseArgs ["--computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = True })
+            parseArgs ["--computer-use", "--no-computer-use"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optComputerUse = False })
+
         it "keeps ghci disabled by default and enables it explicitly" do
             parseArgs []
                 `shouldBe` Right (RunAgent defaultCliOptions)

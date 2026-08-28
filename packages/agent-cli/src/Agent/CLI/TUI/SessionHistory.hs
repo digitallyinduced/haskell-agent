@@ -26,8 +26,10 @@ import Agent.Loop
     ( LoopEvent(..)
     )
 import Agent.OpenAI.Compaction (isCompactSessionTurn)
+import Agent.Responses.LoopBackend (responseItemToToolCall)
 import Agent.Responses.Types
-    ( CustomToolCall(..)
+    ( ComputerCallOutput(..)
+    , CustomToolCall(..)
     , CustomToolCallOutput(..)
     , FunctionCall(..)
     , FunctionCallOutput(..)
@@ -183,6 +185,19 @@ projectItem state = \case
                         call.name
                         call.arguments)))
             state
+    ComputerCallOutputItem output ->
+        reduceUi
+            (UiLoop
+                (ToolFinished
+                    (ToolCallResult
+                        output.computerOutputCallId
+                        "Screenshot captured"
+                        ComputerCallKind)))
+            state
+    ComputerCallItem call ->
+        maybe state
+            (\toolCall -> reduceUi (UiLoop (ToolStarted toolCall)) state)
+            (responseItemToToolCall (ComputerCallItem call))
     CustomToolCallItem call ->
         reduceUi
             (UiLoop

@@ -42,6 +42,15 @@ import Test.Hspec
 
 spec :: Spec
 spec = describe "schemasFromAppTools" do
+    it "advertises the reserved computer tool as a built-in" do
+        let computer = jsonAppTool "computer" "Control this computer" []
+                AlwaysPrompt
+                (noArgsTool "computer" (pure (Right "ok")))
+        schemasFromAppTools codexDialect [computer]
+            `shouldBe`
+                [ webSearchTool
+                , knownResponseTool ToolComputer
+                ]
     it "keeps native shell tools both direct and nested for code-only models" do
         let tools = map testTool
                 ["read_file", "shell_command", "write_stdin", "apply_patch"]
@@ -50,7 +59,6 @@ spec = describe "schemasFromAppTools" do
             `shouldBe` ["shell_command", "write_stdin"]
         map (.appToolName) projection.nestedCodeModeTools
             `shouldBe` ["read_file", "shell_command", "write_stdin", "apply_patch"]
-
     it "enables built-in web_search ahead of app tools" do
         case schemasFromAppTools codexDialect [jsonTool] of
             KnownResponseTool ToolWebSearch : _ -> pure ()

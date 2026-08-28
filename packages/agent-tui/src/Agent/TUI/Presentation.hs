@@ -111,6 +111,12 @@ toolCallInput call = case canonicalToolName call.name of
     "exec" -> call.arguments
     _ -> ""
 
+-- Computer-call arguments can contain secrets in @type@ and @keypress@
+-- actions. Keep approval/activity chrome structural: report action kinds and
+-- text lengths, never the text or complete JSON payload.
+computerActionDetail :: Text -> Text
+computerActionDetail _ = "computer action"
+
 data SearchReplaceAction
     = SearchReplaceCreate
     | SearchReplaceDelete
@@ -174,6 +180,7 @@ formatSearchReplaceDiffRelative workspace arguments =
 
 formatToolOutput :: ToolCall -> Text -> Text
 formatToolOutput call output = case canonicalToolName call.name of
+    "computer" -> "Screenshot captured"
     "exec" -> completedExecOutput output
     name | name `elem` ["spawn_agent", "spawn_agent_in_worktree"] ->
         maybe output ("Agent: " <>) (nonEmptyJsonText "task_name" output)
@@ -439,6 +446,7 @@ firstPlanStepFromArguments arguments =
 
 toolVerb :: Text -> Text
 toolVerb name = case canonicalToolName name of
+    "computer" -> "Control computer"
     "read_file" -> "Read"
     "list_dir" -> "Listed"
     "grep" -> "Searched"
@@ -479,6 +487,7 @@ toolVerb name = case canonicalToolName name of
 
 toolDetail :: ToolCall -> Text
 toolDetail call = case canonicalToolName call.name of
+    "computer" -> computerActionDetail call.arguments
     "read_file" -> jsonTextFieldDefault "target_file" call.arguments
     "list_dir" -> jsonTextFieldDefault "target_directory" call.arguments
     "search_replace" -> jsonTextFieldDefault "file_path" call.arguments

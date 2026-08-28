@@ -475,6 +475,10 @@ renderResponseItem = \case
         labelled
             ("Tool result " <> output.callId)
             (renderRawJson output.output)
+    ComputerCallItem item ->
+        labelled "Assistant computer call" (renderJsonValue (Aeson.toJSON item))
+    ComputerCallOutputItem item ->
+        labelled "Computer result" (renderJsonValue (Aeson.toJSON item))
     -- Reasoning is deliberately excluded from imported history. In
     -- particular, never copy private chain-of-thought into a Claude prompt.
     ReasoningItemValue{} ->

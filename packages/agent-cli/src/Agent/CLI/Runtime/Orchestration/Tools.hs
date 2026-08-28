@@ -21,6 +21,7 @@ import Agent.CLI.Auth
 import Agent.CLI.Clipboard ()
 import Agent.CLI.CodeModeRuntime ()
 import Agent.CLI.Command ()
+import qualified Agent.CLI.ComputerUse as ComputerUse
 import Agent.CLI.Compaction ()
 import Agent.CLI.Config
     ( HarnessConfig(..),
@@ -67,7 +68,7 @@ import Agent.CLI.Options
       normalizeReasoningEffortForDialect,
       resolveApprovalPolicy,
       CliOptions(optYolo, optModel, optEffort, optMaxConcurrentAgents,
-                 optGhci, optBash, optNoYolo) )
+                 optGhci, optBash, optComputerUse, optNoYolo) )
 import Agent.CLI.PendingInputs
     ( enqueuePendingInput, newPendingInputs )
 import Agent.CLI.Plan
@@ -811,6 +812,8 @@ runAgentTools
         databaseAppTools = databaseTools databaseToolsEnv
         learnedSkillAppTools =
             learnedSkillTools skillInvocationsRef learnedSkillToolsEnv
+        computerTools =
+            [ComputerUse.computerUseTool | options.optComputerUse, provider == OpenAIProvider]
         allTools =
             coding.codingAppTools
                 ++ extraTools
@@ -819,6 +822,8 @@ runAgentTools
                 ++ gatewayTools
                 ++ databaseAppTools
                 ++ learnedSkillAppTools
+                ++ computerTools
+                ++ computerTools
         tools =
             filterGhciTools options.optGhci
                 (filterBashTools options.optBash coding.codingAppTools)
