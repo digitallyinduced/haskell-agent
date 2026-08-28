@@ -216,7 +216,7 @@ spec = describe "Agent.CLI.AgentSessions" do
             launchSessionThread manager "later" (pure (Right ()))
                 `shouldReturn` Left "agent session manager is closed"
 
-    it "evicts terminal in-process status before checking external locks" $
+    it "retains terminal in-process status across reads and lock masking" $
         withTempSessionThreadManager ["terminal"] \root manager -> do
             launched <- launchSessionThread
                 manager
@@ -224,6 +224,8 @@ spec = describe "Agent.CLI.AgentSessions" do
                 (pure (Right ()))
             launched `shouldBe` Right "started session terminal"
             waitForThreadStatus manager "terminal" "completed"
+            -- A still-held external session lock masks the outcome as
+            -- "running" for this poll, but the terminal record is retained.
             acquired <-
                 acquireSessionLock
                     (root </> unsafeEncodeUtf "terminal")
@@ -232,8 +234,12 @@ spec = describe "Agent.CLI.AgentSessions" do
             sessionThreadStatus manager "terminal"
                 `shouldReturn` "running"
             releaseSessionLock lock
+            -- Once the lock clears the real status is observable again, and
+            -- repeated reads keep reporting it instead of decaying to "idle".
             sessionThreadStatus manager "terminal"
-                `shouldReturn` "idle"
+                `shouldReturn` "completed"
+            sessionThreadStatus manager "terminal"
+                `shouldReturn` "completed"
 
     it "serializes background turns with a cross-process session lock" $
         withTempStoreDir "agent-session-runtime-" \pool root -> do
