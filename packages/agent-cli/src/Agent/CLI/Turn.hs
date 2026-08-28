@@ -506,7 +506,7 @@ runOneTurnBusy includeTurnContext env@SessionEnv
             let assistantText =
                     fmap stripBracketedTimestamps loopResult.finalText
             commitConversationPatch
-                (finishConversation prepared
+                (finishConversation committedPrepared
                     (ConversationCompleted
                         loopResult.finalResponseId
                         loopResult.tokenUsage
