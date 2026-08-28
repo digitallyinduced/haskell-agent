@@ -15,6 +15,7 @@ let
     mkIf
     mkOption
     nameValuePair
+    optionalAttrs
     types
     ;
 
@@ -26,7 +27,7 @@ let
   isAbsoluteEnvironmentFile =
     path: hasPrefix "/" path || (hasPrefix "-/" path && builtins.stringLength path > 2);
 
-  mcpServerType = types.submodule {
+  mcpServerType = types.addCheck (types.submodule {
     options = {
       enabled = mkOption {
         type = types.bool;
@@ -34,8 +35,14 @@ let
         description = "Whether this MCP server is enabled.";
       };
       command = mkOption {
-        type = types.str;
-        description = "Executable used to start the stdio MCP server.";
+        type = types.nullOr types.str;
+        default = null;
+        description = "Executable used to start a stdio MCP server.";
+      };
+      url = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = "URL of a remote Streamable HTTP MCP server.";
       };
       args = mkOption {
         type = types.listOf types.str;
@@ -66,7 +73,7 @@ let
         description = "Maximum time allowed for one MCP request.";
       };
     };
-  };
+  }) (server: (server.command != null) != (server.url != null));
 
   instanceType = types.submodule (
     { name, config, ... }:
@@ -271,17 +278,20 @@ let
     pkgs.writeText "haskell-agent-telegram-${name}-mcp.json" (
       builtins.toJSON {
         mcpInitStrategy = instance.mcpInitStrategy;
-        mcpServers = lib.mapAttrs (_: server: {
-          inherit (server)
-            args
-            command
-            cwd
-            enabled
-            requestTimeoutSeconds
-            startupTimeoutSeconds
-            ;
-          env = server.environment;
-        }) instance.mcpServers;
+        mcpServers = lib.mapAttrs (_: server:
+          {
+            inherit (server)
+              args
+              cwd
+              enabled
+              requestTimeoutSeconds
+              startupTimeoutSeconds
+              ;
+            env = server.environment;
+          }
+          // optionalAttrs (server.command != null) { inherit (server) command; }
+          // optionalAttrs (server.url != null) { inherit (server) url; }
+        ) instance.mcpServers;
       }
     );
 
