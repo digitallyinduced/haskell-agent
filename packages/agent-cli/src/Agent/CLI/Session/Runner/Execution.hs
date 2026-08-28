@@ -74,7 +74,7 @@ import Agent.OsPath
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.Chan (newChan, readChan, writeChan)
 import Control.Concurrent.MVar (newMVar, withMVar)
-import Control.Exception.Safe (catchAny, mask_)
+import Control.Exception.Safe (catchAny, uninterruptibleMask_)
 import Control.Monad (forM_, unless, void, when)
 import Data.IORef
 import qualified Data.Map.Strict as Map
@@ -812,7 +812,11 @@ runSession callbacks SessionRequest{..} SessionBackend{..} = do
                 reportSessionError
                     ("failed to reload generated context: "
                         <> formatException err)
-        commitAutomaticCompaction outcome pendingInputs = mask_ do
+        -- The durable replace and its in-memory publication form one
+        -- checkpoint transaction. Do not allow cancellation to land after
+        -- PostgreSQL commits but before the boundary becomes visible to turn
+        -- cleanup; that would resurrect the superseded response chain.
+        commitAutomaticCompaction outcome pendingInputs = uninterruptibleMask_ do
             case persist of
                 PersistenceDisabled -> pure ()
                 PersistenceEnabled slotRef -> do
