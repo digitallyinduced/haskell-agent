@@ -178,6 +178,7 @@ middle values = values !! (length values `div` 2)
 fakeConfig :: FilePath -> Int -> Int -> McpServerConfig
 fakeConfig script delayMillis index = McpServerConfig
     { mcpServerName = "fake-" <> Text.pack (show index)
+    , mcpServerUrl = Nothing
     , mcpServerCommand = script
     , mcpServerArgs = [show (fromIntegral delayMillis / 1000 :: Double)]
     , mcpServerCwd = Nothing

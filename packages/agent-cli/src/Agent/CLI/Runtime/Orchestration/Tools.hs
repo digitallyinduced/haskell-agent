@@ -241,7 +241,7 @@ import qualified Agent.MCP as MCP
       McpFleet(mcpFleetRegistrations, mcpFleetWarnings),
       McpFleetLease(mcpLeaseFleet),
       McpServerConfig(mcpServerRequestTimeoutSeconds, McpServerConfig,
-                      mcpServerName, mcpServerCommand, mcpServerArgs, mcpServerCwd,
+                      mcpServerName, mcpServerUrl, mcpServerCommand, mcpServerArgs, mcpServerCwd,
                       mcpServerEnv, mcpServerStartupTimeoutSeconds) )
 import qualified Data.Map.Strict as Map
     ( toAscList, empty, lookup )
@@ -578,6 +578,7 @@ runAgentTools
         mcpServerConfigs =
             [ MCP.McpServerConfig
                 { MCP.mcpServerName = label
+                , MCP.mcpServerUrl = config.mcpUrl
                 , MCP.mcpServerCommand = Text.unpack config.mcpCommand
                 , MCP.mcpServerArgs = map Text.unpack config.mcpArgs
                 , MCP.mcpServerCwd =

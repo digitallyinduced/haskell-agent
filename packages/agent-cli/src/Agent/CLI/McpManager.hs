@@ -313,6 +313,7 @@ promptNewServer config =
                                     ( label
                                     , McpServerConfig
                                         { mcpEnabled = True
+                                        , mcpUrl = Nothing
                                         , mcpCommand = command
                                         , mcpArgs = arguments
                                         , mcpCwd = Nothing

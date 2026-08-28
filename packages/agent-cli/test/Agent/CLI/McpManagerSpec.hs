@@ -107,6 +107,7 @@ spec = describe "Agent.CLI.McpManager" do
 server :: Bool -> Text.Text -> McpServerConfig
 server enabled command = McpServerConfig
     { mcpEnabled = enabled
+    , mcpUrl = Nothing
     , mcpCommand = command
     , mcpArgs = []
     , mcpCwd = Nothing

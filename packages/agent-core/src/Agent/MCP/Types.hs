@@ -113,6 +113,7 @@ import System.Timeout (timeout)
 
 data McpServerConfig = McpServerConfig
     { mcpServerName :: !Text
+    , mcpServerUrl :: !(Maybe Text)
     , mcpServerCommand :: !FilePath
     , mcpServerArgs :: ![String]
     , mcpServerCwd :: !(Maybe FilePath)
@@ -125,6 +126,7 @@ instance Show McpServerConfig where
     show config =
         "McpServerConfig"
             <> " { mcpServerName = " <> show config.mcpServerName
+            <> ", mcpServerUrl = " <> show config.mcpServerUrl
             <> ", mcpServerCommand = " <> show config.mcpServerCommand
             <> ", mcpServerArgs = " <> show config.mcpServerArgs
             <> ", mcpServerCwd = " <> show config.mcpServerCwd
@@ -221,6 +223,7 @@ data McpFleetLease = McpFleetLease
 -- and 'closeMcpSupervisor' performs the final deterministic shutdown.
 data McpClient = McpClient
     { clientConfig :: !McpServerConfig
+    , clientHttpSession :: !(IORef (Maybe Text))
     , clientInput :: !Handle
     , clientProcess :: !ProcessHandle
     , clientGroupId :: !(Maybe ProcessGroupID)

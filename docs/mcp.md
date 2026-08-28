@@ -35,3 +35,24 @@ Enabled servers are shared with subagents. Only tools explicitly annotated
 `server__tool`. Progressive startup exposes `mcp_search` and `mcp_call` while
 servers connect, then publishes each server's read-only catalog. Failed stdio
 transports are restarted once before a progressive call is retried.
+
+## Remote Streamable HTTP servers
+
+Remote MCP endpoints use `url` instead of `command`:
+
+```json
+{
+  "mcpServers": {
+    "remote": {
+      "url": "https://example.com/mcp",
+      "env": { "MCP_ACCESS_TOKEN": "..." }
+    }
+  }
+}
+```
+
+The client preserves the `Mcp-Session-Id` returned by initialization. OAuth
+protected-resource discovery, authorization-server discovery, dynamic client
+registration, and refresh-token exchange are available in the MCP OAuth layer.
+Until the interactive PKCE login UI is wired in, an access token can be supplied
+as the redacted `MCP_ACCESS_TOKEN` environment entry.

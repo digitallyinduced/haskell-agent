@@ -12,10 +12,9 @@ import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Encoding
-import Network.HTTP.Client (Manager, RequestBody(..), httpLbs, parseRequest, responseBody, responseStatus)
+import Network.HTTP.Client (Manager, RequestBody(..), httpLbs, parseRequest, responseBody, responseStatus, urlEncodedBody)
 import qualified Network.HTTP.Client as HC
 import Network.HTTP.Types (statusCode)
-import Network.HTTP.Types.URI (urlEncodeAsForm)
 
 data OAuthTokens = OAuthTokens { accessToken :: !Text, refreshToken :: !(Maybe Text), expiresIn :: !(Maybe Int) } deriving (Eq)
 instance Show OAuthTokens where
@@ -58,8 +57,7 @@ refreshAccessToken :: Manager -> Text -> Text -> Text -> IO OAuthTokenResponse
 refreshAccessToken manager endpoint clientId oldRefresh = do
     result <- tryAny $ do
         request <- parseRequest (Text.unpack endpoint)
-        let body = urlEncodeAsForm [("grant_type", "refresh_token"), ("refresh_token", Encoding.encodeUtf8 oldRefresh), ("client_id", Encoding.encodeUtf8 clientId)]
-            request' = request { HC.method = "POST", HC.requestBody = RequestBodyLBS body, HC.requestHeaders = [("Content-Type", "application/x-www-form-urlencoded")] }
+        let request' = urlEncodedBody [("grant_type", "refresh_token"), ("refresh_token", Encoding.encodeUtf8 oldRefresh), ("client_id", Encoding.encodeUtf8 clientId)] request { HC.method = "POST" }
         httpLbs request' manager
     case result of
         Left e -> pure (OAuthTokenFailure (Text.pack (show e)))
@@ -84,3 +82,10 @@ metadataRoot url = case Text.breakOn "://" url of
                    | otherwise -> scheme <> "://" <> Text.takeWhile (/= '/') (Text.drop 3 rest)
 trimTrailingSlash :: Text -> Text
 trimTrailingSlash t = Text.dropWhileEnd (== '/') t
+
+instance Aeson.FromJSON OAuthTokens where
+    parseJSON = Aeson.withObject "OAuthTokens" $ \object ->
+        OAuthTokens
+            <$> object Aeson..: "access_token"
+            <*> object Aeson..:? "refresh_token"
+            <*> object Aeson..:? "expires_in"

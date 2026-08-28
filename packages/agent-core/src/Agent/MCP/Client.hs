@@ -18,6 +18,7 @@ import Agent.Tools.Types
     )
 import Agent.ToolDispatch (typedTool)
 import Agent.Concurrent (forConcurrentlyBounded_)
+import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
     ( Async
     , asyncWithUnmask
@@ -63,7 +64,7 @@ import Control.Exception.Safe
     , throwIO
     , tryAny
     )
-import Control.Monad (forM, unless, void, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import Data.Aeson
     ( ToJSON(toJSON)
     , Value
@@ -88,6 +89,7 @@ import Data.IORef
     , atomicModifyIORef'
     , newIORef
     , readIORef
+    , writeIORef
     )
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
@@ -121,27 +123,84 @@ import System.Process
     , proc
     )
 import System.Timeout (timeout)
+import System.IO.Unsafe (unsafePerformIO)
 import Agent.MCP.Types
+import Network.HTTP.Client (Manager, RequestBody(..), httpLbs, parseRequest, responseBody, responseHeaders, responseStatus)
+import qualified Network.HTTP.Client as HC
+import Network.HTTP.Client.TLS (newTlsManager)
+import Network.HTTP.Types (statusCode)
 startMcpClient :: McpServerConfig -> IO McpClient
-startMcpClient config = mask \_ -> do
-    processEnvironment <- mergedEnvironment config.mcpServerEnv
-    let processSpec =
-            (proc config.mcpServerCommand config.mcpServerArgs)
-                { cwd = config.mcpServerCwd
-                , env = Just processEnvironment
-                , std_in = CreatePipe
-                , std_out = CreatePipe
-                , std_err = CreatePipe
-                , create_group = True
-                }
-    created <- createProcess processSpec
+startMcpClient config = case config.mcpServerUrl of
+    Just url -> startMcpHttpClient config url
+    Nothing -> mask \_ -> do
+        processEnvironment <- mergedEnvironment config.mcpServerEnv
+        let processSpec =
+                (proc config.mcpServerCommand config.mcpServerArgs)
+                    { cwd = config.mcpServerCwd
+                    , env = Just processEnvironment
+                    , std_in = CreatePipe
+                    , std_out = CreatePipe
+                    , std_err = CreatePipe
+                    , create_group = True
+                    }
+        created <- createProcess processSpec
+        case created of
+            (Just input, Just output, Just errOutput, processHandle) -> do
+                groupId <- getPid processHandle
+                hSetBinaryMode input True
+                hSetBinaryMode output True
+                hSetBinaryMode errOutput True
+                hSetBuffering input LineBuffering
+                nextId <- newIORef 1
+                pending <- newTVarIO IntMap.empty
+                failure <- newTVarIO Nothing
+                writeLock <- newMVar ()
+                stderrRef <- newIORef emptyCapturedStderr
+                closed <- newMVar False
+                lifecycle <- newTVarIO ClientPending
+                reader <- asyncWithUnmask \unmask ->
+                    unmask (readerLoop output pending failure)
+                        `finally` void (tryAny (hClose output))
+                stderrReader <- asyncWithUnmask \unmask ->
+                    unmask (stderrLoop errOutput stderrRef)
+                        `finally` void (tryAny (hClose errOutput))
+                session <- newIORef Nothing
+                let client = McpClient
+                        { clientConfig = config
+                        , clientHttpSession = session
+                        , clientInput = input
+                        , clientProcess = processHandle
+                        , clientGroupId = groupId
+                        , clientNextId = nextId
+                        , clientPending = pending
+                        , clientFailure = failure
+                        , clientWriteLock = writeLock
+                        , clientStderr = stderrRef
+                        , clientReader = reader
+                        , clientStderrReader = stderrReader
+                        , clientClosed = closed
+                        , clientLifecycle = lifecycle
+                        }
+                pure client
+            _ -> do
+                let (_, _, _, processHandle) = created
+                groupId <- getPid processHandle
+                terminateProcessGroup groupId processHandle
+                closeOptionalHandles created
+                ioError (userError "MCP server did not provide all stdio pipes")
+
+mcpHttpManager :: Manager
+mcpHttpManager = unsafePerformIO newTlsManager
+{-# NOINLINE mcpHttpManager #-}
+
+startMcpHttpClient :: McpServerConfig -> Text -> IO McpClient
+startMcpHttpClient config url = mask $ \_ -> do
+    -- Keep the existing client record/lifecycle while using synchronous HTTP.
+    -- An exited helper process supplies the legacy handles needed by shutdown.
+    created <- createProcess ((proc "true" [])
+        { std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe })
     case created of
         (Just input, Just output, Just errOutput, processHandle) -> do
-            groupId <- getPid processHandle
-            hSetBinaryMode input True
-            hSetBinaryMode output True
-            hSetBinaryMode errOutput True
-            hSetBuffering input LineBuffering
             nextId <- newIORef 1
             pending <- newTVarIO IntMap.empty
             failure <- newTVarIO Nothing
@@ -149,34 +208,20 @@ startMcpClient config = mask \_ -> do
             stderrRef <- newIORef emptyCapturedStderr
             closed <- newMVar False
             lifecycle <- newTVarIO ClientPending
-            reader <- asyncWithUnmask \unmask ->
-                unmask (readerLoop output pending failure)
-                    `finally` void (tryAny (hClose output))
-            stderrReader <- asyncWithUnmask \unmask ->
-                unmask (stderrLoop errOutput stderrRef)
-                    `finally` void (tryAny (hClose errOutput))
-            let client = McpClient
-                    { clientConfig = config
-                    , clientInput = input
-                    , clientProcess = processHandle
-                    , clientGroupId = groupId
-                    , clientNextId = nextId
-                    , clientPending = pending
-                    , clientFailure = failure
-                    , clientWriteLock = writeLock
-                    , clientStderr = stderrRef
-                    , clientReader = reader
-                    , clientStderrReader = stderrReader
-                    , clientClosed = closed
-                    , clientLifecycle = lifecycle
-                    }
-            pure client
-        _ -> do
-            let (_, _, _, processHandle) = created
-            groupId <- getPid processHandle
-            terminateProcessGroup groupId processHandle
-            closeOptionalHandles created
-            ioError (userError "MCP server did not provide all stdio pipes")
+            session <- newIORef Nothing
+            reader <- asyncWithUnmask $ \unmask -> unmask (threadDelay maxBound)
+            stderrReader <- asyncWithUnmask $ \unmask -> unmask (threadDelay maxBound)
+            pure McpClient
+                { clientConfig = config, clientHttpSession = session
+                , clientInput = input, clientProcess = processHandle
+                , clientGroupId = Nothing, clientNextId = nextId
+                , clientPending = pending, clientFailure = failure
+                , clientWriteLock = writeLock, clientStderr = stderrRef
+                , clientReader = reader, clientStderrReader = stderrReader
+                , clientClosed = closed, clientLifecycle = lifecycle }
+        _ -> ioError (userError "MCP HTTP client setup failed")
+  where
+    _ = url
 
 data InitializeRole
     = InitializeLeader
@@ -465,9 +510,10 @@ requestMcp
     -> IO (Either Text RawJson)
 requestMcp client timeoutMicros method parameters = do
     failed <- readTVarIO client.clientFailure
-    case failed of
-        Just err -> pure (Left err)
-        Nothing -> do
+    case (failed, client.clientConfig.mcpServerUrl) of
+        (Just err, _) -> pure (Left err)
+        (Nothing, Just url) -> httpRequestMcp client timeoutMicros url method parameters
+        (Nothing, Nothing) -> do
             requestId <- atomicModifyIORef' client.clientNextId \current ->
                 (current + 1, current)
             response <- newEmptyTMVarIO
@@ -501,16 +547,50 @@ requestMcp client timeoutMicros method parameters = do
                                             ((timeoutMicros + 999999) `div` 1000000))
                                     <> " seconds"
 
+httpRequestMcp :: McpClient -> Int -> Text -> Text -> Aeson.Encoding -> IO (Either Text RawJson)
+httpRequestMcp client timeoutMicros url method parameters = do
+    requestId <- atomicModifyIORef' client.clientNextId (\current -> (current + 1, current))
+    request <- parseRequest (Text.unpack url)
+    session <- readIORef client.clientHttpSession
+    let body = AesonEncodingInternal.encodingToLazyByteString $ Aeson.pairs
+            ("jsonrpc" .= ("2.0" :: Text) <> "id" .= requestId <> "method" .= method <> AesonEncoding.pair "params" parameters)
+        configuredToken = lookup "MCP_ACCESS_TOKEN" client.clientConfig.mcpServerEnv
+        headers = [("Content-Type", "application/json"), ("Accept", "application/json, text/event-stream")]
+            <> maybe [] (\token -> [("Authorization", "Bearer " <> BS8.pack token)]) configuredToken
+            <> maybe [] (\value -> [("Mcp-Session-Id", TextEncoding.encodeUtf8 value)]) session
+        request' = request { HC.method = "POST", HC.requestBody = RequestBodyLBS body, HC.requestHeaders = headers }
+    result <- tryAny (timeout (max 1 timeoutMicros) (httpLbs request' mcpHttpManager))
+    case result of
+        Left exception -> pure (Left ("MCP HTTP request failed: " <> exceptionSummary exception))
+        Right Nothing -> pure (Left ("MCP request " <> method <> " timed out"))
+        Right (Just response)
+            | statusCode (responseStatus response) == 401 ->
+                pure (Left "MCP server requires OAuth authorization; configure MCP OAuth credentials")
+            | statusCode (responseStatus response) < 200 || statusCode (responseStatus response) >= 300 ->
+                pure (Left ("MCP HTTP request failed with status " <> Text.pack (show (statusCode (responseStatus response)))))
+            | otherwise -> do
+                forM_ (lookup "Mcp-Session-Id" (responseHeaders response)) $ \value ->
+                    writeIORef client.clientHttpSession (Just (TextEncoding.decodeUtf8 value))
+                let bytes = LBS.toStrict (responseBody response)
+                if BS.null bytes
+                    then pure (Right (rawJsonFromEncoding (Aeson.toEncoding (object []))))
+                    else pure (either (Left . ("Invalid MCP HTTP response: " <>) . Text.pack . show) Right (Json.decodeEither rawJsonDecoder bytes))
+
 sendNotification
     :: McpClient
     -> Text
     -> Aeson.Encoding
     -> IO (Either Text ())
 sendNotification client method parameters =
-    sendMessage client . Aeson.pairs $
-        "jsonrpc" .= ("2.0" :: Text)
-            <> "method" .= method
-            <> AesonEncoding.pair "params" parameters
+    case client.clientConfig.mcpServerUrl of
+        Just url -> fmap (fmap (const ())) $
+            httpRequestMcp client
+                (secondsToMicros client.clientConfig.mcpServerRequestTimeoutSeconds)
+                url method parameters
+        Nothing -> sendMessage client . Aeson.pairs $
+            "jsonrpc" .= ("2.0" :: Text)
+                <> "method" .= method
+                <> AesonEncoding.pair "params" parameters
 
 sendMessage :: McpClient -> Aeson.Encoding -> IO (Either Text ())
 sendMessage client message =
