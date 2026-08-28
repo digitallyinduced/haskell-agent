@@ -23,6 +23,7 @@ data ReplAction
       -- ^ Original user-visible text and the model-visible expansion.
     | ReplShowEffort
     | ReplSetEffort ReasoningEffort
+    | ReplToggleFast
     | ReplShowModel
     | ReplSetModel Text
     | ReplToggleAlwaysApprove

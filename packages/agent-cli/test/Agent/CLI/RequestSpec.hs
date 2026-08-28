@@ -179,6 +179,14 @@ spec = describe "requestParams" do
             (genericText { verbosity = Nothing })
         restored.input `shouldBe` Just (ResponseInputItems [pending])
 
+    it "clears Fast mode when switching models" do
+        let params =
+                (requestParams OpenAIProvider "gpt-generic"
+                    "instructions" [] "high")
+                    { serviceTier = Just "priority" }
+        setRequestModel OpenAIProvider "gpt-5.6-terra" params
+            `shouldSatisfy` \result -> result.serviceTier == Nothing
+
 isAdditionalTools :: ResponseItem -> Bool
 isAdditionalTools = \case
     AdditionalToolsItemValue{} -> True

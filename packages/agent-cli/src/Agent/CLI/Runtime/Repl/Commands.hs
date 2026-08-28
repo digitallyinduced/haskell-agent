@@ -26,7 +26,7 @@ import Agent.CLI.Command
                  ReplGoalSet, ReplWorkflowRuns, ReplWorkflowManage, ReplCopyLast,
                  ReplCopyCode, ReplCopyDiff, ReplCopyPath, ReplCopySession,
                  ReplShowTerminal, ReplShowEffort, ReplSetEffort, ReplShowModel,
-                 ReplSetModel, ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
+                 ReplSetModel, ReplToggleFast, ReplToggleAlwaysApprove, ReplCompact, ReplPlan,
                  ReplBtw, ReplRecap, ReplRetry, ReplResume, ReplSearch, ReplClear, ReplNew,
                  ReplShowSession, ReplShowSessionInfo, ReplAfk, ReplWorktree,
                  ReplRename, ReplRenameAuto, ReplLogin, ReplUsage, ReplReloadAuth,
@@ -544,6 +544,7 @@ handleReplLine
                         continue
                     action@ReplShowEffort -> handleSelectionAction env continue action
                     action@ReplSetEffort{} -> handleSelectionAction env continue action
+                    action@ReplToggleFast -> handleSelectionAction env continue action
                     action@ReplShowModel -> handleSelectionAction env continue action
                     action@ReplSetModel{} -> handleSelectionAction env continue action
                     ReplToggleAlwaysApprove

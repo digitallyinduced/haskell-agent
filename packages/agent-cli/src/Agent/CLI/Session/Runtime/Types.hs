@@ -22,6 +22,7 @@ import Agent.CLI.Database.Store (DatabaseScopes)
 import Agent.CLI.Interrupt (InterruptState)
 import Agent.CLI.ManagedTurn (ManagedTurnRequest)
 import Agent.CLI.ModelConfig (ModelCatalog)
+import Agent.OpenAI.Models.Types (ModelInfo)
 import Agent.CLI.Options
     ( ApprovalPolicy
     , CliOptions
@@ -92,6 +93,7 @@ data SessionBackend = SessionBackend
 
 data SessionRequest = SessionRequest
     { catalog :: !ModelCatalog
+    , modelInfo :: !(Maybe ModelInfo)
     , connectionId :: !Text
     , options :: !CliOptions
     , provider :: !Provider
