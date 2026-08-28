@@ -286,9 +286,9 @@
                         hermes-json =
                             pkgs.haskell.lib.overrideSrc previous.hermes-json {
                                 src = pkgs.fetchFromGitHub {
-                                    owner = "mpscholten";
+                                    owner = "velveteer";
                                     repo = "hermes";
-                                    rev = "f70adba535051516b51b1aff8147bc77bac4f335";
+                                    rev = "c04619a2b490fb49c67cacc0d2eb15368b78505f";
                                     hash = "sha256-BZEIcQrQTYE7Vf3FVq1EOaeH/dLnFvU+INZZNNQSMcw=";
                                     fetchSubmodules = true;
                                 };
