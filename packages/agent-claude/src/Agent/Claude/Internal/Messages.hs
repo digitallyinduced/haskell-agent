@@ -422,6 +422,11 @@ interpretClaudeTurnWithCredentialValidation validateCredential messages result =
     if validateCredential
         then validateSubscriptionSource visibleMessages
         else Right ()
+    if Text.null (Text.strip result.sessionId)
+        then Left
+            (ClaudeProtocolFailure
+                "Claude Code returned a result without a session id.")
+        else Right ()
     let
         liveEvents = concatMap messageLiveEvents visibleMessages
         -- Claude Code's result text is only the last text block; the
