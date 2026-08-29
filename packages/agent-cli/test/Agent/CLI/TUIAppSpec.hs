@@ -446,6 +446,14 @@ spec = do
                   , V.EvKey (V.KChar 'v') [V.MMeta]
                   )
                 , ( Nothing
+                  , "\ESC[107;9u"
+                  , V.EvKey (V.KChar 'k') [V.MMeta]
+                  )
+                , ( Nothing
+                  , "\ESC[107:75:75;9:1u"
+                  , V.EvKey (V.KChar 'k') [V.MMeta]
+                  )
+                , ( Nothing
                   , "\ESC[114;5u"
                   , V.EvKey (V.KChar 'r') [V.MCtrl]
                   )
