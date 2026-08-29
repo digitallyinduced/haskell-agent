@@ -99,3 +99,171 @@ int ha_image_attachment_stage_smoke(void) {
     ha_runtime_exit();
     return status;
 }
+
+static void repository_snapshot_callback(
+        void *context,
+        const uint8_t *snapshot_id, size_t snapshot_id_length,
+        const uint8_t *root, size_t root_length,
+        const uint8_t *head, size_t head_length,
+        const uint8_t *index_fingerprint, size_t index_fingerprint_length,
+        const uint8_t *worktree_fingerprint,
+        size_t worktree_fingerprint_length) {
+    (void)context;
+    (void)snapshot_id;
+    (void)snapshot_id_length;
+    (void)root;
+    (void)root_length;
+    (void)head;
+    (void)head_length;
+    (void)index_fingerprint;
+    (void)index_fingerprint_length;
+    (void)worktree_fingerprint;
+    (void)worktree_fingerprint_length;
+}
+
+static void repository_file_callback(
+        void *context,
+        const uint8_t *path, size_t path_length,
+        const uint8_t *original_path, size_t original_path_length,
+        int32_t index_status, int32_t worktree_status) {
+    (void)context;
+    (void)path;
+    (void)path_length;
+    (void)original_path;
+    (void)original_path_length;
+    (void)index_status;
+    (void)worktree_status;
+}
+
+static void repository_diff_callback(
+        void *context, const uint8_t *bytes, size_t length,
+        int32_t is_binary) {
+    (void)context;
+    (void)bytes;
+    (void)length;
+    (void)is_binary;
+}
+
+static void repository_hunk_callback(
+        void *context,
+        int64_t old_start, int64_t old_count,
+        int64_t new_start, int64_t new_count,
+        const uint8_t *header, size_t header_length) {
+    (void)context;
+    (void)old_start;
+    (void)old_count;
+    (void)new_start;
+    (void)new_count;
+    (void)header;
+    (void)header_length;
+}
+
+static void repository_result_callback(
+        void *context, int32_t status,
+        const uint8_t *snapshot_id, size_t snapshot_id_length,
+        const uint8_t *error, size_t error_length) {
+    (void)context;
+    (void)status;
+    (void)snapshot_id;
+    (void)snapshot_id_length;
+    (void)error;
+    (void)error_length;
+}
+
+static void repository_check_output_callback(
+        void *context, int32_t stream,
+        const uint8_t *bytes, size_t length) {
+    (void)context;
+    (void)stream;
+    (void)bytes;
+    (void)length;
+}
+
+static void repository_check_exit_callback(
+        void *context, int32_t cancelled, int32_t exit_code,
+        const uint8_t *error, size_t error_length) {
+    (void)context;
+    (void)cancelled;
+    (void)exit_code;
+    (void)error;
+    (void)error_length;
+}
+
+/*
+ * Compile every repository-review callback and function signature and exercise
+ * synchronous validation without starting a worker.
+ */
+int ha_repository_review_abi_smoke(void) {
+    const uint8_t value[] = "x";
+    if (offsetof(ha_utf8_string, bytes) != 0
+            || offsetof(ha_utf8_string, length)
+                != sizeof(const uint8_t *)) {
+        return 19;
+    }
+    if (HA_REPOSITORY_STAGE != 0
+            || HA_REPOSITORY_UNSTAGE != 1
+            || HA_REPOSITORY_RESTORE != 2) {
+        return 20;
+    }
+    if (ha_repository_snapshot(
+            NULL, 0,
+            repository_snapshot_callback,
+            repository_file_callback,
+            repository_result_callback,
+            NULL) != 2) {
+        return 21;
+    }
+    if (ha_repository_diff(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            HA_REPOSITORY_DIFF_WORKTREE,
+            value, sizeof(value) - 1,
+            NULL,
+            repository_hunk_callback,
+            repository_result_callback,
+            NULL) != 1) {
+        return 22;
+    }
+    if (ha_repository_apply_path(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            99,
+            value, sizeof(value) - 1,
+            repository_result_callback,
+            NULL) != 2) {
+        return 23;
+    }
+    if (ha_repository_apply_patch(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            HA_REPOSITORY_STAGE,
+            NULL, 0,
+            repository_result_callback,
+            NULL) != 2) {
+        return 24;
+    }
+    if (ha_repository_commit(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL,
+            NULL) != 1) {
+        return 25;
+    }
+    void *check = NULL;
+    if (ha_repository_check_start(
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            value, sizeof(value) - 1,
+            NULL, 0,
+            repository_check_output_callback,
+            NULL,
+            NULL,
+            &check) != 1) {
+        return 26;
+    }
+    ha_repository_check_cancel(NULL);
+    ha_repository_check_destroy(NULL);
+    ha_repository_cancel_all();
+    return 0;
+}

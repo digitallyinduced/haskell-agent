@@ -25,6 +25,21 @@ typedef void (*ha_event_callback)(
     size_t length
 );
 
+typedef void (*ha_repository_check_output_callback)(
+    void *context,
+    int32_t stream,
+    const uint8_t *bytes,
+    size_t length
+);
+
+typedef void (*ha_repository_check_exit_callback)(
+    void *context,
+    int32_t cancelled,
+    int32_t exit_code,
+    const uint8_t *error,
+    size_t error_length
+);
+
 /*
  * A conversation-search callback. status is 0 for a result, 1 for terminal
  * success, and -1 for terminal failure (with error populated). All UTF-8
@@ -170,6 +185,84 @@ typedef struct ha_image_attachment {
     size_t bytes_length;
 } ha_image_attachment;
 
+/* A borrowed UTF-8 slice used for typed arrays such as process argv. */
+typedef struct ha_utf8_string {
+    const uint8_t *bytes;
+    size_t length;
+} ha_utf8_string;
+
+/*
+ * Repository review operations run asynchronously on runtime worker threads.
+ * Every accepted operation invokes its result callback exactly once. Callback
+ * buffers are borrowed only for the callback duration and must be copied.
+ *
+ * A successful snapshot first invokes snapshot_callback once, then
+ * file_callback once per changed file, and finally result_callback. HEAD is
+ * empty for an unborn branch. original_path is empty unless Git reports a
+ * rename/copy. File status values are unsigned Git porcelain status bytes.
+ *
+ * A successful diff invokes diff_callback with ordered patch chunks of at
+ * most 64 KiB, then hunk_callback for each parsed hunk, then result_callback.
+ * is_binary applies to the complete file diff. An empty patch emits no chunks.
+ *
+ * result_callback status is 0 for success, -1 for failure, and -2 when the
+ * supplied snapshot is stale. Success and stale results populate snapshot_id;
+ * failures populate error. Callbacks for one operation are serialized.
+ */
+typedef void (*ha_repository_snapshot_callback)(
+    void *context,
+    const uint8_t *snapshot_id, size_t snapshot_id_length,
+    const uint8_t *root, size_t root_length,
+    const uint8_t *head, size_t head_length,
+    const uint8_t *index_fingerprint, size_t index_fingerprint_length,
+    const uint8_t *worktree_fingerprint, size_t worktree_fingerprint_length
+);
+
+typedef void (*ha_repository_file_callback)(
+    void *context,
+    const uint8_t *path, size_t path_length,
+    const uint8_t *original_path, size_t original_path_length,
+    int32_t index_status,
+    int32_t worktree_status
+);
+
+typedef void (*ha_repository_diff_callback)(
+    void *context,
+    const uint8_t *bytes,
+    size_t length,
+    int32_t is_binary
+);
+
+typedef void (*ha_repository_hunk_callback)(
+    void *context,
+    int64_t old_start,
+    int64_t old_count,
+    int64_t new_start,
+    int64_t new_count,
+    const uint8_t *header,
+    size_t header_length
+);
+
+typedef void (*ha_repository_result_callback)(
+    void *context,
+    int32_t status,
+    const uint8_t *snapshot_id,
+    size_t snapshot_id_length,
+    const uint8_t *error,
+    size_t error_length
+);
+
+enum ha_repository_operation {
+    HA_REPOSITORY_STAGE = 0,
+    HA_REPOSITORY_UNSTAGE = 1,
+    HA_REPOSITORY_RESTORE = 2
+};
+
+enum ha_repository_diff_kind {
+    HA_REPOSITORY_DIFF_WORKTREE = 0,
+    HA_REPOSITORY_DIFF_STAGED = 1
+};
+
 /* Runtime calls are process-global and reference counted. */
 int32_t ha_runtime_init(void);
 void ha_runtime_exit(void);
@@ -246,6 +339,114 @@ int32_t ha_engine_session_archive(
     void *context
 );
 void ha_engine_destroy(void *engine);
+
+/*
+ * Repository input text is required, non-null, non-empty UTF-8 and is copied
+ * before these functions return. Patch bytes are required, non-null,
+ * non-empty binary data and are also copied. Callers must keep callback
+ * context valid until its terminal result callback.
+ *
+ * Return values are 0 when accepted, 1 for a null required callback, 2 for an
+ * invalid pointer/length/UTF-8/operation, and 3 for an internal start failure.
+ * All mutations compare the supplied snapshot fingerprint while holding a
+ * per-repository mutation lock. Stale operations do not modify the repository.
+ * Restore never deletes an untracked file.
+ *
+ * ha_repository_cancel_all cancels and joins accepted snapshot, diff, and
+ * mutation operations before returning. Checks are owned and cancelled by
+ * their explicit handles. Cancelled operations do not invoke a terminal
+ * callback; after cancel_all returns, their callback contexts may be released.
+ */
+int32_t ha_repository_snapshot(
+    const uint8_t *path,
+    size_t path_length,
+    ha_repository_snapshot_callback snapshot_callback,
+    ha_repository_file_callback file_callback,
+    ha_repository_result_callback result_callback,
+    void *context
+);
+
+int32_t ha_repository_diff(
+    const uint8_t *path,
+    size_t path_length,
+    const uint8_t *snapshot_id,
+    size_t snapshot_id_length,
+    int32_t diff_kind,
+    const uint8_t *file_path,
+    size_t file_path_length,
+    ha_repository_diff_callback diff_callback,
+    ha_repository_hunk_callback hunk_callback,
+    ha_repository_result_callback result_callback,
+    void *context
+);
+
+int32_t ha_repository_apply_path(
+    const uint8_t *path,
+    size_t path_length,
+    const uint8_t *snapshot_id,
+    size_t snapshot_id_length,
+    int32_t operation,
+    const uint8_t *file_path,
+    size_t file_path_length,
+    ha_repository_result_callback result_callback,
+    void *context
+);
+
+int32_t ha_repository_apply_patch(
+    const uint8_t *path,
+    size_t path_length,
+    const uint8_t *snapshot_id,
+    size_t snapshot_id_length,
+    int32_t operation,
+    const uint8_t *patch,
+    size_t patch_length,
+    ha_repository_result_callback result_callback,
+    void *context
+);
+
+int32_t ha_repository_commit(
+    const uint8_t *path,
+    size_t path_length,
+    const uint8_t *snapshot_id,
+    size_t snapshot_id_length,
+    const uint8_t *message,
+    size_t message_length,
+    ha_repository_result_callback result_callback,
+    void *context
+);
+
+void ha_repository_cancel_all(void);
+
+/*
+ * Start an argv-based repository check without a shell. executable and every
+ * argument are required non-empty UTF-8; arguments may be NULL only when
+ * argument_count is zero. stream is 1 for stdout and 2 for stderr. Output
+ * buffers are callback-scoped and ordered within each stream; the two streams
+ * may interleave. exit_callback is invoked once with the process exit code,
+ * or -1 plus an error if launch fails.
+ *
+ * On status 0, out_check receives an owned opaque handle. Cancel is
+ * asynchronous. Destroy waits for readers/process completion, frees the
+ * handle, and must be called exactly once; no callbacks occur after it
+ * returns. Status values match the other repository functions.
+ */
+int32_t ha_repository_check_start(
+    const uint8_t *path,
+    size_t path_length,
+    const uint8_t *snapshot_id,
+    size_t snapshot_id_length,
+    const uint8_t *executable,
+    size_t executable_length,
+    const ha_utf8_string *arguments,
+    size_t argument_count,
+    ha_repository_check_output_callback output_callback,
+    ha_repository_check_exit_callback exit_callback,
+    void *context,
+    void **out_check
+);
+
+void ha_repository_check_cancel(void *check);
+void ha_repository_check_destroy(void *check);
 
 /*
  * Account operations use typed callbacks. Callback buffers are valid only

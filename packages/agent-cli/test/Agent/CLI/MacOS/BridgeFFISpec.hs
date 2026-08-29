@@ -9,6 +9,9 @@ import Test.Hspec (Spec, describe, it, shouldReturn)
 
 foreign import ccall "ha_image_attachment_stage_smoke"
     imageAttachmentStageSmoke :: IO CInt
+
+foreign import ccall "ha_repository_review_abi_smoke"
+    repositoryReviewAbiSmoke :: IO CInt
 #else
 import Test.Hspec (Spec, describe, it, pendingWith)
 #endif
@@ -18,6 +21,13 @@ spec = describe "native image attachment staging" do
     it "accepts copied image buffers through the exported bridge" do
 #ifdef darwin_HOST_OS
         imageAttachmentStageSmoke `shouldReturn` 0
+#else
+        pendingWith "the native bridge smoke test only links on macOS"
+#endif
+
+    it "validates the typed repository-review ABI from native code" do
+#ifdef darwin_HOST_OS
+        repositoryReviewAbiSmoke `shouldReturn` 0
 #else
         pendingWith "the native bridge smoke test only links on macOS"
 #endif
