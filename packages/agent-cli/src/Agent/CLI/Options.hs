@@ -132,6 +132,8 @@ data CliOptions = CliOptions
       -- ^ Expose the provider's explicit shell execution tool (default: True).
     , optComputerUse :: !Bool
       -- ^ Allow the model to control the local macOS desktop (default: False).
+    , optCodeMode :: !Bool
+      -- ^ Honor catalog-selected JavaScript code mode (default: False).
     , optScreenMode :: !ScreenMode
     , optMotionMode :: !MotionMode
     } deriving (Eq, Show)
@@ -160,6 +162,7 @@ defaultCliOptions = CliOptions
     , optGhci = False
     , optBash = True
     , optComputerUse = False
+    , optCodeMode = False
     , optScreenMode = ScreenAuto
     , optMotionMode = MotionFull
     }
@@ -396,6 +399,10 @@ optionUpdateParser = asum
         (\value options -> options { optComputerUse = value })
     , boolFlagUpdate "no-computer-use" False "Disable local computer use"
         (\value options -> options { optComputerUse = value })
+    , boolFlagUpdate "code-mode" True "Enable catalog-selected code mode"
+        (\value options -> options { optCodeMode = value })
+    , boolFlagUpdate "no-code-mode" False "Use conventional tool calling"
+        (\value options -> options { optCodeMode = value })
     , screenFlagUpdate "fullscreen" ScreenFullscreen
         "Use the retained full-screen TUI"
     , screenFlagUpdate "minimal" ScreenMinimal

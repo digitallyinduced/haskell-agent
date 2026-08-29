@@ -267,6 +267,15 @@ spec = do
                 `shouldBe` Right (RunAgent defaultCliOptions
                     { optComputerUse = False })
 
+        it "uses conventional tool calling by default" do
+            defaultCliOptions.optCodeMode `shouldBe` False
+            parseArgs ["--code-mode"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = True })
+            parseArgs ["--code-mode", "--no-code-mode"]
+                `shouldBe` Right (RunAgent defaultCliOptions
+                    { optCodeMode = False })
+
         it "keeps ghci disabled by default and enables it explicitly" do
             parseArgs []
                 `shouldBe` Right (RunAgent defaultCliOptions)
