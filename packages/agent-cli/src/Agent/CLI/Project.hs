@@ -1,7 +1,8 @@
 -- | Project-scoped settings under @<project>/.haskell-agent/settings.json@,
 -- plus the user-level last model under @~/.haskell-agent/settings.json@.
 module Agent.CLI.Project
-    ( ProjectAccount(..)
+    ( ModelSwitchScope(..)
+    , ProjectAccount(..)
     , ProjectModel(..)
     , ProjectSettings(..)
     , defaultProjectSettings
@@ -17,7 +18,7 @@ module Agent.CLI.Project
     , saveProjectMaxConcurrentAgents
     , saveProjectAccount
     , saveProjectModel
-    , saveRememberedModel
+    , persistModelSwitch
     , userSettingsPath
     , withInheritedLastModel
     ) where
@@ -307,16 +308,26 @@ saveProjectModel projectRoot target =
                 { projectModelTarget = target }
             }
 
--- | Persist the selected model on the current checkout and as the user-level
--- default so the next freshly created worktree can inherit it.
-saveRememberedModel
-    :: OsPath
+-- | Whether a live model/provider switch may update inherited settings.
+-- Startup and resume targets are not switch events and must not be persisted;
+-- delegated/background transitions use 'SessionLocalSwitch'.
+data ModelSwitchScope
+    = TopLevelSwitch
+    | SessionLocalSwitch
+    deriving (Eq, Show)
+
+-- | Persist a top-level switch on the current checkout and as the user-level
+-- default. Session-local switches retain their target only in session state.
+persistModelSwitch
+    :: ModelSwitchScope
+    -> OsPath
     -- ^ User home (@~/.haskell-agent/settings.json@).
     -> OsPath
     -- ^ Checkout root.
     -> ModelTarget
     -> IO ()
-saveRememberedModel home projectRoot target = do
+persistModelSwitch SessionLocalSwitch _ _ _ = pure ()
+persistModelSwitch TopLevelSwitch home projectRoot target = do
     saveProjectModel projectRoot target
     saveProjectModel home target
 

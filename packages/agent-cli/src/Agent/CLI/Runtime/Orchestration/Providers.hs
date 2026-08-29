@@ -212,6 +212,7 @@ import qualified Agent.XAI.Request as XAIRequest ( mapModel )
 import qualified Agent.XAI.Usage as XAIUsage ()
 
 runAgentProviders
+    modelSwitchScope
     loaded
     sessionRequest
     activeAccountIdRef
@@ -513,7 +514,8 @@ runAgentProviders
                                                 resetCodexTurnState turnState
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        home projectRoot transition persist noticingBackend
+                                        modelSwitchScope home projectRoot
+                                        transition persist noticingBackend
                                 withAsync switchLoop \switchWorker -> do
                                     link switchWorker
                                     runSession
@@ -623,7 +625,8 @@ runAgentProviders
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                home projectRoot transition persist backend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable
@@ -697,7 +700,8 @@ runAgentProviders
                             \backend -> do
                                 activeBackend <-
                                     prepareTransitionBackend
-                                        home projectRoot transition persist backend
+                                        modelSwitchScope home projectRoot
+                                        transition persist backend
                                 result <- runSession
                                     (sessionRequest
                                         startupUnavailable
@@ -809,7 +813,8 @@ runAgentProviders
                                     focus
                         activeBackend <-
                             prepareTransitionBackend
-                                home projectRoot transition persist backend
+                                modelSwitchScope home projectRoot
+                                transition persist backend
                         runSession
                             (sessionRequest
                                 startupUnavailable

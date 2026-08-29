@@ -77,7 +77,6 @@ import Agent.CLI.Plan
     ( cliPlanHooks
     , resumedPlanNeedsApproval
     )
-import Agent.CLI.Project ( saveRememberedModel )
 import Agent.CLI.Prompt ( subscriptionSubagentModelGuidance )
 import Agent.CLI.PromptHooks
     ( fullscreenAwareImageHooks, fullscreenAwarePlanHooks, fullscreenAwareSecretHooks )
@@ -480,11 +479,9 @@ runAgentTools
     -- is durable in the session transcript. Reconstruct the approval phase
     -- before entering the REPL so a resumed Codex session cannot interpret
     -- the user's approval as ordinary steering input.
-    -- Provider transitions commit their selection separately: manual switches
-    -- immediately, automatic fallbacks only after the replacement succeeds.
-    when (isNothing transition) $
-        saveRememberedModel home projectRoot
-            inferredTarget { targetDialect = dialectId }
+    -- Keep inferred startup, resume, and delegated-agent targets session-local.
+    -- Live top-level model/provider switches persist their selection in
+    -- Agent.CLI.Provider.Switch instead.
     activeSessionLock <- newIORef resumeLock
     persistSlotRef <- newIORef PersistenceDisabled
     -- Per-subagent transcripts / previous ids, shared across send_input / task.
