@@ -34,6 +34,7 @@ module Agent.Store.Postgres.Skill
     , readLearnedSkill
     , searchLearnedSkills
     , listApplicableLearnedSkills
+    , listAllLearnedSkills
     , listLearnedSkillRevisions
     , listLearnedSkillSources
     ) where
@@ -506,6 +507,18 @@ listApplicableLearnedSkills pool scopes =
                 (HasqlSession.statement applicable listSkillsStatement)
                 >>= pure . decodeSkillListResult
 
+listAllLearnedSkills
+    :: StorePool
+    -> [Scope]
+    -> IO (Either StoreError [LearnedSkill])
+listAllLearnedSkills pool scopes =
+    case applicableScopes scopes of
+        Left err -> pure (Left (StoreDataError err))
+        Right applicable ->
+            withSession pool
+                (HasqlSession.statement applicable listAllSkillsStatement)
+                >>= pure . decodeSkillListResult
+
 listLearnedSkillRevisions
     :: StorePool
     -> Scope
@@ -818,6 +831,15 @@ insertSkillStatement = mkStatement
         <> ((.learnedSkillCreateAt) >$< Encoders.param (Encoders.nonNullable Encoders.timestamptz))
     )
     (Decoders.rowMaybe (Decoders.column (Decoders.nonNullable Decoders.text)))
+    True
+
+listAllSkillsStatement :: Statement ApplicableScopes [SkillRow]
+listAllSkillsStatement = mkStatement
+    (skillSelectSql
+        <> applicableWhereSql
+        <> " ORDER BY scope_kind, title, slug")
+    applicableScopesEncoder
+    (Decoders.rowList skillRowDecoder)
     True
 
 updateSkillStatement :: Statement LearnedSkill ()

@@ -57,6 +57,32 @@ typedef void (*ha_conversation_search_callback)(
 );
 
 /*
+ * Learned-skill list callbacks emit current rows from all applicable scopes,
+ * including archived skills. Status is 0 for an item, 1 for end-of-list, and
+ * -1 for an error. UTF-8 buffers are callback-scoped and must be copied.
+ */
+typedef void (*ha_learned_skills_list_callback)(
+    void *context, int32_t status,
+    const uint8_t *scope, size_t scope_length,
+    const uint8_t *slug, size_t slug_length,
+    int64_t revision,
+    const uint8_t *title, size_t title_length,
+    const uint8_t *description, size_t description_length,
+    const uint8_t *applies_when, size_t applies_when_length,
+    const uint8_t *instructions, size_t instructions_length,
+    const uint8_t *activation, size_t activation_length,
+    const uint8_t *status_text, size_t status_text_length,
+    int32_t priority,
+    const uint8_t *updated_at, size_t updated_at_length,
+    const uint8_t *error, size_t error_length
+);
+
+int32_t ha_learned_skills_list(
+    const uint8_t *cwd, size_t cwd_length,
+    ha_learned_skills_list_callback callback, void *context
+);
+
+/*
  * Account list callbacks use status 0 for an item, 1 for end-of-list, and
  * -1 for an error. Item strings include disabled managed credentials and
  * externally discovered accounts.
