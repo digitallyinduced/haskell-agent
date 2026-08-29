@@ -583,6 +583,8 @@ usage :: String
 usage = unlines
     [ "Usage: agent-cli [OPTIONS]"
     , "       agent-cli login"
+    , "       agent-cli gateway connect --url <https-url>"
+    , "       agent-cli gateway <status|disconnect>"
     , "       agent-cli sessions [list]"
     , "       agent-cli sessions show <session-id> [--json]"
     , "              [--limit N] [--before TURN_INDEX]"
