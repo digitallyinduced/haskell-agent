@@ -26,9 +26,13 @@ spec = describe "decodeUsageResponse" do
                 map (.meteredFeature) usage.additionalRateLimits `shouldBe` ["codex_review"]
 
     it "accepts null and absent optional limit data" do
-        decodeUsageResponse (LBS.pack "{\"plan_type\":\"free\",\"rate_limit\":null}")
-            `shouldBe` Right UsageSnapshot
+        let expected = UsageSnapshot
                 { planType = "free"
                 , rateLimit = Nothing
                 , additionalRateLimits = []
                 }
+        decodeUsageResponse (LBS.pack "{\"plan_type\":\"free\",\"rate_limit\":null}")
+            `shouldBe` Right expected
+        decodeUsageResponse
+            (LBS.pack "{\"plan_type\":\"free\",\"rate_limit\":null,\"additional_rate_limits\":null}")
+            `shouldBe` Right expected

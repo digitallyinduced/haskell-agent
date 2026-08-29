@@ -471,7 +471,7 @@ intOrString = Json.withType \case
 
 firstPresentText :: [Text] -> Json.FieldsDecoder Text
 firstPresentText keys = do
-    values <- traverse (`Json.atKeyOptional` Json.text) keys
+    values <- traverse (`Json.optionalKey` Json.text) keys
     case [value | Just value <- values] of
         value : _ -> pure value
         [] -> fail "missing patch text"

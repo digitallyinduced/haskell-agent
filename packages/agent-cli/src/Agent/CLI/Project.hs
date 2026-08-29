@@ -44,7 +44,6 @@ import Data.Aeson
     , (.=)
     )
 import qualified Data.Aeson as Aeson
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Char (isSpace)
 import Data.List (dropWhileEnd)
@@ -205,9 +204,9 @@ projectSettingsDecoder = Hermes.object do
 
 lenient :: Hermes.Decoder a -> Hermes.Decoder (Maybe a)
 lenient decoder =
-    Hermes.withRawJsonByteString \raw ->
+    Hermes.withOwnedRawJson \raw ->
         pure $ either (const Nothing) Just
-            (Hermes.decodeEither decoder (BS.copy raw))
+            (Hermes.decodeEither decoder raw)
 
 -- | Settings root for the checkout that contains @cwd@.
 -- Uses @git rev-parse --show-toplevel@ so a linked worktree stays in that

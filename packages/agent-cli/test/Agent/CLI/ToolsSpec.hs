@@ -354,7 +354,7 @@ propertyNames tool =
         Hermes.atKey "properties" $
             Hermes.objectFold []
                 (\key names ->
-                    (key : names) <$ Hermes.withRawJsonByteString (const (pure ()))))
+                    (key : names) <$ Hermes.withOwnedRawJson (const (pure ()))))
 
 propertyDescription :: Text -> FunctionTool -> Maybe Text
 propertyDescription propertyName tool =
