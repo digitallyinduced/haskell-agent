@@ -21,6 +21,12 @@ data ReplAction
     | ReplPrompt Text
     | ReplExpandedPrompt !Text !Text
       -- ^ Original user-visible text and the model-visible expansion.
+    | ReplInit
+    | ReplReview (Maybe Text)
+    | ReplDiff
+    | ReplFork (Maybe Text)
+    | ReplExport (Maybe Text)
+    | ReplPermissions
     | ReplShowEffort
     | ReplSetEffort ReasoningEffort
     | ReplToggleFast

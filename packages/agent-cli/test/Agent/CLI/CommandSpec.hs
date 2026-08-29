@@ -1,6 +1,7 @@
 module Agent.CLI.CommandSpec (spec) where
 
 import Agent.CLI.Command
+import Agent.CLI.Command.Instructions (initInstruction)
 import Agent.CLI.Afk
 import Agent.Dialect (DialectId(..))
 import Agent.ReasoningEffort (ReasoningEffort(..))
@@ -67,6 +68,32 @@ spec = do
             parseReplLine "/effort XHIGH" `shouldBe` ReplSetEffort EffortXHigh
             parseReplLine "/effort MAX" `shouldBe` ReplSetEffort EffortMax
             parseReplLine "/effort medium" `shouldBe` ReplSetEffort EffortMedium
+
+        it "parses the Codex workflow commands" do
+            parseReplLine "/init" `shouldBe` ReplInit
+            parseReplLine "/init now"
+                `shouldBe` ReplCommandError "usage: /init"
+            parseReplLine "/review" `shouldBe` ReplReview Nothing
+            parseReplLine "/review   inspect auth  "
+                `shouldBe` ReplReview (Just "inspect auth")
+            parseReplLine "/diff" `shouldBe` ReplDiff
+            parseReplLine "/diff now"
+                `shouldBe` ReplCommandError "usage: /diff"
+            parseReplLine "/fork" `shouldBe` ReplFork Nothing
+            parseReplLine "/fork   experiment branch  "
+                `shouldBe` ReplFork (Just "experiment branch")
+            parseReplLine "/export" `shouldBe` ReplExport Nothing
+            parseReplLine "/export  notes/session.md  "
+                `shouldBe` ReplExport (Just "notes/session.md")
+            parseReplLine "/permissions" `shouldBe` ReplPermissions
+            parseReplLine "/permissions now"
+                `shouldBe` ReplCommandError "usage: /permissions"
+
+        it "includes the no-overwrite AGENTS.md init prompt" do
+            initInstruction `shouldSatisfy` Text.isInfixOf
+                "Before writing, check whether AGENTS.md already exists"
+            initInstruction `shouldSatisfy` Text.isInfixOf
+                "Repository Guidelines"
 
         it "toggles always-approve from slash and colon aliases" do
             parseReplLine "/always-approve" `shouldBe` ReplToggleAlwaysApprove
@@ -333,6 +360,12 @@ spec = do
             names
                 `shouldBe`
                     [ "help"
+                    , "init"
+                    , "review"
+                    , "diff"
+                    , "fork"
+                    , "export"
+                    , "permissions"
                     , "model"
                     , "effort"
                     , "fast"
