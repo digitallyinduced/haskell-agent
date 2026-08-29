@@ -185,6 +185,15 @@ spec = describe "Agent.Tools.IO" do
                 (fromFilePath ("link" </> "missing" </> "file.txt"))
             result `shouldSatisfy` isLeft
 
+    it "rejects missing paths whose traversal is hidden after a safe segment" do
+        withTempDir \dir -> do
+            let workspace = dir </> "workspace"
+            createDirectory workspace
+            env <- defaultToolEnv (fromFilePath workspace)
+            result <- resolveUnderCwd env
+                (fromFilePath ("nested" </> ".." </> ".." </> "outside.txt"))
+            result `shouldSatisfy` isLeft
+
     it "preserves parent-segment semantics after a directory symlink" do
         withTempDir \dir -> do
             let workspace = dir </> "workspace"

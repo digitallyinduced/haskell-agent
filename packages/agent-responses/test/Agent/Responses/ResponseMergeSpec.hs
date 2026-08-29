@@ -5,10 +5,28 @@ import Agent.Responses.ResponseMerge
 import Agent.Responses.Types
 import qualified Data.ByteString.Char8 as BS
 import Data.Text (Text)
+import qualified Data.Text as Text
 import Test.Hspec
+import Test.Hspec.QuickCheck (modifyMaxSuccess, prop)
+import Test.QuickCheck
+    ( Arbitrary(..)
+    , chooseInt
+    , counterexample
+    , listOf
+    , (===)
+    )
 
 spec :: Spec
 spec = describe "typed response merging" do
+    modifyMaxSuccess (const 500) $
+        prop "merging streamed function calls is idempotent" $
+            \(FunctionCallStream items) ->
+                let once = mergeCompletedResponseOutput items baseResponse
+                    twice = mergeCompletedResponseOutput items once
+                in counterexample
+                    ("streamed items: " <> show items)
+                    (twice === once)
+
     it "fills empty terminal output from streamed items" do
         let call = functionCall "call-1"
             merged = mergeCompletedResponseOutput [call] baseResponse
@@ -73,6 +91,20 @@ functionCall callId = FunctionCallItem FunctionCall
     , encryptedFunctionArgs = Nothing
     , status = Nothing
     }
+
+newtype FunctionCallStream = FunctionCallStream [ResponseItem]
+    deriving (Show)
+
+instance Arbitrary FunctionCallStream where
+    arbitrary = do
+        identifiers <- listOf (chooseInt (-10, 10))
+        pure
+            (FunctionCallStream
+                [ functionCall ("call-" <> Text.pack (show identifier))
+                | identifier <- identifiers
+                ])
+
+    shrink _ = []
 
 withOutput :: [ResponseItem] -> Response -> Response
 withOutput value response = response { output = value }
